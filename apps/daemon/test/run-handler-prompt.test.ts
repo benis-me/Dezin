@@ -1,8 +1,67 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { shouldAutoRepair, standardRepairableDefects, standardRepairPolicy, standardRepairPrompt, standardRunPassed } from "../src/run-policy.ts";
+import {
+  reviewerAgentCommand,
+  reviewerModel,
+  shouldAutoRepair,
+  standardRepairableDefects,
+  standardRepairPolicy,
+  standardRepairPrompt,
+  standardRunPassed,
+} from "../src/run-policy.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
+
+test("visual review policy always selects the hard no-tools Claude transport", () => {
+  const settings = {
+    agentCommand: "codex",
+    model: "gpt-5",
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5",
+  } as Settings;
+
+  assert.equal(reviewerAgentCommand(settings, "gemini"), "claude");
+});
+
+test("visual review policy never sends a Codex or Gemini model to Claude", () => {
+  const inheritedCodex = {
+    agentCommand: "codex",
+    model: "gpt-5",
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+  } as Settings;
+  const legacyCodexOverride = {
+    ...inheritedCodex,
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5-reviewer",
+  };
+
+  assert.equal(reviewerModel(inheritedCodex, "gpt-5"), undefined);
+  assert.equal(reviewerModel(legacyCodexOverride, "gemini-2.5-pro"), undefined);
+});
+
+test("visual review policy preserves an explicit Claude reviewer model and same-provider fallback", () => {
+  const explicitReviewer = {
+    agentCommand: "codex",
+    model: "gpt-5",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-sonnet-4-6",
+  } as Settings;
+  const inheritedClaude = {
+    agentCommand: "claude",
+    model: "claude-opus-4-8",
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+  } as Settings;
+
+  assert.equal(reviewerModel(explicitReviewer, "gpt-5"), "claude-sonnet-4-6");
+  assert.equal(reviewerModel(inheritedClaude, "claude-opus-4-8"), "claude-opus-4-8");
+  assert.equal(
+    reviewerModel(inheritedClaude, "gpt-5", "codex"),
+    undefined,
+    "the Claude reviewer must never inherit a request-level model from a different provider",
+  );
+});
 
 test("standardRepairPrompt constrains visual-source findings to measured local patches", () => {
   const findings: QualityFinding[] = [

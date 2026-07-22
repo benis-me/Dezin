@@ -569,7 +569,7 @@ function validateArtifactPayload(task: GenerationTask): void {
     "dependsOnArtifactIds",
     "capabilityIds",
     "responsiveFrameIds",
-  ], [], `${task.kind} Artifact plan`);
+  ], ["dispatchContextPackId", "researchDirectionSelection"], `${task.kind} Artifact plan`);
   if (plan.operation !== "create" && plan.operation !== "revise") {
     fail(`${task.kind} Artifact plan operation is unsupported`);
   }
@@ -583,6 +583,28 @@ function validateArtifactPayload(task: GenerationTask): void {
     fail(`${task.kind} Artifact plan Track does not match its Task`);
   }
   nullableCanonicalString(plan.baseRevisionId, `${task.kind} Artifact plan base Revision id`);
+  if (plan.dispatchContextPackId !== undefined
+    && !/^context-pack-[0-9a-f]{64}$/.test(canonicalString(
+      plan.dispatchContextPackId,
+      `${task.kind} Artifact plan dispatch Context Pack id`,
+    ))) {
+    fail(`${task.kind} Artifact plan dispatch Context Pack id is invalid`);
+  }
+  let selectedResearchResourceId: string | null = null;
+  if (plan.researchDirectionSelection !== undefined) {
+    const selection = exactObject(plan.researchDirectionSelection, [
+      "protocol", "version", "resourceId", "revisionId", "directionId",
+    ], [], `${task.kind} Artifact Research direction selection`);
+    if (selection.protocol !== "dezin.research-direction-selection.v1" || selection.version !== 1) {
+      fail(`${task.kind} Artifact Research direction selection protocol is unsupported`);
+    }
+    selectedResearchResourceId = canonicalString(
+      selection.resourceId,
+      `${task.kind} Artifact Research direction selection Resource id`,
+    );
+    canonicalString(selection.revisionId, `${task.kind} Artifact Research direction selection Revision id`);
+    canonicalString(selection.directionId, `${task.kind} Artifact Research direction selection direction id`);
+  }
   stringArray(plan.dependsOnArtifactIds, `${task.kind} Artifact dependency ids`, { unique: true, sorted: true });
   const capabilityIds = stringArray(plan.capabilityIds, `${task.kind} Artifact capability ids`, {
     unique: true,
@@ -615,6 +637,14 @@ function validateArtifactPayload(task: GenerationTask): void {
   const sortedDependencyKeys = [...dependencyKeys].sort(compareBinary);
   if (dependencyKeys.some((key, index) => key !== sortedDependencyKeys[index])) {
     fail(`${task.kind} dependency plans must be sorted`);
+  }
+  if (selectedResearchResourceId !== null && !dependencies.some((dependency, index) => {
+    const record = plainRecord(dependency, `${task.kind} dependency plan[${index}]`);
+    return record.kind === "resource"
+      && record.ownerArtifactId === task.target.id
+      && record.resourceId === selectedResearchResourceId;
+  })) {
+    fail(`${task.kind} Artifact Research direction selection is not an owned Resource dependency`);
   }
   const frameIds = validateFrames(payload.responsiveFrames, `${task.kind} responsive Frames`);
   if (frameIds.length !== plannedFrameIds.length
@@ -663,7 +693,7 @@ function validateResourcePayload(task: GenerationTask): void {
     "kind",
     "title",
     "revisionPolicy",
-  ], [], "Resource operation");
+  ], ["dispatchContextPackId"], "Resource operation");
   if (operation.operation !== "create" && operation.operation !== "revise") {
     fail("Resource operation must be create or revise");
   }
@@ -675,6 +705,13 @@ function validateResourcePayload(task: GenerationTask): void {
     fail("Resource operation Resource kind is unsupported");
   }
   canonicalString(operation.title, "Resource operation title");
+  if (operation.dispatchContextPackId !== undefined
+    && !/^context-pack-[0-9a-f]{64}$/.test(canonicalString(
+      operation.dispatchContextPackId,
+      "Resource operation dispatch Context Pack id",
+    ))) {
+    fail("Resource operation dispatch Context Pack id is invalid");
+  }
   const policy = exactObject(operation.revisionPolicy, ["kind"], [], "Resource revision policy");
   if (policy.kind !== "generate") fail("Resource Task must use the frozen generate revision policy");
   const brief = validateBrief(payload.brief, "Resource Task brief");

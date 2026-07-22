@@ -354,9 +354,9 @@ export interface Settings {
   autoFixLiveRuntimeErrors: boolean;
   /** True once the user has affirmed they're authorized to reproduce a site with Sharingan (asked once, not per run). */
   sharinganAffirmed: boolean;
-  /** Optional reviewer Agent override; empty means inherit the current project run Agent. */
+  /** Visual reviewer transport preference. Runtime policy currently canonicalizes this to the built-in Claude no-tools reviewer. */
   visualQaAgentCommand: string;
-  /** Optional reviewer model override; empty means inherit the current project run model. */
+  /** Optional Claude reviewer model; empty uses Claude's default and never inherits a different provider's model. */
   visualQaModel: string;
   /** When enabled, runs do a pre-design Research phase (writes research/) before building. */
   researchEnabled: boolean;

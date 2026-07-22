@@ -264,6 +264,14 @@ test("a generated Component successor substitutes the old Head in its dependent 
         executionMode: "full",
       },
     );
+    const componentClaim = store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: fixture.componentTask.id,
+      attempt: componentAttempt.attempt,
+      ownerId: "component-substitution-worker",
+      now: 70_000,
+      leaseMs: 30_000,
+    });
+    assert.ok(componentClaim);
 
     const successorRevision = store.workspace.createArtifactRevision({
       artifactId: "substitution-component",
@@ -300,7 +308,8 @@ test("a generated Component successor substitutes the old Head in its dependent 
     store.db.prepare(
       `UPDATE generation_task_attempts
        SET status = 'succeeded', candidate_revision_id = ?, candidate_evidence_json = ?,
-           candidate_evidence_hash = ?, started_at = 70_000, finished_at = 70_001
+           candidate_evidence_hash = ?, owner_id = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, finished_at = 70_001
        WHERE task_id = ? AND plan_id = ? AND attempt = ?`,
     ).run(
       successorRevision.id,
@@ -315,6 +324,9 @@ test("a generated Component successor substitutes the old Head in its dependent 
        SET status = 'succeeded', result_revision_id = ?, result_snapshot_id = ?, finished_at = 70_001
        WHERE id = ? AND plan_id = ?`,
     ).run(successorRevision.id, successorSnapshot.id, fixture.componentTask.id, fixture.plan.id);
+    store.db.prepare(
+      "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = ?",
+    ).run(fixture.componentTask.id, componentAttempt.attempt);
     const sequence = Number((store.db.prepare(
       "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM generation_plan_events WHERE plan_id = ?",
     ).get(fixture.plan.id) as { sequence: number }).sequence) + 1;

@@ -3134,6 +3134,90 @@ test("aggregate Revision reads stay on one SQLite snapshot during a concurrent r
   reader.close();
 });
 
+test("compact Workspace overview reads current pins, Resources, and layout from one SQLite snapshot", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-compact-overview-read-")), "overview.db");
+  const reader = new Store(file, fakeClock());
+  const project = reader.createProject({ name: "Compact overview snapshot", mode: "standard" });
+  const workspace = reader.workspace.ensureWorkspaceRecord(project.id);
+  const beforeLayout = reader.workspace.getLayout(project.id);
+  const writer = new Store(file, fakeClock());
+  const prepare = reader.db.prepare.bind(reader.db);
+  let writerCommitted = false;
+  Object.defineProperty(reader.db, "prepare", {
+    configurable: true,
+    value(sql: string) {
+      if (!writerCommitted && sql.includes("FROM resources")) {
+        writer.workspace.saveLayout(project.id, {
+          graphRevision: workspace.graphRevision,
+          baseLayoutChecksum: beforeLayout.checksum,
+          commands: [{ type: "set-viewport", viewport: { x: 40, y: 80, zoom: 1.25 } }],
+        });
+        writerCommitted = true;
+      }
+      return prepare(sql);
+    },
+  });
+  const aggregate = reader.workspace as WorkspaceStore & {
+    getCompactOverviewByProjectId(projectId: string): null | {
+      workspace: { id: string };
+      resources: unknown[];
+      resourceRevisions: unknown[];
+      layout: typeof beforeLayout;
+    };
+  };
+  let overview: ReturnType<typeof aggregate.getCompactOverviewByProjectId>;
+  try {
+    overview = aggregate.getCompactOverviewByProjectId(project.id);
+  } finally {
+    Reflect.deleteProperty(reader.db, "prepare");
+  }
+  assert.equal(writerCommitted, true);
+  assert.equal(overview?.workspace.id, workspace.id);
+  assert.deepEqual(overview?.resources, []);
+  assert.deepEqual(overview?.resourceRevisions, []);
+  assert.deepEqual(overview?.layout, beforeLayout);
+  assert.deepEqual(reader.workspace.getLayout(project.id).viewport, { x: 40, y: 80, zoom: 1.25 });
+  writer.close();
+  reader.close();
+});
+
+test("compact bundle returns only graph-and-Snapshot active Artifact identities", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact active Artifact identities", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  insertArtifact(store.db, workspace.id, "archived-history-artifact");
+  store.db.prepare("UPDATE workspace_artifacts SET archived_at = 99 WHERE id = 'archived-history-artifact'").run();
+
+  assert.deepEqual(
+    store.workspace.getCompactBundleByProjectId(project.id)?.artifacts.map(({ id }) => id).sort(),
+    graph.graph.nodes.filter((node) => node.kind !== "resource").map((node) => node.artifactId).sort(),
+  );
+
+  insertArtifact(store.db, workspace.id, "ungraphed-live-artifact");
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /active Artifact identities|immutable graph|exact set/i,
+  );
+  store.close();
+});
+
+test("compact overview rejects an ungraphed live Resource identity and excludes archived history", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact active Resource identities", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  insertResource(store.db, workspace.id, "archived-history-resource");
+  store.db.prepare("UPDATE resources SET archived_at = 99 WHERE id = 'archived-history-resource'").run();
+  assert.deepEqual(store.workspace.getCompactOverviewByProjectId(project.id)?.resources, []);
+
+  insertResource(store.db, workspace.id, "ungraphed-live-resource");
+  assert.throws(
+    () => store.workspace.getCompactOverviewByProjectId(project.id),
+    /active Resource identities|immutable graph|exact set/i,
+  );
+  store.close();
+});
+
 test("a second SQLite connection waiting behind a graph writer observes the committed revision", async () => {
   const file = join(mkdtempSync(join(tmpdir(), "dezin-layout-race-")), "race.db");
   const store = new Store(file, fakeClock());
@@ -5823,7 +5907,7 @@ test("history reads validate each distinct Artifact, Kernel, and Snapshot lineag
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   let activeSnapshot = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId).snapshot;
   let artifactHead: string | null = null;
-  const artifactHistorySize = 64;
+  const artifactHistorySize = 128;
   const kernelHistorySize = 32;
 
   for (let index = 0; index < artifactHistorySize; index += 1) {
@@ -5930,6 +6014,557 @@ test("history reads validate each distinct Artifact, Kernel, and Snapshot lineag
   assert.equal(counts.artifactReferenceReads, revisions.length);
   assert.equal(counts.runOwnershipReads, revisions.length * 2);
   assert.equal(counts.kernelRows, kernelHistorySize + 1);
+  activeSnapshot = checkpoint;
+
+  const compactReader = observed as WorkspaceStore & {
+    getCompactBundleByProjectId(id: string): ReturnType<WorkspaceStore["getBundleByProjectId"]>;
+    getSnapshotForProject(id: string, snapshotId: string): WorkspaceSnapshotRecord | null;
+  };
+  const originalListSnapshots = observed.listSnapshots.bind(observed);
+  const originalListRevisions = observed.listRevisions.bind(observed);
+  observed.listSnapshots = (() => assert.fail("compact bundle must not scan Snapshot history")) as typeof observed.listSnapshots;
+  observed.listRevisions = (() => assert.fail("compact bundle must not scan Artifact Revision history")) as typeof observed.listRevisions;
+  resetCounts();
+  const compact = compactReader.getCompactBundleByProjectId(project.id);
+  observed.listSnapshots = originalListSnapshots;
+  observed.listRevisions = originalListRevisions;
+  assert.ok(compact);
+  assert.deepEqual(compact.snapshots.map((snapshot) => snapshot.id), [activeSnapshot.id]);
+  assert.deepEqual(compact.revisions.map((revision) => revision.id), [artifactHead]);
+  assert.deepEqual(compact.tracks.map((track) => track.id), [
+    "revision-component-track",
+    "revision-page-track",
+  ]);
+  assert.equal(counts.snapshotRows, 1, "compact reads only the active Snapshot row");
+  assert.ok(counts.artifactRows <= 1, "compact reads no Artifact parent lineage");
+  assert.ok(counts.kernelRows <= 2, "compact reads only directly active Kernel identities");
+
+  const corruptRevisionId = revisions[0]!.id;
+  const corruptSnapshotId = snapshots[1]!.id;
+  store.db.exec(`
+    DROP TRIGGER artifact_revision_update_immutable;
+    DROP TRIGGER workspace_snapshot_update_immutable;
+  `);
+  store.db.prepare("UPDATE artifact_revisions SET render_spec_json = '{' WHERE id = ?")
+    .run(corruptRevisionId);
+  store.db.prepare("UPDATE workspace_snapshots SET provenance_json = '{' WHERE id = ?")
+    .run(corruptSnapshotId);
+
+  const activeAfterHistoricalCorruption = compactReader.getCompactBundleByProjectId(project.id);
+  assert.equal(activeAfterHistoricalCorruption?.activeSnapshot.id, activeSnapshot.id);
+  assert.equal(activeAfterHistoricalCorruption?.revisions[0]?.id, artifactHead);
+  assert.throws(() => observed.getArtifactRevision(corruptRevisionId), /JSON|render spec/i);
+  assert.throws(
+    () => compactReader.getSnapshotForProject(project.id, corruptSnapshotId),
+    /JSON|provenance/i,
+  );
+  store.close();
+});
+
+test("compact Snapshot shallow roots require sequence one and sequence one cannot name a parent", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Snapshot disguised root", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const active = addRevisionTestArtifacts(store, project.id, foundation.activeSnapshotId).snapshot;
+    store.db.exec(`
+      DROP TRIGGER workspace_snapshot_update_immutable;
+      DROP TRIGGER snapshot_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE workspace_snapshots SET parent_snapshot_id = NULL WHERE id = ?").run(active.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Snapshot.*sequence 1|Snapshot.*root/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Snapshot sequence one parent", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const successor = store.workspace.createWorkspaceSnapshot(project.id, {
+      expectedSnapshotId: foundation.activeSnapshotId,
+      reason: "inactive successor",
+      provenance: {
+        kind: "plan-checkpoint",
+        proposalId: "snapshot-root-proposal",
+        planId: "snapshot-root-plan",
+        checkpointId: "snapshot-root-checkpoint",
+      },
+    });
+    store.db.exec(`
+      DROP TRIGGER workspace_snapshot_update_immutable;
+      DROP TRIGGER snapshot_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE workspace_snapshots SET parent_snapshot_id = ? WHERE id = ?")
+      .run(successor.id, foundation.activeSnapshotId);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Snapshot.*sequence 1|Snapshot.*root|earlier sealed/i,
+    );
+    store.close();
+  }
+});
+
+test("compact Kernel shallow roots require sequence one and sequence one cannot name a parent", () => {
+  const createSuccessor = (store: Store, workspace: ReturnType<WorkspaceStore["ensureWorkspaceRecord"]>) => (
+    store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: {}, typography: {}, sharedAssetRevisionIds: [], brief: "successor", terminology: {}, exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [], blockingSeverities: [], requireRuntimeChecks: false, requireVisualReview: false,
+      },
+    })
+  );
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Kernel disguised root", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const successor = createSuccessor(store, foundation);
+    store.workspace.publishKernelRevision(successor.id, {
+      expectedKernelRevisionId: foundation.activeKernelRevisionId,
+      expectedSnapshotId: foundation.activeSnapshotId,
+    });
+    store.db.exec(`
+      DROP TRIGGER kernel_revision_update_immutable;
+      DROP TRIGGER kernel_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE shared_design_kernel_revisions SET parent_revision_id = NULL WHERE id = ?")
+      .run(successor.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Kernel.*sequence 1|Kernel.*root/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Kernel sequence one parent", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const successor = createSuccessor(store, foundation);
+    store.db.exec(`
+      DROP TRIGGER kernel_revision_update_immutable;
+      DROP TRIGGER kernel_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE shared_design_kernel_revisions SET parent_revision_id = ? WHERE id = ?")
+      .run(successor.id, foundation.activeKernelRevisionId);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Kernel.*sequence 1|Kernel.*root|earlier Revision/i,
+    );
+    store.close();
+  }
+});
+
+test("compact Artifact shallow roots require sequence one and sequence one cannot name a parent", () => {
+  const setup = () => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact shallow root", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    const first = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "artifact-root-one",
+    }));
+    const snapshot = store.workspace.publishArtifactRevision(first.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    });
+    const second = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: first.id,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "artifact-root-two",
+    }));
+    return { store, project, first, second, snapshot };
+  };
+  {
+    const { store, project, first, second, snapshot } = setup();
+    store.workspace.publishArtifactRevision(second.id, {
+      expectedHeadRevisionId: first.id,
+      expectedSnapshotId: snapshot.id,
+    });
+    store.db.exec(`
+      DROP TRIGGER artifact_revision_update_immutable;
+      DROP TRIGGER artifact_revision_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE artifact_revisions SET parent_revision_id = NULL WHERE id = ?").run(second.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Artifact.*sequence 1|Artifact.*root/i,
+    );
+    store.close();
+  }
+  {
+    const { store, project, first, second } = setup();
+    store.db.exec(`
+      DROP TRIGGER artifact_revision_update_immutable;
+      DROP TRIGGER artifact_revision_parent_update_ownership;
+    `);
+    store.db.prepare("UPDATE artifact_revisions SET parent_revision_id = ? WHERE id = ?")
+      .run(second.id, first.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Artifact.*sequence 1|Artifact.*root|earlier sealed/i,
+    );
+    store.close();
+  }
+});
+
+test("compact Resource shallow roots require sequence one and sequence one cannot name a parent", () => {
+  const setup = () => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Resource shallow root", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const created = store.workspace.createResourceForProject(project.id, {
+      kind: "research",
+      title: "Research",
+      defaultPinPolicy: "follow-head",
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+    });
+    const first = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+      revisionId: `resource-root-one-${project.id}`,
+      parentRevisionId: null,
+      manifestPath: `resources/resource-root-one-${project.id}.json`,
+      summary: "one", metadata: {}, checksum: "1".repeat(64), provenance: {},
+    });
+    const snapshot = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, first.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: "publish one",
+    });
+    const second = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+      revisionId: `resource-root-two-${project.id}`,
+      parentRevisionId: first.id,
+      manifestPath: `resources/resource-root-two-${project.id}.json`,
+      summary: "two", metadata: {}, checksum: "2".repeat(64), provenance: {},
+    });
+    return { store, project, created, first, second, snapshot };
+  };
+  {
+    const { store, project, created, first, second, snapshot } = setup();
+    store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, second.id, {
+      expectedHeadRevisionId: first.id,
+      expectedSnapshotId: snapshot.id,
+      reason: "publish two",
+    });
+    store.db.exec("DROP TRIGGER resource_revision_update_immutable");
+    store.db.prepare("UPDATE resource_revisions SET parent_revision_id = NULL WHERE id = ?").run(second.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Resource.*sequence 1|Resource.*root/i,
+    );
+    store.close();
+  }
+  {
+    const { store, project, first, second } = setup();
+    store.db.exec("DROP TRIGGER resource_revision_update_immutable");
+    store.db.prepare("UPDATE resource_revisions SET parent_revision_id = ? WHERE id = ?")
+      .run(second.id, first.id);
+    assert.throws(
+      () => store.workspace.getCompactBundleByProjectId(project.id),
+      /Resource.*sequence 1|Resource.*root|earlier Revision/i,
+    );
+    store.close();
+  }
+});
+
+test("compact active Snapshot rejects an unsealed direct parent without decoding older provenance", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact Snapshot parent", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, foundation.activeSnapshotId);
+  const active = store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: graph.snapshot.id,
+    reason: "compact-parent-check",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "compact-parent-proposal",
+      planId: "compact-parent-plan",
+      checkpointId: "compact-parent-checkpoint",
+    },
+  });
+  store.db.exec(`
+    DROP TRIGGER workspace_snapshot_update_immutable;
+    DROP TRIGGER workspace_snapshot_seal_transition_guard;
+  `);
+  store.db.prepare("UPDATE workspace_snapshots SET sealed = 0 WHERE id = ?")
+    .run(active.parentSnapshotId);
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /Snapshot.*direct parent|sealed/i,
+  );
+  store.close();
+});
+
+test("compact active Kernel rejects a newer direct parent without decoding its payload", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact Kernel parent", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const activeCandidate = store.workspace.createKernelRevision({
+    workspaceId: foundation.id,
+    parentRevisionId: foundation.activeKernelRevisionId,
+    tokens: {}, typography: {}, sharedAssetRevisionIds: [], brief: "active", terminology: {}, exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [], blockingSeverities: [], requireRuntimeChecks: false, requireVisualReview: false,
+    },
+  });
+  const activeSnapshot = store.workspace.publishKernelRevision(activeCandidate.id, {
+    expectedKernelRevisionId: foundation.activeKernelRevisionId,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const newerCandidate = store.workspace.createKernelRevision({
+    workspaceId: foundation.id,
+    parentRevisionId: activeCandidate.id,
+    tokens: {}, typography: {}, sharedAssetRevisionIds: [], brief: "newer", terminology: {}, exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [], blockingSeverities: [], requireRuntimeChecks: false, requireVisualReview: false,
+    },
+  });
+  store.db.exec(`
+    DROP TRIGGER kernel_revision_update_immutable;
+    DROP TRIGGER kernel_parent_update_ownership;
+  `);
+  store.db.prepare("UPDATE shared_design_kernel_revisions SET parent_revision_id = ? WHERE id = ?")
+    .run(newerCandidate.id, activeCandidate.id);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, activeSnapshot.id);
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /Kernel.*direct parent|earlier/i,
+  );
+  store.close();
+});
+
+test("compact active Artifact rejects an unsealed direct parent", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact Artifact parent", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  let snapshot = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId).snapshot;
+  const first = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "compact-parent-one",
+  }));
+  snapshot = store.workspace.publishArtifactRevision(first.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: snapshot.id,
+  });
+  const second = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: first.id,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "compact-parent-two",
+  }));
+  store.workspace.publishArtifactRevision(second.id, {
+    expectedHeadRevisionId: first.id,
+    expectedSnapshotId: snapshot.id,
+  });
+  store.db.exec(`
+    DROP TRIGGER artifact_revision_update_immutable;
+    DROP TRIGGER artifact_revision_seal_transition_guard;
+  `);
+  store.db.prepare("UPDATE artifact_revisions SET sealed = 0 WHERE id = ?").run(first.id);
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /Artifact.*direct parent|sealed/i,
+  );
+  store.close();
+});
+
+test("compact active Artifact rejects a foreign direct parent", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact foreign Artifact parent", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  let snapshot = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId).snapshot;
+  const first = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "compact-foreign-parent-one",
+  }));
+  snapshot = store.workspace.publishArtifactRevision(first.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: snapshot.id,
+  });
+  const second = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: first.id,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "compact-foreign-parent-two",
+  }));
+  store.workspace.publishArtifactRevision(second.id, {
+    expectedHeadRevisionId: first.id,
+    expectedSnapshotId: snapshot.id,
+  });
+
+  const foreignProject = store.createProject({ name: "Foreign parent owner", mode: "standard" });
+  const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  insertArtifact(store.db, foreignWorkspace.id, "foreign-compact-artifact");
+  insertTrack(store.db, "foreign-compact-artifact", "foreign-compact-track");
+  insertRevision(store.db, {
+    id: "foreign-compact-revision",
+    workspaceId: foreignWorkspace.id,
+    artifactId: "foreign-compact-artifact",
+    trackId: "foreign-compact-track",
+    kernelRevisionId: foreignWorkspace.activeKernelRevisionId,
+  });
+  store.db.exec(`
+    DROP TRIGGER artifact_revision_update_immutable;
+    DROP TRIGGER artifact_revision_parent_update_ownership;
+    PRAGMA foreign_keys = OFF;
+  `);
+  store.db.prepare("UPDATE artifact_revisions SET parent_revision_id = ? WHERE id = ?")
+    .run("foreign-compact-revision", second.id);
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /Artifact.*direct parent|same Track|same Workspace/i,
+  );
+  store.close();
+});
+
+test("compact active Resource rejects a self direct parent", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Compact Resource parent", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "research",
+    title: "Research",
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const first = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "compact-resource-v1",
+    parentRevisionId: null,
+    manifestPath: "resources/compact-resource-v1.json",
+    summary: "v1",
+    metadata: {}, checksum: "1".repeat(64), provenance: {},
+  });
+  let snapshot = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, first.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "publish v1",
+  });
+  const second = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "compact-resource-v2",
+    parentRevisionId: first.id,
+    manifestPath: "resources/compact-resource-v2.json",
+    summary: "v2",
+    metadata: {}, checksum: "2".repeat(64), provenance: {},
+  });
+  snapshot = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, second.id, {
+    expectedHeadRevisionId: first.id,
+    expectedSnapshotId: snapshot.id,
+    reason: "publish v2",
+  });
+  store.db.exec("DROP TRIGGER resource_revision_update_immutable");
+  store.db.prepare("UPDATE resource_revisions SET parent_revision_id = ? WHERE id = ?")
+    .run(second.id, second.id);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, snapshot.id);
+  assert.throws(
+    () => store.workspace.getCompactBundleByProjectId(project.id),
+    /Resource.*direct parent|earlier|self/i,
+  );
+  store.close();
+});
+
+test("compact overview returns an active Resource without decoding its parent's payload", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Shallow active Resource", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "research",
+    title: "Research",
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const first = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "shallow-resource-v1",
+    parentRevisionId: null,
+    manifestPath: "resources/shallow-resource-v1.json",
+    summary: "v1",
+    metadata: {}, checksum: "1".repeat(64), provenance: {},
+  });
+  let snapshot = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, first.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "publish v1",
+  });
+  const second = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "shallow-resource-v2",
+    parentRevisionId: first.id,
+    manifestPath: "resources/shallow-resource-v2.json",
+    summary: "v2",
+    metadata: {}, checksum: "2".repeat(64), provenance: {},
+  });
+  snapshot = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, second.id, {
+    expectedHeadRevisionId: first.id,
+    expectedSnapshotId: snapshot.id,
+    reason: "publish v2",
+  });
+  store.db.exec("DROP TRIGGER resource_revision_update_immutable");
+  store.db.prepare("UPDATE resource_revisions SET metadata_json = '{' WHERE id = ?").run(first.id);
+
+  const overview = store.workspace.getCompactOverviewByProjectId(project.id);
+  assert.equal(overview?.activeSnapshot.id, snapshot.id);
+  assert.deepEqual(overview?.resourceRevisions.map(({ id }) => id), [second.id]);
+  assert.throws(
+    () => store.workspace.getResourceRevisionForWorkspace(workspace.id, second.id),
+    /metadata|JSON/i,
+  );
+  store.close();
+});
+
+test("workspace-scoped Resource Revision reads one exact lineage without scanning Resource history", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Exact Resource Revision", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  insertResource(store.db, workspace.id, "exact-resource");
+  insertResourceRevision(store.db, workspace.id, "exact-resource", "exact-resource-v1", 1);
+  insertResource(store.db, workspace.id, "corrupt-sibling-resource");
+  insertResourceRevision(store.db, workspace.id, "corrupt-sibling-resource", "corrupt-sibling-v1", 1);
+  store.db.exec("DROP TRIGGER resource_revision_update_immutable");
+  store.db.prepare("UPDATE resource_revisions SET checksum = ? WHERE id = 'exact-resource-v1'")
+    .run("a".repeat(64));
+  store.db.prepare("UPDATE resource_revisions SET metadata_json = '{' WHERE id = 'corrupt-sibling-v1'").run();
+  const exact = store.workspace as WorkspaceStore & {
+    getResourceRevisionForWorkspace(workspaceId: string, revisionId: string): unknown;
+  };
+  store.workspace.listResources = (() => assert.fail(
+    "exact Resource Revision must not scan Resources",
+  )) as typeof store.workspace.listResources;
+  store.workspace.listResourceRevisions = (() => assert.fail(
+    "exact Resource Revision must not scan history",
+  )) as typeof store.workspace.listResourceRevisions;
+  assert.deepEqual(exact.getResourceRevisionForWorkspace(workspace.id, "exact-resource-v1"), {
+    id: "exact-resource-v1",
+    workspaceId: workspace.id,
+    resourceId: "exact-resource",
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resources/exact-resource-v1.json",
+    summary: "Summary exact-resource-v1",
+    metadata: {},
+    checksum: "a".repeat(64),
+    provenance: {},
+    createdByRunId: null,
+    createdAt: 16,
+  });
   store.close();
 });
 
@@ -5966,6 +6601,20 @@ test("legacy Standard migration adopts the empty foundation as one wrapped Page"
     kind: "legacy-migration",
     migration: "legacy-standard-v1",
   });
+  const originalListSnapshots = store.workspace.listSnapshots.bind(store.workspace);
+  const originalListRevisions = store.workspace.listRevisions.bind(store.workspace);
+  store.workspace.listSnapshots = (() => assert.fail(
+    "compact legacy validation must not scan Snapshot history",
+  )) as typeof store.workspace.listSnapshots;
+  store.workspace.listRevisions = (() => assert.fail(
+    "compact legacy validation must not scan Revision history",
+  )) as typeof store.workspace.listRevisions;
+  const compact = store.workspace.getCompactBundleByProjectId(project.id);
+  store.workspace.listSnapshots = originalListSnapshots;
+  store.workspace.listRevisions = originalListRevisions;
+  assert.ok(compact);
+  assert.deepEqual(compact.snapshots.map((snapshot) => snapshot.id), [compact.activeSnapshot.id]);
+  assert.deepEqual(compact.revisions, []);
   assert.deepEqual(store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id), beforeProject);
   assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
   store.close();
@@ -6504,6 +7153,93 @@ test("Workspace Proposal drafts isolate canonical state and retain immutable CAS
   store.close();
 });
 
+test("Workspace Proposal creation and edits cannot weaken their immutable base Kernel QA contract", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal quality floor", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const wideFrame = { id: "wide", name: "Wide", width: 1600, height: 1000 };
+  const kernel = store.workspace.createKernelRevision({
+    workspaceId: foundation.id,
+    parentRevisionId: foundation.activeKernelRevisionId,
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Preserve strict multi-frame review.",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [wideFrame],
+    qualityProfile: {
+      requiredFrameIds: ["wide"],
+      blockingSeverities: ["P2"],
+      requireRuntimeChecks: true,
+      requireVisualReview: true,
+    },
+  });
+  store.workspace.publishKernelRevision(kernel.id, {
+    expectedKernelRevisionId: foundation.activeKernelRevisionId,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const command = proposalPageCommand("quality", "Quality page");
+  if (command.type !== "add-node" || command.node.kind !== "page") assert.fail("quality fixture must add one Page");
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [command],
+    {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        artifactPlans: [{
+          operation: "create",
+          nodeId: command.node.id,
+          artifactId: command.node.artifactId,
+          kind: "page",
+          name: command.node.name,
+          trackId: command.node.createIdentity!.initialTrackId,
+          baseRevisionId: null,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: ["wide"],
+        }],
+        responsiveFrames: [wideFrame],
+        qualityProfile: {
+          requiredFrameIds: ["wide"],
+          blockingSeverities: ["P2"],
+          requireRuntimeChecks: true,
+          requireVisualReview: true,
+        },
+      },
+    },
+  ));
+  if (proposal.generation.kind !== "workspace-generation") assert.fail("quality Proposal kind changed");
+  const proposalGeneration = proposal.generation;
+  assert.deepEqual(proposalGeneration.qualityProfile.blockingSeverities, ["P0", "P1", "P2"]);
+  assert.ok(proposalGeneration.responsiveFrames.some(
+    (frame) => frame.width >= 320 && frame.width <= 480 && frame.height >= 640,
+  ));
+
+  const update = (generation: typeof proposalGeneration) => store.workspace.updateProposal(proposal.id, {
+    expectedProposalRevision: proposal.revision,
+    operations: proposal.operations,
+    layoutOperations: proposal.layoutOperations,
+    generation,
+    rationale: proposal.rationale,
+    assumptions: proposal.assumptions,
+  });
+  assert.throws(() => update({
+    ...proposalGeneration,
+    responsiveFrames: proposalGeneration.responsiveFrames.filter((frame) => frame.id !== "wide"),
+  }), /Design Kernel frame|preserve|required frame.*does not exist/i);
+  assert.throws(() => update({
+    ...proposalGeneration,
+    qualityProfile: {
+      ...proposalGeneration.qualityProfile,
+      blockingSeverities: ["P0", "P1"],
+    },
+  }), /Design Kernel severity|preserve/i);
+  assert.equal(store.workspace.getProposal(proposal.id)?.revision, proposal.revision);
+  store.close();
+});
+
 test("Proposal approval fails closed when the mutable row diverges from its exact audited revision", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Proposal audit guard", mode: "standard" });
@@ -7005,6 +7741,57 @@ test("layout CAS rejects a stale checksum and Proposal validation rejects unsupp
     },
   } as never), /Task 13|component-propagation/i);
   assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, workspace.activeSnapshotId);
+  store.close();
+});
+
+test("Proposal approval rejects Resource kinds that require an explicit owned source before queuing generation", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Owned-source Resource admission", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const unsupportedKinds: ResourceKind[] = ["file", "asset", "effect", "external-reference"];
+
+  for (const kind of unsupportedKinds) {
+    const resourceId = `owned-source-${kind}`;
+    const nodeId = `owned-source-node-${kind}`;
+    const title = `Owned source ${kind}`;
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+      store,
+      project.id,
+      [{
+        id: `add-${nodeId}`,
+        type: "add-node",
+        node: {
+          id: nodeId,
+          kind: "resource",
+          name: title,
+          resourceId,
+          createIdentity: { resourceKind: kind, defaultPinPolicy: "pin-current" },
+        },
+      }],
+      {
+        generation: {
+          ...emptyWorkspaceGenerationPayload(),
+          resourceOperations: [{
+            operation: "create",
+            nodeId,
+            resourceId,
+            kind,
+            title,
+            revisionPolicy: { kind: "generate" },
+          }],
+        },
+      },
+    ));
+
+    assert.throws(
+      () => store.workspace.approveProposalForProject(project.id, proposal.id, "generate"),
+      /explicit owned source|cannot be Agent-generated/i,
+      kind,
+    );
+    assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+  }
+
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
   store.close();
 });
 
@@ -8078,6 +8865,64 @@ test("Artifact plans distinguish new planned identities from existing Revision b
     rejectsExistingPlan({ baseRevisionId: "missing-base-revision" }),
     rejectsPlannedRevise(),
   ], [true, true, true, true, true]);
+});
+
+test("Artifact revise plans reject a non-active Track before an executable Plan is approved", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Non-active Artifact Track", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const added = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("active-track-only")],
+  });
+  const activeRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "proposal-artifact-active-track-only",
+    trackId: "proposal-track-active-track-only",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "active-track-v1",
+  }));
+  const published = store.workspace.publishArtifactRevision(activeRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: added.snapshot.id,
+  });
+  insertTrack(store.db, activeRevision.artifactId, "proposal-track-inactive");
+  insertRevision(store.db, {
+    id: "proposal-revision-inactive",
+    workspaceId: workspace.id,
+    artifactId: activeRevision.artifactId,
+    trackId: "proposal-track-inactive",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+  });
+  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = ? WHERE id = ?")
+    .run("proposal-revision-inactive", "proposal-track-inactive");
+
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      artifactPlans: [{
+        operation: "revise",
+        nodeId: "proposal-node-active-track-only",
+        artifactId: activeRevision.artifactId,
+        kind: "page",
+        name: "Page active-track-only",
+        trackId: "proposal-track-inactive",
+        baseRevisionId: "proposal-revision-inactive",
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: [],
+      }],
+    },
+  }));
+
+  assert.throws(
+    () => store.workspace.approveProposal(proposal.id, "generate"),
+    /active Track/i,
+  );
+  assert.equal(store.workspace.getProposal(proposal.id)?.status, "draft");
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, published.id);
+  store.close();
 });
 
 test("valid Artifact create and revise plans preserve planned identities and exact Revision bases", () => {

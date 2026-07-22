@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
     CHECK(current_attempt >= 0 AND current_attempt <= 9007199254740991),
   materialization_failures INTEGER NOT NULL DEFAULT 0
     CHECK(materialization_failures >= 0 AND materialization_failures <= 9007199254740991),
+  rebase_count INTEGER NOT NULL DEFAULT 0
+    CHECK(rebase_count >= 0 AND rebase_count <= 3),
   failure_class TEXT CHECK(failure_class IN (
     'context','adapter','storage','provider','agent-transport','build-infrastructure',
     'design','build','qa','publication-conflict','cancelled','unknown'
@@ -106,6 +108,8 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   plan_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   attempt INTEGER NOT NULL CHECK(attempt > 0 AND attempt <= 9007199254740991),
+  execution_epoch INTEGER NOT NULL DEFAULT 0
+    CHECK(execution_epoch >= 0 AND execution_epoch <= 9007199254740991),
   target_artifact_id TEXT,
   target_track_id TEXT,
   target_resource_id TEXT,
@@ -412,8 +416,9 @@ CREATE TABLE IF NOT EXISTS generation_plan_events (
   task_id TEXT,
   type TEXT NOT NULL CHECK(type IN (
     'plan-queued','plan-compile-failed','task-materialization-failed','task-blocked-context',
-    'task-materialized','task-running','task-candidate-ready','task-needs-rebase',
-    'task-retry-wait','task-succeeded','task-failed','task-blocked','task-cancel-requested',
+    'plan-cancel-requested','task-materialized','task-running','task-candidate-ready','task-needs-rebase',
+    'task-rebase-disposition','task-retry-requested','task-retry-wait',
+    'task-succeeded','task-failed','task-blocked','task-cancel-requested',
     'task-cancelled','plan-succeeded','plan-failed','plan-cancelled'
   )),
   payload_json TEXT NOT NULL CHECK(json_valid(payload_json) = 1),
@@ -432,6 +437,8 @@ CREATE INDEX IF NOT EXISTS idx_generation_tasks_plan_status
   ON generation_tasks(plan_id, status, next_eligible_at, id);
 CREATE INDEX IF NOT EXISTS idx_generation_tasks_workspace_status
   ON generation_tasks(workspace_id, status, next_eligible_at, id);
+CREATE INDEX IF NOT EXISTS idx_generation_tasks_scoped_artifact_plan
+  ON generation_tasks(workspace_id, target_artifact_id, kind, plan_id);
 CREATE INDEX IF NOT EXISTS idx_generation_task_dependencies_dependency
   ON generation_task_dependencies(dependency_task_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_generation_task_attempts_status
@@ -456,12 +463,254 @@ CREATE INDEX IF NOT EXISTS idx_generation_plan_events_plan
   ON generation_plan_events(plan_id, sequence);
 `;
 
+const SCOPED_AGENT_TURN_TABLE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS scoped_agent_turns (
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  proposal_hash TEXT NOT NULL,
+  proposal_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  context_pack_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+    CHECK(typeof(created_at) = 'integer' AND created_at >= 0 AND created_at <= 9007199254740991),
+  FOREIGN KEY(proposal_id, workspace_id)
+    REFERENCES workspace_proposals(id, workspace_id),
+  FOREIGN KEY(plan_id, workspace_id)
+    REFERENCES generation_plans(id, workspace_id),
+  FOREIGN KEY(task_id, plan_id, workspace_id)
+    REFERENCES generation_tasks(id, plan_id, workspace_id),
+  FOREIGN KEY(context_pack_id, workspace_id)
+    REFERENCES context_packs(id, workspace_id),
+  CHECK(length(turn_id) = 41 AND substr(turn_id, 1, 5) = 'turn-'
+    AND substr(turn_id, 14, 1) = '-'
+    AND substr(turn_id, 19, 1) = '-'
+    AND substr(turn_id, 20, 1) = '4'
+    AND substr(turn_id, 24, 1) = '-'
+    AND substr(turn_id, 25, 1) IN ('8','9','a','b')
+    AND substr(turn_id, 29, 1) = '-'
+    AND length(replace(substr(turn_id, 6), '-', '')) = 32
+    AND replace(substr(turn_id, 6), '-', '') NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(proposal_hash) = 64 AND proposal_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(json_valid(request_json) = 1 AND json_type(request_json) = 'object'),
+  PRIMARY KEY(workspace_id, turn_id),
+  UNIQUE(proposal_id),
+  UNIQUE(plan_id),
+  UNIQUE(task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scoped_agent_turns_task
+  ON scoped_agent_turns(task_id, plan_id, workspace_id);
+CREATE TRIGGER IF NOT EXISTS scoped_agent_turn_update_immutable
+BEFORE UPDATE ON scoped_agent_turns
+BEGIN SELECT RAISE(ABORT, 'Scoped Agent turn receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS scoped_agent_turn_delete_history_guard
+BEFORE DELETE ON scoped_agent_turns
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Scoped Agent turn receipts are immutable'); END;
+`;
+
+const WORKSPACE_AGENT_TURN_TABLE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS workspace_agent_turns (
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  proposal_id TEXT NOT NULL,
+  context_pack_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+    CHECK(typeof(created_at) = 'integer' AND created_at >= 0 AND created_at <= 9007199254740991),
+  FOREIGN KEY(proposal_id, workspace_id)
+    REFERENCES workspace_proposals(id, workspace_id),
+  FOREIGN KEY(context_pack_id, workspace_id)
+    REFERENCES context_packs(id, workspace_id),
+  CHECK(length(turn_id) = 41 AND substr(turn_id, 1, 5) = 'turn-'
+    AND substr(turn_id, 14, 1) = '-'
+    AND substr(turn_id, 19, 1) = '-'
+    AND substr(turn_id, 20, 1) = '4'
+    AND substr(turn_id, 24, 1) = '-'
+    AND substr(turn_id, 25, 1) IN ('8','9','a','b')
+    AND substr(turn_id, 29, 1) = '-'
+    AND length(replace(substr(turn_id, 6), '-', '')) = 32
+    AND replace(substr(turn_id, 6), '-', '') NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(json_valid(request_json) = 1 AND json_type(request_json) = 'object'),
+  PRIMARY KEY(workspace_id, turn_id),
+  UNIQUE(proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_agent_turns_proposal
+  ON workspace_agent_turns(proposal_id, workspace_id);
+CREATE TRIGGER IF NOT EXISTS workspace_agent_turn_update_immutable
+BEFORE UPDATE ON workspace_agent_turns
+BEGIN SELECT RAISE(ABORT, 'Workspace Agent turn receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_agent_turn_delete_history_guard
+BEFORE DELETE ON workspace_agent_turns
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Workspace Agent turn receipts are immutable'); END;
+`;
+
+const RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS research_direction_artifact_intents (
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  proposal_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  graph_revision INTEGER NOT NULL CHECK(graph_revision >= 0),
+  snapshot_id TEXT NOT NULL,
+  layout_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+    CHECK(typeof(created_at) = 'integer' AND created_at >= 0 AND created_at <= 9007199254740991),
+  FOREIGN KEY(proposal_id, workspace_id)
+    REFERENCES workspace_proposals(id, workspace_id),
+  FOREIGN KEY(plan_id, workspace_id)
+    REFERENCES generation_plans(id, workspace_id),
+  FOREIGN KEY(task_id, plan_id, workspace_id)
+    REFERENCES generation_tasks(id, plan_id, workspace_id),
+  FOREIGN KEY(workspace_id, graph_revision)
+    REFERENCES workspace_graph_revisions(workspace_id, revision),
+  FOREIGN KEY(snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id),
+  CHECK(length(request_id) = 46 AND substr(request_id, 1, 10) = 'selection-'
+    AND substr(request_id, 19, 1) = '-'
+    AND substr(request_id, 24, 1) = '-'
+    AND substr(request_id, 25, 1) = '4'
+    AND substr(request_id, 29, 1) = '-'
+    AND substr(request_id, 30, 1) IN ('8','9','a','b')
+    AND substr(request_id, 34, 1) = '-'
+    AND length(replace(substr(request_id, 11), '-', '')) = 32
+    AND replace(substr(request_id, 11), '-', '') NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(json_valid(request_json) = 1 AND json_type(request_json) = 'object'),
+  CHECK(json_valid(layout_json) = 1 AND json_type(layout_json) = 'object'),
+  PRIMARY KEY(workspace_id, request_id),
+  UNIQUE(proposal_id),
+  UNIQUE(plan_id),
+  UNIQUE(task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_direction_artifact_intents_task
+  ON research_direction_artifact_intents(task_id, plan_id, workspace_id);
+CREATE TRIGGER IF NOT EXISTS research_direction_artifact_intent_update_immutable
+BEFORE UPDATE ON research_direction_artifact_intents
+BEGIN SELECT RAISE(ABORT, 'Research direction Artifact intent receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_direction_artifact_intent_delete_history_guard
+BEFORE DELETE ON research_direction_artifact_intents
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Research direction Artifact intent receipts are immutable'); END;
+`;
+
+const GENERATION_PLAN_EVENT_CONTROL_TYPES = [
+  "plan-cancel-requested",
+  "task-rebase-disposition",
+  "task-retry-requested",
+] as const;
+
+/**
+ * SQLite cannot widen an existing CHECK constraint with ALTER TABLE. Rebuild
+ * only the append-only event table when opening a database created before the
+ * durable Task 12 controls existed, preserving its exact ordered history.
+ */
+function upgradeGenerationPlanEventTypeConstraint(db: DatabaseSync): void {
+  const row = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_plan_events'",
+  ).get() as { sql: string | null } | undefined;
+  if (!row?.sql || GENERATION_PLAN_EVENT_CONTROL_TYPES.every((type) => (
+    row.sql!.includes(`'${type}'`)
+  ))) return;
+
+  db.exec("SAVEPOINT generation_plan_events_task12_upgrade_savepoint");
+  try {
+    db.exec(`
+      DROP TRIGGER IF EXISTS generation_plan_execution_epoch_guard;
+      DROP TRIGGER IF EXISTS generation_plan_event_insert_guard;
+      DROP TRIGGER IF EXISTS generation_plan_event_update_immutable;
+      DROP TRIGGER IF EXISTS generation_plan_event_delete_history_guard;
+      DROP TRIGGER IF EXISTS generation_task_claim_insert_guard;
+      DROP TRIGGER IF EXISTS generation_task_result_write_once;
+      DROP TABLE IF EXISTS generation_plan_events_task12_upgrade;
+      CREATE TABLE generation_plan_events_task12_upgrade (
+        plan_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK(sequence > 0 AND sequence <= 9007199254740991),
+        task_id TEXT,
+        type TEXT NOT NULL CHECK(type IN (
+          'plan-queued','plan-compile-failed','task-materialization-failed','task-blocked-context',
+          'plan-cancel-requested','task-materialized','task-running','task-candidate-ready','task-needs-rebase',
+          'task-rebase-disposition','task-retry-requested','task-retry-wait',
+          'task-succeeded','task-failed','task-blocked','task-cancel-requested',
+          'task-cancelled','plan-succeeded','plan-failed','plan-cancelled'
+        )),
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json) = 1),
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(plan_id, workspace_id)
+          REFERENCES generation_plans(id, workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY(task_id, plan_id, workspace_id)
+          REFERENCES generation_tasks(id, plan_id, workspace_id) ON DELETE CASCADE,
+        CHECK(
+          (type LIKE 'task-%' AND task_id IS NOT NULL) OR
+          (type LIKE 'plan-%' AND task_id IS NULL)
+        ),
+        PRIMARY KEY(plan_id, sequence)
+      );
+      INSERT INTO generation_plan_events_task12_upgrade (
+        plan_id, workspace_id, sequence, task_id, type, payload_json, created_at
+      )
+      SELECT plan_id, workspace_id, sequence, task_id, type, payload_json, created_at
+      FROM generation_plan_events
+      ORDER BY plan_id COLLATE BINARY ASC, sequence ASC;
+      DROP TABLE generation_plan_events;
+      ALTER TABLE generation_plan_events_task12_upgrade RENAME TO generation_plan_events;
+      CREATE INDEX IF NOT EXISTS idx_generation_plan_events_plan
+        ON generation_plan_events(plan_id, sequence);
+    `);
+    // The rebuild temporarily removes triggers attached to, or selecting from,
+    // the event table. Restore the complete set before committing the upgrade.
+    db.exec(TASK12_GENERATION_TRIGGER_SCHEMA);
+    db.exec("RELEASE generation_plan_events_task12_upgrade_savepoint");
+  } catch (error) {
+    db.exec("ROLLBACK TO generation_plan_events_task12_upgrade_savepoint");
+    db.exec("RELEASE generation_plan_events_task12_upgrade_savepoint");
+    throw error;
+  }
+}
+
+const SAME_CONTEXT_HISTORICAL_PACK_LINEAGE_PREDICATE = `(
+  task.status = 'materialization-pending'
+  AND task.pending_context_policy = 'same-context'
+  AND NEW.retry_context_policy = 'same-context'
+  AND EXISTS (
+    SELECT 1
+    FROM generation_task_attempts predecessor
+    WHERE predecessor.task_id = task.id
+      AND predecessor.plan_id = task.plan_id
+      AND predecessor.workspace_id = task.workspace_id
+      AND predecessor.attempt = task.current_attempt
+      AND NEW.attempt = predecessor.attempt + 1
+      AND predecessor.target_artifact_id IS NEW.target_artifact_id
+      AND predecessor.target_track_id IS NEW.target_track_id
+      AND predecessor.target_resource_id IS NEW.target_resource_id
+      AND predecessor.context_pack_id IS pack.id
+      AND predecessor.materialization_sealed = 1
+      AND predecessor.status IN ('failed','needs-rebase')
+      AND predecessor.finished_at IS NOT NULL
+      AND predecessor.owner_id IS NULL
+      AND predecessor.lease_token IS NULL
+      AND predecessor.lease_expires_at IS NULL
+      AND predecessor.heartbeat_at IS NULL
+  )
+)`;
+
 const TASK12_GENERATION_TRIGGER_SCHEMA = `
 DROP TRIGGER IF EXISTS generation_plan_construction_seal_guard;
 DROP TRIGGER IF EXISTS generation_plan_execution_requires_seal;
 DROP TRIGGER IF EXISTS generation_plan_initial_state_guard;
 DROP TRIGGER IF EXISTS generation_plan_status_transition_guard;
 DROP TRIGGER IF EXISTS generation_plan_terminal_state_guard;
+DROP TRIGGER IF EXISTS generation_plan_execution_epoch_guard;
 DROP TRIGGER IF EXISTS generation_task_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_intent_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_delete_history_guard;
@@ -470,6 +719,9 @@ DROP TRIGGER IF EXISTS generation_task_dependency_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_dependency_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_task_current_attempt_guard;
 DROP TRIGGER IF EXISTS generation_task_result_write_once;
+DROP TRIGGER IF EXISTS generation_task_status_transition_guard;
+DROP TRIGGER IF EXISTS generation_task_state_shape_guard;
+DROP TRIGGER IF EXISTS generation_task_success_authority_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_retry_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_materialization_seal_guard;
@@ -478,6 +730,9 @@ DROP TRIGGER IF EXISTS generation_task_attempt_advance_current;
 DROP TRIGGER IF EXISTS generation_task_attempt_input_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_attempt_candidate_write_once;
 DROP TRIGGER IF EXISTS generation_task_attempt_delete_history_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_status_transition_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_state_shape_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_success_authority_guard;
 DROP TRIGGER IF EXISTS generation_task_validation_result_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_validation_result_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_validation_result_delete_history_guard;
@@ -771,14 +1026,35 @@ CREATE TRIGGER generation_plan_initial_state_guard
 BEFORE INSERT ON generation_plans
 WHEN NEW.status <> 'approved'
   OR NEW.construction_sealed <> 0
+  OR NEW.execution_epoch <> 0
   OR NEW.compile_error_json IS NOT NULL
   OR NEW.finished_at IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'Generation Plan must begin as an unsealed approved compilation shell'); END;
 
+CREATE TRIGGER generation_plan_execution_epoch_guard
+BEFORE UPDATE OF execution_epoch ON generation_plans
+WHEN NEW.execution_epoch IS NOT OLD.execution_epoch AND NOT (
+  NEW.execution_epoch = OLD.execution_epoch + 1
+  AND NEW.execution_epoch <= 9007199254740991
+  AND (
+    (OLD.status IN ('queued','running') AND NEW.status IN ('queued','running','cancelled'))
+    OR (OLD.status = 'approved' AND OLD.construction_sealed = 0 AND NEW.status = 'cancelled')
+    OR (OLD.status = 'failed' AND NEW.status = 'queued')
+  )
+  AND EXISTS (
+    SELECT 1 FROM generation_plan_events event
+    WHERE event.plan_id = OLD.id
+      AND event.sequence = (SELECT MAX(latest.sequence) FROM generation_plan_events latest WHERE latest.plan_id = OLD.id)
+      AND event.type IN ('plan-cancel-requested','task-retry-requested')
+      AND json_extract(event.payload_json, '$.executionEpoch') = NEW.execution_epoch
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Plan execution epoch is not fenced by one durable control event'); END;
+
 CREATE TRIGGER generation_plan_status_transition_guard
 BEFORE UPDATE OF status ON generation_plans
 WHEN NEW.status IS NOT OLD.status AND NOT (
-  (OLD.status = 'approved' AND NEW.status IN ('queued','compile-failed')) OR
+  (OLD.status = 'approved' AND NEW.status IN ('queued','compile-failed','cancelled')) OR
   (OLD.status = 'queued' AND NEW.status IN ('running','failed','cancelled')) OR
   (OLD.status = 'running' AND NEW.status IN ('succeeded','failed','requires-new-impact','cancelled')) OR
   (OLD.status IN ('failed','requires-new-impact') AND NEW.status = 'queued')
@@ -806,10 +1082,16 @@ WHEN
   )) OR
   (NEW.status = 'cancelled' AND (
     NEW.finished_at IS NULL OR
-    NOT EXISTS (SELECT 1 FROM generation_tasks task WHERE task.plan_id = NEW.id AND task.status = 'cancelled') OR
-    EXISTS (
-      SELECT 1 FROM generation_tasks task
-      WHERE task.plan_id = NEW.id AND task.status NOT IN ('succeeded','failed','blocked','cancelled')
+    NOT (
+      (NEW.construction_sealed = 0
+        AND NOT EXISTS (SELECT 1 FROM generation_tasks task WHERE task.plan_id = NEW.id))
+      OR
+      (NEW.construction_sealed = 1
+        AND EXISTS (SELECT 1 FROM generation_tasks task WHERE task.plan_id = NEW.id AND task.status = 'cancelled')
+        AND NOT EXISTS (
+          SELECT 1 FROM generation_tasks task
+          WHERE task.plan_id = NEW.id AND task.status NOT IN ('succeeded','failed','blocked','cancelled')
+        ))
     )
   )) OR
   (NEW.status = 'compile-failed' AND (
@@ -833,10 +1115,21 @@ CREATE TRIGGER generation_task_insert_guard
 BEFORE INSERT ON generation_tasks
 WHEN NEW.current_attempt <> 0
   OR NEW.materialization_failures <> 0
+  OR NEW.rebase_count <> 0
   OR NEW.status <> 'materialization-pending'
+  OR NEW.blocked_reason IS NOT NULL
+  OR NEW.blocked_by_task_id IS NOT NULL
+  OR NEW.pending_context_policy IS NOT NULL
+  OR NEW.failure_class IS NOT NULL
+  OR NEW.error_json IS NOT NULL
+  OR NEW.next_eligible_at IS NOT NULL
   OR NEW.result_revision_id IS NOT NULL
   OR NEW.result_resource_revision_id IS NOT NULL
   OR NEW.result_snapshot_id IS NOT NULL
+  OR typeof(NEW.created_at) <> 'integer'
+  OR NEW.created_at < 0
+  OR NEW.created_at > 9007199254740991
+  OR NEW.finished_at IS NOT NULL
   OR NOT EXISTS (
     SELECT 1 FROM generation_plans plan
     WHERE plan.id = NEW.plan_id
@@ -910,8 +1203,465 @@ BEFORE UPDATE OF result_revision_id, result_resource_revision_id, result_snapsho
 WHEN (OLD.result_revision_id IS NOT NULL AND NEW.result_revision_id IS NOT OLD.result_revision_id)
   OR (OLD.result_resource_revision_id IS NOT NULL
     AND NEW.result_resource_revision_id IS NOT OLD.result_resource_revision_id)
-  OR (OLD.result_snapshot_id IS NOT NULL AND NEW.result_snapshot_id IS NOT OLD.result_snapshot_id)
+  OR (
+    OLD.result_snapshot_id IS NOT NULL
+    AND NEW.result_snapshot_id IS NOT OLD.result_snapshot_id
+    AND NOT (
+      OLD.kind = 'prototype-validation'
+      AND OLD.status = 'succeeded'
+      AND OLD.result_revision_id IS NULL
+      AND OLD.result_resource_revision_id IS NULL
+      AND NEW.status = 'materialization-pending'
+      AND NEW.current_attempt = OLD.current_attempt
+      AND NEW.result_revision_id IS NULL
+      AND NEW.result_resource_revision_id IS NULL
+      AND NEW.result_snapshot_id IS NULL
+      AND NEW.pending_context_policy IN ('same-context','latest-context')
+      AND NEW.failure_class IS NULL
+      AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.finished_at IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM generation_plan_events event
+        JOIN generation_tasks checkpoint
+          ON checkpoint.id = event.task_id
+         AND checkpoint.plan_id = event.plan_id
+         AND checkpoint.workspace_id = event.workspace_id
+        JOIN generation_task_dependencies dependency
+          ON dependency.task_id = checkpoint.id
+         AND dependency.plan_id = checkpoint.plan_id
+         AND dependency.workspace_id = checkpoint.workspace_id
+        JOIN generation_task_attempts checkpoint_attempt
+          ON checkpoint_attempt.task_id = checkpoint.id
+         AND checkpoint_attempt.plan_id = checkpoint.plan_id
+         AND checkpoint_attempt.workspace_id = checkpoint.workspace_id
+         AND checkpoint_attempt.attempt = checkpoint.current_attempt
+        JOIN generation_task_attempt_dependency_outputs output
+          ON output.task_id = checkpoint_attempt.task_id
+         AND output.plan_id = checkpoint_attempt.plan_id
+         AND output.workspace_id = checkpoint_attempt.workspace_id
+         AND output.attempt = checkpoint_attempt.attempt
+         AND output.dependency_task_id = OLD.id
+        JOIN generation_task_validation_results validation
+          ON validation.task_id = OLD.id
+         AND validation.plan_id = OLD.plan_id
+         AND validation.workspace_id = OLD.workspace_id
+         AND validation.attempt = OLD.current_attempt
+        JOIN project_workspaces workspace
+          ON workspace.id = OLD.workspace_id
+        WHERE event.plan_id = OLD.plan_id
+          AND event.workspace_id = OLD.workspace_id
+          AND event.type = 'task-rebase-disposition'
+          AND event.sequence = (
+            SELECT MAX(latest.sequence)
+            FROM generation_plan_events latest
+            WHERE latest.plan_id = OLD.plan_id
+              AND latest.workspace_id = OLD.workspace_id
+          )
+          AND checkpoint.kind = 'checkpoint'
+          AND checkpoint.status = 'needs-rebase'
+          AND checkpoint.current_attempt = json_extract(event.payload_json, '$.sourceAttempt')
+          AND dependency.dependency_task_id = OLD.id
+          AND checkpoint_attempt.status = 'needs-rebase'
+          AND checkpoint_attempt.finished_at IS NOT NULL
+          AND checkpoint_attempt.owner_id IS NULL
+          AND checkpoint_attempt.lease_token IS NULL
+          AND checkpoint_attempt.lease_expires_at IS NULL
+          AND checkpoint_attempt.heartbeat_at IS NULL
+          AND checkpoint_attempt.expected_snapshot_id = OLD.result_snapshot_id
+          AND output.ordinal = dependency.ordinal
+          AND output.result_revision_id IS NULL
+          AND output.result_resource_revision_id IS NULL
+          AND output.result_snapshot_id = OLD.result_snapshot_id
+          AND validation.snapshot_id = OLD.result_snapshot_id
+          AND validation.created_at = OLD.finished_at
+          AND json_extract(event.payload_json, '$.kind') = 'full'
+          AND json_extract(event.payload_json, '$.round') = 'checkpoint-validation'
+          AND json_extract(event.payload_json, '$.validationTaskId') = OLD.id
+          AND json_extract(event.payload_json, '$.validationSourceAttempt') = OLD.current_attempt
+          AND json_extract(event.payload_json, '$.validationSourceSnapshotId') = OLD.result_snapshot_id
+          AND json_extract(event.payload_json, '$.validationEvidenceHash') = validation.evidence_hash
+          AND json_extract(event.payload_json, '$.expectedSnapshotId') = workspace.active_snapshot_id
+      )
+    )
+  )
 BEGIN SELECT RAISE(ABORT, 'Generation Task result is write-once'); END;
+
+CREATE TRIGGER generation_task_status_transition_guard
+BEFORE UPDATE OF status ON generation_tasks
+WHEN NEW.status IS NOT OLD.status AND NOT (
+  (OLD.status = 'materialization-pending' AND NEW.status IN (
+    'queued','retry-wait','blocked-context','failed','blocked','cancelled'
+  )) OR
+  (OLD.status = 'retry-wait' AND NEW.status IN (
+    'queued','blocked-context','failed','blocked','cancelled'
+  )) OR
+  (OLD.status = 'blocked-context' AND NEW.status IN (
+    'materialization-pending','blocked','cancelled'
+  )) OR
+  (OLD.status = 'queued' AND NEW.status IN ('running','blocked','cancelled')) OR
+  (OLD.status = 'running' AND NEW.status IN (
+    'candidate-ready','succeeded','retry-wait','failed','needs-rebase','cancel-requested'
+  )) OR
+  (OLD.status = 'candidate-ready' AND NEW.status IN (
+    'succeeded','needs-rebase','failed','cancel-requested'
+  )) OR
+  (OLD.status = 'needs-rebase' AND NEW.status IN (
+    'queued','retry-wait','materialization-pending','awaiting-context-refresh',
+    'failed','blocked','cancelled'
+  )) OR
+  (OLD.status = 'awaiting-context-refresh' AND NEW.status IN (
+    'queued','retry-wait','blocked-context','failed','blocked','cancelled'
+  )) OR
+  (OLD.status = 'cancel-requested' AND NEW.status = 'cancelled') OR
+  (OLD.status IN ('failed','blocked') AND NEW.status = 'materialization-pending') OR
+  (OLD.status = 'succeeded' AND NEW.status = 'materialization-pending')
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task status transition is invalid or terminal'); END;
+
+CREATE TRIGGER generation_task_state_shape_guard
+BEFORE UPDATE OF status, blocked_reason, blocked_by_task_id, pending_context_policy,
+  current_attempt, materialization_failures, rebase_count, failure_class, error_json,
+  next_eligible_at, result_revision_id, result_resource_revision_id,
+  result_snapshot_id, finished_at
+ON generation_tasks
+WHEN NOT (
+  (
+    NEW.status = 'materialization-pending'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND (NEW.current_attempt = 0 OR EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1
+        AND attempt.status IN (
+          'queued','retryable-failed','failed','needs-rebase','cancelled','succeeded'
+        )
+    ))
+  ) OR (
+    NEW.status = 'retry-wait'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NOT NULL
+    AND json_type(NEW.error_json) = 'object'
+    AND typeof(NEW.next_eligible_at) = 'integer'
+    AND NEW.next_eligible_at >= 0
+    AND NEW.next_eligible_at <= 9007199254740991
+    AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND (
+      EXISTS (
+        SELECT 1 FROM generation_task_materialization_failures failure
+        WHERE failure.task_id = NEW.id AND failure.plan_id = NEW.plan_id
+          AND failure.workspace_id = NEW.workspace_id
+          AND failure.sequence IN (NEW.materialization_failures, NEW.materialization_failures - 1)
+          AND failure.failure_class = NEW.failure_class
+          AND failure.error_json = NEW.error_json
+          AND failure.next_eligible_at IS NOT NULL
+      ) OR (
+        NEW.current_attempt > 0 AND EXISTS (
+          SELECT 1 FROM generation_task_attempts attempt
+          WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+            AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+            AND attempt.materialization_sealed = 1
+            AND attempt.status IN ('queued','retryable-failed','failed','needs-rebase')
+        )
+      )
+    )
+  ) OR (
+    NEW.status = 'blocked-context'
+    AND NEW.blocked_reason IS NOT NULL AND length(trim(NEW.blocked_reason)) > 0
+    AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy = 'latest-context'
+    AND NEW.failure_class = 'context' AND json_type(NEW.error_json) = 'object'
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND EXISTS (
+      SELECT 1 FROM generation_task_materialization_failures failure
+      WHERE failure.task_id = NEW.id AND failure.plan_id = NEW.plan_id
+        AND failure.workspace_id = NEW.workspace_id
+        AND failure.sequence = NEW.materialization_failures
+        AND failure.failure_class = 'context'
+        AND failure.error_json = NEW.error_json
+        AND failure.next_eligible_at IS NULL
+    )
+  ) OR (
+    NEW.status = 'queued'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1 AND attempt.status = 'queued'
+    )
+  ) OR (
+    NEW.status = 'running'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1 AND attempt.status = 'running'
+        AND attempt.owner_id IS NOT NULL AND attempt.lease_token IS NOT NULL
+        AND attempt.lease_expires_at IS NOT NULL AND attempt.heartbeat_at IS NOT NULL
+    )
+  ) OR (
+    NEW.status = 'candidate-ready'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1 AND attempt.status = 'candidate-ready'
+        AND attempt.owner_id IS NOT NULL AND attempt.lease_token IS NOT NULL
+        AND attempt.lease_expires_at IS NOT NULL AND attempt.heartbeat_at IS NOT NULL
+        AND attempt.candidate_evidence_json IS NOT NULL
+        AND attempt.candidate_evidence_hash IS NOT NULL
+    )
+  ) OR (
+    NEW.status = 'needs-rebase'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IN ('publication-conflict','build-infrastructure')
+    AND json_type(NEW.error_json) = 'object'
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1
+        AND attempt.status IN ('needs-rebase','queued')
+    )
+  ) OR (
+    NEW.status = 'awaiting-context-refresh'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy = 'latest-context'
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1
+        AND attempt.status IN ('needs-rebase','queued')
+    )
+  ) OR (
+    NEW.status = 'cancel-requested'
+    AND NEW.current_attempt > 0
+    AND NEW.pending_context_policy IS NULL AND NEW.next_eligible_at IS NULL
+    AND NEW.finished_at IS NULL
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND (
+      (NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+        AND NEW.failure_class IS NULL AND NEW.error_json IS NULL) OR
+      (NEW.blocked_reason IS NOT NULL AND NEW.blocked_by_task_id IS NOT NULL
+        AND NEW.failure_class IS NULL AND NEW.error_json IS NULL) OR
+      (NEW.blocked_reason IS NOT NULL
+        AND NEW.failure_class = 'cancelled' AND json_type(NEW.error_json) = 'object')
+    )
+    AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1 AND attempt.status = 'cancel-requested'
+        AND attempt.owner_id IS NOT NULL AND attempt.lease_token IS NOT NULL
+    )
+  ) OR (
+    NEW.status = 'succeeded'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+    AND NEW.next_eligible_at IS NULL
+    AND typeof(NEW.finished_at) = 'integer'
+    AND NEW.finished_at >= NEW.created_at AND NEW.finished_at <= 9007199254740991
+    AND NEW.current_attempt > 0 AND EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1 AND attempt.status = 'succeeded'
+        AND attempt.finished_at = NEW.finished_at
+    )
+    AND (
+      (NEW.target_type = 'artifact'
+        AND NEW.result_revision_id IS NOT NULL
+        AND NEW.result_resource_revision_id IS NULL
+        AND NEW.result_snapshot_id IS NOT NULL) OR
+      (NEW.target_type = 'resource'
+        AND NEW.result_revision_id IS NULL
+        AND NEW.result_resource_revision_id IS NOT NULL
+        AND NEW.result_snapshot_id IS NOT NULL) OR
+      (NEW.target_type = 'workspace'
+        AND NEW.result_revision_id IS NULL
+        AND NEW.result_resource_revision_id IS NULL
+        AND NEW.result_snapshot_id IS NOT NULL)
+    )
+  ) OR (
+    NEW.status = 'failed'
+    AND NEW.blocked_reason IS NULL AND NEW.blocked_by_task_id IS NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NOT NULL AND json_type(NEW.error_json) = 'object'
+    AND NEW.next_eligible_at IS NULL
+    AND typeof(NEW.finished_at) = 'integer'
+    AND NEW.finished_at >= NEW.created_at AND NEW.finished_at <= 9007199254740991
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND (
+      (NEW.current_attempt = 0 AND EXISTS (
+        SELECT 1 FROM generation_task_materialization_failures failure
+        WHERE failure.task_id = NEW.id AND failure.plan_id = NEW.plan_id
+          AND failure.workspace_id = NEW.workspace_id
+          AND failure.sequence = NEW.materialization_failures
+          AND failure.failure_class = NEW.failure_class
+          AND failure.error_json = NEW.error_json
+          AND failure.next_eligible_at IS NULL
+      )) OR
+      (NEW.current_attempt > 0 AND EXISTS (
+        SELECT 1 FROM generation_task_attempts attempt
+        WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+          AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+          AND attempt.materialization_sealed = 1
+          AND attempt.status IN ('failed','needs-rebase')
+      ))
+    )
+  ) OR (
+    NEW.status = 'blocked'
+    AND NEW.blocked_reason IS NOT NULL AND length(trim(NEW.blocked_reason)) > 0
+    AND NEW.blocked_by_task_id IS NOT NULL
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class IS NOT NULL AND json_type(NEW.error_json) = 'object'
+    AND NEW.next_eligible_at IS NULL
+    AND typeof(NEW.finished_at) = 'integer'
+    AND NEW.finished_at >= NEW.created_at AND NEW.finished_at <= 9007199254740991
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND EXISTS (
+      SELECT 1 FROM generation_tasks blocker
+      WHERE blocker.id = NEW.blocked_by_task_id AND blocker.plan_id = NEW.plan_id
+        AND blocker.workspace_id = NEW.workspace_id AND blocker.status = 'failed'
+        AND blocker.failure_class = NEW.failure_class AND blocker.error_json = NEW.error_json
+    )
+    AND (NEW.current_attempt = 0 OR EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1
+        AND attempt.status IN ('cancelled','retryable-failed','failed','needs-rebase')
+    ))
+  ) OR (
+    NEW.status = 'cancelled'
+    AND (NEW.blocked_reason IS NULL OR length(trim(NEW.blocked_reason)) > 0)
+    AND NEW.pending_context_policy IS NULL
+    AND NEW.failure_class = 'cancelled' AND json_type(NEW.error_json) = 'object'
+    AND NEW.next_eligible_at IS NULL
+    AND typeof(NEW.finished_at) = 'integer'
+    AND NEW.finished_at >= NEW.created_at AND NEW.finished_at <= 9007199254740991
+    AND NEW.result_revision_id IS NULL AND NEW.result_resource_revision_id IS NULL
+    AND NEW.result_snapshot_id IS NULL
+    AND (NEW.current_attempt = 0 OR EXISTS (
+      SELECT 1 FROM generation_task_attempts attempt
+      WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+        AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+        AND attempt.materialization_sealed = 1
+        AND attempt.status IN (
+          'cancelled','retryable-failed','failed','needs-rebase','succeeded'
+        )
+    ))
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task state shape is incoherent'); END;
+
+CREATE TRIGGER generation_task_success_authority_guard
+BEFORE UPDATE OF status ON generation_tasks
+WHEN NEW.status = 'succeeded' AND OLD.status IS NOT 'succeeded' AND NOT EXISTS (
+  SELECT 1
+  FROM generation_task_attempts attempt
+  JOIN project_workspaces workspace ON workspace.id = NEW.workspace_id
+  WHERE attempt.task_id = NEW.id AND attempt.plan_id = NEW.plan_id
+    AND attempt.workspace_id = NEW.workspace_id AND attempt.attempt = NEW.current_attempt
+    AND attempt.materialization_sealed = 1 AND attempt.status = 'succeeded'
+    AND attempt.finished_at = NEW.finished_at
+    AND (
+      (NEW.target_type = 'artifact'
+        AND attempt.candidate_revision_id = NEW.result_revision_id
+        AND attempt.candidate_resource_revision_id IS NULL
+        AND workspace.active_snapshot_id = NEW.result_snapshot_id
+        AND EXISTS (
+          SELECT 1 FROM artifact_tracks track
+          JOIN workspace_snapshot_artifacts mapping
+            ON mapping.snapshot_id = NEW.result_snapshot_id
+           AND mapping.workspace_id = NEW.workspace_id
+           AND mapping.artifact_id = NEW.target_artifact_id
+          WHERE track.id = NEW.target_track_id AND track.artifact_id = NEW.target_artifact_id
+            AND track.head_revision_id = NEW.result_revision_id
+            AND mapping.track_id = NEW.target_track_id
+            AND mapping.revision_id = NEW.result_revision_id
+        )) OR
+      (NEW.target_type = 'resource'
+        AND attempt.candidate_revision_id IS NULL
+        AND attempt.candidate_resource_revision_id = NEW.result_resource_revision_id
+        AND workspace.active_snapshot_id = NEW.result_snapshot_id
+        AND EXISTS (
+          SELECT 1 FROM resources resource
+          JOIN workspace_snapshot_resources mapping
+            ON mapping.snapshot_id = NEW.result_snapshot_id
+           AND mapping.workspace_id = NEW.workspace_id
+           AND mapping.resource_id = NEW.target_resource_id
+          WHERE resource.id = NEW.target_resource_id
+            AND resource.workspace_id = NEW.workspace_id
+            AND resource.head_revision_id = NEW.result_resource_revision_id
+            AND mapping.revision_id = NEW.result_resource_revision_id
+        )) OR
+      (NEW.target_type = 'workspace' AND NEW.kind = 'prototype-validation'
+        AND NEW.result_snapshot_id = attempt.expected_snapshot_id
+        AND EXISTS (
+          SELECT 1 FROM generation_task_validation_results validation
+          WHERE validation.task_id = NEW.id AND validation.plan_id = NEW.plan_id
+            AND validation.workspace_id = NEW.workspace_id
+            AND validation.attempt = NEW.current_attempt
+            AND validation.snapshot_id = NEW.result_snapshot_id
+            AND validation.created_at = NEW.finished_at
+        )) OR
+      (NEW.target_type = 'workspace' AND NEW.kind IN ('checkpoint','propagation-publish')
+        AND workspace.active_snapshot_id = NEW.result_snapshot_id
+        AND EXISTS (
+          SELECT 1 FROM workspace_snapshots snapshot
+          WHERE snapshot.id = NEW.result_snapshot_id
+            AND snapshot.workspace_id = NEW.workspace_id
+            AND snapshot.sealed = 1
+            AND json_extract(snapshot.provenance_json, '$.kind') = 'plan-checkpoint'
+            AND json_extract(snapshot.provenance_json, '$.planId') = NEW.plan_id
+            AND json_extract(snapshot.provenance_json, '$.checkpointId') = NEW.id
+        ))
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task success lacks exact published Attempt authority'); END;
 
 CREATE TRIGGER generation_task_attempt_insert_guard
 BEFORE INSERT ON generation_task_attempts
@@ -929,12 +1679,23 @@ WHEN NEW.attempt_origin = 'materialized' AND (
   ))
   OR NEW.materialization_sealed <> 0
   OR NEW.status <> 'queued'
+  OR NEW.blocked_reason IS NOT NULL
+  OR NEW.failure_class IS NOT NULL
+  OR NEW.error_json IS NOT NULL
+  OR NEW.next_eligible_at IS NOT NULL
+  OR NEW.candidate_revision_id IS NOT NULL
+  OR NEW.candidate_resource_revision_id IS NOT NULL
+  OR NEW.candidate_evidence_json IS NOT NULL
+  OR NEW.candidate_evidence_hash IS NOT NULL
   OR NEW.owner_id IS NOT NULL
   OR NEW.lease_token IS NOT NULL
   OR NEW.lease_expires_at IS NOT NULL
   OR NEW.heartbeat_at IS NOT NULL
   OR NEW.started_at IS NOT NULL
   OR NEW.finished_at IS NOT NULL
+  OR typeof(NEW.created_at) <> 'integer'
+  OR NEW.created_at < 0
+  OR NEW.created_at > 9007199254740991
   OR NOT EXISTS (
     SELECT 1 FROM generation_tasks task
     JOIN generation_plans plan
@@ -949,6 +1710,7 @@ WHEN NEW.attempt_origin = 'materialized' AND (
       AND task.workspace_id = NEW.workspace_id
       AND plan.construction_sealed = 1
       AND plan.status IN ('queued','running')
+      AND NEW.execution_epoch = plan.execution_epoch
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
       AND NEW.attempt = task.current_attempt + 1
       AND NOT EXISTS (
@@ -996,7 +1758,10 @@ WHEN NEW.attempt_origin = 'materialized' AND (
             AND pack.workspace_id = NEW.workspace_id
             AND pack.scope_type = 'resource'
             AND pack.scope_id = task.target_resource_id
-            AND pack.graph_revision = snapshot.graph_revision
+            AND (
+              pack.graph_revision = snapshot.graph_revision
+              OR ${SAME_CONTEXT_HISTORICAL_PACK_LINEAGE_PREDICATE}
+            )
             AND pack.intent = 'generate'
             AND pack.sealed = 1
         )) OR
@@ -1006,7 +1771,10 @@ WHEN NEW.attempt_origin = 'materialized' AND (
             AND pack.workspace_id = NEW.workspace_id
             AND pack.scope_type = 'artifact'
             AND pack.scope_id = task.target_artifact_id
-            AND pack.graph_revision = snapshot.graph_revision
+            AND (
+              pack.graph_revision = snapshot.graph_revision
+              OR ${SAME_CONTEXT_HISTORICAL_PACK_LINEAGE_PREDICATE}
+            )
             AND pack.intent = 'generate'
             AND pack.sealed = 1
         )) OR
@@ -1045,6 +1813,14 @@ WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
   OR NEW.heartbeat_at IS NOT NULL
   OR NEW.started_at IS NOT NULL
   OR NEW.finished_at IS NOT NULL
+  OR typeof(NEW.created_at) <> 'integer'
+  OR NEW.created_at < 0
+  OR NEW.created_at > 9007199254740991
+  OR (NEW.candidate_evidence_hash IS NOT NULL AND (
+    length(NEW.candidate_evidence_hash) <> 64
+    OR NEW.candidate_evidence_hash GLOB '*[^0-9a-f]*'
+    OR json_type(NEW.candidate_evidence_json) <> 'object'
+  ))
   OR NOT EXISTS (
     SELECT 1
     FROM generation_tasks task
@@ -1056,8 +1832,8 @@ WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
      AND predecessor.workspace_id = task.workspace_id
      AND predecessor.attempt = NEW.predecessor_attempt
     JOIN workspace_snapshots snapshot
-      ON snapshot.id = predecessor.expected_snapshot_id
-     AND snapshot.workspace_id = predecessor.workspace_id
+      ON snapshot.id = NEW.expected_snapshot_id
+     AND snapshot.workspace_id = NEW.workspace_id
     WHERE task.id = NEW.task_id
       AND task.plan_id = NEW.plan_id
       AND task.workspace_id = NEW.workspace_id
@@ -1073,13 +1849,24 @@ WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
       AND predecessor.heartbeat_at IS NULL
       AND snapshot.sealed = 1
       AND NEW.automatic_retry_index = predecessor.automatic_retry_index + 1
+      AND NEW.execution_epoch = predecessor.execution_epoch
       AND NEW.target_artifact_id IS predecessor.target_artifact_id
       AND NEW.target_track_id IS predecessor.target_track_id
       AND NEW.target_resource_id IS predecessor.target_resource_id
       AND NEW.base_revision_id IS predecessor.base_revision_id
       AND NEW.source_commit_hash IS predecessor.source_commit_hash
       AND NEW.source_tree_hash IS predecessor.source_tree_hash
-      AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+      AND (
+        NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+        OR (
+          NEW.attempt_origin = 'publication-retry'
+          AND EXISTS (
+            SELECT 1 FROM project_workspaces workspace
+            WHERE workspace.id = NEW.workspace_id
+              AND workspace.active_snapshot_id = NEW.expected_snapshot_id
+          )
+        )
+      )
       AND NEW.context_pack_id IS predecessor.context_pack_id
       AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
       AND snapshot.kernel_revision_id IS NEW.kernel_revision_id
@@ -1155,6 +1942,7 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
       AND task.workspace_id = NEW.workspace_id
       AND plan.construction_sealed = 1
       AND plan.status IN ('queued','running')
+      AND NEW.execution_epoch = plan.execution_epoch
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
       AND NEW.attempt = task.current_attempt + 1
       AND NOT EXISTS (
@@ -1176,7 +1964,10 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
             AND pack.workspace_id = NEW.workspace_id
             AND pack.scope_type = 'resource'
             AND pack.scope_id = task.target_resource_id
-            AND pack.graph_revision = snapshot.graph_revision
+            AND (
+              pack.graph_revision = snapshot.graph_revision
+              OR ${SAME_CONTEXT_HISTORICAL_PACK_LINEAGE_PREDICATE}
+            )
             AND pack.intent = 'generate'
             AND pack.sealed = 1
         )) OR
@@ -1186,7 +1977,10 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
             AND pack.workspace_id = NEW.workspace_id
             AND pack.scope_type = 'artifact'
             AND pack.scope_id = task.target_artifact_id
-            AND pack.graph_revision = snapshot.graph_revision
+            AND (
+              pack.graph_revision = snapshot.graph_revision
+              OR ${SAME_CONTEXT_HISTORICAL_PACK_LINEAGE_PREDICATE}
+            )
             AND pack.intent = 'generate'
             AND pack.sealed = 1
         )) OR
@@ -1305,8 +2099,8 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
      AND predecessor.workspace_id = task.workspace_id
      AND predecessor.attempt = NEW.predecessor_attempt
     JOIN workspace_snapshots snapshot
-      ON snapshot.id = predecessor.expected_snapshot_id
-     AND snapshot.workspace_id = predecessor.workspace_id
+      ON snapshot.id = NEW.expected_snapshot_id
+     AND snapshot.workspace_id = NEW.workspace_id
     WHERE task.id = NEW.task_id
       AND task.plan_id = NEW.plan_id
       AND task.workspace_id = NEW.workspace_id
@@ -1322,13 +2116,24 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
       AND predecessor.heartbeat_at IS NULL
       AND snapshot.sealed = 1
       AND NEW.automatic_retry_index = predecessor.automatic_retry_index + 1
+      AND NEW.execution_epoch = predecessor.execution_epoch
       AND NEW.target_artifact_id IS predecessor.target_artifact_id
       AND NEW.target_track_id IS predecessor.target_track_id
       AND NEW.target_resource_id IS predecessor.target_resource_id
       AND NEW.base_revision_id IS predecessor.base_revision_id
       AND NEW.source_commit_hash IS predecessor.source_commit_hash
       AND NEW.source_tree_hash IS predecessor.source_tree_hash
-      AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+      AND (
+        NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+        OR (
+          NEW.attempt_origin = 'publication-retry'
+          AND EXISTS (
+            SELECT 1 FROM project_workspaces workspace
+            WHERE workspace.id = NEW.workspace_id
+              AND workspace.active_snapshot_id = NEW.expected_snapshot_id
+          )
+        )
+      )
       AND NEW.context_pack_id IS predecessor.context_pack_id
       AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
       AND snapshot.kernel_revision_id IS NEW.kernel_revision_id
@@ -1471,7 +2276,7 @@ END;
 
 CREATE TRIGGER generation_task_attempt_input_update_immutable
 BEFORE UPDATE OF task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
-  target_resource_id, base_revision_id, source_commit_hash, source_tree_hash,
+  target_resource_id, execution_epoch, base_revision_id, source_commit_hash, source_tree_hash,
   expected_snapshot_id, context_pack_id,
   kernel_revision_id, execution_mode, payload_json, input_hash,
   pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
@@ -1491,6 +2296,307 @@ WHEN (OLD.candidate_revision_id IS NOT NULL AND NEW.candidate_revision_id IS NOT
   OR (OLD.candidate_evidence_hash IS NOT NULL
     AND NEW.candidate_evidence_hash IS NOT OLD.candidate_evidence_hash)
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt candidate evidence is write-once'); END;
+
+CREATE TRIGGER generation_task_attempt_status_transition_guard
+BEFORE UPDATE OF status ON generation_task_attempts
+WHEN NEW.status IS NOT OLD.status AND NOT (
+  (OLD.status = 'queued' AND NEW.status IN ('running','cancelled')) OR
+  (OLD.status = 'running' AND NEW.status IN (
+    'candidate-ready','succeeded','retryable-failed','failed','needs-rebase','cancel-requested'
+  )) OR
+  (OLD.status = 'candidate-ready' AND NEW.status IN (
+    'succeeded','failed','needs-rebase','cancel-requested'
+  )) OR
+  (OLD.status = 'cancel-requested' AND NEW.status = 'cancelled')
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt status transition is invalid or terminal'); END;
+
+CREATE TRIGGER generation_task_attempt_state_shape_guard
+BEFORE UPDATE OF materialization_sealed, status, blocked_reason, failure_class, error_json,
+  next_eligible_at, candidate_revision_id, candidate_resource_revision_id,
+  candidate_evidence_json, candidate_evidence_hash, owner_id, lease_token,
+  lease_expires_at, heartbeat_at, started_at, finished_at
+ON generation_task_attempts
+WHEN NOT (
+  EXISTS (
+    SELECT 1 FROM generation_tasks task
+    WHERE task.id = NEW.task_id AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND (
+        (NEW.status = 'queued' AND (
+          (NEW.materialization_sealed = 0 AND NEW.attempt = task.current_attempt + 1) OR
+          (NEW.materialization_sealed = 1 AND NEW.attempt = task.current_attempt) OR
+          (OLD.materialization_sealed = 0 AND NEW.materialization_sealed = 1
+            AND NEW.attempt = task.current_attempt + 1)
+        )) OR
+        (NEW.status <> 'queued' AND NEW.materialization_sealed = 1
+          AND NEW.attempt = task.current_attempt)
+      )
+  )
+  AND (
+    NEW.candidate_evidence_hash IS NULL OR (
+      length(NEW.candidate_evidence_hash) = 64
+      AND NEW.candidate_evidence_hash NOT GLOB '*[^0-9a-f]*'
+      AND json_type(NEW.candidate_evidence_json) = 'object'
+    )
+  )
+  AND (
+    (
+      NEW.status = 'queued'
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND NEW.started_at IS NULL AND NEW.finished_at IS NULL
+      AND (
+        NEW.execution_mode = 'publication-only' OR (
+          NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND NEW.candidate_evidence_json IS NULL
+          AND NEW.candidate_evidence_hash IS NULL
+        )
+      )
+    ) OR (
+      NEW.status = 'running'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NOT NULL AND length(trim(NEW.owner_id)) > 0
+      AND NEW.owner_id IS trim(NEW.owner_id)
+      AND NEW.lease_token IS NOT NULL AND length(trim(NEW.lease_token)) > 0
+      AND NEW.lease_token IS trim(NEW.lease_token)
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.heartbeat_at) = 'integer'
+      AND typeof(NEW.lease_expires_at) = 'integer'
+      AND NEW.started_at >= NEW.created_at
+      AND NEW.started_at <= 9007199254740991
+      AND NEW.heartbeat_at >= NEW.started_at
+      AND NEW.heartbeat_at <= 9007199254740991
+      AND NEW.lease_expires_at > NEW.heartbeat_at
+      AND NEW.lease_expires_at <= 9007199254740991
+      AND NEW.finished_at IS NULL
+      AND (
+        NEW.execution_mode = 'publication-only' OR (
+          NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND NEW.candidate_evidence_json IS NULL
+          AND NEW.candidate_evidence_hash IS NULL
+        )
+      )
+    ) OR (
+      NEW.status = 'candidate-ready'
+      AND NEW.materialization_sealed = 1 AND NEW.execution_mode = 'full'
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NOT NULL AND NEW.lease_token IS NOT NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.heartbeat_at) = 'integer'
+      AND typeof(NEW.lease_expires_at) = 'integer'
+      AND NEW.heartbeat_at >= NEW.started_at
+      AND NEW.lease_expires_at > NEW.heartbeat_at
+      AND NEW.finished_at IS NULL
+      AND NEW.candidate_evidence_json IS NOT NULL
+      AND NEW.candidate_evidence_hash IS NOT NULL
+      AND (
+        (NEW.target_artifact_id IS NOT NULL
+          AND NEW.candidate_revision_id IS NOT NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM artifact_revisions revision
+            WHERE revision.id = NEW.candidate_revision_id
+              AND revision.workspace_id = NEW.workspace_id
+              AND revision.artifact_id = NEW.target_artifact_id
+              AND revision.track_id = NEW.target_track_id
+              AND revision.parent_revision_id IS NEW.base_revision_id
+              AND revision.sealed = 1
+          )) OR
+        (NEW.target_resource_id IS NOT NULL
+          AND NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM resource_revisions revision
+            WHERE revision.id = NEW.candidate_resource_revision_id
+              AND revision.workspace_id = NEW.workspace_id
+              AND revision.resource_id = NEW.target_resource_id
+              AND revision.parent_revision_id IS NEW.base_revision_id
+          ))
+      )
+    ) OR (
+      NEW.status = 'cancel-requested'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NOT NULL AND NEW.lease_token IS NOT NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.heartbeat_at) = 'integer'
+      AND typeof(NEW.lease_expires_at) = 'integer'
+      AND NEW.heartbeat_at >= NEW.started_at
+      AND NEW.lease_expires_at > NEW.heartbeat_at
+      AND NEW.finished_at IS NULL
+    ) OR (
+      NEW.status = 'succeeded'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NULL AND NEW.error_json IS NULL
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.finished_at) = 'integer'
+      AND NEW.finished_at >= NEW.started_at
+      AND NEW.finished_at <= 9007199254740991
+    ) OR (
+      NEW.status = 'retryable-failed'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NOT NULL AND json_type(NEW.error_json) = 'object'
+      AND typeof(NEW.next_eligible_at) = 'integer'
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.finished_at) = 'integer'
+      AND NEW.finished_at >= NEW.started_at
+      AND NEW.next_eligible_at > NEW.finished_at
+      AND NEW.next_eligible_at <= 9007199254740991
+      AND NEW.candidate_revision_id IS NULL
+      AND NEW.candidate_resource_revision_id IS NULL
+      AND NEW.candidate_evidence_json IS NULL
+      AND NEW.candidate_evidence_hash IS NULL
+    ) OR (
+      NEW.status = 'failed'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IS NOT NULL AND json_type(NEW.error_json) = 'object'
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.finished_at) = 'integer'
+      AND NEW.finished_at >= NEW.started_at
+      AND NEW.finished_at <= 9007199254740991
+    ) OR (
+      NEW.status = 'needs-rebase'
+      AND NEW.materialization_sealed = 1
+      AND NEW.blocked_reason IS NULL
+      AND NEW.failure_class IN ('publication-conflict','build-infrastructure')
+      AND json_type(NEW.error_json) = 'object'
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND typeof(NEW.started_at) = 'integer'
+      AND typeof(NEW.finished_at) = 'integer'
+      AND NEW.finished_at >= NEW.started_at
+      AND NEW.finished_at <= 9007199254740991
+    ) OR (
+      NEW.status = 'cancelled'
+      AND NEW.materialization_sealed = 1
+      AND NEW.failure_class IN ('cancelled','build-infrastructure')
+      AND json_type(NEW.error_json) = 'object'
+      AND NEW.next_eligible_at IS NULL
+      AND NEW.owner_id IS NULL AND NEW.lease_token IS NULL
+      AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+      AND (NEW.started_at IS NULL OR (
+        typeof(NEW.started_at) = 'integer' AND NEW.started_at >= NEW.created_at
+      ))
+      AND typeof(NEW.finished_at) = 'integer'
+      AND NEW.finished_at >= COALESCE(NEW.started_at, NEW.created_at)
+      AND NEW.finished_at <= 9007199254740991
+    )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt state shape is incoherent'); END;
+
+CREATE TRIGGER generation_task_attempt_success_authority_guard
+BEFORE UPDATE OF status ON generation_task_attempts
+WHEN NEW.status = 'succeeded' AND OLD.status IS NOT 'succeeded' AND NOT (
+  OLD.status IN ('running','candidate-ready')
+  AND OLD.owner_id IS NOT NULL AND OLD.lease_token IS NOT NULL
+  AND OLD.lease_expires_at IS NOT NULL AND OLD.heartbeat_at IS NOT NULL
+  AND OLD.lease_expires_at > NEW.finished_at
+  AND EXISTS (
+    SELECT 1 FROM generation_task_claims claim
+    WHERE claim.task_id = OLD.task_id AND claim.attempt = OLD.attempt
+      AND claim.plan_id = OLD.plan_id AND claim.workspace_id = OLD.workspace_id
+      AND claim.owner_id = OLD.owner_id AND claim.lease_token = OLD.lease_token
+      AND claim.lease_expires_at = OLD.lease_expires_at
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM generation_task_claims claim
+    WHERE claim.task_id = OLD.task_id AND claim.attempt = OLD.attempt
+      AND (
+        claim.plan_id IS NOT OLD.plan_id
+        OR claim.workspace_id IS NOT OLD.workspace_id
+        OR claim.owner_id IS NOT OLD.owner_id
+        OR claim.lease_token IS NOT OLD.lease_token
+        OR claim.lease_expires_at IS NOT OLD.lease_expires_at
+      )
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM generation_tasks task
+    JOIN project_workspaces workspace ON workspace.id = task.workspace_id
+    WHERE task.id = NEW.task_id AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id AND task.current_attempt = NEW.attempt
+      AND task.status = OLD.status
+      AND (
+        (task.target_type = 'artifact'
+          AND NEW.candidate_revision_id IS NOT NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND workspace.active_snapshot_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM artifact_tracks track
+            JOIN workspace_snapshot_artifacts mapping
+              ON mapping.snapshot_id = workspace.active_snapshot_id
+             AND mapping.workspace_id = task.workspace_id
+             AND mapping.artifact_id = task.target_artifact_id
+            WHERE track.id = task.target_track_id AND track.artifact_id = task.target_artifact_id
+              AND track.head_revision_id = NEW.candidate_revision_id
+              AND mapping.track_id = task.target_track_id
+              AND mapping.revision_id = NEW.candidate_revision_id
+          )) OR
+        (task.target_type = 'resource'
+          AND NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NOT NULL
+          AND workspace.active_snapshot_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM resources resource
+            JOIN workspace_snapshot_resources mapping
+              ON mapping.snapshot_id = workspace.active_snapshot_id
+             AND mapping.workspace_id = task.workspace_id
+             AND mapping.resource_id = task.target_resource_id
+            WHERE resource.id = task.target_resource_id
+              AND resource.workspace_id = task.workspace_id
+              AND resource.head_revision_id = NEW.candidate_resource_revision_id
+              AND mapping.revision_id = NEW.candidate_resource_revision_id
+          )) OR
+        (task.target_type = 'workspace' AND task.kind = 'prototype-validation'
+          AND EXISTS (
+            SELECT 1 FROM generation_task_validation_results validation
+            WHERE validation.task_id = NEW.task_id AND validation.plan_id = NEW.plan_id
+              AND validation.workspace_id = NEW.workspace_id
+              AND validation.attempt = NEW.attempt
+              AND validation.snapshot_id = NEW.expected_snapshot_id
+              AND validation.created_at = NEW.finished_at
+          )) OR
+        (task.target_type = 'workspace' AND task.kind IN ('checkpoint','propagation-publish')
+          AND workspace.active_snapshot_id IS NOT NEW.expected_snapshot_id
+          AND EXISTS (
+            SELECT 1 FROM workspace_snapshots snapshot
+            WHERE snapshot.id = workspace.active_snapshot_id
+              AND snapshot.workspace_id = NEW.workspace_id
+              AND snapshot.sealed = 1
+              AND json_extract(snapshot.provenance_json, '$.kind') = 'plan-checkpoint'
+              AND json_extract(snapshot.provenance_json, '$.planId') = NEW.plan_id
+              AND json_extract(snapshot.provenance_json, '$.checkpointId') = NEW.task_id
+          ))
+      )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt success lacks exact lease and publication authority'); END;
 
 CREATE TRIGGER generation_task_attempt_delete_history_guard
 BEFORE DELETE ON generation_task_attempts
@@ -3039,6 +4145,8 @@ CREATE TABLE IF NOT EXISTS generation_plans (
     'approved','queued','running','succeeded','failed','compile-failed','requires-new-impact','cancelled'
   )),
   construction_sealed INTEGER NOT NULL DEFAULT 0 CHECK(construction_sealed IN (0, 1)),
+  execution_epoch INTEGER NOT NULL DEFAULT 0
+    CHECK(execution_epoch >= 0 AND execution_epoch <= 9007199254740991),
   compile_error_json TEXT,
   created_at INTEGER NOT NULL,
   finished_at INTEGER,
@@ -3054,6 +4162,9 @@ CREATE TABLE IF NOT EXISTS generation_plans (
 
 ${TASK12_GENERATION_TABLE_SCHEMA}
 ${TASK12_GENERATION_TRIGGER_SCHEMA}
+${SCOPED_AGENT_TURN_TABLE_SCHEMA}
+${WORKSPACE_AGENT_TURN_TABLE_SCHEMA}
+${RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA}
 
 CREATE INDEX IF NOT EXISTS idx_workspace_nodes_workspace ON workspace_nodes(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_edges_workspace ON workspace_edges(workspace_id);
@@ -3066,6 +4177,8 @@ CREATE INDEX IF NOT EXISTS idx_workspace_graph_revisions_workspace
 CREATE INDEX IF NOT EXISTS idx_workspace_artifacts_workspace ON workspace_artifacts(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_tracks_artifact ON artifact_tracks(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_revisions_track ON artifact_revisions(track_id, sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_artifact_revisions_producing_run
+  ON artifact_revisions(workspace_id, produced_by_run_id, created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_kernel_revisions_workspace
   ON shared_design_kernel_revisions(workspace_id, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_component_instances_owner
@@ -4439,6 +5552,23 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "construction_sealed INTEGER NOT NULL DEFAULT 0 CHECK(construction_sealed IN (0, 1))",
   );
   ensureColumn(
+    "generation_plans",
+    "execution_epoch",
+    "execution_epoch INTEGER NOT NULL DEFAULT 0 CHECK(execution_epoch >= 0 AND execution_epoch <= 9007199254740991)",
+  );
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_generation_plans_active
+    ON generation_plans(workspace_id, status, construction_sealed, id)`);
+  ensureColumn(
+    "generation_tasks",
+    "rebase_count",
+    "rebase_count INTEGER NOT NULL DEFAULT 0 CHECK(rebase_count >= 0 AND rebase_count <= 3)",
+  );
+  ensureColumn(
+    "generation_task_attempts",
+    "execution_epoch",
+    "execution_epoch INTEGER NOT NULL DEFAULT 0 CHECK(execution_epoch >= 0 AND execution_epoch <= 9007199254740991)",
+  );
+  ensureColumn(
     "generation_task_attempts",
     "materialization_sealed",
     "materialization_sealed INTEGER NOT NULL DEFAULT 0 CHECK(materialization_sealed IN (0, 1))",
@@ -4466,8 +5596,13 @@ export function migrateStoreSchema(db: DatabaseSync): void {
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_task_attempt_retry_predecessor
     ON generation_task_attempts(task_id, predecessor_attempt)
     WHERE predecessor_attempt IS NOT NULL`);
+  upgradeGenerationPlanEventTypeConstraint(db);
   db.exec(TASK12_GENERATION_TABLE_SCHEMA);
   db.exec(TASK12_GENERATION_TRIGGER_SCHEMA);
+  db.exec(SCOPED_AGENT_TURN_TABLE_SCHEMA);
+  db.exec(WORKSPACE_AGENT_TURN_TABLE_SCHEMA);
+  db.exec(RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA);
+  ensureColumn("scoped_agent_turns", "proposal_hash", "proposal_hash TEXT");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_workspace_hash ON context_packs(workspace_id, hash)");
   db.exec(TASK4_OWNERSHIP_TRIGGER_UPGRADE_SCHEMA);
   db.exec(TASK5_LEGACY_WRAPPER_TRIGGER_UPGRADE_SCHEMA);

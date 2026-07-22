@@ -18,14 +18,19 @@ import type { StandardArtifactCandidateIdentity } from "./standard-artifact-exec
 const SHA256 = /^[0-9a-f]{64}$/;
 const CONTEXT_PACK_ID = /^context-pack-([0-9a-f]{64})$/;
 const MAX_BUNDLE_FILES = 20_000;
-const MAX_BUNDLE_BYTES = 1024 * 1024 * 1024;
-const MAX_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_BUNDLE_DIRECTORIES = 20_000;
+const MAX_BUNDLE_DEPTH = 64;
+const MAX_BUNDLE_BYTES = 48 * 1024 * 1024;
+const MAX_FILE_BYTES = 48 * 1024 * 1024;
 const MAX_PATH_BYTES = 8 * 1024;
 const READ_CHUNK_BYTES = 256 * 1024;
 const BUNDLE_MOUNT = ".sharingan";
+const ASSET_MOUNT = "public/_assets";
+const MATERIALIZED_ROOTS = [BUNDLE_MOUNT, ASSET_MOUNT] as const;
 
 export interface ImmutableSharinganCaptureReference {
   readonly workspaceId: string;
+  /** Context Pack of the consuming Artifact Attempt, not the Resource Task that produced the Revision. */
   readonly contextPackId: string;
   readonly contextPackHash: string;
   readonly resourceId: string;
@@ -49,6 +54,11 @@ export interface SharinganCaptureBundleFence {
   readonly fingerprint: string;
   verify(signal: AbortSignal): Promise<void>;
   withoutMaterializedBundle<Result>(
+    operation: () => Promise<Result>,
+    signal: AbortSignal,
+  ): Promise<Result>;
+  /** Keeps `.sharingan` readable for exact QA while hiding runtime-served source assets. */
+  withoutMaterializedAssets<Result>(
     operation: () => Promise<Result>,
     signal: AbortSignal,
   ): Promise<Result>;
@@ -135,6 +145,7 @@ function safePathComponent(value: string): void {
 
 interface FingerprintState {
   files: number;
+  directories: number;
   bytes: number;
   readonly records: string[];
 }
@@ -149,23 +160,46 @@ function sameFile(left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["sta
     && left.ctimeMs === right.ctimeMs;
 }
 
+export function resolveSharinganFingerprintOpenFlags(
+  source: { readonly O_NOFOLLOW?: number; readonly O_NONBLOCK?: number } = constants,
+): number | null {
+  if (!Number.isInteger(source.O_NOFOLLOW) || (source.O_NOFOLLOW ?? 0) <= 0
+    || !Number.isInteger(source.O_NONBLOCK) || (source.O_NONBLOCK ?? 0) <= 0) {
+    return null;
+  }
+  return source.O_NOFOLLOW! | source.O_NONBLOCK!;
+}
+
 async function hashExactFile(
   path: string,
-  expectedSize: number,
+  expectedFile: Awaited<ReturnType<typeof lstat>>,
+  parentPath: string,
+  expectedParent: Awaited<ReturnType<typeof lstat>>,
   signal: AbortSignal,
 ): Promise<string> {
+  const secureFlags = resolveSharinganFingerprintOpenFlags();
+  if (secureFlags === null) {
+    throw new SharinganCaptureReferenceError(
+      "bundle-unsafe",
+      "Sharingan Capture file cannot be opened with non-blocking no-follow semantics",
+    );
+  }
+  checkAbort(signal);
   let handle: Awaited<ReturnType<typeof open>>;
   try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    handle = await open(path, constants.O_RDONLY | secureFlags);
   } catch {
     throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture file could not be opened safely");
   }
   try {
     const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1 || before.size !== expectedSize) {
+    const parentBefore = await lstat(parentPath).catch(() => null);
+    if (!before.isFile() || before.nlink !== 1 || !sameFile(expectedFile, before)
+      || parentBefore === null || !parentBefore.isDirectory() || parentBefore.isSymbolicLink()
+      || !sameFile(expectedParent, parentBefore)) {
       throw new SharinganCaptureReferenceError(
         "bundle-unsafe",
-        "Sharingan Capture file is not an isolated immutable regular file",
+        "Sharingan Capture file or its parent changed before its fd was pinned",
       );
     }
     const hash = createHash("sha256");
@@ -184,11 +218,22 @@ async function hashExactFile(
     if (extra.bytesRead !== 0) {
       throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture file grew during verification");
     }
-    const after = await handle.stat();
-    if (!sameFile(before, after)) {
+    const [after, currentPath, parentAfter] = await Promise.all([
+      handle.stat(),
+      lstat(path).catch(() => null),
+      lstat(parentPath).catch(() => null),
+    ]);
+    if (!sameFile(before, after)
+      || currentPath === null || currentPath.isSymbolicLink() || !currentPath.isFile()
+      || !sameFile(after, currentPath)
+      || parentAfter === null || !parentAfter.isDirectory() || parentAfter.isSymbolicLink()
+      || !sameFile(expectedParent, parentAfter)) {
       throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture file changed during verification");
     }
     return hash.digest("hex");
+  } catch (error) {
+    if (error instanceof SharinganCaptureReferenceError) throw error;
+    throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture file verification failed safely");
   } finally {
     await handle.close().catch(() => {});
   }
@@ -199,8 +244,18 @@ async function collectFingerprintRecords(
   relativeDirectory: string,
   state: FingerprintState,
   signal: AbortSignal,
+  depth: number,
+  afterFileLstat?: (path: string) => void | Promise<void>,
 ): Promise<void> {
   checkAbort(signal);
+  state.directories += 1;
+  if (depth > MAX_BUNDLE_DEPTH || state.directories > MAX_BUNDLE_DIRECTORIES) {
+    throw new SharinganCaptureReferenceError("bundle-unbounded", "Sharingan Capture directory tree exceeds its bound");
+  }
+  const directoryBefore = await lstat(directory).catch(() => null);
+  if (directoryBefore === null || !directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()) {
+    throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture directory is unsafe");
+  }
   let names: string[];
   try {
     names = await readdir(directory);
@@ -222,7 +277,7 @@ async function collectFingerprintRecords(
     }
     if (metadata.isDirectory()) {
       state.records.push(JSON.stringify(["directory", relativePath, metadata.mode & 0o777]));
-      await collectFingerprintRecords(absolutePath, relativePath, state, signal);
+      await collectFingerprintRecords(absolutePath, relativePath, state, signal, depth + 1, afterFileLstat);
       continue;
     }
     if (!metadata.isFile() || metadata.nlink !== 1) {
@@ -235,7 +290,9 @@ async function collectFingerprintRecords(
       || state.files >= MAX_BUNDLE_FILES || state.bytes > MAX_BUNDLE_BYTES - metadata.size) {
       throw new SharinganCaptureReferenceError("bundle-unbounded", "Sharingan Capture bundle exceeds its bound");
     }
-    const checksum = await hashExactFile(absolutePath, metadata.size, signal);
+    await afterFileLstat?.(absolutePath);
+    checkAbort(signal);
+    const checksum = await hashExactFile(absolutePath, metadata, directory, directoryBefore, signal);
     state.files += 1;
     state.bytes += metadata.size;
     state.records.push(JSON.stringify([
@@ -246,9 +303,18 @@ async function collectFingerprintRecords(
       checksum,
     ]));
   }
+  const directoryAfter = await lstat(directory).catch(() => null);
+  if (directoryAfter === null || !directoryAfter.isDirectory() || directoryAfter.isSymbolicLink()
+    || !sameFile(directoryBefore, directoryAfter)) {
+    throw new SharinganCaptureReferenceError("bundle-unsafe", "Sharingan Capture directory changed during verification");
+  }
 }
 
-async function bundleFingerprint(worktreeDir: string, signal: AbortSignal): Promise<string> {
+async function bundleFingerprint(
+  worktreeDir: string,
+  signal: AbortSignal,
+  afterFileLstat?: (path: string) => void | Promise<void>,
+): Promise<string> {
   checkAbort(signal);
   let canonicalWorktree: string;
   try {
@@ -256,27 +322,42 @@ async function bundleFingerprint(worktreeDir: string, signal: AbortSignal): Prom
   } catch {
     throw new SharinganCaptureReferenceError("bundle-missing", "Sharingan candidate worktree is missing");
   }
-  const mount = join(canonicalWorktree, BUNDLE_MOUNT);
-  const metadata = await lstat(mount).catch(() => null);
-  if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new SharinganCaptureReferenceError("bundle-missing", "Pinned Sharingan Capture bundle is missing");
-  }
-  let canonicalMount: string;
-  try {
-    canonicalMount = await realpath(mount);
-  } catch {
-    throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture bundle is not resolvable");
-  }
-  if (canonicalMount !== resolve(canonicalWorktree, BUNDLE_MOUNT)) {
-    throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture bundle escaped its worktree");
-  }
-  const state: FingerprintState = { files: 0, bytes: 0, records: [] };
-  await collectFingerprintRecords(canonicalMount, "", state, signal);
-  if (state.files === 0 || state.bytes === 0) {
-    throw new SharinganCaptureReferenceError("bundle-missing", "Pinned Sharingan Capture bundle is empty");
+  const state: FingerprintState = { files: 0, directories: 0, bytes: 0, records: [] };
+  for (const relativeRoot of MATERIALIZED_ROOTS) {
+    const mount = join(canonicalWorktree, ...relativeRoot.split("/"));
+    const metadata = await lstat(mount).catch(() => null);
+    if (metadata === null) {
+      if (relativeRoot === BUNDLE_MOUNT) {
+        throw new SharinganCaptureReferenceError("bundle-missing", "Pinned Sharingan Capture bundle is missing");
+      }
+      state.records.push(JSON.stringify(["root", relativeRoot, "absent"]));
+      continue;
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture root is unsafe");
+    }
+    let canonicalMount: string;
+    try {
+      canonicalMount = await realpath(mount);
+    } catch {
+      throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture root is not resolvable");
+    }
+    if (canonicalMount !== resolve(canonicalWorktree, ...relativeRoot.split("/"))) {
+      throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture root escaped its worktree");
+    }
+    state.records.push(JSON.stringify(["root", relativeRoot, metadata.mode & 0o777]));
+    const filesBefore = state.files;
+    const canonicalMetadata = await lstat(canonicalMount).catch(() => null);
+    if (canonicalMetadata === null || !sameFile(metadata, canonicalMetadata)) {
+      throw new SharinganCaptureReferenceError("bundle-unsafe", "Pinned Sharingan Capture root changed while resolving");
+    }
+    await collectFingerprintRecords(canonicalMount, relativeRoot, state, signal, 0, afterFileLstat);
+    if (relativeRoot === BUNDLE_MOUNT && state.files === filesBefore) {
+      throw new SharinganCaptureReferenceError("bundle-missing", "Pinned Sharingan Capture bundle is empty");
+    }
   }
   const hash = createHash("sha256");
-  hash.update("dezin.sharingan-capture-bundle-fingerprint.v1\0");
+  hash.update("dezin.sharingan-capture-bundle-fingerprint.v2\0");
   for (const record of state.records) hash.update(record).update("\n");
   return hash.digest("hex");
 }
@@ -289,6 +370,8 @@ export async function createSharinganCaptureBundleFence(input: {
   reference: ImmutableSharinganCaptureReference;
   worktreeDir: string;
   signal: AbortSignal;
+  /** Test seam invoked after pathname metadata is observed and before the non-blocking no-follow open. */
+  afterFingerprintFileLstat?: (path: string) => void | Promise<void>;
 }): Promise<SharinganCaptureBundleFence> {
   const reference = canonicalReference(input.reference);
   checkAbort(input.signal);
@@ -298,10 +381,19 @@ export async function createSharinganCaptureBundleFence(input: {
   } catch {
     throw new SharinganCaptureReferenceError("bundle-missing", "Sharingan candidate worktree is missing");
   }
-  const fingerprint = await bundleFingerprint(worktreeDir, input.signal);
-  const mount = join(worktreeDir, BUNDLE_MOUNT);
+  const fingerprint = await bundleFingerprint(worktreeDir, input.signal, input.afterFingerprintFileLstat);
+  const roots = await Promise.all(MATERIALIZED_ROOTS.map(async (relativeRoot) => ({
+    relativeRoot,
+    mount: join(worktreeDir, ...relativeRoot.split("/")),
+    present: await pathExists(join(worktreeDir, ...relativeRoot.split("/"))),
+  })));
   const quarantineRoot = await mkdtemp(join(dirname(worktreeDir), ".dezin-sharingan-reference-"));
+  const bundleRoot = roots.find((root) => root.relativeRoot === BUNDLE_MOUNT)!;
+  const assetRoot = roots.find((root) => root.relativeRoot === ASSET_MOUNT)!;
+  const publicPath = join(worktreeDir, "public");
   const heldBundle = join(quarantineRoot, "bundle");
+  const heldPublic = join(quarantineRoot, "public-with-pinned-assets");
+  const candidatePublic = join(quarantineRoot, "candidate-public");
   let disposed = false;
   let busy = false;
 
@@ -316,7 +408,7 @@ export async function createSharinganCaptureBundleFence(input: {
         "Sharingan Capture bundle is hidden by a candidate transaction",
       );
     }
-    const current = await bundleFingerprint(worktreeDir, signal);
+    const current = await bundleFingerprint(worktreeDir, signal, input.afterFingerprintFileLstat);
     if (current !== fingerprint) {
       throw new SharinganCaptureReferenceError(
         "bundle-fingerprint-mismatch",
@@ -353,19 +445,67 @@ export async function createSharinganCaptureBundleFence(input: {
       let result: Result | undefined;
       let operationError: unknown = null;
       let integrityError: unknown = null;
+      let bundleHidden = false;
+      let publicHidden = false;
+      let conflictIndex = 0;
+      const conflicts: string[] = [];
+      const markConflict = (message: string): void => {
+        integrityError ??= new SharinganCaptureReferenceError("bundle-operation-conflict", message);
+      };
+      const quarantineEntry = async (path: string): Promise<void> => {
+        const destination = join(quarantineRoot, `candidate-conflict-${conflictIndex++}`);
+        await rename(path, destination);
+        conflicts.push(destination);
+      };
       try {
-        await rename(mount, heldBundle);
+        if (bundleRoot.present) {
+          await rename(bundleRoot.mount, heldBundle);
+          bundleHidden = true;
+        }
+        if (assetRoot.present) {
+          const publicBefore = await lstat(publicPath);
+          const canonicalPublic = await realpath(publicPath);
+          if (!publicBefore.isDirectory() || publicBefore.isSymbolicLink()
+            || canonicalPublic !== resolve(worktreeDir, "public")) {
+            throw new SharinganCaptureReferenceError(
+              "bundle-unsafe",
+              "Pinned Sharingan Capture public parent is unsafe",
+            );
+          }
+          await rename(publicPath, heldPublic);
+          publicHidden = true;
+          const heldBefore = await lstat(heldPublic);
+          if (heldBefore.dev !== publicBefore.dev || heldBefore.ino !== publicBefore.ino) {
+            throw new SharinganCaptureReferenceError(
+              "bundle-operation-conflict",
+              "Pinned Sharingan Capture public parent changed while it was isolated",
+            );
+          }
+          await mkdir(publicPath, { mode: publicBefore.mode & 0o777 });
+          const activePublic = await lstat(publicPath);
+          const names = await readdir(heldPublic);
+          names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+          if (!names.includes("_assets")) {
+            throw new SharinganCaptureReferenceError("bundle-missing", "Pinned Sharingan Capture assets are missing");
+          }
+          for (const name of names) {
+            if (name === "_assets") continue;
+            safePathComponent(name);
+            await rename(join(heldPublic, name), join(publicPath, name));
+            const [heldNow, activeNow] = await Promise.all([lstat(heldPublic), lstat(publicPath)]);
+            if (heldNow.dev !== heldBefore.dev || heldNow.ino !== heldBefore.ino
+              || activeNow.dev !== activePublic.dev || activeNow.ino !== activePublic.ino) {
+              throw new SharinganCaptureReferenceError(
+                "bundle-operation-conflict",
+                "Sharingan Capture public parents changed while source assets were isolated",
+              );
+            }
+          }
+        }
         try {
           result = await operation();
         } catch (error) {
           operationError = error;
-        }
-        if (await pathExists(mount)) {
-          integrityError = new SharinganCaptureReferenceError(
-            "bundle-operation-conflict",
-            "Candidate operation recreated the reserved Sharingan Capture mount",
-          );
-          await rm(mount, { recursive: true, force: true }).catch(() => {});
         }
       } catch (error) {
         integrityError = error instanceof SharinganCaptureReferenceError
@@ -376,13 +516,95 @@ export async function createSharinganCaptureBundleFence(input: {
           );
       } finally {
         try {
-          await mkdir(worktreeDir, { recursive: true });
-          if (await pathExists(heldBundle)) await rename(heldBundle, mount);
-        } catch {
+          if (publicHidden && await pathExists(heldPublic)) {
+            if (await pathExists(candidatePublic)) {
+              await quarantineEntry(candidatePublic);
+              markConflict("Candidate operation collided with Sharingan public restoration staging");
+            }
+            const currentPublic = await lstat(publicPath).catch(() => null);
+            if (currentPublic !== null) {
+              await rename(publicPath, candidatePublic);
+              const isolated = await lstat(candidatePublic);
+              const canonical = await realpath(candidatePublic).catch(() => "");
+              if (!isolated.isDirectory() || isolated.isSymbolicLink()
+                || canonical !== candidatePublic) {
+                await quarantineEntry(candidatePublic);
+                await mkdir(candidatePublic, { mode: 0o755 });
+                markConflict("Candidate operation replaced the public parent with an unsafe entry");
+              }
+            } else {
+              await mkdir(candidatePublic, { mode: 0o755 });
+            }
+
+            const remaining = await readdir(heldPublic);
+            remaining.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+            for (const name of remaining) {
+              if (name === "_assets") continue;
+              safePathComponent(name);
+              const destination = join(candidatePublic, name);
+              if (await pathExists(destination)) {
+                await quarantineEntry(join(heldPublic, name));
+                markConflict("Candidate operation collided with an original public entry during restoration");
+              } else {
+                await rename(join(heldPublic, name), destination);
+              }
+            }
+
+            const candidateAssets = join(candidatePublic, "_assets");
+            if (await pathExists(candidateAssets)) {
+              await quarantineEntry(candidateAssets);
+              markConflict("Candidate operation recreated the reserved Sharingan Capture asset root");
+            }
+            await rename(join(heldPublic, "_assets"), candidateAssets);
+
+            let installed = false;
+            for (let attempt = 0; attempt < 4 && !installed; attempt += 1) {
+              if (await pathExists(publicPath)) {
+                await quarantineEntry(publicPath);
+                markConflict("Candidate operation raced Sharingan public restoration");
+              }
+              try {
+                await rename(candidatePublic, publicPath);
+                installed = true;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+              }
+            }
+            if (!installed) {
+              throw new SharinganCaptureReferenceError(
+                "bundle-cleanup-failed",
+                "Pinned Sharingan Capture public root could not be restored atomically",
+              );
+            }
+            const restoredPublic = await lstat(publicPath);
+            const restoredCanonical = await realpath(publicPath);
+            if (!restoredPublic.isDirectory() || restoredPublic.isSymbolicLink()
+              || restoredCanonical !== resolve(worktreeDir, "public")) {
+              throw new SharinganCaptureReferenceError(
+                "bundle-cleanup-failed",
+                "Pinned Sharingan Capture public root escaped during restoration",
+              );
+            }
+            publicHidden = false;
+            await rm(heldPublic, { recursive: true, force: true });
+          }
+          if (bundleHidden && await pathExists(heldBundle)) {
+            if (await pathExists(bundleRoot.mount)) {
+              await quarantineEntry(bundleRoot.mount);
+              markConflict("Candidate operation recreated the reserved Sharingan Capture bundle root");
+            }
+            await rename(heldBundle, bundleRoot.mount);
+            bundleHidden = false;
+          }
+          for (const conflict of conflicts) {
+            await rm(conflict, { recursive: true, force: true });
+          }
+        } catch (error) {
           integrityError = new SharinganCaptureReferenceError(
             "bundle-cleanup-failed",
-            "Pinned Sharingan Capture bundle could not be restored after the candidate operation",
+            "Pinned Sharingan Capture roots could not be restored after the candidate operation",
           );
+          (integrityError as Error & { cause?: unknown }).cause = error;
         }
         busy = false;
       }
@@ -394,6 +616,32 @@ export async function createSharinganCaptureBundleFence(input: {
       if (integrityError !== null) throw integrityError;
       if (operationError !== null) throw operationError;
       return result as Result;
+    },
+    async withoutMaterializedAssets<Result>(
+      operation: () => Promise<Result>,
+      signal: AbortSignal,
+    ): Promise<Result> {
+      return fence.withoutMaterializedBundle(async () => {
+        if (!bundleRoot.present) return operation();
+        if (!await pathExists(heldBundle) || await pathExists(bundleRoot.mount)) {
+          throw new SharinganCaptureReferenceError(
+            "bundle-operation-conflict",
+            "Pinned Sharingan Capture bundle could not be exposed for asset-hidden QA",
+          );
+        }
+        await rename(heldBundle, bundleRoot.mount);
+        try {
+          return await operation();
+        } finally {
+          if (!await pathExists(bundleRoot.mount) || await pathExists(heldBundle)) {
+            throw new SharinganCaptureReferenceError(
+              "bundle-cleanup-failed",
+              "Pinned Sharingan Capture bundle could not be re-isolated after asset-hidden QA",
+            );
+          }
+          await rename(bundleRoot.mount, heldBundle);
+        }
+      }, signal);
     },
     async dispose(): Promise<void> {
       if (disposed) return;

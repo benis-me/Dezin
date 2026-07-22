@@ -454,8 +454,16 @@ function validateDraft(draft: ContextPackDraft): void {
     if (item.contextClass === "target"
       && item.ref.id === draft.target.id
       && (draft.target.type === "workspace"
-        || (draft.target.type === "artifact" && item.ref.kind === "artifact")
-        || (draft.target.type === "resource" && item.ref.kind === "resource"))) {
+        || (draft.target.type === "artifact"
+          && (item.ref.kind === "artifact"
+            || (draft.intent === "generate" && item.ref.kind === "inline"
+              && item.resolvedKind === "inline" && item.trustLevel === "trusted"
+              && item.boundary.source.startsWith("generation-task:"))))
+        || (draft.target.type === "resource"
+          && (item.ref.kind === "resource"
+            || (draft.intent === "generate" && item.ref.kind === "inline"
+              && item.resolvedKind === "inline" && item.trustLevel === "trusted"
+              && item.boundary.source.startsWith("generation-task:")))))) {
       hasExactTarget = true;
     }
     if (item.capabilities.length > 64 || item.capabilities.some((capability: unknown) => typeof capability !== "string"

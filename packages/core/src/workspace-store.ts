@@ -7,6 +7,7 @@ import type {
   AgentScope,
   AgentIntent,
   ArtifactPublicationExpectation,
+  ForkArtifactTrackInput,
   ContextItemRef,
   ContextOmission,
   ContextPack,
@@ -16,6 +17,8 @@ import type {
   CreateGenerationTaskAttemptInput,
   CreateResourceForProjectInput,
   CreateResourceForProjectResult,
+  CreatePublishedResourceForProjectInput,
+  CreatePublishedResourceForProjectResult,
   CreateResourceRevisionCandidateInput,
   CreateWorkspaceProposalInput,
   CreateArtifactRevisionInput,
@@ -35,6 +38,7 @@ import type {
   GenerationTaskExecutionLease,
   GenerationTaskExecutionMode,
   GenerationTaskFailureClass,
+  GenerationTaskRetryContextPolicy,
   CompleteGenerationTaskValidationInput,
   GenerationTaskValidationRecord,
   FinishGenerationTaskAttemptFailureInput,
@@ -54,6 +58,8 @@ import type {
   PersistContextPackItemInput,
   RecordContextPackItemUsageInput,
   RecordGenerationTaskMaterializationFailureInput,
+  RetryGenerationTaskInput,
+  GenerationTaskRebaseDisposition,
   ResolvedContextItem,
   ResolvedContextKind,
   Resource,
@@ -69,6 +75,7 @@ import type {
   ResourcePinPolicy,
   ResourcePublicationExpectation,
   ResourceRevision,
+  RestoreArtifactRevisionInput,
   SharedDesignKernelRevision,
   PublishGenerationTaskCandidateInput,
   PublishGenerationPlanCheckpointInput,
@@ -103,6 +110,7 @@ import {
   assertAcyclicTaskGraph,
   compileGenerationPlan,
   GenerationPlanCompileError,
+  isAgentGeneratableResourceKind,
 } from "./generation-plan.ts";
 import {
   generationTaskArtifactCandidateRetentionRef,
@@ -141,9 +149,11 @@ import {
   normalizeArtifactPublicationExpectation,
   normalizeCreateArtifactRevisionInput,
   normalizeCreateKernelRevisionInput,
+  normalizeForkArtifactTrackInput,
   normalizeCreateWorkspaceProposalInput,
   normalizeKernelPublicationExpectation,
   normalizeLegacyWorkspaceSeed,
+  normalizeRestoreArtifactRevisionInput,
   normalizeWorkspaceGraphMutationInput,
   normalizeWorkspaceLayoutId,
   normalizeWorkspaceLayoutPatch,
@@ -158,6 +168,10 @@ import {
   type ArtifactTrackRecord,
   type WorkspaceArtifactRecord,
   type WorkspaceBundle,
+  type WorkspaceBundleReadMode,
+  type WorkspaceCompactOverview,
+  type WorkspaceLegacyMigrationRead,
+  type WorkspaceShallowArtifactClosure,
   type WorkspaceProposalRecord,
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";
@@ -205,6 +219,9 @@ const GENERATION_TASK_CAPACITY_LIMITS = {
   image: 2,
 } as const;
 const GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES = 1024 * 1024;
+const SHALLOW_ARTIFACT_CLOSURE_MAX_REVISIONS = 256;
+const SHALLOW_ARTIFACT_CLOSURE_MAX_DEPENDENCIES = 2_048;
+const SHALLOW_ARTIFACT_CLOSURE_MAX_RESOURCE_PINS = 2_048;
 
 export interface StageGenerationTaskCandidateResult {
   attempt: GenerationTaskAttempt;
@@ -221,6 +238,128 @@ export interface StageGenerationTaskResourceCandidateResult {
 export type AnyStageGenerationTaskCandidateResult =
   | StageGenerationTaskCandidateResult
   | StageGenerationTaskResourceCandidateResult;
+
+export interface ArtifactVersionActionResult {
+  action: "restore-as-new-revision" | "fork-track";
+  artifact: WorkspaceArtifactRecord;
+  track: ArtifactTrackRecord;
+  revision: ArtifactRevisionRecord;
+  snapshot: WorkspaceSnapshotRecord;
+}
+
+export interface ArtifactRevisionHistoryCursor {
+  createdAt: number;
+  id: string;
+}
+
+export interface ArtifactRevisionHistoryPage {
+  items: ArtifactRevisionRecord[];
+  nextCursor: ArtifactRevisionHistoryCursor | null;
+}
+
+export interface ResourceRevisionHistoryCursor {
+  createdAt: number;
+  id: string;
+}
+
+export interface ResourceRevisionHistoryPage {
+  items: ResourceRevision[];
+  nextCursor: ResourceRevisionHistoryCursor | null;
+}
+
+export interface ResourceRevisionViewFacts {
+  resource: Resource;
+  revision: ResourceRevision;
+  snapshotId: string;
+}
+
+export interface ScopedAgentTurnRequestFacts {
+  workspaceId: string;
+  scopeType: "artifact" | "resource";
+  scopeId: string;
+  intent: "generate" | "edit" | "repair";
+  message: string;
+  graphRevision: number;
+  baseRevisionId: string;
+  /** Hash of the normalized explicit Context and selection supplied by the client. */
+  requestContextHash: string;
+}
+
+export interface EnqueueScopedAgentTurnInput {
+  projectId: string;
+  turnId: string;
+  request: ScopedAgentTurnRequestFacts;
+  contextPackId: string;
+  proposal: CreateWorkspaceProposalInput;
+}
+
+export interface ScopedAgentTurnReceipt {
+  turnId: string;
+  requestHash: string;
+  proposalId: string;
+  planId: string;
+  task: GenerationTask;
+  contextPackId: string;
+}
+
+export interface ScopedAgentTurnEnqueueResult {
+  receipt: ScopedAgentTurnReceipt;
+  created: boolean;
+}
+
+export interface ApprovedResearchDirectionArtifactIntent {
+  selectionRequestId: string;
+  requestHash: string;
+  created: boolean;
+  proposal: WorkspaceProposalRecord;
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshotRecord;
+  layout: WorkspaceLayout;
+  plan: GenerationPlan;
+  task: GenerationTask;
+}
+
+export interface ResearchDirectionArtifactIntentRequestFacts {
+  workspaceId: string;
+  resourceId: string;
+  revisionId: string;
+  directionId: string;
+  artifactId: string;
+  resourceHeadRevisionId: string;
+  graphRevision: number;
+  snapshotId: string;
+  layoutChecksum: string;
+  confirmHypothesis: boolean;
+}
+
+export interface WorkspaceAgentTurnRequestFacts {
+  workspaceId: string;
+  intent: "plan";
+  message: string;
+  graphRevision: number;
+  /** Hash of the normalized explicit Context and selection supplied by the client. */
+  requestContextHash: string;
+}
+
+export interface CommitWorkspaceAgentTurnInput {
+  projectId: string;
+  turnId: string;
+  request: WorkspaceAgentTurnRequestFacts;
+  contextPackId: string;
+  proposal: CreateWorkspaceProposalInput;
+}
+
+export interface WorkspaceAgentTurnReceipt {
+  turnId: string;
+  requestHash: string;
+  proposal: WorkspaceProposalRecord;
+  contextPackId: string;
+}
+
+export interface WorkspaceAgentTurnCommitResult {
+  receipt: WorkspaceAgentTurnReceipt;
+  created: boolean;
+}
 
 export type ArtifactCandidateRefRecoveryAttemptStatus =
   | "succeeded"
@@ -346,6 +485,12 @@ export type FinishGenerationTaskAttemptResult =
       sourceAttempt: GenerationTaskAttempt;
       successorAttempt: null;
       nextEligibleAt: null;
+    }
+  | {
+      status: "cancelled";
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: null;
+      nextEligibleAt: null;
     };
 
 export interface CompleteGenerationTaskValidationResult {
@@ -383,6 +528,211 @@ export type PublishGenerationPlanCheckpointResult =
 
 function checksum(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+const CANONICAL_AGENT_TURN_ID = /^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CANONICAL_RESEARCH_SELECTION_REQUEST_ID = /^selection-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CANONICAL_SHA256 = /^[0-9a-f]{64}$/;
+
+interface NormalizedResearchDirectionArtifactIntentIdentity {
+  projectId: string;
+  selectionRequestId: string;
+  request: ResearchDirectionArtifactIntentRequestFacts;
+  requestJson: string;
+  requestHash: string;
+}
+
+function normalizeResearchDirectionArtifactIntentIdentity(
+  projectIdValue: unknown,
+  selectionRequestIdValue: unknown,
+  requestValue: unknown,
+): NormalizedResearchDirectionArtifactIntentIdentity {
+  const projectId = boundaryId(projectIdValue, "Research direction intent Project id");
+  const selectionRequestId = boundaryString(
+    selectionRequestIdValue,
+    "Research direction selection request id",
+    64,
+  );
+  if (!CANONICAL_RESEARCH_SELECTION_REQUEST_ID.test(selectionRequestId)) {
+    throw new WorkspaceStoreCodecError(
+      "Research direction selection request id must be canonical selection-<lowercase UUID v4>",
+    );
+  }
+  const input = boundaryObject(requestValue, "Research direction intent request facts", [
+    "workspaceId",
+    "resourceId",
+    "revisionId",
+    "directionId",
+    "artifactId",
+    "resourceHeadRevisionId",
+    "graphRevision",
+    "snapshotId",
+    "layoutChecksum",
+    "confirmHypothesis",
+  ]);
+  const request: ResearchDirectionArtifactIntentRequestFacts = {
+    workspaceId: boundaryId(input.workspaceId, "Research direction intent Workspace id"),
+    resourceId: boundaryId(input.resourceId, "Research direction intent Resource id"),
+    revisionId: boundaryId(input.revisionId, "Research direction intent Revision id"),
+    directionId: boundaryId(input.directionId, "Research direction intent direction id"),
+    artifactId: boundaryId(input.artifactId, "Research direction intent Artifact id"),
+    resourceHeadRevisionId: boundaryId(
+      input.resourceHeadRevisionId,
+      "Research direction intent expected Resource Head Revision id",
+    ),
+    graphRevision: boundarySafeInteger(input.graphRevision, "Research direction intent graph Revision"),
+    snapshotId: boundaryId(input.snapshotId, "Research direction intent Snapshot id"),
+    layoutChecksum: boundaryChecksum(input.layoutChecksum, "Research direction intent layout checksum"),
+    confirmHypothesis: input.confirmHypothesis === true
+      ? true
+      : input.confirmHypothesis === false
+        ? false
+        : (() => {
+            throw new WorkspaceStoreCodecError("Research direction intent hypothesis confirmation must be boolean");
+          })(),
+  };
+  const requestJson = canonicalJsonText({ projectId, ...request }, "Research direction intent request identity");
+  return {
+    projectId,
+    selectionRequestId,
+    request,
+    requestJson,
+    requestHash: checksum(requestJson),
+  };
+}
+
+interface NormalizedScopedAgentTurnIdentity {
+  projectId: string;
+  turnId: string;
+  request: ScopedAgentTurnRequestFacts;
+  requestJson: string;
+  requestHash: string;
+}
+
+function normalizeScopedAgentTurnIdentity(
+  projectIdValue: unknown,
+  turnIdValue: unknown,
+  requestValue: unknown,
+): NormalizedScopedAgentTurnIdentity {
+  const projectId = boundaryId(projectIdValue, "Scoped Agent turn Project id");
+  const turnId = boundaryString(turnIdValue, "Scoped Agent turn id", 256);
+  if (!CANONICAL_AGENT_TURN_ID.test(turnId)) {
+    throw new WorkspaceStoreCodecError("Scoped Agent turn id must be canonical turn-<lowercase UUID v4>");
+  }
+  const input = boundaryObject(requestValue, "Scoped Agent turn request facts", [
+    "workspaceId",
+    "scopeType",
+    "scopeId",
+    "intent",
+    "message",
+    "graphRevision",
+    "baseRevisionId",
+    "requestContextHash",
+  ]);
+  const workspaceId = boundaryId(input.workspaceId, "Scoped Agent turn Workspace id");
+  const scopeId = boundaryId(input.scopeId, "Scoped Agent turn scope id");
+  if (input.scopeType !== "artifact" && input.scopeType !== "resource") {
+    throw new WorkspaceStoreCodecError("Scoped Agent turn scope type is unsupported");
+  }
+  if (input.intent !== "generate" && input.intent !== "edit" && input.intent !== "repair") {
+    throw new WorkspaceStoreCodecError("Scoped Agent turn intent is unsupported");
+  }
+  const message = boundaryString(input.message, "Scoped Agent turn message", 64 * 1024);
+  if (message.trim() !== message || Buffer.byteLength(message, "utf8") > 64 * 1024) {
+    throw new WorkspaceStoreCodecError("Scoped Agent turn message must be canonical and at most 64 KiB");
+  }
+  const graphRevision = boundarySafeInteger(input.graphRevision, "Scoped Agent turn graph Revision");
+  const baseRevisionId = boundaryId(input.baseRevisionId, "Scoped Agent turn base Revision id");
+  const requestContextHash = boundaryString(
+    input.requestContextHash,
+    "Scoped Agent turn request Context hash",
+    64,
+  );
+  if (!CANONICAL_SHA256.test(requestContextHash)) {
+    throw new WorkspaceStoreCodecError("Scoped Agent turn request Context hash is invalid");
+  }
+  const request: ScopedAgentTurnRequestFacts = {
+    workspaceId,
+    scopeType: input.scopeType,
+    scopeId,
+    intent: input.intent,
+    message,
+    graphRevision,
+    baseRevisionId,
+    requestContextHash,
+  };
+  const requestJson = canonicalJsonText({
+    projectId,
+    workspaceId,
+    scopeType: request.scopeType,
+    scopeId,
+    intent: request.intent,
+    message,
+    graphRevision,
+    baseRevisionId,
+    requestContextHash,
+  }, "Scoped Agent turn request identity");
+  return { projectId, turnId, request, requestJson, requestHash: checksum(requestJson) };
+}
+
+interface NormalizedWorkspaceAgentTurnIdentity {
+  projectId: string;
+  turnId: string;
+  request: WorkspaceAgentTurnRequestFacts;
+  requestJson: string;
+  requestHash: string;
+}
+
+function normalizeWorkspaceAgentTurnIdentity(
+  projectIdValue: unknown,
+  turnIdValue: unknown,
+  requestValue: unknown,
+): NormalizedWorkspaceAgentTurnIdentity {
+  const projectId = boundaryId(projectIdValue, "Workspace Agent turn Project id");
+  const turnId = boundaryString(turnIdValue, "Workspace Agent turn id", 256);
+  if (!CANONICAL_AGENT_TURN_ID.test(turnId)) {
+    throw new WorkspaceStoreCodecError("Workspace Agent turn id must be canonical turn-<lowercase UUID v4>");
+  }
+  const input = boundaryObject(requestValue, "Workspace Agent turn request facts", [
+    "workspaceId",
+    "intent",
+    "message",
+    "graphRevision",
+    "requestContextHash",
+  ]);
+  const workspaceId = boundaryId(input.workspaceId, "Workspace Agent turn Workspace id");
+  if (input.intent !== "plan") {
+    throw new WorkspaceStoreCodecError("Workspace Agent turn intent must be plan");
+  }
+  const message = boundaryString(input.message, "Workspace Agent turn message", 64 * 1024);
+  if (message.trim() !== message || Buffer.byteLength(message, "utf8") > 64 * 1024) {
+    throw new WorkspaceStoreCodecError("Workspace Agent turn message must be canonical and at most 64 KiB");
+  }
+  const graphRevision = boundarySafeInteger(input.graphRevision, "Workspace Agent turn graph Revision");
+  const requestContextHash = boundaryString(
+    input.requestContextHash,
+    "Workspace Agent turn request Context hash",
+    64,
+  );
+  if (!CANONICAL_SHA256.test(requestContextHash)) {
+    throw new WorkspaceStoreCodecError("Workspace Agent turn request Context hash is invalid");
+  }
+  const request: WorkspaceAgentTurnRequestFacts = {
+    workspaceId,
+    intent: "plan",
+    message,
+    graphRevision,
+    requestContextHash,
+  };
+  const requestJson = canonicalJsonText({
+    projectId,
+    workspaceId,
+    intent: request.intent,
+    message,
+    graphRevision,
+    requestContextHash,
+  }, "Workspace Agent turn request identity");
+  return { projectId, turnId, request, requestJson, requestHash: checksum(requestJson) };
 }
 
 function generationClaimKeyId(value: string): string {
@@ -867,6 +1217,34 @@ export function normalizeCreateResourceForProjectInput(value: unknown): CreateRe
     defaultPinPolicy: resourcePinPolicy(input.defaultPinPolicy, "Resource default pin policy"),
     baseGraphRevision: boundarySafeInteger(input.baseGraphRevision, "Resource base graph revision"),
     expectedSnapshotId: boundaryId(input.expectedSnapshotId, "Resource expected Snapshot id"),
+  };
+}
+
+export function normalizeCreatePublishedResourceForProjectInput(
+  value: unknown,
+): CreatePublishedResourceForProjectInput {
+  const input = boundaryObject(value, "Create published Resource input", [
+    "resourceId", "nodeId", "commandId", "kind", "title", "defaultPinPolicy",
+    "baseGraphRevision", "expectedSnapshotId", "revision", "reason",
+  ]);
+  const resource = normalizeCreateResourceForProjectInput({
+    kind: input.kind,
+    title: input.title,
+    defaultPinPolicy: input.defaultPinPolicy,
+    baseGraphRevision: input.baseGraphRevision,
+    expectedSnapshotId: input.expectedSnapshotId,
+  });
+  const revision = normalizeCreateResourceRevisionCandidateInput(input.revision);
+  if (revision.parentRevisionId !== null) {
+    throw new WorkspaceStoreCodecError("a newly materialized Resource Revision cannot have a parent");
+  }
+  return {
+    resourceId: boundaryId(input.resourceId, "Resource id"),
+    nodeId: boundaryId(input.nodeId, "Resource node id"),
+    commandId: boundaryId(input.commandId, "Resource command id"),
+    ...resource,
+    revision,
+    reason: boundaryText(input.reason, "Resource publication reason", 2_000),
   };
 }
 
@@ -1618,6 +1996,58 @@ export class WorkspaceProposalValidationError extends WorkspaceGraphValidationEr
   }
 }
 
+export class ScopedAgentTurnConflictError extends Error {
+  readonly turnId: string;
+  readonly expectedRequestHash: string;
+  readonly actualRequestHash: string;
+
+  constructor(turnId: string, expectedRequestHash: string, actualRequestHash: string) {
+    super(`Scoped Agent turn ${turnId} was already committed for a different immutable request`);
+    this.name = "ScopedAgentTurnConflictError";
+    this.turnId = turnId;
+    this.expectedRequestHash = expectedRequestHash;
+    this.actualRequestHash = actualRequestHash;
+  }
+}
+
+export class ScopedAgentTurnDerivedInputConflictError extends Error {
+  readonly turnId: string;
+
+  constructor(turnId: string) {
+    super(`Scoped Agent turn ${turnId} resolved to a different Context Pack or Proposal`);
+    this.name = "ScopedAgentTurnDerivedInputConflictError";
+    this.turnId = turnId;
+  }
+}
+
+export class WorkspaceAgentTurnConflictError extends Error {
+  readonly turnId: string;
+  readonly expectedRequestHash: string;
+  readonly actualRequestHash: string;
+
+  constructor(turnId: string, expectedRequestHash: string, actualRequestHash: string) {
+    super(`Workspace Agent turn ${turnId} was already committed for a different immutable request`);
+    this.name = "WorkspaceAgentTurnConflictError";
+    this.turnId = turnId;
+    this.expectedRequestHash = expectedRequestHash;
+    this.actualRequestHash = actualRequestHash;
+  }
+}
+
+export class ResearchDirectionArtifactIntentConflictError extends Error {
+  readonly selectionRequestId: string;
+  readonly expectedRequestHash: string;
+  readonly actualRequestHash: string;
+
+  constructor(selectionRequestId: string, expectedRequestHash: string, actualRequestHash: string) {
+    super(`Research direction selection ${selectionRequestId} was already committed for a different immutable request`);
+    this.name = "ResearchDirectionArtifactIntentConflictError";
+    this.selectionRequestId = selectionRequestId;
+    this.expectedRequestHash = expectedRequestHash;
+    this.actualRequestHash = actualRequestHash;
+  }
+}
+
 export class WorkspaceProposalConflictError extends WorkspaceRevisionConflictError {
   readonly proposalId: string;
   readonly proposalRevision: number;
@@ -1795,7 +2225,101 @@ export class WorkspaceStore {
     });
   }
 
-  ensureLegacyStandardWorkspace(unsafeSeed: LegacyWorkspaceSeed): WorkspaceBundle {
+  /**
+   * Reads only the mutable Workspace pointers and the immutable records they
+   * name. Historical Revisions and Snapshots remain available through their
+   * explicit readers, but cannot make the current Workspace surface linear in
+   * project age or hide it behind unrelated historical corruption.
+   */
+  getCompactBundleByProjectId(projectId: string): WorkspaceBundle | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const graph = this.getGraph(projectId);
+      const activeSnapshot = this.requireCompactActiveSnapshot(workspace, graph);
+      const activeKernelRevision = this.requireCompactKernelRevision(
+        workspace.id,
+        workspace.activeKernelRevisionId,
+      );
+      const artifacts = this.listCompactActiveArtifacts(workspace.id, activeSnapshot.id, graph);
+      if (artifacts.some((artifact) => artifact.legacyWrapped) && workspace.mode !== "standard") {
+        throw new WorkspaceGraphValidationError("legacy-wrapped Workspace must belong to a Standard Project");
+      }
+      const tracks = this.listCompactSnapshotTracks(workspace.id, activeSnapshot.id);
+      const revisions = this.listCompactSnapshotArtifactRevisions(workspace.id, activeSnapshot.id);
+      this.validateCompactBundleArtifactMappings({
+        workspace,
+        graph,
+        activeSnapshot,
+        artifacts,
+        tracks,
+        revisions,
+      });
+      const bundle: WorkspaceBundle = {
+        workspace,
+        graph,
+        activeSnapshot,
+        activeKernelRevision,
+        artifacts,
+        tracks,
+        revisions,
+        snapshots: [activeSnapshot],
+      };
+      if (artifacts.some((artifact) => artifact.legacyWrapped)) {
+        this.requireCompletedLegacyStandardCompactBundle(bundle);
+      }
+      return bundle;
+    });
+  }
+
+  getCompactOverviewByProjectId(projectId: string): WorkspaceCompactOverview | null {
+    return this.transactionRead(() => {
+      const bundle = this.getCompactBundleByProjectId(projectId);
+      if (bundle === null) return null;
+      const resources = this.listCompactActiveResources(bundle.workspace.id, bundle.graph);
+      const resourceRevisions = Object.entries(bundle.activeSnapshot.resourceRevisions)
+        .sort(([left], [right]) => compareBinary(left, right))
+        .map(([resourceId, revisionId]) => this.requireShallowResourceRevision(
+          bundle.workspace.id,
+          resourceId,
+          revisionId,
+        ));
+      const layoutId = "default";
+      this.validateLayoutGroups(
+        bundle.workspace.id,
+        layoutId,
+        new Set(bundle.graph.nodes.map((node) => node.id)),
+      );
+      return {
+        ...bundle,
+        resources,
+        resourceRevisions,
+        layout: this.getLayoutByWorkspaceId(bundle.workspace.id, layoutId),
+      };
+    });
+  }
+
+  /** Classify migration eligibility in the same SQLite snapshot as the returned bundle. */
+  readWorkspaceForLegacyMigration(
+    projectId: string,
+    readMode: WorkspaceBundleReadMode = "compact",
+  ): WorkspaceLegacyMigrationRead | null {
+    return this.transactionRead(() => {
+      const bundle = readMode === "history"
+        ? this.getBundleByProjectId(projectId)
+        : this.getCompactBundleByProjectId(projectId);
+      if (bundle === null) return null;
+      return {
+        bundle,
+        canonicalEmptyFoundation: this.isCanonicalEmptyWorkspaceFoundation(bundle.workspace),
+      };
+    });
+  }
+
+  ensureLegacyStandardWorkspace(
+    unsafeSeed: LegacyWorkspaceSeed,
+    readMode: WorkspaceBundleReadMode = "history",
+  ): WorkspaceBundle {
     const seed = normalizeLegacyWorkspaceSeed(unsafeSeed);
     return this.transactionImmediate(() => {
       let workspace = this.getWorkspace(seed.project.id);
@@ -1804,7 +2328,9 @@ export class WorkspaceStore {
           "SELECT 1 FROM workspace_artifacts WHERE workspace_id = ? AND legacy_wrapped = 1 LIMIT 1",
         ).get(workspace.id);
         if (wrapped) {
-          const existing = this.getBundleByProjectId(seed.project.id);
+          const existing = readMode === "compact"
+            ? this.getCompactBundleByProjectId(seed.project.id)
+            : this.getBundleByProjectId(seed.project.id);
           if (!existing || existing.workspace.mode !== "standard") {
             throw new WorkspaceGraphValidationError("legacy-wrapped Workspace is not a valid Standard Workspace");
           }
@@ -1975,7 +2501,9 @@ export class WorkspaceStore {
         ),
         `activate legacy Workspace Snapshot ${snapshot.id}`,
       );
-      const bundle = this.getBundleByProjectId(seed.project.id);
+      const bundle = readMode === "compact"
+        ? this.getCompactBundleByProjectId(seed.project.id)
+        : this.getBundleByProjectId(seed.project.id);
       if (!bundle) throw new WorkspaceGraphValidationError("legacy Workspace bundle was not published");
       return bundle;
     });
@@ -2118,6 +2646,74 @@ export class WorkspaceStore {
     });
   }
 
+  createPublishedResourceForProject(
+    projectId: string,
+    unsafeInput: CreatePublishedResourceForProjectInput,
+  ): CreatePublishedResourceForProjectResult {
+    const input = normalizeCreatePublishedResourceForProjectInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const current = this.getGraph(projectId);
+      if (current.revision !== input.baseGraphRevision) {
+        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
+      }
+      const normalized = normalizeWorkspaceGraphMutationInput({
+        baseGraphRevision: input.baseGraphRevision,
+        expectedSnapshotId: input.expectedSnapshotId,
+        commands: [{
+          id: input.commandId,
+          type: "add-node",
+          node: {
+            id: input.nodeId,
+            kind: "resource",
+            name: input.title,
+            resourceId: input.resourceId,
+            createIdentity: {
+              resourceKind: input.kind,
+              defaultPinPolicy: input.defaultPinPolicy,
+            },
+          },
+        }],
+      });
+      const graphResult = this.applyGraphCommandsInTransaction(workspace, current, {
+        expectedSnapshotId: normalized.expectedSnapshotId,
+        commands: normalized.commands,
+        reason: "resource-created-for-publication",
+        provenance: { kind: "graph-command", commandIds: [input.commandId] },
+      });
+      const revision = this.createResourceRevisionInTransaction(
+        projectId,
+        input.resourceId,
+        input.revision,
+        { requireCurrentHead: true },
+      );
+      const snapshot = this.publishResourceRevisionInTransaction(
+        projectId,
+        input.resourceId,
+        revision.id,
+        {
+          expectedHeadRevisionId: null,
+          expectedSnapshotId: graphResult.snapshot.id,
+          reason: input.reason,
+        },
+      );
+      const resource = this.requireResourceForProject(projectId, input.resourceId);
+      const node = graphResult.graph.nodes.find(
+        (candidate): candidate is WorkspaceResourceNode => (
+          candidate.kind === "resource"
+          && candidate.id === input.nodeId
+          && candidate.resourceId === input.resourceId
+        ),
+      );
+      if (!node) throw new WorkspaceGraphValidationError("materialized Resource graph identity is not resolvable");
+      if (resource.headRevisionId !== revision.id
+        || snapshot.resourceRevisions[resource.id] !== revision.id) {
+        throw new WorkspaceGraphValidationError("materialized Resource publication is incoherent");
+      }
+      return { resource, node, revision, graph: graphResult.graph, snapshot };
+    });
+  }
+
   updateResourceForProject(
     projectId: string,
     resourceId: string,
@@ -2226,6 +2822,38 @@ export class WorkspaceStore {
     });
   }
 
+  /** One transaction-scoped fact set for an exact Revision and the mutable pointers observed with it. */
+  getResourceRevisionViewFactsForProject(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+  ): ResourceRevisionViewFacts | null {
+    return this.transactionRead(() => {
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      const revision = this.getResourceRevisionForProject(projectId, resourceId, revisionId);
+      if (revision === null) return null;
+      return { resource, revision, snapshotId: workspace.activeSnapshotId };
+    });
+  }
+
+  /** Read one exact Resource Revision and only its own immutable ancestry. */
+  getResourceRevisionForWorkspace(
+    workspaceId: string,
+    revisionId: string,
+  ): ResourceRevision | null {
+    return this.transactionRead(() => {
+      const workspace = this.db.prepare(
+        "SELECT id FROM project_workspaces WHERE id = ?",
+      ).get(workspaceId);
+      if (!workspace) return null;
+      const revision = this.loadResourceRevision(revisionId);
+      if (revision === null || revision.workspaceId !== workspaceId) return null;
+      this.validateResourceRevisionLineage(revision);
+      return revision;
+    });
+  }
+
   listResourceRevisions(projectId: string, resourceId: string): ResourceRevision[] {
     return this.transactionRead(() => {
       const resource = this.requireResourceForProject(projectId, resourceId);
@@ -2237,6 +2865,50 @@ export class WorkspaceStore {
       const revisions = rows.map(asResourceRevision);
       for (const revision of revisions) this.validateResourceRevisionLineage(revision);
       return revisions;
+    });
+  }
+
+  listResourceRevisionHistoryPage(
+    projectId: string,
+    resourceId: string,
+    input: { limit: number; cursor?: ResourceRevisionHistoryCursor | null },
+  ): ResourceRevisionHistoryPage {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+      throw new WorkspaceStoreCodecError("Resource Revision history limit must be an integer from 1 to 50");
+    }
+    const cursor = input.cursor ?? null;
+    if (cursor !== null && (!Number.isSafeInteger(cursor.createdAt) || cursor.createdAt < 0
+      || typeof cursor.id !== "string" || cursor.id.length === 0
+      || !isWellFormedUtf16(cursor.id) || cursor.id !== cursor.id.trim())) {
+      throw new WorkspaceStoreCodecError("Resource Revision history cursor is invalid");
+    }
+    return this.transactionRead(() => {
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      const cursorSql = cursor === null
+        ? ""
+        : "AND (revision.created_at < ? OR (revision.created_at = ? AND revision.id < ?))";
+      const args = cursor === null
+        ? [resource.workspaceId, resource.id, input.limit + 1]
+        : [resource.workspaceId, resource.id, cursor.createdAt, cursor.createdAt, cursor.id, input.limit + 1];
+      const rows = this.db.prepare(
+        `SELECT revision.*
+         FROM resource_revisions revision
+         JOIN resources resource
+           ON resource.id = revision.resource_id AND resource.workspace_id = revision.workspace_id
+         WHERE revision.workspace_id = ? AND revision.resource_id = ? ${cursorSql}
+         ORDER BY revision.created_at DESC, revision.id DESC
+         LIMIT ?`,
+      ).all(...args) as Row[];
+      const revisions = rows.map(asResourceRevision);
+      for (const revision of revisions) this.validateResourceRevisionLineage(revision);
+      const items = revisions.slice(0, input.limit);
+      const last = items.at(-1) ?? null;
+      return {
+        items,
+        nextCursor: revisions.length > input.limit && last !== null
+          ? { createdAt: last.createdAt, id: last.id }
+          : null,
+      };
     });
   }
 
@@ -2695,62 +3367,7 @@ export class WorkspaceStore {
     if (input.kind === "component-propagation") {
       throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
-    return this.transactionImmediate(() => {
-      const workspace = requireWorkspace(this.getWorkspace(input.projectId), input.projectId);
-      const graph = this.getGraph(input.projectId);
-      if (graph.revision !== input.baseGraphRevision) {
-        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision);
-      }
-      if (workspace.activeSnapshotId !== input.baseSnapshotId) {
-        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision, {
-          expectedSnapshotId: input.baseSnapshotId,
-          actualSnapshotId: workspace.activeSnapshotId,
-        });
-      }
-      const snapshot = this.requireSnapshot(workspace.id, input.baseSnapshotId);
-      if (snapshot.graphRevision !== graph.revision) {
-        throw new WorkspaceProposalValidationError("Workspace Proposal base Snapshot does not match its base graph");
-      }
-      this.validateRunOwnership(workspace.id, input.createdByRunId, "Workspace Proposal");
-      this.validateLayoutGroups(workspace.id, input.layoutId, new Set(graph.nodes.map((node) => node.id)));
-      const baseLayout = this.getLayoutByWorkspaceId(workspace.id, input.layoutId);
-      if (baseLayout.checksum !== input.baseLayoutChecksum) {
-        throw new WorkspaceLayoutConflictError(graph.revision, input.baseLayoutChecksum, baseLayout.checksum);
-      }
-      const id = this.clock.id();
-      const now = this.clock.now();
-      this.db.prepare(
-        `INSERT INTO workspace_proposals (
-           id, workspace_id, base_graph_revision, base_snapshot_id, revision, kind, status,
-           operations_json, layout_id, base_layout_checksum, base_layout_json,
-           layout_operations_json, rationale, assumptions_json, generation_payload_json,
-           review_json, created_by_run_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, 1, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        id,
-        workspace.id,
-        graph.revision,
-        snapshot.id,
-        input.kind,
-        JSON.stringify(input.operations),
-        input.layoutId,
-        input.baseLayoutChecksum,
-        JSON.stringify(baseLayout),
-        JSON.stringify(input.layoutOperations),
-        input.rationale,
-        JSON.stringify(input.assumptions),
-        JSON.stringify(input.generation),
-        JSON.stringify({ kind: "none" }),
-        input.createdByRunId,
-        now,
-        now,
-      );
-      const row = this.proposalRow(id);
-      if (!row) throw new WorkspaceGraphValidationError(`Workspace Proposal ${id} was not inserted`);
-      const proposal = this.decodeProposalCurrentRow(row);
-      this.insertProposalAuditInTransaction(proposal);
-      return this.requireProposalById(id);
-    });
+    return this.transactionImmediate(() => this.createProposalInTransaction(input, this.clock.id()));
   }
 
   getProposal(proposalId: string): WorkspaceProposalRecord | null {
@@ -2873,6 +3490,393 @@ export class WorkspaceStore {
     return this.approveProposalScoped(projectId, proposalId, unsafeMode);
   }
 
+  /** Reads an immutable human-selection receipt without consulting mutable graph state. */
+  getResearchDirectionArtifactIntentReceiptForProject(
+    projectId: string,
+    selectionRequestId: string,
+    unsafeRequest: ResearchDirectionArtifactIntentRequestFacts,
+  ): ApprovedResearchDirectionArtifactIntent | null {
+    const identity = normalizeResearchDirectionArtifactIntentIdentity(
+      projectId,
+      selectionRequestId,
+      unsafeRequest,
+    );
+    return this.transactionRead(() => (
+      this.readResearchDirectionArtifactIntentReceiptInTransaction(identity)
+    ));
+  }
+
+  /**
+   * Crosses one atomic mutation boundary for the human Research direction gate:
+   * a fresh draft Proposal, its approval, and its immutable compiled Artifact
+   * Task either all exist or none do. It never edits or retries an older Task.
+   */
+  createApprovedResearchDirectionArtifactIntentForProject(
+    projectId: string,
+    selectionRequestId: string,
+    unsafeRequest: ResearchDirectionArtifactIntentRequestFacts,
+    unsafeInput: CreateWorkspaceProposalInput,
+  ): ApprovedResearchDirectionArtifactIntent {
+    const identity = normalizeResearchDirectionArtifactIntentIdentity(
+      projectId,
+      selectionRequestId,
+      unsafeRequest,
+    );
+    const input = normalizeCreateWorkspaceProposalInput(unsafeInput);
+    if (input.projectId !== projectId || input.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError(
+        "Research direction successor must be a Workspace generation Proposal owned by its Project",
+      );
+    }
+    const generation = input.generation;
+    const artifactPlan = generation.artifactPlans.length === 1
+      ? generation.artifactPlans[0]
+      : undefined;
+    const selection = artifactPlan?.researchDirectionSelection;
+    const researchOperation = selection === undefined
+      ? undefined
+      : generation.resourceOperations.find((operation) => operation.resourceId === selection.resourceId);
+    const exactDependency = selection === undefined
+      ? undefined
+      : generation.dependencyPlans.filter((dependency) => dependency.kind === "resource"
+        && dependency.ownerArtifactId === artifactPlan?.artifactId
+        && dependency.resourceId === selection.resourceId);
+    const edgeOperation = input.operations.length === 1 ? input.operations[0] : undefined;
+    if (input.operations.length > 1
+      || input.layoutOperations.length !== 0
+      || generation.artifactPlans.length !== 1
+      || generation.resourceOperations.length !== 1
+      || generation.dependencyPlans.length !== 1
+      || generation.prototypeIntents.length !== 0
+      || artifactPlan === undefined
+      || selection === undefined
+      || researchOperation?.kind !== "research"
+      || researchOperation.operation !== "reuse"
+      || researchOperation.revisionPolicy.kind !== "exact"
+      || researchOperation.revisionPolicy.resourceRevisionId !== selection.revisionId
+      || exactDependency?.length !== 1
+      || (edgeOperation !== undefined && (
+        edgeOperation.type !== "add-edge"
+        || edgeOperation.edge.kind !== "informs"
+        || edgeOperation.edge.workspaceId !== identity.request.workspaceId
+        || edgeOperation.edge.sourceNodeId !== researchOperation.nodeId
+        || edgeOperation.edge.targetNodeId !== artifactPlan.nodeId
+      ))) {
+      throw new WorkspaceProposalValidationError(
+        "Research direction successor must contain exactly one selected Research Revision and one Artifact leaf",
+      );
+    }
+    if (identity.request.resourceId !== selection.resourceId
+      || identity.request.revisionId !== selection.revisionId
+      || identity.request.directionId !== selection.directionId
+      || identity.request.artifactId !== artifactPlan.artifactId
+      || identity.request.graphRevision !== input.baseGraphRevision
+      || identity.request.snapshotId !== input.baseSnapshotId
+      || identity.request.layoutChecksum !== input.baseLayoutChecksum) {
+      throw new WorkspaceProposalValidationError(
+        "Research direction successor does not match its immutable selection request",
+      );
+    }
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+      if (workspace.id !== identity.request.workspaceId) {
+        throw new WorkspaceProposalValidationError(
+          "Research direction successor Workspace does not belong to its Project",
+        );
+      }
+      const replay = this.readResearchDirectionArtifactIntentReceiptInTransaction(identity);
+      if (replay !== null) return replay;
+      const researchResource = this.requireResourceForProject(identity.projectId, identity.request.resourceId);
+      if (researchResource.kind !== "research" || researchResource.archivedAt !== null) {
+        throw new WorkspaceProposalValidationError(
+          "Research direction successor requires an active Research Resource",
+        );
+      }
+      this.guardPointer({
+        pointer: "resource-head",
+        workspaceId: workspace.id,
+        ownerId: researchResource.id,
+        expectedId: identity.request.resourceHeadRevisionId,
+        actualId: researchResource.headRevisionId,
+      });
+      this.guardPointer({
+        pointer: "active-snapshot",
+        workspaceId: workspace.id,
+        ownerId: workspace.id,
+        expectedId: identity.request.snapshotId,
+        actualId: workspace.activeSnapshotId,
+      });
+      const graph = this.getGraph(identity.projectId);
+      const hasExactInformsEdge = graph.edges.some((edge) => edge.kind === "informs"
+        && edge.sourceNodeId === researchOperation.nodeId
+        && edge.targetNodeId === artifactPlan.nodeId);
+      if (hasExactInformsEdge === (edgeOperation !== undefined)) {
+        throw new WorkspaceProposalValidationError(
+          hasExactInformsEdge
+            ? "Research direction successor must reuse the existing informs edge without duplicating it"
+            : "Research direction successor must atomically add its missing informs edge",
+        );
+      }
+      const proposal = this.createProposalInTransaction(input, this.clock.id());
+      const planId = this.clock.id();
+      const approved = this.approveProposalInTransaction(projectId, proposal.id, "generate", planId);
+      if (approved.kind !== "approved" || approved.result.plan?.id !== planId) {
+        throw new WorkspaceGraphValidationError("Research direction successor approval did not reserve its exact Plan");
+      }
+      const detail = this.compileApprovedGenerationPlanInTransaction(projectId, planId);
+      const tasks = detail.tasks.filter((task) => task.target.type === "artifact"
+        && task.target.id === artifactPlan.artifactId
+        && (task.kind === "page" || task.kind === "component"));
+      if (tasks.length !== 1) {
+        throw new WorkspaceGraphValidationError(
+          "Research direction successor did not compile to exactly one Artifact leaf Task",
+        );
+      }
+      if (!approved.result.graph.edges.some((edge) => edge.kind === "informs"
+        && edge.sourceNodeId === researchOperation.nodeId
+        && edge.targetNodeId === artifactPlan.nodeId)) {
+        throw new WorkspaceGraphValidationError(
+          "Research direction successor approval did not retain its visible informs relationship",
+        );
+      }
+      const createdAt = boundarySafeInteger(this.clock.now(), "Research direction intent creation time");
+      const inserted = this.db.prepare(
+        `INSERT INTO research_direction_artifact_intents (
+           workspace_id, request_id, request_hash, request_json, proposal_id,
+           plan_id, task_id, graph_revision, snapshot_id, layout_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        workspace.id,
+        identity.selectionRequestId,
+        identity.requestHash,
+        identity.requestJson,
+        approved.result.proposal.id,
+        detail.plan.id,
+        tasks[0]!.id,
+        approved.result.graph.revision,
+        approved.result.snapshot.id,
+        canonicalJsonText(approved.result.layout, "Research direction intent approved layout"),
+        createdAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Research direction intent receipt was not durably recorded");
+      }
+      const receipt = this.readResearchDirectionArtifactIntentReceiptInTransaction(identity);
+      if (receipt === null) {
+        throw new WorkspaceStoreCodecError("Research direction intent receipt disappeared");
+      }
+      return {
+        ...receipt,
+        created: true,
+      };
+    });
+  }
+
+  getWorkspaceAgentTurnReceiptForProject(
+    projectId: string,
+    turnId: string,
+    request: WorkspaceAgentTurnRequestFacts,
+  ): WorkspaceAgentTurnReceipt | null {
+    const identity = normalizeWorkspaceAgentTurnIdentity(projectId, turnId, request);
+    return this.transactionRead(() => this.readWorkspaceAgentTurnReceiptInTransaction(identity));
+  }
+
+  commitWorkspaceAgentTurnForProject(
+    unsafeInput: CommitWorkspaceAgentTurnInput,
+  ): WorkspaceAgentTurnCommitResult {
+    const input = boundaryObject(unsafeInput, "Workspace Agent turn commit", [
+      "projectId",
+      "turnId",
+      "request",
+      "contextPackId",
+      "proposal",
+    ]);
+    const identity = normalizeWorkspaceAgentTurnIdentity(input.projectId, input.turnId, input.request);
+    const contextPackId = boundaryId(input.contextPackId, "Workspace Agent turn Context Pack id");
+    const proposalInput = normalizeCreateWorkspaceProposalInput(input.proposal as CreateWorkspaceProposalInput);
+    if (proposalInput.projectId !== identity.projectId) {
+      throw new WorkspaceProposalOwnershipError("workspace-agent-turn", identity.projectId, proposalInput.projectId);
+    }
+    if (proposalInput.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("Workspace Agent turns require Workspace generation Proposals");
+    }
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+      if (workspace.id !== identity.request.workspaceId) {
+        throw new WorkspaceStoreCodecError("Workspace Agent turn Workspace does not belong to its Project");
+      }
+      const replay = this.readWorkspaceAgentTurnReceiptInTransaction(identity);
+      if (replay !== null) return { receipt: replay, created: false };
+
+      const contextPack = this.db.prepare(
+        `SELECT scope_type, scope_id, graph_revision, intent, message_checksum, sealed
+         FROM context_packs WHERE id = ? AND workspace_id = ?`,
+      ).get(contextPackId, workspace.id) as {
+        scope_type: string;
+        scope_id: string;
+        graph_revision: number;
+        intent: string;
+        message_checksum: string;
+        sealed: number;
+      } | undefined;
+      if (!contextPack || contextPack.sealed !== 1
+        || contextPack.scope_type !== "workspace"
+        || contextPack.scope_id !== workspace.id
+        || contextPack.graph_revision !== identity.request.graphRevision
+        || contextPack.intent !== identity.request.intent
+        || contextPack.message_checksum !== checksum(identity.request.message)) {
+        throw new WorkspaceGraphValidationError(
+          "Workspace Agent turn Context Pack is unsealed, foreign, or does not match its immutable request",
+        );
+      }
+      if (proposalInput.baseGraphRevision !== identity.request.graphRevision) {
+        throw new WorkspaceProposalValidationError(
+          "Workspace Agent turn Proposal is not anchored to its immutable graph Revision",
+        );
+      }
+      const proposal = this.createProposalInTransaction(proposalInput, this.clock.id());
+      const createdAt = boundarySafeInteger(this.clock.now(), "Workspace Agent turn creation time");
+      const inserted = this.db.prepare(
+        `INSERT INTO workspace_agent_turns (
+           workspace_id, turn_id, request_hash, request_json, proposal_id,
+           context_pack_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        workspace.id,
+        identity.turnId,
+        identity.requestHash,
+        identity.requestJson,
+        proposal.id,
+        contextPackId,
+        createdAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Workspace Agent turn receipt was not durably recorded");
+      }
+      const receipt = this.readWorkspaceAgentTurnReceiptInTransaction(identity);
+      if (receipt === null) throw new WorkspaceStoreCodecError("Workspace Agent turn receipt disappeared");
+      return { receipt, created: true };
+    });
+  }
+
+  getScopedAgentTurnReceiptForProject(
+    projectId: string,
+    turnId: string,
+    request: ScopedAgentTurnRequestFacts,
+  ): ScopedAgentTurnReceipt | null {
+    const identity = normalizeScopedAgentTurnIdentity(projectId, turnId, request);
+    return this.transactionRead(() => this.readScopedAgentTurnReceiptInTransaction(identity));
+  }
+
+  enqueueScopedAgentTurnForProject(
+    unsafeInput: EnqueueScopedAgentTurnInput,
+  ): ScopedAgentTurnEnqueueResult {
+    const input = boundaryObject(unsafeInput, "Scoped Agent turn enqueue", [
+      "projectId",
+      "turnId",
+      "request",
+      "contextPackId",
+      "proposal",
+    ]);
+    const identity = normalizeScopedAgentTurnIdentity(input.projectId, input.turnId, input.request);
+    const contextPackId = boundaryId(input.contextPackId, "Scoped Agent turn Context Pack id");
+    const proposalInput = normalizeCreateWorkspaceProposalInput(input.proposal as CreateWorkspaceProposalInput);
+    if (proposalInput.projectId !== identity.projectId) {
+      throw new WorkspaceProposalOwnershipError("scoped-agent-turn", identity.projectId, proposalInput.projectId);
+    }
+    if (proposalInput.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("Scoped Agent turns require Workspace generation Proposals");
+    }
+    const proposalHash = checksum(canonicalJsonText(proposalInput, "Scoped Agent turn Proposal input"));
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+      if (workspace.id !== identity.request.workspaceId) {
+        throw new WorkspaceStoreCodecError("Scoped Agent turn Workspace does not belong to its Project");
+      }
+      const replay = this.readScopedAgentTurnReceiptInTransaction(identity);
+      if (replay !== null) {
+        const stored = this.db.prepare(
+          `SELECT context_pack_id, proposal_hash FROM scoped_agent_turns
+           WHERE workspace_id = ? AND turn_id = ?`,
+        ).get(workspace.id, identity.turnId) as {
+          context_pack_id: string;
+          proposal_hash: string | null;
+        } | undefined;
+        if (!stored || stored.context_pack_id !== contextPackId || stored.proposal_hash !== proposalHash) {
+          throw new ScopedAgentTurnDerivedInputConflictError(identity.turnId);
+        }
+        return { receipt: replay, created: false };
+      }
+      const contextPackRow = this.db.prepare(
+        `SELECT scope_type, scope_id, graph_revision, intent, message_checksum, sealed
+         FROM context_packs WHERE id = ? AND workspace_id = ?`,
+      ).get(contextPackId, workspace.id) as {
+        scope_type: string;
+        scope_id: string;
+        graph_revision: number;
+        intent: string;
+        message_checksum: string;
+        sealed: number;
+      } | undefined;
+      if (!contextPackRow || contextPackRow.sealed !== 1
+        || contextPackRow.scope_type !== identity.request.scopeType
+        || contextPackRow.scope_id !== identity.request.scopeId
+        || contextPackRow.graph_revision !== identity.request.graphRevision
+        || contextPackRow.intent !== identity.request.intent
+        || contextPackRow.message_checksum !== checksum(identity.request.message)) {
+        throw new WorkspaceGraphValidationError(
+          "Scoped Agent turn Context Pack is unsealed, foreign, or does not match its immutable request",
+        );
+      }
+      const proposal = this.createProposalInTransaction(proposalInput, this.clock.id());
+      const planId = this.clock.id();
+      const approved = this.approveProposalInTransaction(
+        identity.projectId,
+        proposal.id,
+        "generate",
+        planId,
+      );
+      if (approved.kind !== "approved" || approved.result.plan === null
+        || approved.result.plan.id !== planId) {
+        throw new WorkspaceGraphValidationError("Scoped Agent turn did not create its exact Generation Plan");
+      }
+      const detail = this.compileApprovedGenerationPlanInTransaction(identity.projectId, planId);
+      const tasks = detail.tasks.filter((task) => task.target.type === identity.request.scopeType
+        && task.target.id === identity.request.scopeId
+        && (task.kind === "page" || task.kind === "component" || task.kind === "resource"));
+      if (tasks.length !== 1) {
+        throw new WorkspaceGraphValidationError(
+          "Scoped Agent turn did not compile to exactly one target-owned leaf Task",
+        );
+      }
+      const task = tasks[0]!;
+      const createdAt = boundarySafeInteger(this.clock.now(), "Scoped Agent turn creation time");
+      const inserted = this.db.prepare(
+        `INSERT INTO scoped_agent_turns (
+           workspace_id, turn_id, request_hash, request_json, proposal_hash, proposal_id,
+           plan_id, task_id, context_pack_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        workspace.id,
+        identity.turnId,
+        identity.requestHash,
+        identity.requestJson,
+        proposalHash,
+        proposal.id,
+        planId,
+        task.id,
+        contextPackId,
+        createdAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Scoped Agent turn receipt was not durably recorded");
+      }
+      const receipt = this.readScopedAgentTurnReceiptInTransaction(identity);
+      if (receipt === null) throw new WorkspaceStoreCodecError("Scoped Agent turn receipt disappeared");
+      return { receipt, created: true };
+    });
+  }
+
   getGenerationPlan(planId: string): GenerationPlan | null {
     return this.transactionRead(() => {
       const row = this.db.prepare(
@@ -2893,100 +3897,940 @@ export class WorkspaceStore {
     return this.transactionRead(() => this.readGenerationPlanDetailForProject(projectId, planId));
   }
 
-  compileApprovedGenerationPlanForProject(projectId: string, planId: string): GenerationPlanDetail {
-    try {
-      return this.transactionImmediate(() => {
-        const shell = this.requireGenerationPlanForProject(projectId, planId);
-        if (shell.constructionSealed) {
-          if (shell.status === "approved" || shell.status === "compile-failed") {
-            throw new WorkspaceStoreCodecError(
-              `Generation Plan ${shell.id} construction seal is incoherent with status ${shell.status}`,
-            );
-          }
-          return this.readGenerationPlanDetailForProject(projectId, planId);
-        }
-        if (shell.status !== "approved") {
-          throw new GenerationPlanStateConflictError(shell.id, shell.status);
-        }
-        const proposal = this.requireProposalForProject(projectId, shell.proposalId);
-        this.validateGenerationPlanShellSnapshotInTransaction(shell, proposal);
-        const compiled = compileGenerationPlan({ shell, proposal });
-        this.ensureGenerationComponentInstanceIdentitiesInTransaction(proposal);
-        const insertTask = this.db.prepare(
-        `INSERT INTO generation_tasks (
-           id, ordinal, workspace_id, plan_id, kind, target_type, target_id,
-           target_artifact_id, target_track_id, target_resource_id,
-           payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
-           idempotency_key, status, blocked_reason, blocked_by_task_id, pending_context_policy,
-           current_attempt, materialization_failures, failure_class, error_json, next_eligible_at,
-           result_revision_id, result_resource_revision_id, result_snapshot_id, created_at, finished_at
-         ) VALUES (
-           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-           'materialization-pending', NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL
-         )`,
-        );
-        const createdAt = this.clock.now();
-        for (const taskValue of compiled.tasks) {
-          const { intentHash, idempotencyKey, ...intentInput } = taskValue;
-          const task = normalizeGenerationTaskIntent(intentInput);
-          if (task.intentHash !== intentHash || task.idempotencyKey !== idempotencyKey) {
-            throw new WorkspaceStoreCodecError("compiled Generation Task derived identity is inconsistent");
-          }
-          if (task.planId !== shell.id || task.workspaceId !== shell.workspaceId) {
-            throw new WorkspaceStoreCodecError("compiled Generation Task ownership does not match its Plan shell");
-          }
-          insertTask.run(
-          task.id,
-          task.ordinal,
-          task.workspaceId,
-          task.planId,
-          task.kind,
-          task.target.type,
-          task.target.id,
-          task.target.type === "artifact" ? task.target.id : null,
-          task.target.type === "artifact" ? task.target.trackId : null,
-          task.target.type === "resource" ? task.target.id : null,
-          canonicalJsonText(task.payload, "Generation Task payload"),
-          task.intentHash,
-          canonicalJsonText(task.capabilities, "Generation Task capabilities"),
-          canonicalJsonText(task.qaProfile, "Generation Task QA profile"),
-          canonicalJsonText(task.resourceLimits, "Generation Task resource limits"),
-          task.idempotencyKey,
-          createdAt,
-          );
-        }
-        const insertDependency = this.db.prepare(
-        `INSERT INTO generation_task_dependencies (
-           plan_id, workspace_id, task_id, dependency_task_id, ordinal
-         ) VALUES (?, ?, ?, ?, ?)`,
-        );
-        for (const dependency of compiled.dependencies) {
-          insertDependency.run(
-          dependency.planId,
-          shell.workspaceId,
-          dependency.taskId,
-          dependency.dependencyTaskId,
-          dependency.ordinal,
-          );
-        }
-        const sealed = this.db.prepare(
-        `UPDATE generation_plans
-         SET status = 'queued', construction_sealed = 1
-         WHERE id = ? AND workspace_id = ? AND status = 'approved' AND construction_sealed = 0`,
-        ).run(shell.id, shell.workspaceId);
-        if (Number(sealed.changes) !== 1) {
-          const actual = this.requireGenerationPlanForProject(projectId, planId);
-          throw new GenerationPlanStateConflictError(actual.id, actual.status);
+  cancelGenerationPlanForProject(
+    projectId: string,
+    planId: string,
+    nowValue = this.clock.now(),
+  ): GenerationPlanDetail {
+    const now = boundarySafeInteger(nowValue, "Generation Plan cancellation time");
+    return this.transactionImmediate(() => {
+      let detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      if (detail.plan.status === "cancelled") return detail;
+      if (!detail.plan.constructionSealed && detail.plan.status === "approved") {
+        const executionEpoch = (detail.plan.executionEpoch ?? 0) + 1;
+        if (!Number.isSafeInteger(executionEpoch)) {
+          throw new WorkspaceStoreCodecError("Generation Plan execution epoch is exhausted");
         }
         this.appendGenerationPlanEventInTransaction({
-          planId: shell.id,
-          workspaceId: shell.workspaceId,
+          planId: detail.plan.id,
+          workspaceId: detail.plan.workspaceId,
           taskId: null,
-          type: "plan-queued",
-          payload: { taskCount: compiled.tasks.length, dependencyCount: compiled.dependencies.length },
+          type: "plan-cancel-requested",
+          payload: { executionEpoch, newlyRequestedTaskIds: [], cancelledTaskIds: [] },
+        });
+        const cancelled = this.db.prepare(
+          `UPDATE generation_plans
+           SET execution_epoch = ?, status = 'cancelled', finished_at = ?
+           WHERE id = ? AND workspace_id = ? AND execution_epoch = ?
+             AND status = 'approved' AND construction_sealed = 0`,
+        ).run(
+          executionEpoch,
+          now,
+          detail.plan.id,
+          detail.plan.workspaceId,
+          detail.plan.executionEpoch ?? 0,
+        );
+        if (Number(cancelled.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Plan shell ${detail.plan.id} changed while cancelling`,
+          );
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: detail.plan.id,
+          workspaceId: detail.plan.workspaceId,
+          taskId: null,
+          type: "plan-cancelled",
+          payload: { executionEpoch, cancelledTaskIds: [] },
         });
         return this.readGenerationPlanDetailForProject(projectId, planId);
+      }
+      if (!detail.plan.constructionSealed
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running")) {
+        throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
+      }
+      const requestRows = this.db.prepare(
+        `SELECT * FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND type = 'plan-cancel-requested'
+         ORDER BY sequence ASC`,
+      ).all(detail.plan.id, detail.plan.workspaceId) as Row[];
+      const requests = requestRows.map(asGenerationPlanEvent);
+      if (requests.length > 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${detail.plan.id} has ambiguous cancellation requests`,
+        );
+      }
+      if (requests.length === 1) {
+        if (requests[0]!.payload.executionEpoch !== (detail.plan.executionEpoch ?? 0)) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Plan ${detail.plan.id} cancellation epoch is internally inconsistent`,
+          );
+        }
+        this.terminalizeCancelledGenerationPlanIfSettledInTransaction(detail.plan.id, now);
+        return this.readGenerationPlanDetailForProject(projectId, planId);
+      }
+
+      const executionEpoch = (detail.plan.executionEpoch ?? 0) + 1;
+      if (!Number.isSafeInteger(executionEpoch)) {
+        throw new WorkspaceStoreCodecError("Generation Plan execution epoch is exhausted");
+      }
+      const cancellationError = {
+        code: "generation-plan-cancelled",
+        planId: detail.plan.id,
+      };
+      const errorJson = canonicalJsonText(cancellationError, "Generation Plan cancellation error");
+      const cancelledTaskIds: string[] = [];
+      const newlyRequestedTaskIds: string[] = [];
+      const liveStatuses = new Set<GenerationTask["status"]>([
+        "running",
+        "candidate-ready",
+        "cancel-requested",
+      ]);
+      const terminalStatuses = new Set<GenerationTask["status"]>([
+        "succeeded",
+        "failed",
+        "blocked",
+        "cancelled",
+      ]);
+
+      for (const task of detail.tasks) {
+        if (terminalStatuses.has(task.status)) continue;
+        if (liveStatuses.has(task.status)) {
+          if (task.currentAttempt <= 0) {
+            throw new WorkspaceStoreCodecError(
+              `live Generation Task ${task.id} has no current Attempt`,
+            );
+          }
+          if (task.status !== "cancel-requested") {
+            const requestedAttempt = this.db.prepare(
+              `UPDATE generation_task_attempts SET status = 'cancel-requested'
+               WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+                 AND status = ? AND owner_id IS NOT NULL AND lease_token IS NOT NULL`,
+            ).run(
+              task.id,
+              task.planId,
+              task.workspaceId,
+              task.currentAttempt,
+              task.status,
+            );
+            if (Number(requestedAttempt.changes) !== 1) {
+              throw new WorkspaceStoreCodecError(
+                `Generation Task ${task.id} changed while requesting cancellation`,
+              );
+            }
+            const requestedTask = this.db.prepare(
+              `UPDATE generation_tasks
+               SET status = 'cancel-requested', blocked_reason = ?, blocked_by_task_id = NULL,
+                   pending_context_policy = NULL, failure_class = 'cancelled', error_json = ?,
+                   next_eligible_at = NULL, finished_at = NULL
+               WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?
+                 AND current_attempt = ?`,
+            ).run(
+              `Cancellation requested for Generation Plan ${detail.plan.id}`,
+              errorJson,
+              task.id,
+              task.planId,
+              task.workspaceId,
+              task.status,
+              task.currentAttempt,
+            );
+            if (Number(requestedTask.changes) !== 1) {
+              throw new WorkspaceStoreCodecError(
+                `Generation Task ${task.id} changed while recording cancellation`,
+              );
+            }
+            this.appendGenerationPlanEventInTransaction({
+              planId: task.planId,
+              workspaceId: task.workspaceId,
+              taskId: task.id,
+              type: "task-cancel-requested",
+              payload: {
+                attempt: task.currentAttempt,
+                reason: "plan-cancelled",
+                executionEpoch,
+              },
+            });
+            newlyRequestedTaskIds.push(task.id);
+          }
+          continue;
+        }
+
+        if (task.currentAttempt > 0) {
+          const attempt = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+          if (!attempt || attempt.planId !== task.planId || attempt.workspaceId !== task.workspaceId) {
+            throw new WorkspaceStoreCodecError(
+              `Generation Task ${task.id} current Attempt disappeared during cancellation`,
+            );
+          }
+          if (attempt.status === "queued") {
+            const cancelledAttempt = this.db.prepare(
+              `UPDATE generation_task_attempts
+               SET status = 'cancelled', blocked_reason = ?, failure_class = 'cancelled',
+                   error_json = ?, next_eligible_at = NULL, finished_at = ?
+               WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+                 AND status = 'queued' AND owner_id IS NULL AND lease_token IS NULL`,
+            ).run(
+              `Cancelled with Generation Plan ${detail.plan.id}`,
+              errorJson,
+              now,
+              task.id,
+              task.planId,
+              task.workspaceId,
+              task.currentAttempt,
+            );
+            if (Number(cancelledAttempt.changes) !== 1) {
+              throw new WorkspaceStoreCodecError(
+                `Generation Task ${task.id} queued Attempt changed during cancellation`,
+              );
+            }
+          } else if (attempt.lease !== null) {
+            throw new WorkspaceStoreCodecError(
+              `Generation Task ${task.id} has an unexpected live Attempt during cancellation`,
+            );
+          }
+        }
+        const cancelledTask = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'cancelled', blocked_reason = ?, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, failure_class = 'cancelled', error_json = ?,
+               next_eligible_at = NULL, finished_at = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?
+             AND current_attempt = ?`,
+        ).run(
+          `Cancelled with Generation Plan ${detail.plan.id}`,
+          errorJson,
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          task.status,
+          task.currentAttempt,
+        );
+        if (Number(cancelledTask.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} changed while becoming cancelled`,
+          );
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-cancelled",
+          payload: {
+            attempt: task.currentAttempt === 0 ? null : task.currentAttempt,
+            failureClass: "cancelled",
+            error: cancellationError,
+            reason: "plan-cancelled",
+            executionEpoch,
+          },
+        });
+        cancelledTaskIds.push(task.id);
+      }
+
+      this.appendGenerationPlanEventInTransaction({
+        planId: detail.plan.id,
+        workspaceId: detail.plan.workspaceId,
+        taskId: null,
+        type: "plan-cancel-requested",
+        payload: { executionEpoch, newlyRequestedTaskIds, cancelledTaskIds },
       });
+      const fenced = this.db.prepare(
+        `UPDATE generation_plans SET execution_epoch = ?
+         WHERE id = ? AND workspace_id = ? AND execution_epoch = ? AND status = ?`,
+      ).run(
+        executionEpoch,
+        detail.plan.id,
+        detail.plan.workspaceId,
+        detail.plan.executionEpoch ?? 0,
+        detail.plan.status,
+      );
+      if (Number(fenced.changes) !== 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${detail.plan.id} changed while fencing cancellation`,
+        );
+      }
+      this.terminalizeCancelledGenerationPlanIfSettledInTransaction(detail.plan.id, now);
+      detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      return detail;
+    });
+  }
+
+  retryGenerationTaskForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+    unsafeInput: RetryGenerationTaskInput,
+  ): GenerationPlanDetail {
+    const input = boundaryObject(
+      unsafeInput,
+      "Generation Task retry request",
+      ["mode"],
+      ["now"],
+    );
+    if (input.mode !== "same-context" && input.mode !== "latest-context") {
+      throw new WorkspaceStoreCodecError("Generation Task retry mode is unsupported");
+    }
+    const mode = input.mode;
+    const now = boundarySafeInteger(
+      input.now ?? this.clock.now(),
+      "Generation Task retry time",
+    );
+    return this.transactionImmediate(() => {
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      if (!detail.plan.constructionSealed
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running"
+          && detail.plan.status !== "failed")) {
+        throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
+      }
+      const task = detail.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new GenerationTaskNotFoundError(taskId);
+
+      const requestRows = this.db.prepare(
+        `SELECT * FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND type = 'task-retry-requested'
+         ORDER BY sequence ASC`,
+      ).all(detail.plan.id, detail.plan.workspaceId) as Row[];
+      const retryRequests = requestRows.map(asGenerationPlanEvent);
+      const latestRequest = retryRequests.filter((event) => event.taskId === task.id).at(-1) ?? null;
+      const currentExecutionEpoch = detail.plan.executionEpoch ?? 0;
+      const activeCancellation = this.db.prepare(
+        `SELECT 1 FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND type = 'plan-cancel-requested'
+           AND json_extract(payload_json, '$.executionEpoch') = ?
+         LIMIT 1`,
+      ).get(detail.plan.id, detail.plan.workspaceId, currentExecutionEpoch);
+      if (activeCancellation) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "Generation Plan cancellation is active",
+        );
+      }
+      const requestStillActive = latestRequest !== null
+        && latestRequest.payload.executionEpoch === currentExecutionEpoch
+        && task.status !== "failed"
+        && task.status !== "blocked-context";
+      if (requestStillActive) {
+        if (latestRequest.payload.mode !== mode) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `retry was already requested with mode ${String(latestRequest.payload.mode)}`,
+          );
+        }
+        return detail;
+      }
+
+      if (task.status !== "failed" && task.status !== "blocked-context") {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `Task is ${task.status}, expected failed or blocked-context`,
+        );
+      }
+      const retryWindowStart = retryRequests.find((event) => (
+        event.payload.executionEpoch === currentExecutionEpoch
+      ));
+      let continuingFailedRetryWindow = false;
+      if (task.status === "failed" && detail.plan.status !== "failed"
+        && retryWindowStart !== undefined) {
+        const latestFailureRow = this.db.prepare(
+          `SELECT sequence FROM generation_plan_events
+           WHERE plan_id = ? AND workspace_id = ? AND task_id = ? AND type = 'task-failed'
+           ORDER BY sequence DESC LIMIT 1`,
+        ).get(detail.plan.id, detail.plan.workspaceId, task.id) as { sequence: unknown } | undefined;
+        continuingFailedRetryWindow = latestFailureRow !== undefined
+          && boundarySafeInteger(
+            latestFailureRow.sequence,
+            "Generation Task terminal failure event sequence",
+          ) < retryWindowStart.sequence;
+      }
+      const sourceAttempt = task.currentAttempt === 0
+        ? null
+        : this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      if (mode === "same-context" && (!sourceAttempt
+        || sourceAttempt.finishedAt === null
+        || sourceAttempt.lease !== null
+        || sourceAttempt.status === "queued"
+        || sourceAttempt.status === "running"
+        || sourceAttempt.status === "candidate-ready"
+        || sourceAttempt.status === "cancel-requested")) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "same-context retry requires one complete immutable Attempt",
+        );
+      }
+      const executionEpoch = continuingFailedRetryWindow
+        ? currentExecutionEpoch
+        : currentExecutionEpoch + 1;
+      if (!Number.isSafeInteger(executionEpoch)) {
+        throw new WorkspaceStoreCodecError("Generation Plan execution epoch is exhausted");
+      }
+      const selectedDescendantIds = new Set([task.id]);
+      let discoveredSelectedDescendant = true;
+      while (discoveredSelectedDescendant) {
+        discoveredSelectedDescendant = false;
+        for (const candidate of detail.tasks) {
+          if (selectedDescendantIds.has(candidate.id)
+            || !candidate.dependencyIds.some((dependencyId) => selectedDescendantIds.has(dependencyId))) {
+            continue;
+          }
+          selectedDescendantIds.add(candidate.id);
+          discoveredSelectedDescendant = true;
+        }
+      }
+      const remainingFailedRoots = detail.tasks.filter((candidate) => (
+        candidate.id !== task.id && candidate.status === "failed"
+      ));
+      const blockingRootIdsByTask = new Map<string, Set<string>>();
+      for (const root of remainingFailedRoots) {
+        blockingRootIdsByTask.set(root.id, new Set([root.id]));
+      }
+      let propagatedBlockingRoot = true;
+      while (propagatedBlockingRoot) {
+        propagatedBlockingRoot = false;
+        for (const candidate of detail.tasks) {
+          const roots = blockingRootIdsByTask.get(candidate.id) ?? new Set<string>();
+          const before = roots.size;
+          for (const dependencyId of candidate.dependencyIds) {
+            for (const rootId of blockingRootIdsByTask.get(dependencyId) ?? []) roots.add(rootId);
+          }
+          if (roots.size === 0) continue;
+          blockingRootIdsByTask.set(candidate.id, roots);
+          if (roots.size !== before) propagatedBlockingRoot = true;
+        }
+      }
+      const blockedDescendants = detail.tasks.filter((candidate) => (
+        candidate.status === "blocked" && selectedDescendantIds.has(candidate.id)
+      ));
+      const reopened: GenerationTask[] = [];
+      const retained = new Map<string, GenerationTask>();
+      for (const descendant of blockedDescendants) {
+        const blockingIds = blockingRootIdsByTask.get(descendant.id) ?? new Set<string>();
+        const blocker = remainingFailedRoots.find((candidate) => blockingIds.has(candidate.id));
+        if (blocker === undefined) reopened.push(descendant);
+        else retained.set(descendant.id, blocker);
+      }
+
+      const movedTask = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'materialization-pending', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = ?, rebase_count = 0, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, finished_at = NULL
+         WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?
+           AND current_attempt = ?`,
+      ).run(
+        mode,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        task.status,
+        task.currentAttempt,
+      );
+      if (Number(movedTask.changes) !== 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id} changed while requesting retry`,
+        );
+      }
+      for (const descendant of reopened) {
+        const movedDescendant = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'materialization-pending', blocked_reason = NULL, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, rebase_count = 0, failure_class = NULL,
+               error_json = NULL, next_eligible_at = NULL, finished_at = NULL
+           WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = 'blocked'
+             AND blocked_by_task_id IS ? AND current_attempt = ?`,
+        ).run(
+          descendant.id,
+          descendant.planId,
+          descendant.workspaceId,
+          descendant.blockedByTaskId,
+          descendant.currentAttempt,
+        );
+        if (Number(movedDescendant.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task descendant ${descendant.id} changed while reopening`,
+          );
+        }
+      }
+      for (const descendant of blockedDescendants) {
+        const blocker = retained.get(descendant.id);
+        if (blocker === undefined) continue;
+        if (blocker.failureClass === null || blocker.error === null) {
+          throw new WorkspaceStoreCodecError(
+            `failed Generation Task blocker ${blocker.id} has no durable failure`,
+          );
+        }
+        const blockedReason = `Blocked by failed prerequisite ${blocker.id}`;
+        if (descendant.blockedByTaskId === blocker.id
+          && descendant.blockedReason === blockedReason
+          && descendant.failureClass === blocker.failureClass
+          && isDeepStrictEqual(descendant.error, blocker.error)) {
+          continue;
+        }
+        const retainedDescendant = this.db.prepare(
+          `UPDATE generation_tasks
+           SET blocked_reason = ?, blocked_by_task_id = ?, pending_context_policy = NULL,
+               failure_class = ?, error_json = ?, next_eligible_at = NULL, finished_at = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = 'blocked'
+             AND blocked_by_task_id IS ? AND current_attempt = ?`,
+        ).run(
+          blockedReason,
+          blocker.id,
+          blocker.failureClass,
+          canonicalJsonText(blocker.error, "Generation Task retained blocker error"),
+          now,
+          descendant.id,
+          descendant.planId,
+          descendant.workspaceId,
+          descendant.blockedByTaskId,
+          descendant.currentAttempt,
+        );
+        if (Number(retainedDescendant.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task descendant ${descendant.id} changed while retaining its blocker`,
+          );
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: descendant.planId,
+          workspaceId: descendant.workspaceId,
+          taskId: descendant.id,
+          type: "task-blocked",
+          payload: {
+            blockedByTaskId: blocker.id,
+            reason: blockedReason,
+            reassignedByRetryTaskId: task.id,
+          },
+        });
+      }
+
+      this.appendGenerationPlanEventInTransaction({
+        planId: detail.plan.id,
+        workspaceId: detail.plan.workspaceId,
+        taskId: task.id,
+        type: "task-retry-requested",
+        payload: {
+          mode,
+          executionEpoch,
+          sourceAttempt: task.currentAttempt === 0 ? null : task.currentAttempt,
+          reopenedTaskIds: reopened.map((candidate) => candidate.id),
+        },
+      });
+      const movedPlan = this.db.prepare(
+        `UPDATE generation_plans
+         SET execution_epoch = ?, status = ?, finished_at = NULL
+         WHERE id = ? AND workspace_id = ? AND execution_epoch = ? AND status = ?`,
+      ).run(
+        executionEpoch,
+        detail.plan.status === "failed" ? "queued" : detail.plan.status,
+        detail.plan.id,
+        detail.plan.workspaceId,
+        detail.plan.executionEpoch ?? 0,
+        detail.plan.status,
+      );
+      if (Number(movedPlan.changes) !== 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${detail.plan.id} changed while fencing retry`,
+        );
+      }
+      return this.readGenerationPlanDetailForProject(projectId, planId);
+    });
+  }
+
+  reconcileGenerationTaskNeedsRebaseForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+    modeValue?: GenerationTaskRetryContextPolicy,
+  ): GenerationTaskRebaseDisposition {
+    if (modeValue !== undefined && modeValue !== "same-context" && modeValue !== "latest-context") {
+      throw new WorkspaceStoreCodecError("Generation Task rebase Context mode is unsupported");
+    }
+    return this.transactionImmediate(() => {
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      const task = detail.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new GenerationTaskNotFoundError(taskId);
+      const dispositionRows = this.db.prepare(
+        `SELECT * FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND task_id = ?
+           AND type = 'task-rebase-disposition'
+         ORDER BY sequence DESC`,
+      ).all(planId, detail.plan.workspaceId, task.id) as Row[];
+      const latestDisposition = dispositionRows.length === 0
+        ? null
+        : asGenerationPlanEvent(dispositionRows[0]!);
+      if (latestDisposition !== null) {
+        const sourceAttemptNumber = latestDisposition.payload.sourceAttempt;
+        const sourceAttempt = Number.isSafeInteger(sourceAttemptNumber)
+          ? this.readGenerationTaskAttemptInTransaction(task.id, sourceAttemptNumber as number)
+          : null;
+        if (!sourceAttempt) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} rebase disposition lost its source Attempt`,
+          );
+        }
+        if (latestDisposition.payload.kind === "publication-only"
+          && Number.isSafeInteger(latestDisposition.payload.successorAttempt)
+          && task.currentAttempt === latestDisposition.payload.successorAttempt
+          && task.status !== "needs-rebase" && task.status !== "failed") {
+          const successor = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+          if (!successor || successor.attemptOrigin !== "publication-retry") {
+            throw new WorkspaceStoreCodecError(
+              `Generation Task ${task.id} publication rebase successor is missing`,
+            );
+          }
+          return {
+            kind: "publication-only",
+            taskId: task.id,
+            planId: task.planId,
+            sourceAttempt,
+            successorAttempt: successor,
+            rebaseCount: task.rebaseCount ?? 0,
+          };
+        }
+        if (latestDisposition.payload.kind === "full"
+          && sourceAttempt.attempt === task.currentAttempt
+          && (task.status === "materialization-pending"
+            || task.status === "awaiting-context-refresh")) {
+          const mode = latestDisposition.payload.mode;
+          if (mode !== "same-context" && mode !== "latest-context") {
+            throw new WorkspaceStoreCodecError(
+              `Generation Task ${task.id} full rebase mode is corrupt`,
+            );
+          }
+          if (modeValue !== undefined && modeValue !== mode) {
+            throw new GenerationTaskMaterializationConflictError(
+              task.id,
+              `rebase was already disposed with mode ${mode}`,
+            );
+          }
+          return {
+            kind: "full",
+            taskId: task.id,
+            planId: task.planId,
+            sourceAttempt,
+            successorAttempt: null,
+            mode,
+            status: task.status,
+            rebaseCount: task.rebaseCount ?? 0,
+          };
+        }
+        if (latestDisposition.payload.kind === "failed"
+          && sourceAttempt.attempt === task.currentAttempt && task.status === "failed") {
+          const error = latestDisposition.payload.error;
+          if (error === null || typeof error !== "object" || Array.isArray(error)) {
+            throw new WorkspaceStoreCodecError(
+              `Generation Task ${task.id} failed rebase error is corrupt`,
+            );
+          }
+          return {
+            kind: "failed",
+            taskId: task.id,
+            planId: task.planId,
+            sourceAttempt,
+            successorAttempt: null,
+            error: error as Record<string, unknown>,
+            rebaseCount: task.rebaseCount ?? 0,
+          };
+        }
+      }
+
+      if (!detail.plan.constructionSealed
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running")) {
+        throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
+      }
+      if (task.status !== "needs-rebase" || task.currentAttempt <= 0) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `Task is ${task.status}, expected needs-rebase`,
+        );
+      }
+      const source = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      if (!source || source.status !== "needs-rebase" || source.finishedAt === null
+        || source.lease !== null || source.planId !== task.planId
+        || source.workspaceId !== task.workspaceId) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id} has no exact terminal needs-rebase Attempt`,
+        );
+      }
+      const now = boundarySafeInteger(this.clock.now(), "Generation Task rebase time");
+      const rebaseCount = task.rebaseCount ?? 0;
+      if (rebaseCount >= 3) {
+        const error = {
+          code: "generation-task-rebase-exhausted",
+          message: "Generation Task exceeded its bounded rebase limit",
+          limit: 3,
+          sourceAttempt: source.attempt,
+        };
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-rebase-disposition",
+          payload: {
+            kind: "failed",
+            sourceAttempt: source.attempt,
+            successorAttempt: null,
+            rebaseCount,
+            error,
+          },
+        });
+        const failed = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'failed', blocked_reason = NULL, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, failure_class = 'publication-conflict',
+               error_json = ?, next_eligible_at = NULL, finished_at = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'needs-rebase' AND rebase_count = ?`,
+        ).run(
+          canonicalJsonText(error, "Generation Task exhausted rebase error"),
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          rebaseCount,
+        );
+        if (Number(failed.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} changed while exhausting its rebase budget`,
+          );
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-failed",
+          payload: {
+            attempt: source.attempt,
+            failureClass: "publication-conflict",
+            error,
+            rebaseExhausted: true,
+          },
+        });
+        const failedTask = this.readGenerationTaskForExecutionInTransaction(task.id);
+        if (!failedTask) throw new GenerationTaskNotFoundError(task.id);
+        this.blockGenerationTaskDescendantsInTransaction(
+          failedTask,
+          "publication-conflict",
+          error,
+          now,
+        );
+        this.terminalizeFailedGenerationPlanIfSettledInTransaction(failedTask, now);
+        return {
+          kind: "failed",
+          taskId: task.id,
+          planId: task.planId,
+          sourceAttempt: source,
+          successorAttempt: null,
+          error,
+          rebaseCount,
+        };
+      }
+
+      const observation = this.observeGenerationTaskMaterializationInTransaction(
+        projectId,
+        planId,
+        task.id,
+      );
+      const stripDependencyOrdinals = source.dependencyOutputs.map(({
+        ordinal: _ordinal,
+        ...output
+      }) => output);
+      const stripResourceOrdinals = source.resourcePins.map(({
+        ordinal: _ordinal,
+        ...pin
+      }) => pin);
+      const stripComponentOrdinals = source.componentPins.map(({
+        ordinal: _ordinal,
+        designNodeId: _designNodeId,
+        ...pin
+      }) => pin);
+      const candidateIsReusable = task.target.type === "workspace"
+        ? false
+        : source.candidateEvidence !== null
+          && source.candidateEvidenceHash !== null
+          && ((task.target.type === "artifact"
+            && source.candidateRevisionId !== null
+            && source.candidateResourceRevisionId === null)
+            || (task.target.type === "resource"
+              && source.candidateRevisionId === null
+              && source.candidateResourceRevisionId !== null));
+      const publicationOnly = candidateIsReusable
+        && isDeepStrictEqual(source.target, observation.target)
+        && source.baseRevisionId === observation.baseRevisionId
+        && source.kernelRevisionId === observation.kernelRevisionId
+        && isDeepStrictEqual(source.payload, observation.payload)
+        && isDeepStrictEqual(stripDependencyOrdinals, observation.dependencyOutputs)
+        && isDeepStrictEqual(stripResourceOrdinals, observation.resourcePins)
+        && isDeepStrictEqual(stripComponentOrdinals, observation.componentPins);
+      const nextRebaseCount = rebaseCount + 1;
+      const checkpointValidation = task.kind === "checkpoint"
+        ? this.requireGenerationPlanCheckpointValidationAuthorityInTransaction(task, source)
+        : null;
+
+      if (publicationOnly) {
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-rebase-disposition",
+          payload: {
+            kind: "publication-only",
+            sourceAttempt: source.attempt,
+            successorAttempt: source.attempt + 1,
+            expectedSnapshotId: observation.expectedSnapshotId,
+            rebaseCount: nextRebaseCount,
+          },
+        });
+        const counted = this.db.prepare(
+          `UPDATE generation_tasks SET rebase_count = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'needs-rebase' AND rebase_count = ?`,
+        ).run(
+          nextRebaseCount,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          rebaseCount,
+        );
+        if (Number(counted.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} changed while counting publication rebase`,
+          );
+        }
+        const successor = this.appendExactGenerationTaskRetrySuccessorInTransaction({
+          task,
+          source,
+          createdAt: now,
+          publicationRetry: true,
+          expectedSnapshotId: observation.expectedSnapshotId,
+        });
+        const queued = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'queued', blocked_reason = NULL, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+               next_eligible_at = NULL, finished_at = NULL
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'needs-rebase' AND rebase_count = ?`,
+        ).run(
+          task.id,
+          task.planId,
+          task.workspaceId,
+          successor.attempt,
+          nextRebaseCount,
+        );
+        if (Number(queued.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} changed while queueing publication rebase`,
+          );
+        }
+        return {
+          kind: "publication-only",
+          taskId: task.id,
+          planId: task.planId,
+          sourceAttempt: source,
+          successorAttempt: successor,
+          rebaseCount: nextRebaseCount,
+        };
+      }
+
+      const mode = modeValue ?? source.retryContextPolicy;
+      const agentTask = task.kind === "resource" || task.kind === "component"
+        || task.kind === "page" || task.kind === "propagation-candidate";
+      const status = mode === "latest-context" && agentTask
+        ? "awaiting-context-refresh"
+        : "materialization-pending";
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-rebase-disposition",
+        payload: {
+          kind: "full",
+          sourceAttempt: source.attempt,
+          successorAttempt: null,
+          mode,
+          status,
+          expectedSnapshotId: observation.expectedSnapshotId,
+          baseRevisionId: observation.baseRevisionId,
+          kernelRevisionId: observation.kernelRevisionId,
+          rebaseCount: nextRebaseCount,
+          ...(checkpointValidation === null ? {} : {
+            round: "checkpoint-validation",
+            validationTaskId: checkpointValidation.task.id,
+            validationSourceAttempt: checkpointValidation.attempt.attempt,
+            validationSourceSnapshotId: checkpointValidation.snapshot.id,
+            validationEvidenceHash: checkpointValidation.evidenceHash,
+          }),
+        },
+      });
+      if (checkpointValidation !== null) {
+        const validationTask = checkpointValidation.task;
+        const validationAttempt = checkpointValidation.attempt;
+        const reopenedValidation = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'materialization-pending', blocked_reason = NULL,
+               blocked_by_task_id = NULL, pending_context_policy = ?,
+               failure_class = NULL, error_json = NULL, next_eligible_at = NULL,
+               result_revision_id = NULL, result_resource_revision_id = NULL,
+               result_snapshot_id = NULL, finished_at = NULL
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'succeeded'
+             AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+             AND result_snapshot_id = ? AND finished_at = ?`,
+        ).run(
+          mode,
+          validationTask.id,
+          validationTask.planId,
+          validationTask.workspaceId,
+          validationAttempt.attempt,
+          checkpointValidation.snapshot.id,
+          validationAttempt.finishedAt,
+        );
+        if (Number(reopenedValidation.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${validationTask.id} changed while reopening checkpoint validation`,
+          );
+        }
+      }
+      const moved = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = ?, blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = ?, rebase_count = ?, failure_class = NULL,
+             error_json = NULL, next_eligible_at = NULL, finished_at = NULL
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'needs-rebase' AND rebase_count = ?`,
+      ).run(
+        status,
+        mode,
+        nextRebaseCount,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        source.attempt,
+        rebaseCount,
+      );
+      if (Number(moved.changes) !== 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id} changed while selecting full rebase`,
+        );
+      }
+      return {
+        kind: "full",
+        taskId: task.id,
+        planId: task.planId,
+        sourceAttempt: source,
+        successorAttempt: null,
+        mode,
+        status,
+        rebaseCount: nextRebaseCount,
+      };
+    });
+  }
+
+  compileApprovedGenerationPlanForProject(projectId: string, planId: string): GenerationPlanDetail {
+    try {
+      return this.transactionImmediate(
+        () => this.compileApprovedGenerationPlanInTransaction(projectId, planId),
+      );
     } catch (error) {
       if (!(error instanceof GenerationPlanCompileError)) throw error;
       const current = this.getGenerationPlan(planId);
@@ -3007,6 +4851,103 @@ export class WorkspaceStore {
       }
       throw error;
     }
+  }
+
+  private compileApprovedGenerationPlanInTransaction(
+    projectId: string,
+    planId: string,
+  ): GenerationPlanDetail {
+    if (!this.db.isTransaction) throw new Error("Generation Plan compilation requires a transaction");
+    const shell = this.requireGenerationPlanForProject(projectId, planId);
+    if (shell.constructionSealed) {
+      if (shell.status === "approved" || shell.status === "compile-failed") {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${shell.id} construction seal is incoherent with status ${shell.status}`,
+        );
+      }
+      return this.readGenerationPlanDetailForProject(projectId, planId);
+    }
+    if (shell.status !== "approved") {
+      throw new GenerationPlanStateConflictError(shell.id, shell.status);
+    }
+    const proposal = this.requireProposalForProject(projectId, shell.proposalId);
+    this.validateGenerationPlanShellSnapshotInTransaction(shell, proposal);
+    const compiled = compileGenerationPlan({ shell, proposal });
+    this.ensureGenerationComponentInstanceIdentitiesInTransaction(proposal);
+    const insertTask = this.db.prepare(
+      `INSERT INTO generation_tasks (
+         id, ordinal, workspace_id, plan_id, kind, target_type, target_id,
+         target_artifact_id, target_track_id, target_resource_id,
+         payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
+         idempotency_key, status, blocked_reason, blocked_by_task_id, pending_context_policy,
+         current_attempt, materialization_failures, failure_class, error_json, next_eligible_at,
+         result_revision_id, result_resource_revision_id, result_snapshot_id, created_at, finished_at
+       ) VALUES (
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+         'materialization-pending', NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL
+       )`,
+    );
+    const createdAt = this.clock.now();
+    for (const taskValue of compiled.tasks) {
+      const { intentHash, idempotencyKey, ...intentInput } = taskValue;
+      const task = normalizeGenerationTaskIntent(intentInput);
+      if (task.intentHash !== intentHash || task.idempotencyKey !== idempotencyKey) {
+        throw new WorkspaceStoreCodecError("compiled Generation Task derived identity is inconsistent");
+      }
+      if (task.planId !== shell.id || task.workspaceId !== shell.workspaceId) {
+        throw new WorkspaceStoreCodecError("compiled Generation Task ownership does not match its Plan shell");
+      }
+      insertTask.run(
+        task.id,
+        task.ordinal,
+        task.workspaceId,
+        task.planId,
+        task.kind,
+        task.target.type,
+        task.target.id,
+        task.target.type === "artifact" ? task.target.id : null,
+        task.target.type === "artifact" ? task.target.trackId : null,
+        task.target.type === "resource" ? task.target.id : null,
+        canonicalJsonText(task.payload, "Generation Task payload"),
+        task.intentHash,
+        canonicalJsonText(task.capabilities, "Generation Task capabilities"),
+        canonicalJsonText(task.qaProfile, "Generation Task QA profile"),
+        canonicalJsonText(task.resourceLimits, "Generation Task resource limits"),
+        task.idempotencyKey,
+        createdAt,
+      );
+    }
+    const insertDependency = this.db.prepare(
+      `INSERT INTO generation_task_dependencies (
+         plan_id, workspace_id, task_id, dependency_task_id, ordinal
+       ) VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const dependency of compiled.dependencies) {
+      insertDependency.run(
+        dependency.planId,
+        shell.workspaceId,
+        dependency.taskId,
+        dependency.dependencyTaskId,
+        dependency.ordinal,
+      );
+    }
+    const sealed = this.db.prepare(
+      `UPDATE generation_plans
+       SET status = 'queued', construction_sealed = 1
+       WHERE id = ? AND workspace_id = ? AND status = 'approved' AND construction_sealed = 0`,
+    ).run(shell.id, shell.workspaceId);
+    if (Number(sealed.changes) !== 1) {
+      const actual = this.requireGenerationPlanForProject(projectId, planId);
+      throw new GenerationPlanStateConflictError(actual.id, actual.status);
+    }
+    this.appendGenerationPlanEventInTransaction({
+      planId: shell.id,
+      workspaceId: shell.workspaceId,
+      taskId: null,
+      type: "plan-queued",
+      payload: { taskCount: compiled.tasks.length, dependencyCount: compiled.dependencies.length },
+    });
+    return this.readGenerationPlanDetailForProject(projectId, planId);
   }
 
   markGenerationPlanCompileFailedIfApprovedForProject(
@@ -3053,7 +4994,7 @@ export class WorkspaceStore {
   listGenerationPlanEventsForProject(
     projectId: string,
     planId: string,
-    unsafeInput: ListGenerationPlanEventsInput,
+    unsafeInput: ListGenerationPlanEventsInput = { after: 0, limit: 1_000 },
   ): GenerationPlanEvent[] {
     const input = normalizeListGenerationPlanEventsInput(unsafeInput);
     return this.transactionRead(() => {
@@ -3097,6 +5038,68 @@ export class WorkspaceStore {
          WHERE workspace_id = ? ORDER BY created_at ASC, id COLLATE BINARY ASC`,
       ).all(workspace.id) as Array<{ id: string }>;
       return rows.map((row) => this.readGenerationPlanDetailForProject(projectId, row.id).plan);
+    });
+  }
+
+  getLatestScopedArtifactGenerationPlanForProject(
+    projectId: string,
+    artifactId: string,
+  ): GenerationPlan | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const row = this.db.prepare(
+        `SELECT plan.id
+         FROM generation_plans plan
+         JOIN generation_tasks leaf
+           ON leaf.plan_id = plan.id AND leaf.workspace_id = plan.workspace_id
+         WHERE plan.workspace_id = ?
+           AND plan.construction_sealed = 1
+           AND leaf.kind IN ('resource', 'component', 'page')
+           AND leaf.target_type = 'artifact'
+           AND leaf.target_id = ?
+           AND leaf.target_artifact_id = ?
+           AND json_type(leaf.payload_json, '$.artifactPlan') = 'object'
+           AND json_type(leaf.payload_json, '$.artifactPlan.dispatchContextPackId') = 'text'
+           AND length(json_extract(
+             leaf.payload_json,
+             '$.artifactPlan.dispatchContextPackId'
+           )) = 77
+           AND substr(json_extract(
+             leaf.payload_json,
+             '$.artifactPlan.dispatchContextPackId'
+           ), 1, 13) = 'context-pack-'
+           AND substr(json_extract(
+             leaf.payload_json,
+             '$.artifactPlan.dispatchContextPackId'
+           ), 14) NOT GLOB '*[^0-9a-f]*'
+           AND (
+             SELECT COUNT(*)
+             FROM generation_tasks generated
+             WHERE generated.plan_id = plan.id
+               AND generated.workspace_id = plan.workspace_id
+               AND generated.kind IN ('resource', 'component', 'page')
+           ) = 1
+         ORDER BY plan.created_at DESC, plan.id COLLATE BINARY DESC
+         LIMIT 1`,
+      ).get(workspace.id, artifactId, artifactId) as { id: string } | undefined;
+      return row === undefined
+        ? null
+        : this.readGenerationPlanDetailForProject(projectId, row.id).plan;
+    });
+  }
+
+  listActiveGenerationPlanIdsForProject(projectId: string): string[] {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT id FROM generation_plans
+         WHERE workspace_id = ? AND construction_sealed = 1
+           AND status IN ('queued', 'running')
+         ORDER BY id COLLATE BINARY ASC`,
+      ).all(workspace.id) as Array<{ id: string }>;
+      return rows.map((row) => row.id);
     });
   }
 
@@ -5068,10 +7071,14 @@ export class WorkspaceStore {
       if (replay !== null) return replay;
 
       const now = boundarySafeInteger(this.clock.now(), "Generation Task execution failure time");
+      const acknowledgingCancellation = input.failure.failureClass === "cancelled"
+        && task.status === "cancel-requested"
+        && source.status === "cancel-requested";
       if ((plan.status !== "queued" && plan.status !== "running")
         || task.currentAttempt !== source.attempt
-        || task.status !== "running"
-        || source.status !== "running"
+        || (acknowledgingCancellation
+          ? task.status !== "cancel-requested" || source.status !== "cancel-requested"
+          : task.status !== "running" || source.status !== "running")
         || !isDeepStrictEqual(task.target, source.target)
         || !source.lease
         || source.lease.ownerId !== input.lease.ownerId
@@ -5092,6 +7099,96 @@ export class WorkspaceStore {
           source.attempt,
           "Attempt failure claims are stale or expired",
         );
+      }
+
+      if (acknowledgingCancellation) {
+        const errorJson = canonicalJsonText(
+          input.failure.error,
+          "Generation Task cancellation acknowledgement error",
+        );
+        const finishedSource = this.db.prepare(
+          `UPDATE generation_task_attempts
+           SET status = 'cancelled', blocked_reason = NULL, failure_class = 'cancelled',
+               error_json = ?, next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+               lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+           WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+             AND status = 'cancel-requested' AND owner_id = ? AND lease_token = ?
+             AND lease_expires_at = ? AND lease_expires_at > ?`,
+        ).run(
+          errorJson,
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          live.ownerId,
+          live.leaseToken,
+          live.leaseExpiresAt,
+          now,
+        );
+        if (Number(finishedSource.changes) !== 1) {
+          throw new GenerationTaskLeaseFenceError(
+            task.id,
+            source.attempt,
+            "Attempt changed while acknowledging cancellation",
+          );
+        }
+        this.releaseExactGenerationTaskClaimsInTransaction(task, source.attempt, live);
+        const finishedTask = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'cancelled', pending_context_policy = NULL,
+               failure_class = 'cancelled', error_json = ?, next_eligible_at = NULL,
+               finished_at = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'cancel-requested'`,
+        ).run(
+          errorJson,
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+        );
+        if (Number(finishedTask.changes) !== 1) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} changed while acknowledging cancellation`,
+          );
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-cancelled",
+          payload: {
+            attempt: source.attempt,
+            failureClass: "cancelled",
+            error: input.failure.error,
+            failureFenceHash,
+          },
+        });
+        this.terminalizeCancelledGenerationPlanIfSettledInTransaction(task.planId, now);
+        const currentPlan = this.requireGenerationPlanForProject(projectId, planId);
+        if (currentPlan.status === "queued" || currentPlan.status === "running") {
+          const failedPrerequisite = task.blockedByTaskId === null
+            ? null
+            : this.readGenerationTaskForExecutionInTransaction(task.blockedByTaskId);
+          this.terminalizeFailedGenerationPlanIfSettledInTransaction(
+            failedPrerequisite ?? task,
+            now,
+          );
+        }
+        const terminalSource = this.readGenerationTaskAttemptInTransaction(task.id, source.attempt);
+        if (!terminalSource || terminalSource.status !== "cancelled") {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${source.attempt} cancellation did not round-trip`,
+          );
+        }
+        return {
+          status: "cancelled",
+          sourceAttempt: terminalSource,
+          successorAttempt: null,
+          nextEligibleAt: null,
+        };
       }
 
       const transientFailure = input.failure.failureClass === "adapter"
@@ -5501,10 +7598,16 @@ export class WorkspaceStore {
         });
         if (terminalTaskStatus === "cancelled") {
           summary.cancelledTaskIds.push(task.id);
-          this.terminalizeFailedGenerationPlanIfSettledInTransaction(
-            failedPrerequisite ?? task,
-            now,
-          );
+          this.terminalizeCancelledGenerationPlanIfSettledInTransaction(task.planId, now);
+          const currentPlan = this.db.prepare(
+            "SELECT status FROM generation_plans WHERE id = ? AND workspace_id = ?",
+          ).get(task.planId, task.workspaceId) as { status: GenerationPlan["status"] } | undefined;
+          if (currentPlan?.status === "queued" || currentPlan?.status === "running") {
+            this.terminalizeFailedGenerationPlanIfSettledInTransaction(
+              failedPrerequisite ?? task,
+              now,
+            );
+          }
         } else {
           summary.failedTaskIds.push(task.id);
           this.blockGenerationTaskDescendantsInTransaction(
@@ -5577,7 +7680,7 @@ export class WorkspaceStore {
       if (!this.generationTaskAttemptMatchesObservation(input, observation)) {
         throw new GenerationTaskMaterializationConflictError(
           input.taskId,
-          "the observed Snapshot, base, dependency outputs, or pins are stale",
+          "the observed execution epoch, Snapshot, base, dependency outputs, or pins are stale",
         );
       }
       const detail = this.readGenerationPlanDetailForProject(projectId, planId);
@@ -5591,24 +7694,32 @@ export class WorkspaceStore {
           `expected ${expectedPolicy}/${expectedMode} retry execution policy`,
         );
       }
+      if (observation.requiredContextPackId !== undefined
+        && input.contextPackId !== observation.requiredContextPackId) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "same-context retry must retain its exact immutable Context Pack",
+        );
+      }
       this.validateGenerationTaskAttemptSourceBaseInTransaction(task, input);
       this.validateGenerationTaskAttemptContextInTransaction(task, input);
 
       const createdAt = this.clock.now();
       this.db.prepare(
         `INSERT INTO generation_task_attempts (
-           task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
+           task_id, plan_id, workspace_id, attempt, execution_epoch, target_artifact_id, target_track_id,
            target_resource_id, base_revision_id, source_commit_hash, source_tree_hash,
            expected_snapshot_id, context_pack_id,
            kernel_revision_id, execution_mode, payload_json, input_hash,
            pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
            retry_context_policy, status, materialization_sealed, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)`,
       ).run(
         input.taskId,
         input.planId,
         input.workspaceId,
         input.attempt,
+        input.executionEpoch ?? 0,
         input.target.type === "artifact" ? input.target.id : null,
         input.target.type === "artifact" ? input.target.trackId : null,
         input.target.type === "resource" ? input.target.id : null,
@@ -5720,6 +7831,7 @@ export class WorkspaceStore {
         type: "task-materialized",
         payload: {
           attempt: input.attempt,
+          executionEpoch: input.executionEpoch ?? 0,
           inputHash: input.inputHash,
           expectedSnapshotId: input.expectedSnapshotId,
           baseRevisionId: input.baseRevisionId,
@@ -6062,6 +8174,36 @@ export class WorkspaceStore {
     });
   }
 
+  listArtifactRevisionsProducedByRun(
+    projectId: string,
+    runId: string,
+    limit = 2,
+  ): ArtifactRevisionRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new WorkspaceStoreCodecError("producing Run Artifact Revision limit must be an integer from 1 to 100");
+    }
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT revision.*, artifact.source_root AS owning_source_root
+         FROM artifact_revisions revision
+         JOIN workspace_artifacts artifact
+           ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
+         WHERE revision.workspace_id = ? AND revision.produced_by_run_id = ?
+         ORDER BY revision.created_at ASC, revision.id ASC
+         LIMIT ?`,
+      ).all(workspace.id, runId, limit) as Row[];
+      const context = this.readContext();
+      return rows.map((row) => {
+        const revision = asOwnedArtifactRevision(row);
+        context.artifactRevisions.set(revision.id, revision);
+        this.validateArtifactRevisionLineage(revision);
+        return revision;
+      });
+    });
+  }
+
   getArtifactRevisionContextChecksum(revisionId: string): string | null {
     return this.transactionRead(() => {
       const revision = this.loadArtifactRevision(revisionId);
@@ -6259,7 +8401,7 @@ export class WorkspaceStore {
   private publishArtifactRevisionInTransaction(
     revisionId: string,
     expected: ArtifactPublicationExpectation,
-    attribution: { planId?: string; taskId?: string } = {},
+    attribution: { planId?: string; taskId?: string; restoredRevisionId?: string } = {},
   ): WorkspaceSnapshotRecord {
       if (!this.db.isTransaction) throw new Error("Artifact Revision publication requires a transaction");
       const revision = this.requireArtifactRevision(revisionId);
@@ -6323,13 +8465,16 @@ export class WorkspaceStore {
       const snapshot = this.createSnapshotInTransaction(workspace.id, {
         expectedSnapshotId: expected.expectedSnapshotId,
         graphRevision: derived.graph.revision,
-        reason: "artifact-published",
-        provenance: {
-          kind: "artifact-publication",
-          revisionId: revision.id,
-          ...(revision.producedByRunId === null ? {} : { runId: revision.producedByRunId }),
-          ...attribution,
-        },
+        reason: attribution.restoredRevisionId === undefined ? "artifact-published" : "artifact-restored",
+        provenance: attribution.restoredRevisionId === undefined
+          ? {
+              kind: "artifact-publication",
+              revisionId: revision.id,
+              ...(revision.producedByRunId === null ? {} : { runId: revision.producedByRunId }),
+              ...(attribution.planId === undefined ? {} : { planId: attribution.planId }),
+              ...(attribution.taskId === undefined ? {} : { taskId: attribution.taskId }),
+            }
+          : { kind: "restore", restoredRevisionId: attribution.restoredRevisionId },
         artifactOverrides: [{
           artifactId: revision.artifactId,
           trackId: revision.trackId,
@@ -6360,6 +8505,208 @@ export class WorkspaceStore {
         });
       }
       return snapshot;
+  }
+
+  restoreArtifactRevisionForProject(
+    projectId: string,
+    artifactId: string,
+    unsafeInput: RestoreArtifactRevisionInput,
+  ): ArtifactVersionActionResult {
+    const input = normalizeRestoreArtifactRevisionInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) throw new WorkspaceGraphValidationError("Workspace does not exist for this Project");
+      const artifact = this.requireArtifact(artifactId);
+      const source = this.requireArtifactRevision(input.sourceRevisionId);
+      if (artifact.workspaceId !== workspace.id
+        || source.workspaceId !== workspace.id
+        || source.artifactId !== artifact.id) {
+        throw new WorkspaceGraphValidationError("source Artifact Revision is not owned by the request Artifact");
+      }
+      if (artifact.archivedAt !== null || artifact.activeTrackId === null) {
+        throw new WorkspaceGraphValidationError("Artifact does not have an editable active Track");
+      }
+      const track = this.requireTrack(artifact.activeTrackId);
+      this.guardPointer({
+        pointer: "artifact-head",
+        workspaceId: workspace.id,
+        ownerId: track.id,
+        expectedId: input.expectedHeadRevisionId,
+        actualId: track.headRevisionId,
+      });
+      this.guardPointer({
+        pointer: "active-snapshot",
+        workspaceId: workspace.id,
+        ownerId: workspace.id,
+        expectedId: input.expectedSnapshotId,
+        actualId: workspace.activeSnapshotId,
+      });
+      const parentSnapshot = this.requireSnapshot(workspace.id, input.expectedSnapshotId);
+      const revision = this.createArtifactRevisionInTransaction(
+        this.cloneArtifactRevisionInput(source, {
+          trackId: track.id,
+          parentRevisionId: input.expectedHeadRevisionId,
+          kernelRevisionId: parentSnapshot.kernelRevisionId,
+        }, "restored-needs-revalidation"),
+      );
+      const snapshot = this.publishArtifactRevisionInTransaction(revision.id, {
+        expectedHeadRevisionId: input.expectedHeadRevisionId,
+        expectedSnapshotId: input.expectedSnapshotId,
+      }, { restoredRevisionId: source.id });
+      return {
+        action: "restore-as-new-revision",
+        artifact: this.requireArtifact(artifact.id),
+        track: this.requireTrack(track.id),
+        revision,
+        snapshot,
+      };
+    });
+  }
+
+  forkArtifactTrackForProject(
+    projectId: string,
+    artifactId: string,
+    unsafeInput: ForkArtifactTrackInput,
+  ): ArtifactVersionActionResult {
+    const input = normalizeForkArtifactTrackInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) throw new WorkspaceGraphValidationError("Workspace does not exist for this Project");
+      const artifact = this.requireArtifact(artifactId);
+      const source = this.requireArtifactRevision(input.sourceRevisionId);
+      if (artifact.workspaceId !== workspace.id
+        || source.workspaceId !== workspace.id
+        || source.artifactId !== artifact.id) {
+        throw new WorkspaceGraphValidationError("source Artifact Revision is not owned by the request Artifact");
+      }
+      if (artifact.archivedAt !== null || artifact.activeTrackId === null) {
+        throw new WorkspaceGraphValidationError("Artifact does not have an editable active Track");
+      }
+      const previousTrack = this.requireTrack(artifact.activeTrackId);
+      this.guardPointer({
+        pointer: "artifact-head",
+        workspaceId: workspace.id,
+        ownerId: previousTrack.id,
+        expectedId: input.expectedHeadRevisionId,
+        actualId: previousTrack.headRevisionId,
+      });
+      this.guardPointer({
+        pointer: "active-snapshot",
+        workspaceId: workspace.id,
+        ownerId: workspace.id,
+        expectedId: input.expectedSnapshotId,
+        actualId: workspace.activeSnapshotId,
+      });
+      const parentSnapshot = this.requireSnapshot(workspace.id, input.expectedSnapshotId);
+      const trackId = this.clock.id();
+      const now = this.clock.now();
+      this.db.prepare(
+        `INSERT INTO artifact_tracks
+           (id, artifact_id, name, head_revision_id, legacy_variant_id, created_at)
+         VALUES (?, ?, ?, NULL, NULL, ?)`,
+      ).run(trackId, artifact.id, input.name, now);
+      const activated = this.db.prepare(
+        `UPDATE workspace_artifacts SET active_track_id = ?, updated_at = ?
+         WHERE id = ? AND workspace_id = ? AND active_track_id = ? AND archived_at IS NULL`,
+      ).run(trackId, now, artifact.id, workspace.id, previousTrack.id);
+      if (Number(activated.changes) !== 1) {
+        throw new WorkspaceGraphValidationError("Artifact active Track changed before the fork could be created");
+      }
+      const revision = this.createArtifactRevisionInTransaction(
+        this.cloneArtifactRevisionInput(source, {
+          trackId,
+          parentRevisionId: null,
+          kernelRevisionId: parentSnapshot.kernelRevisionId,
+        }, "forked-needs-revalidation"),
+      );
+      const movedHead = this.db.prepare(
+        `UPDATE artifact_tracks SET head_revision_id = ?
+         WHERE id = ? AND artifact_id = ? AND head_revision_id IS NULL`,
+      ).run(revision.id, trackId, artifact.id);
+      if (Number(movedHead.changes) !== 1) {
+        throw new WorkspaceGraphValidationError("new Artifact Track could not publish its seed Revision");
+      }
+      const derived = this.deriveUsesGraphForArtifactPublication(workspace, parentSnapshot, revision);
+      if (derived.changed) {
+        this.reconcileDerivedUsesEdges(derived.graph);
+        this.insertImmutableGraphRevision(derived.graph);
+      }
+      const snapshot = this.createSnapshotInTransaction(workspace.id, {
+        expectedSnapshotId: input.expectedSnapshotId,
+        graphRevision: derived.graph.revision,
+        reason: "artifact-track-forked",
+        provenance: { kind: "restore", restoredRevisionId: source.id },
+        artifactOverrides: [{ artifactId: artifact.id, trackId, revisionId: revision.id }],
+      });
+      const movedSnapshot = this.db.prepare(
+        `UPDATE project_workspaces
+         SET graph_revision = ?, active_snapshot_id = ?, updated_at = ?
+         WHERE id = ? AND graph_revision = ? AND active_snapshot_id IS ?`,
+      ).run(
+        derived.graph.revision,
+        snapshot.id,
+        this.clock.now(),
+        workspace.id,
+        workspace.graphRevision,
+        input.expectedSnapshotId,
+      );
+      if (Number(movedSnapshot.changes) !== 1) {
+        const actual = this.requireWorkspaceById(workspace.id);
+        throw new WorkspacePointerConflictError({
+          pointer: "active-snapshot",
+          workspaceId: workspace.id,
+          ownerId: workspace.id,
+          expectedId: input.expectedSnapshotId,
+          actualId: actual.activeSnapshotId,
+        });
+      }
+      return {
+        action: "fork-track",
+        artifact: this.requireArtifact(artifact.id),
+        track: this.requireTrack(trackId),
+        revision,
+        snapshot,
+      };
+    });
+  }
+
+  private cloneArtifactRevisionInput(
+    source: ArtifactRevisionRecord,
+    target: Pick<CreateArtifactRevisionInput, "trackId" | "parentRevisionId" | "kernelRevisionId">,
+    revalidationReason: "restored-needs-revalidation" | "forked-needs-revalidation",
+  ): CreateArtifactRevisionInput {
+    return {
+      artifactId: source.artifactId,
+      ...target,
+      sourceCommitHash: source.sourceCommitHash,
+      sourceTreeHash: source.sourceTreeHash,
+      renderSpec: source.renderSpec,
+      // A version action republishes the source bytes against the current Snapshot Kernel.
+      // The old QA and Agent Context Pack describe a different immutable assembly, so carrying
+      // them forward would falsely certify this new Revision.
+      quality: {
+        state: "unassessed",
+        score: null,
+        findings: [],
+        reason: revalidationReason,
+      },
+      contextPackHash: null,
+      producedByRunId: null,
+      dependencies: this.listArtifactRevisionDependencies(source.id).map((dependency) => ({
+        instanceId: dependency.instanceId,
+        componentArtifactId: dependency.componentArtifactId,
+        componentRevisionId: dependency.componentRevisionId,
+        ...(dependency.variantKey === null ? {} : { variantKey: dependency.variantKey }),
+        ...(dependency.stateKey === null ? {} : { stateKey: dependency.stateKey }),
+        sourceLocator: dependency.sourceLocator,
+        overrides: dependency.overrides,
+        status: dependency.status,
+      })),
+      resourcePins: this.listArtifactRevisionResourcePins(source.id).map((pin) => ({
+        resourceId: pin.resourceId,
+        resourceRevisionId: pin.resourceRevisionId,
+      })),
+    };
   }
 
   createKernelRevision(unsafeInput: CreateKernelRevisionInput): SharedDesignKernelRevision {
@@ -6608,6 +8955,58 @@ export class WorkspaceStore {
     });
   }
 
+  listArtifactRevisionHistoryPage(
+    projectId: string,
+    artifactId: string,
+    input: { limit: number; cursor?: ArtifactRevisionHistoryCursor | null },
+  ): ArtifactRevisionHistoryPage {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+      throw new WorkspaceStoreCodecError("Artifact Revision history limit must be an integer from 1 to 50");
+    }
+    const cursor = input.cursor ?? null;
+    if (cursor !== null && (!Number.isSafeInteger(cursor.createdAt) || cursor.createdAt < 0
+      || typeof cursor.id !== "string" || cursor.id.length === 0
+      || !isWellFormedUtf16(cursor.id) || cursor.id !== cursor.id.trim())) {
+      throw new WorkspaceStoreCodecError("Artifact Revision history cursor is invalid");
+    }
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return { items: [], nextCursor: null };
+      const artifact = this.getArtifact(artifactId);
+      if (!artifact || artifact.workspaceId !== workspace.id) return { items: [], nextCursor: null };
+      const cursorSql = cursor === null
+        ? ""
+        : "AND (revision.created_at < ? OR (revision.created_at = ? AND revision.id < ?))";
+      const args = cursor === null
+        ? [workspace.id, artifact.id, input.limit + 1]
+        : [workspace.id, artifact.id, cursor.createdAt, cursor.createdAt, cursor.id, input.limit + 1];
+      const rows = this.db.prepare(
+        `SELECT revision.*, artifact.source_root AS owning_source_root
+         FROM artifact_revisions revision
+         JOIN workspace_artifacts artifact
+           ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
+         WHERE revision.workspace_id = ? AND revision.artifact_id = ? ${cursorSql}
+         ORDER BY revision.created_at DESC, revision.id DESC
+         LIMIT ?`,
+      ).all(...args) as Row[];
+      const context = this.readContext();
+      const revisions = rows.map((row) => {
+        const revision = asOwnedArtifactRevision(row);
+        context.artifactRevisions.set(revision.id, revision);
+        this.validateArtifactRevisionLineage(revision);
+        return revision;
+      });
+      const items = revisions.slice(0, input.limit);
+      const last = items.at(-1) ?? null;
+      return {
+        items,
+        nextCursor: revisions.length > input.limit && last !== null
+          ? { createdAt: last.createdAt, id: last.id }
+          : null,
+      };
+    });
+  }
+
   listSnapshots(projectId: string): WorkspaceSnapshotRecord[] {
     return this.transactionRead(() => {
       const workspace = this.getWorkspace(projectId);
@@ -6624,6 +9023,221 @@ export class WorkspaceStore {
         return snapshot;
       });
       return snapshots.map((snapshot) => this.requireSnapshot(workspace.id, snapshot.id));
+    });
+  }
+
+  getSnapshotForProject(projectId: string, snapshotId: string): WorkspaceSnapshotRecord | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const owned = this.db.prepare(
+        "SELECT 1 FROM workspace_snapshots WHERE workspace_id = ? AND id = ?",
+      ).get(workspace.id, snapshotId);
+      return owned ? this.requireSnapshot(workspace.id, snapshotId) : null;
+    });
+  }
+
+  /**
+   * Read one sealed Snapshot and its exact pins without replaying historical
+   * publication provenance. The Snapshot and every directly pinned immutable
+   * record still receive one-hop parent validation.
+   */
+  getShallowSnapshotForProject(projectId: string, snapshotId: string): WorkspaceSnapshotRecord | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const snapshot = this.loadSnapshotBase(snapshotId);
+      if (snapshot === null || snapshot.workspaceId !== workspace.id) return null;
+      return this.buildShallowSnapshotRecord(workspace.id, snapshot);
+    });
+  }
+
+  /**
+   * Resolve exactly the render-affecting leaf closure pinned by one Snapshot.
+   * Selected Revisions and Kernels are decoded, while their direct parents are
+   * checked from narrow metadata rows so unrelated ancestry cannot poison a
+   * current Preview.
+   */
+  getShallowArtifactClosureForProject(
+    projectId: string,
+    snapshotId: string,
+    rootRevisionId: string,
+  ): WorkspaceShallowArtifactClosure | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const snapshot = this.loadSnapshotBase(snapshotId);
+      if (snapshot === null || snapshot.workspaceId !== workspace.id) return null;
+      this.validateShallowSnapshotDirectParent(snapshot);
+      this.requireCompactKernelRevision(workspace.id, snapshot.kernelRevisionId);
+      this.validateRunOwnership(workspace.id, snapshot.createdByRunId, "Workspace Snapshot");
+      const graph = this.requireGraphRevision(workspace.id, snapshot.graphRevision);
+      if (graph.workspaceId !== workspace.id || graph.revision !== snapshot.graphRevision) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace Snapshot ${snapshot.id} graph Revision is incoherent`,
+        );
+      }
+
+      const rootRevision = this.loadArtifactRevision(rootRevisionId);
+      if (rootRevision === null || rootRevision.workspaceId !== workspace.id) return null;
+      const rootMapping = this.db.prepare(
+        `SELECT track_id, revision_id FROM workspace_snapshot_artifacts
+         WHERE workspace_id = ? AND snapshot_id = ? AND artifact_id = ?`,
+      ).get(workspace.id, snapshot.id, rootRevision.artifactId) as {
+        track_id: unknown;
+        revision_id: unknown;
+      } | undefined;
+      if (!rootMapping
+        || rootMapping.track_id !== rootRevision.trackId
+        || rootMapping.revision_id !== rootRevision.id) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace Snapshot ${snapshot.id} does not exactly pin root Artifact Revision ${rootRevision.id}`,
+        );
+      }
+
+      const graphKinds = new Map<string, "page" | "component">();
+      for (const node of graph.nodes) {
+        if (node.kind !== "resource") graphKinds.set(node.artifactId, node.kind);
+      }
+      const artifactsById = new Map<string, WorkspaceArtifactRecord>();
+      const revisionsById = new Map<string, ArtifactRevisionRecord>();
+      const dependenciesByKey = new Map<string, ArtifactRevisionDependencyRecord>();
+      const resourcePinsByKey = new Map<string, ArtifactRevisionResourcePinRecord>();
+      const kernelsById = new Map<string, SharedDesignKernelRevision>();
+      const visiting = new Set<string>();
+      let dependencyCount = 0;
+      let resourcePinCount = 0;
+
+      const requireGraphArtifact = (artifactId: string): WorkspaceArtifactRecord => {
+        const cached = artifactsById.get(artifactId);
+        if (cached) return cached;
+        const artifact = this.getArtifact(artifactId);
+        const graphKind = graphKinds.get(artifactId);
+        if (!artifact || artifact.workspaceId !== workspace.id
+          || artifact.archivedAt !== null || graphKind !== artifact.kind
+          || !artifactHasValidSourceRoot(artifact)) {
+          throw new WorkspaceGraphValidationError(
+            `Snapshot render closure Artifact ${artifactId} is not an active exact graph identity`,
+          );
+        }
+        artifactsById.set(artifact.id, artifact);
+        return artifact;
+      };
+
+      const visit = (revision: ArtifactRevisionRecord): void => {
+        if (revisionsById.has(revision.id)) return;
+        if (visiting.has(revision.id)) {
+          throw new WorkspaceGraphValidationError("Snapshot render closure contains a Component Revision cycle");
+        }
+        if (revisionsById.size + visiting.size >= SHALLOW_ARTIFACT_CLOSURE_MAX_REVISIONS) {
+          throw new WorkspaceGraphValidationError("Snapshot render closure exceeds its Revision bound");
+        }
+        if (revision.workspaceId !== workspace.id) {
+          throw new WorkspaceGraphValidationError("Snapshot render closure contains a foreign Artifact Revision");
+        }
+        const artifact = requireGraphArtifact(revision.artifactId);
+        this.validateShallowArtifactRevision(revision);
+        const kernel = this.requireCompactKernelRevision(workspace.id, revision.kernelRevisionId);
+        kernelsById.set(kernel.id, kernel);
+
+        visiting.add(revision.id);
+        const dependencyRows = this.db.prepare(
+          `SELECT * FROM artifact_revision_dependencies
+           WHERE revision_id = ? ORDER BY instance_id ASC
+           LIMIT ?`,
+        ).all(
+          revision.id,
+          SHALLOW_ARTIFACT_CLOSURE_MAX_DEPENDENCIES - dependencyCount + 1,
+        ) as Row[];
+        dependencyCount += dependencyRows.length;
+        if (dependencyCount > SHALLOW_ARTIFACT_CLOSURE_MAX_DEPENDENCIES) {
+          throw new WorkspaceGraphValidationError("Snapshot render closure exceeds its Component dependency bound");
+        }
+        const dependencies = dependencyRows.map(asArtifactRevisionDependency);
+        this.validateShallowArtifactDependencyRecords(revision, dependencies);
+        for (const dependency of dependencies) {
+          if (dependency.status !== "linked") continue;
+          dependenciesByKey.set(
+            `${dependency.revisionId}\0${dependency.instanceId}\0${dependency.componentRevisionId}`,
+            dependency,
+          );
+          const componentRevision = this.loadArtifactRevision(dependency.componentRevisionId);
+          if (componentRevision === null) {
+            throw new WorkspaceGraphValidationError(
+              `Component Revision ${dependency.componentRevisionId} is not resolvable`,
+            );
+          }
+          visit(componentRevision);
+        }
+
+        const resourceRows = this.db.prepare(
+          `SELECT * FROM artifact_revision_resources
+           WHERE revision_id = ? ORDER BY resource_id ASC
+           LIMIT ?`,
+        ).all(
+          revision.id,
+          SHALLOW_ARTIFACT_CLOSURE_MAX_RESOURCE_PINS - resourcePinCount + 1,
+        ) as Row[];
+        resourcePinCount += resourceRows.length;
+        if (resourcePinCount > SHALLOW_ARTIFACT_CLOSURE_MAX_RESOURCE_PINS) {
+          throw new WorkspaceGraphValidationError("Snapshot render closure exceeds its Resource pin bound");
+        }
+        const resourcePins = resourceRows.map(asArtifactRevisionResourcePin);
+        this.validateArtifactResourcePinRecords(revision, resourcePins);
+        for (const pin of resourcePins) {
+          resourcePinsByKey.set(`${pin.revisionId}\0${pin.resourceId}\0${pin.resourceRevisionId}`, pin);
+        }
+        visiting.delete(revision.id);
+        revisionsById.set(revision.id, revision);
+        artifactsById.set(artifact.id, artifact);
+      };
+
+      visit(rootRevision);
+      const compareRecordId = (left: { id: string }, right: { id: string }): number => (
+        compareBinary(left.id, right.id)
+      );
+      return {
+        workspaceId: workspace.id,
+        snapshotId: snapshot.id,
+        rootRevision,
+        artifacts: [...artifactsById.values()].sort(compareRecordId),
+        revisions: [
+          rootRevision,
+          ...[...revisionsById.values()]
+            .filter((revision) => revision.id !== rootRevision.id)
+            .sort(compareRecordId),
+        ],
+        dependencies: [...dependenciesByKey.values()].sort((left, right) => compareBinary(
+          `${left.revisionId}\0${left.instanceId}\0${left.componentRevisionId}`,
+          `${right.revisionId}\0${right.instanceId}\0${right.componentRevisionId}`,
+        )),
+        resourcePins: [...resourcePinsByKey.values()].sort((left, right) => compareBinary(
+          `${left.revisionId}\0${left.resourceId}\0${left.resourceRevisionId}`,
+          `${right.revisionId}\0${right.resourceId}\0${right.resourceRevisionId}`,
+        )),
+        kernelRevisions: [...kernelsById.values()].sort(compareRecordId),
+      };
+    });
+  }
+
+  getLatestSnapshotForArtifactRevision(
+    projectId: string,
+    artifactId: string,
+    revisionId: string,
+  ): WorkspaceSnapshotRecord | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const row = this.db.prepare(
+        `SELECT snapshot.id
+         FROM workspace_snapshot_artifacts mapping
+         JOIN workspace_snapshots snapshot
+           ON snapshot.id = mapping.snapshot_id AND snapshot.workspace_id = mapping.workspace_id
+         WHERE mapping.workspace_id = ? AND mapping.artifact_id = ? AND mapping.revision_id = ?
+         ORDER BY snapshot.sequence DESC, snapshot.id DESC
+         LIMIT 1`,
+      ).get(workspace.id, artifactId, revisionId) as { id: string } | undefined;
+      return row ? this.requireSnapshot(workspace.id, row.id) : null;
     });
   }
 
@@ -6671,29 +9285,29 @@ export class WorkspaceStore {
     return requireWorkspace(this.getWorkspace(projectId), projectId);
   }
 
-  private requireEmptyWorkspaceFoundation(workspace: ProjectWorkspace): void {
-    if (workspace.graphRevision !== 0) {
-      throw new WorkspaceGraphValidationError("legacy migration requires an empty Workspace foundation");
+  private isCanonicalEmptyWorkspaceFoundation(workspace: ProjectWorkspace): boolean {
+    if (workspace.graphRevision !== 0) return false;
+    const foundation = this.loadSnapshotBase(workspace.activeSnapshotId);
+    const kernel = this.loadKernelRevision(workspace.activeKernelRevisionId);
+    if (!foundation || foundation.workspaceId !== workspace.id
+      || foundation.id !== workspace.activeSnapshotId
+      || foundation.sequence !== 1
+      || foundation.parentSnapshotId !== null
+      || foundation.graphRevision !== 0
+      || foundation.kernelRevisionId !== workspace.activeKernelRevisionId
+      || foundation.reason !== "workspace-created"
+      || foundation.createdByRunId !== null
+      || foundation.provenance.kind !== "workspace-created"
+      || !kernel || kernel.workspaceId !== workspace.id
+      || kernel.sequence !== 1
+      || kernel.parentRevisionId !== null) {
+      return false;
     }
     const graph = this.getGraph(workspace.projectId);
-    const snapshots = this.listSnapshots(workspace.projectId);
-    const kernel = this.requireKernelRevision(workspace.activeKernelRevisionId);
-    const count = (table: string): number => Number((this.db.prepare(
-      `SELECT COUNT(*) AS count FROM ${table} WHERE workspace_id = ?`,
-    ).get(workspace.id) as { count: number }).count);
-    const empty = graph.nodes.length === 0
-      && graph.edges.length === 0
-      && count("workspace_artifacts") === 0
-      && count("resources") === 0
-      && count("workspace_nodes") === 0
-      && count("workspace_edges") === 0
-      && count("workspace_layout_nodes") === 0
-      && count("workspace_layout_viewports") === 0
-      && count("workspace_graph_commands") === 0
-      && count("workspace_graph_revisions") === 1
-      && count("shared_design_kernel_revisions") === 1
-      && snapshots.length === 1;
-    const foundation = snapshots[0];
+    if (graph.workspaceId !== workspace.id || graph.revision !== 0
+      || graph.nodes.length !== 0 || graph.edges.length !== 0) {
+      return false;
+    }
     const kernelPayload = {
       tokens: kernel.tokens,
       typography: kernel.typography,
@@ -6704,22 +9318,34 @@ export class WorkspaceStore {
       responsiveFrames: kernel.responsiveFrames,
       qualityProfile: kernel.qualityProfile,
     };
-    if (!empty
-      || !foundation
-      || foundation.id !== workspace.activeSnapshotId
-      || foundation.sequence !== 1
-      || foundation.parentSnapshotId !== null
-      || foundation.graphRevision !== 0
-      || foundation.kernelRevisionId !== workspace.activeKernelRevisionId
-      || foundation.reason !== "workspace-created"
-      || foundation.createdByRunId !== null
-      || foundation.provenance.kind !== "workspace-created"
-      || Object.keys(foundation.artifactTracks).length !== 0
-      || Object.keys(foundation.artifactRevisions).length !== 0
-      || Object.keys(foundation.resourceRevisions).length !== 0
-      || kernel.sequence !== 1
-      || kernel.parentRevisionId !== null
-      || !isDeepStrictEqual(kernelPayload, DEFAULT_KERNEL_PAYLOAD)) {
+    if (!isDeepStrictEqual(kernelPayload, DEFAULT_KERNEL_PAYLOAD)) return false;
+
+    const expectedCounts = new Map<string, number>([
+      ["workspace_graph_revisions", 1],
+      ["shared_design_kernel_revisions", 1],
+      ["workspace_snapshots", 1],
+    ]);
+    const tables = this.db.prepare(
+      `SELECT DISTINCT schema.name
+       FROM sqlite_schema schema, pragma_table_info(schema.name) column
+       WHERE schema.type = 'table' AND column.name = 'workspace_id'
+       ORDER BY schema.name ASC`,
+    ).all() as Array<{ name: string }>;
+    for (const { name } of tables) {
+      const quoted = `"${name.replaceAll('"', '""')}"`;
+      const count = Number((this.db.prepare(
+        `SELECT COUNT(*) AS count FROM ${quoted} WHERE workspace_id = ?`,
+      ).get(workspace.id) as { count: number }).count);
+      if (count !== (expectedCounts.get(name) ?? 0)) return false;
+    }
+    return true;
+  }
+
+  private requireEmptyWorkspaceFoundation(workspace: ProjectWorkspace): void {
+    if (workspace.graphRevision !== 0) {
+      throw new WorkspaceGraphValidationError("legacy migration requires an empty Workspace foundation");
+    }
+    if (!this.isCanonicalEmptyWorkspaceFoundation(workspace)) {
       throw new WorkspaceGraphValidationError("legacy migration requires the canonical empty Workspace foundation");
     }
   }
@@ -6824,6 +9450,154 @@ export class WorkspaceStore {
     };
     if (foundationKernel.workspaceId !== bundle.workspace.id
       || foundationKernel.sequence !== 1
+      || foundationKernel.parentRevisionId !== null
+      || !isDeepStrictEqual(foundationKernelPayload, DEFAULT_KERNEL_PAYLOAD)) {
+      invalid("foundation Kernel is not canonical");
+    }
+  }
+
+  private requireCompletedLegacyStandardCompactBundle(bundle: WorkspaceBundle): void {
+    const invalid = (detail: string): never => {
+      throw new WorkspaceGraphValidationError(`completed legacy Workspace migration is invalid: ${detail}`);
+    };
+    if (bundle.workspace.mode !== "standard") invalid("Project mode is not Standard");
+    if (bundle.workspace.graphRevision < 1) invalid("active graph precedes the migration graph");
+    if (bundle.activeSnapshot.id !== bundle.workspace.activeSnapshotId
+      || bundle.activeSnapshot.graphRevision !== bundle.workspace.graphRevision
+      || bundle.activeSnapshot.kernelRevisionId !== bundle.workspace.activeKernelRevisionId
+      || bundle.activeKernelRevision.id !== bundle.workspace.activeKernelRevisionId
+      || !graphsAreSemanticallyEqual(bundle.activeSnapshot.graph, bundle.graph)) {
+      invalid("current Workspace pointers are incoherent");
+    }
+
+    const wrappers = bundle.artifacts.filter((artifact) => artifact.legacyWrapped);
+    if (wrappers.length !== 1) invalid("expected exactly one wrapped Page");
+    const wrapper = wrappers[0]!;
+    if (wrapper.kind !== "page" || wrapper.sourceRoot !== "." || wrapper.activeTrackId === null) {
+      invalid("wrapped Page identity is incomplete");
+    }
+    const currentTrackRow = this.db.prepare(
+      "SELECT * FROM artifact_tracks WHERE id = ? AND artifact_id = ?",
+    ).get(wrapper.activeTrackId, wrapper.id) as Row | undefined;
+    if (!currentTrackRow || asArtifactTrack(currentTrackRow).artifactId !== wrapper.id) {
+      invalid("wrapped Page active Track is not owned by the Page");
+    }
+
+    const snapshotRows = this.db.prepare(
+      `SELECT * FROM workspace_snapshots
+       WHERE workspace_id = ? AND sequence IN (1, 2)
+       ORDER BY sequence ASC`,
+    ).all(bundle.workspace.id) as Row[];
+    if (snapshotRows.length !== 2) invalid("canonical foundation or migration Snapshot is missing");
+    const foundation = asWorkspaceSnapshotBase(snapshotRows[0]!);
+    const migration = asWorkspaceSnapshotBase(snapshotRows[1]!);
+    const foundationGraph = this.requireGraphRevision(bundle.workspace.id, foundation.graphRevision);
+    const migrationGraph = this.requireGraphRevision(bundle.workspace.id, migration.graphRevision);
+    const foundationArtifactMappings = this.db.prepare(
+      `SELECT artifact_id, track_id, revision_id FROM workspace_snapshot_artifacts
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY artifact_id ASC`,
+    ).all(bundle.workspace.id, foundation.id) as Row[];
+    const foundationResourceMappings = this.db.prepare(
+      `SELECT resource_id, revision_id FROM workspace_snapshot_resources
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY resource_id ASC`,
+    ).all(bundle.workspace.id, foundation.id) as Row[];
+    if (foundation.sequence !== 1
+      || foundation.parentSnapshotId !== null
+      || foundation.graphRevision !== 0
+      || foundation.reason !== "workspace-created"
+      || foundation.createdByRunId !== null
+      || foundation.provenance.kind !== "workspace-created"
+      || foundationGraph.revision !== 0
+      || foundationGraph.nodes.length !== 0
+      || foundationGraph.edges.length !== 0
+      || foundationArtifactMappings.length !== 0
+      || foundationResourceMappings.length !== 0) {
+      invalid("foundation Snapshot is not canonical");
+    }
+
+    const migrationArtifactMappings = this.db.prepare(
+      `SELECT artifact_id, track_id, revision_id FROM workspace_snapshot_artifacts
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY artifact_id ASC`,
+    ).all(bundle.workspace.id, migration.id) as Row[];
+    const migrationResourceMappings = this.db.prepare(
+      `SELECT resource_id, revision_id FROM workspace_snapshot_resources
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY resource_id ASC`,
+    ).all(bundle.workspace.id, migration.id) as Row[];
+    if (migration.sequence !== 2
+      || migration.parentSnapshotId !== foundation.id
+      || migration.graphRevision !== 1
+      || migration.kernelRevisionId !== foundation.kernelRevisionId
+      || migration.reason !== "legacy-standard-wrap"
+      || migration.createdByRunId !== null
+      || migration.provenance.kind !== "legacy-migration"
+      || migration.provenance.migration !== "legacy-standard-v1"
+      || migrationGraph.revision !== 1
+      || migrationGraph.nodes.length !== 1
+      || migrationGraph.edges.length !== 0
+      || migrationArtifactMappings.length !== 1
+      || migrationResourceMappings.length !== 0) {
+      invalid("migration Snapshot is not canonical");
+    }
+
+    const migrationNode = migrationGraph.nodes[0];
+    const migrationMapping = migrationArtifactMappings[0]!;
+    const migrationArtifactId = requiredCell(migrationMapping.artifact_id, "legacy migration Artifact id");
+    const migrationTrackId = requiredCell(migrationMapping.track_id, "legacy migration Artifact Track id");
+    const migrationRevisionId = migrationMapping.revision_id === null
+      ? null
+      : requiredCell(migrationMapping.revision_id, "legacy migration Artifact Revision id");
+    if (!migrationNode
+      || migrationNode.kind !== "page"
+      || migrationNode.artifactId !== wrapper.id
+      || migrationArtifactId !== wrapper.id) {
+      invalid("migration Snapshot does not map the wrapped Page exactly");
+    }
+    const migrationTrackRow = this.db.prepare(
+      "SELECT * FROM artifact_tracks WHERE id = ? AND artifact_id = ?",
+    ).get(migrationTrackId, wrapper.id) as Row | undefined;
+    if (!migrationTrackRow || asArtifactTrack(migrationTrackRow).artifactId !== wrapper.id) {
+      invalid("migration Snapshot Track is not owned by the wrapped Page");
+    }
+    if (migrationRevisionId !== null) {
+      const migrationRevisionRow = this.db.prepare(
+        `SELECT revision.*, artifact.source_root AS owning_source_root
+         FROM artifact_revisions revision
+         JOIN workspace_artifacts artifact
+           ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
+         WHERE revision.id = ? AND revision.workspace_id = ?
+           AND revision.artifact_id = ? AND revision.track_id = ? AND revision.sealed = 1`,
+      ).get(
+        migrationRevisionId,
+        bundle.workspace.id,
+        wrapper.id,
+        migrationTrackId,
+      ) as Row | undefined;
+      const migrationRevision = asOwnedArtifactRevision(
+        migrationRevisionRow ?? invalid("migration Snapshot Revision is not owned by its mapped Track"),
+      );
+      this.requireCompactKernelRevision(bundle.workspace.id, migrationRevision.kernelRevisionId);
+      this.validateRunOwnership(
+        bundle.workspace.id,
+        migrationRevision.producedByRunId,
+        "legacy migration Artifact Revision",
+      );
+    }
+
+    const foundationKernel = this.requireCompactKernelRevision(
+      bundle.workspace.id,
+      foundation.kernelRevisionId,
+    );
+    const foundationKernelPayload = {
+      tokens: foundationKernel.tokens,
+      typography: foundationKernel.typography,
+      sharedAssetRevisionIds: foundationKernel.sharedAssetRevisionIds,
+      brief: foundationKernel.brief,
+      terminology: foundationKernel.terminology,
+      exclusions: foundationKernel.exclusions,
+      responsiveFrames: foundationKernel.responsiveFrames,
+      qualityProfile: foundationKernel.qualityProfile,
+    };
+    if (foundationKernel.sequence !== 1
       || foundationKernel.parentRevisionId !== null
       || !isDeepStrictEqual(foundationKernelPayload, DEFAULT_KERNEL_PAYLOAD)) {
       invalid("foundation Kernel is not canonical");
@@ -7006,7 +9780,7 @@ export class WorkspaceStore {
           `unsealed Generation Plan ${plan.id} cannot expose partially constructed Tasks`,
         );
       }
-      if (plan.status !== "approved" && plan.status !== "compile-failed") {
+      if (plan.status !== "approved" && plan.status !== "compile-failed" && plan.status !== "cancelled") {
         throw new WorkspaceStoreCodecError(
           `unsealed Generation Plan ${plan.id} has invalid status ${plan.status}`,
         );
@@ -7017,7 +9791,7 @@ export class WorkspaceStore {
             `approved Generation Plan ${plan.id} cannot expose terminal compilation state`,
           );
         }
-      } else {
+      } else if (plan.status === "compile-failed") {
         const event = events[0];
         if (plan.compileError === null || plan.finishedAt === null || events.length !== 1
           || event?.type !== "plan-compile-failed"
@@ -7025,6 +9799,24 @@ export class WorkspaceStore {
           || !isDeepStrictEqual(event.payload, plan.compileError)) {
           throw new WorkspaceStoreCodecError(
             `compile-failed Generation Plan ${plan.id} does not match its terminal event`,
+          );
+        }
+      } else {
+        const request = events[0];
+        const terminal = events[1];
+        const executionEpoch = plan.executionEpoch ?? 0;
+        if (plan.compileError !== null || plan.finishedAt === null || executionEpoch !== 1
+          || events.length !== 2
+          || request?.type !== "plan-cancel-requested" || request.taskId !== null
+          || terminal?.type !== "plan-cancelled" || terminal.taskId !== null
+          || !isDeepStrictEqual(request.payload, {
+            executionEpoch,
+            newlyRequestedTaskIds: [],
+            cancelledTaskIds: [],
+          })
+          || !isDeepStrictEqual(terminal.payload, { executionEpoch, cancelledTaskIds: [] })) {
+          throw new WorkspaceStoreCodecError(
+            `cancelled Generation Plan shell ${plan.id} does not match its durable control events`,
           );
         }
       }
@@ -7323,11 +10115,25 @@ export class WorkspaceStore {
         });
       }
     }
+    let requiredContextPackId: string | null | undefined;
+    if (task.pendingContextPolicy === "same-context" && task.currentAttempt > 0) {
+      const previous = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      if (!previous || previous.finishedAt === null || previous.lease !== null
+        || previous.status === "queued" || previous.status === "running"
+        || previous.status === "candidate-ready" || previous.status === "cancel-requested") {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "same-context retry has no complete immutable source Attempt",
+        );
+      }
+      requiredContextPackId = previous.contextPackId;
+    }
     return {
       taskId: task.id,
       planId: task.planId,
       workspaceId: task.workspaceId,
       attempt: task.currentAttempt + 1,
+      executionEpoch: detail.plan.executionEpoch ?? 0,
       target: task.target,
       baseRevisionId,
       expectedSnapshotId: snapshot.id,
@@ -7336,6 +10142,7 @@ export class WorkspaceStore {
       dependencyOutputs,
       resourcePins,
       componentPins,
+      ...(requiredContextPackId === undefined ? {} : { requiredContextPackId }),
     };
   }
 
@@ -7358,17 +10165,28 @@ export class WorkspaceStore {
     const expectedTarget: ContextPackTarget = { type: task.target.type, id: task.target.id };
     const snapshot = this.requireSnapshot(task.workspaceId, input.expectedSnapshotId);
     if (!pack || pack.workspaceId !== task.workspaceId
-      || pack.graphRevision !== snapshot.graphRevision
       || !isDeepStrictEqual(pack.target, expectedTarget)) {
       throw new GenerationTaskMaterializationConflictError(
         task.id,
-        "Context Pack is missing, stale, or scoped to another target",
+        "Context Pack is missing or scoped to another target",
       );
     }
     if (pack.intent !== "generate") {
       throw new GenerationTaskMaterializationConflictError(
         task.id,
         "Generation Task Attempt Context Pack intent must be generate",
+      );
+    }
+    if (task.pendingContextPolicy === "same-context" && task.currentAttempt > 0) {
+      // The immutable Attempt carries the rebased base/Kernel/pins. Reusing the
+      // exact prior Pack preserves conversational/research context without
+      // pretending that its historical Revision items were refreshed.
+      return;
+    }
+    if (pack.graphRevision !== snapshot.graphRevision) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Context Pack is stale for the observed Workspace graph Revision",
       );
     }
     const providedKernelIds = new Set(pack.items
@@ -7440,6 +10258,7 @@ export class WorkspaceStore {
       && input.planId === observation.planId
       && input.workspaceId === observation.workspaceId
       && input.attempt === observation.attempt
+      && (input.executionEpoch ?? 0) === (observation.executionEpoch ?? 0)
       && isDeepStrictEqual(input.target, observation.target)
       && input.baseRevisionId === observation.baseRevisionId
       && input.expectedSnapshotId === observation.expectedSnapshotId
@@ -7468,6 +10287,7 @@ export class WorkspaceStore {
       && attempt.planId === input.planId
       && attempt.workspaceId === input.workspaceId
       && attempt.attempt === input.attempt
+      && (attempt.executionEpoch ?? 0) === (input.executionEpoch ?? 0)
       && isDeepStrictEqual(attempt.target, input.target)
       && attempt.baseRevisionId === input.baseRevisionId
       && attempt.sourceCommitHash === input.sourceCommitHash
@@ -7505,6 +10325,7 @@ export class WorkspaceStore {
     source: GenerationTaskAttempt;
     createdAt: number;
     publicationRetry: boolean;
+    expectedSnapshotId?: string;
   }): GenerationTaskAttempt {
     if (!this.db.isTransaction) throw new Error("Generation Task retry successor requires a transaction");
     const { task, source, createdAt, publicationRetry } = input;
@@ -7534,11 +10355,12 @@ export class WorkspaceStore {
       planId: source.planId,
       workspaceId: source.workspaceId,
       attempt: attemptNumber,
+      executionEpoch: source.executionEpoch ?? 0,
       target: source.target,
       baseRevisionId: source.baseRevisionId,
       sourceCommitHash: source.sourceCommitHash,
       sourceTreeHash: source.sourceTreeHash,
-      expectedSnapshotId: source.expectedSnapshotId,
+      expectedSnapshotId: input.expectedSnapshotId ?? source.expectedSnapshotId,
       contextPackId: source.contextPackId,
       kernelRevisionId: source.kernelRevisionId,
       payload: source.payload,
@@ -7569,14 +10391,14 @@ export class WorkspaceStore {
     this.db.prepare(
       `INSERT INTO generation_task_attempts (
          task_id, plan_id, workspace_id, attempt, attempt_origin, predecessor_attempt,
-         automatic_retry_index, target_artifact_id, target_track_id, target_resource_id,
+         automatic_retry_index, execution_epoch, target_artifact_id, target_track_id, target_resource_id,
          base_revision_id, source_commit_hash, source_tree_hash, expected_snapshot_id,
          context_pack_id, kernel_revision_id,
          execution_mode, payload_json, input_hash, pinned_resource_revision_ids_json,
          component_dependency_revision_ids_json, retry_context_policy, status,
          materialization_sealed, candidate_revision_id, candidate_resource_revision_id,
          candidate_evidence_json, candidate_evidence_hash, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  'queued', 0, ?, ?, ?, ?, ?)`,
     ).run(
       successorInput.taskId,
@@ -7586,6 +10408,7 @@ export class WorkspaceStore {
       publicationRetry ? "publication-retry" : "same-input-retry",
       source.attempt,
       automaticRetryIndex,
+      successorInput.executionEpoch ?? 0,
       successorInput.target.type === "artifact" ? successorInput.target.id : null,
       successorInput.target.type === "artifact" ? successorInput.target.trackId : null,
       successorInput.target.type === "resource" ? successorInput.target.id : null,
@@ -7660,6 +10483,7 @@ export class WorkspaceStore {
       type: "task-materialized",
       payload: {
         attempt: successorInput.attempt,
+        executionEpoch: successorInput.executionEpoch ?? 0,
         inputHash: successorInput.inputHash,
         expectedSnapshotId: successorInput.expectedSnapshotId,
         baseRevisionId: successorInput.baseRevisionId,
@@ -7693,12 +10517,14 @@ export class WorkspaceStore {
     const rows = this.db.prepare(
       `SELECT * FROM generation_plan_events
        WHERE plan_id = ? AND workspace_id = ? AND task_id = ?
-         AND type IN ('task-retry-wait','task-failed')
+         AND type IN ('task-retry-wait','task-failed','task-cancelled')
        ORDER BY sequence ASC`,
     ).all(input.task.planId, input.task.workspaceId, input.task.id) as Row[];
     const events = rows.map(asGenerationPlanEvent).filter((event) => (
       (event.type === "task-retry-wait" && event.payload.sourceAttempt === input.source.attempt)
       || (event.type === "task-failed" && event.payload.attempt === input.source.attempt)
+      || (event.type === "task-cancelled" && event.payload.attempt === input.source.attempt
+        && event.payload.failureFenceHash !== undefined)
     ));
     if (events.length === 0) return null;
     if (events.length !== 1) {
@@ -7724,6 +10550,19 @@ export class WorkspaceStore {
       }
       return {
         status: "failed",
+        sourceAttempt: input.source,
+        successorAttempt: null,
+        nextEligibleAt: null,
+      };
+    }
+    if (event.type === "task-cancelled") {
+      if (input.source.status !== "cancelled" || input.source.nextEligibleAt !== null) {
+        throw new WorkspaceStoreCodecError(
+          "Generation Task cancellation replay is internally inconsistent",
+        );
+      }
+      return {
+        status: "cancelled",
         sourceAttempt: input.source,
         successorAttempt: null,
         nextEligibleAt: null,
@@ -7914,6 +10753,66 @@ export class WorkspaceStore {
     });
   }
 
+  private terminalizeCancelledGenerationPlanIfSettledInTransaction(
+    planId: string,
+    now: number,
+  ): void {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Plan cancellation terminalization requires a transaction");
+    }
+    const planRow = this.db.prepare(
+      `SELECT workspace_id, status, execution_epoch FROM generation_plans WHERE id = ?`,
+    ).get(planId) as {
+      workspace_id: string;
+      status: GenerationPlan["status"];
+      execution_epoch: number;
+    } | undefined;
+    if (!planRow || planRow.status === "cancelled") return;
+    if (planRow.status !== "queued" && planRow.status !== "running") return;
+    const executionEpoch = boundarySafeInteger(
+      planRow.execution_epoch,
+      "Generation Plan cancellation execution epoch",
+    );
+    const request = this.db.prepare(
+      `SELECT 1 FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND type = 'plan-cancel-requested'
+         AND json_extract(payload_json, '$.executionEpoch') = ?`,
+    ).get(planId, planRow.workspace_id, executionEpoch);
+    if (!request) return;
+    const nonterminal = this.db.prepare(
+      `SELECT COUNT(*) AS count FROM generation_tasks
+       WHERE plan_id = ? AND workspace_id = ?
+         AND status NOT IN ('succeeded','failed','blocked','cancelled')`,
+    ).get(planId, planRow.workspace_id) as { count: number };
+    if (boundarySafeInteger(nonterminal.count, "Generation Plan nonterminal Task count") !== 0) return;
+    const cancelledRows = this.db.prepare(
+      `SELECT id FROM generation_tasks
+       WHERE plan_id = ? AND workspace_id = ? AND status = 'cancelled'
+       ORDER BY ordinal ASC, id COLLATE BINARY ASC`,
+    ).all(planId, planRow.workspace_id) as Array<{ id: string }>;
+    const cancelledTaskIds = cancelledRows.map((row) => (
+      requiredCell(row.id, "cancelled Generation Task id")
+    ));
+    if (cancelledTaskIds.length === 0) return;
+    const terminalized = this.db.prepare(
+      `UPDATE generation_plans SET status = 'cancelled', finished_at = ?
+       WHERE id = ? AND workspace_id = ? AND execution_epoch = ?
+         AND status IN ('queued','running')`,
+    ).run(now, planId, planRow.workspace_id, executionEpoch);
+    if (Number(terminalized.changes) !== 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Plan ${planId} changed while terminalizing cancellation`,
+      );
+    }
+    this.appendGenerationPlanEventInTransaction({
+      planId,
+      workspaceId: planRow.workspace_id,
+      taskId: null,
+      type: "plan-cancelled",
+      payload: { executionEpoch, cancelledTaskIds },
+    });
+  }
+
   private generationTaskWriterClaimKeys(task: GenerationTask): string[] {
     const workspaceKey = generationClaimKeyId(task.workspaceId);
     if (task.target.type === "artifact") {
@@ -8076,7 +10975,7 @@ export class WorkspaceStore {
     attempt: GenerationTaskAttempt,
   ): void {
     const allowedStatuses: Record<GenerationTask["status"], readonly GenerationTaskAttempt["status"][]> = {
-      "materialization-pending": ["failed", "retryable-failed", "needs-rebase"],
+      "materialization-pending": ["cancelled", "failed", "retryable-failed", "needs-rebase"],
       "retry-wait": ["queued", "failed", "retryable-failed", "needs-rebase"],
       "blocked-context": ["failed", "retryable-failed", "needs-rebase"],
       queued: ["queued"],
@@ -8088,13 +10987,245 @@ export class WorkspaceStore {
       succeeded: ["succeeded"],
       failed: ["failed", "retryable-failed", "needs-rebase"],
       blocked: ["cancelled", "failed", "retryable-failed", "needs-rebase"],
-      cancelled: ["cancelled"],
+      cancelled: ["cancelled", "failed", "retryable-failed", "needs-rebase"],
     };
-    if (!allowedStatuses[task.status].includes(attempt.status)) {
+    if (!allowedStatuses[task.status].includes(attempt.status)
+      && !this.isGenerationTaskPendingCheckpointRevalidationInTransaction(task, attempt)
+      && !this.isGenerationTaskCancelledCheckpointRevalidationInTransaction(task, attempt)) {
       throw new WorkspaceStoreCodecError(
         `Generation Task ${task.id} status ${task.status} does not match current Attempt ${attempt.attempt} status ${attempt.status}`,
       );
     }
+  }
+
+  private isGenerationTaskPendingCheckpointRevalidationInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): boolean {
+    if (!this.db.isTransaction
+      || task.kind !== "prototype-validation"
+      || task.status !== "materialization-pending"
+      || task.pendingContextPolicy === null
+      || task.currentAttempt !== attempt.attempt
+      || task.resultRevisionId !== null
+      || task.resultResourceRevisionId !== null
+      || task.resultSnapshotId !== null
+      || task.failureClass !== null
+      || task.error !== null
+      || task.nextEligibleAt !== null
+      || task.finishedAt !== null
+      || attempt.status !== "succeeded"
+      || attempt.finishedAt === null
+      || attempt.lease !== null) {
+      return false;
+    }
+    const eventRow = this.db.prepare(
+      `SELECT event.*
+       FROM generation_plan_events event
+       JOIN generation_task_dependencies dependency
+         ON dependency.task_id = event.task_id
+        AND dependency.plan_id = event.plan_id
+        AND dependency.workspace_id = event.workspace_id
+       WHERE event.plan_id = ? AND event.workspace_id = ?
+         AND event.type = 'task-rebase-disposition'
+         AND dependency.dependency_task_id = ?
+         AND json_extract(event.payload_json, '$.kind') = 'full'
+         AND json_extract(event.payload_json, '$.round') = 'checkpoint-validation'
+         AND json_extract(event.payload_json, '$.validationTaskId') = ?
+         AND json_extract(event.payload_json, '$.validationSourceAttempt') = ?
+       ORDER BY event.sequence DESC LIMIT 1`,
+    ).get(
+      task.planId,
+      task.workspaceId,
+      task.id,
+      task.id,
+      attempt.attempt,
+    ) as Row | undefined;
+    if (!eventRow) return false;
+    const event = asGenerationPlanEvent(eventRow);
+    if (event.taskId === null
+      || event.payload.mode !== task.pendingContextPolicy
+      || event.payload.status !== "materialization-pending"
+      || event.payload.validationSourceSnapshotId !== attempt.expectedSnapshotId) {
+      return false;
+    }
+    const checkpoint = this.readGenerationTaskForExecutionInTransaction(event.taskId);
+    if (!checkpoint
+      || checkpoint.kind !== "checkpoint"
+      || checkpoint.planId !== task.planId
+      || checkpoint.workspaceId !== task.workspaceId
+      || checkpoint.status !== "materialization-pending"
+      || checkpoint.dependencyIds.length !== 1
+      || checkpoint.dependencyIds[0] !== task.id
+      || event.payload.sourceAttempt !== checkpoint.currentAttempt) {
+      return false;
+    }
+    const checkpointAttempt = this.readGenerationTaskAttemptInTransaction(
+      checkpoint.id,
+      checkpoint.currentAttempt,
+    );
+    const validation = this.readGenerationTaskValidationRecordInTransaction(
+      task.id,
+      attempt.attempt,
+    );
+    return checkpointAttempt !== null
+      && checkpointAttempt.status === "needs-rebase"
+      && checkpointAttempt.finishedAt !== null
+      && checkpointAttempt.lease === null
+      && checkpointAttempt.dependencyOutputs.length === 1
+      && checkpointAttempt.dependencyOutputs[0]?.taskId === task.id
+      && checkpointAttempt.dependencyOutputs[0]?.resultSnapshotId === attempt.expectedSnapshotId
+      && validation !== null
+      && validation.snapshotId === attempt.expectedSnapshotId
+      && validation.evidenceHash === event.payload.validationEvidenceHash;
+  }
+
+  private isGenerationTaskCancelledCheckpointRevalidationInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): boolean {
+    const cancellationError = {
+      code: "generation-plan-cancelled",
+      planId: task.planId,
+    };
+    if (!this.db.isTransaction
+      || task.kind !== "prototype-validation"
+      || task.status !== "cancelled"
+      || task.pendingContextPolicy !== null
+      || task.blockedReason !== `Cancelled with Generation Plan ${task.planId}`
+      || task.blockedByTaskId !== null
+      || task.currentAttempt !== attempt.attempt
+      || task.resultRevisionId !== null
+      || task.resultResourceRevisionId !== null
+      || task.resultSnapshotId !== null
+      || task.failureClass !== "cancelled"
+      || !isDeepStrictEqual(task.error, cancellationError)
+      || task.nextEligibleAt !== null
+      || task.finishedAt === null
+      || attempt.status !== "succeeded"
+      || attempt.finishedAt === null
+      || attempt.lease !== null) {
+      return false;
+    }
+    const eventRow = this.db.prepare(
+      `SELECT event.*
+       FROM generation_plan_events event
+       JOIN generation_task_dependencies dependency
+         ON dependency.task_id = event.task_id
+        AND dependency.plan_id = event.plan_id
+        AND dependency.workspace_id = event.workspace_id
+       WHERE event.plan_id = ? AND event.workspace_id = ?
+         AND event.type = 'task-rebase-disposition'
+         AND dependency.dependency_task_id = ?
+         AND json_extract(event.payload_json, '$.kind') = 'full'
+         AND json_extract(event.payload_json, '$.round') = 'checkpoint-validation'
+         AND json_extract(event.payload_json, '$.validationTaskId') = ?
+         AND json_extract(event.payload_json, '$.validationSourceAttempt') = ?
+       ORDER BY event.sequence DESC LIMIT 1`,
+    ).get(
+      task.planId,
+      task.workspaceId,
+      task.id,
+      task.id,
+      attempt.attempt,
+    ) as Row | undefined;
+    if (!eventRow) return false;
+    const event = asGenerationPlanEvent(eventRow);
+    if (event.taskId === null
+      || (event.payload.mode !== "same-context" && event.payload.mode !== "latest-context")
+      || event.payload.status !== "materialization-pending"
+      || event.payload.validationSourceSnapshotId !== attempt.expectedSnapshotId) {
+      return false;
+    }
+    const checkpoint = this.readGenerationTaskForExecutionInTransaction(event.taskId);
+    if (!checkpoint
+      || checkpoint.kind !== "checkpoint"
+      || checkpoint.planId !== task.planId
+      || checkpoint.workspaceId !== task.workspaceId
+      || checkpoint.status !== "cancelled"
+      || checkpoint.pendingContextPolicy !== null
+      || checkpoint.blockedReason !== `Cancelled with Generation Plan ${task.planId}`
+      || checkpoint.blockedByTaskId !== null
+      || checkpoint.failureClass !== "cancelled"
+      || !isDeepStrictEqual(checkpoint.error, cancellationError)
+      || checkpoint.nextEligibleAt !== null
+      || checkpoint.finishedAt !== task.finishedAt
+      || checkpoint.resultRevisionId !== null
+      || checkpoint.resultResourceRevisionId !== null
+      || checkpoint.resultSnapshotId !== null
+      || checkpoint.dependencyIds.length !== 1
+      || checkpoint.dependencyIds[0] !== task.id
+      || event.payload.sourceAttempt !== checkpoint.currentAttempt) {
+      return false;
+    }
+    const checkpointAttempt = this.readGenerationTaskAttemptInTransaction(
+      checkpoint.id,
+      checkpoint.currentAttempt,
+    );
+    const validation = this.readGenerationTaskValidationRecordInTransaction(
+      task.id,
+      attempt.attempt,
+    );
+    if (checkpointAttempt === null
+      || checkpointAttempt.status !== "needs-rebase"
+      || checkpointAttempt.finishedAt === null
+      || checkpointAttempt.lease !== null
+      || checkpointAttempt.dependencyOutputs.length !== 1
+      || checkpointAttempt.dependencyOutputs[0]?.taskId !== task.id
+      || checkpointAttempt.dependencyOutputs[0]?.resultSnapshotId !== attempt.expectedSnapshotId
+      || validation === null
+      || validation.snapshotId !== attempt.expectedSnapshotId
+      || validation.evidenceHash !== event.payload.validationEvidenceHash) {
+      return false;
+    }
+    const planRow = this.db.prepare(
+      "SELECT * FROM generation_plans WHERE id = ? AND workspace_id = ?",
+    ).get(task.planId, task.workspaceId) as Row | undefined;
+    if (!planRow) return false;
+    const plan = asGenerationPlan(planRow);
+    if (plan.status !== "cancelled" || plan.finishedAt !== task.finishedAt) return false;
+
+    const cancellationEvents = (this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ?
+         AND type IN ('task-cancelled','plan-cancel-requested','plan-cancelled')
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.workspaceId) as Row[]).map(asGenerationPlanEvent);
+    const taskEvents = cancellationEvents.filter((candidate) => candidate.type === "task-cancelled");
+    const requestEvents = cancellationEvents.filter((candidate) => candidate.type === "plan-cancel-requested");
+    const terminalEvents = cancellationEvents.filter((candidate) => candidate.type === "plan-cancelled");
+    const executionEpoch = plan.executionEpoch ?? 0;
+    const expectedTaskPayload = (attemptNumber: number) => ({
+      attempt: attemptNumber,
+      failureClass: "cancelled",
+      error: cancellationError,
+      reason: "plan-cancelled",
+      executionEpoch,
+    });
+    return taskEvents.length === 2
+      && taskEvents[0]?.taskId === task.id
+      && isDeepStrictEqual(taskEvents[0].payload, expectedTaskPayload(attempt.attempt))
+      && taskEvents[1]?.taskId === checkpoint.id
+      && isDeepStrictEqual(
+        taskEvents[1].payload,
+        expectedTaskPayload(checkpointAttempt.attempt),
+      )
+      && requestEvents.length === 1
+      && requestEvents[0]?.taskId === null
+      && isDeepStrictEqual(requestEvents[0].payload, {
+        executionEpoch,
+        newlyRequestedTaskIds: [],
+        cancelledTaskIds: [task.id, checkpoint.id],
+      })
+      && terminalEvents.length === 1
+      && terminalEvents[0]?.taskId === null
+      && isDeepStrictEqual(terminalEvents[0].payload, {
+        executionEpoch,
+        cancelledTaskIds: [task.id, checkpoint.id],
+      })
+      && taskEvents[0].sequence + 1 === taskEvents[1].sequence
+      && taskEvents[1].sequence + 1 === requestEvents[0].sequence
+      && requestEvents[0].sequence + 1 === terminalEvents[0].sequence;
   }
 
   private generationTaskAttemptContextPackHashInTransaction(
@@ -8369,7 +11500,6 @@ export class WorkspaceStore {
         || source.inputHash === predecessor.inputHash
         || !isDeepStrictEqual(source.target, predecessor.target)
         || source.baseRevisionId !== predecessor.baseRevisionId
-        || source.expectedSnapshotId !== predecessor.expectedSnapshotId
         || source.contextPackId !== predecessor.contextPackId
         || source.kernelRevisionId !== predecessor.kernelRevisionId
         || !isDeepStrictEqual(source.payload, predecessor.payload)
@@ -9626,6 +12756,24 @@ export class WorkspaceStore {
       .filter((event) => event.payload.attempt === attempt.attempt);
     const expectedPayload = {
       attempt: attempt.attempt,
+      executionEpoch: attempt.executionEpoch ?? 0,
+      inputHash: attempt.inputHash,
+      expectedSnapshotId: attempt.expectedSnapshotId,
+      baseRevisionId: attempt.baseRevisionId,
+      sourceCommitHash: attempt.sourceCommitHash,
+      sourceTreeHash: attempt.sourceTreeHash,
+      contextPackId: attempt.contextPackId,
+      kernelRevisionId: attempt.kernelRevisionId,
+      retryContextPolicy: attempt.retryContextPolicy,
+      executionMode: attempt.executionMode,
+      ...(attempt.attemptOrigin === "materialized" ? {} : {
+        attemptOrigin: attempt.attemptOrigin,
+        predecessorAttempt: attempt.predecessorAttempt,
+        automaticRetryIndex: attempt.automaticRetryIndex,
+      }),
+    };
+    const preEpochExpectedPayload = {
+      attempt: attempt.attempt,
       inputHash: attempt.inputHash,
       expectedSnapshotId: attempt.expectedSnapshotId,
       baseRevisionId: attempt.baseRevisionId,
@@ -9656,11 +12804,30 @@ export class WorkspaceStore {
         automaticRetryIndex: attempt.automaticRetryIndex,
       }),
     };
+    const legacyNullableWithEpochPayload = {
+      attempt: attempt.attempt,
+      executionEpoch: attempt.executionEpoch ?? 0,
+      inputHash: attempt.inputHash,
+      expectedSnapshotId: attempt.expectedSnapshotId,
+      baseRevisionId: attempt.baseRevisionId,
+      contextPackId: attempt.contextPackId,
+      kernelRevisionId: attempt.kernelRevisionId,
+      retryContextPolicy: attempt.retryContextPolicy,
+      executionMode: attempt.executionMode,
+      ...(attempt.attemptOrigin === "materialized" ? {} : {
+        attemptOrigin: attempt.attemptOrigin,
+        predecessorAttempt: attempt.predecessorAttempt,
+        automaticRetryIndex: attempt.automaticRetryIndex,
+      }),
+    };
     const eventPayload = events[0]?.payload;
     const exact = isDeepStrictEqual(eventPayload, expectedPayload);
+    const historicalPreEpoch = (attempt.executionEpoch ?? 0) === 0
+      && isDeepStrictEqual(eventPayload, preEpochExpectedPayload);
     const historicalNullable = attempt.sourceCommitHash === null
-      && isDeepStrictEqual(eventPayload, legacyExpectedPayload);
-    if (events.length !== 1 || (!exact && !historicalNullable)) {
+      && (isDeepStrictEqual(eventPayload, legacyNullableWithEpochPayload)
+        || isDeepStrictEqual(eventPayload, legacyExpectedPayload));
+    if (events.length !== 1 || (!exact && !historicalPreEpoch && !historicalNullable)) {
       throw new WorkspaceStoreCodecError(
         `Generation Task Attempt ${attempt.taskId}/${attempt.attempt} does not match one materialized event`,
       );
@@ -9723,13 +12890,63 @@ export class WorkspaceStore {
     if (plan.compileError !== null) {
       throw new WorkspaceStoreCodecError(`sealed Generation Plan ${plan.id} cannot retain a compile error`);
     }
+    const controlEvents = events.filter((event) => event.type === "plan-cancel-requested"
+      || event.type === "task-retry-requested");
+    const executionEpoch = plan.executionEpoch ?? 0;
+    let durableExecutionEpoch = 0;
+    let controlHistoryIsValid = true;
+    const retryTaskIdsByEpoch = new Map<number, Set<string>>();
+    for (const event of controlEvents) {
+      const eventEpoch = boundarySafeInteger(
+        event.payload.executionEpoch,
+        "Generation Plan control event execution epoch",
+      );
+      if (eventEpoch !== durableExecutionEpoch + 1
+        && !(event.type === "task-retry-requested"
+          && eventEpoch === durableExecutionEpoch
+          && durableExecutionEpoch > 0)) {
+        controlHistoryIsValid = false;
+        break;
+      }
+      if (eventEpoch === durableExecutionEpoch + 1) durableExecutionEpoch = eventEpoch;
+      if (event.type !== "task-retry-requested" || event.taskId === null) continue;
+      const retryTaskIds = retryTaskIdsByEpoch.get(eventEpoch) ?? new Set<string>();
+      if (retryTaskIds.has(event.taskId)) {
+        controlHistoryIsValid = false;
+        break;
+      }
+      retryTaskIds.add(event.taskId);
+      retryTaskIdsByEpoch.set(eventEpoch, retryTaskIds);
+    }
+    if (!controlHistoryIsValid || durableExecutionEpoch !== executionEpoch) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Plan ${plan.id} execution epoch does not match its durable control history`,
+      );
+    }
     const terminalEvents = events.filter((event) => event.type === "plan-succeeded"
       || event.type === "plan-failed"
       || event.type === "plan-cancelled"
       || event.type === "plan-compile-failed");
+    const historicalTerminalEventsAreRetried = terminalEvents.every((terminal, index) => {
+      if (index === terminalEvents.length - 1) return true;
+      return terminal.type === "plan-failed" && events.some((event) => (
+        event.sequence > terminal.sequence && event.type === "task-retry-requested"
+      ));
+    });
+    if (!historicalTerminalEventsAreRetried) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Plan ${plan.id} retains an unrecoverable historical terminal event`,
+      );
+    }
     const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
     if (!terminalStatuses.has(plan.status)) {
-      if (plan.finishedAt !== null || terminalEvents.length !== 0) {
+      const latestTerminal = terminalEvents.at(-1);
+      const latestRetry = [...events].reverse().find((event) => event.type === "task-retry-requested");
+      if (plan.finishedAt !== null
+        || (latestTerminal !== undefined
+          && (latestTerminal.type !== "plan-failed"
+            || latestRetry === undefined
+            || latestRetry.sequence <= latestTerminal.sequence))) {
         throw new WorkspaceStoreCodecError(
           `non-terminal Generation Plan ${plan.id} cannot expose terminal execution history`,
         );
@@ -9742,7 +12959,7 @@ export class WorkspaceStore {
         ? "plan-failed"
         : "plan-cancelled";
     const last = events.at(-1);
-    if (plan.finishedAt === null || terminalEvents.length !== 1
+    if (plan.finishedAt === null || terminalEvents.length < 1
       || last?.type !== expectedEventType || last.taskId !== null) {
       throw new WorkspaceStoreCodecError(
         `terminal Generation Plan ${plan.id} does not match its final durable event`,
@@ -9975,6 +13192,249 @@ export class WorkspaceStore {
     return asGenerationPlanEvent(row);
   }
 
+  private readWorkspaceAgentTurnReceiptInTransaction(
+    identity: NormalizedWorkspaceAgentTurnIdentity,
+  ): WorkspaceAgentTurnReceipt | null {
+    const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+    if (workspace.id !== identity.request.workspaceId) {
+      throw new WorkspaceStoreCodecError("Workspace Agent turn Workspace does not belong to its Project");
+    }
+    const row = this.db.prepare(
+      `SELECT request_hash, request_json, proposal_id, context_pack_id
+       FROM workspace_agent_turns WHERE workspace_id = ? AND turn_id = ?`,
+    ).get(workspace.id, identity.turnId) as {
+      request_hash: string;
+      request_json: string;
+      proposal_id: string;
+      context_pack_id: string;
+    } | undefined;
+    if (!row) return null;
+    const storedRequestHash = boundaryChecksum(row.request_hash, "Workspace Agent turn stored request hash");
+    if (storedRequestHash !== identity.requestHash || row.request_json !== identity.requestJson) {
+      throw new WorkspaceAgentTurnConflictError(
+        identity.turnId,
+        storedRequestHash,
+        identity.requestHash,
+      );
+    }
+    const proposalId = boundaryId(row.proposal_id, "Workspace Agent turn Proposal id");
+    const contextPackId = boundaryId(row.context_pack_id, "Workspace Agent turn Context Pack id");
+    const proposal = this.requireProposalForProject(identity.projectId, proposalId);
+    const baseSnapshot = this.requireSnapshot(workspace.id, proposal.baseSnapshotId);
+    const contextPack = this.db.prepare(
+      `SELECT scope_type, scope_id, graph_revision, intent, message_checksum, sealed
+       FROM context_packs WHERE id = ? AND workspace_id = ?`,
+    ).get(contextPackId, workspace.id) as {
+      scope_type: string;
+      scope_id: string;
+      graph_revision: number;
+      intent: string;
+      message_checksum: string;
+      sealed: number;
+    } | undefined;
+    if (contextPack?.sealed !== 1
+      || contextPack.scope_type !== "workspace"
+      || contextPack.scope_id !== workspace.id
+      || contextPack.graph_revision !== identity.request.graphRevision
+      || contextPack.intent !== identity.request.intent
+      || contextPack.message_checksum !== checksum(identity.request.message)
+      || proposal.workspaceId !== workspace.id
+      || proposal.kind !== "workspace-generation"
+      || proposal.baseGraphRevision !== identity.request.graphRevision
+      || proposal.baseGraph.workspaceId !== workspace.id
+      || proposal.baseGraph.revision !== identity.request.graphRevision
+      || proposal.baseLayout.workspaceId !== workspace.id
+      || proposal.baseLayoutChecksum !== proposal.baseLayout.checksum
+      || baseSnapshot.graphRevision !== identity.request.graphRevision
+      || !graphsAreSemanticallyEqual(baseSnapshot.graph, proposal.baseGraph)) {
+      throw new WorkspaceStoreCodecError("Workspace Agent turn durable receipt is internally inconsistent");
+    }
+    return {
+      turnId: identity.turnId,
+      requestHash: storedRequestHash,
+      proposal,
+      contextPackId,
+    };
+  }
+
+  private readScopedAgentTurnReceiptInTransaction(
+    identity: NormalizedScopedAgentTurnIdentity,
+  ): ScopedAgentTurnReceipt | null {
+    const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+    if (workspace.id !== identity.request.workspaceId) {
+      throw new WorkspaceStoreCodecError("Scoped Agent turn Workspace does not belong to its Project");
+    }
+    const row = this.db.prepare(
+      `SELECT request_hash, request_json, proposal_hash, proposal_id, plan_id, task_id, context_pack_id
+       FROM scoped_agent_turns WHERE workspace_id = ? AND turn_id = ?`,
+    ).get(workspace.id, identity.turnId) as {
+      request_hash: string;
+      request_json: string;
+      proposal_hash: string;
+      proposal_id: string;
+      plan_id: string;
+      task_id: string;
+      context_pack_id: string;
+    } | undefined;
+    if (!row) return null;
+    const storedRequestHash = boundaryChecksum(row.request_hash, "Scoped Agent turn stored request hash");
+    if (storedRequestHash !== identity.requestHash || row.request_json !== identity.requestJson) {
+      throw new ScopedAgentTurnConflictError(
+        identity.turnId,
+        storedRequestHash,
+        identity.requestHash,
+      );
+    }
+    boundaryChecksum(row.proposal_hash, "Scoped Agent turn stored Proposal hash");
+    const proposalId = boundaryId(row.proposal_id, "Scoped Agent turn Proposal id");
+    const planId = boundaryId(row.plan_id, "Scoped Agent turn Plan id");
+    const taskId = boundaryId(row.task_id, "Scoped Agent turn Task id");
+    const contextPackId = boundaryId(row.context_pack_id, "Scoped Agent turn Context Pack id");
+    const proposal = this.requireProposalForProject(identity.projectId, proposalId);
+    const detail = this.readGenerationPlanDetailForProject(identity.projectId, planId);
+    const task = detail.tasks.find((candidate) => candidate.id === taskId);
+    const contextPack = this.db.prepare(
+      `SELECT scope_type, scope_id, graph_revision, intent, message_checksum, sealed
+       FROM context_packs WHERE id = ? AND workspace_id = ?`,
+    ).get(contextPackId, workspace.id) as {
+      scope_type: string;
+      scope_id: string;
+      graph_revision: number;
+      intent: string;
+      message_checksum: string;
+      sealed: number;
+    } | undefined;
+    if (!task || contextPack?.sealed !== 1
+      || contextPack.scope_type !== identity.request.scopeType
+      || contextPack.scope_id !== identity.request.scopeId
+      || contextPack.graph_revision !== identity.request.graphRevision
+      || contextPack.intent !== identity.request.intent
+      || contextPack.message_checksum !== checksum(identity.request.message)
+      || detail.plan.proposalId !== proposal.id
+      || proposal.baseGraphRevision !== identity.request.graphRevision
+      || proposal.rationale !== identity.request.message
+      || proposal.status !== "approved" || proposal.review.kind !== "approved"
+      || task.planId !== planId || task.workspaceId !== workspace.id
+      || task.target.type !== identity.request.scopeType
+      || task.target.id !== identity.request.scopeId) {
+      throw new WorkspaceStoreCodecError("Scoped Agent turn durable receipt is internally inconsistent");
+    }
+    return {
+      turnId: identity.turnId,
+      requestHash: storedRequestHash,
+      proposalId,
+      planId,
+      task,
+      contextPackId,
+    };
+  }
+
+  private readResearchDirectionArtifactIntentReceiptInTransaction(
+    identity: NormalizedResearchDirectionArtifactIntentIdentity,
+  ): ApprovedResearchDirectionArtifactIntent | null {
+    const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+    if (workspace.id !== identity.request.workspaceId) {
+      throw new WorkspaceStoreCodecError("Research direction intent Workspace does not belong to its Project");
+    }
+    const row = this.db.prepare(
+      `SELECT request_hash, request_json, proposal_id, plan_id, task_id,
+              graph_revision, snapshot_id, layout_json
+       FROM research_direction_artifact_intents
+       WHERE workspace_id = ? AND request_id = ?`,
+    ).get(workspace.id, identity.selectionRequestId) as {
+      request_hash: string;
+      request_json: string;
+      proposal_id: string;
+      plan_id: string;
+      task_id: string;
+      graph_revision: number;
+      snapshot_id: string;
+      layout_json: string;
+    } | undefined;
+    if (!row) return null;
+    const storedRequestHash = boundaryChecksum(
+      row.request_hash,
+      "Research direction intent stored request hash",
+    );
+    if (storedRequestHash !== identity.requestHash || row.request_json !== identity.requestJson) {
+      throw new ResearchDirectionArtifactIntentConflictError(
+        identity.selectionRequestId,
+        storedRequestHash,
+        identity.requestHash,
+      );
+    }
+    const proposalId = boundaryId(row.proposal_id, "Research direction intent Proposal id");
+    const planId = boundaryId(row.plan_id, "Research direction intent Plan id");
+    const taskId = boundaryId(row.task_id, "Research direction intent Task id");
+    const graphRevision = boundarySafeInteger(
+      row.graph_revision,
+      "Research direction intent approved graph Revision",
+    );
+    const snapshotId = boundaryId(row.snapshot_id, "Research direction intent approved Snapshot id");
+    const proposal = this.requireProposalForProject(identity.projectId, proposalId);
+    const detail = this.readGenerationPlanDetailForProject(identity.projectId, planId);
+    const task = detail.tasks.find((candidate) => candidate.id === taskId);
+    const snapshot = this.requireSnapshot(workspace.id, snapshotId);
+    const graph = this.requireGraphRevision(workspace.id, graphRevision);
+    let layout: WorkspaceLayout;
+    try {
+      layout = asWorkspaceLayoutValue(JSON.parse(row.layout_json));
+    } catch (error) {
+      throw new WorkspaceStoreCodecError(
+        `Research direction intent approved layout is invalid: ${error instanceof Error ? error.message : "decode failed"}`,
+      );
+    }
+    const artifactPlan = proposal.generation.kind === "workspace-generation"
+      ? proposal.generation.artifactPlans.find((candidate) => candidate.artifactId === identity.request.artifactId)
+      : undefined;
+    const selection = artifactPlan?.researchDirectionSelection;
+    const resourceOperation = proposal.generation.kind === "workspace-generation"
+      ? proposal.generation.resourceOperations.find((candidate) => candidate.resourceId === identity.request.resourceId)
+      : undefined;
+    if (!task
+      || detail.plan.proposalId !== proposal.id
+      || detail.plan.baseSnapshotId !== snapshot.id
+      || proposal.status !== "approved"
+      || proposal.review.kind !== "approved"
+      || proposal.baseGraphRevision !== identity.request.graphRevision
+      || proposal.baseSnapshotId !== identity.request.snapshotId
+      || proposal.baseLayoutChecksum !== identity.request.layoutChecksum
+      || task.planId !== planId
+      || task.workspaceId !== workspace.id
+      || task.target.type !== "artifact"
+      || task.target.id !== identity.request.artifactId
+      || artifactPlan === undefined
+      || selection === undefined
+      || selection.resourceId !== identity.request.resourceId
+      || selection.revisionId !== identity.request.revisionId
+      || selection.directionId !== identity.request.directionId
+      || resourceOperation === undefined
+      || resourceOperation.operation !== "reuse"
+      || resourceOperation.kind !== "research"
+      || resourceOperation.revisionPolicy.kind !== "exact"
+      || resourceOperation.revisionPolicy.resourceRevisionId !== identity.request.revisionId
+      || snapshot.graphRevision !== graph.revision
+      || !graphsAreSemanticallyEqual(snapshot.graph, graph)
+      || layout.workspaceId !== workspace.id
+      || layout.layoutId !== proposal.layoutId
+      || !graph.edges.some((edge) => edge.kind === "informs"
+        && edge.sourceNodeId === resourceOperation.nodeId
+        && edge.targetNodeId === artifactPlan.nodeId)) {
+      throw new WorkspaceStoreCodecError("Research direction intent durable receipt is internally inconsistent");
+    }
+    return {
+      selectionRequestId: identity.selectionRequestId,
+      requestHash: storedRequestHash,
+      created: false,
+      proposal,
+      graph,
+      snapshot,
+      layout,
+      plan: detail.plan,
+      task,
+    };
+  }
+
   private requireGenerationPlanForProject(projectId: string, planId: string): GenerationPlan {
     const row = this.db.prepare(
       `SELECT plan.*, workspace.project_id
@@ -9998,6 +13458,71 @@ export class WorkspaceStore {
       throw new WorkspaceProposalStateConflictError(proposal.id, proposal.status);
     }
     return proposal;
+  }
+
+  private createProposalInTransaction(
+    input: ReturnType<typeof normalizeCreateWorkspaceProposalInput>,
+    id: string,
+  ): WorkspaceProposalRecord {
+    if (!this.db.isTransaction) throw new Error("Workspace Proposal insertion requires a transaction");
+    const workspace = requireWorkspace(this.getWorkspace(input.projectId), input.projectId);
+    const graph = this.getGraph(input.projectId);
+    if (graph.revision !== input.baseGraphRevision) {
+      throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision);
+    }
+    if (workspace.activeSnapshotId !== input.baseSnapshotId) {
+      throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision, {
+        expectedSnapshotId: input.baseSnapshotId,
+        actualSnapshotId: workspace.activeSnapshotId,
+      });
+    }
+    const snapshot = this.requireSnapshot(workspace.id, input.baseSnapshotId);
+    if (snapshot.graphRevision !== graph.revision) {
+      throw new WorkspaceProposalValidationError("Workspace Proposal base Snapshot does not match its base graph");
+    }
+    this.validateProposalArtifactQualityContract({
+      workspaceId: workspace.id,
+      baseSnapshotId: snapshot.id,
+      generation: input.generation,
+    });
+    this.validateRunOwnership(workspace.id, input.createdByRunId, "Workspace Proposal");
+    this.validateLayoutGroups(workspace.id, input.layoutId, new Set(graph.nodes.map((node) => node.id)));
+    const baseLayout = this.getLayoutByWorkspaceId(workspace.id, input.layoutId);
+    if (baseLayout.checksum !== input.baseLayoutChecksum) {
+      throw new WorkspaceLayoutConflictError(graph.revision, input.baseLayoutChecksum, baseLayout.checksum);
+    }
+    const now = this.clock.now();
+    this.db.prepare(
+      `INSERT INTO workspace_proposals (
+         id, workspace_id, base_graph_revision, base_snapshot_id, revision, kind, status,
+         operations_json, layout_id, base_layout_checksum, base_layout_json,
+         layout_operations_json, rationale, assumptions_json, generation_payload_json,
+         review_json, created_by_run_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 1, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      workspace.id,
+      graph.revision,
+      snapshot.id,
+      input.kind,
+      JSON.stringify(input.operations),
+      input.layoutId,
+      input.baseLayoutChecksum,
+      JSON.stringify(baseLayout),
+      JSON.stringify(input.layoutOperations),
+      input.rationale,
+      JSON.stringify(input.assumptions),
+      JSON.stringify(input.generation),
+      JSON.stringify({ kind: "none" }),
+      input.createdByRunId,
+      now,
+      now,
+    );
+    const row = this.proposalRow(id);
+    if (!row) throw new WorkspaceGraphValidationError(`Workspace Proposal ${id} was not inserted`);
+    const proposal = this.decodeProposalCurrentRow(row);
+    this.insertProposalAuditInTransaction(proposal);
+    return this.requireProposalById(id);
   }
 
   private insertProposalAuditInTransaction(proposal: WorkspaceProposalRecord): void {
@@ -10043,6 +13568,7 @@ export class WorkspaceStore {
         review: { kind: "none" },
         updatedAt: this.clock.now(),
       };
+      this.validateProposalArtifactQualityContract(next);
       this.insertProposalAuditInTransaction(next);
       const moved = this.db.prepare(
         `UPDATE workspace_proposals
@@ -10083,100 +13609,113 @@ export class WorkspaceStore {
     unsafeMode: WorkspaceProposalApprovalMode,
   ): ApprovedProposalResult {
     const mode = normalizeWorkspaceProposalApprovalMode(unsafeMode);
-    const outcome = this.transactionImmediate<ProposalApprovedOutcome | ProposalConflictOutcome>(() => {
-      const proposal = this.requireDraftProposal(projectId, proposalId);
-      if (proposal.kind === "component-propagation") {
-        throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
-      }
-      const workspace = this.requireWorkspaceById(proposal.workspaceId);
-      const graph = this.getGraph(workspace.projectId);
-      const layout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
-      const summary: WorkspaceProposalConflictSummary = {
-        graphChanged: graph.revision !== proposal.baseGraphRevision,
-        snapshotChanged: workspace.activeSnapshotId !== proposal.baseSnapshotId,
-        layoutChanged: layout.checksum !== proposal.baseLayoutChecksum,
-        expectedGraphRevision: proposal.baseGraphRevision,
-        actualGraphRevision: graph.revision,
-        expectedSnapshotId: proposal.baseSnapshotId,
-        actualSnapshotId: workspace.activeSnapshotId,
-        expectedLayoutChecksum: proposal.baseLayoutChecksum,
-        actualLayoutChecksum: layout.checksum,
-      };
-      if (summary.graphChanged || summary.snapshotChanged || summary.layoutChanged) {
-        const review: WorkspaceProposalReview = {
-          kind: "conflict",
-          expectedGraphRevision: summary.expectedGraphRevision,
-          actualGraphRevision: summary.actualGraphRevision,
-          expectedSnapshotId: summary.expectedSnapshotId,
-          actualSnapshotId: summary.actualSnapshotId,
-          expectedLayoutChecksum: summary.expectedLayoutChecksum,
-          actualLayoutChecksum: summary.actualLayoutChecksum,
-          graphChanged: summary.graphChanged,
-          snapshotChanged: summary.snapshotChanged,
-          layoutChanged: summary.layoutChanged,
-        };
-        const conflicted = this.markProposalStatusInTransaction(proposal, "conflicted", review);
-        return { kind: "conflict", proposal: conflicted, summary };
-      }
-      this.validateLayoutGroups(workspace.id, proposal.layoutId, new Set(graph.nodes.map((node) => node.id)));
-
-      this.validateProposalForApproval(proposal);
-      const planId = mode === "generate" ? this.clock.id() : null;
-      let result: WorkspaceGraphMutationResult;
-      if (proposal.operations.length === 0) {
-        if (proposal.layoutOperations.length > 0) {
-          this.applyLayoutCommandsInTransaction(
-            workspace.id,
-            graph,
-            proposal.layoutId,
-            proposal.layoutOperations,
-          );
-        }
-        result = {
-          graph,
-          snapshot: this.requireSnapshot(workspace.id, proposal.baseSnapshotId),
-        };
-      } else {
-        result = this.applyGraphCommandsInTransaction(workspace, graph, {
-          expectedSnapshotId: proposal.baseSnapshotId,
-          commands: proposal.operations,
-          reason: "proposal-approval",
-          provenance: {
-            kind: "proposal-approval",
-            proposalId: proposal.id,
-            proposalRevision: proposal.revision,
-            ...(planId === null ? {} : { planId }),
-          },
-        });
-        if (proposal.layoutOperations.length > 0) {
-          this.applyLayoutCommandsInTransaction(
-            workspace.id,
-            result.graph,
-            proposal.layoutId,
-            proposal.layoutOperations,
-          );
-        }
-      }
-      const approved = this.markProposalStatusInTransaction(proposal, "approved", { kind: "approved", mode });
-      const plan = planId === null
-        ? null
-        : this.insertGenerationPlanShellInTransaction(planId, approved, result.snapshot.id);
-      const approvedLayout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
-      return {
-        kind: "approved",
-        result: {
-          proposal: approved,
-          graph: result.graph,
-          snapshot: result.snapshot,
-          layout: approvedLayout,
-          plan,
-        },
-      };
-    });
+    const outcome = this.transactionImmediate<ProposalApprovedOutcome | ProposalConflictOutcome>(
+      () => this.approveProposalInTransaction(projectId, proposalId, mode),
+    );
     if (outcome.kind === "conflict") {
       throw new WorkspaceProposalConflictError(outcome.proposal, outcome.summary);
     }
     return outcome.result;
+  }
+
+  private approveProposalInTransaction(
+    projectId: string | null,
+    proposalId: string,
+    mode: WorkspaceProposalApprovalMode,
+    exactPlanId?: string,
+  ): ProposalApprovedOutcome | ProposalConflictOutcome {
+    if (!this.db.isTransaction) throw new Error("Workspace Proposal approval requires a transaction");
+    const proposal = this.requireDraftProposal(projectId, proposalId);
+    if (proposal.kind === "component-propagation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    const workspace = this.requireWorkspaceById(proposal.workspaceId);
+    const graph = this.getGraph(workspace.projectId);
+    const layout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
+    const summary: WorkspaceProposalConflictSummary = {
+      graphChanged: graph.revision !== proposal.baseGraphRevision,
+      snapshotChanged: workspace.activeSnapshotId !== proposal.baseSnapshotId,
+      layoutChanged: layout.checksum !== proposal.baseLayoutChecksum,
+      expectedGraphRevision: proposal.baseGraphRevision,
+      actualGraphRevision: graph.revision,
+      expectedSnapshotId: proposal.baseSnapshotId,
+      actualSnapshotId: workspace.activeSnapshotId,
+      expectedLayoutChecksum: proposal.baseLayoutChecksum,
+      actualLayoutChecksum: layout.checksum,
+    };
+    if (summary.graphChanged || summary.snapshotChanged || summary.layoutChanged) {
+      const review: WorkspaceProposalReview = {
+        kind: "conflict",
+        expectedGraphRevision: summary.expectedGraphRevision,
+        actualGraphRevision: summary.actualGraphRevision,
+        expectedSnapshotId: summary.expectedSnapshotId,
+        actualSnapshotId: summary.actualSnapshotId,
+        expectedLayoutChecksum: summary.expectedLayoutChecksum,
+        actualLayoutChecksum: summary.actualLayoutChecksum,
+        graphChanged: summary.graphChanged,
+        snapshotChanged: summary.snapshotChanged,
+        layoutChanged: summary.layoutChanged,
+      };
+      const conflicted = this.markProposalStatusInTransaction(proposal, "conflicted", review);
+      return { kind: "conflict", proposal: conflicted, summary };
+    }
+    this.validateLayoutGroups(workspace.id, proposal.layoutId, new Set(graph.nodes.map((node) => node.id)));
+
+    this.validateProposalForApproval(proposal);
+    const planId = mode === "generate" ? (exactPlanId ?? this.clock.id()) : null;
+    if (mode !== "generate" && exactPlanId !== undefined) {
+      throw new WorkspaceProposalValidationError("structure-only approval cannot reserve a Generation Plan id");
+    }
+    let result: WorkspaceGraphMutationResult;
+    if (proposal.operations.length === 0) {
+      if (proposal.layoutOperations.length > 0) {
+        this.applyLayoutCommandsInTransaction(
+          workspace.id,
+          graph,
+          proposal.layoutId,
+          proposal.layoutOperations,
+        );
+      }
+      result = {
+        graph,
+        snapshot: this.requireSnapshot(workspace.id, proposal.baseSnapshotId),
+      };
+    } else {
+      result = this.applyGraphCommandsInTransaction(workspace, graph, {
+        expectedSnapshotId: proposal.baseSnapshotId,
+        commands: proposal.operations,
+        reason: "proposal-approval",
+        provenance: {
+          kind: "proposal-approval",
+          proposalId: proposal.id,
+          proposalRevision: proposal.revision,
+          ...(planId === null ? {} : { planId }),
+        },
+      });
+      if (proposal.layoutOperations.length > 0) {
+        this.applyLayoutCommandsInTransaction(
+          workspace.id,
+          result.graph,
+          proposal.layoutId,
+          proposal.layoutOperations,
+        );
+      }
+    }
+    const approved = this.markProposalStatusInTransaction(proposal, "approved", { kind: "approved", mode });
+    const plan = planId === null
+      ? null
+      : this.insertGenerationPlanShellInTransaction(planId, approved, result.snapshot.id);
+    const approvedLayout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
+    return {
+      kind: "approved",
+      result: {
+        proposal: approved,
+        graph: result.graph,
+        snapshot: result.snapshot,
+        layout: approvedLayout,
+        plan,
+      },
+    };
   }
 
   private markProposalStatusInTransaction(
@@ -10253,6 +13792,7 @@ export class WorkspaceStore {
     this.validateProposalArtifactPlans(proposal, artifactNodes);
     const resourceResolution = this.validateProposalResourceOperations(proposal, resourceNodes);
     this.validateProposalDependencies(proposal, artifactNodes, resourceNodes, resourceResolution);
+    this.validateProposalResearchDirectionSelections(proposal);
     this.validateProposalPrototypeIntents(proposal, graph);
     return graph;
   }
@@ -10320,6 +13860,71 @@ export class WorkspaceStore {
     }
   }
 
+  private validateProposalArtifactQualityContract(input: {
+    readonly workspaceId: string;
+    readonly baseSnapshotId: string;
+    readonly generation: WorkspaceProposalRecord["generation"];
+  }): void {
+    if (input.generation.kind !== "workspace-generation"
+      || input.generation.artifactPlans.length === 0) return;
+    const baseSnapshot = this.requireSnapshot(input.workspaceId, input.baseSnapshotId);
+    const kernel = this.requireKernelRevision(baseSnapshot.kernelRevisionId);
+    const framesById = new Map(
+      input.generation.responsiveFrames.map((frame) => [frame.id, frame] as const),
+    );
+    for (const kernelFrame of kernel.responsiveFrames) {
+      const proposedFrame = framesById.get(kernelFrame.id);
+      if (!proposedFrame || !isDeepStrictEqual(proposedFrame, kernelFrame)) {
+        throw new WorkspaceProposalValidationError(
+          `generation QA frame ${kernelFrame.id} must preserve the immutable base Design Kernel frame`,
+        );
+      }
+    }
+    const requiredFrameIds = new Set(input.generation.qualityProfile.requiredFrameIds);
+    const blockingSeverities = new Set(input.generation.qualityProfile.blockingSeverities);
+    const missingKernelFrame = kernel.qualityProfile.requiredFrameIds.find(
+      (frameId) => !requiredFrameIds.has(frameId),
+    );
+    const missingKernelSeverity = kernel.qualityProfile.blockingSeverities.find(
+      (severity) => !blockingSeverities.has(severity),
+    );
+    if (missingKernelFrame) {
+      throw new WorkspaceProposalValidationError(
+        `generation QA must preserve required Design Kernel frame ${missingKernelFrame}`,
+      );
+    }
+    if (missingKernelSeverity) {
+      throw new WorkspaceProposalValidationError(
+        `generation QA must preserve blocking Design Kernel severity ${missingKernelSeverity}`,
+      );
+    }
+    if ((kernel.qualityProfile.requireRuntimeChecks
+        && !input.generation.qualityProfile.requireRuntimeChecks)
+      || (kernel.qualityProfile.requireVisualReview
+        && !input.generation.qualityProfile.requireVisualReview)) {
+      throw new WorkspaceProposalValidationError(
+        "generation QA cannot weaken the immutable base Design Kernel quality contract",
+      );
+    }
+    const hasDesktopViewport = input.generation.responsiveFrames.some(
+      (frame) => frame.width >= 1280 && frame.height >= 720 && requiredFrameIds.has(frame.id),
+    );
+    const hasMobileViewport = input.generation.responsiveFrames.some(
+      (frame) => frame.width >= 320 && frame.width <= 480
+        && frame.height >= 640 && requiredFrameIds.has(frame.id),
+    );
+    if (!input.generation.qualityProfile.requireRuntimeChecks
+      || !input.generation.qualityProfile.requireVisualReview
+      || !blockingSeverities.has("P0")
+      || !blockingSeverities.has("P1")
+      || !hasDesktopViewport
+      || !hasMobileViewport) {
+      throw new WorkspaceProposalValidationError(
+        "generation QA requires blocking runtime and visual review at production desktop and mobile viewports",
+      );
+    }
+  }
+
   private validateProposalArtifactPlans(
     proposal: WorkspaceProposalRecord,
     artifactNodes: ReadonlyMap<string, WorkspaceArtifactNode>,
@@ -10327,6 +13932,7 @@ export class WorkspaceStore {
     if (proposal.generation.kind !== "workspace-generation") {
       throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
+    this.validateProposalArtifactQualityContract(proposal);
     const proposedArtifactIdentities = new Map<string, { nodeId: string; trackId: string }>();
     for (const command of proposal.operations) {
       if (command.type !== "add-node"
@@ -10355,30 +13961,55 @@ export class WorkspaceStore {
       }
       plannedTrackIds.add(plan.trackId);
       const artifact = this.db.prepare(
-        "SELECT id, workspace_id, kind FROM workspace_artifacts WHERE id = ?",
-      ).get(plan.artifactId) as { id: string; workspace_id: string; kind: string } | undefined;
+        "SELECT id, workspace_id, kind, active_track_id, archived_at FROM workspace_artifacts WHERE id = ?",
+      ).get(plan.artifactId) as {
+        id: string;
+        workspace_id: string;
+        kind: string;
+        active_track_id: string | null;
+        archived_at: number | null;
+      } | undefined;
       if (plan.operation === "create") {
-        if (artifact) {
-          throw new WorkspaceProposalValidationError(
-            `generation Artifact create plan ${plan.artifactId} already has a durable identity`,
-          );
-        }
         if (plan.baseRevisionId !== null) {
           throw new WorkspaceProposalValidationError(
             `generation Artifact create plan ${plan.artifactId} cannot have a base Revision`,
           );
         }
-        const proposedIdentity = proposedArtifactIdentities.get(plan.artifactId);
-        if (!proposedIdentity || proposedIdentity.nodeId !== plan.nodeId
-          || proposedIdentity.trackId !== plan.trackId) {
-          throw new WorkspaceProposalValidationError(
-            `generation Artifact create plan ${plan.artifactId} does not match its proposed identity and Track`,
-          );
-        }
-        if (this.db.prepare("SELECT 1 FROM artifact_tracks WHERE id = ?").get(plan.trackId)) {
-          throw new WorkspaceProposalValidationError(
-            `generation Artifact create Track ${plan.trackId} already exists`,
-          );
+        if (artifact) {
+          const shellTrack = this.db.prepare(
+            `SELECT track.head_revision_id,
+                    (SELECT COUNT(*) FROM artifact_revisions revision
+                     WHERE revision.artifact_id = track.artifact_id) AS revision_count
+             FROM artifact_tracks track
+             WHERE track.id = ? AND track.artifact_id = ?`,
+          ).get(plan.trackId, plan.artifactId) as {
+            head_revision_id: string | null;
+            revision_count: number;
+          } | undefined;
+          if (artifact.workspace_id !== proposal.workspaceId
+            || artifact.kind !== plan.kind
+            || artifact.archived_at !== null
+            || artifact.active_track_id !== plan.trackId
+            || !shellTrack
+            || shellTrack.head_revision_id !== null
+            || shellTrack.revision_count !== 0) {
+            throw new WorkspaceProposalValidationError(
+              `generation Artifact create plan ${plan.artifactId} may only claim its exact owned active empty shell`,
+            );
+          }
+        } else {
+          const proposedIdentity = proposedArtifactIdentities.get(plan.artifactId);
+          if (!proposedIdentity || proposedIdentity.nodeId !== plan.nodeId
+            || proposedIdentity.trackId !== plan.trackId) {
+            throw new WorkspaceProposalValidationError(
+              `generation Artifact create plan ${plan.artifactId} does not match its proposed identity and Track`,
+            );
+          }
+          if (this.db.prepare("SELECT 1 FROM artifact_tracks WHERE id = ?").get(plan.trackId)) {
+            throw new WorkspaceProposalValidationError(
+              `generation Artifact create Track ${plan.trackId} already exists`,
+            );
+          }
         }
       } else {
         if (!artifact || artifact.workspace_id !== proposal.workspaceId || artifact.kind !== plan.kind) {
@@ -10387,19 +14018,32 @@ export class WorkspaceStore {
           );
         }
         const track = this.db.prepare(
-          `SELECT track.id
+          `SELECT track.id, track.head_revision_id
            FROM artifact_tracks track
            JOIN workspace_artifacts artifact ON artifact.id = track.artifact_id
            WHERE track.id = ? AND track.artifact_id = ? AND artifact.workspace_id = ?`,
-        ).get(plan.trackId, plan.artifactId, proposal.workspaceId);
+        ).get(plan.trackId, plan.artifactId, proposal.workspaceId) as {
+          id: string;
+          head_revision_id: string | null;
+        } | undefined;
         if (!track) {
           throw new WorkspaceProposalValidationError(
             `generation Artifact revise plan ${plan.artifactId} requires an existing owned Track ${plan.trackId}`,
           );
         }
+        if (artifact.active_track_id !== plan.trackId) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} must target its active Track`,
+          );
+        }
         if (plan.baseRevisionId === null) {
           throw new WorkspaceProposalValidationError(
             `generation Artifact revise plan ${plan.artifactId} requires an exact base Revision`,
+          );
+        }
+        if (track.head_revision_id !== plan.baseRevisionId) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} base Revision must equal its active Track Head`,
           );
         }
         const revision = this.db.prepare(
@@ -10425,6 +14069,17 @@ export class WorkspaceStore {
       for (const frameId of plan.responsiveFrameIds) {
         if (!frameIds.has(frameId)) {
           throw new WorkspaceProposalValidationError(`missing generation responsive frame ${frameId}`);
+        }
+      }
+      if (proposal.generation.artifactPlans.length > 0) {
+        const plannedFrameIds = new Set(plan.responsiveFrameIds);
+        const missingRequiredFrame = proposal.generation.qualityProfile.requiredFrameIds.find(
+          (frameId) => !plannedFrameIds.has(frameId),
+        );
+        if (missingRequiredFrame) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact ${plan.artifactId} must test required QA frame ${missingRequiredFrame}`,
+          );
         }
       }
     }
@@ -10477,6 +14132,12 @@ export class WorkspaceStore {
       if (!node || node.id !== operation.nodeId || node.name !== operation.title) {
         throw new WorkspaceProposalValidationError(
           `missing generation dependency Resource ${operation.resourceId}`,
+        );
+      }
+      if (operation.revisionPolicy.kind === "generate"
+        && !isAgentGeneratableResourceKind(operation.kind)) {
+        throw new WorkspaceProposalValidationError(
+          `generation Resource kind ${operation.kind} requires an explicit owned source and cannot be Agent-generated`,
         );
       }
       const planned = plannedResources.get(operation.resourceId);
@@ -10546,6 +14207,73 @@ export class WorkspaceStore {
       basePinnedResourceIds: new Set(basePins.keys()),
       operationResourceIds,
     };
+  }
+
+  private validateProposalResearchDirectionSelections(
+    proposal: WorkspaceProposalRecord,
+  ): void {
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    const operationsByResourceId = new Map(
+      proposal.generation.resourceOperations.map((operation) => [operation.resourceId, operation] as const),
+    );
+    for (const plan of proposal.generation.artifactPlans) {
+      const selection = plan.researchDirectionSelection;
+      const researchDependencies = proposal.generation.dependencyPlans.flatMap((dependency) => {
+        if (dependency.kind !== "resource" || dependency.ownerArtifactId !== plan.artifactId) return [];
+        const operation = operationsByResourceId.get(dependency.resourceId);
+        return operation?.kind === "research" ? [{ dependency, operation }] : [];
+      });
+      const generatedResearch = researchDependencies.find(({ operation }) => (
+        operation.operation !== "reuse" || operation.revisionPolicy.kind !== "exact"
+      ));
+      if (generatedResearch !== undefined) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} cannot consume Research generated in the same Plan; publish the Research Revision, choose one exact direction, then approve a successor Artifact Plan`,
+        );
+      }
+      if (researchDependencies.length === 0) {
+        if (selection === undefined) continue;
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} Research direction selection must bind its exact reused Research Revision dependency`,
+        );
+      }
+      if (researchDependencies.length !== 1 || selection === undefined) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} requires one explicit immutable Research direction selection before approval`,
+        );
+      }
+      const exactResearch = researchDependencies[0];
+      if (exactResearch === undefined) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} requires one explicit immutable Research direction selection before approval`,
+        );
+      }
+      const { dependency, operation } = exactResearch;
+      if (dependency.resourceId !== selection.resourceId
+        || operation.operation !== "reuse"
+        || operation.revisionPolicy.kind !== "exact"
+        || operation.revisionPolicy.resourceRevisionId !== selection.revisionId) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} Research direction selection must bind its exact reused Research Revision dependency`,
+        );
+      }
+      const exact = this.db.prepare(
+        `SELECT revision.id
+         FROM resource_revisions revision
+         JOIN resources resource
+           ON resource.id = revision.resource_id
+          AND resource.workspace_id = revision.workspace_id
+         WHERE revision.id = ? AND revision.resource_id = ? AND revision.workspace_id = ?
+           AND resource.kind = 'research' AND resource.archived_at IS NULL`,
+      ).get(selection.revisionId, selection.resourceId, proposal.workspaceId);
+      if (!exact) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact ${plan.artifactId} Research direction selection is not an exact owned immutable Revision`,
+        );
+      }
+    }
   }
 
   private validateProposalDependencies(
@@ -12184,6 +15912,483 @@ export class WorkspaceStore {
     }
   }
 
+  private validateShallowSnapshotDirectParent(snapshot: WorkspaceSnapshotBaseRecord): void {
+    if (snapshot.parentSnapshotId === null) {
+      if (snapshot.sequence !== 1) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace Snapshot ${snapshot.id} root must have sequence 1`,
+        );
+      }
+      return;
+    }
+    if (snapshot.sequence === 1) {
+      throw new WorkspaceGraphValidationError(
+        `Workspace Snapshot ${snapshot.id} with sequence 1 must be a root without a parent`,
+      );
+    }
+    const parent = this.db.prepare(
+      `SELECT id, workspace_id, sequence, sealed
+       FROM workspace_snapshots WHERE id = ?`,
+    ).get(snapshot.parentSnapshotId) as {
+      id: unknown;
+      workspace_id: unknown;
+      sequence: unknown;
+      sealed: unknown;
+    } | undefined;
+    if (!parent
+      || parent.id !== snapshot.parentSnapshotId
+      || parent.id === snapshot.id
+      || parent.workspace_id !== snapshot.workspaceId
+      || !Number.isSafeInteger(parent.sequence)
+      || Number(parent.sequence) < 1
+      || Number(parent.sequence) >= snapshot.sequence
+      || parent.sealed !== 1) {
+      throw new WorkspaceGraphValidationError(
+        `Workspace Snapshot ${snapshot.id} direct parent must be an earlier sealed Snapshot in the same Workspace`,
+      );
+    }
+  }
+
+  private validateShallowKernelDirectParent(revision: SharedDesignKernelRevision): void {
+    if (revision.parentRevisionId === null) {
+      if (revision.sequence !== 1) {
+        throw new WorkspaceGraphValidationError(`Kernel Revision ${revision.id} root must have sequence 1`);
+      }
+      return;
+    }
+    if (revision.sequence === 1) {
+      throw new WorkspaceGraphValidationError(
+        `Kernel Revision ${revision.id} with sequence 1 must be a root without a parent`,
+      );
+    }
+    const parent = this.db.prepare(
+      `SELECT id, workspace_id, sequence
+       FROM shared_design_kernel_revisions WHERE id = ?`,
+    ).get(revision.parentRevisionId) as {
+      id: unknown;
+      workspace_id: unknown;
+      sequence: unknown;
+    } | undefined;
+    if (!parent
+      || parent.id !== revision.parentRevisionId
+      || parent.id === revision.id
+      || parent.workspace_id !== revision.workspaceId
+      || !Number.isSafeInteger(parent.sequence)
+      || Number(parent.sequence) < 1
+      || Number(parent.sequence) >= revision.sequence) {
+      throw new WorkspaceGraphValidationError(
+        `Kernel Revision ${revision.id} direct parent must be an earlier Revision in the same Workspace`,
+      );
+    }
+  }
+
+  private validateShallowArtifactDirectParent(revision: ArtifactRevisionRecord): void {
+    if (revision.parentRevisionId === null) {
+      if (revision.sequence !== 1) {
+        throw new WorkspaceGraphValidationError(`Artifact Revision ${revision.id} root must have sequence 1`);
+      }
+      return;
+    }
+    if (revision.sequence === 1) {
+      throw new WorkspaceGraphValidationError(
+        `Artifact Revision ${revision.id} with sequence 1 must be a root without a parent`,
+      );
+    }
+    const parent = this.db.prepare(
+      `SELECT id, workspace_id, artifact_id, track_id, sequence, sealed
+       FROM artifact_revisions WHERE id = ?`,
+    ).get(revision.parentRevisionId) as {
+      id: unknown;
+      workspace_id: unknown;
+      artifact_id: unknown;
+      track_id: unknown;
+      sequence: unknown;
+      sealed: unknown;
+    } | undefined;
+    if (!parent
+      || parent.id !== revision.parentRevisionId
+      || parent.id === revision.id
+      || parent.workspace_id !== revision.workspaceId
+      || parent.artifact_id !== revision.artifactId
+      || parent.track_id !== revision.trackId
+      || !Number.isSafeInteger(parent.sequence)
+      || Number(parent.sequence) < 1
+      || Number(parent.sequence) >= revision.sequence
+      || parent.sealed !== 1) {
+      throw new WorkspaceGraphValidationError(
+        `Artifact Revision ${revision.id} direct parent must be an earlier sealed Revision on the same Workspace Track`,
+      );
+    }
+  }
+
+  private validateShallowResourceDirectParent(revision: ResourceRevision): void {
+    if (revision.parentRevisionId === null) {
+      if (revision.sequence !== 1) {
+        throw new WorkspaceGraphValidationError(`Resource Revision ${revision.id} root must have sequence 1`);
+      }
+      return;
+    }
+    if (revision.sequence === 1) {
+      throw new WorkspaceGraphValidationError(
+        `Resource Revision ${revision.id} with sequence 1 must be a root without a parent`,
+      );
+    }
+    const parent = this.db.prepare(
+      `SELECT id, workspace_id, resource_id, sequence
+       FROM resource_revisions WHERE id = ?`,
+    ).get(revision.parentRevisionId) as {
+      id: unknown;
+      workspace_id: unknown;
+      resource_id: unknown;
+      sequence: unknown;
+    } | undefined;
+    if (!parent
+      || parent.id !== revision.parentRevisionId
+      || parent.id === revision.id
+      || parent.workspace_id !== revision.workspaceId
+      || parent.resource_id !== revision.resourceId
+      || !Number.isSafeInteger(parent.sequence)
+      || Number(parent.sequence) < 1
+      || Number(parent.sequence) >= revision.sequence) {
+      throw new WorkspaceGraphValidationError(
+        `Resource Revision ${revision.id} direct parent must be an earlier Revision of the same Workspace Resource`,
+      );
+    }
+  }
+
+  private requireCompactKernelRevision(
+    workspaceId: string,
+    revisionId: string,
+  ): SharedDesignKernelRevision {
+    const revision = this.loadKernelRevision(revisionId);
+    if (!revision || revision.workspaceId !== workspaceId) {
+      throw new WorkspaceGraphValidationError(
+        `active Kernel Revision ${revisionId} is not owned by the Workspace`,
+      );
+    }
+    this.validateShallowKernelDirectParent(revision);
+    this.validateKernelSharedAssets(workspaceId, revision.sharedAssetRevisionIds);
+    return revision;
+  }
+
+  private validateShallowArtifactRevision(revision: ArtifactRevisionRecord): void {
+    const artifact = this.getArtifact(revision.artifactId);
+    const track = this.getTrack(revision.trackId);
+    const kernel = this.requireCompactKernelRevision(revision.workspaceId, revision.kernelRevisionId);
+    if (!artifact || artifact.workspaceId !== revision.workspaceId
+      || !artifactHasValidSourceRoot(artifact)
+      || revision.artifactRoot !== artifact.sourceRoot
+      || !track || track.artifactId !== revision.artifactId
+      || kernel.workspaceId !== revision.workspaceId) {
+      throw new WorkspaceGraphValidationError(
+        `Artifact Revision ${revision.id} has a cross-owner Track or Kernel reference`,
+      );
+    }
+    this.validateShallowArtifactDirectParent(revision);
+    this.validateRunOwnership(revision.workspaceId, revision.producedByRunId, "active Artifact Revision");
+  }
+
+  private validateShallowArtifactDependencyRecords(
+    revision: ArtifactRevisionRecord,
+    dependencies: readonly ArtifactRevisionDependencyRecord[],
+  ): void {
+    const instances = new Set<string>();
+    for (const dependency of dependencies) {
+      if (instances.has(dependency.instanceId)) {
+        throw new WorkspaceGraphValidationError(`duplicate Component Instance ${dependency.instanceId}`);
+      }
+      instances.add(dependency.instanceId);
+      if (dependency.workspaceId !== revision.workspaceId
+        || dependency.ownerArtifactId !== revision.artifactId
+        || dependency.revisionId !== revision.id
+        || dependency.componentArtifactId === revision.artifactId) {
+        throw new WorkspaceGraphValidationError(
+          `Artifact Revision ${revision.id} has a cross-owner Component dependency`,
+        );
+      }
+      const componentRevision = this.loadArtifactRevision(dependency.componentRevisionId);
+      const component = this.getArtifact(dependency.componentArtifactId);
+      const componentTrack = componentRevision === null ? null : this.getTrack(componentRevision.trackId);
+      const instance = this.db.prepare(
+        `SELECT 1 FROM component_instances
+         WHERE id = ? AND workspace_id = ? AND owner_artifact_id = ? AND component_artifact_id = ?`,
+      ).get(
+        dependency.instanceId,
+        revision.workspaceId,
+        revision.artifactId,
+        dependency.componentArtifactId,
+      );
+      if (!component
+        || component.workspaceId !== revision.workspaceId
+        || component.kind !== "component"
+        || !componentRevision
+        || componentRevision.workspaceId !== revision.workspaceId
+        || componentRevision.artifactId !== dependency.componentArtifactId
+        || !componentTrack
+        || componentTrack.artifactId !== dependency.componentArtifactId
+        || !instance) {
+        throw new WorkspaceGraphValidationError(
+          `Component Revision ${dependency.componentRevisionId} is not an exact stable same-Workspace pin`,
+        );
+      }
+      this.validateShallowArtifactRevision(componentRevision);
+    }
+  }
+
+  private requireShallowResourceRevision(
+    workspaceId: string,
+    resourceId: string,
+    revisionId: string,
+  ): ResourceRevision {
+    const revision = this.loadResourceRevision(revisionId);
+    const owner = this.db.prepare(
+      "SELECT 1 FROM resources WHERE id = ? AND workspace_id = ?",
+    ).get(resourceId, workspaceId);
+    if (!revision || revision.workspaceId !== workspaceId
+      || revision.resourceId !== resourceId || !owner) {
+      throw new WorkspaceGraphValidationError(
+        `Resource Revision ${revisionId} is not an exact owned Workspace pin`,
+      );
+    }
+    this.validateShallowResourceDirectParent(revision);
+    this.validateRunOwnership(workspaceId, revision.createdByRunId, "active Resource Revision");
+    return revision;
+  }
+
+  private buildShallowSnapshotRecord(
+    workspaceId: string,
+    snapshot: WorkspaceSnapshotBaseRecord,
+    exactGraph?: WorkspaceGraph,
+  ): WorkspaceSnapshotRecord {
+    if (snapshot.workspaceId !== workspaceId) {
+      throw new WorkspaceGraphValidationError(`Workspace Snapshot ${snapshot.id} belongs to another Workspace`);
+    }
+    this.validateShallowSnapshotDirectParent(snapshot);
+    this.requireCompactKernelRevision(workspaceId, snapshot.kernelRevisionId);
+    this.validateRunOwnership(workspaceId, snapshot.createdByRunId, "Workspace Snapshot");
+    const graph = exactGraph ?? this.requireGraphRevision(workspaceId, snapshot.graphRevision);
+    if (graph.workspaceId !== workspaceId || graph.revision !== snapshot.graphRevision) {
+      throw new WorkspaceGraphValidationError(`Workspace Snapshot ${snapshot.id} graph Revision is incoherent`);
+    }
+    const artifactRows = this.db.prepare(
+      `SELECT artifact_id, track_id, revision_id FROM workspace_snapshot_artifacts
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY artifact_id ASC`,
+    ).all(workspaceId, snapshot.id) as Row[];
+    const resourceRows = this.db.prepare(
+      `SELECT resource_id, revision_id FROM workspace_snapshot_resources
+       WHERE workspace_id = ? AND snapshot_id = ? ORDER BY resource_id ASC`,
+    ).all(workspaceId, snapshot.id) as Row[];
+    const artifactTracks = Object.fromEntries(artifactRows.map((mapping) => [
+      requiredCell(mapping.artifact_id, "Snapshot Artifact id"),
+      requiredCell(mapping.track_id, "Snapshot Artifact Track id"),
+    ]));
+    const artifactRevisions = Object.fromEntries(artifactRows.map((mapping) => [
+      requiredCell(mapping.artifact_id, "Snapshot Artifact id"),
+      mapping.revision_id == null ? null : requiredCell(mapping.revision_id, "Snapshot Artifact Revision id"),
+    ]));
+    const resourceRevisions = Object.fromEntries(resourceRows.map((mapping) => [
+      requiredCell(mapping.resource_id, "Snapshot Resource id"),
+      requiredCell(mapping.revision_id, "Snapshot Resource Revision id"),
+    ]));
+    this.validateStoredSnapshotMappings(
+      workspaceId,
+      graph,
+      artifactTracks,
+      artifactRevisions,
+      resourceRevisions,
+      false,
+    );
+    for (const [artifactId, revisionId] of Object.entries(artifactRevisions)) {
+      if (revisionId === null) continue;
+      const revision = this.loadArtifactRevision(revisionId);
+      if (!revision || revision.workspaceId !== workspaceId
+        || revision.artifactId !== artifactId
+        || revision.trackId !== artifactTracks[artifactId]) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace Snapshot ${snapshot.id} Artifact ${artifactId} is not an exact owned Revision pin`,
+        );
+      }
+      this.validateShallowArtifactRevision(revision);
+    }
+    for (const [resourceId, revisionId] of Object.entries(resourceRevisions)) {
+      this.requireShallowResourceRevision(workspaceId, resourceId, revisionId);
+    }
+    return {
+      ...snapshot,
+      graph,
+      artifactTracks,
+      artifactRevisions,
+      resourceRevisions,
+    };
+  }
+
+  private requireCompactActiveSnapshot(
+    workspace: ProjectWorkspace,
+    graph: WorkspaceGraph,
+  ): WorkspaceSnapshotRecord {
+    const snapshot = this.loadSnapshotBase(workspace.activeSnapshotId);
+    if (!snapshot || snapshot.workspaceId !== workspace.id) {
+      throw new WorkspaceGraphValidationError("Workspace active Snapshot is not resolvable");
+    }
+    if (snapshot.id !== workspace.activeSnapshotId
+      || snapshot.graphRevision !== workspace.graphRevision
+      || snapshot.kernelRevisionId !== workspace.activeKernelRevisionId
+      || graph.workspaceId !== workspace.id
+      || graph.revision !== workspace.graphRevision) {
+      throw new WorkspaceGraphValidationError("Workspace current pointers are incoherent");
+    }
+    const record = this.buildShallowSnapshotRecord(workspace.id, snapshot, graph);
+    for (const node of graph.nodes) {
+      if (node.kind !== "resource") continue;
+      const resource = this.db.prepare(
+        `SELECT head_revision_id, archived_at FROM resources
+         WHERE id = ? AND workspace_id = ?`,
+      ).get(node.resourceId, workspace.id) as {
+        head_revision_id: string | null;
+        archived_at: number | null;
+      } | undefined;
+      const mappedRevisionId = record.resourceRevisions[node.resourceId] ?? null;
+      if (!resource || resource.archived_at !== null || resource.head_revision_id !== mappedRevisionId) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace active Snapshot Resource mapping ${node.resourceId} does not match its current Head`,
+        );
+      }
+    }
+    return record;
+  }
+
+  private listCompactSnapshotTracks(
+    workspaceId: string,
+    snapshotId: string,
+  ): ArtifactTrackRecord[] {
+    const rows = this.db.prepare(
+      `SELECT track.*
+       FROM workspace_snapshot_artifacts mapping
+       JOIN artifact_tracks track
+         ON track.id = mapping.track_id AND track.artifact_id = mapping.artifact_id
+       WHERE mapping.workspace_id = ? AND mapping.snapshot_id = ?
+       ORDER BY mapping.artifact_id ASC`,
+    ).all(workspaceId, snapshotId) as Row[];
+    return rows.map(asArtifactTrack);
+  }
+
+  private listCompactActiveArtifacts(
+    workspaceId: string,
+    snapshotId: string,
+    graph: WorkspaceGraph,
+  ): WorkspaceArtifactRecord[] {
+    const rows = this.db.prepare(
+      `SELECT artifact.*, mapping.artifact_id AS mapped_artifact_id
+       FROM workspace_artifacts artifact
+       LEFT JOIN workspace_snapshot_artifacts mapping
+         ON mapping.workspace_id = artifact.workspace_id
+        AND mapping.snapshot_id = ?
+        AND mapping.artifact_id = artifact.id
+       WHERE artifact.workspace_id = ? AND artifact.archived_at IS NULL
+       ORDER BY artifact.created_at ASC, artifact.id COLLATE BINARY ASC`,
+    ).all(snapshotId, workspaceId) as Row[];
+    const artifacts = rows.map(asWorkspaceArtifact);
+    const activeIds = artifacts.map(({ id }) => id).sort(compareBinary);
+    const graphIds = graph.nodes
+      .filter((node) => node.kind !== "resource")
+      .map((node) => node.artifactId)
+      .sort(compareBinary);
+    if (!isDeepStrictEqual(activeIds, graphIds)
+      || rows.some((row) => row.mapped_artifact_id !== row.id)) {
+      if (artifacts.some((artifact) => artifact.legacyWrapped)) {
+        throw new WorkspaceGraphValidationError(
+          "completed legacy Workspace migration is invalid: wrapped Page is not mapped by the active graph and Snapshot",
+        );
+      }
+      throw new WorkspaceGraphValidationError(
+        "Workspace active Artifact identities must exactly match its immutable graph and active Snapshot",
+      );
+    }
+    return artifacts;
+  }
+
+  private listCompactActiveResources(
+    workspaceId: string,
+    graph: WorkspaceGraph,
+  ): Resource[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM resources
+       WHERE workspace_id = ? AND archived_at IS NULL
+       ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+    ).all(workspaceId) as Row[];
+    const resources = rows.map(asResource);
+    const activeIds = resources.map(({ id }) => id).sort(compareBinary);
+    const graphIds = graph.nodes
+      .filter((node) => node.kind === "resource")
+      .map((node) => node.resourceId)
+      .sort(compareBinary);
+    if (!isDeepStrictEqual(activeIds, graphIds)) {
+      throw new WorkspaceGraphValidationError(
+        "Workspace active Resource identities must exactly match its immutable graph",
+      );
+    }
+    return resources;
+  }
+
+  private listCompactSnapshotArtifactRevisions(
+    workspaceId: string,
+    snapshotId: string,
+  ): ArtifactRevisionRecord[] {
+    const rows = this.db.prepare(
+      `SELECT revision.*, artifact.source_root AS owning_source_root
+       FROM workspace_snapshot_artifacts mapping
+       JOIN artifact_revisions revision
+         ON revision.id = mapping.revision_id
+        AND revision.workspace_id = mapping.workspace_id
+        AND revision.artifact_id = mapping.artifact_id
+        AND revision.track_id = mapping.track_id
+       JOIN workspace_artifacts artifact
+         ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
+       WHERE mapping.workspace_id = ? AND mapping.snapshot_id = ?
+         AND mapping.revision_id IS NOT NULL
+       ORDER BY mapping.artifact_id ASC`,
+    ).all(workspaceId, snapshotId) as Row[];
+    return rows.map(asOwnedArtifactRevision);
+  }
+
+  private validateCompactBundleArtifactMappings(input: {
+    workspace: ProjectWorkspace;
+    graph: WorkspaceGraph;
+    activeSnapshot: WorkspaceSnapshotRecord;
+    artifacts: readonly WorkspaceArtifactRecord[];
+    tracks: readonly ArtifactTrackRecord[];
+    revisions: readonly ArtifactRevisionRecord[];
+  }): void {
+    const artifacts = new Map(input.artifacts.map((artifact) => [artifact.id, artifact]));
+    const tracks = new Map(input.tracks.map((track) => [track.id, track]));
+    const revisions = new Map(input.revisions.map((revision) => [revision.id, revision]));
+    for (const node of input.graph.nodes) {
+      if (node.kind === "resource") continue;
+      const artifact = artifacts.get(node.artifactId);
+      const trackId = input.activeSnapshot.artifactTracks[node.artifactId];
+      const revisionId = input.activeSnapshot.artifactRevisions[node.artifactId];
+      const track = trackId === undefined ? undefined : tracks.get(trackId);
+      if (!artifact || artifact.workspaceId !== input.workspace.id
+        || artifact.kind !== node.kind || artifact.archivedAt !== null
+        || artifact.activeTrackId !== trackId || !track
+        || track.artifactId !== artifact.id || track.headRevisionId !== revisionId) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace active Artifact mapping ${node.artifactId} does not match its current Track Head`,
+        );
+      }
+      if (revisionId === null || revisionId === undefined) continue;
+      const revision = revisions.get(revisionId);
+      if (!revision || revision.workspaceId !== input.workspace.id
+        || revision.artifactId !== artifact.id || revision.trackId !== track.id) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace active Artifact mapping ${node.artifactId} is not an exact owned Revision`,
+        );
+      }
+      // The exact immutable pin was shallow-validated while constructing the
+      // active Snapshot record; this pass additionally binds it to mutable Heads.
+    }
+  }
+
   private requireSnapshot(workspaceId: string, snapshotId: string): WorkspaceSnapshotRecord {
     const context = this.readContext();
     const cached = context.snapshotRecords.get(snapshotId);
@@ -12363,6 +16568,7 @@ export class WorkspaceStore {
     artifactTracks: Readonly<Record<string, string>>,
     artifactRevisions: Readonly<Record<string, string | null>>,
     resourceRevisions: Readonly<Record<string, string>>,
+    validateArtifactLineage = true,
   ): void {
     const graphArtifacts = new Map(
       graph.nodes
@@ -12409,7 +16615,7 @@ export class WorkspaceStore {
           `stored Workspace Snapshot Artifact mapping ${artifactId} is not an exact owned Revision pin`,
         );
       }
-      if (revisionId !== null) {
+      if (revisionId !== null && validateArtifactLineage) {
         const revision = this.requireArtifactRevision(revisionId);
         if (revision.workspaceId !== workspaceId
           || revision.artifactId !== artifactId

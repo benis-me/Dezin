@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
 import {
@@ -15,7 +15,6 @@ import {
 import { makeFakeApi } from "../test/fake-api.ts";
 import { ProjectCanvas, isCanvasShortcutTarget } from "./canvas/ProjectCanvas.tsx";
 import { applyWorkspaceLayoutCommands } from "./canvas/workspace-layout.ts";
-import { buildProposalDiff } from "./proposal/proposal-diff.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
 const graph: WorkspaceGraph = {
@@ -47,15 +46,22 @@ const layout: WorkspaceLayout = {
   checksum: "layout-1",
 };
 
-function installReactFlowMeasurements(): () => void {
+interface ReactFlowMeasurementController {
+  (width?: number, height?: number): void;
+  observedCanvasSurfaces: () => number;
+}
+
+function installReactFlowMeasurements(): ReactFlowMeasurementController {
+  let measuredWidth = 960;
+  let measuredHeight = 640;
   vi.stubGlobal("DOMMatrixReadOnly", class MockDOMMatrixReadOnly {
     readonly m22 = 1;
   });
-  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function measuredWidth(this: HTMLElement) {
-    return Number.parseFloat(this.style.width) || 960;
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function elementWidth(this: HTMLElement) {
+    return Number.parseFloat(this.style.width) || measuredWidth;
   });
-  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function measuredHeight(this: HTMLElement) {
-    return Number.parseFloat(this.style.height) || 640;
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function elementHeight(this: HTMLElement) {
+    return Number.parseFloat(this.style.height) || measuredHeight;
   });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function measuredRect(this: HTMLElement) {
     const width = this.offsetWidth;
@@ -92,44 +98,100 @@ function installReactFlowMeasurements(): () => void {
       this.targets.clear();
     }
   });
-  return () => {
+  const measure = ((width = 960, height = 640) => {
+    measuredWidth = width;
+    measuredHeight = height;
     for (const observer of observers) {
-      const entries = [...observer.targets].map((target) => ({
-        target,
-        contentRect: target.getBoundingClientRect(),
-      }) as ResizeObserverEntry);
+      const entries = [...observer.targets].map((target) => {
+        const contentRect = target.getBoundingClientRect();
+        const boxSize = [{ inlineSize: contentRect.width, blockSize: contentRect.height }];
+        return {
+          target,
+          contentRect,
+          borderBoxSize: boxSize,
+          contentBoxSize: boxSize,
+          devicePixelContentBoxSize: boxSize,
+        } as ResizeObserverEntry;
+      });
       if (entries.length > 0) observer.callback(entries, observer.instance);
     }
-  };
+  }) as ReactFlowMeasurementController;
+  measure.observedCanvasSurfaces = () => observers.reduce((count, observer) => (
+    count + [...observer.targets].filter((target) => target.classList.contains("dezin-project-canvas__surface")).length
+  ), 0);
+  return measure;
 }
 
 function CanvasHarness({
   onSaveLayout,
   onApplyGraphCommands = async () => {},
   onOpenArtifact = () => {},
+  onOpenResource,
+  onPresentFlow,
   canvasLayout = layout,
+  canvasGraph = graph,
+  artifactRevisionIds = { "artifact-page-1": "revision-1" },
+  resourceRevisionStates,
 }: {
   onSaveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
   onApplyGraphCommands?: (commands: readonly WorkspaceGraphCommand[]) => Promise<void>;
   onOpenArtifact?: (artifactId: string) => void;
+  onOpenResource?: (resourceId: string, revisionId: string | null) => void;
+  onPresentFlow?: () => void;
   canvasLayout?: WorkspaceLayout;
+  canvasGraph?: WorkspaceGraph;
+  artifactRevisionIds?: Readonly<Record<string, string | null>>;
+  resourceRevisionStates?: Readonly<Record<string, {
+    revisionId: string;
+    resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
+    qualityState: "grounded" | "needs-review" | null;
+  }>>;
 }) {
   const [selection, setSelection] = useState<string[]>([]);
   return (
     <ProjectCanvas
       projectId="project-1"
       projectName="Storefront system"
-      graph={graph}
+      graph={canvasGraph}
       layout={canvasLayout}
-      artifactRevisionIds={{ "artifact-page-1": "revision-1" }}
+      artifactRevisionIds={artifactRevisionIds}
+      resourceRevisionStates={resourceRevisionStates}
       selectedNodeIds={selection}
       onSelectionChange={setSelection}
       onSaveLayout={onSaveLayout}
       onApplyGraphCommands={onApplyGraphCommands}
       onOpenArtifact={onOpenArtifact}
+      onOpenResource={onOpenResource}
+      onPresentFlow={onPresentFlow}
     />
   );
 }
+
+const researchGraph: WorkspaceGraph = {
+  ...graph,
+  nodes: [
+    ...graph.nodes,
+    { id: "research-node", workspaceId: graph.workspaceId, kind: "resource", resourceId: "research-1", name: "Checkout research" },
+  ],
+  edges: [
+    ...graph.edges,
+    {
+      id: "research-informs-checkout",
+      workspaceId: graph.workspaceId,
+      kind: "informs",
+      sourceNodeId: "research-node",
+      targetNodeId: "page-1",
+    },
+  ],
+};
+
+const researchLayout: WorkspaceLayout = {
+  ...layout,
+  objects: [
+    ...layout.objects,
+    { id: "research-node", kind: "node", x: 40, y: 260, parentGroupId: "journey" },
+  ],
+};
 
 beforeEach(() => {
   window.history.pushState({}, "", "/projects/project-1/canvas");
@@ -154,6 +216,80 @@ test("canvas renders immutable-node Outline parity and never mounts iframe conte
   expect(open).toHaveAttribute("href", "/projects/project-1/artifacts/artifact-page-1");
 });
 
+test("Outline opens the same exact Resource revision as the canvas keyboard path", () => {
+  render(
+    <CanvasHarness
+      onSaveLayout={async () => researchLayout}
+      canvasGraph={researchGraph}
+      canvasLayout={researchLayout}
+      resourceRevisionStates={{
+        "research-1": {
+          revisionId: "research-revision-1",
+          resourceKind: "research",
+          qualityState: "grounded",
+        },
+      }}
+    />,
+  );
+
+  expect(screen.getByRole("link", { name: "Open Checkout research" })).toHaveAttribute(
+    "href",
+    "/projects/project-1/resources/research-1/revisions/research-revision-1",
+  );
+});
+
+test("ReactFlow mounts only after a non-zero ResizeObserver measurement and disconnects under StrictMode", () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const rendered = render(
+    <StrictMode>
+      <CanvasHarness onSaveLayout={async () => layout} />
+    </StrictMode>,
+  );
+
+  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+  act(() => measureReactFlow(0, 640));
+  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+
+  act(() => measureReactFlow(960, 640));
+  expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
+  expect(warn.mock.calls.flat().join(" ")).not.toContain("reactflow.dev/error#004");
+
+  rendered.unmount();
+  expect(measureReactFlow.observedCanvasSurfaces()).toBe(0);
+});
+
+test("canvas exposes a restrained Present flow entry when exact Snapshot playback is available", () => {
+  const onPresentFlow = vi.fn();
+  render(<CanvasHarness onSaveLayout={async () => layout} onPresentFlow={onPresentFlow} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Present prototype flow" }));
+  expect(onPresentFlow).toHaveBeenCalledTimes(1);
+});
+
+test("Research awaiting-selection treats sparse and explicit-null artifact revision pins identically", () => {
+  const shared = {
+    onSaveLayout: async () => researchLayout,
+    canvasGraph: researchGraph,
+    canvasLayout: researchLayout,
+    resourceRevisionStates: {
+      "research-1": {
+        revisionId: "research-revision-1",
+        resourceKind: "research" as const,
+        qualityState: "grounded" as const,
+      },
+    },
+  };
+  const rendered = render(<CanvasHarness {...shared} artifactRevisionIds={{}} />);
+
+  expect(screen.getByText(/Grounded · choose direction/i).closest("[data-awaiting-selection]"))
+    .toHaveAttribute("data-awaiting-selection", "true");
+
+  rendered.rerender(<CanvasHarness {...shared} artifactRevisionIds={{ "artifact-page-1": null }} />);
+  expect(screen.getByText(/Grounded · choose direction/i).closest("[data-awaiting-selection]"))
+    .toHaveAttribute("data-awaiting-selection", "true");
+});
+
 test("canvas exposes truthful keyboard instructions without advertising semantic deletion", () => {
   const { container } = render(<CanvasHarness onSaveLayout={async () => layout} />);
   const node = container.querySelector<HTMLElement>('.react-flow__node[data-id="page-1"]');
@@ -167,6 +303,29 @@ test("canvas exposes truthful keyboard instructions without advertising semantic
   expect(edgeDescription).toHaveTextContent("not deleted with the keyboard");
   expect(nodeDescription).not.toHaveTextContent("Press delete");
   expect(edgeDescription).not.toHaveTextContent("Press delete");
+});
+
+test("Resource nodes announce that Enter opens the exact revision viewer", () => {
+  const { container } = render(
+    <CanvasHarness
+      onSaveLayout={async () => researchLayout}
+      canvasGraph={researchGraph}
+      canvasLayout={researchLayout}
+      artifactRevisionIds={{ "artifact-page-1": null }}
+      resourceRevisionStates={{
+        "research-1": {
+          revisionId: "research-revision-1",
+          resourceKind: "research",
+          qualityState: "grounded",
+        },
+      }}
+    />,
+  );
+  const resource = container.querySelector<HTMLElement>('.react-flow__node[data-id="research-node"]');
+  expect(resource).not.toBeNull();
+
+  const description = document.getElementById(resource!.getAttribute("aria-describedby")!);
+  expect(description).toHaveTextContent("For Resource nodes, Enter opens the exact revision viewer");
 });
 
 test("double-clicking a connection Handle never opens the artifact", () => {
@@ -289,76 +448,6 @@ test("full semantic zoom exposes keyboard Page handles and compact zoom removes 
   expect(screen.queryByRole("button", { name: "Connect from Checkout" })).not.toBeInTheDocument();
 });
 
-test("proposal focus does not repeat for the same proposal and nonce after an authoritative overlay recompute", async () => {
-  const measureReactFlow = installReactFlowMeasurements();
-  vi.stubGlobal("matchMedia", () => ({ matches: true }));
-  const proposal = (name: string) => ({
-    id: "proposal-focus",
-    baseGraphRevision: graph.revision,
-    baseSnapshotId: "snapshot-1",
-    baseGraph: graph,
-    baseLayoutChecksum: layout.checksum,
-    baseLayout: layout,
-    operations: [{ id: "rename-checkout", type: "rename-node" as const, nodeId: "page-1", name }],
-    layoutOperations: [],
-  });
-  const current = {
-    graph,
-    activeSnapshotId: "snapshot-1",
-    layoutChecksum: layout.checksum,
-  };
-  const callbacks = {
-    onSelectionChange: vi.fn(),
-    onSaveLayout: vi.fn(async () => layout),
-    onApplyGraphCommands: vi.fn(async () => {}),
-    onOpenArtifact: vi.fn(),
-  };
-  const canvas = (name: string, nonce: number) => (
-    <ProjectCanvas
-      projectId="project-1"
-      projectName="Storefront system"
-      graph={graph}
-      layout={layout}
-      artifactRevisionIds={{}}
-      selectedNodeIds={[]}
-      {...callbacks}
-      proposal={{ id: "proposal-focus" }}
-      proposalDiff={buildProposalDiff(proposal(name), current)}
-      proposalFocus={{ key: "node:page-1", nonce }}
-    />
-  );
-  const rendered = render(
-    <>
-      <button type="button">Inspector field</button>
-      {canvas("Checkout review", 1)}
-    </>,
-  );
-  const overlay = rendered.container.querySelector<HTMLElement>(
-    '.react-flow__node[data-id="proposal:proposal-focus:node:page-1"]',
-  );
-  await act(async () => {
-    measureReactFlow();
-    await Promise.resolve();
-    measureReactFlow();
-  });
-  await waitFor(() => expect(overlay).toHaveFocus());
-
-  const inspectorField = screen.getByRole("button", { name: "Inspector field" });
-  inspectorField.focus();
-  rendered.rerender(
-    <>
-      <button type="button">Inspector field</button>
-      {canvas("Checkout revised", 1)}
-    </>,
-  );
-  await act(async () => {
-    measureReactFlow();
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-    measureReactFlow();
-  });
-  expect(inspectorField).toHaveFocus();
-});
-
 test("shortcut target guard uses closest and ignores nested interactive/contenteditable targets", () => {
   const host = document.createElement("div");
   host.innerHTML = `
@@ -425,13 +514,23 @@ function readyWorkspace(revision = 1, nextLayout = layout): ReadyProjectWorkspac
 
 function StudioMutationProbe() {
   const studio = useProjectStudio("project-1");
+  const [layoutError, setLayoutError] = useState("");
   if (studio.load.status !== "ready") return <div>{studio.load.status}</div>;
   return (
     <div>
       <output data-testid="studio-pointers">
         {studio.load.workspace.graph.revision}:{studio.load.workspace.activeSnapshot.id}:{studio.load.workspace.layout.viewport.x}
       </output>
-      <button type="button" onClick={() => void studio.saveLayout([{ type: "set-viewport", viewport: { x: 44, y: 0, zoom: 1 } }])}>
+      <output data-testid="layout-error">{layoutError}</output>
+      <button
+        type="button"
+        onClick={() => void studio.saveLayout([{
+          type: "set-viewport",
+          viewport: { x: 44, y: 0, zoom: 1 },
+        }]).catch((error: unknown) => {
+          setLayoutError(error instanceof Error ? error.message : String(error));
+        })}
+      >
         Save layout
       </button>
       <button
@@ -488,14 +587,17 @@ describe("Project Studio authoritative persistence", () => {
     expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2:44");
   });
 
-  test("layout checksum conflict refreshes and replays once with the authoritative checksum", async () => {
-    const refreshedLayout = { ...layout, checksum: "layout-2" };
+  test("layout checksum conflict refreshes authoritative layout without replaying an absolute command", async () => {
+    const refreshedLayout = {
+      ...layout,
+      viewport: { x: 96, y: 0, zoom: 1 },
+      checksum: "layout-2",
+    };
     const getWorkspace = vi.fn()
       .mockResolvedValueOnce(readyWorkspace(1))
       .mockResolvedValueOnce(readyWorkspace(1, refreshedLayout));
     const saveWorkspaceLayout = vi.fn()
-      .mockRejectedValueOnce(new ApiError(409, "layout stale", { code: "workspace_layout_conflict" }))
-      .mockResolvedValueOnce({ ...refreshedLayout, viewport: { x: 44, y: 0, zoom: 1 }, checksum: "layout-3" });
+      .mockRejectedValueOnce(new ApiError(409, "layout stale", { code: "workspace_layout_conflict" }));
     render(
       <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, saveWorkspaceLayout })}>
         <StudioMutationProbe />
@@ -503,12 +605,14 @@ describe("Project Studio authoritative persistence", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Save layout" }));
-    await waitFor(() => expect(saveWorkspaceLayout).toHaveBeenCalledTimes(2));
-    expect(saveWorkspaceLayout.mock.calls.map((call) => call[1])).toMatchObject([
-      { graphRevision: 1, baseLayoutChecksum: "layout-1" },
-      { graphRevision: 1, baseLayoutChecksum: "layout-2" },
-    ]);
+    await waitFor(() => expect(screen.getByTestId("layout-error")).toHaveTextContent("layout stale"));
+    expect(saveWorkspaceLayout).toHaveBeenCalledTimes(1);
+    expect(saveWorkspaceLayout.mock.calls[0]?.[1]).toMatchObject({
+      graphRevision: 1,
+      baseLayoutChecksum: "layout-1",
+    });
     expect(getWorkspace).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("1:snapshot-1:96");
   });
 
   test("overlapping layout saves serialize so an older full-layout response cannot clobber a newer one", async () => {

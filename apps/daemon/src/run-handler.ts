@@ -22,7 +22,7 @@ import {
   type GenerateEvent,
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
-import { defaultRegistry } from "../../../packages/design/src/index.ts";
+import { defaultRegistry, type DesignRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, selectSkill, defaultSkillsDir, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
 import { lintArtifact, applyIgnores } from "../../../packages/quality/src/index.ts";
@@ -38,7 +38,7 @@ import {
 } from "./prototype-version-snapshot.ts";
 import { ensureDevServer, releaseVariantRuntime, workingTreeFingerprint } from "./project-runtime.ts";
 import { bestVersion } from "./best-version.ts";
-import type { QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
+import type { Project, QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { requirePreviewLease } from "./preview-lease.ts";
@@ -133,6 +133,85 @@ let cachedSkills: SkillInfo[] | null = null;
 function skills(): SkillInfo[] {
   if (!cachedSkills) cachedSkills = loadSkills();
   return cachedSkills;
+}
+
+export interface ProjectAgentPromptInput {
+  readonly project: Project;
+  readonly settings: Settings;
+  readonly brief: string;
+  readonly designRegistry?: DesignRegistry;
+  readonly imageGenerationEnabled?: boolean;
+  /**
+   * Exact per-Task reconstruction semantic. Generation Plan callers freeze it
+   * from the Task's pinned Capture Revision; legacy Runs retain Project-level
+   * behavior when the value is omitted.
+   */
+  readonly hasExactSharinganCapture?: boolean;
+}
+
+export interface ProjectAgentPromptResult {
+  readonly systemPrompt: string;
+  readonly skill: SkillInfo | null;
+  readonly designSystemName: string | null;
+}
+
+/**
+ * Shared production prompt composition for legacy single-artifact Runs and
+ * Generation Plan Artifact leaves. Keeping this boundary shared prevents the
+ * multi-Artifact runtime from silently losing design systems, progressive
+ * skill disclosure, craft rules, inferred dials, or Sharingan fidelity rules.
+ */
+export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): ProjectAgentPromptResult {
+  const { project, settings } = input;
+  const hasExactSharinganCapture = input.hasExactSharinganCapture ?? project.sharingan;
+  const brief = input.brief.trim();
+  const registry = input.designRegistry ?? defaultRegistry();
+  const designSystemId = hasExactSharinganCapture
+    ? undefined
+    : (project.designSystemId ?? settings.defaultDesignSystemId);
+  const designSystem = designSystemId
+    ? (registry.get(designSystemId) ?? registry.default())
+    : null;
+  const catalog = skills();
+  const skill = hasExactSharinganCapture
+    ? null
+    : project.skillId
+      ? findSkill(catalog, project.skillId)
+      : selectSkill(brief, catalog);
+  const craftSlugs = hasExactSharinganCapture
+    ? []
+    : Array.from(new Set([
+        ...(skill?.craft ?? []),
+        ...(designSystem?.craft?.applies ?? []),
+      ]));
+  const craft = hasExactSharinganCapture ? null : loadCraftSections(craftSlugs);
+  const systemPrompt = hasExactSharinganCapture
+    ? buildSharinganSystemPrompt()
+    : composeSystemPrompt({
+        designSystem: designSystem ?? registry.default(),
+        skills: catalog.map((candidate) => ({
+          id: candidate.id,
+          name: candidate.name,
+          description: candidate.description,
+          triggers: candidate.triggers,
+          mode: candidate.mode,
+          libraries: candidate.libraries,
+          pinned: project.skillId ? candidate.id === project.skillId : false,
+        })),
+        skillsDir: defaultSkillsDir(),
+        userInstructions: settings.customInstructions || undefined,
+        craft: craft || undefined,
+        imageGen: input.imageGenerationEnabled === true,
+        mode: project.mode,
+        dials: inferDials(brief),
+      });
+  return Object.freeze({
+    systemPrompt,
+    skill,
+    designSystemName: hasExactSharinganCapture
+      ? null
+      : (designSystem ?? registry.default()).name,
+  });
 }
 
 /** Build the production agent runner from settings (BYOK). */
@@ -420,7 +499,7 @@ function visualReviewMessage(input: {
   findings: QualityFinding[];
 }): string {
   const agentCommand = reviewerAgentCommand(input.settings, input.agentCommand);
-  const model = reviewerModel(input.settings, input.model);
+  const model = reviewerModel(input.settings, input.model, input.agentCommand);
   const reviewer = [agentCommand, model].filter((value): value is string => !!value && value.trim().length > 0).join(" / ") || "selected reviewer";
   const summary = input.findings.find((finding) => typeof finding.reviewSummary === "string" && finding.reviewSummary.trim())?.reviewSummary;
   return JSON.stringify({
@@ -477,7 +556,7 @@ async function runVisualQa(
       htmlPath,
       settings,
       agentCommand: reviewerAgentCommand(settings, agentCommand),
-      model: reviewerModel(settings, model),
+      model: reviewerModel(settings, model, agentCommand),
       // The fingerprint is about who GENERATED the artifact, not who reviews it.
       provider: providerFamily(getProvider(agentCommand)?.id, model),
       brief,
@@ -607,47 +686,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     }
     conversation ??= store.createConversation(project.id);
 
-  // Resolve the active design system (the project's, else the settings default).
-  // Sharingan reconstructs from captured source pixels/assets, so it must not inherit
-  // a project/default design system or brand craft guidance.
-  const registry = deps.designRegistry ?? defaultRegistry();
-  const designSystemId = project.sharingan ? undefined : (project.designSystemId ?? settings.defaultDesignSystemId);
-  const designSystem = designSystemId ? (registry.get(designSystemId) ?? registry.default()) : null;
-
-  // Best-guess skill: an explicit project.skillId pins it; otherwise the brief's
-  // top trigger match. This is NOT forced on the agent — it only seeds craft
-  // selection, research angles, and attribution. Skills are chosen at RUNTIME:
-  // the agent gets the full catalog (below) and reads whichever playbook(s) fit,
-  // on demand — like Claude Code / Agent Skills, not a single skill picked upfront.
-  const skill = project.skillId ? findSkill(skills(), project.skillId) : selectSkill(body.brief.trim(), skills());
-
-  // Craft = the union of the best-guess skill's required sections and the brand's applied ones.
-  const craftSlugs = project.sharingan ? [] : Array.from(new Set([...(skill?.craft ?? []), ...(designSystem?.craft?.applies ?? [])]));
-  const craft = project.sharingan ? null : loadCraftSections(craftSlugs);
-
-  const systemPrompt = project.sharingan
-    ? buildSharinganSystemPrompt()
-    : composeSystemPrompt({
-        designSystem: designSystem ?? registry.default(),
-        // The whole catalog, for on-demand loading. A pinned project.skillId is
-        // surfaced first and flagged, but the agent still judges + reads on its own.
-        skills: skills().map((s) => ({
-          id: s.id,
-          name: s.name,
-          description: s.description,
-          triggers: s.triggers,
-          mode: s.mode,
-          libraries: s.libraries,
-          pinned: project.skillId ? s.id === project.skillId : false,
-        })),
-        skillsDir: defaultSkillsDir(),
-        userInstructions: settings.customInstructions || undefined,
-        craft: craft || undefined,
-        imageGen: Boolean(imageApiKey && imageBaseUrl),
-        mode: project.mode,
-        // Variance/motion/density inferred from the brief — bind the design to explicit targets.
-        dials: inferDials(body.brief.trim()),
-      });
+  const { systemPrompt, skill, designSystemName } = buildProjectAgentPrompt({
+    project,
+    settings,
+    brief: body.brief,
+    designRegistry: deps.designRegistry,
+    imageGenerationEnabled: Boolean(imageApiKey && imageBaseUrl),
+  });
 
   const brief = body.brief.trim();
   const moodboardRefs = normalizeProjectMoodboardRefs(body.moodboardRefs);
@@ -842,7 +887,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         dir,
         brief: visibleBrief,
         skill: skill ? { id: skill.id, name: skill.name } : undefined,
-        designSystemName: (designSystem ?? registry.default()).name,
+        designSystemName: designSystemName ?? undefined,
         hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
         agentCommand: researchAgentCommand(settings, runAgentCommand),
         model: researchModel(settings, runModel),

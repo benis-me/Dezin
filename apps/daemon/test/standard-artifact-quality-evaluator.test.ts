@@ -34,7 +34,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-test("candidate inspection excludes only the fenced top-level Sharingan sidecar", async () => {
+test("candidate inspection excludes both fenced Sharingan materialization roots", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-quality-sharingan-sidecar-"));
   try {
     git(root, "init", "-q");
@@ -49,11 +49,14 @@ test("candidate inspection excludes only the fenced top-level Sharingan sidecar"
     };
     mkdirSync(join(root, ".sharingan"), { recursive: true });
     writeFileSync(join(root, ".sharingan", "pages.json"), "{\"pages\":[]}\n");
+    mkdirSync(join(root, "public", "_assets"), { recursive: true });
+    writeFileSync(join(root, "public", "_assets", "source.png"), "immutable source asset\n");
 
     const withSidecar = await inspectStandardArtifactCandidate({
       repositoryDir: root,
       worktreeDir: root,
       candidate,
+      immutableSharinganSidecar: true,
       signal: new AbortController().signal,
     });
     assert.equal(withSidecar.status, "");
@@ -63,10 +66,12 @@ test("candidate inspection excludes only the fenced top-level Sharingan sidecar"
       repositoryDir: root,
       worktreeDir: root,
       candidate,
+      immutableSharinganSidecar: true,
       signal: new AbortController().signal,
     });
     assert.match(withSourceMutation.status, /package\.json/);
     assert.doesNotMatch(withSourceMutation.status, /\.sharingan/);
+    assert.doesNotMatch(withSourceMutation.status, /public\/_assets/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -172,6 +177,7 @@ function infrastructure(input: {
       },
     } as unknown as ArtifactRunInfrastructureInput["claim"],
     contextPack,
+    hasExactSharinganCapture: input.sharingan === true,
     repositoryDir: "/repo",
     worktreeDir: "/repo/worktree",
   };
@@ -322,6 +328,14 @@ test("production evaluator audits the exact immutable frames and emits publishab
   assert.equal(deps.calls.visualInput?.signal, signal);
   assert.equal(deps.calls.visualInput?.settings.visualQaEnabled, true);
   assert.equal(deps.calls.visualInput?.renderUrl, `http://127.0.0.1:4173/#dezin-bridge=${"n".repeat(43)}`);
+  assert.ok(deps.calls.visualInput?.screenshotEvidenceRoot,
+    "the evaluator must grant the visual reviewer one exact daemon-owned capture root");
+  assert.equal(
+    deps.calls.visualInput?.screenshotPath,
+    join(deps.calls.visualInput!.screenshotEvidenceRoot!, "screenshot.png"),
+  );
+  assert.notEqual(deps.calls.visualInput?.screenshotEvidenceRoot, infra.worktreeDir,
+    "generated capture authority stays separate from candidate/source evidence authority");
   assert.equal(deps.calls.runtimeInput?.projectId, "project-1");
   assert.equal((result.evidence.visualEvidence as Array<{ owner: { projectId: string }; frame: { id: string } }>)[0]?.owner.projectId, "project-1");
   assert.equal((result.evidence.visualEvidence as Array<{ frame: { id: string } }>)[0]?.frame.id, FRAME.id);
@@ -329,6 +343,78 @@ test("production evaluator audits the exact immutable frames and emits publishab
   assert.equal(deps.calls.acquire, 1);
   assert.equal(deps.calls.release, 1);
   assert.equal(deps.calls.persist, 1);
+});
+
+test("production evaluator applies persisted rule and selector quality ignores only to advisory findings", async () => {
+  const infra = infrastructure();
+  const deps = dependencies({
+    lint() {
+      return [{
+        severity: "P2",
+        id: "low-contrast",
+        message: "CTA contrast is below the project threshold.",
+        fix: "Increase foreground contrast.",
+        selector: ".checkout-cta",
+      }];
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    qualityIgnores: [{ ruleId: "low-contrast", selector: ".checkout-cta" }],
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.quality.findings, []);
+  assert.deepEqual(result.repairFindings, []);
+});
+
+test("production evaluator never lets a persisted ignore weaken the immutable blocking floor", async () => {
+  const infra = infrastructure();
+  const deps = dependencies({
+    lint() {
+      return [{
+        severity: "P1",
+        id: "low-contrast",
+        message: "CTA contrast is below the project threshold.",
+        fix: "Increase foreground contrast.",
+        selector: ".checkout-cta",
+      }];
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    qualityIgnores: [{ ruleId: "low-contrast", selector: ".checkout-cta" }],
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, false);
+  const quality = result.quality as { state: string; findings: Array<{ id: string }> };
+  assert.equal(quality.state, "failed");
+  assert.equal(quality.findings[0]?.id, "low-contrast");
+  assert.equal(result.repairFindings[0]?.id, "low-contrast");
 });
 
 test("production evaluator rejects an unsafe Store Project owner before acquiring runtime", () => {

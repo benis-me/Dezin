@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
-import { writeProbeCli, probeCliScript } from "../src/sharingan-probe-cli.ts";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  immutableProbeCliScript,
+  writeProbeCli,
+  probeCliScript,
+} from "../src/sharingan-probe-cli.ts";
 
 test("probeCliScript bakes the base URL in but keeps the un-baked guard", () => {
   const s = probeCliScript("http://127.0.0.1:7457/api/sharingan/abc");
@@ -15,6 +19,39 @@ test("probeCliScript bakes the base URL in but keeps the un-baked guard", () => 
   assert.match(s, /function renderMap/, "has the render-map command");
   assert.match(s, /function sourceSummary/, "has the source-summary command");
   assert.match(s, /function sourceScaffold/, "has the source-scaffold command");
+});
+
+test("the immutable exported probe rejects mutable source-scaffold before changing either pinned root", () => {
+  const dir = mkdtempSync(join(tmpdir(), "probe-immutable-"));
+  const sharingan = join(dir, ".sharingan");
+  const assets = join(dir, "public", "_assets");
+  mkdirSync(sharingan, { recursive: true });
+  mkdirSync(assets, { recursive: true });
+  const probe = join(sharingan, "probe.mjs");
+  const pages = join(sharingan, "pages.json");
+  const asset = join(assets, "source.png");
+  writeFileSync(probe, immutableProbeCliScript());
+  writeFileSync(pages, "{\"pages\":[]}\n");
+  writeFileSync(asset, "exact-source-asset\n");
+  const before = {
+    probe: readFileSync(probe),
+    pages: readFileSync(pages),
+    asset: readFileSync(asset),
+  };
+
+  const result = spawnSync(process.execPath, [probe, "source-scaffold"], {
+    cwd: dir,
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /immutable.*--stdout/i);
+  assert.deepEqual(readFileSync(probe), before.probe);
+  assert.deepEqual(readFileSync(pages), before.pages);
+  assert.deepEqual(readFileSync(asset), before.asset);
+  assert.equal(existsSync(join(sharingan, "region-plan.json")), false);
+  assert.equal(existsSync(join(sharingan, "source-scaffold")), false);
 });
 
 test("writeProbeCli writes a runnable .sharingan/probe.mjs — help + outline of a captured dom.json", () => {

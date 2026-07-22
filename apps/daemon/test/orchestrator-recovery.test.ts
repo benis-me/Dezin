@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GenerationTaskRecoverySummary } from "../../../packages/core/src/index.ts";
+import {
+  GenerationPlanCompileError,
+  type GenerationTaskRecoverySummary,
+} from "../../../packages/core/src/index.ts";
 import {
   recoverGenerationPlans,
   type GenerationPlanRecoveryDeps,
@@ -22,7 +25,10 @@ function recoverySummary(
 
 test("recoverGenerationPlans isolates each approved shell and continues startup recovery after a compile failure", async () => {
   const order: string[] = [];
-  const compileError = new Error("proposal revision is no longer valid");
+  const compileError = new GenerationPlanCompileError(
+    "proposal-base-mismatch",
+    "proposal revision is no longer valid",
+  );
   const warnings: Array<{ context: GenerationPlanRecoveryWarningContext; message: string }> = [];
   const deps = {
     store: {
@@ -139,7 +145,7 @@ test("recoverGenerationPlans preserves lease dispositions while merging stable u
 
 test("recoverGenerationPlans isolates asynchronous compilation per approved shell", async () => {
   const order: string[] = [];
-  const compileError = new Error("async compile failed");
+  const compileError = new GenerationPlanCompileError("unsupported-proposal", "async compile failed");
   const warnings: Array<{ context: unknown; message: string }> = [];
   const deps = {
     store: {
@@ -180,6 +186,46 @@ test("recoverGenerationPlans isolates asynchronous compilation per approved shel
   }]);
 });
 
+test("recoverGenerationPlans processes later shells but fails startup when an approved shell remains unsealed", async () => {
+  const order: string[] = [];
+  const compileError = new Error("sqlite write failed before compilation could settle");
+  const deps = {
+    store: {
+      listApprovedGenerationPlanShells: () => [
+        { id: "plan-bad" },
+        { id: "plan-after" },
+      ],
+      recoverExpiredGenerationTaskAttempts() {
+        order.push("recover-expired");
+        return recoverySummary();
+      },
+    },
+    planService: {
+      compileAndEnqueueApprovedShell(planId: string) {
+        order.push(`compile:${planId}`);
+        if (planId === "plan-bad") throw compileError;
+      },
+      async reconcileNeedsRebaseTasks() {
+        order.push("reconcile-needs-rebase");
+        return { planIds: [] };
+      },
+    },
+    clock: { now: () => 95_000 },
+    logger: { warn() {} },
+  } satisfies GenerationPlanRecoveryDeps;
+
+  await assert.rejects(
+    recoverGenerationPlans(deps),
+    (error: unknown) => error instanceof AggregateError && error.errors[0] === compileError,
+  );
+  assert.deepEqual(order, [
+    "compile:plan-bad",
+    "compile:plan-after",
+    "recover-expired",
+    "reconcile-needs-rebase",
+  ]);
+});
+
 test("recoverGenerationPlans observes expired-attempt recovery failure and still reconciles rebase work", async () => {
   const order: string[] = [];
   const expiredError = new Error("sqlite busy during lease recovery");
@@ -217,7 +263,7 @@ test("recoverGenerationPlans observes expired-attempt recovery failure and still
   }]);
 });
 
-test("recoverGenerationPlans observes shell-list and rebase failures without discarding completed lease recovery", async () => {
+test("recoverGenerationPlans fails startup after a shell-list failure without skipping other recovery", async () => {
   const listError = new Error("approved shell scan failed");
   const rebaseError = new Error("rebase adapter unavailable");
   const warnings: Array<{ context: unknown; message: string }> = [];
@@ -247,15 +293,10 @@ test("recoverGenerationPlans observes shell-list and rebase failures without dis
     },
   } satisfies GenerationPlanRecoveryDeps;
 
-  const summary = await recoverGenerationPlans(deps);
-
-  assert.deepEqual(summary, {
-    planIds: ["plan-expired"],
-    retriedTaskIds: ["task-retried"],
-    needsRebaseTaskIds: [],
-    cancelledTaskIds: [],
-    failedTaskIds: [],
-  });
+  await assert.rejects(
+    recoverGenerationPlans(deps),
+    (error: unknown) => error instanceof AggregateError && error.errors[0] === listError,
+  );
   assert.deepEqual(warnings, [
     {
       context: { operation: "list-approved-shells", error: listError },

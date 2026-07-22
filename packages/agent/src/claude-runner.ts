@@ -70,6 +70,12 @@ export interface NodeSpawnerOptions {
   stdoutLimitBytes?: number;
   /** Retained stderr tail. Default 1 MiB. */
   stderrLimitBytes?: number;
+  /**
+   * Whether to merge the daemon's ambient environment into the child. Defaults
+   * to true for existing coding-agent runs. Security-sensitive transports set
+   * this to false and provide an exact, allowlisted SpawnInput.env instead.
+   */
+  inheritEnvironment?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -96,7 +102,9 @@ export class NodeSpawner implements ProcessSpawner {
 
   run(input: SpawnInput): Promise<SpawnOutput> {
     return new Promise<SpawnOutput>((resolve, reject) => {
-      const env = agentSpawnEnv(input.env);
+      const env = this.options.inheritEnvironment === false
+        ? { ...(input.env ?? {}) }
+        : agentSpawnEnv(input.env);
       if (input.signal?.aborted) return reject(abortError());
       const child = spawn(input.command, input.args, {
         cwd: input.cwd,

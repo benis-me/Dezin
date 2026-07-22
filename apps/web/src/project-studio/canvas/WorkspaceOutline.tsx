@@ -61,6 +61,19 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
           >
             Open
           </Link>
+        ) : node.data.resourceId ? (
+          <Link
+            to={`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(node.data.resourceId)}${
+              node.data.revisionId === null
+                ? ""
+                : `/revisions/${encodeURIComponent(node.data.revisionId)}`
+            }`}
+            className="dezin-workspace-outline__action"
+            aria-label={`Open ${node.data.name}`}
+            onKeyDown={stopCanvasShortcuts}
+          >
+            Open
+          </Link>
         ) : node.data.kind === "group" ? (
           <button
             type="button"

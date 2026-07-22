@@ -1,6 +1,7 @@
 import { CircleAlert, Copy, LoaderCircle, MousePointer2, RotateCw, X } from "lucide-react";
 import { useState, type RefObject } from "react";
 import type { WorkspaceArtifact, WorkspaceRenderFrameSpec } from "../../lib/api.ts";
+import { previewDocumentSrc } from "../../lib/preview-channel.ts";
 import type { RuntimeError } from "../../lib/preview-runtime-errors.ts";
 import { previewSandboxForSrc } from "../../lib/preview-sandbox.ts";
 import type { ArtifactPreviewController } from "./useArtifactPreview.ts";
@@ -168,8 +169,8 @@ export function ArtifactPreviewSurface({
           <iframe
             ref={iframeRef}
             title={`${artifact.name} preview`}
-            src={preview.lease.url}
-            sandbox={previewSandboxForSrc(preview.lease.url)}
+            src={previewDocumentSrc(preview.lease.url)}
+            sandbox={previewSandboxForSrc(previewDocumentSrc(preview.lease.url))}
             onLoad={onPreviewLoad}
             style={{ background: frameBackground }}
           />

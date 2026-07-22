@@ -134,12 +134,15 @@ const GENERATION_FAILURE_CLASSES = new Set<GenerationTaskFailureClass>([
 const GENERATION_PLAN_EVENT_TYPES = new Set<GenerationPlanEventType>([
   "plan-queued",
   "plan-compile-failed",
+  "plan-cancel-requested",
   "task-materialization-failed",
   "task-blocked-context",
   "task-materialized",
   "task-running",
   "task-candidate-ready",
   "task-needs-rebase",
+  "task-rebase-disposition",
+  "task-retry-requested",
   "task-retry-wait",
   "task-succeeded",
   "task-failed",
@@ -661,6 +664,7 @@ function generationTaskAttemptHashPayload(input: GenerationTaskAttemptHashInput)
     planId: input.planId,
     workspaceId: input.workspaceId,
     attempt: input.attempt,
+    executionEpoch: input.executionEpoch ?? 0,
     target: input.target,
     baseRevisionId: input.baseRevisionId,
     sourceCommitHash: input.sourceCommitHash,
@@ -675,6 +679,13 @@ function generationTaskAttemptHashPayload(input: GenerationTaskAttemptHashInput)
     retryContextPolicy: input.retryContextPolicy,
     executionMode: input.executionMode,
   };
+}
+
+function generationTaskAttemptPreEpochHashPayload(
+  input: GenerationTaskAttemptHashInput,
+): Record<string, unknown> {
+  const { executionEpoch: _executionEpoch, ...payload } = generationTaskAttemptHashPayload(input);
+  return payload;
 }
 
 function generationTaskAttemptLegacyHashPayload(
@@ -709,6 +720,13 @@ function generationTaskAttemptLegacyInputHash(input: GenerationTaskAttemptHashIn
   return generationHash(
     "generation-task-attempt-input",
     generationTaskAttemptLegacyHashPayload(input),
+  );
+}
+
+function generationTaskAttemptPreEpochInputHash(input: GenerationTaskAttemptHashInput): string {
+  return generationHash(
+    "generation-task-attempt-input",
+    generationTaskAttemptPreEpochHashPayload(input),
   );
 }
 
@@ -769,6 +787,7 @@ function normalizeGenerationTaskAttemptInputInternal(
     "planId",
     "workspaceId",
     "attempt",
+    "executionEpoch",
     "target",
     "baseRevisionId",
     "sourceCommitHash",
@@ -782,6 +801,7 @@ function normalizeGenerationTaskAttemptInputInternal(
     "componentPins",
     "retryContextPolicy",
     "executionMode",
+    "requiredContextPackId",
   ], "Generation Task Attempt input");
   const workspaceId = generationCanonicalString(input.workspaceId, "Generation Task Attempt Workspace id");
   const target = normalizeGenerationTaskTarget(input.target);
@@ -844,6 +864,9 @@ function normalizeGenerationTaskAttemptInputInternal(
     planId: generationCanonicalString(input.planId, "Generation Task Attempt Plan id"),
     workspaceId,
     attempt: generationSafeInteger(input.attempt, "Generation Task Attempt number", 1),
+    executionEpoch: input.executionEpoch === undefined
+      ? 0
+      : generationSafeInteger(input.executionEpoch, "Generation Task Attempt execution epoch", 0),
     target,
     baseRevisionId: generationNullableString(input.baseRevisionId, "Generation Task Attempt base Revision id"),
     sourceCommitHash,
@@ -1440,7 +1463,7 @@ export function asGenerationTask(rowValue: Row, dependencyRowsValue: readonly Ro
     "target_artifact_id", "target_track_id", "target_resource_id", "payload_json", "intent_hash",
     "capabilities_json", "qa_profile_json", "resource_limits_json", "idempotency_key", "status",
     "blocked_reason", "blocked_by_task_id", "pending_context_policy", "current_attempt",
-    "materialization_failures", "failure_class", "error_json", "next_eligible_at", "result_revision_id",
+    "materialization_failures", "rebase_count", "failure_class", "error_json", "next_eligible_at", "result_revision_id",
     "result_resource_revision_id", "result_snapshot_id", "created_at", "finished_at",
   ], "Generation Task row");
   const id = generationExactString(row.id, "Generation Task id");
@@ -1495,6 +1518,7 @@ export function asGenerationTask(rowValue: Row, dependencyRowsValue: readonly Ro
       "Generation Task materialization failures",
       0,
     ),
+    rebaseCount: generationSafeInteger(row.rebase_count ?? 0, "Generation Task rebase count", 0),
     failureClass: generationFailureClass(row.failure_class, "Generation Task failure class"),
     error,
     nextEligibleAt: generationStoredNullableInteger(row.next_eligible_at, "Generation Task next eligible at"),
@@ -1679,7 +1703,7 @@ export function asGenerationTaskAttempt(
 ): GenerationTaskAttempt {
   const row = generationRecord(rowValue, "Generation Task Attempt row");
   generationAllowFields(row, [
-    "task_id", "plan_id", "workspace_id", "attempt", "target_artifact_id", "target_track_id",
+    "task_id", "plan_id", "workspace_id", "attempt", "execution_epoch", "target_artifact_id", "target_track_id",
     "target_resource_id", "base_revision_id", "source_commit_hash", "source_tree_hash",
     "expected_snapshot_id", "context_pack_id", "kernel_revision_id",
     "materialization_sealed", "attempt_origin", "predecessor_attempt", "automatic_retry_index",
@@ -1782,6 +1806,11 @@ export function asGenerationTaskAttempt(
     planId,
     workspaceId,
     attempt: attemptNumber,
+    executionEpoch: generationSafeInteger(
+      row.execution_epoch ?? 0,
+      "Generation Task Attempt execution epoch",
+      0,
+    ),
     target,
     baseRevisionId: generationStoredNullableString(
       row.base_revision_id,
@@ -1816,8 +1845,9 @@ export function asGenerationTaskAttempt(
   }, { allowLegacyArtifactSourceBase: true });
   const storedInputHash = generationExactString(row.input_hash, "Generation Task Attempt input hash");
   if (storedInputHash !== input.inputHash) {
-    if (input.sourceCommitHash !== null
-      || storedInputHash !== generationTaskAttemptLegacyInputHash(input)) {
+    if (storedInputHash !== generationTaskAttemptPreEpochInputHash(input)
+      && (input.sourceCommitHash !== null
+        || storedInputHash !== generationTaskAttemptLegacyInputHash(input))) {
       throw new WorkspaceStoreCodecError("Generation Task Attempt input hash does not match its immutable input");
     }
     input = { ...input, inputHash: storedInputHash };

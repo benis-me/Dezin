@@ -583,6 +583,7 @@ test("PreviewTarget parsing is exhaustive and rejects unknown transport fields",
     { kind: "artifact-revision", projectId: "project", revisionId: "revision" },
     { kind: "run-candidate", projectId: "project", runId: "run" },
     { kind: "workspace-flow", projectId: "project", snapshotId: "snapshot", startArtifactId: "page" },
+    { kind: "workspace-flow", projectId: "project", snapshotId: "snapshot", startArtifactId: "page", stateKey: "receipt" },
     {
       kind: "component-state",
       projectId: "project",
@@ -605,6 +606,63 @@ test("PreviewTarget parsing is exhaustive and rejects unknown transport fields",
     () => parsePreviewTarget({ kind: "artifact-current", projectId: "", artifactId: "page" }),
     /projectId must be a non-empty string/i,
   );
+});
+
+test("workspace-flow stateKey resolves and revalidates only an exact frozen Revision RenderSpec state", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const exact = fixture.createRevision({
+      renderSpec: {
+        entry: "index.html",
+        frames: [
+          { id: "desktop", name: "Desktop", width: 1440, height: 900 },
+          { id: "receipt", name: "Receipt", width: 1440, height: 900, initialState: "receipt-ready" },
+        ],
+      },
+    });
+    const target = {
+      kind: "workspace-flow" as const,
+      projectId: fixture.projectId,
+      snapshotId: exact.snapshotId,
+      startArtifactId: fixture.artifactId,
+      stateKey: "receipt-ready",
+    };
+    const resolved = await resolvePreviewTarget(fixture, target);
+    const withoutState = await resolvePreviewTarget(fixture, {
+      kind: "workspace-flow",
+      projectId: fixture.projectId,
+      snapshotId: exact.snapshotId,
+      startArtifactId: fixture.artifactId,
+    });
+
+    assert.equal(resolved.revisionId, exact.revisionId);
+    assert.equal(resolved.stateKey, "receipt-ready");
+    assert.notEqual(resolved.targetKey, withoutState.targetKey);
+    assert.deepEqual(revalidateResolvedPreviewTarget(fixture, resolved), resolved);
+    await assert.rejects(
+      resolvePreviewTarget(fixture, { ...target, stateKey: "missing-state" }),
+      /RenderSpec state missing-state/i,
+    );
+
+    const duplicate = fixture.createRevision({
+      renderSpec: {
+        entry: "index.html",
+        frames: [
+          { id: "one", name: "One", width: 1440, height: 900, initialState: "duplicate" },
+          { id: "two", name: "Two", width: 1440, height: 900, initialState: "duplicate" },
+        ],
+      },
+    });
+    await assert.rejects(resolvePreviewTarget(fixture, {
+      kind: "workspace-flow",
+      projectId: fixture.projectId,
+      snapshotId: duplicate.snapshotId,
+      startArtifactId: fixture.artifactId,
+      stateKey: "duplicate",
+    }), /ambiguous/i);
+  } finally {
+    fixture.close();
+  }
 });
 
 test("current, revision, candidate, and flow targets resolve to immutable owned revisions", async () => {
@@ -656,6 +714,197 @@ test("current, revision, candidate, and flow targets resolve to immutable owned 
     });
     assert.equal(nextCurrent.revisionId, second.revisionId);
     assert.notEqual(nextCurrent.targetKey, current.targetKey);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("preview resolution and lease revalidation never build the full Workspace history bundle", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const historical = fixture.createRevision();
+    const current = fixture.createRevision();
+    const originalBundle = fixture.store.workspace.getBundleByProjectId.bind(fixture.store.workspace);
+    const originalSnapshots = fixture.store.workspace.listSnapshots.bind(fixture.store.workspace);
+    const originalRevisions = fixture.store.workspace.listRevisions.bind(fixture.store.workspace);
+    fixture.store.workspace.getBundleByProjectId = (() => assert.fail(
+      "Preview Target must not build a full Workspace history bundle",
+    )) as typeof fixture.store.workspace.getBundleByProjectId;
+    fixture.store.workspace.listSnapshots = (() => assert.fail(
+      "Preview Target must not scan Snapshot history",
+    )) as typeof fixture.store.workspace.listSnapshots;
+    fixture.store.workspace.listRevisions = (() => assert.fail(
+      "Preview Target must not scan Artifact Revision history",
+    )) as typeof fixture.store.workspace.listRevisions;
+    try {
+      const flow = await resolvePreviewTarget(fixture, {
+        kind: "workspace-flow",
+        projectId: fixture.projectId,
+        snapshotId: historical.snapshotId,
+        startArtifactId: fixture.artifactId,
+      });
+      assert.equal(flow.revisionId, historical.revisionId);
+      assert.equal(flow.snapshotId, historical.snapshotId);
+
+      const active = await resolvePreviewTarget(fixture, {
+        kind: "artifact-current",
+        projectId: fixture.projectId,
+        artifactId: fixture.artifactId,
+      });
+      assert.equal(active.revisionId, current.revisionId);
+      assert.deepEqual(revalidateResolvedPreviewTarget(fixture, flow), flow);
+      assert.deepEqual(revalidateResolvedPreviewTarget(fixture, active), active);
+    } finally {
+      fixture.store.workspace.getBundleByProjectId = originalBundle;
+      fixture.store.workspace.listSnapshots = originalSnapshots;
+      fixture.store.workspace.listRevisions = originalRevisions;
+    }
+  } finally {
+    fixture.close();
+  }
+});
+
+test("current Preview uses shallow Snapshot pins while historical replay keeps full lineage validation", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const first = fixture.createRevision({ source: "<main>First</main>" });
+    const second = fixture.createRevision({ source: "<main>Second</main>" });
+    const resolvedSecond = await resolvePreviewTarget(fixture, {
+      kind: "artifact-current",
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+    });
+    const third = fixture.createRevision({ source: "<main>Third</main>" });
+    fixture.store.db.exec("DROP TRIGGER workspace_snapshot_update_immutable");
+    fixture.store.db.prepare("UPDATE workspace_snapshots SET provenance_json = '{' WHERE id = ?")
+      .run(first.snapshotId);
+
+    assert.deepEqual(revalidateResolvedPreviewTarget(fixture, resolvedSecond), resolvedSecond);
+    const lease = await acquirePreviewTargetLease({
+      ...fixture,
+      ensureDevServer: async () => ({
+        leaseId: "shallow-current-lease",
+        url: "http://127.0.0.1:4312",
+        bridgeNonce: "shallow_current_preview_bridge_nonce_abcdefghijklmnopqrstuvwxyz0123456789",
+        expiresAt: 99_000,
+        release: async () => {},
+      }),
+    }, resolvedSecond);
+    assert.equal(lease.resolved.revisionId, second.revisionId);
+    await lease.release();
+
+    const current = await resolvePreviewTarget(fixture, {
+      kind: "artifact-current",
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+    });
+    assert.equal(current.revisionId, third.revisionId);
+    await assert.rejects(
+      resolvePreviewTarget(fixture, {
+        kind: "workspace-flow",
+        projectId: fixture.projectId,
+        snapshotId: third.snapshotId,
+        startArtifactId: fixture.artifactId,
+      }),
+      /JSON|provenance/i,
+    );
+    await assert.rejects(
+      resolvePreviewTarget(fixture, {
+        kind: "artifact-revision",
+        projectId: fixture.projectId,
+        revisionId: third.revisionId,
+      }),
+      /JSON|provenance/i,
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
+test("current Preview builds a bounded leaf closure without decoding Artifact ancestors", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const first = fixture.createRevision({ source: "<main>Ancestor</main>" });
+    const second = fixture.createRevision({ source: "<main>Current</main>" });
+    fixture.store.db.exec("DROP TRIGGER artifact_revision_update_immutable");
+    fixture.store.db.prepare("UPDATE artifact_revisions SET render_spec_json = '{' WHERE id = ?")
+      .run(first.revisionId);
+
+    const fullReads = {
+      artifactRevision: 0,
+      kernelRevision: 0,
+      dependencies: 0,
+      resourcePins: 0,
+    };
+    const originalArtifactRevision = fixture.store.workspace.getArtifactRevision.bind(fixture.store.workspace);
+    const originalKernelRevision = fixture.store.workspace.getKernelRevision.bind(fixture.store.workspace);
+    const originalDependencies = fixture.store.workspace.listArtifactRevisionDependencies.bind(fixture.store.workspace);
+    const originalResourcePins = fixture.store.workspace.listArtifactRevisionResourcePins.bind(fixture.store.workspace);
+    fixture.store.workspace.getArtifactRevision = ((revisionId: string) => {
+      fullReads.artifactRevision += 1;
+      return originalArtifactRevision(revisionId);
+    }) as typeof fixture.store.workspace.getArtifactRevision;
+    fixture.store.workspace.getKernelRevision = ((revisionId: string) => {
+      fullReads.kernelRevision += 1;
+      return originalKernelRevision(revisionId);
+    }) as typeof fixture.store.workspace.getKernelRevision;
+    fixture.store.workspace.listArtifactRevisionDependencies = ((revisionId: string) => {
+      fullReads.dependencies += 1;
+      return originalDependencies(revisionId);
+    }) as typeof fixture.store.workspace.listArtifactRevisionDependencies;
+    fixture.store.workspace.listArtifactRevisionResourcePins = ((revisionId: string) => {
+      fullReads.resourcePins += 1;
+      return originalResourcePins(revisionId);
+    }) as typeof fixture.store.workspace.listArtifactRevisionResourcePins;
+    let current: Awaited<ReturnType<typeof resolvePreviewTarget>>;
+    try {
+      current = await resolvePreviewTarget(fixture, {
+        kind: "artifact-current",
+        projectId: fixture.projectId,
+        artifactId: fixture.artifactId,
+      });
+      assert.deepEqual(revalidateResolvedPreviewTarget(fixture, current), current);
+      const lease = await acquirePreviewTargetLease({
+        ...fixture,
+        ensureDevServer: async () => ({
+          leaseId: "bounded-current-lease",
+          url: "http://127.0.0.1:4312",
+          bridgeNonce: "bounded_current_preview_bridge_nonce_abcdefghijklmnopqrstuvwxyz0123456789",
+          expiresAt: 99_000,
+          release: async () => {},
+        }),
+      }, current);
+      await lease.release();
+    } finally {
+      fixture.store.workspace.getArtifactRevision = originalArtifactRevision;
+      fixture.store.workspace.getKernelRevision = originalKernelRevision;
+      fixture.store.workspace.listArtifactRevisionDependencies = originalDependencies;
+      fixture.store.workspace.listArtifactRevisionResourcePins = originalResourcePins;
+    }
+    assert.equal(current!.revisionId, second.revisionId);
+    assert.deepEqual(fullReads, {
+      artifactRevision: 0,
+      kernelRevision: 0,
+      dependencies: 0,
+      resourcePins: 0,
+    });
+    await assert.rejects(
+      resolvePreviewTarget(fixture, {
+        kind: "artifact-revision",
+        projectId: fixture.projectId,
+        revisionId: second.revisionId,
+      }),
+      /JSON|render spec/i,
+    );
+    await assert.rejects(
+      resolvePreviewTarget(fixture, {
+        kind: "workspace-flow",
+        projectId: fixture.projectId,
+        snapshotId: second.snapshotId,
+        startArtifactId: fixture.artifactId,
+      }),
+      /JSON|render spec/i,
+    );
   } finally {
     fixture.close();
   }

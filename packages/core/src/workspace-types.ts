@@ -44,6 +44,279 @@ export interface ResourceRevision {
   createdAt: number;
 }
 
+export type ResearchEvidenceStatus = "evidence" | "hypothesis";
+export type ResearchRevisionQualityState = "grounded" | "needs-review";
+
+export interface ResearchRevisionSourceView {
+  id: string;
+  kind: "context" | "web" | "user";
+  title: string;
+  locator: string;
+  excerpt: string;
+  notes: string;
+  verification: "verified" | "unverified";
+  receiptId: string;
+}
+
+export interface ResearchRevisionFindingView {
+  id: string;
+  statement: string;
+  implication: string;
+  confidence: "high" | "medium" | "low";
+  evidenceStatus: ResearchEvidenceStatus;
+  sourceIds: string[];
+  verifiedSourceIds: string[];
+  unverifiedSourceIds: string[];
+  supportReceiptIds: string[];
+  groundedness: {
+    verified: boolean;
+    verifier: { id: string; model?: string } | null;
+    rationale: string;
+    supportReceiptIds: string[];
+  };
+}
+
+export interface ResearchRevisionPrincipleView {
+  id: string;
+  title: string;
+  rationale: string;
+  findingIds: string[];
+  evidenceStatus: ResearchEvidenceStatus;
+  evidenceFindingIds: string[];
+  hypothesisFindingIds: string[];
+}
+
+export interface ResearchRevisionDirectionView {
+  id: string;
+  title: string;
+  thesis: string;
+  visualLanguage: string[];
+  interactionPrinciples: string[];
+  risks: string[];
+  findingIds: string[];
+  evidenceStatus: ResearchEvidenceStatus;
+  evidenceFindingIds: string[];
+  hypothesisFindingIds: string[];
+}
+
+/** A bounded, client-safe projection of one exact immutable Research v3 payload. */
+export interface ResearchResourceRevisionView {
+  protocol: "dezin.research-resource-revision-view.v1";
+  resource: Resource;
+  revision: ResourceRevision;
+  observed: ResourceRevisionViewObservation;
+  qualityState: ResearchRevisionQualityState;
+  evidenceDirectionCount: number;
+  hypothesisDirectionCount: number;
+  executiveSummary: string;
+  sources: ResearchRevisionSourceView[];
+  findings: ResearchRevisionFindingView[];
+  designPrinciples: ResearchRevisionPrincipleView[];
+  directions: ResearchRevisionDirectionView[];
+  openQuestions: string[];
+}
+
+export type ResourceRevisionPreviewKind = "text" | "image" | "pdf" | "video" | "audio" | "download";
+
+/** Client-safe identity for an immutable Revision; storage paths and open-ended metadata stay daemon-side. */
+export interface ResourceRevisionViewIdentity {
+  id: string;
+  workspaceId: string;
+  resourceId: string;
+  sequence: number;
+  parentRevisionId: string | null;
+  summary: string;
+  checksum: string;
+  createdAt: number;
+}
+
+export interface ResourceRevisionViewObservation {
+  headRevisionId: string | null;
+  snapshotId: string;
+}
+
+export interface ResourceRevisionPayloadView {
+  mimeType: string;
+  byteLength: number;
+  checksum: string;
+  previewKind: ResourceRevisionPreviewKind;
+  /** Present only when the MIME has a controlled inline representation. */
+  url: string | null;
+  downloadUrl: string;
+}
+
+interface ResourceRevisionViewBase {
+  protocol: "dezin.resource-revision-view.v1";
+  resource: Resource;
+  revision: ResourceRevisionViewIdentity;
+  observed: ResourceRevisionViewObservation;
+  payload: ResourceRevisionPayloadView;
+}
+
+export interface ResearchResourceRevisionContentView {
+  qualityState: ResearchRevisionQualityState;
+  evidenceDirectionCount: number;
+  hypothesisDirectionCount: number;
+  executiveSummary: string;
+  sources: ResearchRevisionSourceView[];
+  findings: ResearchRevisionFindingView[];
+  designPrinciples: ResearchRevisionPrincipleView[];
+  directions: ResearchRevisionDirectionView[];
+  openQuestions: string[];
+}
+
+export interface MoodboardRevisionNodeView {
+  id: string;
+  type: string;
+  label: string;
+  text: string;
+  x: number | null;
+  y: number | null;
+  width: number | null;
+  height: number | null;
+  assetId: string | null;
+}
+
+export interface MoodboardRevisionAssetView {
+  id: string;
+  kind: string;
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  byteLength: number;
+  checksum: string;
+  url: string | null;
+  downloadUrl: string;
+}
+
+export interface MoodboardResourceRevisionContentView {
+  board: {
+    id: string;
+    name: string;
+    coverAssetId: string | null;
+  };
+  nodes: MoodboardRevisionNodeView[];
+  assets: MoodboardRevisionAssetView[];
+  totalNodeCount: number;
+  totalAssetCount: number;
+  nodesTruncated: boolean;
+  assetsTruncated: boolean;
+}
+
+export interface SharinganCaptureScreenshotView {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+  url: string;
+  downloadUrl: string;
+}
+
+export interface SharinganCapturePageView {
+  title: string;
+  requestedUrl: string;
+  finalUrl: string;
+  viewport: { width: number; height: number };
+  document: { width: number; height: number };
+  screenshots: SharinganCaptureScreenshotView[];
+  dom: { nodeCount: number; tags: string[] };
+  styleTokens: {
+    colors: string[];
+    fontFamilies: string[];
+    fontSizes: string[];
+    radii: string[];
+    shadows: string[];
+  };
+  links: string[];
+}
+
+export interface SharinganCaptureResourceRevisionContentView {
+  source: { requestedUrl: string; finalUrl: string; capturedAt: number };
+  exporter: { id: string; version: 1 };
+  pages: SharinganCapturePageView[];
+}
+
+export type EffectRevisionParameterValue = string | number | boolean;
+
+export interface EffectRevisionParameterView {
+  id: string;
+  label: string;
+  type: "number" | "color" | "select" | "boolean" | "image";
+  defaultValue: EffectRevisionParameterValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  options: Array<{ label: string; value: string }>;
+  description: string;
+}
+
+export interface EffectResourceRevisionContentView {
+  definition: {
+    id: string;
+    name: string;
+    origin: "built-in" | "custom";
+    category: string;
+    summary: string;
+    parameters: EffectRevisionParameterView[];
+    presets: Array<{ id: string; name: string; values: Record<string, EffectRevisionParameterValue> }>;
+    code: string;
+  };
+  /** A declarative, non-executable preview fixture for UI controls and time scrubbers. */
+  fixture: {
+    width: 640;
+    height: 360;
+    timesMs: [0, 500, 1_000];
+    values: Record<string, EffectRevisionParameterValue>;
+  };
+}
+
+export interface FileResourceRevisionContentView {
+  fileName: string;
+  previewKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+}
+
+export interface AssetResourceRevisionContentView {
+  fileName: string;
+  mediaKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+  width: number | null;
+  height: number | null;
+  sourceType: string;
+  sourceId: string;
+}
+
+export interface ExternalReferenceResourceRevisionContentView {
+  sourceUrl: string;
+  finalUrl: string;
+  status: number;
+  previewKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+}
+
+export type ResourceRevisionView =
+  | (ResourceRevisionViewBase & { kind: "research"; content: ResearchResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "moodboard"; content: MoodboardResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "sharingan-capture"; content: SharinganCaptureResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "file"; content: FileResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "asset"; content: AssetResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "effect"; content: EffectResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "external-reference"; content: ExternalReferenceResourceRevisionContentView });
+
+export interface CreateResearchDirectionArtifactIntentInput {
+  selectionRequestId: string;
+  artifactId: string;
+  expectedResourceHeadRevisionId: string;
+  expectedGraphRevision: number;
+  expectedSnapshotId: string;
+  expectedLayoutChecksum: string;
+  confirmHypothesis: boolean;
+}
+
 export interface ResourcePayloadCleanupIdentity {
   taskId: string;
   attempt: number;
@@ -131,6 +404,24 @@ export interface CreateResourceForProjectResult {
   node: WorkspaceResourceNode;
   graph: WorkspaceGraph;
   snapshot: WorkspaceSnapshot;
+}
+
+/**
+ * Internal publication contract used when one user action creates a Resource,
+ * freezes its first immutable Revision, and publishes that Revision together.
+ * Identities are daemon-allocated because the sealed payload already embeds
+ * the Resource and Revision ids before the database transaction begins.
+ */
+export interface CreatePublishedResourceForProjectInput extends CreateResourceForProjectInput {
+  resourceId: string;
+  nodeId: string;
+  commandId: string;
+  revision: CreateResourceRevisionCandidateInput;
+  reason: string;
+}
+
+export interface CreatePublishedResourceForProjectResult extends CreateResourceForProjectResult {
+  revision: ResourceRevision;
 }
 
 export type UpdateResourceForProjectInput =
@@ -477,6 +768,15 @@ export interface ArtifactPublicationExpectation {
   expectedSnapshotId: string;
 }
 
+export interface RestoreArtifactRevisionInput extends ArtifactPublicationExpectation {
+  sourceRevisionId: string;
+}
+
+export interface ForkArtifactTrackInput extends ArtifactPublicationExpectation {
+  sourceRevisionId: string;
+  name: string;
+}
+
 export interface KernelPublicationExpectation {
   expectedKernelRevisionId: string;
   expectedSnapshotId: string;
@@ -745,11 +1045,26 @@ export type WorkspaceGenerationResourceOperation =
   | (WorkspaceGenerationResourceOperationBase & {
     operation: "create" | "revise";
     revisionPolicy: { kind: "generate" };
+    /** Immutable Agent dispatch Context Pack bound to this generated leaf only. */
+    dispatchContextPackId?: string;
   })
   | (WorkspaceGenerationResourceOperationBase & {
     operation: "reuse";
     revisionPolicy: Extract<WorkspaceResourceRevisionPolicy, { kind: "exact" | "base-snapshot" }>;
   });
+
+/**
+ * A user choice bound to one immutable Research Revision. This record travels
+ * inside the sealed Artifact leaf intent; it is never inferred from a mutable
+ * Project-level slug or from a newly generated Research dependency.
+ */
+export interface WorkspaceResearchDirectionSelection {
+  protocol: "dezin.research-direction-selection.v1";
+  version: 1;
+  resourceId: string;
+  revisionId: string;
+  directionId: string;
+}
 
 export interface WorkspaceGenerationArtifactPlan {
   operation: "create" | "revise";
@@ -762,6 +1077,10 @@ export interface WorkspaceGenerationArtifactPlan {
   dependsOnArtifactIds: string[];
   capabilityIds: string[];
   responsiveFrameIds: string[];
+  /** Immutable Agent dispatch Context Pack bound to this generated leaf only. */
+  dispatchContextPackId?: string;
+  /** Exact pre-existing Research Revision direction chosen for this Artifact. */
+  researchDirectionSelection?: WorkspaceResearchDirectionSelection;
 }
 
 export type WorkspaceGenerationDependencyPlan =
@@ -960,6 +1279,11 @@ export interface GenerationPlan {
   baseSnapshotId: string;
   status: GenerationPlanStatus;
   constructionSealed: boolean;
+  /**
+   * Monotonic durable fence for asynchronous Plan maintenance. Older clients
+   * may omit the initial zero, but every Store-produced Plan exposes it.
+   */
+  executionEpoch?: number;
   compileError: Record<string, unknown> | null;
   createdAt: number;
   finishedAt: number | null;
@@ -1092,6 +1416,8 @@ export interface GenerationTask extends GenerationTaskIntent {
   pendingContextPolicy: GenerationTaskRetryContextPolicy | null;
   currentAttempt: number;
   materializationFailures: number;
+  /** Durable bounded count of publication-conflict rebase dispositions. */
+  rebaseCount?: number;
   failureClass: GenerationTaskFailureClass | null;
   error: Record<string, unknown> | null;
   nextEligibleAt: number | null;
@@ -1162,6 +1488,8 @@ export interface GenerationTaskMaterializationObservation {
   planId: string;
   workspaceId: string;
   attempt: number;
+  /** Exact Plan execution epoch observed before asynchronous resolution. */
+  executionEpoch?: number;
   target: GenerationTaskTarget;
   baseRevisionId: string | null;
   expectedSnapshotId: string;
@@ -1170,6 +1498,12 @@ export interface GenerationTaskMaterializationObservation {
   dependencyOutputs: GenerationTaskAttemptDependencyOutputInput[];
   resourcePins: GenerationTaskAttemptResourcePinInput[];
   componentPins: GenerationTaskAttemptComponentPinInput[];
+  /**
+   * A same-context retry must reuse this exact immutable Context Pack. `null`
+   * means no Context Pack is required; `undefined` means a fresh resolution is
+   * permitted (initial or latest-context materialization).
+   */
+  requiredContextPackId?: string | null;
 }
 
 export interface CreateGenerationTaskAttemptInput extends GenerationTaskMaterializationObservation {
@@ -1183,7 +1517,7 @@ export interface CreateGenerationTaskAttemptInput extends GenerationTaskMaterial
 
 export interface GenerationTaskAttemptInput extends Omit<
   CreateGenerationTaskAttemptInput,
-  "dependencyOutputs" | "resourcePins" | "componentPins"
+  "dependencyOutputs" | "resourcePins" | "componentPins" | "requiredContextPackId"
 > {
   dependencyOutputs: GenerationTaskAttemptDependencyOutput[];
   resourcePins: GenerationTaskAttemptResourcePin[];
@@ -1358,12 +1692,15 @@ export interface GenerationTaskRecoverySummary {
 export type GenerationPlanEventType =
   | "plan-queued"
   | "plan-compile-failed"
+  | "plan-cancel-requested"
   | "task-materialization-failed"
   | "task-blocked-context"
   | "task-materialized"
   | "task-running"
   | "task-candidate-ready"
   | "task-needs-rebase"
+  | "task-rebase-disposition"
+  | "task-retry-requested"
   | "task-retry-wait"
   | "task-succeeded"
   | "task-failed"
@@ -1373,6 +1710,40 @@ export type GenerationPlanEventType =
   | "plan-succeeded"
   | "plan-failed"
   | "plan-cancelled";
+
+export interface RetryGenerationTaskInput {
+  mode: GenerationTaskRetryContextPolicy;
+  now?: number;
+}
+
+export type GenerationTaskRebaseDisposition =
+  | {
+      kind: "publication-only";
+      taskId: string;
+      planId: string;
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: GenerationTaskAttempt;
+      rebaseCount: number;
+    }
+  | {
+      kind: "full";
+      taskId: string;
+      planId: string;
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: null;
+      mode: GenerationTaskRetryContextPolicy;
+      status: Extract<GenerationTaskStatus, "materialization-pending" | "awaiting-context-refresh">;
+      rebaseCount: number;
+    }
+  | {
+      kind: "failed";
+      taskId: string;
+      planId: string;
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: null;
+      error: Record<string, unknown>;
+      rebaseCount: number;
+    };
 
 export interface GenerationPlanEvent {
   planId: string;

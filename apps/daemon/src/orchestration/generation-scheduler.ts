@@ -6,6 +6,13 @@ import {
   type GenerationTaskRecoverySummary,
 } from "../../../../packages/core/src/index.ts";
 import type { RuntimeScope } from "../runtime-supervisor.ts";
+import {
+  GenerationTaskDeadlineExceededError,
+} from "./generation-task-failure.ts";
+import {
+  generationTaskCancellationCause,
+  type GenerationTaskCancellationCause,
+} from "./generation-task-cancellation.ts";
 
 export interface GenerationSchedulerStore {
   recoverExpiredGenerationTaskAttempts(now: number, limit?: number): GenerationTaskRecoverySummary;
@@ -39,6 +46,14 @@ export interface GenerationSchedulerRuntimeSupervisor {
 
 export interface GenerationSchedulerExecutor {
   execute(claim: GenerationTaskAttemptClaim, signal: AbortSignal): Promise<unknown>;
+  acknowledgeCancellation?(
+    claim: GenerationTaskAttemptClaim,
+    cancellation: GenerationTaskCancellationCause,
+  ): Promise<unknown>;
+  acknowledgeDeadlineExceeded?(
+    claim: GenerationTaskAttemptClaim,
+    deadline: GenerationTaskDeadlineExceededError,
+  ): Promise<unknown>;
 }
 
 export interface GenerationSchedulerEvents {
@@ -60,6 +75,7 @@ export interface GenerationSchedulerOptions {
   clock: GenerationSchedulerClock;
   leaseMs?: number;
   heartbeatMs?: number;
+  abortSettlementMs?: number;
   pollMs?: number;
   readyLimit?: number;
   onError?: (error: unknown) => void;
@@ -67,6 +83,7 @@ export interface GenerationSchedulerOptions {
 
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_HEARTBEAT_MS = 10_000;
+const DEFAULT_ABORT_SETTLEMENT_MS = 5_000;
 const DEFAULT_POLL_MS = 250;
 const DEFAULT_READY_LIMIT = 100;
 
@@ -102,6 +119,24 @@ function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
 }
 
+export class GenerationTaskCancellationRequestedError extends Error {
+  readonly cancellation: GenerationTaskCancellationCause;
+
+  constructor(cancellation: GenerationTaskCancellationCause) {
+    super("Generation Task cancellation requested");
+    this.name = "GenerationTaskCancellationRequestedError";
+    this.cancellation = cancellation;
+  }
+}
+
+interface ActiveGenerationExecution {
+  readonly controller: AbortController;
+  readonly claim: GenerationTaskAttemptClaim;
+  readonly projectId: string;
+  cancellation: GenerationTaskCancellationCause | null;
+  abortKind: "supervisor" | "cancellation" | "heartbeat" | "deadline" | null;
+}
+
 async function awaitWithAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
   checkAbort(signal);
   let listener: (() => void) | null = null;
@@ -127,10 +162,11 @@ export class GenerationScheduler {
   private readonly options: GenerationSchedulerOptions;
   private readonly leaseMs: number;
   private readonly heartbeatMs: number;
+  private readonly abortSettlementMs: number;
   private readonly pollMs: number;
   private readonly readyLimit: number;
   private readonly executions = new Set<Promise<unknown>>();
-  private readonly executionControllers = new Set<AbortController>();
+  private readonly executionControllers = new Map<AbortController, ActiveGenerationExecution>();
   private readonly maintenanceController = new AbortController();
   private tickPromise: Promise<void> | null = null;
   private tickRequested = false;
@@ -145,6 +181,11 @@ export class GenerationScheduler {
       options.heartbeatMs,
       DEFAULT_HEARTBEAT_MS,
       "Generation heartbeat interval",
+    );
+    this.abortSettlementMs = positiveInteger(
+      options.abortSettlementMs,
+      DEFAULT_ABORT_SETTLEMENT_MS,
+      "Generation abort settlement interval",
     );
     this.pollMs = positiveInteger(options.pollMs, DEFAULT_POLL_MS, "Generation poll interval");
     this.readyLimit = positiveInteger(options.readyLimit, DEFAULT_READY_LIMIT, "Generation ready limit");
@@ -183,6 +224,29 @@ export class GenerationScheduler {
     return this.startTickLoop();
   }
 
+  /**
+   * Observes the just-committed durable cancel state through the exact live
+   * lease before aborting a worker. A completed or substituted claim is left
+   * alone, so an HTTP cancellation cannot turn a concurrently published Task
+   * back into cancelled state.
+   */
+  requestCancellation(projectId: string, planId: string): void {
+    for (const execution of this.executionControllers.values()) {
+      if (execution.projectId !== projectId || execution.claim.attempt.planId !== planId) continue;
+      if (execution.controller.signal.reason instanceof GenerationTaskDeadlineExceededError) continue;
+      try {
+        const cancellation = this.observeDurableCancellation(execution);
+        if (cancellation !== null && !execution.controller.signal.aborted) {
+          execution.abortKind = "cancellation";
+          execution.controller.abort(new GenerationTaskCancellationRequestedError(cancellation));
+        }
+      } catch (error) {
+        if (!(error instanceof GenerationTaskLeaseFenceError)) this.reportError(error);
+      }
+    }
+    if (!this.stopped) this.requestTick();
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) {
       await this.waitForSettlements();
@@ -196,8 +260,10 @@ export class GenerationScheduler {
       this.pollTimer = null;
     }
     this.maintenanceController.abort(new Error("GenerationScheduler stopped"));
-    for (const controller of this.executionControllers) {
-      controller.abort(new Error("GenerationScheduler stopped"));
+    for (const execution of this.executionControllers.values()) {
+      if (execution.controller.signal.aborted) continue;
+      execution.abortKind = "supervisor";
+      execution.controller.abort(new Error("GenerationScheduler stopped"));
     }
     await this.waitForSettlements();
   }
@@ -246,7 +312,7 @@ export class GenerationScheduler {
             leaseMs: this.leaseMs,
           });
           if (claim === null) return;
-          await this.executeWithHeartbeat(claim, supervisorSignal, () => {
+          await this.executeWithHeartbeat(claim, projectId, supervisorSignal, () => {
             this.notifyPlan(claim.attempt.planId);
           });
         },
@@ -263,17 +329,70 @@ export class GenerationScheduler {
 
   private async executeWithHeartbeat(
     claim: GenerationTaskAttemptClaim,
+    projectId: string,
     supervisorSignal: AbortSignal,
     beforeExecute: () => void,
   ): Promise<void> {
     const controller = new AbortController();
-    this.executionControllers.add(controller);
-    const forwardAbort = (): void => controller.abort(supervisorSignal.reason);
+    const timeoutMs = claim.task.resourceLimits.timeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+      throw new Error("Claimed Generation Task timeout must be a positive safe integer");
+    }
+    const deadline = new GenerationTaskDeadlineExceededError({
+      taskId: claim.task.id,
+      attempt: claim.attempt.attempt,
+      timeoutMs,
+    });
+    const execution: ActiveGenerationExecution = {
+      controller,
+      claim,
+      projectId,
+      cancellation: null,
+      abortKind: null,
+    };
+    this.executionControllers.set(controller, execution);
+    const forwardAbort = (): void => {
+      if (controller.signal.aborted) return;
+      execution.abortKind = "supervisor";
+      controller.abort(supervisorSignal.reason);
+    };
     if (supervisorSignal.aborted) forwardAbort();
     else supervisorSignal.addEventListener("abort", forwardAbort, { once: true });
 
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortSettlementTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortSettlementListener: (() => void) | null = null;
     let settled = false;
+    let cancellationAcknowledged = false;
+    let deadlineAcknowledged = false;
+    let deadlineLeaseValidated = false;
+    const acknowledgeCancellation = async (): Promise<boolean> => {
+      const cancellation = execution.cancellation;
+      if (cancellation === null) return false;
+      if (cancellationAcknowledged) return true;
+      const acknowledge = this.options.executor.acknowledgeCancellation;
+      if (acknowledge === undefined) {
+        throw new GenerationTaskCancellationRequestedError(cancellation);
+      }
+      cancellationAcknowledged = true;
+      await acknowledge.call(this.options.executor, claim, cancellation);
+      return true;
+    };
+    const acknowledgeDeadline = async (): Promise<boolean> => {
+      if (controller.signal.reason !== deadline) return false;
+      if (!deadlineLeaseValidated) return true;
+      if (deadlineAcknowledged) return true;
+      const acknowledge = this.options.executor.acknowledgeDeadlineExceeded;
+      if (acknowledge === undefined) throw deadline;
+      deadlineAcknowledged = true;
+      try {
+        await acknowledge.call(this.options.executor, claim, deadline);
+      } catch (error) {
+        if (!this.isExactLeaseFence(error, claim)) throw error;
+      }
+      return true;
+    };
     const scheduleHeartbeat = (): void => {
       if (settled || controller.signal.aborted) return;
       heartbeatTimer = setTimeout(() => {
@@ -285,9 +404,10 @@ export class GenerationScheduler {
             this.options.clock.now(),
             this.leaseMs,
           );
-          if (renewed.task.status === "cancel-requested"
-            || renewed.attempt.status === "cancel-requested") {
-            controller.abort(new Error("Generation Task cancellation requested"));
+          const cancellation = this.recordDurableCancellation(execution, renewed);
+          if (cancellation !== null) {
+            execution.abortKind = "cancellation";
+            controller.abort(new GenerationTaskCancellationRequestedError(cancellation));
             return;
           }
           scheduleHeartbeat();
@@ -296,22 +416,102 @@ export class GenerationScheduler {
           // Fence errors are expected during takeover; other heartbeat failures
           // are reported, but both must stop the executor before further writes.
           if (!(error instanceof GenerationTaskLeaseFenceError)) this.reportError(error);
+          execution.abortKind = "heartbeat";
           controller.abort(error);
         }
       }, this.heartbeatMs);
       unrefTimer(heartbeatTimer);
     };
+    const deadlineReached = new Promise<never>((_resolve, reject) => {
+      deadlineTimer = setTimeout(() => {
+        deadlineTimer = null;
+        if (settled || controller.signal.aborted) return;
+        if (heartbeatTimer !== null) {
+          clearTimeout(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        try {
+          const cancellation = this.observeDurableCancellation(execution);
+          if (cancellation !== null) {
+            execution.abortKind = "cancellation";
+            controller.abort(new GenerationTaskCancellationRequestedError(cancellation));
+            return;
+          }
+          deadlineLeaseValidated = true;
+        } catch (error) {
+          if (!this.isExactLeaseFence(error, claim)) {
+            execution.abortKind = "heartbeat";
+            controller.abort(error);
+            reject(error);
+            return;
+          }
+          // The timeout still stops the stale leaf, but cannot publish after
+          // exact ownership has already been lost.
+        }
+        execution.abortKind = "deadline";
+        controller.abort(deadline);
+        reject(deadline);
+      }, timeoutMs);
+      unrefTimer(deadlineTimer);
+    });
+    const abortSettlementReached = new Promise<never>((_resolve, reject) => {
+      abortSettlementListener = () => {
+        if (controller.signal.reason === deadline || abortSettlementTimer !== null) return;
+        abortSettlementTimer = setTimeout(() => {
+          abortSettlementTimer = null;
+          reject(abortReason(controller.signal));
+        }, this.abortSettlementMs);
+      };
+      if (controller.signal.aborted) abortSettlementListener();
+      else controller.signal.addEventListener("abort", abortSettlementListener, { once: true });
+    });
     try {
       // Register the controller before invoking any external wake-up callback.
       // A synchronous stop/abort from that callback must see and fence this
       // already-claimed operation before an executor can begin.
       beforeExecute();
-      if (this.stopped || controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        await acknowledgeCancellation();
+        return;
+      }
+      if (this.stopped) return;
       scheduleHeartbeat();
-      await this.options.executor.execute(claim, controller.signal);
+      try {
+        const executorExecution = Promise.resolve()
+          .then(() => this.options.executor.execute(claim, controller.signal));
+        await Promise.race([executorExecution, deadlineReached, abortSettlementReached]);
+      } catch (error) {
+        if (controller.signal.reason === deadline) {
+          await acknowledgeDeadline();
+          return;
+        }
+        if (execution.cancellation === null && this.isExactLeaseFence(error, claim)) {
+          try {
+            this.observeDurableCancellation(execution);
+          } catch (observationError) {
+            if (!(observationError instanceof GenerationTaskLeaseFenceError)) {
+              this.reportError(observationError);
+            }
+          }
+        }
+        if (execution.cancellation === null) {
+          if (execution.abortKind === "supervisor" || execution.abortKind === "heartbeat") return;
+          throw error;
+        }
+      }
+      if (controller.signal.reason === deadline) {
+        await acknowledgeDeadline();
+        return;
+      }
+      await acknowledgeCancellation();
     } finally {
       settled = true;
       if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      if (abortSettlementTimer !== null) clearTimeout(abortSettlementTimer);
+      if (abortSettlementListener !== null) {
+        controller.signal.removeEventListener("abort", abortSettlementListener);
+      }
       supervisorSignal.removeEventListener("abort", forwardAbort);
       this.executionControllers.delete(controller);
       try {
@@ -326,6 +526,37 @@ export class GenerationScheduler {
 
   private notifyPlans(planIds: readonly string[]): void {
     for (const planId of new Set(planIds)) this.notifyPlan(planId);
+  }
+
+  private recordDurableCancellation(
+    execution: ActiveGenerationExecution,
+    current: GenerationTaskAttemptClaim,
+  ): GenerationTaskCancellationCause | null {
+    const cancellation = generationTaskCancellationCause(current);
+    if (cancellation !== null && execution.cancellation === null) {
+      execution.cancellation = cancellation;
+    }
+    return execution.cancellation;
+  }
+
+  private observeDurableCancellation(
+    execution: ActiveGenerationExecution,
+  ): GenerationTaskCancellationCause | null {
+    const current = this.options.store.heartbeatGenerationTaskAttempt(
+      execution.claim.lease,
+      this.options.clock.now(),
+      this.leaseMs,
+    );
+    return this.recordDurableCancellation(execution, current);
+  }
+
+  private isExactLeaseFence(
+    error: unknown,
+    claim: GenerationTaskAttemptClaim,
+  ): error is GenerationTaskLeaseFenceError {
+    return error instanceof GenerationTaskLeaseFenceError
+      && error.taskId === claim.attempt.taskId
+      && error.attempt === claim.attempt.attempt;
   }
 
   private notifyPlan(planId: string): void {

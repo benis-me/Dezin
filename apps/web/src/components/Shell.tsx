@@ -48,6 +48,9 @@ export function Shell({
   const inProject = route.name === "project"
     || route.name === "project-canvas"
     || route.name === "project-artifact"
+    || route.name === "project-artifact-revision"
+    || route.name === "project-resource"
+    || route.name === "project-resource-revision"
     || route.name === "moodboard";
   const mobile = useMediaQuery("(max-width: 639px)");
   const sidebarPercent = readPanelPercent(SHELL_SIDEBAR_WIDTH_KEY, 18, 12, 28);

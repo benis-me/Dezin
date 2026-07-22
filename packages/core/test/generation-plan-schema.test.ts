@@ -164,6 +164,7 @@ test("additive migration restores Generation Plan execution tables and the const
     ).all() as Array<{ name: string }>;
     for (const { name } of triggerNames) db.exec(`DROP TRIGGER "${name}"`);
     db.exec(`
+      DROP INDEX idx_generation_plans_active;
       DROP TABLE generation_task_attempt_dependency_outputs;
       ALTER TABLE generation_task_attempts DROP COLUMN materialization_sealed;
       ALTER TABLE generation_plans DROP COLUMN construction_sealed;
@@ -180,6 +181,8 @@ test("additive migration restores Generation Plan execution tables and the const
       (db.prepare("PRAGMA table_info(generation_plans)").all() as Array<{ name: string }>).map(({ name }) => name),
     );
     assert.ok(columns.has("construction_sealed"));
+    assert.ok((db.prepare("PRAGMA index_list('generation_plans')").all() as Array<{ name: string }>)
+      .some((index) => index.name === "idx_generation_plans_active"));
     const attemptColumns = new Set(
       (db.prepare("PRAGMA table_info(generation_task_attempts)").all() as Array<{ name: string }>).map(
         ({ name }) => name,
@@ -310,7 +313,7 @@ function insertWorkspaceTask(
        payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
        idempotency_key, status, created_at
      ) VALUES (?, ?, ?, ?, ?, 'workspace', ?, NULL, NULL, NULL,
-       '{}', ?, '[]', '{}', '{}', ?, 'materialization-pending', 20)`,
+       '{}', ?, '[]', '{}', '{"capacityClasses":[]}', ?, 'materialization-pending', 20)`,
   ).run(
     input.id,
     fixture.workspaceId,
@@ -364,6 +367,149 @@ function insertTaskAttempt(
     JSON.stringify(input.componentRevisionIds ?? []),
   );
 }
+
+test("initial Task and materialized Attempt INSERTs cannot preload execution state", () => {
+  const store = new Store();
+  try {
+    const fixture = createPlanFixture(store, "insert-state-shape");
+    insertWorkspaceTask(store.db, fixture, {
+      id: "insert-state-anchor",
+      kind: "prototype-validation",
+      ordinal: 0,
+    });
+    const taskPollutants: Array<{
+      blockedReason?: string;
+      blockedByTaskId?: string;
+      createdAt?: number;
+      errorJson?: string;
+      failureClass?: string;
+      finishedAt?: number;
+      label: string;
+      nextEligibleAt?: number;
+      pendingContextPolicy?: string;
+    }> = [
+      { label: "blocked-reason", blockedReason: "forged blocked state" },
+      { label: "blocked-by", blockedByTaskId: "insert-state-anchor" },
+      { label: "pending-context", pendingContextPolicy: "latest-context" },
+      { label: "failure", failureClass: "design" },
+      { label: "error", errorJson: "{}" },
+      { label: "next-eligible", nextEligibleAt: 25 },
+      { label: "negative-created", createdAt: -1 },
+      { label: "finished", finishedAt: 25 },
+    ];
+    for (const [index, pollutant] of taskPollutants.entries()) {
+      const taskId = `insert-state-task-${pollutant.label}`;
+      assert.throws(
+        () => store.db.prepare(
+          `INSERT INTO generation_tasks (
+             id, workspace_id, plan_id, ordinal, kind, target_type, target_id,
+             target_artifact_id, target_track_id, target_resource_id,
+             payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
+             idempotency_key, status, blocked_reason, blocked_by_task_id,
+             pending_context_policy, failure_class, error_json, next_eligible_at,
+             created_at, finished_at
+           ) VALUES (?, ?, ?, ?, 'prototype-validation', 'workspace', ?, NULL, NULL, NULL,
+             '{}', ?, '[]', '{}', '{"capacityClasses":[]}', ?, 'materialization-pending',
+             ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          taskId,
+          fixture.workspaceId,
+          fixture.planId,
+          index + 1,
+          fixture.workspaceId,
+          `intent-${taskId}`,
+          `idempotency-${taskId}`,
+          pollutant.blockedReason ?? null,
+          pollutant.blockedByTaskId ?? null,
+          pollutant.pendingContextPolicy ?? null,
+          pollutant.failureClass ?? null,
+          pollutant.errorJson ?? null,
+          pollutant.nextEligibleAt ?? null,
+          pollutant.createdAt ?? 20,
+          pollutant.finishedAt ?? null,
+        ),
+        /must be inserted as immutable intent/i,
+        pollutant.label,
+      );
+    }
+
+    store.db.prepare(
+      "UPDATE generation_plans SET construction_sealed = 1, status = 'queued' WHERE id = ?",
+    ).run(fixture.planId);
+    const attemptPollutants: Array<{
+      blockedReason?: string;
+      candidateEvidenceHash?: string;
+      candidateEvidenceJson?: string;
+      candidateResourceRevisionId?: string;
+      candidateRevisionId?: string;
+      createdAt?: number;
+      errorJson?: string;
+      failureClass?: string;
+      label: string;
+      nextEligibleAt?: number;
+    }> = [
+      { label: "blocked-reason", blockedReason: "forged blocked Attempt" },
+      { label: "failure", failureClass: "design" },
+      { label: "error", errorJson: "{}" },
+      { label: "next-eligible", nextEligibleAt: 60 },
+      { label: "candidate-revision", candidateRevisionId: "forged-candidate-revision" },
+      { label: "candidate-resource", candidateResourceRevisionId: "forged-candidate-resource" },
+      {
+        label: "candidate-evidence",
+        candidateEvidenceJson: "{}",
+        candidateEvidenceHash: "a".repeat(64),
+      },
+      { label: "negative-created", createdAt: -1 },
+    ];
+    for (const pollutant of attemptPollutants) {
+      assert.throws(
+        () => store.db.prepare(
+          `INSERT INTO generation_task_attempts (
+             task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
+             target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
+             kernel_revision_id, execution_mode, payload_json, input_hash,
+             pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
+             retry_context_policy, status, blocked_reason, failure_class, error_json,
+             next_eligible_at, candidate_revision_id, candidate_resource_revision_id,
+             candidate_evidence_json, candidate_evidence_hash, created_at
+           ) VALUES ('insert-state-anchor', ?, ?, 1, NULL, NULL, NULL, NULL, ?, NULL, ?,
+             'full', '{}', ?, '[]', '[]', 'same-context', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          fixture.planId,
+          fixture.workspaceId,
+          fixture.snapshotId,
+          fixture.kernelRevisionId,
+          `input-insert-state-${pollutant.label}`,
+          pollutant.blockedReason ?? null,
+          pollutant.failureClass ?? null,
+          pollutant.errorJson ?? null,
+          pollutant.nextEligibleAt ?? null,
+          pollutant.candidateRevisionId ?? null,
+          pollutant.candidateResourceRevisionId ?? null,
+          pollutant.candidateEvidenceJson ?? null,
+          pollutant.candidateEvidenceHash ?? null,
+          pollutant.createdAt ?? 50,
+        ),
+        /Attempt input or target ownership is invalid/i,
+        pollutant.label,
+      );
+    }
+
+    insertTaskAttempt(store.db, fixture, { taskId: "insert-state-anchor" });
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = 'insert-state-anchor' AND attempt = 1`,
+    ).run();
+    assert.equal(
+      (store.db.prepare(
+        "SELECT current_attempt FROM generation_tasks WHERE id = 'insert-state-anchor'",
+      ).get() as { current_attempt: number }).current_attempt,
+      1,
+    );
+  } finally {
+    store.close();
+  }
+});
 
 test("construction seal freezes task intent and append-only Plan history", () => {
   const store = new Store();
@@ -467,8 +613,77 @@ test("attempt sealing advances current only after the exact succeeded dependency
       `UPDATE generation_task_attempts SET materialization_sealed = 1
        WHERE task_id = 'checkpoint-source' AND attempt = 1`,
     ).run();
-    insertTaskAttempt(store.db, fixture, { taskId: "checkpoint-dependent" });
+    store.db.prepare(
+      "UPDATE generation_tasks SET status = 'queued' WHERE id = 'checkpoint-source'",
+    ).run();
+    store.db.prepare(
+      `INSERT INTO generation_plan_events (
+         plan_id, workspace_id, sequence, task_id, type, payload_json, created_at
+       ) VALUES (?, ?, 1, 'checkpoint-source', 'task-materialized', '{"attempt":1}', 51)`,
+    ).run(fixture.planId, fixture.workspaceId);
+    const writerClaimKey = String((store.db.prepare(
+      `SELECT 'writer:checkpoint:' || lower(hex(CAST(? AS BLOB))) AS claim_key`,
+    ).get(fixture.workspaceId) as { claim_key: string }).claim_key);
+    store.db.prepare(
+      `INSERT INTO generation_task_claims (
+         claim_key, claim_kind, task_id, plan_id, attempt, workspace_id,
+         owner_id, lease_token, lease_expires_at, created_at
+       ) VALUES (?, 'writer', 'checkpoint-source', ?, 1, ?,
+         'checkpoint-source-owner', 'checkpoint-source-lease', 100, 55)`,
+    ).run(writerClaimKey, fixture.planId, fixture.workspaceId);
+    store.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'running', owner_id = 'checkpoint-source-owner',
+           lease_token = 'checkpoint-source-lease', lease_expires_at = 100,
+           heartbeat_at = 55, started_at = 55
+       WHERE task_id = 'checkpoint-source' AND attempt = 1`,
+    ).run();
+    store.db.prepare(
+      "UPDATE generation_tasks SET status = 'running' WHERE id = 'checkpoint-source'",
+    ).run();
+    store.db.prepare(
+      "UPDATE generation_plans SET status = 'running' WHERE id = ?",
+    ).run(fixture.planId);
+    const checkpointSnapshotId = "snapshot-dependency-output-checkpoint";
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) SELECT ?, workspace_id, sequence + 1, id, graph_revision, kernel_revision_id,
+           'dependency output checkpoint', ?, NULL, 58, 1
+         FROM workspace_snapshots WHERE id = ? AND workspace_id = ?`,
+    ).run(
+      checkpointSnapshotId,
+      JSON.stringify({
+        kind: "plan-checkpoint",
+        planId: fixture.planId,
+        checkpointId: "checkpoint-source",
+      }),
+      fixture.snapshotId,
+      fixture.workspaceId,
+    );
+    store.db.prepare(
+      "UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?",
+    ).run(checkpointSnapshotId, fixture.workspaceId);
+    store.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'succeeded', owner_id = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, finished_at = 60
+       WHERE task_id = 'checkpoint-source' AND attempt = 1`,
+    ).run();
+    store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', result_snapshot_id = ?, finished_at = 60
+       WHERE id = 'checkpoint-source'`,
+    ).run(checkpointSnapshotId);
+    store.db.prepare(
+      "DELETE FROM generation_task_claims WHERE task_id = 'checkpoint-source' AND attempt = 1",
+    ).run();
 
+    insertTaskAttempt(store.db, fixture, {
+      taskId: "checkpoint-dependent",
+      expectedSnapshotId: checkpointSnapshotId,
+    });
     assert.throws(
       () => store.db.prepare(
         `INSERT INTO generation_task_attempt_dependency_outputs (
@@ -485,32 +700,12 @@ test("attempt sealing advances current only after the exact succeeded dependency
       ).run(),
       /dependency|materialization|seal/i,
     );
-
-    store.db.prepare(
-      `UPDATE generation_task_attempts
-       SET status = 'succeeded', finished_at = 60
-       WHERE task_id = 'checkpoint-source' AND attempt = 1`,
-    ).run();
-    store.db.prepare(
-      `UPDATE generation_tasks
-       SET status = 'succeeded', result_snapshot_id = ?, finished_at = 60
-       WHERE id = 'checkpoint-source'`,
-    ).run(fixture.snapshotId);
-    assert.throws(
-      () => store.db.prepare(
-        `INSERT INTO generation_task_attempt_dependency_outputs (
-           task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
-           result_revision_id, result_resource_revision_id, result_snapshot_id
-         ) VALUES ('checkpoint-dependent', ?, 1, ?, 0, 'checkpoint-source', NULL, NULL, NULL)`,
-      ).run(fixture.planId, fixture.workspaceId),
-      /dependency|succeeded|result|materialization/i,
-    );
     store.db.prepare(
       `INSERT INTO generation_task_attempt_dependency_outputs (
          task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
          result_revision_id, result_resource_revision_id, result_snapshot_id
        ) VALUES ('checkpoint-dependent', ?, 1, ?, 0, 'checkpoint-source', NULL, NULL, ?)`,
-    ).run(fixture.planId, fixture.workspaceId, fixture.snapshotId);
+    ).run(fixture.planId, fixture.workspaceId, checkpointSnapshotId);
     assert.equal(
       (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'checkpoint-dependent'").get() as {
         current_attempt: number;
@@ -769,7 +964,7 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
     );
     assert.throws(
       () => store.db.prepare("UPDATE generation_tasks SET current_attempt = 3 WHERE id = 'validate-attempt'").run(),
-      /exact successor/i,
+      /exact successor|state shape|incoherent/i,
     );
 
     store.db.prepare(
@@ -821,39 +1016,41 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
       ).run(fixture.planId, fixture.workspaceId),
       /materialization|immutable|seal/i,
     );
-    store.db.prepare(
-      `UPDATE generation_task_attempts
-       SET candidate_resource_revision_id = 'resource-revision-attempt',
-           candidate_evidence_json = '{"qa":"passed"}',
-           candidate_evidence_hash = 'evidence-hash'
-       WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
-    ).run();
     assert.throws(
       () => store.db.prepare(
         `UPDATE generation_task_attempts
-         SET candidate_evidence_json = '{"qa":"rewritten"}'
+         SET candidate_resource_revision_id = 'resource-revision-attempt',
+             candidate_evidence_json = '{"qa":"passed"}',
+             candidate_evidence_hash = 'evidence-hash'
          WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
       ).run(),
-      /write-once/i,
+      /candidate|evidence|state shape|incoherent/i,
     );
-    store.db.prepare(
-      `UPDATE generation_task_attempts SET status = 'succeeded', finished_at = 70
-       WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
-    ).run();
-    store.db.prepare(
-      `UPDATE generation_tasks
-       SET status = 'succeeded', result_resource_revision_id = 'resource-revision-attempt',
-           result_snapshot_id = ?, finished_at = 70
-       WHERE id = 'resource-task-attempt'`,
-    ).run(fixture.snapshotId);
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE generation_task_attempts SET status = 'succeeded', finished_at = 70
+         WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
+      ).run(),
+      /status transition|success.*authority|state shape|incoherent/i,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'succeeded', result_resource_revision_id = 'resource-revision-attempt',
+             result_snapshot_id = ?, finished_at = 70
+         WHERE id = 'resource-task-attempt'`,
+      ).run(fixture.snapshotId),
+      /status transition|success.*authority|state shape|incoherent/i,
+    );
     assert.deepEqual(
       { ...store.db.prepare(
-        `SELECT result_resource_revision_id, result_snapshot_id
+        `SELECT status, result_resource_revision_id, result_snapshot_id
          FROM generation_tasks WHERE id = 'resource-task-attempt'`,
       ).get() },
       {
-        result_resource_revision_id: "resource-revision-attempt",
-        result_snapshot_id: fixture.snapshotId,
+        status: "materialization-pending",
+        result_resource_revision_id: null,
+        result_snapshot_id: null,
       },
     );
   } finally {

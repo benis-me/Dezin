@@ -27,6 +27,7 @@ const FALLBACK_COLUMNS = 3;
 const FALLBACK_COLUMN_STEP = 360;
 const FALLBACK_ROW_STEP = 260;
 const GROUP_PADDING = 48;
+const EDGE_CORRIDOR_PADDING = 32;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -76,15 +77,80 @@ export function decodeWorkspaceLayout(raw: unknown): WorkspaceLayout {
   };
 }
 
-export function fallbackPosition(index: number): CanvasPoint {
+export function fallbackPosition(index: number, origin: CanvasPoint = FALLBACK_ORIGIN): CanvasPoint {
   return {
-    x: FALLBACK_ORIGIN.x + (index % FALLBACK_COLUMNS) * FALLBACK_COLUMN_STEP,
-    y: FALLBACK_ORIGIN.y + Math.floor(index / FALLBACK_COLUMNS) * FALLBACK_ROW_STEP,
+    x: origin.x + (index % FALLBACK_COLUMNS) * FALLBACK_COLUMN_STEP,
+    y: origin.y + Math.floor(index / FALLBACK_COLUMNS) * FALLBACK_ROW_STEP,
   };
 }
 
 export function layoutObjectMap(layout: WorkspaceLayout): Map<string, WorkspaceLayoutObject> {
   return new Map(layout.objects.map((object) => [object.id, object]));
+}
+
+interface EdgeCorridor {
+  start: CanvasPoint;
+  end: CanvasPoint;
+}
+
+function segmentIntersectsPaddedBounds(
+  corridor: EdgeCorridor,
+  bounds: CanvasPoint & CanvasSize,
+): boolean {
+  const minX = bounds.x - EDGE_CORRIDOR_PADDING;
+  const maxX = bounds.x + bounds.width + EDGE_CORRIDOR_PADDING;
+  const minY = bounds.y - EDGE_CORRIDOR_PADDING;
+  const maxY = bounds.y + bounds.height + EDGE_CORRIDOR_PADDING;
+  const dx = corridor.end.x - corridor.start.x;
+  const dy = corridor.end.y - corridor.start.y;
+  let start = 0;
+  let end = 1;
+  for (const [direction, distance] of [
+    [-dx, corridor.start.x - minX],
+    [dx, maxX - corridor.start.x],
+    [-dy, corridor.start.y - minY],
+    [dy, maxY - corridor.start.y],
+  ] as const) {
+    if (direction === 0) {
+      if (distance < 0) return false;
+      continue;
+    }
+    const ratio = distance / direction;
+    if (direction < 0) {
+      if (ratio > end) return false;
+      start = Math.max(start, ratio);
+    } else {
+      if (ratio < start) return false;
+      end = Math.min(end, ratio);
+    }
+  }
+  return true;
+}
+
+function existingEdgeCorridors(
+  graph: WorkspaceGraph,
+  layout: WorkspaceLayout,
+  graphNodes: ReadonlyMap<string, WorkspaceNode>,
+): EdgeCorridor[] {
+  return graph.edges.flatMap((edge): EdgeCorridor[] => {
+    const sourceNode = graphNodes.get(edge.sourceNodeId);
+    const targetNode = graphNodes.get(edge.targetNodeId);
+    const sourcePosition = rootPosition(layout, edge.sourceNodeId);
+    const targetPosition = rootPosition(layout, edge.targetNodeId);
+    if (!sourceNode || !targetNode || !sourcePosition || !targetPosition) return [];
+    const sourceSize = WORKSPACE_NODE_SIZES[sourceNode.kind];
+    const targetSize = WORKSPACE_NODE_SIZES[targetNode.kind];
+    return [{
+      start: {
+        x: sourcePosition.x + sourceSize.width,
+        y: sourcePosition.y + sourceSize.height / 2,
+      },
+      end: {
+        x: targetPosition.x,
+        y: targetPosition.y + targetSize.height / 2,
+      },
+    }];
+  });
 }
 
 export function materializeWorkspaceLayout(
@@ -95,6 +161,7 @@ export function materializeWorkspaceLayout(
   const existing = layoutObjectMap(layout);
   const additions: WorkspaceLayoutObject[] = [];
   const graphNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  const edgeCorridors = existingEdgeCorridors(graph, layout, graphNodes);
   const occupied = layout.objects
     .filter((object) => object.parentGroupId === null)
     .map((object) => {
@@ -103,6 +170,12 @@ export function materializeWorkspaceLayout(
         : WORKSPACE_NODE_SIZES[graphNodes.get(object.id)?.kind ?? "page"];
       return { x: object.x, y: object.y, ...size };
     });
+  const fallbackOrigin = occupied.length === 0
+    ? FALLBACK_ORIGIN
+    : {
+        x: Math.min(...occupied.map((bounds) => bounds.x)),
+        y: Math.min(...occupied.map((bounds) => bounds.y)),
+      };
   let gridIndex = 0;
   graph.nodes.forEach((node) => {
     if (existing.has(node.id)) return;
@@ -110,13 +183,16 @@ export function materializeWorkspaceLayout(
     const size = WORKSPACE_NODE_SIZES[node.kind];
     let position = livePosition;
     while (!position) {
-      const candidate = fallbackPosition(gridIndex++);
+      const candidate = fallbackPosition(gridIndex++, fallbackOrigin);
       const collision = occupied.some((bounds) => (
         candidate.x < bounds.x + bounds.width + 24
         && candidate.x + size.width + 24 > bounds.x
         && candidate.y < bounds.y + bounds.height + 24
         && candidate.y + size.height + 24 > bounds.y
-      ));
+      )) || edgeCorridors.some((corridor) => segmentIntersectsPaddedBounds(corridor, {
+        ...candidate,
+        ...size,
+      }));
       if (!collision) position = candidate;
     }
     additions.push({

@@ -16,8 +16,9 @@ import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDi
 import { createApp, createRuntimeSupervisor } from "./app.ts";
 import { startDaemonAfterGenerationRecovery } from "./daemon-startup.ts";
 import { shutdownDaemon } from "./daemon-shutdown.ts";
-import { createProductionGenerationRecoveryBarrier } from "./orchestration/generation-runtime-composition.ts";
+import { createProductionGenerationBootstrap } from "./orchestration/production-generation-bootstrap.ts";
 import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snapshot.ts";
+import { createProductionSafeBoundedExternalFetcher } from "./production-safe-external-fetch.ts";
 import { projectDir } from "./serve-static.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
@@ -103,22 +104,32 @@ async function main(): Promise<void> {
   if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
-  const generationRecovery = createProductionGenerationRecoveryBarrier({
-    workspaceStore: store.workspace,
-    dataDir: DATA_DIR,
-    repositoryDirForWorkspace(workspaceId) {
-      for (const project of store.listProjects()) {
-        if (store.workspace.getWorkspace(project.id)?.id === workspaceId) {
-          return projectDir(DATA_DIR, project.id);
-        }
+  const runtimeSupervisor = createRuntimeSupervisor({ store, dataDir: DATA_DIR });
+  // One network boundary is shared by direct Resource imports and generated
+  // Research. Both paths therefore use identical DNS pinning, redirect
+  // revalidation, deadline, and response-size enforcement.
+  const resourceExternalFetch = createProductionSafeBoundedExternalFetcher();
+  const repositoryDirForWorkspace = (workspaceId: string): string => {
+    for (const project of store.listProjects()) {
+      if (store.workspace.getWorkspace(project.id)?.id === workspaceId) {
+        return projectDir(DATA_DIR, project.id);
       }
-      throw new Error(`Generation Workspace has no owning Project: ${workspaceId}`);
-    },
-    onError(event) {
-      console.warn(`Generation recovery ${event.operation} failed`, event.error);
+    }
+    throw new Error(`Generation Workspace has no owning Project: ${workspaceId}`);
+  };
+  const generationSystem = createProductionGenerationBootstrap({
+    store,
+    dataDir: DATA_DIR,
+    designRegistry,
+    runtimeSupervisor,
+    daemonOwnerId: DAEMON_OWNER_ID,
+    repositoryDirForWorkspace,
+    resourceExternalFetch,
+    onError(error) {
+      console.warn("Generation runtime operation failed", error);
     },
   });
-  const runtimeSupervisor = createRuntimeSupervisor({ store, dataDir: DATA_DIR });
+  const generationRecovery = generationSystem.runtime;
   const server = createApp({
     store,
     dataDir: DATA_DIR,
@@ -127,6 +138,10 @@ async function main(): Promise<void> {
     security: { token: DAEMON_TOKEN },
     daemonOwnerId: DAEMON_OWNER_ID,
     runtimeSupervisor,
+    resourceExternalFetch,
+    generationPlanEvents: generationSystem.events,
+    generationPlanRuntime: generationSystem.control,
+    workspaceAgent: generationSystem.workspaceAgent,
   });
 
   let shuttingDown = false;

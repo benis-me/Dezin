@@ -88,6 +88,28 @@ test("adapter uses immutable revision thumbnails, parent-relative layout, and st
   expect(overview.nodes.find((node) => node.id === "page-1")?.data.zoomLevel).toBe("overview");
 });
 
+test("adapter binds Research quality and awaiting-selection state to the exact active Resource revision", () => {
+  const flow = workspaceGraphToFlow(graph, layout, {
+    zoom: 0.8,
+    edgeFilter: "all",
+    resourceRevisionStates: {
+      "research-1": {
+        revisionId: "research-revision-7",
+        resourceKind: "research",
+        qualityState: "needs-review",
+      },
+    },
+    awaitingSelectionResourceIds: new Set(["research-1"]),
+  });
+  const research = flow.nodes.find((node) => node.id === "resource-1")!;
+
+  expect(research.data.revisionId).toBe("research-revision-7");
+  expect(research.data.resourceKind).toBe("research");
+  expect(research.data.resourceQualityState).toBe("needs-review");
+  expect(research.data.generationState).toBe("awaiting-selection");
+  expect(research.ariaLabel).toContain("quality needs-review");
+});
+
 test("layout groups are adapter-only parents and recursively collapsed descendants hide with incident edges", () => {
   const nested: WorkspaceLayout = {
     ...layout,
@@ -118,6 +140,101 @@ test("missing layout rows receive a deterministic non-overlapping fallback grid"
 
   expect(new Set(positions.map((position) => `${position.x}:${position.y}`)).size).toBe(graph.nodes.length);
   expect(second.nodes.map((node) => node.position)).toEqual(positions);
+});
+
+test("a newly materialized Resource avoids an existing prototype edge corridor without mutating stored layout", () => {
+  const storedLayout: WorkspaceLayout = {
+    workspaceId: "workspace-1",
+    layoutId: "default",
+    objects: [
+      { id: "page-1", kind: "node", x: -420, y: -120, parentGroupId: null },
+      { id: "page-2", kind: "node", x: 210, y: -120, parentGroupId: null },
+      { id: "component-1", kind: "node", x: -110, y: 310, parentGroupId: null },
+    ],
+    viewport: { x: 720, y: 360, zoom: 0.82 },
+    checksum: "stored-layout-checksum",
+  };
+  const storedSnapshot = structuredClone(storedLayout);
+
+  const first = workspaceGraphToFlow(graph, storedLayout, { zoom: 0.82, edgeFilter: "all" });
+  const second = workspaceGraphToFlow(graph, storedLayout, { zoom: 0.82, edgeFilter: "all" });
+  const resource = first.nodes.find((node) => node.id === "resource-1")!;
+  const otherBounds = first.nodes
+    .filter((node) => node.id !== resource.id)
+    .map((node) => ({
+      x: node.position.x,
+      y: node.position.y,
+      width: Number(node.style?.width),
+      height: Number(node.style?.height),
+    }));
+  const overlapsAnotherNode = otherBounds.some((bounds) => (
+    resource.position.x < bounds.x + bounds.width + 24
+    && resource.position.x + Number(resource.style?.width) + 24 > bounds.x
+    && resource.position.y < bounds.y + bounds.height + 24
+    && resource.position.y + Number(resource.style?.height) + 24 > bounds.y
+  ));
+
+  expect(resource.position).toEqual({ x: -420, y: 140 });
+  expect(overlapsAnotherNode).toBe(false);
+  expect(second.nodes.find((node) => node.id === "resource-1")?.position).toEqual(resource.position);
+  expect(storedLayout).toEqual(storedSnapshot);
+  expect(storedLayout.checksum).toBe("stored-layout-checksum");
+});
+
+test("fallback placement keeps the original nearby slot when the graph has no edge corridor", () => {
+  const storedLayout: WorkspaceLayout = {
+    workspaceId: "workspace-1",
+    layoutId: "default",
+    objects: [
+      { id: "page-1", kind: "node", x: -420, y: -120, parentGroupId: null },
+      { id: "page-2", kind: "node", x: 210, y: -120, parentGroupId: null },
+      { id: "component-1", kind: "node", x: -110, y: 310, parentGroupId: null },
+    ],
+    viewport: { x: 720, y: 360, zoom: 0.82 },
+    checksum: "stored-layout-checksum",
+  };
+  const graphWithoutEdges = { ...graph, edges: [] };
+
+  const flow = workspaceGraphToFlow(graphWithoutEdges, storedLayout, { zoom: 0.82, edgeFilter: "all" });
+
+  expect(flow.nodes.find((node) => node.id === "resource-1")?.position).toEqual({ x: -60, y: -120 });
+});
+
+test("edge-corridor avoidance resolves grouped endpoints to root coordinates", () => {
+  const groupedGraph: WorkspaceGraph = {
+    workspaceId: "workspace-1",
+    revision: 5,
+    nodes: [
+      { id: "page-1", workspaceId: "workspace-1", kind: "page", artifactId: "artifact-page-1", name: "Overview" },
+      { id: "page-2", workspaceId: "workspace-1", kind: "page", artifactId: "artifact-page-2", name: "System detail" },
+      { id: "resource-1", workspaceId: "workspace-1", kind: "resource", resourceId: "research-1", name: "Research" },
+    ],
+    edges: [{
+      id: "prototype-1",
+      workspaceId: "workspace-1",
+      kind: "prototype",
+      sourceNodeId: "page-1",
+      targetNodeId: "page-2",
+      prototype: { status: "planned" },
+    }],
+  };
+  const groupedLayout: WorkspaceLayout = {
+    workspaceId: "workspace-1",
+    layoutId: "default",
+    objects: [
+      { id: "overview-group", kind: "group", x: -500, y: -120, width: 280, height: 188, parentGroupId: null, label: "Overview frame", collapsed: false },
+      { id: "page-1", kind: "node", x: 0, y: 0, parentGroupId: "overview-group" },
+      { id: "page-2", kind: "node", x: 210, y: -120, parentGroupId: null },
+    ],
+    viewport: { x: 720, y: 360, zoom: 0.82 },
+    checksum: "grouped-layout-checksum",
+  };
+  const storedSnapshot = structuredClone(groupedLayout);
+
+  const flow = workspaceGraphToFlow(groupedGraph, groupedLayout, { zoom: 0.82, edgeFilter: "all" });
+
+  expect(flow.nodes.find((node) => node.id === "resource-1")?.position).toEqual({ x: -500, y: 140 });
+  expect(groupedLayout).toEqual(storedSnapshot);
 });
 
 test("edge filters and connection validation preserve semantic rules", () => {

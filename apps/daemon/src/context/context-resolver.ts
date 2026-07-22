@@ -189,16 +189,72 @@ function matchesRequestedExplicitRef(requested: ContextItemRef, resolved: Contex
 
 function matchesTarget(request: AgentTurnRequest, candidate: ContextCandidate): boolean {
   if (candidate.ref.id !== request.scope.id) return false;
-  if (request.scope.type === "artifact") return candidate.ref.kind === "artifact";
-  if (request.scope.type === "resource") return candidate.ref.kind === "resource";
+  // A newly-created Artifact/Resource has no Revision yet. Its trusted target
+  // contract is therefore an inline, immutable Task description; exact prior
+  // Revisions are supplied separately as required explicit Context.
+  const immutableGenerationTarget = request.intent === "generate"
+    && candidate.ref.kind === "inline"
+    && candidate.resolvedKind === "inline"
+    && candidate.trustLevel === "trusted"
+    && candidate.boundary.source.startsWith("generation-task:");
+  if (request.scope.type === "artifact") {
+    return candidate.ref.kind === "artifact" || immutableGenerationTarget;
+  }
+  if (request.scope.type === "resource") {
+    return candidate.ref.kind === "resource" || immutableGenerationTarget;
+  }
   return true;
 }
 
 function matchesSelection(
+  request: AgentTurnRequest,
   selection: NonNullable<AgentTurnRequest["selection"]>[number],
   candidate: ContextCandidate,
+  targetArtifactRevisionId: string | undefined,
 ): boolean {
   if (candidate.ref.id !== selection.id) return false;
+  if (selection.kind === "element") {
+    const provenance = candidate.provenance;
+    if (request.scope.type !== "artifact" || targetArtifactRevisionId === undefined
+      || candidate.ref.kind !== "inline" || candidate.trustLevel !== "trusted"
+      || provenance.selectionManifestProtocol !== "dezin.artifact-element-selection-manifest.v1"
+      || provenance.designNodeId !== selection.id
+      || provenance.workspaceId !== request.scope.workspaceId
+      || provenance.artifactId !== request.scope.id
+      || provenance.artifactRevisionId !== targetArtifactRevisionId
+      || (request.baseRevisionId !== undefined && provenance.artifactRevisionId !== request.baseRevisionId)
+      || typeof provenance.assemblyHash !== "string" || !SHA256.test(provenance.assemblyHash)
+      || typeof provenance.sourceArtifactId !== "string" || provenance.sourceArtifactId.length === 0
+      || typeof provenance.sourceArtifactRevisionId !== "string" || provenance.sourceArtifactRevisionId.length === 0
+      || typeof provenance.sourceCommitHash !== "string"
+      || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(provenance.sourceCommitHash)
+      || typeof provenance.sourceTreeHash !== "string"
+      || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(provenance.sourceTreeHash)
+      || typeof provenance.sourcePath !== "string" || provenance.sourcePath.length === 0
+      || typeof provenance.selectionManifestHash !== "string"
+      || !SHA256.test(provenance.selectionManifestHash)) return false;
+    const manifest = {
+      protocol: provenance.selectionManifestProtocol,
+      workspaceId: provenance.workspaceId,
+      artifactId: provenance.artifactId,
+      artifactRevisionId: provenance.artifactRevisionId,
+      assemblyHash: provenance.assemblyHash,
+      designNodeId: provenance.designNodeId,
+      sourceArtifactId: provenance.sourceArtifactId,
+      sourceArtifactRevisionId: provenance.sourceArtifactRevisionId,
+      sourceCommitHash: provenance.sourceCommitHash,
+      sourceTreeHash: provenance.sourceTreeHash,
+      sourcePath: provenance.sourcePath,
+    };
+    const manifestHash = checksumBytes(stableStringify(manifest));
+    if (manifestHash !== provenance.selectionManifestHash) return false;
+    if (candidate.content !== stableStringify({
+      ...manifest,
+      selectionManifestHash: provenance.selectionManifestHash,
+    })) return false;
+    return selection.revisionId === undefined
+      || provenance.artifactRevisionId === selection.revisionId;
+  }
   if (selection.kind === "artifact" && candidate.ref.kind !== "artifact") return false;
   if (selection.kind === "resource" && candidate.ref.kind !== "resource") return false;
   if (selection.revisionId !== undefined) {
@@ -389,8 +445,17 @@ export class ContextResolver {
       );
     }
     if (request.selection?.length) {
+      const artifactTarget = request.scope.type === "artifact"
+        ? candidates.find((candidate) => candidate.contextClass === "target"
+          && candidate.ref.kind === "artifact"
+          && candidate.ref.id === request.scope.id)
+        : undefined;
+      const targetArtifactRevisionId = artifactTarget?.ref.kind === "artifact"
+        ? artifactTarget.ref.revisionId
+        : undefined;
       const missingSelections = request.selection.filter((selection) => !candidates.some(
-        (candidate) => candidate.contextClass === "selection" && matchesSelection(selection, candidate),
+        (candidate) => candidate.contextClass === "selection"
+          && matchesSelection(request, selection, candidate, targetArtifactRevisionId),
       ));
       if (missingSelections.length) {
         throw new BlockedContextError(

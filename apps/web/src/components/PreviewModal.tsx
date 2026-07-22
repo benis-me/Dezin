@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { Dialog, IconButton } from "./ui/index.ts";
+import { previewDocumentSrc } from "../lib/preview-channel.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 
 /** Near-fullscreen artifact preview overlay. `src` is a /projects/:id/preview/ URL. */
@@ -17,8 +18,8 @@ export function PreviewModal({ open, src, onClose }: { open: boolean; src?: stri
           <iframe
             key={src}
             title="Artifact preview (full screen)"
-            src={src}
-            sandbox={previewSandboxForSrc(src)}
+            src={previewDocumentSrc(src)}
+            sandbox={previewSandboxForSrc(previewDocumentSrc(src))}
             className="h-full w-full border-0 bg-white"
           />
         ) : (

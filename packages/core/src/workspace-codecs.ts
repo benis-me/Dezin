@@ -12,6 +12,7 @@ import type {
   ArtifactRevisionResourcePinInput,
   ArtifactKind,
   ArtifactPublicationExpectation,
+  ForkArtifactTrackInput,
   ArtifactQualityProfile,
   ApprovedProposalResult,
   ComponentPropagationOverrideResolution,
@@ -28,6 +29,10 @@ import type {
   LegacyWorkspaceSeed,
   LegacyWorkspaceVariantFact,
   ProjectWorkspace,
+  Resource,
+  ResourceRevision,
+  RenderFrameSpec,
+  RestoreArtifactRevisionInput,
   SharedDesignKernelRevision,
   WorkspaceEdge,
   WorkspaceGraph,
@@ -159,6 +164,41 @@ export interface WorkspaceBundle {
   revisions: ArtifactRevisionRecord[];
   snapshots: WorkspaceSnapshotRecord[];
 }
+
+/** One transaction-scoped migration decision paired with the exact bundle it classified. */
+export interface WorkspaceLegacyMigrationRead {
+  bundle: WorkspaceBundle;
+  canonicalEmptyFoundation: boolean;
+}
+
+/**
+ * Current Workspace surface assembled from one SQLite read snapshot. Historical
+ * records stay behind their explicit readers so this DTO scales with the live
+ * canvas rather than the age of the Project.
+ */
+export interface WorkspaceCompactOverview extends WorkspaceBundle {
+  resources: Resource[];
+  resourceRevisions: ResourceRevision[];
+  layout: WorkspaceLayout;
+}
+
+/**
+ * Exact, bounded immutable records needed to render one Snapshot-pinned
+ * Artifact. Parent rows are checked as metadata only and are intentionally not
+ * decoded into this leaf closure.
+ */
+export interface WorkspaceShallowArtifactClosure {
+  workspaceId: string;
+  snapshotId: string;
+  rootRevision: ArtifactRevisionRecord;
+  artifacts: WorkspaceArtifactRecord[];
+  revisions: ArtifactRevisionRecord[];
+  dependencies: ArtifactRevisionDependencyRecord[];
+  resourcePins: ArtifactRevisionResourcePinRecord[];
+  kernelRevisions: SharedDesignKernelRevision[];
+}
+
+export type WorkspaceBundleReadMode = "compact" | "history";
 
 export interface WorkspaceProposalRecord extends WorkspaceProposal {}
 export interface GenerationPlanRecord extends GenerationPlan {}
@@ -870,6 +910,47 @@ export function normalizeArtifactPublicationExpectation(value: unknown): Artifac
   };
 }
 
+export function normalizeRestoreArtifactRevisionInput(value: unknown): RestoreArtifactRevisionInput {
+  const input = boundaryRecord(value, "restore Artifact Revision input");
+  allowFields(
+    input,
+    ["sourceRevisionId", "expectedHeadRevisionId", "expectedSnapshotId"],
+    "restore Artifact Revision input",
+  );
+  return {
+    sourceRevisionId: canonicalString(input.sourceRevisionId, "source Artifact Revision id"),
+    expectedHeadRevisionId: normalizeExpectedId(
+      input.expectedHeadRevisionId,
+      "expected Artifact Head Revision id",
+      true,
+    ),
+    expectedSnapshotId: canonicalString(input.expectedSnapshotId, "expected active Snapshot id"),
+  };
+}
+
+export function normalizeForkArtifactTrackInput(value: unknown): ForkArtifactTrackInput {
+  const input = boundaryRecord(value, "fork Artifact Track input");
+  allowFields(
+    input,
+    ["sourceRevisionId", "name", "expectedHeadRevisionId", "expectedSnapshotId"],
+    "fork Artifact Track input",
+  );
+  const name = canonicalString(input.name, "Artifact Track name");
+  if (name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new WorkspaceStoreCodecError("Artifact Track name must be at most 80 characters and contain no control characters");
+  }
+  return {
+    sourceRevisionId: canonicalString(input.sourceRevisionId, "source Artifact Revision id"),
+    name,
+    expectedHeadRevisionId: normalizeExpectedId(
+      input.expectedHeadRevisionId,
+      "expected Artifact Head Revision id",
+      true,
+    ),
+    expectedSnapshotId: canonicalString(input.expectedSnapshotId, "expected active Snapshot id"),
+  };
+}
+
 export function normalizeKernelPublicationExpectation(value: unknown): KernelPublicationExpectation {
   const expected = boundaryRecord(value, "Kernel publication expectation");
   allowFields(expected, ["expectedKernelRevisionId", "expectedSnapshotId"], "Kernel publication expectation");
@@ -1233,10 +1314,39 @@ function normalizeResourceRevisionPolicy(value: unknown, label: string): Workspa
   throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
 }
 
+function normalizeDispatchContextPackId(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const id = canonicalString(value, label);
+  if (!/^context-pack-[0-9a-f]{64}$/.test(id)) {
+    throw new WorkspaceStoreCodecError(`${label} must be an immutable Context Pack identity`);
+  }
+  return id;
+}
+
+function normalizeResearchDirectionSelection(
+  value: unknown,
+  label: string,
+): WorkspaceGenerationArtifactPlan["researchDirectionSelection"] {
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["protocol", "version", "resourceId", "revisionId", "directionId"], label);
+  if (input.protocol !== "dezin.research-direction-selection.v1" || input.version !== 1) {
+    throw new WorkspaceStoreCodecError(`${label} protocol is unsupported`);
+  }
+  return {
+    protocol: input.protocol,
+    version: input.version,
+    resourceId: canonicalString(input.resourceId, `${label} Resource id`),
+    revisionId: canonicalString(input.revisionId, `${label} Revision id`),
+    directionId: canonicalString(input.directionId, `${label} direction id`),
+  };
+}
+
 function normalizeGenerationResourceOperation(value: unknown, index: number): WorkspaceGenerationResourceOperation {
   const label = `Workspace generation Resource operation at index ${index}`;
   const input = boundaryRecord(value, label);
-  allowFields(input, ["operation", "nodeId", "resourceId", "kind", "title", "revisionPolicy"], label);
+  allowFields(input, [
+    "operation", "nodeId", "resourceId", "kind", "title", "revisionPolicy", "dispatchContextPackId",
+  ], label);
   if (input.operation !== "create" && input.operation !== "revise" && input.operation !== "reuse") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
   }
@@ -1253,6 +1363,12 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
     kind: resourceKind,
     title: canonicalString(input.title, `${label} title`),
     revisionPolicy: normalizeResourceRevisionPolicy(input.revisionPolicy, `${label} revision policy`),
+    ...(input.dispatchContextPackId === undefined ? {} : {
+      dispatchContextPackId: normalizeDispatchContextPackId(
+        input.dispatchContextPackId,
+        `${label} dispatch Context Pack id`,
+      ),
+    }),
   } as const;
   if (operation === "create" || operation === "revise") {
     if (normalized.revisionPolicy.kind !== "generate") {
@@ -1260,10 +1376,16 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
     }
     return { ...normalized, operation, revisionPolicy: normalized.revisionPolicy };
   }
+  if (normalized.dispatchContextPackId !== undefined) {
+    throw new WorkspaceStoreCodecError(
+      `${label} reuse cannot bind an Agent dispatch Context Pack because it has no generated leaf`,
+    );
+  }
   if (normalized.revisionPolicy.kind === "generate") {
     throw new WorkspaceStoreCodecError(`${label} reuse must pin an existing Resource Revision`);
   }
-  return { ...normalized, operation, revisionPolicy: normalized.revisionPolicy };
+  const { dispatchContextPackId: _dispatchContextPackId, ...reused } = normalized;
+  return { ...reused, operation, revisionPolicy: normalized.revisionPolicy };
 }
 
 function normalizeGenerationArtifactPlan(value: unknown, index: number): WorkspaceGenerationArtifactPlan {
@@ -1271,7 +1393,8 @@ function normalizeGenerationArtifactPlan(value: unknown, index: number): Workspa
   const input = boundaryRecord(value, label);
   allowFields(input, [
     "operation", "nodeId", "artifactId", "kind", "name", "trackId", "baseRevisionId",
-    "dependsOnArtifactIds", "capabilityIds", "responsiveFrameIds",
+    "dependsOnArtifactIds", "capabilityIds", "responsiveFrameIds", "dispatchContextPackId",
+    "researchDirectionSelection",
   ], label);
   if (input.operation !== "create" && input.operation !== "revise") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
@@ -1290,6 +1413,18 @@ function normalizeGenerationArtifactPlan(value: unknown, index: number): Workspa
     dependsOnArtifactIds: uniqueCanonicalStrings(input.dependsOnArtifactIds, `${label} dependency Artifact ids`),
     capabilityIds: uniqueCanonicalStrings(input.capabilityIds, `${label} capability ids`),
     responsiveFrameIds: uniqueCanonicalStrings(input.responsiveFrameIds, `${label} responsive frame ids`),
+    ...(input.dispatchContextPackId === undefined ? {} : {
+      dispatchContextPackId: normalizeDispatchContextPackId(
+        input.dispatchContextPackId,
+        `${label} dispatch Context Pack id`,
+      ),
+    }),
+    ...(input.researchDirectionSelection === undefined ? {} : {
+      researchDirectionSelection: normalizeResearchDirectionSelection(
+        input.researchDirectionSelection,
+        `${label} Research direction selection`,
+      ),
+    }),
   };
 }
 
@@ -1391,6 +1526,68 @@ function normalizeGenerationCapability(value: unknown, index: number): Workspace
   return { id: canonicalString(input.id, `${label} id`), kind: input.kind, required: input.required };
 }
 
+const DEFAULT_GENERATION_QUALITY_FRAMES = Object.freeze([
+  Object.freeze({ id: "desktop", name: "Desktop", width: 1440, height: 900 }),
+  Object.freeze({ id: "mobile", name: "Mobile", width: 390, height: 844 }),
+] satisfies readonly RenderFrameSpec[]);
+
+function uniqueQualityFrameId(preferredId: string, occupiedIds: ReadonlySet<string>): string {
+  if (!occupiedIds.has(preferredId)) return preferredId;
+  let sequence = 2;
+  while (occupiedIds.has(`${preferredId}-${sequence}`)) sequence += 1;
+  return `${preferredId}-${sequence}`;
+}
+
+function withRequiredQualityViewports(input: readonly RenderFrameSpec[]): RenderFrameSpec[] {
+  const frames = input.map((frame) => ({ ...frame }));
+  const occupiedIds = new Set(frames.map((frame) => frame.id));
+  const hasDesktopViewport = frames.some((frame) => frame.width >= 1280 && frame.height >= 720);
+  const hasMobileViewport = frames.some((frame) => (
+    frame.width >= 320 && frame.width <= 480 && frame.height >= 640
+  ));
+  for (const defaultFrame of DEFAULT_GENERATION_QUALITY_FRAMES) {
+    if ((defaultFrame.id === "desktop" && hasDesktopViewport)
+      || (defaultFrame.id === "mobile" && hasMobileViewport)) continue;
+    const id = uniqueQualityFrameId(defaultFrame.id, occupiedIds);
+    occupiedIds.add(id);
+    frames.push({ ...defaultFrame, id });
+  }
+  return frames;
+}
+
+function enforceWorkspaceArtifactQualityFloor(input: {
+  readonly artifactPlans: readonly WorkspaceGenerationArtifactPlan[];
+  readonly responsiveFrames: readonly RenderFrameSpec[];
+  readonly qualityProfile: ArtifactQualityProfile;
+}): Pick<WorkspaceGenerationPayload, "artifactPlans" | "responsiveFrames" | "qualityProfile"> {
+  if (input.artifactPlans.length === 0) {
+    return {
+      artifactPlans: [...input.artifactPlans],
+      responsiveFrames: [...input.responsiveFrames],
+      qualityProfile: input.qualityProfile,
+    };
+  }
+  const responsiveFrames = withRequiredQualityViewports(input.responsiveFrames);
+  const requiredFrameIds = responsiveFrames.map((frame) => frame.id);
+  const blocking = new Set(input.qualityProfile.blockingSeverities);
+  blocking.add("P0");
+  blocking.add("P1");
+  const blockingSeverities = (["P0", "P1", "P2"] as const).filter((severity) => blocking.has(severity));
+  return {
+    artifactPlans: input.artifactPlans.map((plan) => ({
+      ...plan,
+      responsiveFrameIds: [...requiredFrameIds],
+    })),
+    responsiveFrames,
+    qualityProfile: {
+      requiredFrameIds,
+      blockingSeverities,
+      requireRuntimeChecks: true,
+      requireVisualReview: true,
+    },
+  };
+}
+
 function uniqueBy<T>(values: readonly T[], key: (value: T) => string, label: string): void {
   const seen = new Set<string>();
   for (const value of values) {
@@ -1439,15 +1636,20 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
     responsiveFrames: input.responsiveFrames,
     qualityProfile: input.qualityProfile,
   }, label);
+  const quality = enforceWorkspaceArtifactQualityFloor({
+    artifactPlans,
+    responsiveFrames: kernelShape.responsiveFrames,
+    qualityProfile: kernelShape.qualityProfile,
+  });
   return {
     kind: input.kind,
     resourceOperations,
-    artifactPlans,
+    artifactPlans: quality.artifactPlans,
     dependencyPlans,
     prototypeIntents,
     capabilities,
-    responsiveFrames: kernelShape.responsiveFrames,
-    qualityProfile: kernelShape.qualityProfile,
+    responsiveFrames: quality.responsiveFrames,
+    qualityProfile: quality.qualityProfile,
   };
 }
 
@@ -1761,6 +1963,7 @@ export function asGenerationPlan(row: Row): GenerationPlanRecord {
     baseSnapshotId: requiredString(row.base_snapshot_id, "Generation Plan base Snapshot id"),
     status: row.status,
     constructionSealed: row.construction_sealed === 1,
+    executionEpoch: nonNegativeInteger(row.execution_epoch ?? 0, "Generation Plan execution epoch"),
     compileError: row.compile_error_json == null
       ? null
       : jsonObject(row.compile_error_json, "Generation Plan compile error"),
@@ -1771,7 +1974,9 @@ export function asGenerationPlan(row: Row): GenerationPlanRecord {
   const isTerminalExecution = plan.status === "succeeded"
     || plan.status === "failed"
     || plan.status === "cancelled";
-  const shouldBeSealed = plan.status !== "approved" && !isCompileFailure;
+  const shouldBeSealed = plan.status !== "approved"
+    && !isCompileFailure
+    && !(plan.status === "cancelled" && !plan.constructionSealed);
   if (plan.constructionSealed !== shouldBeSealed
     || (isCompileFailure ? plan.compileError === null : plan.compileError !== null)
     || ((isCompileFailure || isTerminalExecution) ? plan.finishedAt === null : plan.finishedAt !== null)) {

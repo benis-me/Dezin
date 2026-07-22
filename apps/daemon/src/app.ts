@@ -111,16 +111,21 @@ import {
 import {
   handleApproveProposal,
   handleCreateResource,
+  handleMaterializeResource,
+  handleCreateResearchDirectionArtifactIntent,
   handleCreateResourceRevision,
   handleCreateProposal,
   handleGetArtifactRevision,
   handleGetProposal,
   handleGetResource,
+  handleGetResearchResourceRevision,
   handleGetWorkspace,
   handleGetWorkspaceArtifact,
   handleGetWorkspaceSnapshot,
+  handleForkArtifactTrack,
   handleGraphCommands,
   handleListArtifactRevisions,
+  handleListArtifactRevisionHistory,
   handleListArtifactTracks,
   handleListProposals,
   handleListResourceRevisions,
@@ -130,19 +135,42 @@ import {
   handlePutWorkspaceLayout,
   handlePublishResourceRevision,
   handleRejectProposal,
+  handleRestoreArtifactRevision,
+  handleScopedAgentTurn,
   handleUpdateProposal,
   handleUpdateResource,
+  handleWorkspaceAgentTurn,
 } from "./workspace-handler.ts";
 import {
   handleAcquirePreviewTargetLease,
   handleResolvePreviewTarget,
 } from "./preview-target-handler.ts";
+import type { GenerationPlanRuntimeControl } from "./orchestration/generation-plan-control.ts";
 import {
   handleArtifactMutation,
   handleArtifactThumbnail,
 } from "./artifact-editor-handler.ts";
 import { ensureStandardProjectWorkspace } from "./workspace-migration.ts";
 import type { SafeBoundedExternalFetcher } from "./resource-revision-source.ts";
+import {
+  handleGetResourceRevisionEmbeddedAsset,
+  handleGetResourceRevisionPayload,
+  handleGetResourceRevisionView,
+  handleListResourceRevisionHistory,
+} from "./resource-revision-handler.ts";
+import {
+  handleCancelGenerationPlan,
+  handleGenerationPlanEvents,
+  handleGetGenerationPlan,
+  handleGetLatestScopedArtifactGenerationPlan,
+  handleListGenerationPlans,
+  handleRetryGenerationTask,
+} from "./generation-plan-handler.ts";
+import {
+  GenerationPlanEventBroker,
+  type GenerationPlanEventsPort,
+} from "./orchestration/generation-plan-events.ts";
+import type { ProductionAgentTurnPort } from "./orchestration/production-agent-orchestrator.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
@@ -231,6 +259,12 @@ export interface AppDeps {
   daemonOwnerId?: string;
   /** Daemon-owned scoped runtime lifecycle; createApp supplies the production instance by default. */
   runtimeSupervisor?: RuntimeSupervisor;
+  /** Wake-only broker for the durable per-Plan Generation event journal. */
+  generationPlanEvents?: GenerationPlanEventsPort;
+  /** Process-local scheduler controls; every operation is backed by durable Store state. */
+  generationPlanRuntime?: GenerationPlanRuntimeControl;
+  /** Workspace/Artifact/Resource Agent dispatcher; production startup supplies the Store-backed composition. */
+  workspaceAgent?: ProductionAgentTurnPort;
 }
 
 type Handler = (
@@ -302,7 +336,7 @@ async function requireConversationScopeOwnership(
   scope: ConversationScope,
 ): Promise<void> {
   if (scope.type === "workspace") return;
-  const workspace = await ensureStandardProjectWorkspace(deps, projectId);
+  const workspace = await ensureStandardProjectWorkspace(deps, projectId, { readMode: "compact" });
   if (workspace.status === "unsupported") {
     throw new HttpError(409, "Artifact and Resource conversations require a Standard project");
   }
@@ -456,6 +490,19 @@ const routes: Route[] = [
   },
   {
     method: "POST",
+    pattern: "/api/projects/:id/workspace/agent/turns",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleWorkspaceAgentTurn(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
+    method: "POST",
     pattern: "/api/projects/:id/workspace/graph/commands",
     handler: handleGraphCommands,
   },
@@ -496,6 +543,31 @@ const routes: Route[] = [
   },
   {
     method: "GET",
+    pattern: "/api/projects/:id/workspace/plans",
+    handler: handleListGenerationPlans,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/plans/:planId",
+    handler: handleGetGenerationPlan,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/plans/:planId/events",
+    handler: handleGenerationPlanEvents,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/plans/:planId/cancel",
+    handler: handleCancelGenerationPlan,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/plans/:planId/tasks/:taskId/retry",
+    handler: handleRetryGenerationTask,
+  },
+  {
+    method: "GET",
     pattern: "/api/projects/:id/resources",
     handler: handleListResources,
   },
@@ -505,9 +577,27 @@ const routes: Route[] = [
     handler: handleCreateResource,
   },
   {
+    method: "POST",
+    pattern: "/api/projects/:id/resources/materialize",
+    handler: handleMaterializeResource,
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/resources/:resourceId",
     handler: handleGetResource,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/resources/:resourceId/agent/turns",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleScopedAgentTurn(req, res, params, deps, signal),
+      ),
+    ),
   },
   {
     method: "PATCH",
@@ -518,6 +608,36 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/projects/:id/resources/:resourceId/revisions",
     handler: handleListResourceRevisions,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/history",
+    handler: handleListResourceRevisionHistory,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId",
+    handler: handleGetResourceRevisionView,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId/payload",
+    handler: handleGetResourceRevisionPayload,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId/embedded-assets/:assetId",
+    handler: handleGetResourceRevisionEmbeddedAsset,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId/research",
+    handler: handleGetResearchResourceRevision,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId/directions/:directionId/artifact-intents",
+    handler: handleCreateResearchDirectionArtifactIntent,
   },
   {
     method: "POST",
@@ -540,6 +660,24 @@ const routes: Route[] = [
     handler: handleGetWorkspaceArtifact,
   },
   {
+    method: "POST",
+    pattern: "/api/projects/:id/artifacts/:artifactId/agent/turns",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleScopedAgentTurn(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/agent/latest-plan",
+    handler: handleGetLatestScopedArtifactGenerationPlan,
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/artifacts/:artifactId/tracks",
     handler: handleListArtifactTracks,
@@ -551,8 +689,23 @@ const routes: Route[] = [
   },
   {
     method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/history",
+    handler: handleListArtifactRevisionHistory,
+  },
+  {
+    method: "GET",
     pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId",
     handler: handleGetArtifactRevision,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId/restore",
+    handler: handleRestoreArtifactRevision,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId/fork-track",
+    handler: handleForkArtifactTrack,
   },
   {
     method: "POST",
@@ -1689,6 +1842,7 @@ export function createApp(deps: AppDeps): http.Server {
   const appDeps: AppDeps = {
     ...deps,
     previewLeaseManager: resolvedPreviewLeaseManager,
+    generationPlanEvents: deps.generationPlanEvents ?? new GenerationPlanEventBroker(),
     runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor({
       ...deps,
       previewLeaseManager: resolvedPreviewLeaseManager,

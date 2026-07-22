@@ -40,9 +40,43 @@ installMemoryStorage(globalThis);
 // jsdom polyfills for Radix UI primitives (shadcn) used in tests.
 if (typeof window !== "undefined") {
   installMemoryStorage(window);
+  if (!("DOMMatrixReadOnly" in window)) {
+    (window as unknown as { DOMMatrixReadOnly: unknown }).DOMMatrixReadOnly = class {
+      readonly m22 = 1;
+    };
+  }
   if (!("ResizeObserver" in window)) {
     (window as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
-      observe() {}
+      private readonly callback: ResizeObserverCallback;
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe(target: Element) {
+        const rect = target.getBoundingClientRect();
+        const width = rect.width || 1024;
+        const height = rect.height || 768;
+        const contentRect = {
+          x: rect.x,
+          y: rect.y,
+          top: rect.top,
+          right: rect.right || width,
+          bottom: rect.bottom || height,
+          left: rect.left,
+          width,
+          height,
+          toJSON: () => ({}),
+        } as DOMRectReadOnly;
+        const boxSize = [{ inlineSize: width, blockSize: height }];
+        this.callback([{
+          target,
+          contentRect,
+          borderBoxSize: boxSize,
+          contentBoxSize: boxSize,
+          devicePixelContentBoxSize: boxSize,
+        } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
       unobserve() {}
       disconnect() {}
     };

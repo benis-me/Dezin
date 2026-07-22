@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Store } from "../../../packages/core/src/index.ts";
+import { GenerationPlanCompileError, Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import { ensureStandardProjectWorkspace } from "../src/workspace-migration.ts";
 
@@ -1061,7 +1061,7 @@ test("workspace Proposal approval HTTP returns authoritative layout for layout-o
   });
 });
 
-test("workspace Proposal HTTP generate approval returns an unqueued shell and reject changes only Proposal state", async () => {
+test("workspace Proposal HTTP generate approval compiles the immutable Plan before returning", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const project = store.createProject({ name: "Proposal generate and reject", mode: "standard" });
     const ready = await readyWorkspace(base, project.id);
@@ -1091,6 +1091,7 @@ test("workspace Proposal HTTP generate approval returns an unqueued shell and re
         proposalRevision: number;
         baseSnapshotId: string;
         status: string;
+        constructionSealed: boolean;
       };
     };
     assert.deepEqual(Object.keys(approval).sort(), ["graph", "layout", "plan", "proposal", "snapshot"]);
@@ -1103,14 +1104,23 @@ test("workspace Proposal HTTP generate approval returns an unqueued shell and re
     assert.equal(approval.plan.proposalId, generated.id);
     assert.equal(approval.plan.proposalRevision, generated.revision);
     assert.equal(approval.plan.baseSnapshotId, approval.snapshot.id);
-    assert.equal(approval.plan.status, "approved");
+    assert.equal(approval.plan.status, "queued");
+    assert.equal(approval.plan.constructionSealed, true);
     const planRow = store.db.prepare(
-      `SELECT status, compile_error_json AS compileError, finished_at AS finishedAt
+      `SELECT status, construction_sealed AS constructionSealed,
+              compile_error_json AS compileError, finished_at AS finishedAt
        FROM generation_plans WHERE id = ?`,
-    ).get(approval.plan.id) as { status: string; compileError: string | null; finishedAt: number | null };
-    assert.equal(planRow.status, "approved");
+    ).get(approval.plan.id) as {
+      status: string;
+      constructionSealed: number;
+      compileError: string | null;
+      finishedAt: number | null;
+    };
+    assert.equal(planRow.status, "queued");
+    assert.equal(planRow.constructionSealed, 1);
     assert.equal(planRow.compileError, null);
     assert.equal(planRow.finishedAt, null);
+    assert.ok(store.workspace.getGenerationPlanDetailForProject(project.id, approval.plan.id).tasks.length > 0);
 
     const afterGenerate = await readyWorkspace(base, project.id);
     const rejectedCreate = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
@@ -1163,6 +1173,75 @@ test("workspace Proposal HTTP generate approval returns an unqueued shell and re
       (await secondReject.json() as { code: string }).code,
       "workspace_proposal_state_conflict",
     );
+  });
+});
+
+test("generate approval compile failure returns the already-committed canonical workspace and failed Plan", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal compile failure HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "compile-failure")),
+    });
+    const proposal = await createResponse.json() as { id: string };
+    const compile = store.workspace.compileApprovedGenerationPlanForProject.bind(store.workspace);
+    store.workspace.compileApprovedGenerationPlanForProject = ((projectId: string, planId: string) => {
+      const error = new GenerationPlanCompileError(
+        "invalid-reference",
+        "Generated dependency is unavailable.",
+        { dependencyId: "missing-dependency" },
+      );
+      store.workspace.markGenerationPlanCompileFailedIfApprovedForProject(projectId, planId, {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      });
+      throw error;
+    }) as typeof compile;
+
+    const response = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+
+    assert.equal(response.status, 422);
+    const body = await response.json() as {
+      code: string;
+      planId: string;
+      compileCode: string;
+      details: Record<string, unknown>;
+      proposal: { id: string; status: string };
+      graph: ReadyWorkspaceResponse["graph"];
+      snapshot: ReadyWorkspaceResponse["activeSnapshot"];
+      layout: ReadyWorkspaceResponse["layout"];
+      plan: { id: string; status: string; compileError: Record<string, unknown> };
+    };
+    assert.equal(body.code, "generation_plan_compile_failed");
+    assert.equal(body.compileCode, "invalid-reference");
+    assert.deepEqual(body.details, { dependencyId: "missing-dependency" });
+    assert.equal(body.proposal.id, proposal.id);
+    assert.equal(body.proposal.status, "approved");
+    assert.equal(body.plan.id, body.planId);
+    assert.equal(body.plan.status, "compile-failed");
+    assert.deepEqual(body.plan.compileError, {
+      code: "invalid-reference",
+      message: "Generated dependency is unavailable.",
+      details: { dependencyId: "missing-dependency" },
+    });
+    assert.deepEqual(body.proposal, store.workspace.getProposalForProject(project.id, proposal.id));
+    assert.deepEqual(body.graph, store.workspace.getGraph(project.id));
+    assert.deepEqual(body.layout, store.workspace.getLayout(project.id));
+    assert.deepEqual(body.plan, store.workspace.getGenerationPlanForProject(project.id, body.planId));
+    const canonical = await readyWorkspace(base, project.id);
+    assert.deepEqual(body.graph, canonical.graph);
+    assert.deepEqual(body.snapshot, canonical.activeSnapshot);
+    assert.equal(store.workspace.getGenerationPlanDetailForProject(project.id, body.planId).tasks.length, 0);
   });
 });
 
@@ -1855,7 +1934,7 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
     assert.equal(snapshots.status, 200);
     assert.equal((await snapshots.json() as Array<{ id: string }>).length, 2);
     assert.equal((await fetch(
-      `${base}/api/projects/${projectA.id}/workspace/snapshots/${readyA.snapshots[1]!.id}`,
+      `${base}/api/projects/${projectA.id}/workspace/snapshots/${readyA.activeSnapshot.id}`,
     )).status, 200);
 
     const foreignArtifact = await fetch(`${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}`);
@@ -1867,7 +1946,7 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
       `${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}/revisions/${revisionA.id}`,
     )).status, 404);
     assert.equal((await fetch(
-      `${base}/api/projects/${projectB.id}/workspace/snapshots/${readyA.snapshots[1]!.id}`,
+      `${base}/api/projects/${projectB.id}/workspace/snapshots/${readyA.activeSnapshot.id}`,
     )).status, 404);
 
     store.workspace.applyGraphCommands(projectA.id, {
@@ -1919,6 +1998,236 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
     assert.equal((await fetch(`${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}`)).status, 404);
     assert.equal((await fetch(`${base}/api/projects/${projectA.id}/workspace`)).status, 500);
     assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  });
+});
+
+test("Artifact history is lazy and paged while restore and fork publish new immutable Revisions", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Paged Artifact history", mode: "standard" });
+    const initialResponse = await fetch(`${base}/api/projects/${project.id}/workspace`);
+    assert.equal(initialResponse.status, 200);
+    const initial = await initialResponse.json() as {
+      workspace: { activeKernelRevisionId: string };
+      activeSnapshot: { id: string };
+      artifacts: Array<{ id: string }>;
+      tracks: Array<{ id: string; artifactId: string }>;
+    };
+    const artifact = initial.artifacts[0]!;
+    const track = initial.tracks.find((candidate) => candidate.artifactId === artifact.id)!;
+    const first = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: track.id,
+      parentRevisionId: null,
+      sourceCommitHash: "a".repeat(40),
+      sourceTreeHash: "b".repeat(40),
+      kernelRevisionId: initial.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }] },
+      quality: { state: "passed", score: 91, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const firstSnapshot = store.workspace.publishArtifactRevision(first.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: initial.activeSnapshot.id,
+    });
+    const second = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: track.id,
+      parentRevisionId: first.id,
+      sourceCommitHash: "c".repeat(40),
+      sourceTreeHash: "d".repeat(40),
+      kernelRevisionId: initial.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }] },
+      quality: { state: "passed", score: 97, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const secondSnapshot = store.workspace.publishArtifactRevision(second.id, {
+      expectedHeadRevisionId: first.id,
+      expectedSnapshotId: firstSnapshot.id,
+    });
+
+    const overview = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
+      activeSnapshot: { id: string };
+      revisions: Array<{ id: string }>;
+      snapshots: Array<{ id: string }>;
+    };
+    assert.deepEqual(overview.revisions.map(({ id }) => id), [second.id]);
+    assert.deepEqual(overview.snapshots.map(({ id }) => id), [secondSnapshot.id]);
+
+    const firstPageResponse = await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/history?limit=1`,
+    );
+    assert.equal(firstPageResponse.status, 200);
+    const firstPage = await firstPageResponse.json() as {
+      items: Array<{ id: string }>;
+      nextCursor: string | null;
+    };
+    assert.deepEqual(firstPage.items.map(({ id }) => id), [second.id]);
+    assert.equal(typeof firstPage.nextCursor, "string");
+    const nextPage = await (await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/history?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+    )).json() as { items: Array<{ id: string }>; nextCursor: string | null };
+    assert.deepEqual(nextPage.items.map(({ id }) => id), [first.id]);
+    assert.equal(nextPage.nextCursor, null);
+
+    const restoredResponse = await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions/${first.id}/restore`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: second.id,
+          expectedSnapshotId: secondSnapshot.id,
+        }),
+      },
+    );
+    assert.equal(restoredResponse.status, 201);
+    const restored = await restoredResponse.json() as {
+      action: string;
+      revision: { id: string; parentRevisionId: string | null; sourceCommitHash: string };
+      snapshot: { id: string };
+    };
+    assert.equal(restored.action, "restore-as-new-revision");
+    assert.notEqual(restored.revision.id, first.id);
+    assert.equal(restored.revision.parentRevisionId, second.id);
+    assert.equal(restored.revision.sourceCommitHash, first.sourceCommitHash);
+
+    const forkedResponse = await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions/${first.id}/fork-track`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Homepage exploration",
+          expectedHeadRevisionId: restored.revision.id,
+          expectedSnapshotId: restored.snapshot.id,
+        }),
+      },
+    );
+    assert.equal(forkedResponse.status, 201);
+    const forked = await forkedResponse.json() as {
+      action: string;
+      track: { id: string; name: string; headRevisionId: string };
+      revision: { id: string; parentRevisionId: string | null };
+      snapshot: { artifactTracks: Record<string, string>; artifactRevisions: Record<string, string> };
+    };
+    assert.equal(forked.action, "fork-track");
+    assert.equal(forked.track.name, "Homepage exploration");
+    assert.equal(forked.track.headRevisionId, forked.revision.id);
+    assert.equal(forked.revision.parentRevisionId, null);
+    assert.equal(forked.snapshot.artifactTracks[artifact.id], forked.track.id);
+    assert.equal(forked.snapshot.artifactRevisions[artifact.id], forked.revision.id);
+    assert.deepEqual(store.workspace.getArtifactRevision(first.id), first);
+    assert.deepEqual(store.workspace.getArtifactRevision(second.id), second);
+  });
+});
+
+test("workspace overview stays compact while explicit history routes use exact readers", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Compact overview", mode: "standard" });
+    const initial = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
+      workspace: { activeKernelRevisionId: string };
+      activeSnapshot: { id: string };
+      artifacts: Array<{ id: string }>;
+      tracks: Array<{ id: string; artifactId: string }>;
+    };
+    const artifact = initial.artifacts[0]!;
+    const track = initial.tracks.find((candidate) => candidate.artifactId === artifact.id)!;
+    const first = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: track.id,
+      parentRevisionId: null,
+      sourceCommitHash: "1".repeat(40),
+      sourceTreeHash: "2".repeat(40),
+      kernelRevisionId: initial.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [] },
+      quality: { state: "passed", score: 90, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const firstSnapshot = store.workspace.publishArtifactRevision(first.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: initial.activeSnapshot.id,
+    });
+    const second = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: track.id,
+      parentRevisionId: first.id,
+      sourceCommitHash: "3".repeat(40),
+      sourceTreeHash: "4".repeat(40),
+      kernelRevisionId: initial.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [] },
+      quality: { state: "passed", score: 95, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const secondSnapshot = store.workspace.publishArtifactRevision(second.id, {
+      expectedHeadRevisionId: first.id,
+      expectedSnapshotId: firstSnapshot.id,
+    });
+
+    const originalBundle = store.workspace.getBundleByProjectId.bind(store.workspace);
+    const originalSnapshots = store.workspace.listSnapshots.bind(store.workspace);
+    const originalRevisions = store.workspace.listRevisions.bind(store.workspace);
+    const originalResources = store.workspace.listResources.bind(store.workspace);
+    const originalResourceRevision = store.workspace.getResourceRevisionForProject.bind(store.workspace);
+    const originalLayout = store.workspace.getLayout.bind(store.workspace);
+    store.workspace.getBundleByProjectId = (() => assert.fail(
+      "readiness must not build the history bundle",
+    )) as typeof store.workspace.getBundleByProjectId;
+    store.workspace.listSnapshots = (() => assert.fail(
+      "workspace overview must not scan Snapshot history",
+    )) as typeof store.workspace.listSnapshots;
+    store.workspace.listRevisions = (() => assert.fail(
+      "workspace overview must not scan Revision history",
+    )) as typeof store.workspace.listRevisions;
+    store.workspace.listResources = (() => assert.fail(
+      "workspace handler must use the atomic compact overview aggregate",
+    )) as typeof store.workspace.listResources;
+    store.workspace.getResourceRevisionForProject = (() => assert.fail(
+      "workspace handler must not recursively compose active Resource Revisions",
+    )) as typeof store.workspace.getResourceRevisionForProject;
+    store.workspace.getLayout = (() => assert.fail(
+      "workspace handler must not compose layout outside the overview transaction",
+    )) as typeof store.workspace.getLayout;
+    try {
+      const overviewResponse = await fetch(`${base}/api/projects/${project.id}/workspace`);
+      assert.equal(overviewResponse.status, 200);
+      const overview = await overviewResponse.json() as {
+        revisions: Array<{ id: string }>;
+        snapshots: Array<{ id: string }>;
+      };
+      assert.deepEqual(overview.revisions.map(({ id }) => id), [second.id]);
+      assert.deepEqual(overview.snapshots.map(({ id }) => id), [secondSnapshot.id]);
+
+      store.workspace.listSnapshots = originalSnapshots;
+      store.workspace.listRevisions = originalRevisions;
+      store.workspace.listResources = originalResources;
+      store.workspace.getResourceRevisionForProject = originalResourceRevision;
+      store.workspace.getLayout = originalLayout;
+      const revisionHistory = await fetch(
+        `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions`,
+      );
+      assert.equal(revisionHistory.status, 200);
+      assert.deepEqual(
+        (await revisionHistory.json() as Array<{ id: string }>).map(({ id }) => id),
+        [first.id, second.id],
+      );
+      const snapshotHistory = await fetch(`${base}/api/projects/${project.id}/workspace/snapshots`);
+      assert.equal(snapshotHistory.status, 200);
+      assert.deepEqual(
+        (await snapshotHistory.json() as Array<{ id: string }>).map(({ id }) => id),
+        store.workspace.listSnapshots(project.id).map(({ id }) => id),
+      );
+    } finally {
+      store.workspace.getBundleByProjectId = originalBundle;
+      store.workspace.listSnapshots = originalSnapshots;
+      store.workspace.listRevisions = originalRevisions;
+      store.workspace.listResources = originalResources;
+      store.workspace.getResourceRevisionForProject = originalResourceRevision;
+      store.workspace.getLayout = originalLayout;
+    }
   });
 });
 
@@ -2098,6 +2407,9 @@ test("workspace mutations never relabel durable graph or layout corruption as cl
     };
     const graphArtifact = graphReady.artifacts[0]!;
     const graphNode = graphReady.graph.nodes.find((node) => node.artifactId === graphArtifact.id)!;
+    const graphSnapshotCount = (store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+    ).get(graphReady.workspace.id) as { count: number }).count;
     const originalApplyGraphCommands = store.workspace.applyGraphCommands.bind(store.workspace);
     let injectedGraphCorruption = false;
     store.workspace.applyGraphCommands = ((...args: Parameters<typeof originalApplyGraphCommands>) => {
@@ -2127,7 +2439,7 @@ test("workspace mutations never relabel durable graph or layout corruption as cl
     assert.equal(graphState.activeSnapshotId, graphReady.activeSnapshot.id);
     assert.equal((store.db.prepare(`
       SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?
-    `).get(graphReady.workspace.id) as { count: number }).count, graphReady.snapshots.length);
+    `).get(graphReady.workspace.id) as { count: number }).count, graphSnapshotCount);
   });
 });
 
@@ -2221,6 +2533,141 @@ test("Standard workspace migration verifies Git without changing Git or legacy r
   store.close();
 });
 
+test("modern non-legacy Workspace reloads without entering legacy migration", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Modern Workspace reload", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const published = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: foundation.graphRevision,
+      expectedSnapshotId: foundation.activeSnapshotId,
+      commands: [proposalPageCommand("modern-reload", "Modern page")],
+    });
+    const before = {
+      workspace: store.workspace.getWorkspace(project.id),
+      graphs: Number((store.db.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_graph_revisions WHERE workspace_id = ?",
+      ).get(foundation.id) as { count: number }).count),
+      snapshots: Number((store.db.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+      ).get(foundation.id) as { count: number }).count),
+      artifacts: Number((store.db.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_artifacts WHERE workspace_id = ?",
+      ).get(foundation.id) as { count: number }).count),
+    };
+    const originalMigration = store.workspace.ensureLegacyStandardWorkspace.bind(store.workspace);
+    store.workspace.ensureLegacyStandardWorkspace = (() => {
+      assert.fail("modern Workspace reload must not enter legacy migration");
+    }) as typeof store.workspace.ensureLegacyStandardWorkspace;
+
+    try {
+      const first = await fetch(`${base}/api/projects/${project.id}/workspace`);
+      const second = await fetch(`${base}/api/projects/${project.id}/workspace`);
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
+      const firstBody = await first.json() as ReadyWorkspaceResponse;
+      const secondBody = await second.json() as ReadyWorkspaceResponse;
+      assert.deepEqual(secondBody, firstBody);
+      assert.equal(firstBody.graph.revision, published.graph.revision);
+      assert.deepEqual({
+        workspace: store.workspace.getWorkspace(project.id),
+        graphs: Number((store.db.prepare(
+          "SELECT COUNT(*) AS count FROM workspace_graph_revisions WHERE workspace_id = ?",
+        ).get(foundation.id) as { count: number }).count),
+        snapshots: Number((store.db.prepare(
+          "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+        ).get(foundation.id) as { count: number }).count),
+        artifacts: Number((store.db.prepare(
+          "SELECT COUNT(*) AS count FROM workspace_artifacts WHERE workspace_id = ?",
+        ).get(foundation.id) as { count: number }).count),
+      }, before);
+    } finally {
+      store.workspace.ensureLegacyStandardWorkspace = originalMigration;
+    }
+  });
+});
+
+test("Kernel-only graph-zero Workspace reloads as modern without legacy migration", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-kernel-only-"));
+  const store = new Store(join(dataDir, "store.db"));
+  const project = store.createProject({ name: "Kernel-only modern Workspace", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const kernel = store.workspace.createKernelRevision({
+    workspaceId: foundation.id,
+    parentRevisionId: foundation.activeKernelRevisionId,
+    tokens: { accent: "#6633ff" },
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Modern design direction",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const snapshot = store.workspace.publishKernelRevision(kernel.id, {
+    expectedKernelRevisionId: foundation.activeKernelRevisionId,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const before = store.workspace.getCompactBundleByProjectId(project.id);
+  assert.ok(before);
+  assert.equal(before.workspace.graphRevision, 0);
+  assert.equal(before.activeKernelRevision.sequence, 2);
+  assert.equal(before.activeSnapshot.id, snapshot.id);
+  let verificationReached = 0;
+
+  const first = await ensureStandardProjectWorkspace({ store, dataDir }, project.id, {
+    afterVerification: () => { verificationReached += 1; },
+  });
+  const second = await ensureStandardProjectWorkspace({ store, dataDir }, project.id, {
+    afterVerification: () => { verificationReached += 1; },
+  });
+
+  assert.deepEqual(first, { status: "ready", ...before });
+  assert.deepEqual(second, first);
+  assert.equal(verificationReached, 0);
+  store.close();
+});
+
+test("checkpoint-only graph-zero Workspace reloads as modern without legacy migration", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-checkpoint-only-"));
+  const store = new Store(join(dataDir, "store.db"));
+  const project = store.createProject({ name: "Checkpoint-only modern Workspace", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const checkpoint = store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: foundation.activeSnapshotId,
+    reason: "modern-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "modern-proposal",
+      planId: "modern-plan",
+      checkpointId: "modern-checkpoint",
+    },
+  });
+  const before = store.workspace.getCompactBundleByProjectId(project.id);
+  assert.ok(before);
+  assert.equal(before.workspace.graphRevision, 0);
+  assert.equal(before.activeKernelRevision.sequence, 1);
+  assert.equal(before.activeSnapshot.sequence, 2);
+  assert.equal(before.activeSnapshot.id, checkpoint.id);
+  let verificationReached = 0;
+
+  const first = await ensureStandardProjectWorkspace({ store, dataDir }, project.id, {
+    afterVerification: () => { verificationReached += 1; },
+  });
+  const second = await ensureStandardProjectWorkspace({ store, dataDir }, project.id, {
+    afterVerification: () => { verificationReached += 1; },
+  });
+
+  assert.deepEqual(first, { status: "ready", ...before });
+  assert.deepEqual(second, first);
+  assert.equal(verificationReached, 0);
+  store.close();
+});
+
 test("Prototype workspace migration is typed unsupported and changes no Workspace state", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-prototype-"));
   const store = new Store(join(dataDir, "store.db"));
@@ -2249,6 +2696,34 @@ test("Prototype workspace migration is typed unsupported and changes no Workspac
     snapshots: store.db.prepare("SELECT * FROM workspace_snapshots ORDER BY sequence").all(),
     artifacts: store.db.prepare("SELECT * FROM workspace_artifacts").all(),
   }, before);
+  store.close();
+});
+
+test("modern Prototype Workspace remains unsupported after graph publication", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-modern-prototype-"));
+  const store = new Store(join(dataDir, "store.db"));
+  const project = store.createProject({ name: "Modern Prototype", mode: "prototype" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [proposalPageCommand("modern-prototype")],
+  });
+  const before = store.workspace.getCompactBundleByProjectId(project.id);
+  let verificationReached = false;
+
+  const result = await ensureStandardProjectWorkspace({ store, dataDir }, project.id, {
+    afterVerification: () => { verificationReached = true; },
+  });
+
+  assert.deepEqual(result, {
+    status: "unsupported",
+    code: "workspace_requires_standard_project",
+    projectId: project.id,
+    projectMode: "prototype",
+  });
+  assert.equal(verificationReached, false);
+  assert.deepEqual(store.workspace.getCompactBundleByProjectId(project.id), before);
   store.close();
 });
 
@@ -2346,7 +2821,7 @@ test("migration retries a whole seed after verified legacy rows drift", async ()
   assert.equal(result.revisions[0]?.legacyRunId, run.id);
   assert.equal(result.revisions[0]?.sourceCommitHash, commitB);
   assert.equal(result.revisions[0]?.sourceTreeHash, treeB);
-  assert.equal(result.snapshots.length, 2);
+  assert.deepEqual(result.snapshots.map((snapshot) => snapshot.id), [result.activeSnapshot.id]);
   assert.equal(result.artifacts.length, 1);
   store.close();
 });
@@ -2449,13 +2924,13 @@ test("migration retries SQLITE_BUSY raised before seed capture", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-busy-"));
   const store = new Store(join(dataDir, "store.db"));
   const project = store.createProject({ name: "Busy retry", mode: "standard" });
-  const original = store.workspace.getBundleByProjectId.bind(store.workspace);
+  const original = store.workspace.getCompactBundleByProjectId.bind(store.workspace);
   let reads = 0;
-  store.workspace.getBundleByProjectId = ((projectId: string) => {
+  store.workspace.getCompactBundleByProjectId = ((projectId: string) => {
     reads += 1;
     if (reads === 1) throw Object.assign(new Error("busy"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
     return original(projectId);
-  }) as typeof store.workspace.getBundleByProjectId;
+  }) as typeof store.workspace.getCompactBundleByProjectId;
   const result = await ensureStandardProjectWorkspace({ store, dataDir }, project.id);
   assert.equal(result.status, "ready");
   assert.ok(reads >= 2);

@@ -22,6 +22,14 @@ jobs:
           node-version: 22.14.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Verify Chrome for browser-backed QA
+        run: >-
+          node --experimental-strip-types --no-warnings -e
+          "import('./apps/daemon/src/capture-cover.ts').then(({ findChrome }) => {
+          const executable = findChrome();
+          if (!executable) throw new Error('Chrome is required for browser-backed QA');
+          console.log(executable);
+          })"
       - name: Typecheck every workspace
         run: pnpm typecheck
       - name: Test with coverage and process-leak guard

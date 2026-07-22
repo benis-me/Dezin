@@ -105,10 +105,17 @@ function installReactFlowMeasurements(): () => void {
   });
   return () => {
     for (const observer of observers) {
-      const entries = [...observer.targets].map((target) => ({
-        target,
-        contentRect: target.getBoundingClientRect(),
-      }) as ResizeObserverEntry);
+      const entries = [...observer.targets].map((target) => {
+        const contentRect = target.getBoundingClientRect();
+        const boxSize = [{ inlineSize: contentRect.width, blockSize: contentRect.height }];
+        return {
+          target,
+          contentRect,
+          borderBoxSize: boxSize,
+          contentBoxSize: boxSize,
+          devicePixelContentBoxSize: boxSize,
+        } as ResizeObserverEntry;
+      });
       if (entries.length > 0) observer.callback(entries, observer.instance);
     }
   };
@@ -675,6 +682,7 @@ test("proposal overlay keeps removed and modified non-prototype relations in the
 });
 
 test("canvas merges the proposal into one ReactFlow and keeps proposal focus out of canonical selection", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
   const proposal: ProposalDiffProposal = {
     id: "proposal-canvas",
     baseGraphRevision: 7,
@@ -729,6 +737,11 @@ test("canvas merges the proposal into one ReactFlow and keeps proposal focus out
     />,
   );
   const { container } = rendered;
+  await act(async () => {
+    measureReactFlow();
+    await Promise.resolve();
+    measureReactFlow();
+  });
 
   expect(container.querySelectorAll(".react-flow")).toHaveLength(1);
   expect(container.querySelector("iframe")).toBeNull();
@@ -763,9 +776,16 @@ test("canvas merges the proposal into one ReactFlow and keeps proposal focus out
       proposalFocus={{ key: "node:page-checkout", nonce: 2 }}
     />,
   );
+  await act(async () => {
+    measureReactFlow();
+    await Promise.resolve();
+    measureReactFlow();
+  });
   reviewControl.focus();
   expect(document.activeElement).toBe(reviewControl);
-  await waitFor(() => expect(document.activeElement).toBe(overlayNode));
+  await waitFor(() => expect(container.querySelector<HTMLElement>(
+    '.react-flow__node[data-id="proposal:proposal-canvas:node:page-checkout"]',
+  )).toHaveFocus());
   reviewControl.remove();
 });
 
@@ -836,7 +856,33 @@ test("real ReactFlow renderer resolves Proposal handles and paints the overlay r
 });
 
 test("proposal review panel exposes editable rationale review actions and non-color status language", async () => {
-  const proposal = draftProposal();
+  const proposal = draftProposal({
+    generation: {
+      ...emptyGeneration,
+      artifactPlans: [{
+        operation: "create",
+        nodeId: "page-checkout",
+        artifactId: "artifact-checkout",
+        kind: "page",
+        name: "Checkout",
+        trackId: "track-checkout",
+        baseRevisionId: null,
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: ["desktop", "mobile"],
+      }],
+      responsiveFrames: [
+        { id: "desktop", name: "Desktop", width: 1440, height: 900 },
+        { id: "mobile", name: "Mobile", width: 390, height: 844 },
+      ],
+      qualityProfile: {
+        requiredFrameIds: ["desktop", "mobile"],
+        blockingSeverities: ["P0", "P1"],
+        requireRuntimeChecks: true,
+        requireVisualReview: true,
+      },
+    },
+  });
   const diff = buildProposalDiff(proposal, {
     graph: baseGraph,
     activeSnapshotId: "snapshot-7",
@@ -869,6 +915,9 @@ test("proposal review panel exposes editable rationale review actions and non-co
   expect(screen.getByRole("button", { name: "Apply structure only" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Approve and generate" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Reject proposal" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Effective quality contract" })).toHaveTextContent(
+    "Desktop1440 × 900Mobile390 × 844RuntimeRequiredVisual reviewRequiredBlocks onP0 · P1",
+  );
 
   const rationale = screen.getByRole("textbox", { name: "Proposal rationale" });
   fireEvent.change(rationale, { target: { value: "Add a complete checkout flow" } });
@@ -1418,6 +1467,75 @@ test("Proposal validation errors retain the editable draft and focus its issue s
     expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Proposal needs attention" }));
   });
   expect(approveWorkspaceProposal).toHaveBeenCalledTimes(1);
+});
+
+test("a committed generation compile failure refreshes canonical workspace state and opens its Build plan", async () => {
+  const approved = draftProposal({
+    revision: 2,
+    status: "approved",
+    review: { kind: "approved", mode: "generate" },
+    updatedAt: 8,
+  });
+  const failedPlan = {
+    ...approvedResult("generate").plan!,
+    status: "compile-failed" as const,
+    constructionSealed: false,
+    compileError: {
+      code: "unsupported-resource-kind",
+      message: "Generated files require an explicit owned source.",
+      details: { resourceKind: "file" },
+    },
+    finishedAt: 8,
+  };
+  const getWorkspace = vi.fn()
+    .mockResolvedValueOnce(workspacePayload())
+    .mockResolvedValueOnce(workspacePayload(8));
+  const getWorkspaceProposal = vi.fn(async () => approved);
+  const approveWorkspaceProposal = vi.fn(async () => {
+    throw new ApiError(422, failedPlan.compileError.message, {
+      code: "generation_plan_compile_failed",
+      planId: failedPlan.id,
+      compileCode: failedPlan.compileError.code,
+      details: failedPlan.compileError.details,
+      proposal: approved,
+      graph: workspacePayload(8).graph,
+      snapshot: workspacePayload(8).activeSnapshot,
+      layout: workspacePayload(8).layout,
+      plan: failedPlan,
+    });
+  });
+  const listGenerationPlans = vi.fn(async () => [failedPlan]);
+  const getGenerationPlan = vi.fn(async () => ({
+    plan: failedPlan,
+    tasks: [],
+    dependencies: [],
+    currentAttempts: [],
+  }));
+  const { container } = renderStudio({
+    getWorkspace,
+    getWorkspaceProposal,
+    approveWorkspaceProposal,
+    listGenerationPlans,
+    getGenerationPlan,
+  });
+
+  fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
+
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Generated files require an explicit owned source.");
+  expect(screen.getByLabelText("2 objects at 100 percent zoom")).toBeInTheDocument();
+  expect(container.querySelector('[data-id="proposal:proposal-1:node:page-checkout"]')).toBeNull();
+  expect(getWorkspace).toHaveBeenCalledTimes(2);
+  expect(getWorkspaceProposal).not.toHaveBeenCalled();
+  expect(getGenerationPlan).toHaveBeenCalledWith("project-1", failedPlan.id);
+  expect(approveWorkspaceProposal).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+
+  fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 });
 
 test("two rapid per-item reverts serialize against the latest authoritative Proposal revision", async () => {

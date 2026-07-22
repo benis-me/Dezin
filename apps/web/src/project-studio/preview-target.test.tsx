@@ -50,12 +50,22 @@ function PreviewProbe({
   projectId,
   target,
   expectedArtifactId,
+  expectedWorkspaceId,
+  expectedRenderSpec,
 }: {
   projectId: string;
   target: PreviewTarget;
   expectedArtifactId?: string;
+  expectedWorkspaceId?: string;
+  expectedRenderSpec?: Readonly<Record<string, unknown>>;
 }) {
-  const preview = useArtifactPreview({ projectId, target, expectedArtifactId });
+  const preview = useArtifactPreview({
+    projectId,
+    target,
+    expectedArtifactId,
+    expectedWorkspaceId,
+    expectedRenderSpec,
+  });
   return (
     <output aria-label="Preview state" data-status={preview.status}>
       {preview.status === "ready"
@@ -353,6 +363,26 @@ test("rejects a resolved preview that does not belong to the Artifact route befo
   );
 
   expect(await screen.findByText("Resolved preview belongs to a different artifact.")).toBeInTheDocument();
+  expect(acquirePreviewTargetLease).not.toHaveBeenCalled();
+});
+
+test("rejects a resolved preview outside the frozen Snapshot workspace before acquire", async () => {
+  const current = resolved("artifact-1", "revision-1");
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, value: ResolvedPreviewTarget) => lease(value));
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async () => current,
+      acquirePreviewTargetLease,
+    })}>
+      <PreviewProbe
+        projectId="project-1"
+        expectedWorkspaceId="workspace-frozen"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Resolved preview does not match the frozen Snapshot workspace.")).toBeInTheDocument();
   expect(acquirePreviewTargetLease).not.toHaveBeenCalled();
 });
 

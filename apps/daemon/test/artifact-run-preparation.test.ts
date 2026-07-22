@@ -144,6 +144,7 @@ function captureMaterializer(
   onMaterialize?: Parameters<SharinganCaptureRevisionMaterializerPort["materializeExactRevision"]>[0] extends infer Input
     ? (input: Input) => void
     : never,
+  disposeError?: Error,
 ): SharinganCaptureRevisionMaterializerPort {
   return {
     async materializeExactRevision(input) {
@@ -154,7 +155,14 @@ function captureMaterializer(
         join(input.worktreeDir, ".sharingan", "pages.json"),
         JSON.stringify({ revisionId: input.reference.revisionId, pages: [{ id: "entry" }] }),
       );
-      return createSharinganCaptureBundleFence(input);
+      const fence = await createSharinganCaptureBundleFence(input);
+      if (disposeError === undefined) return fence;
+      return Object.freeze({
+        ...fence,
+        async dispose(): Promise<void> {
+          throw disposeError;
+        },
+      });
     },
   };
 }
@@ -164,17 +172,28 @@ test("Default preparation binds the exact Context Pack and Git base into prompts
   const exactClaim = claim(repo);
   const pack = contextPack();
   let materialized = false;
+  let exactInfrastructure: object | null = null;
   const preparation = new DefaultArtifactRunPreparation({
     contextPacks: { get: () => pack },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
-    createRunner: () => runner,
+    createRunner: (infrastructure) => {
+      exactInfrastructure = infrastructure;
+      return runner;
+    },
     createQualityEvaluator: () => ({
       async evaluate() {
         throw new Error("not used");
       },
     }),
-    baseSystemPrompt: () => "You are Dezin's senior design Agent.",
+    baseSystemPrompt: (infrastructure) => {
+      assert.equal(
+        infrastructure,
+        exactInfrastructure,
+        "all Attempt-bound factories must receive the same infrastructure identity",
+      );
+      return "You are Dezin's senior design Agent.";
+    },
     environment: () => ({ DEZIN_PLAN_ID: "plan-1" }),
     sharinganCaptures: captureMaterializer((input) => {
       materialized = true;
@@ -281,6 +300,41 @@ test("failed infrastructure setup removes the isolated worktree", async () => {
     );
     assert.notEqual(worktreeDir, "");
     assert.equal(existsSync(worktreeDir), false);
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("failed infrastructure setup exposes capture cleanup failure without losing the primary error", async () => {
+  const repo = repository();
+  const primaryError = new Error("runner setup failed");
+  const cleanupError = new Error("capture cleanup failed");
+  let worktreeDir = "";
+  const preparation = new DefaultArtifactRunPreparation({
+    contextPacks: { get: () => contextPack() },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    createRunner: (input) => {
+      worktreeDir = input.worktreeDir;
+      throw primaryError;
+    },
+    createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
+    baseSystemPrompt: () => "base",
+    sharinganCaptures: captureMaterializer(undefined, cleanupError),
+  });
+  try {
+    await assert.rejects(
+      preparation.prepare(claim(repo), new AbortController().signal),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.cause, primaryError);
+        assert.deepEqual(error.errors, [primaryError, cleanupError]);
+        assert.match(error.message, /cleanup failed/i);
+        return true;
+      },
+    );
+    assert.notEqual(worktreeDir, "");
+    assert.equal(existsSync(worktreeDir), false, "worktree cleanup is still attempted after fence cleanup fails");
   } finally {
     rmSync(repo.root, { recursive: true, force: true });
   }

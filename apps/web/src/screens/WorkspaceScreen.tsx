@@ -98,6 +98,7 @@ import {
   cacheBustedPreviewUrl,
   previewBridgeAddressForSrc,
   previewBridgeNonceForSrc,
+  previewDocumentSrc,
   usePreviewChannel,
   withPreviewBridgeNonce,
   type PreviewChannelMessage,
@@ -4569,8 +4570,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       key={previewSrc ?? "artifact-preview"}
       ref={previewIframeRef}
       title="Artifact preview"
-      src={previewSrc ?? undefined}
-      sandbox={previewSandboxForSrc(previewSrc)}
+      src={previewSrc ? previewDocumentSrc(previewSrc) : undefined}
+      sandbox={previewSandboxForSrc(previewSrc ? previewDocumentSrc(previewSrc) : null)}
       onLoad={onPreviewFrameLoad}
       style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
       className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}

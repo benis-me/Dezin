@@ -2,13 +2,11 @@ import type {
   ArtifactKind,
   ArtifactRevisionRecord,
   Store,
-  WorkspaceBundle,
   WorkspaceSnapshotRecord,
 } from "../../../packages/core/src/index.ts";
 import {
   acquireMaterializedRenderAssembly,
   buildRenderAssembly,
-  compareCodeUnits,
   ComponentFixtureContractError,
   ComponentInstanceRuntimeContractError,
   ComponentRevisionBindingConflictError,
@@ -30,7 +28,7 @@ export type PreviewTarget =
   | { kind: "artifact-current"; projectId: string; artifactId: string; trackId?: string }
   | { kind: "artifact-revision"; projectId: string; revisionId: string }
   | { kind: "run-candidate"; projectId: string; runId: string }
-  | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string }
+  | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string; stateKey?: string }
   | {
     kind: "component-state";
     projectId: string;
@@ -123,6 +121,14 @@ function nullableStringField(value: unknown, field: string): string | null {
   return value === null ? null : stringField(value, field);
 }
 
+function stateKeyField(value: unknown): string {
+  const stateKey = stringField(value, "stateKey");
+  if (stateKey.length > 256 || /[\u0000-\u001f\u007f]/.test(stateKey)) {
+    throw new PreviewTargetValidationError("stateKey must be at most 256 characters without control characters");
+  }
+  return stateKey;
+}
+
 function artifactKindField(value: unknown): ArtifactKind {
   switch (value) {
     case "page":
@@ -171,14 +177,17 @@ export function parsePreviewTarget(value: unknown): PreviewTarget {
     case "run-candidate":
       rejectUnexpectedFields(input, ["kind", "projectId", "runId"]);
       return { kind, projectId, runId: stringField(input.runId, "runId") };
-    case "workspace-flow":
-      rejectUnexpectedFields(input, ["kind", "projectId", "snapshotId", "startArtifactId"]);
+    case "workspace-flow": {
+      rejectUnexpectedFields(input, ["kind", "projectId", "snapshotId", "startArtifactId", "stateKey"]);
+      const stateKey = input.stateKey === undefined ? undefined : stateKeyField(input.stateKey);
       return {
         kind,
         projectId,
         snapshotId: stringField(input.snapshotId, "snapshotId"),
         startArtifactId: stringField(input.startArtifactId, "startArtifactId"),
+        ...(stateKey === undefined ? {} : { stateKey }),
       };
+    }
     case "component-state":
       rejectUnexpectedFields(input, ["kind", "projectId", "revisionId", "variantKey", "stateKey"]);
       return {
@@ -256,19 +265,30 @@ export function parseResolvedPreviewTarget(value: unknown): ResolvedPreviewTarge
 }
 
 function snapshotForRevision(
-  bundle: WorkspaceBundle,
+  deps: PreviewTargetResolverDeps,
+  projectId: string,
+  workspaceId: string,
   artifactId: string,
   revisionId: string,
 ): WorkspaceSnapshotRecord | null {
-  return bundle.snapshots
-    .filter((snapshot) => snapshot.artifactRevisions[artifactId] === revisionId)
-    .sort((left, right) => left.sequence - right.sequence || compareCodeUnits(left.id, right.id))
-    .at(-1) ?? null;
+  const snapshot = deps.store.workspace.getLatestSnapshotForArtifactRevision(
+    projectId,
+    artifactId,
+    revisionId,
+  );
+  if (snapshot && snapshot.workspaceId !== workspaceId) {
+    throw new PreviewTargetNotFoundError("Preview Target Workspace Snapshot was not found");
+  }
+  return snapshot;
 }
 
-function ownedRevision(bundle: WorkspaceBundle, revisionId: string): ArtifactRevisionRecord {
-  const revision = bundle.revisions.find((candidate) => candidate.id === revisionId);
-  if (!revision || revision.workspaceId !== bundle.workspace.id) {
+function ownedRevision(
+  deps: PreviewTargetResolverDeps,
+  workspaceId: string,
+  revisionId: string,
+): ArtifactRevisionRecord {
+  const revision = deps.store.workspace.getArtifactRevision(revisionId);
+  if (!revision || revision.workspaceId !== workspaceId) {
     throw new PreviewTargetNotFoundError("Preview Target Artifact Revision was not found");
   }
   return revision;
@@ -277,9 +297,29 @@ function ownedRevision(bundle: WorkspaceBundle, revisionId: string): ArtifactRev
 interface RevisionResolution {
   revision: ArtifactRevisionRecord;
   snapshot: WorkspaceSnapshotRecord | null;
+  boundedCurrent: boolean;
   variantKey: string | null;
   stateKey: string | null;
   runId: string | null;
+}
+
+function validateWorkspaceFlowState(renderSpec: Record<string, unknown>, stateKey: string | null): void {
+  if (stateKey === null) return;
+  const frames = renderSpec.frames;
+  if (!Array.isArray(frames) || frames.length === 0 || frames.length > 64) {
+    throw new PreviewTargetValidationError(`Preview Target flow Revision has no exact RenderSpec state ${stateKey}`);
+  }
+  let matches = 0;
+  for (const value of frames) {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)
+      && (value as Record<string, unknown>).initialState === stateKey) matches += 1;
+  }
+  if (matches === 0) {
+    throw new PreviewTargetValidationError(`Preview Target flow RenderSpec state ${stateKey} does not exist`);
+  }
+  if (matches > 1) {
+    throw new PreviewTargetValidationError(`Preview Target flow RenderSpec state ${stateKey} is ambiguous`);
+  }
 }
 
 function buildPreviewAssembly(
@@ -289,6 +329,7 @@ function buildPreviewAssembly(
   variantKey: string | null,
   stateKey: string | null,
   dataDir?: string,
+  shallowSnapshotId?: string,
 ): RenderAssembly {
   try {
     return buildRenderAssembly(store, {
@@ -297,7 +338,10 @@ function buildPreviewAssembly(
       ...(variantKey === null || stateKey === null
         ? {}
         : { componentState: { variantKey, stateKey } }),
-    }, dataDir === undefined ? {} : { dataDir });
+    }, {
+      ...(dataDir === undefined ? {} : { dataDir }),
+      ...(shallowSnapshotId === undefined ? {} : { shallowSnapshotId }),
+    });
   } catch (error) {
     if (error instanceof ComponentFixtureContractError
       || error instanceof ComponentInstanceRuntimeContractError
@@ -310,35 +354,87 @@ function buildPreviewAssembly(
 
 function resolveRevision(
   deps: PreviewTargetResolverDeps,
-  bundle: WorkspaceBundle,
+  workspaceId: string,
   target: PreviewTarget,
 ): RevisionResolution {
   switch (target.kind) {
     case "artifact-current": {
-      const artifact = bundle.artifacts.find((candidate) => candidate.id === target.artifactId);
-      if (!artifact || artifact.workspaceId !== bundle.workspace.id || artifact.archivedAt !== null) {
+      const artifact = deps.store.workspace.getArtifact(target.artifactId);
+      if (!artifact || artifact.workspaceId !== workspaceId || artifact.archivedAt !== null) {
         throw new PreviewTargetNotFoundError("Preview Target Artifact was not found");
       }
-      const trackId = target.trackId ?? artifact.activeTrackId;
-      if (trackId === null) throw new PreviewTargetNotFoundError("Preview Target Artifact has no active Track");
-      const track = bundle.tracks.find((candidate) => candidate.id === trackId && candidate.artifactId === artifact.id);
+      const requestedActiveTrack = target.trackId === undefined || target.trackId === artifact.activeTrackId;
+      if (requestedActiveTrack) {
+        const bundle = deps.store.workspace.getCompactBundleByProjectId(target.projectId);
+        const currentArtifact = bundle?.artifacts.find((candidate) => candidate.id === target.artifactId);
+        if (!bundle || bundle.workspace.id !== workspaceId || !currentArtifact
+          || currentArtifact.archivedAt !== null) {
+          throw new PreviewTargetNotFoundError("Preview Target Artifact was not found");
+        }
+        // An explicit Track can cease to be active between the identity read
+        // above and the aggregate read. In that case it is an exact historical
+        // Track request and must keep the full-lineage path below.
+        if (target.trackId === undefined || target.trackId === currentArtifact.activeTrackId) {
+          const trackId = currentArtifact.activeTrackId;
+          if (trackId === null) {
+            throw new PreviewTargetNotFoundError("Preview Target Artifact has no active Track");
+          }
+          const revisionId = bundle.activeSnapshot.artifactRevisions[currentArtifact.id];
+          const snapshotTrackId = bundle.activeSnapshot.artifactTracks[currentArtifact.id];
+          const track = bundle.tracks.find((candidate) => candidate.id === trackId);
+          const revision = revisionId == null
+            ? undefined
+            : bundle.revisions.find((candidate) => candidate.id === revisionId);
+          if (snapshotTrackId !== trackId || !track || track.artifactId !== currentArtifact.id
+            || track.headRevisionId !== revisionId || !revision
+            || revision.workspaceId !== workspaceId
+            || revision.artifactId !== currentArtifact.id
+            || revision.trackId !== trackId) {
+            throw new PreviewTargetNotFoundError("Preview Target Artifact Track has no current Revision");
+          }
+          return {
+            revision,
+            snapshot: bundle.activeSnapshot,
+            boundedCurrent: true,
+            variantKey: null,
+            stateKey: null,
+            runId: null,
+          };
+        }
+      }
+      const trackId = target.trackId;
+      if (trackId === undefined) {
+        throw new PreviewTargetNotFoundError("Preview Target Artifact has no active Track");
+      }
+      const track = deps.store.workspace.getTrack(trackId);
       if (!track || track.headRevisionId === null) {
         throw new PreviewTargetNotFoundError("Preview Target Artifact Track has no current Revision");
       }
-      const revision = ownedRevision(bundle, track.headRevisionId);
+      if (track.artifactId !== artifact.id) {
+        throw new PreviewTargetNotFoundError("Preview Target Artifact Track was not found");
+      }
+      const revision = ownedRevision(deps, workspaceId, track.headRevisionId);
       return {
         revision,
-        snapshot: snapshotForRevision(bundle, artifact.id, revision.id),
+        snapshot: snapshotForRevision(deps, target.projectId, workspaceId, artifact.id, revision.id),
+        boundedCurrent: false,
         variantKey: null,
         stateKey: null,
         runId: null,
       };
     }
     case "artifact-revision": {
-      const revision = ownedRevision(bundle, target.revisionId);
+      const revision = ownedRevision(deps, workspaceId, target.revisionId);
       return {
         revision,
-        snapshot: snapshotForRevision(bundle, revision.artifactId, revision.id),
+        snapshot: snapshotForRevision(
+          deps,
+          target.projectId,
+          workspaceId,
+          revision.artifactId,
+          revision.id,
+        ),
+        boundedCurrent: false,
         variantKey: null,
         stateKey: null,
         runId: null,
@@ -349,7 +445,11 @@ function resolveRevision(
       if (!run || run.projectId !== target.projectId) {
         throw new PreviewTargetNotFoundError("Preview Target candidate Run was not found");
       }
-      const revisions = bundle.revisions.filter((revision) => revision.producedByRunId === target.runId);
+      const revisions = deps.store.workspace.listArtifactRevisionsProducedByRun(
+        target.projectId,
+        target.runId,
+        2,
+      );
       if (revisions.length === 0) {
         throw new PreviewTargetNotFoundError("Preview Target candidate Run has no Artifact Revision");
       }
@@ -359,19 +459,26 @@ function resolveRevision(
       const revision = revisions[0]!;
       return {
         revision,
-        snapshot: snapshotForRevision(bundle, revision.artifactId, revision.id),
+        snapshot: snapshotForRevision(
+          deps,
+          target.projectId,
+          workspaceId,
+          revision.artifactId,
+          revision.id,
+        ),
+        boundedCurrent: false,
         variantKey: null,
         stateKey: null,
         runId: target.runId,
       };
     }
     case "workspace-flow": {
-      const snapshot = bundle.snapshots.find((candidate) => candidate.id === target.snapshotId);
-      if (!snapshot || snapshot.workspaceId !== bundle.workspace.id) {
+      const snapshot = deps.store.workspace.getSnapshotForProject(target.projectId, target.snapshotId);
+      if (!snapshot || snapshot.workspaceId !== workspaceId) {
         throw new PreviewTargetNotFoundError("Preview Target Workspace Snapshot was not found");
       }
-      const artifact = bundle.artifacts.find((candidate) => candidate.id === target.startArtifactId);
-      if (!artifact || artifact.workspaceId !== bundle.workspace.id) {
+      const artifact = deps.store.workspace.getArtifact(target.startArtifactId);
+      if (!artifact || artifact.workspaceId !== workspaceId) {
         throw new PreviewTargetNotFoundError("Preview Target flow start Artifact was not found");
       }
       if (artifact.kind !== "page") {
@@ -381,23 +488,34 @@ function resolveRevision(
       if (revisionId === undefined || revisionId === null) {
         throw new PreviewTargetNotFoundError("Preview Target flow Snapshot has no start Artifact Revision");
       }
+      const revision = ownedRevision(deps, workspaceId, revisionId);
+      const stateKey = target.stateKey ?? null;
+      validateWorkspaceFlowState(revision.renderSpec, stateKey);
       return {
-        revision: ownedRevision(bundle, revisionId),
+        revision,
         snapshot,
+        boundedCurrent: false,
         variantKey: null,
-        stateKey: null,
+        stateKey,
         runId: null,
       };
     }
     case "component-state": {
-      const revision = ownedRevision(bundle, target.revisionId);
-      const artifact = bundle.artifacts.find((candidate) => candidate.id === revision.artifactId);
-      if (!artifact || artifact.kind !== "component") {
+      const revision = ownedRevision(deps, workspaceId, target.revisionId);
+      const artifact = deps.store.workspace.getArtifact(revision.artifactId);
+      if (!artifact || artifact.workspaceId !== workspaceId || artifact.kind !== "component") {
         throw new PreviewTargetValidationError("Preview Target component-state requires a Component Revision");
       }
       return {
         revision,
-        snapshot: snapshotForRevision(bundle, revision.artifactId, revision.id),
+        snapshot: snapshotForRevision(
+          deps,
+          target.projectId,
+          workspaceId,
+          revision.artifactId,
+          revision.id,
+        ),
+        boundedCurrent: false,
         variantKey: target.variantKey,
         stateKey: target.stateKey,
         runId: null,
@@ -411,11 +529,11 @@ export async function resolvePreviewTarget(
   unsafeTarget: PreviewTarget | unknown,
 ): Promise<ResolvedPreviewTarget> {
   const target = parsePreviewTarget(unsafeTarget);
-  const bundle = deps.store.workspace.getBundleByProjectId(target.projectId);
-  if (!bundle) throw new PreviewTargetNotFoundError("Preview Target project Workspace was not found");
-  const resolution = resolveRevision(deps, bundle, target);
-  const artifact = bundle.artifacts.find((candidate) => candidate.id === resolution.revision.artifactId);
-  if (!artifact || artifact.workspaceId !== bundle.workspace.id) {
+  const workspace = deps.store.workspace.getWorkspace(target.projectId);
+  if (!workspace) throw new PreviewTargetNotFoundError("Preview Target project Workspace was not found");
+  const resolution = resolveRevision(deps, workspace.id, target);
+  const artifact = deps.store.workspace.getArtifact(resolution.revision.artifactId);
+  if (!artifact || artifact.workspaceId !== workspace.id) {
     throw new PreviewTargetNotFoundError("Preview Target owning Artifact was not found");
   }
   const assembly = buildPreviewAssembly(
@@ -425,11 +543,12 @@ export async function resolvePreviewTarget(
     resolution.variantKey,
     resolution.stateKey,
     deps.dataDir,
+    resolution.boundedCurrent ? resolution.snapshot?.id : undefined,
   );
   const targetKey = `preview-target-v1:${stablePreviewHash("dezin-preview-target-v1", {
     requestedKind: target.kind,
     projectId: target.projectId,
-    workspaceId: bundle.workspace.id,
+    workspaceId: workspace.id,
     artifactId: artifact.id,
     revisionId: resolution.revision.id,
     snapshotId: resolution.snapshot?.id ?? null,
@@ -443,7 +562,7 @@ export async function resolvePreviewTarget(
     targetKey,
     requestedKind: target.kind,
     projectId: target.projectId,
-    workspaceId: bundle.workspace.id,
+    workspaceId: workspace.id,
     artifactId: artifact.id,
     artifactKind: artifact.kind,
     revisionId: resolution.revision.id,
@@ -497,10 +616,25 @@ export function revalidateResolvedPreviewTarget(
   unsafeResolved: ResolvedPreviewTarget | unknown,
 ): ResolvedPreviewTarget {
   const resolved = parseResolvedPreviewTarget(unsafeResolved);
-  const bundle = deps.store.workspace.getBundleByProjectId(resolved.projectId);
-  if (!bundle || bundle.workspace.id !== resolved.workspaceId) immutableIdentityChanged();
-  const revision = bundle.revisions.find((candidate) => candidate.id === resolved.revisionId);
-  const artifact = bundle.artifacts.find((candidate) => candidate.id === resolved.artifactId);
+  const workspace = deps.store.workspace.getWorkspace(resolved.projectId);
+  if (!workspace || workspace.id !== resolved.workspaceId) immutableIdentityChanged();
+  const artifact = deps.store.workspace.getArtifact(resolved.artifactId);
+  const useShallowCurrentSnapshot = resolved.requestedKind === "artifact-current"
+    && resolved.snapshotId !== null
+    && artifact?.activeTrackId === resolved.trackId;
+  let assembly = useShallowCurrentSnapshot
+    ? buildPreviewAssembly(
+      deps.store,
+      resolved.projectId,
+      resolved.revisionId,
+      resolved.variantKey,
+      resolved.stateKey,
+      deps.dataDir,
+      resolved.snapshotId ?? undefined,
+    )
+    : null;
+  const revision = assembly?.rootRevision
+    ?? deps.store.workspace.getArtifactRevision(resolved.revisionId);
   if (
     !revision
     || revision.workspaceId !== resolved.workspaceId
@@ -517,12 +651,15 @@ export function revalidateResolvedPreviewTarget(
 
   const snapshot = resolved.snapshotId === null
     ? null
-    : bundle.snapshots.find((candidate) => candidate.id === resolved.snapshotId);
+    : useShallowCurrentSnapshot
+      ? null
+      : deps.store.workspace.getSnapshotForProject(resolved.projectId, resolved.snapshotId);
   if (
     resolved.snapshotId !== null
-    && (!snapshot
-      || snapshot.workspaceId !== resolved.workspaceId
-      || snapshot.artifactRevisions[resolved.artifactId] !== resolved.revisionId)
+    && (!useShallowCurrentSnapshot
+      && (!snapshot
+        || snapshot.workspaceId !== resolved.workspaceId
+        || snapshot.artifactRevisions[resolved.artifactId] !== resolved.revisionId))
   ) immutableIdentityChanged();
 
   switch (resolved.requestedKind) {
@@ -539,9 +676,9 @@ export function revalidateResolvedPreviewTarget(
         resolved.artifactKind !== "page"
         || resolved.snapshotId === null
         || resolved.variantKey !== null
-        || resolved.stateKey !== null
         || resolved.runId !== null
       ) immutableIdentityChanged();
+      validateWorkspaceFlowState(revision.renderSpec, resolved.stateKey);
       break;
     case "run-candidate": {
       const run = resolved.runId === null ? null : deps.store.getRun(resolved.runId);
@@ -571,7 +708,7 @@ export function revalidateResolvedPreviewTarget(
       break;
   }
 
-  const assembly = buildPreviewAssembly(
+  assembly ??= buildPreviewAssembly(
     deps.store,
     resolved.projectId,
     resolved.revisionId,
@@ -598,6 +735,11 @@ export async function acquirePreviewTargetLease(
 ): Promise<PreviewTargetLease> {
   signal?.throwIfAborted();
   const resolved = revalidateResolvedPreviewTarget(deps, unsafeResolved);
+  const artifact = deps.store.workspace.getArtifact(resolved.artifactId);
+  const shallowSnapshotId = resolved.requestedKind === "artifact-current"
+    && artifact?.activeTrackId === resolved.trackId
+    ? resolved.snapshotId ?? undefined
+    : undefined;
   const assembly = buildPreviewAssembly(
     deps.store,
     resolved.projectId,
@@ -605,6 +747,7 @@ export async function acquirePreviewTargetLease(
     resolved.variantKey,
     resolved.stateKey,
     deps.dataDir,
+    shallowSnapshotId,
   );
   const materialized = await acquireMaterializedRenderAssembly(deps, assembly, signal);
   let lease: PreviewLease;

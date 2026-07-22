@@ -240,6 +240,161 @@ test("explicit references retain their own priority class and must resolve their
   }), /duplicate explicit Context reference/i);
 });
 
+test("element selection Revision is verified against trusted Artifact provenance", async () => {
+  const selectionManifest = {
+    protocol: "dezin.artifact-element-selection-manifest.v1",
+    workspaceId: "workspace-1",
+    artifactId: "artifact-1",
+    artifactRevisionId: "revision-1",
+    designNodeId: "hero-cta",
+    assemblyHash: "a".repeat(64),
+    sourceArtifactId: "artifact-1",
+    sourceArtifactRevisionId: "revision-1",
+    sourceCommitHash: "b".repeat(40),
+    sourceTreeHash: "c".repeat(40),
+    sourcePath: "src/Hero.tsx",
+  };
+  const attestedSelection = (manifest: typeof selectionManifest): ContextCandidate => {
+    const { protocol: selectionManifestProtocol, ...selectionProvenance } = manifest;
+    const selectionManifestHash = checksumBytes(stableStringify(manifest));
+    return {
+      ...inlineCandidate({
+        id: manifest.designNodeId,
+        contextClass: "selection" as const,
+        content: stableStringify({ ...manifest, selectionManifestHash }),
+      }),
+      provenance: {
+        selectionManifestProtocol,
+        ...selectionProvenance,
+        selectionManifestHash,
+      },
+    };
+  };
+  const selection = attestedSelection(selectionManifest);
+  const target: ContextCandidate = {
+    ...inlineCandidate({
+      id: "artifact-1",
+      contextClass: "target",
+      content: "exact target artifact",
+    }),
+    ref: { kind: "artifact", id: "artifact-1", revisionId: "revision-1" },
+    resolvedKind: "artifact-revision",
+    provenance: { workspaceId: "workspace-1", artifactRevisionId: "revision-1" },
+  };
+  const harness = await makeHarness({
+    collect: async (contextClass) => contextClass === "selection"
+      ? [selection]
+      : contextClass === "target"
+        ? [target]
+        : [],
+  });
+  const scopedRequest = {
+    scope: { type: "artifact" as const, workspaceId: "workspace-1", id: "artifact-1" },
+    intent: "edit" as const,
+    message: "Refine the selected call to action",
+    explicitContext: [],
+    graphRevision: 7,
+    baseRevisionId: "revision-1",
+    selection: [{ kind: "element" as const, id: "hero-cta", revisionId: "revision-1" }],
+  };
+  try {
+    const pack = await harness.resolver.resolve(scopedRequest);
+    assert.equal(pack.items.find((item) => item.contextClass === "selection")?.ref.id, "hero-cta");
+
+    await assert.rejects(
+      () => harness.resolver.resolve({
+        ...scopedRequest,
+        selection: [{ kind: "element", id: "hero-cta", revisionId: "revision-2" }],
+      }),
+      (error: unknown) => error instanceof BlockedContextError
+        && error.missing.includes("hero-cta"),
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+
+  for (const substitutedManifest of [
+    { ...selectionManifest, artifactId: "artifact-2" },
+    {
+      ...selectionManifest,
+      artifactRevisionId: "revision-2",
+      sourceArtifactRevisionId: "revision-2",
+    },
+  ]) {
+    const substitutedSelection = attestedSelection(substitutedManifest);
+    const substitutedHarness = await makeHarness({
+      collect: async (contextClass) => contextClass === "selection"
+        ? [substitutedSelection]
+        : contextClass === "target"
+          ? [target]
+          : [],
+    });
+    try {
+      await assert.rejects(
+        () => substitutedHarness.resolver.resolve({
+          ...scopedRequest,
+          selection: [{ kind: "element", id: "hero-cta" }],
+        }),
+        (error: unknown) => error instanceof BlockedContextError
+          && error.missing.includes("hero-cta"),
+      );
+    } finally {
+      await rm(substitutedHarness.root, { recursive: true, force: true });
+    }
+  }
+
+  const forged = {
+    ...inlineCandidate({
+      id: "forged-cta",
+      contextClass: "selection" as const,
+      content: "client-shaped but unattested element",
+    }),
+    provenance: {
+      workspaceId: "workspace-1",
+      artifactId: "artifact-1",
+      artifactRevisionId: "revision-1",
+      designNodeId: "forged-cta",
+    },
+  };
+  const forgedHarness = await makeHarness({
+    collect: async (contextClass) => contextClass === "selection"
+      ? [forged]
+      : contextClass === "target"
+        ? [target]
+        : [],
+  });
+  try {
+    await assert.rejects(
+      () => forgedHarness.resolver.resolve({
+        ...scopedRequest,
+        selection: [{ kind: "element", id: "forged-cta", revisionId: "revision-1" }],
+      }),
+      (error: unknown) => error instanceof BlockedContextError
+        && error.missing.includes("forged-cta"),
+    );
+  } finally {
+    await rm(forgedHarness.root, { recursive: true, force: true });
+  }
+
+  const tamperedContent = "substituted selection content";
+  const tamperedHarness = await makeHarness({
+    collect: async (contextClass) => contextClass === "selection"
+      ? [{ ...selection, content: tamperedContent, checksum: checksumBytes(tamperedContent) }]
+      : contextClass === "target"
+        ? [target]
+        : [],
+  });
+  try {
+    await assert.rejects(
+      () => tamperedHarness.resolver.resolve(scopedRequest),
+      (error: unknown) => error instanceof BlockedContextError
+        && error.missing.includes("hero-cta"),
+    );
+  } finally {
+    await rm(tamperedHarness.root, { recursive: true, force: true });
+  }
+});
+
 test("a Resource adapter cannot substitute another immutable identity for an explicit reference", async (t) => {
   const snapshotRoot = await mkdtemp(join(tmpdir(), "dezin-context-resource-identity-"));
   t.after(() => rm(snapshotRoot, { recursive: true, force: true }));
@@ -339,20 +494,18 @@ test("priority fitting compacts then omits optional items in deterministic lowes
   }
 });
 
-test("base adapter registry is closed and rejects deferred or duplicate resource kinds", () => {
+test("base adapter registry is closed, includes immutable Research and Sharingan, and rejects duplicates", () => {
   assert.deepEqual(baseResourceAdapterList.map((adapter) => adapter.kind), [
     "moodboard",
     "effect",
     "file",
     "asset",
     "external-reference",
+    "research",
+    "sharingan-capture",
   ]);
-  assert.throws(() => resourceAdapters.require("research"), (error: unknown) => {
-    assert.ok(error instanceof BlockedContextError);
-    assert.match(error.message, /unregistered resource adapter.*research/i);
-    return true;
-  });
-  assert.throws(() => resourceAdapters.require("sharingan-capture"), /unregistered resource adapter/i);
+  assert.equal(resourceAdapters.require("research").kind, "research");
+  assert.equal(resourceAdapters.require("sharingan-capture").kind, "sharingan-capture");
   assert.throws(
     () => createResourceAdapterRegistry([...baseResourceAdapterList, baseResourceAdapterList[0]!]),
     /duplicate resource adapter/i,
@@ -758,6 +911,23 @@ test("Resource payload rollback deletes only bytes created by the current snapsh
   assert.equal(await readFile(created.snapshotPath, "utf8"), "rollback");
   assert.equal(await removeSealedResourceRevisionPayload(snapshotRoot, created), true);
   await assert.rejects(() => readFile(created.snapshotPath), /ENOENT/);
+});
+
+test("Artifact and Resource inline targets are accepted only from immutable Generation Task Context", async () => {
+  const harness = await makeHarness({
+    explicit: async (id) => inlineCandidate({ id, contextClass: "explicit", content: "explicit" }),
+  });
+  try {
+    await assert.rejects(
+      () => harness.resolver.resolve({
+        ...inlineRequest,
+        scope: { type: "artifact", workspaceId: "workspace-1", id: "artifact-1" },
+      }),
+      /required Context.*target|exact target|Generation Task|target Context/i,
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
 });
 
 test("system Kernel and target Context are required, and message identity participates in the pack hash", async () => {

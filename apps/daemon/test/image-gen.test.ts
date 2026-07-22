@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateImages, requestImage, requestImageEdit, type FetchLike } from "../src/image-gen.ts";
+import {
+  generateImages,
+  MAX_GENERATED_IMAGE_PLACEHOLDERS,
+  MAX_GENERATED_IMAGE_OUTPUT_BYTES,
+  MAX_GENERATED_IMAGE_PROMPT_BYTES,
+  MAX_GENERATED_IMAGE_TOTAL_PROMPT_BYTES,
+  requestImage,
+  requestImageEdit,
+  type FetchLike,
+} from "../src/image-gen.ts";
 
 const OPTS = { baseUrl: "https://img.example/v1", apiKey: "sk-test", model: "gpt-image-1" };
 
@@ -25,12 +34,141 @@ test("generateImages replaces data-gen-prompt placeholders with saved assets", a
   assert.ok(existsSync(join(dir, "assets", "gen-1.png")), "asset written to disk");
 });
 
+test("generateImages supports single-quoted generation prompt attributes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-single-quote-"));
+  const html = "<img src='placeholder.png' data-gen-prompt='a quiet landscape' alt='Cover'>";
+
+  const result = await generateImages(html, OPTS, join(dir, "assets"), fakeFetch);
+
+  assert.equal(result.generated, 1);
+  assert.doesNotMatch(result.html, /data-gen-prompt/i);
+  assert.match(result.html, /src="assets\/gen-1\.png"/);
+});
+
+test("generateImages preserves literal replacement tokens in unrelated attributes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-replacement-token-"));
+  const html = '<img src="placeholder.png" data-gen-prompt="a quiet landscape" alt="$& $1 $$">';
+
+  const result = await generateImages(html, OPTS, join(dir, "assets"), fakeFetch);
+
+  assert.equal(result.generated, 1);
+  assert.match(result.html, /alt="\$& \$1 \$\$"/);
+  assert.equal((result.html.match(/<img\b/g) ?? []).length, 1);
+});
+
 test("generateImages is a no-op without an API key", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-img-"));
   const html = `<img src="" data-gen-prompt="x">`;
   const { html: out, generated } = await generateImages(html, { ...OPTS, apiKey: "" }, join(dir, "assets"), fakeFetch);
   assert.equal(generated, 0);
   assert.equal(out, html);
+});
+
+test("generateImages rejects an unbounded placeholder set before provider access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-limit-"));
+  const html = Array.from(
+    { length: MAX_GENERATED_IMAGE_PLACEHOLDERS + 1 },
+    (_, index) => `<img src="placeholder-${index}.png" data-gen-prompt="image ${index}">`,
+  ).join("");
+  let calls = 0;
+  const fetcher: FetchLike = async () => {
+    calls += 1;
+    return fakeFetch("https://img.example/v1");
+  };
+
+  const result = await generateImages(html, OPTS, join(dir, "assets"), fetcher);
+
+  assert.equal(calls, 0);
+  assert.equal(result.generated, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.failures[0]?.stage, "prompt");
+  assert.match(result.failures[0]?.message ?? "", /placeholder.*limit/i);
+  assert.equal(result.html, html);
+});
+
+test("generateImages rejects an oversized generation prompt before provider access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-prompt-limit-"));
+  const html = `<img src="placeholder.png" data-gen-prompt="${"x".repeat(MAX_GENERATED_IMAGE_PROMPT_BYTES + 1)}">`;
+  let calls = 0;
+  const result = await generateImages(
+    html,
+    OPTS,
+    join(dir, "assets"),
+    async () => {
+      calls += 1;
+      return fakeFetch("https://img.example/v1");
+    },
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.failures[0]?.stage, "prompt");
+  assert.match(result.failures[0]?.message ?? "", /prompt.*byte limit/i);
+});
+
+test("generateImages rejects an oversized aggregate prompt budget before provider access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-total-prompt-limit-"));
+  const promptCount = Math.floor(
+    MAX_GENERATED_IMAGE_TOTAL_PROMPT_BYTES / MAX_GENERATED_IMAGE_PROMPT_BYTES,
+  ) + 1;
+  const prompt = "x".repeat(MAX_GENERATED_IMAGE_PROMPT_BYTES);
+  const html = Array.from(
+    { length: promptCount },
+    (_, index) => `<img src="placeholder-${index}.png" data-gen-prompt="${prompt}">`,
+  ).join("");
+  let calls = 0;
+  const result = await generateImages(
+    html,
+    OPTS,
+    join(dir, "assets"),
+    async () => {
+      calls += 1;
+      return fakeFetch("https://img.example/v1");
+    },
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.failures[0]?.stage, "prompt");
+  assert.match(result.failures[0]?.message ?? "", /aggregate prompt.*byte limit/i);
+});
+
+test("generateImages bounds decoded provider output before writing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-output-limit-"));
+  const html = '<img src="placeholder.png" data-gen-prompt="quiet landscape">';
+  const result = await generateImages(
+    html,
+    OPTS,
+    join(dir, "assets"),
+    fakeFetch,
+    { maxOutputBytes: Math.min(MAX_GENERATED_IMAGE_OUTPUT_BYTES, 4) },
+  );
+
+  assert.equal(result.generated, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.failures[0]?.stage, "output");
+  assert.match(result.failures[0]?.message ?? "", /output.*byte limit/i);
+  assert.equal(existsSync(join(dir, "assets", "gen-1.png")), false);
+});
+
+test("generateImages observes pre-cancellation before creating the assets directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-img-pre-cancel-"));
+  const assetsDir = join(dir, "assets");
+  const controller = new AbortController();
+  const reason = new DOMException("cancel image generation", "AbortError");
+  controller.abort(reason);
+
+  await assert.rejects(
+    () => generateImages(
+      '<img src="placeholder.png" data-gen-prompt="quiet landscape">',
+      OPTS,
+      assetsDir,
+      fakeFetch,
+      { signal: controller.signal },
+    ),
+    (error: unknown) => error === reason,
+  );
+  assert.equal(existsSync(assetsDir), false);
 });
 
 test("requestImage routes Azure v1 image generation with the deployment model in the body", async () => {

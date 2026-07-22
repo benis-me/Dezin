@@ -11,8 +11,8 @@ test("preview bridge requires a nonce-bound parent handshake and never emits to 
   assert.match(out, /dezin-bridge/);
   assert.match(out, /bridge-init/);
   assert.match(out, /e\.source!==parent/);
-  assert.match(out, /e\.origin==='null'/);
-  assert.match(out, /d\.nonce!==nonce/);
+  assert.match(out, /e\.isTrusted!==true/);
+  assert.match(out, /nonce&&d\.nonce!==nonce/);
   assert.match(out, /\^\[a-zA-Z0-9_-\]\{43\}\$/);
   assert.match(out, /function command\(d\)/);
   assert.match(out, /d\.type==='select-mode'.*typeof d\.on==='boolean'/);
@@ -157,6 +157,104 @@ test("picker supports keyboard selection and preserves complete text without fol
   );
 });
 
+test("the public picker bridge ignores prototype descriptors and never intercepts flow events", () => {
+  const html = injectSelectBridge("<html><body><form><button>Submit</button></form></body></html>");
+  const source = html.match(/<script data-dezin-bridge>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+
+  const documentListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const sent: Array<Record<string, unknown>> = [];
+  const commandRef: { current: ((message: Record<string, unknown>) => void) | null } = { current: null };
+  const body = {
+    nodeType: 1,
+    tagName: "BODY",
+    style: {},
+    appendChild() {},
+  } as Record<string, unknown>;
+  const element = (tagName: string, designNodeId: string, parentElement: Record<string, unknown>) => ({
+    nodeType: 1,
+    tagName,
+    id: "",
+    className: "",
+    classList: { length: 0 },
+    parentElement,
+    previousElementSibling: null,
+    textContent: tagName,
+    getAttribute(name: string) { return name === "data-design-node-id" ? designNodeId : ""; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 40 }; },
+  });
+  const form = element("FORM", "checkout-form", body);
+  const button = element("BUTTON", "checkout-button", form);
+  const bridge = {
+    send(message: Record<string, unknown>) { sent.push(message); },
+    listen(listener: (message: Record<string, unknown>) => void) { commandRef.current = listener; },
+  };
+  const document = {
+    body,
+    documentElement: { nodeType: 1, tagName: "HTML", style: {} },
+    scrollingElement: body,
+    createElement() { return { style: {}, setAttribute() {}, textContent: "" }; },
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void) {
+      documentListeners.set(type, [...(documentListeners.get(type) ?? []), listener]);
+    },
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  };
+  runInNewContext(source, {
+    window: { __dezinBridgeTransport: bridge, addEventListener() {}, setTimeout },
+    document,
+    CSS: { escape: (value: string) => value },
+    getComputedStyle: () => new Proxy({}, { get: () => "" }),
+    setTimeout,
+    clearTimeout,
+  });
+  const sendCommand = (message: Record<string, unknown>) => {
+    const listener = commandRef.current;
+    assert.ok(listener);
+    listener(message);
+  };
+
+  const fire = (type: "click" | "submit", target: Record<string, unknown>) => {
+    let prevented = false;
+    let stopped = false;
+    const event = {
+      target,
+      preventDefault() { prevented = true; },
+      stopPropagation() { stopped = true; },
+      stopImmediatePropagation() { stopped = true; },
+    };
+    for (const listener of documentListeners.get(type) ?? []) listener(event);
+    return { prevented, stopped };
+  };
+
+  sendCommand({
+    type: "set-prototype-bindings",
+    bindings: [{
+      bindingId: "binding-submit",
+      locator: { designNodeId: "checkout-form", selector: '[data-design-node-id="checkout-form"]' },
+      trigger: "submit",
+    }],
+  });
+  assert.deepEqual(fire("click", form), { prevented: false, stopped: false }, "submit-only bindings cannot consume click");
+  assert.deepEqual(fire("submit", form), { prevented: false, stopped: false });
+  assert.equal(sent.length, 0, "public bridge listeners cannot activate private prototype bindings");
+
+  sendCommand({
+    type: "set-prototype-bindings",
+    bindings: [{
+      bindingId: "binding-click",
+      locator: { designNodeId: "checkout-button", selector: '[data-design-node-id="checkout-button"]' },
+      trigger: "click",
+    }],
+  });
+  assert.deepEqual(fire("click", button), { prevented: false, stopped: false });
+  assert.equal(sent.length, 0);
+
+  const count = sent.length;
+  assert.deepEqual(fire("click", form), { prevented: false, stopped: false }, "nearby locators cannot activate");
+  assert.equal(sent.length, count);
+});
+
 test("preview bridge stamps the protocol on every queued and live child event", () => {
   const nonce = "a".repeat(43);
   const html = injectRuntimeProbe("<html><head></head><body></body></html>");
@@ -253,15 +351,16 @@ test("preview bridge stamps the protocol on every queued and live child event", 
     send(message: Record<string, unknown>): void;
     listen(listener: (message: Record<string, unknown>) => void): void;
   };
-  bridge.send({ source: "dezin", type: "queued-before-ready" });
+  bridge.send({ source: "dezin", type: "scroll", top: 1, left: 0 });
   const init = {
     data: { source: "dezin-parent", type: "bridge-init", protocol: 1, nonce },
     source: parent,
     origin: "null",
     ports: [port],
+    isTrusted: true,
   };
   listeners.get("message")?.[0]?.(init);
-  bridge.send({ source: "dezin", type: "live-after-ready" });
+  bridge.send({ source: "dezin", type: "scroll", top: 2, left: 0 });
 
   const commands: string[] = [];
   bridge.listen((message) => commands.push(String(message.type)));
@@ -297,8 +396,8 @@ test("preview bridge stamps the protocol on every queued and live child event", 
 
   assert.deepEqual(sent.slice(0, 3).map((message) => message.type), [
     "bridge-ready",
-    "queued-before-ready",
-    "live-after-ready",
+    "scroll",
+    "scroll",
   ]);
   assert.equal(sent.filter((message) => message.type === "runtime-error").length, 16);
   assert.equal(sent.at(-1)?.type, "frame-applied");
@@ -434,11 +533,12 @@ test("preview bridge stamps the protocol on every queued and live child event", 
     source: parent,
     origin: "null",
     ports: [replacementPort],
+    isTrusted: true,
   });
-  bridge.send({ source: "dezin", type: "after-reconnect" });
+  bridge.send({ source: "dezin", type: "scroll", top: 3, left: 0 });
   assert.deepEqual(
     replacementSent.map((message) => message.type),
-    ["bridge-ready", "after-reconnect"],
+    ["bridge-ready", "scroll"],
     "a nonce-bound parent may replace a stale MessagePort generation",
   );
 });
@@ -450,6 +550,269 @@ test("preview bridge rejects malformed or oversized frame state without changing
   assert.match(out, /dezin:frame-change/);
   assert.match(out, /65536/);
   assert.match(out, /4096/);
+});
+
+test("preview bridge rejects malformed, oversized, target-bearing, and extra-field prototype commands", () => {
+  const nonce = "a".repeat(43);
+  const html = injectRuntimeProbe("<html><head></head><body>rendered preview content</body></html>");
+  const source = html.match(/<script data-dezin-runtime-probe>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const parent = {};
+  const window = {
+    origin: "null",
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void) {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    dispatchEvent() { return true; },
+  } as Record<string, unknown>;
+  const sent: Array<Record<string, unknown>> = [];
+  const port = {
+    postMessage(message: Record<string, unknown>) { sent.push(message); },
+    start() {},
+    onmessage: null as null | ((event: { data: unknown }) => void),
+  };
+  function FakeXhr() {}
+  Reflect.set(FakeXhr, "prototype", {});
+  runInNewContext(source, {
+    window,
+    parent,
+    location: { hash: `#dezin-bridge=${nonce}` },
+    document: {
+      readyState: "complete",
+      documentElement: { style: {}, setAttribute() {} },
+      body: { scrollHeight: 100, innerText: "rendered preview content", style: {} },
+    },
+    console: { error() {} },
+    XMLHttpRequest: FakeXhr,
+    CSS: { supports: () => true },
+    CustomEvent: class {},
+    setTimeout,
+    clearTimeout,
+    isFinite,
+  });
+  const commands: Array<Record<string, unknown>> = [];
+  (window.__dezinBridgeTransport as { listen(listener: (message: Record<string, unknown>) => void): void })
+    .listen((message) => commands.push(message));
+  let stolenPort: unknown = null;
+  listeners.set("message", [
+    ...(listeners.get("message") ?? []),
+    (event) => { stolenPort = (event.ports as unknown[] | undefined)?.[0] ?? null; },
+  ]);
+  let handshakeConsumed = false;
+  const untrustedHandshake = {
+    data: { source: "dezin-parent", type: "bridge-init", protocol: 1, nonce },
+    source: parent,
+    origin: "null",
+    ports: [port],
+    isTrusted: false,
+    stopImmediatePropagation() { handshakeConsumed = true; },
+  };
+  for (const listener of listeners.get("message") ?? []) listener(untrustedHandshake);
+  assert.equal(sent.length, 0, "a generated page cannot forge the private parent handshake");
+  stolenPort = null;
+  handshakeConsumed = false;
+  const handshake = {
+    data: { source: "dezin-parent", type: "bridge-init", protocol: 1, nonce },
+    source: parent,
+    origin: "null",
+    ports: [port],
+    isTrusted: true,
+    stopImmediatePropagation() { handshakeConsumed = true; },
+  };
+  for (const listener of listeners.get("message") ?? []) {
+    listener(handshake);
+    if (handshakeConsumed) break;
+  }
+  assert.equal(stolenPort, null, "page listeners installed after the injected bridge cannot observe its private port");
+  const envelope = (bindings: unknown, extra: Record<string, unknown> = {}) => ({
+    source: "dezin-parent",
+    type: "set-prototype-bindings",
+    protocol: 1,
+    nonce,
+    bindings,
+    ...extra,
+  });
+  const valid = [{ bindingId: "binding-0", locator: { designNodeId: "cta" }, trigger: "click" }];
+  port.onmessage?.({ data: envelope(valid) });
+  port.onmessage?.({ data: envelope(valid, { targetUrl: "https://attacker.invalid" }) });
+  port.onmessage?.({ data: envelope([{ ...valid[0], targetArtifactId: "page-secret" }]) });
+  port.onmessage?.({ data: envelope([{ ...valid[0], bindingId: "x".repeat(129) }]) });
+  port.onmessage?.({ data: envelope(Array.from({ length: 65 }, (_, index) => ({
+    bindingId: `binding-${index}`,
+    locator: { designNodeId: `node-${index}` },
+    trigger: "click",
+  }))) });
+
+  assert.equal(commands.length, 0, "generated page listeners must not receive prototype descriptors");
+  const beforeDirectSend = sent.length;
+  (window.__dezinBridgeTransport as { send(message: Record<string, unknown>): void }).send({
+    source: "dezin",
+    type: "prototype-binding-activated",
+    bindingId: "binding-0",
+    locator: { designNodeId: "cta" },
+    trigger: "click",
+  });
+  for (const type of ["frame-applied", "frame-rejected", "bridge-ready", "set-prototype-bindings"]) {
+    (window.__dezinBridgeTransport as { send(message: Record<string, unknown>): void }).send({
+      source: "dezin",
+      type,
+      frameId: "desktop",
+      frameAttemptId: "guessed-attempt",
+    });
+  }
+  assert.equal(sent.length, beforeDirectSend, "generated page scripts must not forge control-plane messages");
+  (window.__dezinBridgeTransport as { send(message: Record<string, unknown>): void }).send({
+    source: "dezin",
+    type: "runtime-error",
+    kind: "nonfatal",
+    errorType: "page",
+    message: "diagnostic",
+  });
+  assert.equal(sent.length, beforeDirectSend + 1, "the bounded public diagnostic surface remains available");
+});
+
+test("prototype activation is private, trusted-only, and chooses the nearest composed-path binding", () => {
+  const nonce = "b".repeat(43);
+  const html = injectRuntimeProbe("<html><head></head><body>rendered preview content</body></html>");
+  const source = html.match(/<script data-dezin-runtime-probe>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const documentListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const parent = {};
+  const window = {
+    origin: "null",
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void) {
+      windowListeners.set(type, [...(windowListeners.get(type) ?? []), listener]);
+    },
+    dispatchEvent() { return true; },
+  } as Record<string, unknown>;
+  const style = { setProperty() {}, getPropertyPriority() { return ""; } };
+  const body = { nodeType: 1, parentElement: null, scrollHeight: 100, innerText: "rendered preview content", style };
+  const document = {
+    readyState: "complete",
+    documentElement: { nodeType: 1, parentElement: null, style, setAttribute() {} },
+    body,
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void) {
+      documentListeners.set(type, [...(documentListeners.get(type) ?? []), listener]);
+    },
+  };
+  const sent: Array<Record<string, unknown>> = [];
+  const port = {
+    postMessage(message: Record<string, unknown>) { sent.push(message); },
+    start() {},
+    onmessage: null as null | ((event: { data: unknown }) => void),
+  };
+  function FakeXhr() {}
+  Reflect.set(FakeXhr, "prototype", {});
+  runInNewContext(source, {
+    window,
+    parent,
+    location: { hash: `#dezin-bridge=${nonce}` },
+    document,
+    console: { error() {} },
+    XMLHttpRequest: FakeXhr,
+    CSS: { supports: () => true },
+    CustomEvent: class {},
+    setTimeout,
+    clearTimeout,
+    isFinite,
+  });
+  windowListeners.get("message")?.[0]?.({
+    data: { source: "dezin-parent", type: "bridge-init", protocol: 1, nonce },
+    source: parent,
+    origin: "null",
+    ports: [port],
+    isTrusted: true,
+  });
+  const descriptors = [
+    { bindingId: "binding-outer", locator: { designNodeId: "outer" }, trigger: "click" },
+    { bindingId: "binding-inner", locator: { designNodeId: "inner" }, trigger: "click" },
+    { bindingId: "binding-form", locator: { designNodeId: "form" }, trigger: "submit" },
+  ];
+  port.onmessage?.({ data: {
+    source: "dezin-parent",
+    type: "set-prototype-bindings",
+    protocol: 1,
+    nonce,
+    bindings: descriptors,
+  } });
+
+  const element = (
+    designNodeId: string | null,
+    parentElement: Record<string, unknown> | null,
+    fields: Record<string, unknown> = {},
+  ) => ({
+    nodeType: 1,
+    parentElement,
+    getAttribute(name: string) { return name === "data-design-node-id" ? designNodeId : null; },
+    ...fields,
+  });
+  const outer = element("outer", body);
+  const inner = element("inner", outer);
+  const svg = element(null, inner);
+  const form = element("form", body, { tagName: "FORM" });
+  const submitter = element(null, form, { tagName: "BUTTON", type: "submit", form });
+  const input = element(null, form, { tagName: "INPUT", type: "text", form });
+  const stopped: string[] = [];
+  const event = (
+    isTrusted: boolean,
+    path: Array<Record<string, unknown>>,
+    fields: Record<string, unknown> = {},
+  ) => ({
+    isTrusted,
+    target: path[0],
+    composedPath: () => path,
+    preventDefault: () => stopped.push("prevent"),
+    stopPropagation: () => stopped.push("stop"),
+    stopImmediatePropagation: () => stopped.push("immediate"),
+    ...fields,
+  });
+
+  const beforeUntrusted = sent.length;
+  documentListeners.get("click")?.[0]?.(event(false, [svg, inner, outer, body]));
+  documentListeners.get("submit")?.[0]?.(event(false, [form, body]));
+  assert.equal(sent.length, beforeUntrusted, "scripted click() and requestSubmit() events must be ignored");
+
+  const beforeUnarmedSubmit = sent.length;
+  documentListeners.get("submit")?.[0]?.(event(true, [form, body], { submitter }));
+  assert.equal(
+    sent.length,
+    beforeUnarmedSubmit,
+    "a user-agent submit event without a matching trusted pointer or keyboard activation must be ignored",
+  );
+
+  const beforeWrongTrigger = sent.length;
+  documentListeners.get("click")?.[0]?.(event(true, [form, body]));
+  documentListeners.get("submit")?.[0]?.(event(true, [inner, outer, body]));
+  assert.equal(sent.length, beforeWrongTrigger, "trusted events still require the exact locator and trigger");
+  assert.deepEqual(stopped, []);
+
+  documentListeners.get("click")?.[0]?.(event(true, [svg, inner, outer, body]));
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))), {
+    source: "dezin",
+    type: "prototype-binding-activated",
+    bindingId: "binding-inner",
+    locator: { designNodeId: "inner" },
+    trigger: "click",
+    nonce,
+    protocol: 1,
+  });
+  assert.deepEqual(stopped, ["prevent", "stop", "immediate"]);
+
+  documentListeners.get("pointerdown")?.[0]?.(event(true, [submitter, form, body]));
+  documentListeners.get("submit")?.[0]?.(event(true, [form, body], { submitter }));
+  assert.equal(sent.at(-1)?.bindingId, "binding-form");
+  assert.equal(sent.at(-1)?.trigger, "submit");
+
+  const afterPointerSubmit = sent.length;
+  documentListeners.get("submit")?.[0]?.(event(true, [form, body], { submitter }));
+  assert.equal(sent.length, afterPointerSubmit, "the trusted submit activation must be consumed exactly once");
+
+  documentListeners.get("keydown")?.[0]?.(event(true, [input, form, body], { key: "Enter" }));
+  documentListeners.get("submit")?.[0]?.(event(true, [form, body], { submitter }));
+  assert.equal(sent.at(-1)?.bindingId, "binding-form", "keyboard submission preserves the bound form");
+  assert.equal(sent.length, afterPointerSubmit + 1);
 });
 
 test("runtime probe contains no raw control characters and still parses after the HTML tokenizer", () => {

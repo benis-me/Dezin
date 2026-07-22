@@ -7,17 +7,30 @@ import {
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { CircleAlert, Columns2, GripVertical, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { CircleAlert, Columns2, GripVertical, LoaderCircle, RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { Dialog, Segmented } from "./ui/index.ts";
-import { usePreviewChannel, type PreviewChannelMessage } from "../lib/preview-channel.ts";
+import { previewDocumentSrc, usePreviewChannel, type PreviewChannelMessage } from "../lib/preview-channel.ts";
 import { usePreviewRuntimeErrors, type RuntimeError } from "../lib/preview-runtime-errors.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 
-interface Side {
-  url?: string;
+type SideBase = {
   bridgeNonce?: string;
   label: string;
-  error?: string;
+  retry?: () => void;
+};
+
+export type VersionCompareSide = SideBase & (
+  | { status: "loading"; url?: never; error?: never }
+  | { status: "ready"; url: string; error?: never }
+  | { status: "error"; url?: never; error: string }
+  // Keep existing branch-comparison callers compatible while new acquisition flows use explicit state.
+  | { status?: undefined; url?: string; error?: string }
+);
+
+function sideStatus(side: VersionCompareSide): "loading" | "ready" | "error" {
+  if (side.status !== undefined) return side.status;
+  if (side.error || !side.url) return "error";
+  return "ready";
 }
 
 function frameDocument(frame: HTMLIFrameElement | null): Document | null {
@@ -160,7 +173,17 @@ function CompareRuntimeNotice({
 }
 
 /** Visual diff between two versions/branches: side-by-side, or a before/after slider. */
-export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose: () => void; a: Side; b: Side }) {
+export function VersionCompare({
+  open,
+  onClose,
+  a,
+  b,
+}: {
+  open: boolean;
+  onClose: () => void;
+  a: VersionCompareSide;
+  b: VersionCompareSide;
+}) {
   const [mode, setMode] = useState<"slider" | "split">("slider");
   const [pos, setPos] = useState(50);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -171,7 +194,10 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
   const syncingScrollRef = useRef(false);
   const aSendRef = useRef<(message: { type: string } & Record<string, unknown>) => boolean>(() => false);
   const bSendRef = useRef<(message: { type: string } & Record<string, unknown>) => boolean>(() => false);
-  const hasUnavailablePane = Boolean(a.error || b.error || !a.url || !b.url);
+  const aStatus = sideStatus(a);
+  const bStatus = sideStatus(b);
+  const hasFailedPane = aStatus === "error" || bStatus === "error";
+  const canRenderSlider = aStatus === "ready" && bStatus === "ready" && Boolean(a.url && b.url);
   const aErrors = usePreviewRuntimeErrors({
     iframeRef: aRef,
     previewSrc: a.url ?? null,
@@ -224,10 +250,6 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
   bSendRef.current = bChannel.send;
 
   useEffect(() => {
-    if (hasUnavailablePane) setMode("split");
-  }, [hasUnavailablePane]);
-
-  useEffect(() => {
     if (!open) dragCleanupRef.current?.();
     return () => dragCleanupRef.current?.();
   }, [open]);
@@ -268,25 +290,58 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
     };
   }, [a.url, aChannel.send, b.url, bChannel.send, mode, open]);
 
-  const frame = (side: Side, ref: MutableRefObject<HTMLIFrameElement | null>, onLoad: () => void) =>
-    side.url ? (
-      <iframe
-        key={side.url}
-        ref={ref}
-        src={side.url}
-        title={side.label}
-        sandbox={previewSandboxForSrc(side.url)}
-        onLoad={onLoad}
-        className="h-full w-full bg-white"
-      />
-    ) : (
+  const frame = (side: VersionCompareSide, ref: MutableRefObject<HTMLIFrameElement | null>, onLoad: () => void) => {
+    const status = sideStatus(side);
+    if (status === "ready" && side.url) {
+      return (
+        <iframe
+          key={side.url}
+          ref={ref}
+          src={previewDocumentSrc(side.url)}
+          title={side.label}
+          sandbox={previewSandboxForSrc(previewDocumentSrc(side.url))}
+          onLoad={onLoad}
+          className="h-full w-full bg-white"
+        />
+      );
+    }
+    if (status === "loading") {
+      return (
+        <div className="grid h-full place-items-center p-8">
+          <div
+            role="status"
+            aria-label={`${side.label} preview loading`}
+            className="flex max-w-sm items-start gap-2 rounded-lg border border-border bg-card p-4 text-left"
+          >
+            <LoaderCircle aria-hidden size={15} className="mt-0.5 shrink-0 animate-spin text-muted-foreground" />
+            <div>
+              <div className="text-sm font-semibold text-foreground">Preparing preview</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">Acquiring an isolated preview for this Revision…</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return (
       <div className="grid h-full place-items-center p-8">
-        <div className="max-w-sm rounded-lg border border-border bg-card p-4 text-center">
+        <div role="alert" aria-label={`${side.label} preview unavailable`} className="max-w-sm rounded-lg border border-border bg-card p-4 text-center">
           <div className="text-sm font-semibold text-foreground">Preview unavailable</div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{side.error ?? "This saved version could not be prepared."}</p>
+          {side.retry ? (
+            <button
+              type="button"
+              aria-label={`Retry ${side.label} preview`}
+              onClick={side.retry}
+              className="mt-3 inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] text-foreground hover:bg-surface-2"
+            >
+              <RotateCw aria-hidden size={11} strokeWidth={1.8} />
+              Retry
+            </button>
+          ) : null}
         </div>
       </div>
     );
+  };
 
   const renderDividerPosition = useCallback((value: number): void => {
     if (aRef.current) aRef.current.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
@@ -383,9 +438,11 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
           <Segmented
             ariaLabel="Compare mode"
             size="sm"
-            value={mode}
-            onChange={(v) => setMode(v as typeof mode)}
-            options={hasUnavailablePane
+            value={hasFailedPane ? "split" : mode}
+            onChange={(v) => {
+              if (!hasFailedPane) setMode(v as typeof mode);
+            }}
+            options={hasFailedPane
               ? [{ value: "split", title: "Side by side", icon: <Columns2 size={14} strokeWidth={1.75} /> }]
               : [
                   { value: "slider", title: "Before / after slider", icon: <SlidersHorizontal size={14} strokeWidth={1.75} /> },
@@ -397,7 +454,7 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
           </span>
         </div>
         <div ref={wrapRef} className="relative flex-1 overflow-hidden bg-surface-2">
-          {mode === "split" || hasUnavailablePane ? (
+          {mode === "split" || !canRenderSlider ? (
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
@@ -414,18 +471,18 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
               <iframe
                 key={b.url}
                 ref={bRef}
-                src={b.url}
+                src={b.url ? previewDocumentSrc(b.url) : undefined}
                 title={b.label}
-                sandbox={previewSandboxForSrc(b.url)}
+                sandbox={previewSandboxForSrc(b.url ? previewDocumentSrc(b.url) : null)}
                 onLoad={bChannel.connect}
                 className="absolute inset-0 h-full w-full bg-white"
               />
               <iframe
                 key={a.url}
                 ref={aRef}
-                src={a.url}
+                src={a.url ? previewDocumentSrc(a.url) : undefined}
                 title={a.label}
-                sandbox={previewSandboxForSrc(a.url)}
+                sandbox={previewSandboxForSrc(a.url ? previewDocumentSrc(a.url) : null)}
                 onLoad={aChannel.connect}
                 className="absolute inset-0 h-full w-full bg-white"
                 style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}

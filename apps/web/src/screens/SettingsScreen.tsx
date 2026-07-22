@@ -291,17 +291,12 @@ export function SettingsScreen({
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
-  const visualReviewAgent = settings?.visualQaAgentCommand
-    ? agents.find((a) => a.command === settings.visualQaAgentCommand)
-    : activeAgent;
-  const visualReviewAgentOptions = [
-    { value: "", label: "Same as project agent" },
-    ...agents
-      .filter((agent) => agent.available || agent.command === settings?.visualQaAgentCommand)
-      .map((agent) => ({ value: agent.command, label: agentLabel(agent.id) })),
-  ];
+  const visualReviewAgent = agents.find((agent) => agent.id === "claude" && agent.command === "claude");
+  const visualReviewerAvailable = visualReviewAgent?.available === true;
+  const visualReviewModelSource = settings?.visualQaAgentCommand.trim() || settings?.agentCommand.trim() || "";
+  const visualReviewModelValue = visualReviewModelSource === "claude" ? settings?.visualQaModel ?? "" : "";
   const visualReviewModelOptions = [
-    { value: "", label: "Same as project model" },
+    { value: "", label: "Claude default" },
     ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
   ];
   const researchAgent = settings?.researchAgentCommand ? agents.find((a) => a.command === settings.researchAgentCommand) : activeAgent;
@@ -460,35 +455,46 @@ export function SettingsScreen({
                       <Switch
                         aria-label="Agent visual review"
                         checked={settings.visualQaEnabled}
-                        onCheckedChange={(checked) => save("visualQaEnabled", checked)}
+                        disabled={agentsLoading || (!visualReviewerAvailable && !settings.visualQaEnabled)}
+                        onCheckedChange={(checked) => savePatch({
+                          visualQaEnabled: checked,
+                          visualQaAgentCommand: "claude",
+                          visualQaModel: visualReviewModelSource === "claude" ? settings.visualQaModel : "",
+                        })}
                       />
                     </SettingRow>
-                  <SettingRow label="Review agent" desc="Blank inherits the Agent used for the current project run.">
-                    <Picker
-                      ariaLabel="Visual review agent"
-                      className="w-52"
-                      value={settings.visualQaAgentCommand}
-                      onChange={(value) => savePatch({ visualQaAgentCommand: value, visualQaModel: "" })}
-                      options={visualReviewAgentOptions}
-                    />
+                  <SettingRow
+                    label="Review agent"
+                    desc={visualReviewerAvailable
+                      ? "Claude Code runs in an isolated no-tools mode; the project Agent can remain Codex, Gemini, or another provider."
+                      : "Claude Code is required for isolated visual review. Install or sign in to Claude Code, then rescan Agents."}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">Claude Code</span>
+                      <Badge variant={agentsLoading ? "outline" : visualReviewerAvailable ? "secondary" : "destructive"}>
+                        {agentsLoading ? "Checking…" : visualReviewerAvailable ? "Ready" : "Not available"}
+                      </Badge>
+                    </div>
                   </SettingRow>
-                  <SettingRow label="Review model" desc="Blank inherits the model used for the current project run.">
-                    {visualReviewAgentOptions.length > 0 && visualReviewModelOptions.length > 1 ? (
+                  <SettingRow label="Review model" desc="Blank uses Claude Code's own default; it never inherits a model from another provider.">
+                    {!visualReviewerAvailable ? (
+                      <span className="text-xs text-muted-foreground">Install Claude Code first</span>
+                    ) : visualReviewModelOptions.length > 1 ? (
                       <Picker
                         ariaLabel="Visual review model"
                         className="w-52"
-                        value={settings.visualQaModel}
-                        onChange={(value) => save("visualQaModel", value)}
+                        value={visualReviewModelValue}
+                        onChange={(value) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: value })}
                         options={visualReviewModelOptions}
                       />
                     ) : (
                       <Input
                         aria-label="Visual review model"
                         className="w-52"
-                        value={settings.visualQaModel}
-                        placeholder="Same as project model"
-                        onChange={(event) => setLocal("visualQaModel", event.target.value)}
-                        onBlur={(event) => save("visualQaModel", event.target.value)}
+                        value={visualReviewModelValue}
+                        placeholder="Claude default"
+                        onChange={(event) => setLocalPatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
+                        onBlur={(event) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
                       />
                     )}
                   </SettingRow>

@@ -10,9 +10,13 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const DEFAULT_BUNDLE_BUDGETS = {
   maxInitialMinified: 500 * KIB,
   maxInitialGzip: 180 * KIB,
-  // 2026-07-14 workspace-canvas baseline: prior 786,650 B plus the legitimate
-  // 66,459 B lazy ProjectCanvas chunk. The gate still allows at most 5% drift.
-  totalJsGzipBaseline: 853_109,
+  // 2026-07-22 multi-artifact Studio initial closure. ProjectStudio, Canvas,
+  // Resource/Research viewers, Versions, and Flow remain outside Home/Settings.
+  initialJsGzipBaseline: 324_676,
+  // 2026-07-22 multi-artifact Studio baseline: versioned Resource/Research
+  // viewers, Artifact Versions, and prototype Flow. Studio, Canvas, and Flow
+  // remain outside the Home/Settings dependency closures.
+  totalJsGzipBaseline: 931_282,
 };
 
 async function filesUnder(root) {
@@ -75,6 +79,16 @@ export async function checkBundle({ distDir = join(REPO_ROOT, "apps", "web", "di
     }
   }
 
+  const initialGzip = chunks
+    .filter((chunk) => chunk.initial)
+    .reduce((total, chunk) => total + chunk.gzip, 0);
+  const initialLimit = Math.ceil(limits.initialJsGzipBaseline * 1.05);
+  if (initialGzip > initialLimit) {
+    throw new Error(
+      `Initial JS gzip is ${formatKiB(initialGzip)}; baseline + 5% is ${formatKiB(initialLimit)} (baseline ${formatKiB(limits.initialJsGzipBaseline)})`,
+    );
+  }
+
   const totalGzip = chunks.reduce((total, chunk) => total + chunk.gzip, 0);
   const totalLimit = Math.ceil(limits.totalJsGzipBaseline * 1.05);
   if (totalGzip > totalLimit) {
@@ -98,6 +112,8 @@ export async function checkBundle({ distDir = join(REPO_ROOT, "apps", "web", "di
   }
 
   return {
+    initialGzip,
+    initialLimit,
     totalGzip,
     totalLimit,
     initialChunks: chunks.filter((chunk) => chunk.initial),
@@ -115,6 +131,7 @@ if (isMain) {
       for (const chunk of report.lazyChunks) {
         process.stdout.write(`lazy    ${chunk.file}: ${formatKiB(chunk.minified)} min / ${formatKiB(chunk.gzip)} gzip\n`);
       }
+      process.stdout.write(`initial JS gzip: ${formatKiB(report.initialGzip)} / ${formatKiB(report.initialLimit)}\n`);
       process.stdout.write(`total JS gzip: ${formatKiB(report.totalGzip)} / ${formatKiB(report.totalLimit)}\nBUNDLE: PASS\n`);
     })
     .catch((error) => {

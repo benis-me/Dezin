@@ -51,6 +51,20 @@ export function previewBridgeNonceForSrc(
   return nonce !== null && NONCE_PATTERN.test(nonce) ? nonce : null;
 }
 
+/**
+ * Return the iframe document address without the parent-held bridge capability.
+ * The nonce is delivered only in the private MessagePort handshake.
+ */
+export function previewDocumentSrc(
+  src: string,
+  baseOrigin = globalThis.location?.origin ?? "http://localhost",
+): string {
+  const url = parsePreviewUrl(src, baseOrigin);
+  if (url === null) throw new Error("Preview bridge URL is invalid.");
+  url.hash = "";
+  return src.trim().startsWith("/") ? `${url.pathname}${url.search}` : url.href;
+}
+
 export function generatePreviewBridgeNonce(): string {
   const bytes = new Uint8Array(32);
   globalThis.crypto.getRandomValues(bytes);
@@ -85,9 +99,7 @@ export function cacheBustedPreviewUrl(
 }
 
 type PreviewParentCommand = { type: string } & Record<string, unknown>;
-type ChannelTransport =
-  | { kind: "port"; port: MessagePort }
-  | { kind: "window"; frameWindow: Window };
+type ChannelTransport = { kind: "port"; port: MessagePort };
 
 interface PreviewChannelController {
   connect(): boolean;
@@ -106,13 +118,6 @@ function isBridgeMessage(value: unknown, nonce: string): value is PreviewChannel
     && message.type.length <= 64;
 }
 
-function sameTransport(first: ChannelTransport, second: ChannelTransport): boolean {
-  return first.kind === second.kind
-    && (first.kind === "port"
-      ? first.port === (second as { kind: "port"; port: MessagePort }).port
-      : first.frameWindow === (second as { kind: "window"; frameWindow: Window }).frameWindow);
-}
-
 export function createPreviewChannelController({
   iframeRef,
   previewSrc,
@@ -129,7 +134,7 @@ export function createPreviewChannelController({
   onGenerationChange: (generation: number) => void;
 }): PreviewChannelController | null {
   const address = previewBridgeAddressForSrc(previewSrc);
-  if (address.kind === "invalid" || previewBridgeNonceForSrc(previewSrc) !== bridgeNonce) return null;
+  if (address.kind === "invalid" || !NONCE_PATTERN.test(bridgeNonce)) return null;
 
   let disposed = false;
   let generation = 0;
@@ -161,17 +166,13 @@ export function createPreviewChannelController({
 
   const post = (target: ChannelTransport, command: PreviewParentCommand): void => {
     const message = encoded(command);
-    if (target.kind === "port") {
-      target.port.postMessage(message);
-    } else {
-      target.frameWindow.postMessage(message, address.targetOrigin);
-    }
+    target.port.postMessage(message);
   };
 
   const accept = (value: unknown, candidate: ChannelTransport, messageGeneration: number): void => {
     if (disposed || messageGeneration !== generation || !isBridgeMessage(value, bridgeNonce)) return;
     if (value.type === "bridge-ready") {
-      if (transport !== null && !sameTransport(transport, candidate)) return;
+      if (port !== candidate.port || (transport !== null && transport.port !== candidate.port)) return;
       transport = candidate;
       setReady(true);
       const queued = pending;
@@ -179,17 +180,9 @@ export function createPreviewChannelController({
       for (const command of queued) post(candidate, command);
       return;
     }
-    if (!ready || transport === null || !sameTransport(transport, candidate)) return;
+    if (!ready || transport === null || transport.port !== candidate.port) return;
     onMessage(value);
   };
-
-  const onWindowMessage = (event: MessageEvent): void => {
-    if (disposed || address.kind !== "origin") return;
-    const frameWindow = iframeRef.current?.contentWindow;
-    if (!frameWindow || event.source !== frameWindow || event.origin !== address.expectedEventOrigin) return;
-    accept(event.data, { kind: "window", frameWindow }, generation);
-  };
-  window.addEventListener("message", onWindowMessage);
 
   return {
     connect(): boolean {
@@ -230,7 +223,6 @@ export function createPreviewChannelController({
     dispose(): void {
       if (disposed) return;
       disposed = true;
-      window.removeEventListener("message", onWindowMessage);
       closeTransport(true);
     },
   };
@@ -259,7 +251,7 @@ export function usePreviewChannel({
       && previewSrc !== null
       && bridgeNonce !== null
       && previewBridgeAddressForSrc(previewSrc).kind !== "invalid"
-      && previewBridgeNonceForSrc(previewSrc) === bridgeNonce
+      && NONCE_PATTERN.test(bridgeNonce)
       && typeof MessageChannel !== "undefined",
     [bridgeNonce, enabled, previewSrc],
   );

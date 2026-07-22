@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  GenerationTaskLeaseFenceError,
   normalizeGenerationTaskIntent,
   type GenerationTask,
   type GenerationTaskAttempt,
@@ -17,6 +18,20 @@ import {
   type PrototypeValidationResult,
   type ResourcePreparedCandidate,
 } from "../src/orchestration/generation-task-executor.ts";
+import { GenerationTaskDeadlineExceededError } from "../src/orchestration/generation-task-failure.ts";
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 const WORKSPACE_ID = "workspace-executor";
 const PLAN_ID = "plan-executor";
@@ -389,6 +404,11 @@ function prototypeResultFor(claim: GenerationTaskAttemptClaim): PrototypeValidat
 
 function harness(input: {
   leafError?: unknown;
+  leafErrorFactory?: (signal: AbortSignal) => unknown;
+  artifactExecute?: (
+    claim: GenerationTaskAttemptClaim,
+    signal: AbortSignal,
+  ) => Promise<ArtifactPreparedCandidate>;
   publicationError?: unknown;
   resourceCleanupError?: unknown;
   artifactResultFactory?: (claim: GenerationTaskAttemptClaim) => ArtifactPreparedCandidate;
@@ -408,13 +428,16 @@ function harness(input: {
     prepare: () => Result,
   ): Promise<Result> => {
     calls.push({ port, values: [claim, signal] });
+    if (input.leafErrorFactory !== undefined) throw input.leafErrorFactory(signal);
     if (input.leafError !== undefined) throw input.leafError;
     return prepare();
   };
   const executor = new GenerationTaskExecutor({
     artifacts: {
-      execute: (claim, signal) => executeLeaf("artifact", claim, signal,
-        () => input.artifactResultFactory?.(claim) ?? artifactResultFor(claim)),
+      execute: (claim, signal) => input.artifactExecute !== undefined
+        ? (calls.push({ port: "artifact", values: [claim, signal] }), input.artifactExecute(claim, signal))
+        : executeLeaf("artifact", claim, signal,
+            () => input.artifactResultFactory?.(claim) ?? artifactResultFor(claim)),
     },
     resources: {
       execute: (claim, signal) => executeLeaf("resource", claim, signal,
@@ -503,6 +526,123 @@ test("GenerationTaskExecutor rejects an already-aborted claim before invoking an
 
   await assert.rejects(executor.execute(claim, controller.signal), (error) => error === reason);
   assert.deepEqual(calls, []);
+});
+
+test("GenerationTaskExecutor records a frozen deadline as one agent-transport failure", async () => {
+  const claim = claimFixture("page");
+  const { calls, executor } = harness();
+  const deadline = new GenerationTaskDeadlineExceededError({
+    taskId: claim.task.id,
+    attempt: claim.attempt.attempt,
+    timeoutMs: claim.task.resourceLimits.timeoutMs,
+  });
+
+  await executor.acknowledgeDeadlineExceeded(claim, deadline);
+
+  assert.deepEqual(calls.map((call) => call.port), ["finish-failure"]);
+  assert.strictEqual(calls[0]?.values[0], claim);
+  assert.deepEqual(calls[0]?.values[1], {
+    failureClass: "agent-transport",
+    error: {
+      name: "GenerationTaskDeadlineExceededError",
+      code: "generation-task-deadline-exceeded",
+      message: "Generation Task exceeded its frozen execution deadline",
+      taskId: claim.task.id,
+      attempt: claim.attempt.attempt,
+      timeoutMs: claim.task.resourceLimits.timeoutMs,
+    },
+  });
+});
+
+test("GenerationTaskExecutor blocks publication when a leaf resolves after its deadline signal", async () => {
+  const claim = claimFixture("page");
+  const leafStarted = deferred();
+  const allowLateResolution = deferred();
+  const controller = new AbortController();
+  const reason = new Error("Generation Task deadline exceeded");
+  const { calls, executor } = harness({
+    artifactExecute: async () => {
+      leafStarted.resolve();
+      await allowLateResolution.promise;
+      return artifactResultFor(claim);
+    },
+  });
+
+  const running = executor.execute(claim, controller.signal);
+  await leafStarted.promise;
+  controller.abort(reason);
+  allowLateResolution.resolve();
+
+  await assert.rejects(running, (error) => error === reason);
+  assert.deepEqual(calls.map((call) => call.port), ["artifact"]);
+});
+
+test("GenerationTaskExecutor preserves and reports a leaf cleanup AggregateError after cancellation", async () => {
+  const controller = new AbortController();
+  const abortError = new Error("Runtime scope stopped");
+  const cleanupError = new Error("candidate cleanup failed");
+  const leafError = new AggregateError(
+    [abortError, cleanupError],
+    "Artifact execution aborted and candidate cleanup failed",
+    { cause: abortError },
+  );
+  const { calls, executor, reported } = harness({
+    leafErrorFactory() {
+      controller.abort(abortError);
+      return leafError;
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claimFixture("page"), controller.signal),
+    (error) => error === leafError
+      && error instanceof AggregateError
+      && error.cause === abortError
+      && error.errors[0] === abortError
+      && error.errors[1] === cleanupError,
+  );
+  assert.deepEqual(calls.map((call) => call.port), ["artifact"]);
+  assert.deepEqual(reported, [leafError]);
+});
+
+test("GenerationTaskExecutor rethrows an AggregateError whose primary is a lease fence failure", async () => {
+  const primaryError = new GenerationTaskLeaseFenceError(TASK_ID, 1, "Attempt lease was superseded");
+  const cleanupError = new Error("candidate cleanup failed");
+  const aggregate = new AggregateError(
+    [primaryError, cleanupError],
+    "Artifact execution was fenced and candidate cleanup failed",
+    { cause: primaryError },
+  );
+  const { calls, executor } = harness({ leafError: aggregate });
+
+  await assert.rejects(
+    executor.execute(claimFixture("page"), new AbortController().signal),
+    (error) => error === aggregate,
+  );
+  assert.deepEqual(calls.map((call) => call.port), ["artifact"]);
+});
+
+test("GenerationTaskExecutor does not trust a lease fence error after hostile prototype substitution", async () => {
+  const primaryError = new GenerationTaskLeaseFenceError(TASK_ID, 1, "Attempt lease was superseded");
+  let prototypeTraps = 0;
+  Object.setPrototypeOf(primaryError, new Proxy(GenerationTaskLeaseFenceError.prototype, {
+    getPrototypeOf() {
+      prototypeTraps += 1;
+      return Error.prototype;
+    },
+  }));
+  const aggregate = new AggregateError(
+    [primaryError, new Error("candidate cleanup failed")],
+    "Artifact execution was fenced and candidate cleanup failed",
+    { cause: primaryError },
+  );
+  const { calls, executor } = harness({ leafError: aggregate });
+
+  await executor.execute(claimFixture("page"), new AbortController().signal);
+
+  assert.equal(prototypeTraps, 0);
+  assert.deepEqual(calls.map((call) => call.port), ["artifact", "finish-failure"]);
+  assert.equal((calls[1]?.values[1] as { failureClass?: string }).failureClass, "unknown");
 });
 
 test("GenerationTaskExecutor rejects mismatched Task, Attempt, and lease identity before invoking any port", async () => {
@@ -609,6 +749,301 @@ test("GenerationTaskExecutor records a typed leaf failure exactly once", async (
       name: "GenerationTaskExecutionError",
       message: failure.message,
       details: { findingIds: ["contract-drift"] },
+    },
+  });
+});
+
+test("GenerationTaskExecutor unwraps a Context primary and records bounded cleanup diagnostics", async () => {
+  const primaryError = {
+    name: "ContextIntegrityError",
+    message: "Context Pack is incomplete",
+    missing: ["resource:capture-1"],
+  };
+  let cleanupAccessorReads = 0;
+  const cleanupError = Object.defineProperties({}, {
+    name: {
+      get() {
+        cleanupAccessorReads += 1;
+        return "SecretCleanupError";
+      },
+    },
+    message: {
+      get() {
+        cleanupAccessorReads += 1;
+        return "credential=do-not-persist";
+      },
+    },
+  });
+  const aggregate = new AggregateError(
+    [primaryError, cleanupError],
+    "Artifact execution failed and candidate cleanup failed",
+    { cause: primaryError },
+  );
+  const { calls, executor } = harness({ leafError: aggregate });
+
+  await executor.execute(claimFixture("component"), new AbortController().signal);
+
+  assert.equal(cleanupAccessorReads, 0);
+  assert.deepEqual(calls.map((call) => call.port), ["artifact", "finish-failure"]);
+  assert.deepEqual(calls[1]?.values[1], {
+    failureClass: "context",
+    error: {
+      name: "ContextIntegrityError",
+      message: "Context Pack is incomplete",
+      refs: ["resource:capture-1"],
+      cleanup: { status: "failed", failureCount: 1 },
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(calls[1]?.values[1]), /credential|do-not-persist|SecretCleanupError/);
+});
+
+test("GenerationTaskExecutor unwraps errors[0] for storage classification without leaking cleanup detail", async () => {
+  const primaryError = {
+    name: "SystemError",
+    message: "No space left on device",
+    code: "ENOSPC",
+  };
+  const cleanupError = new Error("/private/project?token=do-not-persist");
+  const aggregate = new AggregateError(
+    [primaryError, cleanupError],
+    "Artifact execution failed and candidate cleanup failed",
+  );
+  const { calls, executor } = harness({ leafError: aggregate });
+
+  await executor.execute(claimFixture("page"), new AbortController().signal);
+
+  assert.deepEqual(calls[1]?.values[1], {
+    failureClass: "storage",
+    error: {
+      name: "SystemError",
+      message: "No space left on device",
+      code: "ENOSPC",
+      cleanup: { status: "failed", failureCount: 1 },
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(calls[1]?.values[1]), /private\/project|token|do-not-persist/);
+});
+
+test("GenerationTaskExecutor keeps an ordinary caused Error as the authoritative outer failure", async () => {
+  const ordinaryError = {
+    name: "RemoteProviderError",
+    message: "Provider request failed",
+    failureClass: "provider",
+    cause: {
+      name: "SystemError",
+      message: "No space left on device",
+      code: "ENOSPC",
+    },
+  };
+  const { calls, executor } = harness({ leafError: ordinaryError });
+
+  await executor.execute(claimFixture("page"), new AbortController().signal);
+
+  assert.deepEqual(calls[1]?.values[1], {
+    failureClass: "provider",
+    error: {
+      name: "RemoteProviderError",
+      message: "Provider request failed",
+    },
+  });
+});
+
+test("GenerationTaskExecutor does not invoke hostile error accessors or Proxy traps", async (t) => {
+  await t.test("accessor", async () => {
+    let reads = 0;
+    const hostile = Object.defineProperties({ name: "Error" }, {
+      message: {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return "credential=do-not-read";
+        },
+      },
+      cause: {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return { failureClass: "context" };
+        },
+      },
+      errors: {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return [{ failureClass: "storage" }];
+        },
+      },
+    });
+    const { calls, executor } = harness({ leafError: hostile });
+
+    await executor.execute(claimFixture("page"), new AbortController().signal);
+
+    assert.equal(reads, 0);
+    assert.deepEqual(calls[1]?.values[1], {
+      failureClass: "unknown",
+      error: { name: "Error", message: "Unknown Generation Task execution failure" },
+    });
+  });
+
+  await t.test("Proxy", async () => {
+    let traps = 0;
+    const hostile = new Proxy({}, {
+      get() {
+        traps += 1;
+        return "credential=do-not-read";
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        return undefined;
+      },
+      getPrototypeOf() {
+        traps += 1;
+        return Object.prototype;
+      },
+    });
+    const { calls, executor } = harness({ leafError: hostile });
+
+    await executor.execute(claimFixture("page"), new AbortController().signal);
+
+    assert.equal(traps, 0);
+    assert.deepEqual(calls[1]?.values[1], {
+      failureClass: "unknown",
+      error: { name: "Error", message: "Unknown Generation Task execution failure" },
+    });
+  });
+
+  await t.test("Proxy prototype", async () => {
+    let traps = 0;
+    const hostilePrototype = new Proxy({}, {
+      getPrototypeOf() {
+        traps += 1;
+        return null;
+      },
+    });
+    const hostile = Object.create(hostilePrototype) as Record<string, unknown>;
+    Object.defineProperty(hostile, "message", {
+      value: "opaque failure",
+      enumerable: true,
+    });
+    const { calls, executor } = harness({ leafError: hostile });
+
+    await executor.execute(claimFixture("page"), new AbortController().signal);
+
+    assert.equal(traps, 0);
+    assert.deepEqual(calls[1]?.values[1], {
+      failureClass: "unknown",
+      error: { name: "Error", message: "opaque failure" },
+    });
+  });
+
+  await t.test("nested details Proxy", async () => {
+    let traps = 0;
+    const details = new Proxy({}, {
+      getPrototypeOf() {
+        traps += 1;
+        return Object.prototype;
+      },
+      ownKeys() {
+        traps += 1;
+        return [];
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        return undefined;
+      },
+    });
+    const { calls, executor } = harness({
+      leafError: {
+        name: "RemoteProviderError",
+        message: "Provider request failed",
+        failureClass: "provider",
+        details,
+      },
+    });
+
+    await executor.execute(claimFixture("page"), new AbortController().signal);
+
+    assert.equal(traps, 0);
+    assert.deepEqual(calls[1]?.values[1], {
+      failureClass: "provider",
+      error: { name: "RemoteProviderError", message: "Provider request failed" },
+    });
+  });
+});
+
+test("GenerationTaskExecutor bounds AggregateError primary traversal", async () => {
+  let hostileReads = 0;
+  const inaccessiblePrimary = Object.defineProperty({}, "cause", {
+    get() {
+      hostileReads += 1;
+      return { name: "ContextIntegrityError", message: "must remain unreachable" };
+    },
+  });
+  let aggregate: unknown = inaccessiblePrimary;
+  for (let index = 0; index < 32; index += 1) {
+    aggregate = new AggregateError(
+      [aggregate, new Error(`cleanup-${index}`)],
+      `aggregate-${index}`,
+      { cause: aggregate },
+    );
+  }
+  const { calls, executor } = harness({ leafError: aggregate });
+
+  await executor.execute(claimFixture("page"), new AbortController().signal);
+
+  assert.equal(hostileReads, 0);
+  const failure = calls[1]?.values[1] as { failureClass: string; error: Record<string, unknown> };
+  assert.equal(failure.failureClass, "unknown");
+  assert.deepEqual(failure.error.cleanup, {
+    status: "failed",
+    failureCount: 8,
+    truncated: true,
+  });
+});
+
+test("GenerationTaskExecutor acknowledges only the scheduler-fenced cancellation through durable failure publication", async () => {
+  const claim = claimFixture("page");
+  const { calls, executor } = harness();
+
+  await executor.acknowledgeCancellation(claim, {
+    reason: "plan-cancelled",
+    planId: claim.attempt.planId,
+    blockedByTaskId: null,
+  });
+
+  assert.deepEqual(calls.map((call) => call.port), ["finish-failure"]);
+  assert.strictEqual(calls[0]?.values[0], claim);
+  assert.deepEqual(calls[0]?.values[1], {
+    failureClass: "cancelled",
+    error: {
+      name: "GenerationTaskCancellationRequested",
+      code: "generation-plan-cancelled",
+      message: "Generation Task stopped after its Plan was cancelled",
+      planId: claim.attempt.planId,
+    },
+  });
+});
+
+test("GenerationTaskExecutor preserves a failed prerequisite cancellation in durable diagnostics", async () => {
+  const claim = claimFixture("page");
+  const { calls, executor } = harness();
+
+  await executor.acknowledgeCancellation(claim, {
+    reason: "prerequisite-failed",
+    planId: claim.attempt.planId,
+    blockedByTaskId: "task-prerequisite",
+  });
+
+  assert.deepEqual(calls.map((call) => call.port), ["finish-failure"]);
+  assert.strictEqual(calls[0]?.values[0], claim);
+  assert.deepEqual(calls[0]?.values[1], {
+    failureClass: "cancelled",
+    error: {
+      name: "GenerationTaskCancellationRequested",
+      code: "generation-task-prerequisite-failed",
+      message: "Generation Task stopped after prerequisite task-prerequisite failed",
+      planId: claim.attempt.planId,
+      blockedByTaskId: "task-prerequisite",
     },
   });
 });

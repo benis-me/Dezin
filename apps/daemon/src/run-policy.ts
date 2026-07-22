@@ -1,4 +1,4 @@
-import { extractFinalSummary } from "../../../packages/agent/src/index.ts";
+import { extractFinalSummary, getProvider } from "../../../packages/agent/src/index.ts";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { lintScore, renderFindingsForAgent } from "../../../packages/quality/src/index.ts";
 
@@ -104,12 +104,21 @@ export function standardRepairPolicy(settings: Settings, isSharingan: boolean | 
   return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
 }
 
-export function reviewerAgentCommand(settings: Settings, fallback: string): string {
-  return settings.visualQaAgentCommand.trim() || fallback || settings.agentCommand || "claude";
+export function reviewerAgentCommand(_settings: Settings, _fallback: string): string {
+  return "claude";
 }
 
-export function reviewerModel(settings: Settings, fallback?: string): string | undefined {
-  return settings.visualQaModel.trim() || fallback || settings.model || undefined;
+export function reviewerModel(
+  settings: Settings,
+  fallback?: string,
+  fallbackCommand: string = settings.agentCommand,
+): string | undefined {
+  const configuredCommand = settings.visualQaAgentCommand.trim();
+  if (configuredCommand && getProvider(configuredCommand)?.id !== "claude") return undefined;
+  const configuredModel = settings.visualQaModel.trim();
+  if (configuredModel) return configuredModel;
+  if (getProvider(fallbackCommand)?.id !== "claude") return undefined;
+  return fallback || settings.model || undefined;
 }
 
 export function researchAgentCommand(settings: Settings, fallback: string): string {
@@ -164,7 +173,7 @@ export function visualQaStartPayload(
     round,
     enabled: true,
     agentCommand: reviewerAgentCommand(settings, agentCommand),
-    model: reviewerModel(settings, model),
+    model: reviewerModel(settings, model, agentCommand),
     screenshotUrl,
   };
 }

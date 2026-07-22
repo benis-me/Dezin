@@ -9,6 +9,7 @@ import {
   GenerationTaskQualityGateError,
   Store,
   type GenerationTaskAttemptClaim,
+  type RenderFrameSpec,
   type StageGenerationTaskCandidateInput,
   type StoreClock,
 } from "../src/index.ts";
@@ -339,6 +340,14 @@ function createCandidateFixture(label: string) {
       executionMode: "full",
     },
   );
+  const componentClaim = store.workspace.tryClaimGenerationTaskAttempt({
+    taskId: componentTask.id,
+    attempt: componentAttempt.attempt,
+    ownerId: `candidate-component-owner-${label}`,
+    now: 70_000,
+    leaseMs: 30_000,
+  });
+  assert.ok(componentClaim);
   const componentSuccessor = store.workspace.createArtifactRevision({
     artifactId: `candidate-component-${label}`,
     trackId: `candidate-component-track-${label}`,
@@ -369,7 +378,8 @@ function createCandidateFixture(label: string) {
   store.db.prepare(
     `UPDATE generation_task_attempts
      SET status = 'succeeded', candidate_revision_id = ?, candidate_evidence_json = ?,
-         candidate_evidence_hash = ?, started_at = 70_000, finished_at = 70_001
+         candidate_evidence_hash = ?, owner_id = NULL, lease_token = NULL,
+         lease_expires_at = NULL, heartbeat_at = NULL, finished_at = 70_001
      WHERE task_id = ? AND plan_id = ? AND attempt = ?`,
   ).run(
     componentSuccessor.id,
@@ -384,6 +394,9 @@ function createCandidateFixture(label: string) {
      SET status = 'succeeded', result_revision_id = ?, result_snapshot_id = ?, finished_at = 70_001
      WHERE id = ? AND plan_id = ?`,
   ).run(componentSuccessor.id, componentSuccessorSnapshot.id, componentTask.id, compiled.plan.id);
+  store.db.prepare(
+    "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = ?",
+  ).run(componentTask.id, componentAttempt.attempt);
   const sequence = Number((store.db.prepare(
     "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM generation_plan_events WHERE plan_id = ?",
   ).get(compiled.plan.id) as { sequence: number }).sequence) + 1;
@@ -491,17 +504,51 @@ function candidateInput(
   if (!contextPackId?.startsWith("context-pack-")) {
     throw new Error("Artifact candidate fixture requires a content-addressed Context Pack");
   }
+  const frames = (claim.attempt.payload as { responsiveFrames?: RenderFrameSpec[] }).responsiveFrames;
+  if (!frames || frames.length === 0) {
+    throw new Error("Artifact candidate fixture requires immutable Task Frames");
+  }
   const candidate = {
     kind: "artifact" as const,
     sourceCommitHash: checksum(`${label}:candidate-commit`),
     sourceTreeHash: checksum(`${label}:candidate-tree`),
-    renderSpec: {
-      frames: [
-        { id: "desktop", name: "Desktop", width: 1_440, height: 900 },
-      ],
-    },
+    renderSpec: { frames },
     quality: { state: "passed" as const, score: 97, findings: [] },
   };
+  const visualEvidence = frames.map((frame) => {
+    const sha256 = checksum(`${label}:visual:${frame.id}`);
+    const frameAttemptId = `quality-round-0-${frame.id}`;
+    const storageKey = [
+      "generation-task-evidence",
+      projectId,
+      claim.task.workspaceId,
+      claim.task.planId,
+      claim.task.id,
+      `attempt-${claim.attempt.attempt}`,
+      "visual",
+      `round-0-${frame.id}-${sha256}.png`,
+    ].join("/");
+    return {
+      protocol: "dezin.generation-task-visual-evidence.v1",
+      owner: {
+        projectId,
+        workspaceId: claim.task.workspaceId,
+        planId: claim.task.planId,
+        taskId: claim.task.id,
+        attempt: claim.attempt.attempt,
+        candidateCommitHash: candidate.sourceCommitHash,
+        candidateTreeHash: candidate.sourceTreeHash,
+        contextPackId,
+        contextPackHash: contextPackId.slice("context-pack-".length),
+      },
+      frame: { ...frame, frameAttemptId },
+      round: 0,
+      mediaType: "image/png",
+      sha256,
+      byteLength: 1_024,
+      storageKey,
+    };
+  });
   const qualityEvidence = {
     protocol: "dezin.standard-artifact-quality.v1",
     candidate: {
@@ -513,8 +560,28 @@ function candidateInput(
       hash: contextPackId.slice("context-pack-".length),
     },
     frames: candidate.renderSpec.frames,
-    frameResults: [],
+    frameResults: frames.map((frame) => ({
+      frameId: frame.id,
+      frameAttemptId: `quality-round-0-${frame.id}`,
+      width: frame.width,
+      height: frame.height,
+      status: "passed",
+      reviewed: true,
+    })),
     round: 0,
+    runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
+    visualReview: {
+      status: "passed",
+      fidelity: 0.97,
+      evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
+        frameId: frame.id,
+        frameAttemptId: frame.frameAttemptId,
+        sha256,
+        byteLength,
+        storageKey,
+      })),
+    },
+    visualEvidence,
   };
   return {
     lease: {
@@ -526,6 +593,8 @@ function candidateInput(
     },
     candidate,
     evidence: {
+      runtimeChecks: qualityEvidence.runtimeChecks,
+      visualReview: qualityEvidence.visualReview,
       protocol: "dezin.artifact-run.v1",
       projectId,
       taskId: claim.task.id,

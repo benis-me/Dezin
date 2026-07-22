@@ -5,6 +5,7 @@ import {
   generationTaskIntentHash,
   normalizeGenerationTaskIntent,
 } from "../src/store-codecs.ts";
+import { normalizeWorkspaceProposalGeneration } from "../src/workspace-codecs.ts";
 import type {
   GenerationPlan,
   GenerationTaskIntent,
@@ -292,6 +293,111 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(Object.isFrozen(compiled), true);
   assert.equal(Object.isFrozen(compiled.tasks), true);
   assert.equal(Object.isFrozen(compiled.dependencies), true);
+});
+
+test("compiles an exact dispatch Context Pack identity into only its scoped Artifact and Resource leaves", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const artifactDispatchContextPackId = `context-pack-${"a".repeat(64)}`;
+  const resourceDispatchContextPackId = `context-pack-${"b".repeat(64)}`;
+  const normalized = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    artifactPlans: generation.artifactPlans.map((plan) => plan.artifactId === "page-home"
+      ? { ...plan, dispatchContextPackId: artifactDispatchContextPackId }
+      : plan),
+    resourceOperations: generation.resourceOperations.map((operation) => operation.resourceId === "resource-copy"
+      ? { ...operation, dispatchContextPackId: resourceDispatchContextPackId }
+      : operation),
+  });
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: normalized },
+  });
+  const pageTask = compiled.tasks.find((task) => task.target.id === "page-home");
+  const resourceTask = compiled.tasks.find((task) => task.target.id === "resource-copy");
+  assert.ok(pageTask);
+  assert.ok(resourceTask);
+  assert.equal(
+    (pageTask.payload.artifactPlan as Record<string, unknown>).dispatchContextPackId,
+    artifactDispatchContextPackId,
+  );
+  assert.equal(
+    (resourceTask.payload.operation as Record<string, unknown>).dispatchContextPackId,
+    resourceDispatchContextPackId,
+  );
+  assert.equal(JSON.stringify(pageTask.payload).includes(resourceDispatchContextPackId), false);
+  assert.equal(JSON.stringify(resourceTask.payload).includes(artifactDispatchContextPackId), false);
+
+  assert.throws(
+    () => normalizeWorkspaceProposalGeneration({
+      ...generation,
+      artifactPlans: generation.artifactPlans.map((plan, index) => index === 0
+        ? { ...plan, dispatchContextPackId: " context-pack-substituted " }
+        : plan),
+    }),
+    /dispatch Context Pack id|canonical/i,
+  );
+  assert.throws(
+    () => normalizeWorkspaceProposalGeneration({
+      ...generation,
+      resourceOperations: generation.resourceOperations.map((operation) => operation.operation === "reuse"
+        ? { ...operation, dispatchContextPackId: resourceDispatchContextPackId }
+        : operation),
+    }),
+    /reuse cannot bind.*dispatch Context Pack/i,
+  );
+});
+
+test("compiles only an exact immutable Research Revision direction selection into its owning Artifact leaf", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const selection = {
+    protocol: "dezin.research-direction-selection.v1" as const,
+    version: 1 as const,
+    resourceId: "resource-brand",
+    revisionId: "brand-revision-1",
+    directionId: "quiet-editorial",
+  };
+  const normalized = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    resourceOperations: generation.resourceOperations.map((operation) => operation.resourceId === selection.resourceId
+      ? { ...operation, kind: "research" as const }
+      : operation),
+    artifactPlans: generation.artifactPlans.map((plan) => plan.artifactId === "page-home"
+      ? { ...plan, researchDirectionSelection: selection }
+      : plan),
+  });
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: normalized },
+  });
+  const home = compiled.tasks.find((task) => task.target.id === "page-home");
+  assert.ok(home);
+  assert.deepEqual(
+    (home.payload.artifactPlan as Record<string, unknown>).researchDirectionSelection,
+    selection,
+  );
+
+  const generatedSelection = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    artifactPlans: generation.artifactPlans.map((plan) => plan.artifactId === "page-home"
+      ? {
+          ...plan,
+          researchDirectionSelection: {
+            ...selection,
+            resourceId: "resource-copy",
+            revisionId: "future-revision-cannot-be-known",
+          },
+        }
+      : plan),
+  });
+  assert.throws(
+    () => compileGenerationPlan({
+      shell: fixture.shell,
+      proposal: { ...fixture.proposal, generation: generatedSelection },
+    }),
+    /selected Research.*exact existing Revision/i,
+  );
 });
 
 test("freezes auditable v2 briefs, complete capabilities, and Resource adapter identity", () => {
@@ -600,6 +706,23 @@ test("rejects duplicate task targets before hashing or persistence", () => {
       && error.code === "duplicate-id"
       && /duplicate Resource operation id resource-copy/.test(error.message),
   );
+});
+
+test("rejects generated Resource kinds that require an explicit owned source", () => {
+  for (const kind of ["file", "asset", "effect", "external-reference"] as const) {
+    const fixture = approvedPlanFixture();
+    const operation = workspaceGeneration(fixture.proposal).resourceOperations[0]!;
+    operation.kind = kind;
+
+    assert.throws(
+      () => compileGenerationPlan(fixture),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === "unsupported-resource-kind"
+        && error.details.resourceKind === kind
+        && /explicit owned source|cannot be Agent-generated/i.test(error.message),
+      kind,
+    );
+  }
 });
 
 test("rejects cycles in the compiled immutable task graph", () => {

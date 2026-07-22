@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 const BASE = "__BASE__";
 const RUN_ID = "__RUN_ID__";
+const IMMUTABLE_CAPTURE = "__IMMUTABLE_CAPTURE__";
 const TOKEN = process.env.DEZIN_DAEMON_TOKEN || "";
 
 function fail(msg) {
@@ -566,7 +567,13 @@ function sourceRegionPlan(page, manifest, data) {
   };
 }
 
-function sourceScaffold() {
+function sourceScaffold(outputMode = ".sharingan") {
+  if (IMMUTABLE_CAPTURE && outputMode !== "--stdout") {
+    fail("immutable source-scaffold requires exactly --stdout and cannot write either pinned root");
+  }
+  if (outputMode !== ".sharingan" && outputMode !== "--stdout") {
+    fail("source-scaffold accepts only --stdout for immutable Tasks (omit it only for legacy mutable Runs)");
+  }
   const manifest = readJson(join(".sharingan", "pages.json"), null);
   const page = manifestEntryPage(manifest);
   if (!page) fail("no captured page in .sharingan/pages.json");
@@ -681,9 +688,24 @@ function sourceScaffold() {
     })),
   };
 
-  const scaffoldDir = join(".sharingan", "source-scaffold");
+  const regionPlan = sourceRegionPlan(page, manifest, data);
+  if (outputMode === "--stdout") {
+    const output = JSON.stringify({
+      protocol: "dezin.sharingan-source-scaffold.v1",
+      source: data,
+      regionPlan,
+    });
+    if (Buffer.byteLength(output, "utf8") > 8 * 1024 * 1024) {
+      fail("source-scaffold output exceeds the immutable 8 MiB bound");
+    }
+    process.stdout.write(`${output}\n`);
+    return;
+  }
+
+  const outputRoot = ".sharingan";
+  const scaffoldDir = join(outputRoot, "source-scaffold");
   mkdirSync(scaffoldDir, { recursive: true });
-  writeFileSync(join(".sharingan", "region-plan.json"), JSON.stringify(sourceRegionPlan(page, manifest, data), null, 2));
+  writeFileSync(join(outputRoot, "region-plan.json"), JSON.stringify(regionPlan, null, 2));
   writeFileSync(
     join(scaffoldDir, "App.jsx"),
     `// SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY.
@@ -873,14 +895,16 @@ body {
 }
 `,
   );
-  console.log(`SOURCE SCAFFOLD wrote .sharingan/source-scaffold/App.jsx and .sharingan/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes, plus .sharingan/region-plan.json.`);
+  console.log(`SOURCE SCAFFOLD wrote ${outputRoot}/source-scaffold/App.jsx and ${outputRoot}/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes, plus ${outputRoot}/region-plan.json.`);
 }
 
 const HELP = `dezin-probe — drive the Sharingan capture browser + read the capture (no curl/python needed).
 Usage: node .sharingan/probe.mjs <command> [args]
 
   source-summary        one bounded source digest: component inventory + tokens + key text + assets
-  source-scaffold       write measured reference scaffold + region-plan.json from render-map/assets
+  source-scaffold --stdout
+                        immutable: print bounded measured SOURCE + region-plan JSON without writes
+                        omit --stdout only for legacy mutable Runs
   navigate <url>        open a URL in the live capture browser
   read-dom              visible DOM nodes (tag/role/text/box) as JSON
   styles                computed style tokens (colors / fonts / radii / shadows)
@@ -893,8 +917,30 @@ Usage: node .sharingan/probe.mjs <command> [args]
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
+  if (IMMUTABLE_CAPTURE) {
+    if (cmd === "source-summary" || cmd === "summary") {
+      if (args.length !== 0) fail("immutable source-summary accepts no arguments");
+      return sourceSummary();
+    }
+    if (cmd === "source-scaffold" || cmd === "scaffold") {
+      if (args.length !== 1 || args[0] !== "--stdout") {
+        fail("immutable source-scaffold requires exactly --stdout and cannot write either pinned root");
+      }
+      return sourceScaffold("--stdout");
+    }
+    if (cmd === "outline") {
+      if (args.length > 1) fail("immutable outline accepts at most one captured DOM path");
+      return outline(args[0]);
+    }
+    if (cmd === "render-map") {
+      if (args.length > 1) fail("immutable render-map accepts at most one captured render-map path");
+      return renderMap(args[0]);
+    }
+    if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return void console.log(HELP);
+    fail("immutable Sharingan probe allows only offline source-summary, source-scaffold --stdout, outline, and render-map reads");
+  }
   if (cmd === "source-summary" || cmd === "summary") return sourceSummary();
-  if (cmd === "source-scaffold" || cmd === "scaffold") return sourceScaffold();
+  if (cmd === "source-scaffold" || cmd === "scaffold") return sourceScaffold(args[0]);
   if (cmd === "outline") return outline(args[0]);
   if (cmd === "render-map") return renderMap(args[0]);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return void console.log(HELP);

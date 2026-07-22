@@ -11,6 +11,7 @@ import {
   type GenerationTask,
   type GenerationTaskAttempt,
   type GenerationTaskAttemptLease,
+  type RenderFrameSpec,
   type StageGenerationTaskCandidateResult,
   type StoreClock,
 } from "../src/index.ts";
@@ -218,15 +219,48 @@ function createPublicationFixture(label: string) {
   });
   assert.ok(claim);
   control.set(100_001);
+  const frames = (attempt.payload as { responsiveFrames?: RenderFrameSpec[] }).responsiveFrames;
+  assert.ok(frames && frames.length > 0);
   const candidate = {
     kind: "artifact" as const,
     sourceCommitHash: checksum(`${label}:candidate-commit`),
     sourceTreeHash: checksum(`${label}:candidate-tree`),
-    renderSpec: {
-      frames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
-    },
+    renderSpec: { frames },
     quality: { state: "passed", score: 98, findings: [] },
   };
+  const visualEvidence = frames.map((frame) => {
+    const sha256 = checksum(`${label}:visual:${frame.id}`);
+    const frameAttemptId = `quality-round-0-${frame.id}`;
+    return {
+      protocol: "dezin.generation-task-visual-evidence.v1",
+      owner: {
+        projectId: project.id,
+        workspaceId: task.workspaceId,
+        planId: task.planId,
+        taskId: task.id,
+        attempt: attempt.attempt,
+        candidateCommitHash: candidate.sourceCommitHash,
+        candidateTreeHash: candidate.sourceTreeHash,
+        contextPackId: context.id,
+        contextPackHash: context.hash,
+      },
+      frame: { ...frame, frameAttemptId },
+      round: 0,
+      mediaType: "image/png",
+      sha256,
+      byteLength: 1_024,
+      storageKey: [
+        "generation-task-evidence",
+        project.id,
+        task.workspaceId,
+        task.planId,
+        task.id,
+        `attempt-${attempt.attempt}`,
+        "visual",
+        `round-0-${frame.id}-${sha256}.png`,
+      ].join("/"),
+    };
+  });
   const qualityEvidence = {
     protocol: "dezin.standard-artifact-quality.v1",
     candidate: {
@@ -235,10 +269,32 @@ function createPublicationFixture(label: string) {
     },
     contextPack: { id: context.id, hash: context.hash },
     frames: candidate.renderSpec.frames,
-    frameResults: [],
+    frameResults: frames.map((frame) => ({
+      frameId: frame.id,
+      frameAttemptId: `quality-round-0-${frame.id}`,
+      width: frame.width,
+      height: frame.height,
+      status: "passed",
+      reviewed: true,
+    })),
     round: 0,
+    runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
+    visualReview: {
+      status: "passed",
+      fidelity: 0.98,
+      evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
+        frameId: frame.id,
+        frameAttemptId: frame.frameAttemptId,
+        sha256,
+        byteLength,
+        storageKey,
+      })),
+    },
+    visualEvidence,
   };
   const evidence = {
+    runtimeChecks: qualityEvidence.runtimeChecks,
+    visualReview: qualityEvidence.visualReview,
     protocol: "dezin.artifact-run.v1",
     projectId: project.id,
     taskId: task.id,
@@ -382,16 +438,16 @@ function assertCandidateRetained(
   assert.equal(attempt.candidateEvidenceHash, staged.attempt.candidateEvidenceHash);
 }
 
-function driftSnapshotOnly(fixture: PublicationFixture) {
+function driftSnapshotOnly(fixture: PublicationFixture, suffix = "initial") {
   const workspace = fixture.store.workspace.getWorkspace(fixture.project.id)!;
   const drift = fixture.store.workspace.applyGraphCommands(fixture.project.id, {
     baseGraphRevision: workspace.graphRevision,
     expectedSnapshotId: workspace.activeSnapshotId,
     commands: [{
-      id: `rename-while-candidate-waits-${fixture.task.id}`,
+      id: `rename-while-candidate-waits-${fixture.task.id}-${suffix}`,
       type: "rename-node",
       nodeId: fixture.nodeId,
-      name: "Page renamed while candidate waits",
+      name: `Page renamed while candidate waits ${suffix}`,
     }],
   });
   assert.equal(fixture.store.workspace.getTrack(fixture.trackId)?.headRevisionId, fixture.baseRevision.id);
@@ -417,6 +473,140 @@ function driftArtifactHead(fixture: PublicationFixture, label: string) {
     expectedSnapshotId: fixture.staged.attempt.expectedSnapshotId,
   });
   return { competing, snapshot };
+}
+
+function prepareHistoricalGraphRebase(
+  fixture: PublicationFixture,
+  mode: "same-context" | "latest-context",
+) {
+  const drift = driftArtifactHead(fixture, `${fixture.task.id}-${mode}`);
+  const afterHeadDrift = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+  const graphDrift = fixture.store.workspace.applyGraphCommands(fixture.project.id, {
+    baseGraphRevision: afterHeadDrift.graphRevision,
+    expectedSnapshotId: afterHeadDrift.activeSnapshotId,
+    commands: [{
+      id: `historical-context-graph-drift-${fixture.task.id}-${mode}`,
+      type: "rename-node",
+      nodeId: fixture.nodeId,
+      name: `Historical Context Pack guard ${mode}`,
+    }],
+  });
+  publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+    fixture.project.id,
+    fixture.plan.id,
+    publicationInput(fixture),
+  );
+  const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+    fixture.project.id,
+    fixture.plan.id,
+    fixture.task.id,
+    mode,
+  );
+  assert.equal(disposition.kind, "full");
+  const observation = fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+    fixture.project.id,
+    fixture.plan.id,
+    fixture.task.id,
+  );
+  const executionEpoch = observation.executionEpoch;
+  assert.ok(executionEpoch !== undefined);
+  assert.equal(observation.expectedSnapshotId, graphDrift.snapshot.id);
+  return { drift, executionEpoch, graphDrift, observation };
+}
+
+function insertAlternateHistoricalContextPack(
+  fixture: PublicationFixture,
+  suffix: string,
+): string {
+  const predecessorContextPackId = fixture.attempt.contextPackId;
+  assert.ok(predecessorContextPackId);
+  const predecessor = fixture.store.db.prepare(
+    `SELECT graph_revision FROM context_packs
+     WHERE id = ? AND workspace_id = ? AND sealed = 1`,
+  ).get(predecessorContextPackId, fixture.workspace.id) as { graph_revision: number } | undefined;
+  assert.ok(predecessor);
+  const id = `alternate-historical-pack-${suffix}`;
+  fixture.store.db.prepare(
+    `INSERT INTO context_packs (
+       id, workspace_id, scope_type, scope_id, graph_revision, intent, message_checksum,
+       manifest_path, token_estimate, omissions_json, hash, created_at, sealed
+     ) VALUES (?, ?, 'artifact', ?, ?, 'generate', ?, ?, 0, '[]', ?, 100100, 0)`,
+  ).run(
+    id,
+    fixture.workspace.id,
+    fixture.artifactId,
+    predecessor.graph_revision,
+    checksum(`${suffix}:alternate-message`),
+    `context-packs/${id}.json`,
+    checksum(`${suffix}:alternate-pack`),
+  );
+  fixture.store.db.prepare(
+    "UPDATE context_packs SET sealed = 1 WHERE id = ? AND workspace_id = ?",
+  ).run(id, fixture.workspace.id);
+  const inserted = fixture.store.db.prepare(
+    `SELECT workspace_id, scope_type, scope_id, graph_revision, intent, sealed
+     FROM context_packs WHERE id = ?`,
+  ).get(id) as Record<string, unknown> | undefined;
+  assert.deepEqual({ ...inserted }, {
+    workspace_id: fixture.workspace.id,
+    scope_type: "artifact",
+    scope_id: fixture.artifactId,
+    graph_revision: predecessor.graph_revision,
+    intent: "generate",
+    sealed: 1,
+  });
+  assert.notEqual(
+    predecessor.graph_revision,
+    fixture.store.workspace.getWorkspace(fixture.project.id)?.graphRevision,
+    "the alternate Pack must be historical so the test reaches the lineage exception",
+  );
+  return id;
+}
+
+function insertRawMaterializedArtifactSuccessor(
+  fixture: PublicationFixture,
+  input: {
+    attempt: number;
+    baseRevisionId: string;
+    contextPackId: string;
+    executionEpoch: number;
+    expectedSnapshotId: string;
+    kernelRevisionId: string;
+    payload: unknown;
+    retryContextPolicy: "same-context" | "latest-context";
+    sourceCommitHash: string;
+    sourceTreeHash: string;
+  },
+): void {
+  fixture.store.db.prepare(
+    `INSERT INTO generation_task_attempts (
+       task_id, plan_id, workspace_id, attempt, attempt_origin, predecessor_attempt,
+       automatic_retry_index, execution_epoch, target_artifact_id, target_track_id,
+       target_resource_id, base_revision_id, source_commit_hash, source_tree_hash,
+       expected_snapshot_id, context_pack_id, kernel_revision_id, execution_mode,
+       payload_json, input_hash, pinned_resource_revision_ids_json,
+       component_dependency_revision_ids_json, retry_context_policy, status,
+       materialization_sealed, created_at
+     ) VALUES (?, ?, ?, ?, 'materialized', NULL, 0, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?,
+       'full', ?, ?, '[]', '[]', ?, 'queued', 0, 100101)`,
+  ).run(
+    fixture.task.id,
+    fixture.plan.id,
+    fixture.workspace.id,
+    input.attempt,
+    input.executionEpoch,
+    fixture.artifactId,
+    fixture.trackId,
+    input.baseRevisionId,
+    input.sourceCommitHash,
+    input.sourceTreeHash,
+    input.expectedSnapshotId,
+    input.contextPackId,
+    input.kernelRevisionId,
+    JSON.stringify(input.payload),
+    checksum(`${fixture.task.id}:${input.attempt}:${input.contextPackId}:${input.retryContextPolicy}`),
+    input.retryContextPolicy,
+  );
 }
 
 function assertNeedsRebase(
@@ -596,6 +786,285 @@ test("Head or Snapshot CAS drift preserves the candidate and records one needs-r
       fixture.store.close();
     }
   });
+});
+
+test("the needs-rebase reconciler reuses a retained candidate only for Snapshot-only movement", () => {
+  const fixture = createPublicationFixture("rebase-publication-only");
+  try {
+    const latestSnapshot = driftSnapshotOnly(fixture);
+    publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      publicationInput(fixture),
+    );
+    const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.task.id,
+    );
+    assert.equal(disposition.kind, "publication-only");
+    if (disposition.kind !== "publication-only") assert.fail("expected publication-only disposition");
+    assert.equal(disposition.rebaseCount, 1);
+    assert.equal(disposition.sourceAttempt.attempt, fixture.attempt.attempt);
+    assert.equal(disposition.successorAttempt.attempt, fixture.attempt.attempt + 1);
+    assert.equal(disposition.successorAttempt.executionMode, "publication-only");
+    assert.equal(disposition.successorAttempt.expectedSnapshotId, latestSnapshot.id);
+    assert.equal(disposition.successorAttempt.candidateRevisionId, fixture.staged.artifactRevision.id);
+    assert.deepEqual(
+      fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+      ),
+      disposition,
+    );
+    const queued = currentTaskAndAttempt(fixture);
+    assert.equal(queued.task.status, "queued");
+    assert.equal(queued.task.rebaseCount, 1);
+    fixture.control.set(100_010);
+    const claim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: fixture.task.id,
+      attempt: queued.attempt.attempt,
+      ownerId: "publication-only-rebase-worker",
+      now: 100_010,
+      leaseMs: 30_000,
+    });
+    assert.ok(claim);
+    fixture.control.set(100_011);
+    publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: claim.lease },
+    );
+    assert.equal(currentTaskAndAttempt(fixture).task.status, "succeeded");
+    assert.equal(taskEvents(fixture, "task-rebase-disposition").length, 1);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("semantic rebase drift selects a full same-context or latest-context successor path", async (t) => {
+  await t.test("same-context retains the exact immutable Context Pack", () => {
+    const fixture = createPublicationFixture("rebase-same-context");
+    try {
+      const drift = driftArtifactHead(fixture, "rebase-same-context");
+      const afterHeadDrift = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+      const graphDrift = fixture.store.workspace.applyGraphCommands(fixture.project.id, {
+        baseGraphRevision: afterHeadDrift.graphRevision,
+        expectedSnapshotId: afterHeadDrift.activeSnapshotId,
+        commands: [{
+          id: "rename-rebase-same-context-page",
+          type: "rename-node",
+          nodeId: fixture.nodeId,
+          name: "Renamed while same-context candidate rebases",
+        }],
+      });
+      publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        publicationInput(fixture),
+      );
+      const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+      );
+      assert.equal(disposition.kind, "full");
+      if (disposition.kind !== "full") assert.fail("expected full disposition");
+      assert.equal(disposition.mode, "same-context");
+      assert.equal(disposition.status, "materialization-pending");
+      const observation = fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+      );
+      assert.equal(observation.baseRevisionId, drift.competing.id);
+      assert.equal(observation.expectedSnapshotId, graphDrift.snapshot.id);
+      assert.equal(observation.requiredContextPackId, fixture.attempt.contextPackId);
+      const successor = fixture.store.workspace.createGenerationTaskAttemptForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        {
+          ...observation,
+          contextPackId: observation.requiredContextPackId!,
+          sourceCommitHash: drift.competing.sourceCommitHash,
+          sourceTreeHash: drift.competing.sourceTreeHash,
+          retryContextPolicy: "same-context",
+          executionMode: "full",
+        },
+      );
+      assert.equal(successor.attempt, fixture.attempt.attempt + 1);
+      assert.equal(successor.contextPackId, fixture.attempt.contextPackId);
+      assert.equal(successor.baseRevisionId, drift.competing.id);
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  await t.test("latest-context waits for an asynchronously resolved Pack", () => {
+    const fixture = createPublicationFixture("rebase-latest-context");
+    try {
+      const drift = driftArtifactHead(fixture, "rebase-latest-context");
+      publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        publicationInput(fixture),
+      );
+      const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+        "latest-context",
+      );
+      assert.equal(disposition.kind, "full");
+      if (disposition.kind !== "full") assert.fail("expected full disposition");
+      assert.equal(disposition.mode, "latest-context");
+      assert.equal(disposition.status, "awaiting-context-refresh");
+      const observation = fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+      );
+      assert.equal(observation.baseRevisionId, drift.competing.id);
+      assert.equal(observation.expectedSnapshotId, drift.snapshot.id);
+      assert.equal(observation.requiredContextPackId, undefined);
+    } finally {
+      fixture.store.close();
+    }
+  });
+});
+
+test("historical Context Pack schema exceptions require the exact same-context predecessor", async (t) => {
+  await t.test("insert and seal guards reject another sealed same-scope historical Pack", () => {
+    const fixture = createPublicationFixture("historical-pack-wrong-predecessor");
+    try {
+      const { drift, executionEpoch, observation } = prepareHistoricalGraphRebase(
+        fixture,
+        "same-context",
+      );
+      const alternateContextPackId = insertAlternateHistoricalContextPack(
+        fixture,
+        "wrong-predecessor",
+      );
+      const input = {
+        attempt: observation.attempt,
+        baseRevisionId: drift.competing.id,
+        contextPackId: alternateContextPackId,
+        executionEpoch,
+        expectedSnapshotId: observation.expectedSnapshotId,
+        kernelRevisionId: observation.kernelRevisionId,
+        payload: observation.payload,
+        retryContextPolicy: "same-context" as const,
+        sourceCommitHash: drift.competing.sourceCommitHash,
+        sourceTreeHash: drift.competing.sourceTreeHash,
+      };
+
+      assert.throws(
+        () => insertRawMaterializedArtifactSuccessor(fixture, input),
+        /input|target|ownership/i,
+      );
+      fixture.store.db.exec("DROP TRIGGER generation_task_attempt_insert_guard");
+      insertRawMaterializedArtifactSuccessor(fixture, input);
+      assert.throws(
+        () => fixture.store.db.prepare(
+          `UPDATE generation_task_attempts SET materialization_sealed = 1
+           WHERE task_id = ? AND attempt = ?`,
+        ).run(fixture.task.id, observation.attempt),
+        /materialization|seal|stale/i,
+      );
+      assert.equal(
+        currentTaskAndAttempt(fixture).task.currentAttempt,
+        fixture.attempt.attempt,
+      );
+    } finally {
+      fixture.store.close();
+    }
+  });
+
+  await t.test("latest-context cannot reuse the predecessor's historical Pack", () => {
+    const fixture = createPublicationFixture("historical-pack-latest-context");
+    try {
+      const { drift, executionEpoch, observation } = prepareHistoricalGraphRebase(
+        fixture,
+        "latest-context",
+      );
+      assert.equal(observation.requiredContextPackId, undefined);
+      assert.ok(fixture.attempt.contextPackId);
+      assert.throws(
+        () => insertRawMaterializedArtifactSuccessor(fixture, {
+          attempt: observation.attempt,
+          baseRevisionId: drift.competing.id,
+          contextPackId: fixture.attempt.contextPackId!,
+          executionEpoch,
+          expectedSnapshotId: observation.expectedSnapshotId,
+          kernelRevisionId: observation.kernelRevisionId,
+          payload: observation.payload,
+          retryContextPolicy: "latest-context",
+          sourceCommitHash: drift.competing.sourceCommitHash,
+          sourceTreeHash: drift.competing.sourceTreeHash,
+        }),
+        /input|target|ownership/i,
+      );
+    } finally {
+      fixture.store.close();
+    }
+  });
+});
+
+test("the fourth consecutive Snapshot publication conflict exhausts the bounded rebase budget", () => {
+  const fixture = createPublicationFixture("rebase-budget");
+  try {
+    let claim = fixture.claim;
+    for (let cycle = 1; cycle <= 4; cycle += 1) {
+      driftSnapshotOnly(fixture, `cycle-${cycle}`);
+      publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        { lease: claim.lease },
+      );
+      if (cycle === 4) break;
+      const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.task.id,
+      );
+      assert.equal(disposition.kind, "publication-only");
+      assert.equal(disposition.rebaseCount, cycle);
+      const queued = currentTaskAndAttempt(fixture);
+      fixture.control.set(100_010 + cycle * 10);
+      const nextClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+        taskId: fixture.task.id,
+        attempt: queued.attempt.attempt,
+        ownerId: `rebase-budget-worker-${cycle}`,
+        now: 100_010 + cycle * 10,
+        leaseMs: 30_000,
+      });
+      assert.ok(nextClaim);
+      claim = nextClaim;
+      fixture.control.set(100_011 + cycle * 10);
+    }
+    const exhausted = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.task.id,
+    );
+    assert.equal(exhausted.kind, "failed");
+    if (exhausted.kind !== "failed") assert.fail("expected exhausted rebase disposition");
+    assert.equal(exhausted.rebaseCount, 3);
+    assert.equal(exhausted.error.code, "generation-task-rebase-exhausted");
+    const detail = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    assert.equal(detail.plan.status, "failed");
+    assert.equal(detail.tasks.find((task) => task.id === fixture.task.id)?.status, "failed");
+    assert.ok(detail.tasks.filter((task) => task.id !== fixture.task.id)
+      .every((task) => task.status === "blocked"));
+    assert.equal(taskEvents(fixture, "task-rebase-disposition").length, 4);
+    assert.equal(taskEvents(fixture, "task-failed").length, 1);
+  } finally {
+    fixture.store.close();
+  }
 });
 
 test("wrong, expired, stale, and incomplete claim fences make publication a zero-write rejection", async (t) => {

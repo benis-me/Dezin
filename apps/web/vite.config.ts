@@ -140,6 +140,12 @@ export default defineConfig({
             name: "ui-core",
             test: /node_modules[\\/](?:react|react-dom|scheduler|@dnd-kit|@preact[\\/]signals-core)[\\/]/,
             includeDependenciesRecursively: false,
+          }, {
+            name: "icons",
+            // Keep the tree-shaken Lucide set in one shared dictionary instead of
+            // repeating its runtime scaffolding across independently lazy screens.
+            test: /node_modules[\\/]lucide-react[\\/]/,
+            includeDependenciesRecursively: false,
           }],
         },
       },

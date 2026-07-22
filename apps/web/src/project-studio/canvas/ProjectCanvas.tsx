@@ -17,7 +17,8 @@ import {
   type ReactFlowInstance,
   type Viewport,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Play } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from "react";
 import type {
   WorkspaceGraph,
   WorkspaceGraphCommand,
@@ -61,11 +62,13 @@ const VIEWPORT_SAVE_DELAY_MS = 260;
 const MOVE_DEDUPE_WINDOW_MS = 80;
 const PROPOSAL_FOCUS_MOUNT_RETRIES = 4;
 const NOOP_VIEWPORT_CHANGE = () => {};
+const EMPTY_RESOURCE_REVISION_STATES = {} as const;
 const proposalNodeTypes = { ...workspaceNodeTypes, proposal: ProposalOverlay } satisfies NodeTypes;
 const proposalEdgeTypes = { ...workspaceEdgeTypes, proposal: ProposalOverlayEdge } satisfies EdgeTypes;
+const CANVAS_NODE_KEYBOARD_DESCRIPTION = "For Page and Component nodes, Enter opens the editor. For Resource nodes, Enter opens the exact revision viewer. Press Space to select; arrow keys move selected objects; Escape clears selection. Objects are not deleted with the keyboard.";
 const CANVAS_ARIA_LABEL_CONFIG = {
-  "node.a11yDescription.default": "For Page and Component nodes, Enter opens the editor. Press Space to select; arrow keys move selected objects; Escape clears selection. Objects are not deleted with the keyboard.",
-  "node.a11yDescription.keyboardDisabled": "For Page and Component nodes, Enter opens the editor. Press Space to select; arrow keys move selected objects; Escape clears selection. Objects are not deleted with the keyboard.",
+  "node.a11yDescription.default": CANVAS_NODE_KEYBOARD_DESCRIPTION,
+  "node.a11yDescription.keyboardDisabled": CANVAS_NODE_KEYBOARD_DESCRIPTION,
   "edge.a11yDescription.default": "Press Enter or Space to select a relation; Escape clears selection. Relations are not deleted with the keyboard.",
 } satisfies Partial<AriaLabelConfig>;
 
@@ -117,12 +120,20 @@ export interface ProjectCanvasProps {
   layout: WorkspaceLayout;
   viewport?: WorkspaceViewport;
   artifactRevisionIds: Readonly<Record<string, string | null>>;
+  resourceRevisionStates?: Readonly<Record<string, {
+    revisionId: string;
+    resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
+    qualityState: "grounded" | "needs-review" | null;
+  }>>;
   selectedNodeIds: readonly string[];
   onSelectionChange: (ids: string[]) => void;
   onViewportChange?: (viewport: WorkspaceViewport) => void;
   onSaveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
   onApplyGraphCommands: (commands: readonly WorkspaceGraphCommand[]) => Promise<void>;
   onOpenArtifact: (artifactId: string) => void;
+  onOpenResource?: (resourceId: string, revisionId: string | null) => void;
+  onPresentFlow?: () => void;
+  presentFlowButtonRef?: Ref<HTMLButtonElement>;
   proposal?: { id: string } | null;
   proposalDiff?: ProposalDiff | null;
   proposalFocus?: ProposalFocusRequest | null;
@@ -138,20 +149,26 @@ export function ProjectCanvas({
   layout,
   viewport = layout.viewport,
   artifactRevisionIds,
+  resourceRevisionStates = EMPTY_RESOURCE_REVISION_STATES,
   selectedNodeIds,
   onSelectionChange,
   onViewportChange = NOOP_VIEWPORT_CHANGE,
   onSaveLayout,
   onApplyGraphCommands,
   onOpenArtifact,
+  onOpenResource,
+  onPresentFlow,
+  presentFlowButtonRef,
   proposal = null,
   proposalDiff = null,
   proposalFocus = null,
 }: ProjectCanvasProps) {
   const canvasRef = useRef<HTMLElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<WorkspaceFlowNode, WorkspaceFlowEdge> | null>(null);
   const viewportTimerRef = useRef<number | null>(null);
   const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
+  const viewportSaveJobsRef = useRef(0);
   const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
   const proposalViewportPreviewRef = useRef<{ proposalId: string; changeKey: string } | null>(null);
@@ -165,6 +182,33 @@ export function ProjectCanvas({
   const [status, setStatus] = useState("Canvas ready");
   const [pendingDeleteGroupId, setPendingDeleteGroupId] = useState<string | null>(null);
   const [reconcileVersion, setReconcileVersion] = useState(0);
+  const [surfaceMeasured, setSurfaceMeasured] = useState(false);
+  const [flowReady, setFlowReady] = useState(false);
+
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    let active = true;
+    const observer = new ResizeObserver((entries) => {
+      if (!active) return;
+      const entry = entries.find((candidate) => candidate.target === surface);
+      if (!entry) return;
+      const measured = entry.contentRect.width > 0 && entry.contentRect.height > 0;
+      setSurfaceMeasured((current) => current === measured ? current : measured);
+    });
+    observer.observe(surface);
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!surfaceMeasured) {
+      flowRef.current = null;
+      setFlowReady(false);
+    }
+  }, [surfaceMeasured]);
 
   const canvasLayout = useMemo(() => materializeWorkspaceLayout(graph, layout), [graph, layout]);
   const authoritativeLayoutRef = useRef(canvasLayout);
@@ -172,6 +216,21 @@ export function ProjectCanvas({
   const layoutMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const queuedLayoutJobsRef = useRef(0);
   const selectedSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
+  const awaitingSelectionResourceIds = useMemo(() => {
+    const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    const result = new Set<string>();
+    for (const edge of graph.edges) {
+      if (edge.kind !== "informs") continue;
+      const source = nodes.get(edge.sourceNodeId);
+      const target = nodes.get(edge.targetNodeId);
+      if (source?.kind !== "resource" || !target || target.kind === "resource"
+        || resourceRevisionStates[source.resourceId]?.resourceKind !== "research"
+        || !resourceRevisionStates[source.resourceId]?.revisionId
+        || (artifactRevisionIds[target.artifactId] ?? null) !== null) continue;
+      result.add(source.resourceId);
+    }
+    return result;
+  }, [artifactRevisionIds, graph.edges, graph.nodes, resourceRevisionStates]);
   const selectedEdgeSet = useMemo(() => new Set(selectedEdgeIds), [selectedEdgeIds]);
 
   useEffect(() => {
@@ -182,6 +241,7 @@ export function ProjectCanvas({
   const synchronizeAuthoritativeViewport = useCallback((
     instance: ReactFlowInstance<WorkspaceFlowNode, WorkspaceFlowEdge>,
   ) => {
+    if (pendingViewportRef.current !== null || viewportSaveJobsRef.current > 0) return;
     proposalViewportPreviewRef.current = null;
     if (sameViewport(instance.getViewport(), viewport)) return;
     if (viewportTimerRef.current !== null) {
@@ -231,6 +291,30 @@ export function ProjectCanvas({
     return result;
   }, [onSaveLayout]);
 
+  const persistViewport = useCallback(async (
+    next: WorkspaceViewport,
+    successMessage: string,
+  ): Promise<boolean> => {
+    viewportSaveJobsRef.current += 1;
+    let saved: boolean;
+    try {
+      saved = await persistLayout([{ type: "set-viewport", viewport: next }], successMessage);
+    } finally {
+      viewportSaveJobsRef.current -= 1;
+    }
+    const authoritative = authoritativeLayoutRef.current.viewport;
+    onViewportChange(authoritative);
+    if (pendingViewportRef.current === null && viewportSaveJobsRef.current === 0) {
+      setZoom(authoritative.zoom);
+      setAdapterZoom(authoritative.zoom);
+      const instance = flowRef.current;
+      if (instance && !sameViewport(instance.getViewport(), authoritative)) {
+        void instance.setViewport(authoritative).catch(() => {});
+      }
+    }
+    return saved;
+  }, [onViewportChange, persistLayout]);
+
   const toggleCollapsed = useCallback((groupId: string, collapsed: boolean) => {
     const previousSelection = [...selectedNodeIds];
     if (collapsed) {
@@ -259,6 +343,8 @@ export function ProjectCanvas({
       edgeFilter,
       projectId,
       artifactRevisionIds,
+      resourceRevisionStates,
+      awaitingSelectionResourceIds,
       selectedNodeIds: selectedSet,
       selectedEdgeIds: selectedEdgeSet,
       onToggleCollapsed: toggleCollapsed,
@@ -298,6 +384,7 @@ export function ProjectCanvas({
   }, [
     adapterZoom,
     artifactRevisionIds,
+    awaitingSelectionResourceIds,
     canvasLayout,
     edgeFilter,
     graph,
@@ -306,6 +393,7 @@ export function ProjectCanvas({
     proposalDiff,
     renameGroup,
     resizeGroup,
+    resourceRevisionStates,
     selectedEdgeSet,
     selectedSet,
     toggleCollapsed,
@@ -363,10 +451,10 @@ export function ProjectCanvas({
     return () => {
       active = false;
     };
-  }, [proposal, proposalDiff, proposalFocus]);
+  }, [flowReady, proposal, proposalDiff, proposalFocus]);
 
   useEffect(() => {
-    if (!proposal || !proposalFocus || (overlayModel.nodes.length === 0 && overlayModel.edges.length === 0)) return;
+    if (!flowReady || !proposal || !proposalFocus || (overlayModel.nodes.length === 0 && overlayModel.edges.length === 0)) return;
     const handled = handledProposalFocusRef.current;
     if (handled?.proposalId === proposal.id && handled.nonce === proposalFocus.nonce) return;
     const viewId = proposalOverlayIdForChange(proposal.id, proposalFocus.key);
@@ -417,7 +505,7 @@ export function ProjectCanvas({
       active = false;
       if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
     };
-  }, [overlayModel, proposal, proposalFocus]);
+  }, [flowReady, overlayModel, proposal, proposalFocus]);
 
   useEffect(() => {
     const preview = proposalViewportPreviewRef.current;
@@ -492,10 +580,9 @@ export function ProjectCanvas({
       const next = instance.getViewport();
       setZoom(next.zoom);
       setAdapterZoom(next.zoom);
-      onViewportChange(next);
-      return persistLayout([{ type: "set-viewport", viewport: next }], "Fit workspace");
+      return persistViewport(next, "Fit workspace");
     });
-  }, [onViewportChange, persistLayout]);
+  }, [persistViewport]);
 
   const handleConnect = useCallback((connection: Connection) => {
     if (!isValidWorkspaceConnection(connection, graph)) {
@@ -558,19 +645,20 @@ export function ProjectCanvas({
 
   const handleViewportEnd = useCallback((event: MouseEvent | TouchEvent | null, next: Viewport) => {
     if (event === null) return;
-    onViewportChange(next);
     pendingViewportRef.current = next;
     if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
     viewportTimerRef.current = window.setTimeout(() => {
       viewportTimerRef.current = null;
       pendingViewportRef.current = null;
-      void persistLayout([{ type: "set-viewport", viewport: next }], "Viewport saved");
+      void persistViewport(next, "Viewport saved");
     }, VIEWPORT_SAVE_DELAY_MS);
-  }, [onViewportChange, persistLayout]);
+  }, [persistViewport]);
 
   const openNode = useCallback((node: WorkspaceFlowNode | undefined) => {
-    if (node && canonicalNodeIds.has(node.id) && node.data.artifactId) onOpenArtifact(node.data.artifactId);
-  }, [canonicalNodeIds, onOpenArtifact]);
+    if (!node || !canonicalNodeIds.has(node.id)) return;
+    if (node.data.artifactId) onOpenArtifact(node.data.artifactId);
+    else if (node.data.resourceId) onOpenResource?.(node.data.resourceId, node.data.revisionId);
+  }, [canonicalNodeIds, onOpenArtifact, onOpenResource]);
 
   const moveSelectionByKeyboard = useCallback((dx: number, dy: number) => {
     const byId = new Map(nodesRef.current.map((node) => [node.id, node]));
@@ -601,7 +689,7 @@ export function ProjectCanvas({
         : undefined;
       const focused = focusedId ? nodes.find((node) => node.id === focusedId) : undefined;
       const selected = focused ?? nodes.find((node) => selectedSet.has(node.id));
-      if (selected?.data.artifactId) {
+      if (selected?.data.artifactId || selected?.data.resourceId) {
         event.preventDefault();
         event.stopPropagation();
         openNode(selected);
@@ -672,14 +760,23 @@ export function ProjectCanvas({
           <h1 title={projectName}>{projectName}</h1>
           <span>Canvas</span>
         </div>
-        <div className="dezin-project-canvas__measure" aria-label={`${canonicalModel.nodes.length} objects at ${Math.round(zoom * 100)} percent zoom`}>
-          <span>{canonicalModel.nodes.length} objects</span>
-          <span>{Math.round(zoom * 100)}%</span>
+        <div className="dezin-project-canvas__header-actions app-no-drag">
+          {onPresentFlow ? (
+            <button ref={presentFlowButtonRef} type="button" className="dezin-project-canvas__present" aria-label="Present prototype flow" onClick={onPresentFlow}>
+              <Play aria-hidden size={11} fill="currentColor" />
+              Present flow
+            </button>
+          ) : null}
+          <div className="dezin-project-canvas__measure" aria-label={`${canonicalModel.nodes.length} objects at ${Math.round(zoom * 100)} percent zoom`}>
+            <span>{canonicalModel.nodes.length} objects</span>
+            <span>{Math.round(zoom * 100)}%</span>
+          </div>
         </div>
       </header>
 
-      <div className="dezin-project-canvas__surface" data-tool={tool}>
-        <ReactFlow<WorkspaceFlowNode, WorkspaceFlowEdge>
+      <div ref={surfaceRef} className="dezin-project-canvas__surface" data-tool={tool}>
+        {surfaceMeasured ? (
+          <ReactFlow<WorkspaceFlowNode, WorkspaceFlowEdge>
           aria-label="Project canvas"
           tabIndex={0}
           ariaLabelConfig={CANVAS_ARIA_LABEL_CONFIG}
@@ -710,6 +807,7 @@ export function ProjectCanvas({
           onInit={(instance) => {
             flowRef.current = instance;
             synchronizeAuthoritativeViewport(instance);
+            setFlowReady(true);
           }}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
@@ -728,7 +826,8 @@ export function ProjectCanvas({
           onMoveEnd={handleViewportEnd}
         >
           <Background variant={BackgroundVariant.Dots} gap={24} size={0.85} />
-        </ReactFlow>
+          </ReactFlow>
+        ) : null}
 
         <WorkspaceCanvasToolbar
           tool={tool}

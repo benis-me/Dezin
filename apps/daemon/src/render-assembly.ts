@@ -107,6 +107,8 @@ export interface RenderAssemblyMaterializeDeps {
 
 export interface BuildRenderAssemblyOptions {
   dataDir?: string;
+  /** Use the bounded leaf-only Core reader for a server-observed Snapshot pin. */
+  shallowSnapshotId?: string;
 }
 
 export interface MaterializedRenderAssembly {
@@ -301,14 +303,58 @@ export function buildRenderAssembly(
   target: RenderAssemblyTarget,
   options: BuildRenderAssemblyOptions = {},
 ): RenderAssembly {
-  const bundle = store.workspace.getBundleByProjectId(target.projectId);
-  if (!bundle) throw new RenderAssemblyError("Preview Target project Workspace was not found");
-  const rootRevision = bundle.revisions.find((revision) => revision.id === target.revisionId);
-  if (!rootRevision || rootRevision.workspaceId !== bundle.workspace.id) {
+  const workspace = store.workspace.getWorkspace(target.projectId);
+  if (!workspace) throw new RenderAssemblyError("Preview Target project Workspace was not found");
+  const shallowClosure = options.shallowSnapshotId === undefined
+    ? null
+    : store.workspace.getShallowArtifactClosureForProject(
+      target.projectId,
+      options.shallowSnapshotId,
+      target.revisionId,
+    );
+  if (options.shallowSnapshotId !== undefined && shallowClosure === null) {
+    throw new RenderAssemblyError("Preview Target Snapshot-pinned Artifact Revision was not found");
+  }
+  const rootRevision = shallowClosure?.rootRevision
+    ?? store.workspace.getArtifactRevision(target.revisionId);
+  if (!rootRevision || rootRevision.workspaceId !== workspace.id) {
     throw new RenderAssemblyError("Preview Target Artifact Revision was not found in the project Workspace");
   }
 
-  const artifactsById = new Map(bundle.artifacts.map((artifact) => [artifact.id, artifact]));
+  const closureRevisionsById = new Map(
+    (shallowClosure?.revisions ?? []).map((revision) => [revision.id, revision]),
+  );
+  const closureKernelsById = new Map(
+    (shallowClosure?.kernelRevisions ?? []).map((kernel) => [kernel.id, kernel]),
+  );
+  const closureDependenciesByRevisionId = new Map<string, ArtifactRevisionDependencyRecord[]>();
+  for (const dependency of shallowClosure?.dependencies ?? []) {
+    const dependencies = closureDependenciesByRevisionId.get(dependency.revisionId) ?? [];
+    dependencies.push(dependency);
+    closureDependenciesByRevisionId.set(dependency.revisionId, dependencies);
+  }
+  const closureResourcePinsByRevisionId = new Map<string, ArtifactRevisionResourcePinRecord[]>();
+  for (const pin of shallowClosure?.resourcePins ?? []) {
+    const pins = closureResourcePinsByRevisionId.get(pin.revisionId) ?? [];
+    pins.push(pin);
+    closureResourcePinsByRevisionId.set(pin.revisionId, pins);
+  }
+  const artifactsById = new Map<string, WorkspaceArtifactRecord>(
+    (shallowClosure?.artifacts ?? []).map((artifact) => [artifact.id, artifact]),
+  );
+  const requireOwnedArtifact = (artifactId: string): WorkspaceArtifactRecord => {
+    const cached = artifactsById.get(artifactId);
+    if (cached) return cached;
+    if (shallowClosure !== null) {
+      throw new RenderAssemblyError("RenderAssembly contains an Artifact outside its bounded closure");
+    }
+    const artifact = store.workspace.getArtifact(artifactId);
+    if (!artifact || artifact.workspaceId !== workspace.id) {
+      throw new RenderAssemblyError("RenderAssembly contains a missing Artifact");
+    }
+    artifactsById.set(artifact.id, artifact);
+    return artifact;
+  };
   const revisionsById = new Map<string, ArtifactRevisionRecord>();
   const dependenciesByKey = new Map<string, ArtifactRevisionDependencyRecord>();
   const resourcePinsByKey = new Map<string, ArtifactRevisionResourcePinRecord>();
@@ -322,33 +368,36 @@ export function buildRenderAssembly(
   const visit = (revision: ArtifactRevisionRecord): void => {
     if (revisionsById.has(revision.id)) return;
     if (visiting.has(revision.id)) throw new RenderAssemblyError("Component Revision dependency cycle detected");
-    if (revision.workspaceId !== bundle.workspace.id) {
+    if (revision.workspaceId !== workspace.id) {
       throw new RenderAssemblyError("RenderAssembly contains a cross-Workspace Artifact Revision");
     }
-    const artifact = artifactsById.get(revision.artifactId);
-    if (!artifact || artifact.workspaceId !== bundle.workspace.id) {
-      throw new RenderAssemblyError("RenderAssembly contains a missing Artifact");
-    }
-    const kernel = store.workspace.getKernelRevision(revision.kernelRevisionId);
-    if (!kernel || kernel.workspaceId !== bundle.workspace.id) {
+    requireOwnedArtifact(revision.artifactId);
+    const kernel = shallowClosure === null
+      ? store.workspace.getKernelRevision(revision.kernelRevisionId)
+      : closureKernelsById.get(revision.kernelRevisionId) ?? null;
+    if (!kernel || kernel.workspaceId !== workspace.id) {
       throw new RenderAssemblyError("RenderAssembly contains a cross-Workspace or missing Kernel Revision");
     }
 
     visiting.add(revision.id);
     kernelsById.set(kernel.id, kernel);
-    const dependencies = store.workspace.listArtifactRevisionDependencies(revision.id)
+    const dependencies = (shallowClosure === null
+      ? store.workspace.listArtifactRevisionDependencies(revision.id)
+      : closureDependenciesByRevisionId.get(revision.id) ?? [])
       .filter((dependency) => dependency.status === "linked");
     for (const dependency of dependencies) {
       const key = dependencySortKey(dependency);
       if (dependenciesByKey.has(key)) throw new RenderAssemblyError("RenderAssembly contains a duplicate Component pin");
       dependenciesByKey.set(key, dependency);
-      const component = artifactsById.get(dependency.componentArtifactId);
-      const componentRevision = store.workspace.getArtifactRevision(dependency.componentRevisionId);
+      const component = requireOwnedArtifact(dependency.componentArtifactId);
+      const componentRevision = shallowClosure === null
+        ? store.workspace.getArtifactRevision(dependency.componentRevisionId)
+        : closureRevisionsById.get(dependency.componentRevisionId) ?? null;
       if (!component
         || component.kind !== "component"
-        || component.workspaceId !== bundle.workspace.id
+        || component.workspaceId !== workspace.id
         || !componentRevision
-        || componentRevision.workspaceId !== bundle.workspace.id
+        || componentRevision.workspaceId !== workspace.id
         || componentRevision.artifactId !== component.id) {
         throw new RenderAssemblyError("RenderAssembly contains an invalid Component Revision pin");
       }
@@ -366,7 +415,10 @@ export function buildRenderAssembly(
       });
       visit(componentRevision);
     }
-    for (const pin of store.workspace.listArtifactRevisionResourcePins(revision.id)) {
+    const revisionResourcePins = shallowClosure === null
+      ? store.workspace.listArtifactRevisionResourcePins(revision.id)
+      : closureResourcePinsByRevisionId.get(revision.id) ?? [];
+    for (const pin of revisionResourcePins) {
       const key = pinSortKey(pin);
       if (resourcePinsByKey.has(key)) throw new RenderAssemblyError("RenderAssembly contains a duplicate Resource pin");
       resourcePinsByKey.set(key, pin);
@@ -435,7 +487,7 @@ export function buildRenderAssembly(
       throw new RenderAssemblyError("RenderAssembly Kernel shared payload is not an Asset Resource Revision");
     }
   }
-  const rootArtifact = artifactsById.get(rootRevision.artifactId)!;
+  const rootArtifact = requireOwnedArtifact(rootRevision.artifactId);
   if (target.componentState && rootArtifact.kind !== "component") {
     throw new ComponentFixtureContractError("Component state can only render a Component Artifact");
   }

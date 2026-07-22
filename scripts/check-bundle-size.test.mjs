@@ -43,6 +43,30 @@ test("bundle checker rejects initial gzip and aggregate gzip regressions", async
   );
 });
 
+test("bundle checker rejects aggregate drift across the initial static dependency closure", async () => {
+  const distDir = await fixture(
+    {
+      "index.html": { file: "assets/index.js", isEntry: true, imports: ["src/ui-core.ts"] },
+      "src/ui-core.ts": { file: "assets/ui-core.js" },
+    },
+    {
+      "index.js": randomBytes(100 * 1024),
+      "ui-core.js": randomBytes(100 * 1024),
+    },
+  );
+
+  await assert.rejects(
+    checkBundle({
+      distDir,
+      budgets: {
+        initialJsGzipBaseline: 150 * 1024,
+        totalJsGzipBaseline: 250 * 1024,
+      },
+    }),
+    /initial JS.*baseline \+ 5%/i,
+  );
+});
+
 test("Home and Settings initial graphs cannot pull lazy editor or canvas chunks", async () => {
   const homeDistDir = await fixture(
     {

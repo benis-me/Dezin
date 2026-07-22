@@ -292,6 +292,7 @@ test("validates Artifact plans, identities, sorted unique sets, and dependency u
     [(payload: any) => { payload.artifactPlan.artifactId = "page-other"; }, /target/i],
     [(payload: any) => { payload.artifactPlan.trackId = "track-other"; }, /track/i],
     [(payload: any) => { payload.artifactPlan.baseRevisionId = ""; }, /base revision/i],
+    [(payload: any) => { payload.artifactPlan.dispatchContextPackId = `context-pack-${"A".repeat(64)}`; }, /dispatch context pack/i],
     [(payload: any) => { payload.artifactPlan.capabilityIds = ["cap-visual", "cap-text"]; }, /sorted/i],
     [(payload: any) => { payload.artifactPlan.responsiveFrameIds = ["desktop", "desktop"]; }, /unique/i],
     [(payload: any) => { payload.artifactPlan.extra = true; }, /fields/i],
@@ -323,6 +324,30 @@ test("validates Artifact plans, identities, sorted unique sets, and dependency u
   }
 });
 
+test("validates the exact versioned Research direction selection and its owned dependency", () => {
+  const component = taskOfTarget("component-card");
+  const payload = clonePayload(component);
+  (payload.artifactPlan as Record<string, unknown>).researchDirectionSelection = {
+    protocol: "dezin.research-direction-selection.v1",
+    version: 1,
+    resourceId: "resource-research",
+    revisionId: "research-revision-1",
+    directionId: "quiet-editorial",
+  };
+  validateGenerationTaskPayload(withPayload(component, payload));
+
+  for (const [mutate, pattern] of [
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.protocol = "dezin.research-direction-selection.v2"; }, /protocol/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.directionId = " selected "; }, /canonical/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.resourceId = "resource-other"; }, /owned Resource dependency/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.extra = true; }, /fields/i],
+  ] as const) {
+    const invalid = structuredClone(payload);
+    mutate(invalid);
+    expectContractError(withPayload(component, invalid), pattern);
+  }
+});
+
 test("validates Resource operation and generate policy recursively", () => {
   const resource = taskOfKind("resource");
   for (const [mutate, pattern] of [
@@ -330,6 +355,7 @@ test("validates Resource operation and generate policy recursively", () => {
     [(payload: any) => { payload.operation.resourceId = "resource-other"; }, /target/i],
     [(payload: any) => { payload.operation.kind = "unknown"; }, /resource kind/i],
     [(payload: any) => { payload.operation.title = " "; }, /title/i],
+    [(payload: any) => { payload.operation.dispatchContextPackId = `context-pack-${"A".repeat(64)}`; }, /dispatch context pack/i],
     [(payload: any) => { payload.operation.revisionPolicy.kind = "exact"; }, /generate/i],
     [(payload: any) => { payload.operation.revisionPolicy.revisionId = "revision-1"; }, /fields/i],
     [(payload: any) => { payload.operation.extra = true; }, /fields/i],

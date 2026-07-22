@@ -15,7 +15,11 @@ import type {
   RenderFrameSpec,
   Settings,
 } from "../../../../packages/core/src/index.ts";
-import { applyIgnores, lintArtifact } from "../../../../packages/quality/src/index.ts";
+import {
+  applyIgnores,
+  lintArtifact,
+  type QualityIgnore,
+} from "../../../../packages/quality/src/index.ts";
 import type { PreviewLease } from "../preview-lease.ts";
 import { previewLeaseManager, requirePreviewLease } from "../preview-lease.ts";
 import { ensureDevServer } from "../project-runtime.ts";
@@ -50,6 +54,7 @@ import type {
   StandardArtifactQualityEvaluatorPort,
   StandardArtifactQualityResult,
 } from "./standard-artifact-execution.ts";
+import { inspectCandidateSidecarReferences } from "./standard-artifact-sidecar-reference.ts";
 
 const MAX_FINDINGS = 10_000;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -80,7 +85,7 @@ export interface StandardArtifactVisualQaInput extends VisualQaInput {
 
 export interface StandardArtifactCandidateInspection
   extends StandardArtifactCandidateIdentity {
-  /** Empty only when candidate source and index remain exact. */
+  /** Empty only when source/index remain exact and the committed tree is self-contained. */
   status: string;
 }
 
@@ -89,6 +94,8 @@ export interface ProductionStandardArtifactQualityEvaluatorDependencies {
     repositoryDir: string;
     worktreeDir: string;
     candidate: StandardArtifactCandidateIdentity;
+    /** True only while the exact immutable Sharingan roots are materialized. */
+    immutableSharinganSidecar: boolean;
     signal: AbortSignal;
   }): Promise<StandardArtifactCandidateInspection>;
   acquireRuntime(input: {
@@ -125,7 +132,7 @@ export interface ProductionStandardArtifactQualityEvaluatorOptions {
   model?: string;
   directionSpec?: string;
   expectedSharinganRequestedUrl?: string;
-  qualityIgnores?: readonly Readonly<{ findingId: string; messagePattern?: string }>[];
+  qualityIgnores?: readonly Readonly<QualityIgnore>[];
   dependencies?: ProductionStandardArtifactQualityEvaluatorDependencies;
 }
 
@@ -210,6 +217,8 @@ export async function inspectStandardArtifactCandidate(input: {
   repositoryDir: string;
   worktreeDir: string;
   candidate: StandardArtifactCandidateIdentity;
+  /** Defaults false so ordinary projects may own `public/_assets`. */
+  immutableSharinganSidecar?: boolean;
   signal: AbortSignal;
 }): Promise<StandardArtifactCandidateInspection> {
   const exact = await verifyArtifactCandidateObject({
@@ -219,6 +228,15 @@ export async function inspectStandardArtifactCandidate(input: {
     signal: input.signal,
   });
   checkAbort(input.signal);
+  const statusPathspec = [
+    ".",
+    ":(exclude).sharingan",
+    ":(exclude).sharingan/**",
+    ...(input.immutableSharinganSidecar === true ? [
+      ":(exclude)public/_assets",
+      ":(exclude)public/_assets/**",
+    ] : []),
+  ];
   const [commitHash, treeHash, status] = await Promise.all([
     gitOutput(input.worktreeDir, ["rev-parse", "--verify", "HEAD^{commit}"], input.signal),
     gitOutput(input.worktreeDir, ["rev-parse", "--verify", "HEAD^{tree}"], input.signal),
@@ -229,9 +247,7 @@ export async function inspectStandardArtifactCandidate(input: {
         "--porcelain=v1",
         "--untracked-files=all",
         "--",
-        ".",
-        ":(exclude).sharingan",
-        ":(exclude).sharingan/**",
+        ...statusPathspec,
       ],
       input.signal,
     ),
@@ -240,7 +256,18 @@ export async function inspectStandardArtifactCandidate(input: {
   if (commitHash !== exact.commitHash || treeHash !== exact.treeHash) {
     return { commitHash, treeHash, status };
   }
-  return { ...exact, status };
+  const sidecarReferenceStatus = input.immutableSharinganSidecar === true
+    ? await inspectCandidateSidecarReferences({
+      repositoryDir: input.repositoryDir,
+      commitHash: exact.commitHash,
+      signal: input.signal,
+    })
+    : "";
+  checkAbort(input.signal);
+  return {
+    ...exact,
+    status: [status, sidecarReferenceStatus].filter((value) => value !== "").join("\n"),
+  };
 }
 
 const DEFAULT_DEPENDENCIES: ProductionStandardArtifactQualityEvaluatorDependencies = Object.freeze({
@@ -291,11 +318,6 @@ function artifactPayload(input: ArtifactRunInfrastructureInput): ArtifactGenerat
     );
   }
   return task.payload as ArtifactGenerationTaskPayloadV2;
-}
-
-function isSharingan(input: ArtifactRunInfrastructureInput): boolean {
-  return input.contextPack.items.some((item) => item.ref.kind === "resource"
-    && item.ref.resourceKind === "sharingan-capture");
 }
 
 function propertyValue(
@@ -554,7 +576,7 @@ implements StandardArtifactQualityEvaluatorPort {
   private readonly model: string | undefined;
   private readonly directionSpec: string | undefined;
   private readonly expectedSharinganRequestedUrl: string | undefined;
-  private readonly qualityIgnores: readonly Readonly<{ findingId: string; messagePattern?: string }>[];
+  private readonly qualityIgnores: readonly Readonly<QualityIgnore>[];
   private readonly dependencies: ProductionStandardArtifactQualityEvaluatorDependencies;
   private readonly payload: ArtifactGenerationTaskPayloadV2;
   private readonly sharingan: boolean;
@@ -565,7 +587,8 @@ implements StandardArtifactQualityEvaluatorPort {
       || typeof options.projectId !== "string" || !SAFE_OWNER_ID.test(options.projectId)
       || typeof options.agentCommand !== "string" || options.agentCommand.length === 0
       || !options.settings || typeof options.settings !== "object"
-      || !options.infrastructure || typeof options.infrastructure !== "object") {
+      || !options.infrastructure || typeof options.infrastructure !== "object"
+      || typeof options.infrastructure.hasExactSharinganCapture !== "boolean") {
       throw new ProductionStandardArtifactQualityEvaluatorError(
         "invalid-input",
         "Production Standard Artifact quality evaluator options are invalid",
@@ -582,7 +605,7 @@ implements StandardArtifactQualityEvaluatorPort {
     this.expectedSharinganRequestedUrl = options.expectedSharinganRequestedUrl;
     this.qualityIgnores = structuredClone(options.qualityIgnores ?? []);
     this.dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
-    this.sharingan = isSharingan(options.infrastructure);
+    this.sharingan = options.infrastructure.hasExactSharinganCapture;
   }
 
   async evaluate(input: {
@@ -669,11 +692,12 @@ implements StandardArtifactQualityEvaluatorPort {
           report = await this.dependencies.visualQa({
             htmlPath: join(input.dir, "index.html"),
             projectRoot: input.dir,
+            screenshotEvidenceRoot: captureDir,
             renderUrl: lease!.url,
             screenshotPath,
             settings: visualSettings,
             agentCommand: reviewerAgentCommand(visualSettings, this.agentCommand),
-            model: reviewerModel(visualSettings, this.model),
+            model: reviewerModel(visualSettings, this.model, this.agentCommand),
             provider: providerFamily(getProvider(this.agentCommand)?.id, this.model),
             brief: this.payload.brief.proposalRationale,
             directionSpec: this.directionSpec,
@@ -827,12 +851,21 @@ implements StandardArtifactQualityEvaluatorPort {
       actionableVisualFindings(rawVisualFindings),
       input.round,
     );
-    const findings = canonicalFindings(applyIgnores(
-      [...staticFindings, ...visualFindings],
-      this.qualityIgnores as never,
-    ));
-    const score = floorScore(findings);
     const blocking = new Set(this.infrastructure.claim.task.qaProfile.blockingSeverities);
+    const unsuppressed = [...staticFindings, ...visualFindings];
+    const protectedFindings = unsuppressed.filter((item) => (
+      blocking.has(item.severity)
+      || isQualityInfrastructureFinding(item)
+      || (this.infrastructure.claim.task.qaProfile.requireRuntimeChecks && runtimeFailed([item]))
+      || (this.infrastructure.claim.task.qaProfile.requireVisualReview && item.id.startsWith("visual-"))
+    ));
+    const protectedSet = new Set(protectedFindings);
+    const advisoryFindings = applyIgnores(
+      unsuppressed.filter((item) => !protectedSet.has(item)),
+      this.qualityIgnores.map((entry) => ({ ...entry })),
+    );
+    const findings = canonicalFindings([...protectedFindings, ...advisoryFindings]);
+    const score = floorScore(findings);
     const profilePassed = !findings.some((item) => item.reviewStatus !== "resolved"
       && blocking.has(item.severity));
     const runtimePassed = !runtimeEnabled || (frameResults.length === this.payload.responsiveFrames.length
@@ -937,6 +970,7 @@ implements StandardArtifactQualityEvaluatorPort {
       repositoryDir: this.infrastructure.repositoryDir,
       worktreeDir: this.infrastructure.worktreeDir,
       candidate,
+      immutableSharinganSidecar: this.sharingan,
       signal,
     });
     checkAbort(signal);
@@ -949,7 +983,7 @@ implements StandardArtifactQualityEvaluatorPort {
     if (inspected.status !== "") {
       throw new ProductionStandardArtifactQualityEvaluatorError(
         "source-dirty",
-        "Standard Artifact candidate source changed outside its immutable committed tree",
+        "Standard Artifact candidate source is not a clean, self-contained immutable tree",
       );
     }
   }

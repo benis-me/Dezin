@@ -2,9 +2,13 @@ import { test, expect, vi } from "vitest";
 import {
   createApiClient,
   ApiError,
+  GenerationPlanStreamError,
   decodeContextItemRef,
   decodeResource,
   decodeResourceRevision,
+  decodeResourceRevisionHistoryPage,
+  decodeResourceRevisionView,
+  decodeScopedAgentTurnReceipt,
   parseSseBlock,
   type FetchLike,
 } from "./api.ts";
@@ -35,6 +39,56 @@ const PROJECT = {
   createdAt: 1,
   updatedAt: 1,
 };
+
+function scopedAgentReceipt() {
+  return {
+    contextPackId: "context-pack-1",
+    task: {
+      id: "task-1",
+      ordinal: 0,
+      workspaceId: "workspace-1",
+      planId: "plan-1",
+      kind: "page",
+      target: { type: "artifact", workspaceId: "workspace-1", id: "artifact-1", trackId: "track-1" },
+      dependencyIds: [],
+      capabilities: ["artifact.generate"],
+      status: "queued",
+      blockedReason: null,
+      blockedByTaskId: null,
+      pendingContextPolicy: null,
+      currentAttempt: 0,
+      materializationFailures: 0,
+      failureClass: null,
+      error: null,
+      nextEligibleAt: null,
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: null,
+      createdAt: 1,
+      finishedAt: null,
+    },
+  };
+}
+
+test("scoped Agent receipts are decoded before entering UI state", async () => {
+  const receipt = scopedAgentReceipt();
+  expect(decodeScopedAgentTurnReceipt(receipt)).toEqual(receipt);
+
+  const malformed = structuredClone(receipt);
+  malformed.task.target.workspaceId = "workspace-other";
+  expect(() => decodeScopedAgentTurnReceipt(malformed)).toThrow(/another Workspace/);
+
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(malformed, 202));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.artifactAgentTurn("project-1", "artifact-1", {
+    turnId: "turn-12345678-1234-4123-8123-123456789abc",
+    intent: "edit",
+    message: "Refine the layout",
+    explicitContext: [],
+    graphRevision: 1,
+    baseRevisionId: "revision-1",
+  })).rejects.toThrow(/another Workspace/);
+});
 
 test("createProject posts JSON and returns the project", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(PROJECT, 201));
@@ -321,6 +375,55 @@ test("workspace APIs encode project and artifact IDs and send typed mutation bod
   expect(fetchImpl).toHaveBeenNthCalledWith(9, "http://d/api/projects/p%20%2F1/workspace/snapshots/s%20%2F1", undefined);
 });
 
+test("Artifact history APIs preserve paging and immutable version action fences", async () => {
+  const page = { items: [{ id: "revision /2" }], nextCursor: "cursor /2" };
+  const restored = { action: "restore-as-new-revision", revision: { id: "revision-restored" } };
+  const forked = { action: "fork-track", revision: { id: "revision-forked" }, track: { id: "track-forked" } };
+  const responses = [page, restored, forked];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift(), 201));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.listArtifactRevisionHistory("project /1", "artifact /1", {
+    limit: 12,
+    cursor: "cursor /1",
+  })).resolves.toEqual(page);
+  await expect(api.restoreArtifactRevision("project /1", "artifact /1", "revision /1", {
+    expectedHeadRevisionId: "revision /2",
+    expectedSnapshotId: "snapshot /2",
+  })).resolves.toEqual(restored);
+  await expect(api.forkArtifactTrack("project /1", "artifact /1", "revision /1", {
+    name: "Exploration A",
+    expectedHeadRevisionId: "revision /2",
+    expectedSnapshotId: "snapshot /2",
+  })).resolves.toEqual(forked);
+
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project%20%2F1/artifacts/artifact%20%2F1/history?limit=12&cursor=cursor%20%2F1",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project%20%2F1/artifacts/artifact%20%2F1/revisions/revision%20%2F1/restore",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ expectedHeadRevisionId: "revision /2", expectedSnapshotId: "snapshot /2" }),
+    }),
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    3,
+    "http://d/api/projects/project%20%2F1/artifacts/artifact%20%2F1/revisions/revision%20%2F1/fork-track",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({
+        name: "Exploration A",
+        expectedHeadRevisionId: "revision /2",
+        expectedSnapshotId: "snapshot /2",
+      }),
+    }),
+  );
+});
+
 test("Resource codecs validate every discriminant and immutable response field", () => {
   const resource = {
     id: "resource-1",
@@ -470,6 +573,197 @@ test("Resource Revision requests reject client-authored storage and integrity fi
     } as never),
   ).toThrow(/unsupported field manifestPath/);
   expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+test("exact Resource Revision view and paged history use strict browser decoders", async () => {
+  const resource = {
+    id: "resource-1",
+    workspaceId: "workspace-1",
+    kind: "file",
+    title: "Product brief",
+    headRevisionId: "revision-1",
+    defaultPinPolicy: "follow-head",
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 2,
+  } as const;
+  const revision = {
+    id: "revision-1",
+    workspaceId: resource.workspaceId,
+    resourceId: resource.id,
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/a/b/manifest.json",
+    summary: "Frozen product brief",
+    metadata: {},
+    checksum: "a".repeat(64),
+    provenance: {},
+    createdByRunId: null,
+    createdAt: 2,
+  };
+  const view = {
+    protocol: "dezin.resource-revision-view.v1",
+    kind: "file",
+    resource,
+    revision: {
+      id: revision.id,
+      workspaceId: revision.workspaceId,
+      resourceId: revision.resourceId,
+      sequence: revision.sequence,
+      parentRevisionId: revision.parentRevisionId,
+      summary: revision.summary,
+      checksum: revision.checksum,
+      createdAt: revision.createdAt,
+    },
+    observed: { headRevisionId: revision.id, snapshotId: "snapshot-1" },
+    payload: {
+      mimeType: "text/plain",
+      byteLength: 12,
+      checksum: "a".repeat(64),
+      previewKind: "text",
+      url: null,
+      downloadUrl: "/api/projects/project-1/resources/resource-1/revisions/revision-1/payload",
+    },
+    content: { fileName: "brief.txt", previewKind: "text", text: "Exact bytes", textTruncated: false },
+  };
+  expect(decodeResourceRevisionView(view)).toEqual(view);
+  expect(() => decodeResourceRevisionView({ ...view, unexpected: true })).toThrow(/unsupported field unexpected/);
+  const externalView = {
+    ...view,
+    kind: "external-reference",
+    resource: { ...resource, kind: "external-reference" },
+    content: {
+      sourceUrl: "https://example.test/",
+      finalUrl: "https://example.test/frozen",
+      status: 200,
+      previewKind: "text",
+      text: "Frozen response",
+      textTruncated: false,
+    },
+  };
+  expect(decodeResourceRevisionView(externalView)).toEqual(externalView);
+  expect(() => decodeResourceRevisionView({
+    ...externalView,
+    content: { ...externalView.content, sourceUrl: "https://example.test?access_token=secret" },
+  })).toThrow(/canonical credential-free/);
+  expect(decodeResourceRevisionHistoryPage({ items: [revision], nextCursor: "opaque-cursor" })).toEqual({
+    items: [revision],
+    nextCursor: "opaque-cursor",
+  });
+
+  let callIndex = 0;
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(callIndex++ === 0
+    ? view
+    : { items: [revision], nextCursor: "opaque-cursor" }));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.getResourceRevisionView("project /1", "resource /1", "revision /1")).resolves.toEqual(view);
+  await expect(api.listResourceRevisionHistory("project /1", "resource /1", {
+    limit: 20,
+    cursor: "opaque cursor",
+  })).resolves.toEqual({ items: [revision], nextCursor: "opaque-cursor" });
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/revisions/revision%20%2F1",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/history?limit=20&cursor=opaque%20cursor",
+    undefined,
+  );
+});
+
+test("exact Resource media bytes are fetched with daemon authentication and never a token query", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => new Response(new Blob(["exact"]), {
+    status: 200,
+    headers: { "content-type": "image/png" },
+  }));
+  const api = createApiClient({ baseUrl: "http://d", daemonToken: "daemon-secret", fetchImpl });
+
+  await expect(api.getResourceRevisionBlob(
+    "/api/projects/project-1/resources/resource-1/revisions/revision-1/embedded-assets/asset-1",
+  )).resolves.toBeInstanceOf(Blob);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project-1/resources/resource-1/revisions/revision-1/embedded-assets/asset-1",
+    expect.objectContaining({ headers: { "x-dezin-daemon-token": "daemon-secret" } }),
+  );
+  expect(fetchImpl.mock.calls[0]?.[0]).not.toContain("token=");
+  expect(() => api.getResourceRevisionBlob(
+    "/api/projects/project-1/resources/resource-1/revisions/revision-1/payload?token=daemon-secret",
+  )).toThrow(/protected Resource Revision byte path/);
+});
+
+test("Resource client materializes an owned source through one atomic route", async () => {
+  const resource = {
+    id: "resource-1",
+    workspaceId: "workspace-1",
+    kind: "file",
+    title: "Product brief",
+    headRevisionId: "revision-1",
+    defaultPinPolicy: "pin-current",
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 2,
+  } as const;
+  const revision = {
+    id: "revision-1",
+    workspaceId: "workspace-1",
+    resourceId: resource.id,
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/a/b/manifest.json",
+    summary: "Uploaded file: brief.txt",
+    metadata: {},
+    checksum: "a".repeat(64),
+    provenance: {},
+    createdByRunId: null,
+    createdAt: 2,
+  };
+  const result = {
+    resource,
+    revision,
+    node: {
+      id: "node-1",
+      workspaceId: "workspace-1",
+      name: resource.title,
+      kind: "resource",
+      resourceId: resource.id,
+    },
+    graph: {
+      workspaceId: "workspace-1",
+      revision: 2,
+      nodes: [{
+        id: "node-1",
+        workspaceId: "workspace-1",
+        name: resource.title,
+        kind: "resource",
+        resourceId: resource.id,
+      }],
+      edges: [],
+    },
+    snapshot: {
+      id: "snapshot-2",
+      workspaceId: "workspace-1",
+      resourceRevisions: { [resource.id]: revision.id },
+    },
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(result, 201));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const input = {
+    kind: "file" as const,
+    title: resource.title,
+    defaultPinPolicy: "pin-current" as const,
+    baseGraphRevision: 1,
+    expectedSnapshotId: "snapshot-1",
+    source: { type: "uploaded-file" as const, uploadedFileId: ".refs/brief.txt" },
+    reason: "Attached to scoped Agent Context",
+  };
+
+  await expect(api.materializeResource("project /1", input)).resolves.toEqual(result);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project%20%2F1/resources/materialize",
+    expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
+  );
 });
 
 test("forkMessage POSTs the message fork endpoint", async () => {
@@ -750,6 +1044,122 @@ test("parseSseBlock ignores non-data noise", () => {
   expect(parseSseBlock(": keep-alive")).toBeNull();
   expect(parseSseBlock("data: not json")).toBeNull();
   expect(parseSseBlock(`data: {"type":"x"}`)).toEqual({ type: "x" });
+});
+
+test("Generation Plan APIs preserve encoded ownership paths and exact control bodies", async () => {
+  const plan = {
+    id: "plan /1",
+    workspaceId: "workspace-1",
+    proposalId: "proposal-1",
+    proposalRevision: 1,
+    baseSnapshotId: "snapshot-1",
+    status: "running",
+    constructionSealed: true,
+    compileError: null,
+    createdAt: 1,
+    finishedAt: null,
+  } as const;
+  const detail = { plan, tasks: [], dependencies: [], currentAttempts: [] };
+  const responses = [[plan], detail, detail, detail];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.listGenerationPlans("project /1")).resolves.toEqual([plan]);
+  await expect(api.getGenerationPlan("project /1", "plan /1")).resolves.toEqual(detail);
+  await expect(api.cancelGenerationPlan("project /1", "plan /1")).resolves.toEqual(detail);
+  await expect(api.retryGenerationTask("project /1", "plan /1", "task /1", "latest-context")).resolves.toEqual(detail);
+
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project%20%2F1/workspace/plans",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project%20%2F1/workspace/plans/plan%20%2F1",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    3,
+    "http://d/api/projects/project%20%2F1/workspace/plans/plan%20%2F1/cancel",
+    expect.objectContaining({ method: "POST", body: "{}" }),
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    4,
+    "http://d/api/projects/project%20%2F1/workspace/plans/plan%20%2F1/tasks/task%20%2F1/retry",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ mode: "latest-context" }),
+    }),
+  );
+});
+
+test("latest scoped Artifact Plan API returns only the durable Plan id", async () => {
+  const responses = [{ planId: "plan-scoped" }, { planId: null }];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.getLatestScopedArtifactPlanId("project-1", "artifact-1"))
+    .resolves.toBe("plan-scoped");
+  await expect(api.getLatestScopedArtifactPlanId("project-1", "artifact-2"))
+    .resolves.toBeNull();
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project-1/artifacts/artifact-1/agent/latest-plan",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project-1/artifacts/artifact-2/agent/latest-plan",
+    undefined,
+  );
+});
+
+test("streamGenerationPlanEvents resumes from a durable cursor with daemon authentication", async () => {
+  const event = {
+    planId: "plan /1",
+    sequence: 8,
+    taskId: "task-1",
+    type: "task-succeeded",
+    payload: { revisionId: "revision-1" },
+    createdAt: 9,
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => new Response(
+    sseStream([`id: 8\ndata: ${JSON.stringify(event)}\n\n`]),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  ));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "tok_plan" });
+
+  const received = [];
+  for await (const item of api.streamGenerationPlanEvents("project /1", "plan /1", undefined, { after: 7 })) {
+    received.push(item);
+  }
+
+  expect(received).toEqual([event]);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project%20%2F1/workspace/plans/plan%20%2F1/events?after=7",
+    expect.objectContaining({ headers: { "x-dezin-daemon-token": "tok_plan" } }),
+  );
+});
+
+test("streamGenerationPlanEvents surfaces a permanent SSE error instead of yielding an invalid Plan event", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => new Response(
+    sseStream([`event: error\ndata: ${JSON.stringify({ error: "Plan ownership no longer matches." })}\n\n`]),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  ));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  const consume = async (): Promise<void> => {
+    for await (const _event of api.streamGenerationPlanEvents("project-1", "plan-1")) {
+      // A typed stream error must terminate before any payload is exposed as a durable Plan event.
+    }
+  };
+
+  await expect(consume()).rejects.toEqual(expect.objectContaining<Partial<GenerationPlanStreamError>>({
+    name: "GenerationPlanStreamError",
+    message: "Plan ownership no longer matches.",
+    retryable: false,
+  }));
 });
 
 test("getDesignSystem GETs the detail endpoint", async () => {

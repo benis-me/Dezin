@@ -1,4 +1,4 @@
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, types as nodeUtilTypes } from "node:util";
 import {
   GenerationTaskLeaseFenceError,
   normalizeCreateResourceRevisionCandidateInput,
@@ -13,9 +13,13 @@ import { validateGenerationTaskArtifactQualityGate } from "../../../../packages/
 import {
   classifyGenerationTaskError,
   GENERATION_TASK_FAILURE_CLASSES,
+  type GenerationTaskDeadlineExceededError,
+  inspectGenerationTaskError,
   reflectedGenerationTaskErrorString,
+  reflectedGenerationTaskErrorValue,
 } from "./generation-task-failure.ts";
 import { validateGenerationTaskPayload } from "./generation-task-contracts.ts";
+import type { GenerationTaskCancellationCause } from "./generation-task-cancellation.ts";
 
 export interface ArtifactPreparedCandidate {
   kind: "artifact-candidate";
@@ -176,6 +180,7 @@ function canonicalJsonValue(
     return value;
   }
   contract(typeof value === "object", `${label} must contain only JSON values`);
+  contract(!nodeUtilTypes.isProxy(value), `${label} cannot contain Proxies`);
   contract(!state.ancestors.has(value), `${label} cannot contain cycles`);
   state.ancestors.add(value);
   try {
@@ -589,30 +594,32 @@ function reflectedString(value: unknown, key: string): string | null {
 }
 
 function reflectedValue(value: unknown, key: string): unknown {
-  try {
-    return value !== null && (typeof value === "object" || typeof value === "function")
-      ? Reflect.get(value, key)
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  return reflectedGenerationTaskErrorValue(value, key);
 }
 
 function classifiedFailureClass(error: unknown): GenerationTaskFailureClass {
   return classifyGenerationTaskError(error);
 }
 
-function isLeaseFenceError(error: unknown): error is GenerationTaskLeaseFenceError {
+function isLeaseFenceError(error: unknown, claim: GenerationTaskAttemptClaim): boolean {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) return false;
   try {
-    return error instanceof GenerationTaskLeaseFenceError;
+    if (nodeUtilTypes.isProxy(error)
+      || Object.getPrototypeOf(error) !== GenerationTaskLeaseFenceError.prototype) return false;
   } catch {
     return false;
   }
+  return reflectedString(error, "name") === "GenerationTaskLeaseFenceError"
+    && reflectedValue(error, "taskId") === claim.task.id
+    && reflectedValue(error, "attempt") === claim.attempt.attempt;
 }
 
 function safeErrorText(error: unknown): string {
   const reflected = reflectedString(error, "message");
   if (reflected !== null) return reflected.slice(0, 4_096);
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    return "Unknown Generation Task execution failure";
+  }
   try {
     return String(error).slice(0, 4_096);
   } catch {
@@ -638,16 +645,25 @@ function safeContextFailureRefs(value: unknown): string[] | null {
 }
 
 function serializeExecutionFailure(error: unknown): GenerationTaskExecutionFailure {
+  const inspection = inspectGenerationTaskError(error);
+  const primary = inspection.primary;
   const failureClass = classifiedFailureClass(error);
-  const name = reflectedString(error, "name") || "Error";
-  const code = reflectedString(error, "code");
-  const missing = reflectedValue(error, "missing");
-  const details = reflectedValue(error, "details");
+  const name = reflectedString(primary, "name") || "Error";
+  const code = reflectedString(primary, "code");
+  const missing = reflectedValue(primary, "missing");
+  const details = reflectedValue(primary, "details");
   const payload: Record<string, unknown> = {
     name: name.slice(0, 256),
-    message: safeErrorText(error),
+    message: safeErrorText(primary),
     ...(code === null ? {} : { code: code.slice(0, 256) }),
   };
+  if (inspection.cleanupFailureCount > 0) {
+    payload.cleanup = {
+      status: "failed",
+      failureCount: inspection.cleanupFailureCount,
+      ...(inspection.truncated ? { truncated: true } : {}),
+    };
+  }
   const contextRefs = failureClass === "context" ? safeContextFailureRefs(missing) : null;
   if (contextRefs !== null) {
     payload.refs = contextRefs;
@@ -732,8 +748,18 @@ export class GenerationTaskExecutor {
       normalizedResult = validatePreparedResult(claim, result);
     } catch (error) {
       await this.cleanupResourceCandidate(claim, resourceCandidate);
-      if (signal.aborted) throw abortReason(signal);
-      if (isLeaseFenceError(error)) throw error;
+      if (signal.aborted) {
+        const reason = abortReason(signal);
+        if (error === reason) throw reason;
+        this.reportBestEffort(error);
+        if (inspectGenerationTaskError(error).primary === reason) throw error;
+        throw new AggregateError(
+          [reason, error],
+          "Generation Task execution aborted while leaf execution or cleanup also failed",
+          { cause: reason },
+        );
+      }
+      if (isLeaseFenceError(inspectGenerationTaskError(error).primary, claim)) throw error;
       await this.options.publication.finishFailure(claim, serializeExecutionFailure(error));
       return;
     }
@@ -743,6 +769,57 @@ export class GenerationTaskExecutor {
     } finally {
       await this.cleanupResourceCandidate(claim, resourceCandidate);
     }
+  }
+
+  /** Completes the exact live cancel-requested lease after its worker stops. */
+  async acknowledgeCancellation(
+    claim: GenerationTaskAttemptClaim,
+    cancellation: GenerationTaskCancellationCause,
+  ): Promise<void> {
+    validateClaim(claim);
+    freezeExecutionAuthority(claim);
+    const error = cancellation.reason === "prerequisite-failed"
+      ? {
+          name: "GenerationTaskCancellationRequested",
+          code: "generation-task-prerequisite-failed",
+          message: `Generation Task stopped after prerequisite ${cancellation.blockedByTaskId} failed`,
+          planId: cancellation.planId,
+          blockedByTaskId: cancellation.blockedByTaskId,
+        }
+      : {
+          name: "GenerationTaskCancellationRequested",
+          code: "generation-plan-cancelled",
+          message: "Generation Task stopped after its Plan was cancelled",
+          planId: cancellation.planId,
+        };
+    await this.options.publication.finishFailure(claim, {
+      failureClass: "cancelled",
+      error,
+    });
+  }
+
+  /** Records only the scheduler-created deadline for this exact frozen claim. */
+  async acknowledgeDeadlineExceeded(
+    claim: GenerationTaskAttemptClaim,
+    deadline: GenerationTaskDeadlineExceededError,
+  ): Promise<void> {
+    validateClaim(claim);
+    freezeExecutionAuthority(claim);
+    contract(deadline.taskId === claim.task.id
+      && deadline.attempt === claim.attempt.attempt
+      && deadline.timeoutMs === claim.task.resourceLimits.timeoutMs,
+    "Generation Task deadline does not match its frozen claim");
+    await this.options.publication.finishFailure(claim, {
+      failureClass: "agent-transport",
+      error: {
+        name: deadline.name,
+        code: deadline.code,
+        message: deadline.message,
+        taskId: deadline.taskId,
+        attempt: deadline.attempt,
+        timeoutMs: deadline.timeoutMs,
+      },
+    });
   }
 
   private async cleanupResourceCandidate(
@@ -756,11 +833,15 @@ export class GenerationTaskExecutor {
       // The receipt remains a durable orphan journal for startup recovery. A
       // cleanup observer must never mask a publication response-loss boundary
       // or prevent the exact fenced failure transition.
-      try {
-        this.options.reportError?.(error);
-      } catch {
-        // Observational only.
-      }
+      this.reportBestEffort(error);
+    }
+  }
+
+  private reportBestEffort(error: unknown): void {
+    try {
+      this.options.reportError?.(error);
+    } catch {
+      // Observational only; the thrown or durably published failure remains authoritative.
     }
   }
 }

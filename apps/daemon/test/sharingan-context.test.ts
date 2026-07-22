@@ -89,11 +89,13 @@ test("buildSharinganSystemPrompt bypasses normal Standard design generation beha
   const prompt = buildSharinganSystemPrompt();
   assert.match(prompt, /Sharingan Capture Replayer/i);
   assert.match(prompt, /not a design-generation task/i);
-  assert.match(prompt, /reference scaffold/i);
-  assert.match(prompt, /region-plan\.json/i);
+  assert.match(prompt, /stdout scaffold JSON/i);
+  assert.match(prompt, /regionPlan/i);
   assert.match(prompt, /src\/sharingan-regions/i);
   assert.match(prompt, /real Standard project/i);
-  assert.match(prompt, /scaffold is not the final artifact/i);
+  assert.match(prompt, /stdout scaffold JSON is measured source material; it is not the final artifact/i);
+  assert.match(prompt, /source-scaffold --stdout/i);
+  assert.match(prompt, /performs no writes/i);
   assert.match(prompt, /Ignore any generic Standard\/design-system\/craft instruction/i);
   assert.match(prompt, /Do not submit the generated SOURCE replay unchanged/i);
   assert.match(prompt, /Do not run `help`, `git status`, `ls`, `find`, `tree`/i);

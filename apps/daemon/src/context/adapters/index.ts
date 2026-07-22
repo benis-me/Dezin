@@ -8,6 +8,8 @@ import { effectResourceAdapter } from "./effect.ts";
 import { externalReferenceAdapter } from "./external-reference.ts";
 import { fileResourceAdapter } from "./file.ts";
 import { moodboardResourceAdapter } from "./moodboard.ts";
+import { researchResourceAdapter } from "./research.ts";
+import { sharinganCaptureResourceAdapter } from "./sharingan-capture.ts";
 
 const REGISTERABLE_RESOURCE_KINDS = new Set<ResourceContextAdapter["kind"]>([
   "moodboard",
@@ -15,6 +17,8 @@ const REGISTERABLE_RESOURCE_KINDS = new Set<ResourceContextAdapter["kind"]>([
   "file",
   "asset",
   "external-reference",
+  "research",
+  "sharingan-capture",
 ]);
 
 export interface ResourceAdapterRegistry {
@@ -61,6 +65,8 @@ export const baseResourceAdapterList = Object.freeze([
   fileResourceAdapter,
   assetResourceAdapter,
   externalReferenceAdapter,
+  researchResourceAdapter,
+  sharinganCaptureResourceAdapter,
 ] as const satisfies readonly ResourceContextAdapter[]);
 
 export const resourceAdapters = createResourceAdapterRegistry(baseResourceAdapterList);
@@ -71,4 +77,6 @@ export {
   externalReferenceAdapter,
   fileResourceAdapter,
   moodboardResourceAdapter,
+  researchResourceAdapter,
+  sharinganCaptureResourceAdapter,
 };

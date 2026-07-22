@@ -134,6 +134,29 @@ test("NodeSpawner passes per-turn extra environment variables", async () => {
   assert.equal(out.stdout, "sk-test");
 });
 
+test("NodeSpawner exact-environment mode does not inherit ambient secrets", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-exact-env-"));
+  const previousSecret = process.env.DEZIN_TEST_AMBIENT_SECRET;
+  process.env.DEZIN_TEST_AMBIENT_SECRET = "must-not-cross-process-boundary";
+  t.after(() => {
+    if (previousSecret === undefined) delete process.env.DEZIN_TEST_AMBIENT_SECRET;
+    else process.env.DEZIN_TEST_AMBIENT_SECRET = previousSecret;
+  });
+
+  const out = await new NodeSpawner({ inheritEnvironment: false }).run({
+    command: process.execPath,
+    args: [
+      "-e",
+      "process.stdout.write(JSON.stringify({ambient:process.env.DEZIN_TEST_AMBIENT_SECRET,explicit:process.env.DEZIN_EXPLICIT_VALUE}))",
+    ],
+    cwd: dir,
+    stdin: "",
+    env: { DEZIN_EXPLICIT_VALUE: "visible" },
+  });
+
+  assert.deepEqual(JSON.parse(out.stdout), { explicit: "visible" });
+});
+
 test("NodeSpawner times out a stuck process and escalates termination", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-timeout-"));
   const spawner = new NodeSpawner({ timeoutMs: 40, killDelayMs: 10 });

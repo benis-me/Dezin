@@ -183,11 +183,33 @@ export interface ArtifactRevision {
   createdAt: number;
 }
 
+export interface ArtifactRevisionHistoryPage {
+  items: ArtifactRevision[];
+  nextCursor: string | null;
+}
+
+export interface ArtifactVersionActionExpectation {
+  expectedHeadRevisionId: string | null;
+  expectedSnapshotId: string;
+}
+
+export interface ForkArtifactTrackRequest extends ArtifactVersionActionExpectation {
+  name: string;
+}
+
+export interface ArtifactVersionActionResult {
+  action: "restore-as-new-revision" | "fork-track";
+  artifact: WorkspaceArtifact;
+  track: ArtifactTrack;
+  revision: ArtifactRevision;
+  snapshot: WorkspaceSnapshot;
+}
+
 export type PreviewTarget =
   | { kind: "artifact-current"; projectId: string; artifactId: string; trackId?: string }
   | { kind: "artifact-revision"; projectId: string; revisionId: string }
   | { kind: "run-candidate"; projectId: string; runId: string }
-  | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string }
+  | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string; stateKey?: string }
   | { kind: "component-state"; projectId: string; revisionId: string; variantKey: string; stateKey: string };
 
 /** Immutable identity returned by PreviewTarget resolution and revalidated on lease acquire. */
@@ -417,6 +439,269 @@ export interface ResourceRevision {
   createdAt: number;
 }
 
+export type ResearchEvidenceStatus = "evidence" | "hypothesis";
+export type ResearchRevisionQualityState = "grounded" | "needs-review";
+
+export interface ResearchRevisionSourceView {
+  id: string;
+  kind: "context" | "web" | "user";
+  title: string;
+  locator: string;
+  excerpt: string;
+  notes: string;
+  verification: "verified" | "unverified";
+  receiptId: string;
+}
+
+export interface ResearchRevisionFindingView {
+  id: string;
+  statement: string;
+  implication: string;
+  confidence: "high" | "medium" | "low";
+  evidenceStatus: ResearchEvidenceStatus;
+  sourceIds: string[];
+  verifiedSourceIds: string[];
+  unverifiedSourceIds: string[];
+  supportReceiptIds: string[];
+  groundedness: {
+    verified: boolean;
+    verifier: { id: string; model?: string } | null;
+    rationale: string;
+    supportReceiptIds: string[];
+  };
+}
+
+export interface ResearchRevisionPrincipleView {
+  id: string;
+  title: string;
+  rationale: string;
+  findingIds: string[];
+  evidenceStatus: ResearchEvidenceStatus;
+  evidenceFindingIds: string[];
+  hypothesisFindingIds: string[];
+}
+
+export interface ResearchRevisionDirectionView {
+  id: string;
+  title: string;
+  thesis: string;
+  visualLanguage: string[];
+  interactionPrinciples: string[];
+  risks: string[];
+  findingIds: string[];
+  evidenceStatus: ResearchEvidenceStatus;
+  evidenceFindingIds: string[];
+  hypothesisFindingIds: string[];
+}
+
+export interface ResearchResourceRevisionView {
+  protocol: "dezin.research-resource-revision-view.v1";
+  resource: Resource;
+  revision: ResourceRevision;
+  observed: ResourceRevisionViewObservation;
+  qualityState: ResearchRevisionQualityState;
+  evidenceDirectionCount: number;
+  hypothesisDirectionCount: number;
+  executiveSummary: string;
+  sources: ResearchRevisionSourceView[];
+  findings: ResearchRevisionFindingView[];
+  designPrinciples: ResearchRevisionPrincipleView[];
+  directions: ResearchRevisionDirectionView[];
+  openQuestions: string[];
+}
+
+export type ResourceRevisionPreviewKind = "text" | "image" | "pdf" | "video" | "audio" | "download";
+
+export interface ResourceRevisionViewIdentity {
+  id: string;
+  workspaceId: string;
+  resourceId: string;
+  sequence: number;
+  parentRevisionId: string | null;
+  summary: string;
+  checksum: string;
+  createdAt: number;
+}
+
+export interface ResourceRevisionViewObservation {
+  headRevisionId: string | null;
+  snapshotId: string;
+}
+
+export interface ResourceRevisionPayloadView {
+  mimeType: string;
+  byteLength: number;
+  checksum: string;
+  previewKind: ResourceRevisionPreviewKind;
+  url: string | null;
+  downloadUrl: string;
+}
+
+interface ResourceRevisionViewBase {
+  protocol: "dezin.resource-revision-view.v1";
+  resource: Resource;
+  revision: ResourceRevisionViewIdentity;
+  observed: ResourceRevisionViewObservation;
+  payload: ResourceRevisionPayloadView;
+}
+
+export type ResearchResourceRevisionContentView = Omit<
+  ResearchResourceRevisionView,
+  "protocol" | "resource" | "revision" | "observed"
+>;
+
+export interface MoodboardRevisionNodeView {
+  id: string;
+  type: string;
+  label: string;
+  text: string;
+  x: number | null;
+  y: number | null;
+  width: number | null;
+  height: number | null;
+  assetId: string | null;
+}
+
+export interface MoodboardRevisionAssetView {
+  id: string;
+  kind: string;
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  byteLength: number;
+  checksum: string;
+  url: string | null;
+  downloadUrl: string;
+}
+
+export interface MoodboardResourceRevisionContentView {
+  board: { id: string; name: string; coverAssetId: string | null };
+  nodes: MoodboardRevisionNodeView[];
+  assets: MoodboardRevisionAssetView[];
+  totalNodeCount: number;
+  totalAssetCount: number;
+  nodesTruncated: boolean;
+  assetsTruncated: boolean;
+}
+
+export interface SharinganCaptureScreenshotView {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+  url: string;
+  downloadUrl: string;
+}
+
+export interface SharinganCapturePageView {
+  title: string;
+  requestedUrl: string;
+  finalUrl: string;
+  viewport: { width: number; height: number };
+  document: { width: number; height: number };
+  screenshots: SharinganCaptureScreenshotView[];
+  dom: { nodeCount: number; tags: string[] };
+  styleTokens: {
+    colors: string[];
+    fontFamilies: string[];
+    fontSizes: string[];
+    radii: string[];
+    shadows: string[];
+  };
+  links: string[];
+}
+
+export interface SharinganCaptureResourceRevisionContentView {
+  source: { requestedUrl: string; finalUrl: string; capturedAt: number };
+  exporter: { id: string; version: 1 };
+  pages: SharinganCapturePageView[];
+}
+
+export type EffectRevisionParameterValue = string | number | boolean;
+
+export interface EffectRevisionParameterView {
+  id: string;
+  label: string;
+  type: "number" | "color" | "select" | "boolean" | "image";
+  defaultValue: EffectRevisionParameterValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  options: Array<{ label: string; value: string }>;
+  description: string;
+}
+
+export interface EffectResourceRevisionContentView {
+  definition: {
+    id: string;
+    name: string;
+    origin: "built-in" | "custom";
+    category: string;
+    summary: string;
+    parameters: EffectRevisionParameterView[];
+    presets: Array<{ id: string; name: string; values: Record<string, EffectRevisionParameterValue> }>;
+    code: string;
+  };
+  fixture: {
+    width: 640;
+    height: 360;
+    timesMs: [0, 500, 1_000];
+    values: Record<string, EffectRevisionParameterValue>;
+  };
+}
+
+export interface FileResourceRevisionContentView {
+  fileName: string;
+  previewKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+}
+
+export interface AssetResourceRevisionContentView {
+  fileName: string;
+  mediaKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+  width: number | null;
+  height: number | null;
+  sourceType: string;
+  sourceId: string;
+}
+
+export interface ExternalReferenceResourceRevisionContentView {
+  sourceUrl: string;
+  finalUrl: string;
+  status: number;
+  previewKind: ResourceRevisionPreviewKind;
+  text: string | null;
+  textTruncated: boolean;
+}
+
+export type ResourceRevisionView =
+  | (ResourceRevisionViewBase & { kind: "research"; content: ResearchResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "moodboard"; content: MoodboardResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "sharingan-capture"; content: SharinganCaptureResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "file"; content: FileResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "asset"; content: AssetResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "effect"; content: EffectResourceRevisionContentView })
+  | (ResourceRevisionViewBase & { kind: "external-reference"; content: ExternalReferenceResourceRevisionContentView });
+
+export interface ResourceRevisionHistoryPage {
+  items: ResourceRevision[];
+  nextCursor: string | null;
+}
+
+export interface CreateResearchDirectionArtifactIntentInput {
+  selectionRequestId: string;
+  artifactId: string;
+  expectedResourceHeadRevisionId: string;
+  expectedGraphRevision: number;
+  expectedSnapshotId: string;
+  expectedLayoutChecksum: string;
+  confirmHypothesis: boolean;
+}
+
 export interface CreateResourceInput {
   kind: WorkspaceResourceKind;
   title: string;
@@ -469,6 +754,15 @@ export interface CreateResourceResult {
 }
 export type CreateResourceForProjectResult = CreateResourceResult;
 
+export interface MaterializeResourceInput extends CreateResourceInput {
+  source: ResourceRevisionOwnedSource;
+  reason: string;
+}
+
+export interface MaterializeResourceResult extends CreateResourceResult {
+  revision: ResourceRevision;
+}
+
 export type UpdateResourceResult =
   | { action: "rename" | "archive"; resource: Resource; graph: WorkspaceGraph; snapshot: WorkspaceSnapshot }
   | { action: "set-default-pin-policy"; resource: Resource };
@@ -496,6 +790,14 @@ export type WorkspaceGenerationResourceOperation =
       revisionPolicy: Extract<WorkspaceResourceRevisionPolicy, { kind: "exact" | "base-snapshot" }>;
     });
 
+export interface WorkspaceResearchDirectionSelection {
+  protocol: "dezin.research-direction-selection.v1";
+  version: 1;
+  resourceId: string;
+  revisionId: string;
+  directionId: string;
+}
+
 export interface WorkspaceGenerationArtifactPlan {
   operation: "create" | "revise";
   nodeId: string;
@@ -507,6 +809,7 @@ export interface WorkspaceGenerationArtifactPlan {
   dependsOnArtifactIds: string[];
   capabilityIds: string[];
   responsiveFrameIds: string[];
+  researchDirectionSelection?: WorkspaceResearchDirectionSelection;
 }
 
 export type WorkspaceGenerationDependencyPlan =
@@ -667,10 +970,114 @@ export interface GenerationPlan {
   proposalRevision: number;
   baseSnapshotId: string;
   status: GenerationPlanStatus;
+  constructionSealed?: boolean;
+  executionEpoch?: number;
   compileError: Record<string, unknown> | null;
   createdAt: number;
   finishedAt: number | null;
 }
+
+export type GenerationTaskKind =
+  | "resource"
+  | "component"
+  | "page"
+  | "prototype-validation"
+  | "checkpoint"
+  | "propagation-candidate"
+  | "propagation-publish";
+
+export type GenerationTaskStatus =
+  | "materialization-pending"
+  | "retry-wait"
+  | "blocked-context"
+  | "queued"
+  | "running"
+  | "candidate-ready"
+  | "needs-rebase"
+  | "awaiting-context-refresh"
+  | "cancel-requested"
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export type GenerationTaskTarget =
+  | { type: "workspace"; workspaceId: string; id: string }
+  | { type: "artifact"; workspaceId: string; id: string; trackId: string }
+  | { type: "resource"; workspaceId: string; id: string };
+
+export interface GenerationTask {
+  id: string;
+  ordinal: number;
+  workspaceId: string;
+  planId: string;
+  kind: GenerationTaskKind;
+  target: GenerationTaskTarget;
+  dependencyIds: string[];
+  payload?: Record<string, unknown>;
+  capabilities: string[];
+  status: GenerationTaskStatus;
+  blockedReason: string | null;
+  blockedByTaskId: string | null;
+  pendingContextPolicy: "same-context" | "latest-context" | null;
+  currentAttempt: number;
+  materializationFailures: number;
+  rebaseCount?: number;
+  failureClass: string | null;
+  error: Record<string, unknown> | null;
+  nextEligibleAt: number | null;
+  resultRevisionId: string | null;
+  resultResourceRevisionId: string | null;
+  resultSnapshotId: string | null;
+  createdAt: number;
+  finishedAt: number | null;
+}
+
+export interface GenerationTaskDependency {
+  planId: string;
+  taskId: string;
+  dependencyTaskId: string;
+  ordinal: number;
+}
+
+export type GenerationTaskAttemptStatus =
+  | "queued"
+  | "running"
+  | "cancel-requested"
+  | "candidate-ready"
+  | "succeeded"
+  | "retryable-failed"
+  | "failed"
+  | "needs-rebase"
+  | "cancelled";
+
+export interface GenerationPlanCurrentAttempt {
+  taskId: string;
+  attempt: number;
+  status: GenerationTaskAttemptStatus;
+  candidateRevisionId: string | null;
+  candidateResourceRevisionId: string | null;
+  candidateEvidence: Record<string, unknown> | null;
+  candidateEvidenceHash: string | null;
+}
+
+export interface GenerationPlanDetail {
+  plan: GenerationPlan;
+  tasks: GenerationTask[];
+  dependencies: GenerationTaskDependency[];
+  currentAttempts: GenerationPlanCurrentAttempt[];
+}
+
+export interface GenerationPlanEvent {
+  planId: string;
+  sequence: number;
+  taskId: string | null;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
+
+export type GenerationTaskRetryMode = "same-context" | "latest-context";
 
 export interface ApprovedProposalResult {
   proposal: WorkspaceProposal;
@@ -678,6 +1085,15 @@ export interface ApprovedProposalResult {
   snapshot: WorkspaceSnapshot;
   layout: WorkspaceLayout;
   plan: GenerationPlan | null;
+}
+
+export interface ApprovedResearchDirectionArtifactIntentResult {
+  proposal: WorkspaceProposal;
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+  layout: WorkspaceLayout;
+  plan: GenerationPlan;
+  task: GenerationTask;
 }
 
 interface NewWorkspaceEdgeBase {
@@ -740,6 +1156,9 @@ export interface ReadyProjectWorkspacePayload {
   tracks: ArtifactTrack[];
   revisions: ArtifactRevision[];
   snapshots: WorkspaceSnapshot[];
+  /** Active, client-safe Resource identities and exact active Revision metadata. */
+  resources?: Resource[];
+  resourceRevisions?: ResourceRevision[];
   layout: WorkspaceLayout;
 }
 
@@ -1023,11 +1442,39 @@ export type AgentIntent = "plan" | "generate" | "edit" | "repair" | "analyze-imp
 export interface AgentTurnRequest {
   scope: AgentScope;
   intent: AgentIntent;
+  turnId: string;
   message: string;
   explicitContext: ContextItemRef[];
   graphRevision: number;
   baseRevisionId?: string;
   selection?: SelectionRef[];
+}
+
+/** Browser-owned inputs only; daemon derives Workspace scope and proposal-only intent from the route. */
+export interface WorkspaceAgentTurnInput {
+  turnId: string;
+  message: string;
+  explicitContext: ContextItemRef[];
+  graphRevision: number;
+  selection?: SelectionRef[];
+}
+
+export type ScopedAgentIntent = "generate" | "edit" | "repair";
+
+/** Browser-owned inputs only; daemon derives the exact Artifact/Resource scope from the route. */
+export interface ScopedAgentTurnInput {
+  turnId: string;
+  intent: ScopedAgentIntent;
+  message: string;
+  explicitContext: ContextItemRef[];
+  graphRevision: number;
+  baseRevisionId: string;
+  selection?: SelectionRef[];
+}
+
+export interface ScopedAgentTurnReceipt {
+  task: GenerationTask;
+  contextPackId: string;
 }
 
 export type ResolvedContextKind = "artifact-revision" | "resource-revision" | "kernel-revision" | "inline";
@@ -1403,6 +1850,776 @@ export function decodeResourceRevision(value: unknown): ResourceRevision {
   };
 }
 
+function codecStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  return value.map((item, index) => codecString(item, `${label} ${index}`));
+}
+
+const GENERATION_TASK_KINDS = [
+  "resource",
+  "component",
+  "page",
+  "prototype-validation",
+  "checkpoint",
+  "propagation-candidate",
+  "propagation-publish",
+] as const satisfies readonly GenerationTaskKind[];
+const GENERATION_TASK_STATUSES = [
+  "materialization-pending",
+  "retry-wait",
+  "blocked-context",
+  "queued",
+  "running",
+  "candidate-ready",
+  "needs-rebase",
+  "awaiting-context-refresh",
+  "cancel-requested",
+  "succeeded",
+  "failed",
+  "blocked",
+  "cancelled",
+] as const satisfies readonly GenerationTaskStatus[];
+
+function decodeGenerationTaskTarget(value: unknown): GenerationTaskTarget {
+  const input = codecRecord(value, "Generation Task target");
+  const type = codecEnum(input.type, ["workspace", "artifact", "resource"] as const, "Generation Task target type");
+  const workspaceId = codecString(input.workspaceId, "Generation Task target workspaceId");
+  const id = codecString(input.id, "Generation Task target id");
+  if (type === "artifact") {
+    return {
+      type,
+      workspaceId,
+      id,
+      trackId: codecString(input.trackId, "Generation Task target trackId"),
+    };
+  }
+  return { type, workspaceId, id };
+}
+
+/** Decode the untrusted HTTP/storage boundary before a scoped Agent receipt reaches UI state. */
+export function decodeScopedAgentTurnReceipt(value: unknown): ScopedAgentTurnReceipt {
+  const input = codecRecord(value, "Scoped Agent receipt");
+  const taskInput = codecRecord(input.task, "Scoped Agent receipt Task");
+  const workspaceId = codecString(taskInput.workspaceId, "Generation Task workspaceId");
+  const target = decodeGenerationTaskTarget(taskInput.target);
+  if (target.workspaceId !== workspaceId) {
+    throw new TypeError("Generation Task target belongs to another Workspace");
+  }
+  const pendingContextPolicy = taskInput.pendingContextPolicy === null
+    ? null
+    : codecEnum(
+        taskInput.pendingContextPolicy,
+        ["same-context", "latest-context"] as const,
+        "Generation Task pendingContextPolicy",
+      );
+  const task: GenerationTask = {
+    id: codecString(taskInput.id, "Generation Task id"),
+    ordinal: codecInteger(taskInput.ordinal, "Generation Task ordinal"),
+    workspaceId,
+    planId: codecString(taskInput.planId, "Generation Task planId"),
+    kind: codecEnum(taskInput.kind, GENERATION_TASK_KINDS, "Generation Task kind"),
+    target,
+    dependencyIds: codecStringArray(taskInput.dependencyIds, "Generation Task dependencyIds"),
+    ...(taskInput.payload === undefined
+      ? {}
+      : { payload: codecRecord(taskInput.payload, "Generation Task payload") }),
+    capabilities: codecStringArray(taskInput.capabilities, "Generation Task capabilities"),
+    status: codecEnum(taskInput.status, GENERATION_TASK_STATUSES, "Generation Task status"),
+    blockedReason: codecNullableString(taskInput.blockedReason, "Generation Task blockedReason"),
+    blockedByTaskId: codecNullableString(taskInput.blockedByTaskId, "Generation Task blockedByTaskId"),
+    pendingContextPolicy,
+    currentAttempt: codecInteger(taskInput.currentAttempt, "Generation Task currentAttempt"),
+    materializationFailures: codecInteger(taskInput.materializationFailures, "Generation Task materializationFailures"),
+    ...(taskInput.rebaseCount === undefined
+      ? {}
+      : { rebaseCount: codecInteger(taskInput.rebaseCount, "Generation Task rebaseCount") }),
+    failureClass: codecNullableString(taskInput.failureClass, "Generation Task failureClass"),
+    error: taskInput.error === null ? null : codecRecord(taskInput.error, "Generation Task error"),
+    nextEligibleAt: taskInput.nextEligibleAt === null
+      ? null
+      : codecTimestamp(taskInput.nextEligibleAt, "Generation Task nextEligibleAt"),
+    resultRevisionId: codecNullableString(taskInput.resultRevisionId, "Generation Task resultRevisionId"),
+    resultResourceRevisionId: codecNullableString(
+      taskInput.resultResourceRevisionId,
+      "Generation Task resultResourceRevisionId",
+    ),
+    resultSnapshotId: codecNullableString(taskInput.resultSnapshotId, "Generation Task resultSnapshotId"),
+    createdAt: codecTimestamp(taskInput.createdAt, "Generation Task createdAt"),
+    finishedAt: taskInput.finishedAt === null
+      ? null
+      : codecTimestamp(taskInput.finishedAt, "Generation Task finishedAt"),
+  };
+  return {
+    task,
+    contextPackId: codecString(input.contextPackId, "Scoped Agent receipt contextPackId"),
+  };
+}
+
+function decodeResearchEvidenceReferences(input: Record<string, unknown>, label: string) {
+  return {
+    findingIds: codecStringArray(input.findingIds, `${label} findingIds`),
+    evidenceStatus: codecEnum(input.evidenceStatus, ["evidence", "hypothesis"] as const, `${label} evidenceStatus`),
+    evidenceFindingIds: codecStringArray(input.evidenceFindingIds, `${label} evidenceFindingIds`),
+    hypothesisFindingIds: codecStringArray(input.hypothesisFindingIds, `${label} hypothesisFindingIds`),
+  };
+}
+
+function sameStringMembers(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((item) => right.includes(item));
+}
+
+function assertUniqueStrings(values: readonly string[], label: string): void {
+  if (new Set(values).size !== values.length) throw new TypeError(`${label} cannot contain duplicates`);
+}
+
+function sameResearchVerifier(
+  left: { id: string; model?: string } | null,
+  right: { id: string; model?: string } | null,
+): boolean {
+  return left?.id === right?.id && (left?.model ?? null) === (right?.model ?? null);
+}
+
+function assertResearchEvidenceReferences(
+  item: ResearchRevisionPrincipleView | ResearchRevisionDirectionView,
+  findings: ReadonlyMap<string, ResearchRevisionFindingView>,
+  label: string,
+): void {
+  assertUniqueStrings(item.findingIds, `${label} findingIds`);
+  assertUniqueStrings(item.evidenceFindingIds, `${label} evidenceFindingIds`);
+  assertUniqueStrings(item.hypothesisFindingIds, `${label} hypothesisFindingIds`);
+  const expectedEvidence = item.findingIds.filter((id) => findings.get(id)?.evidenceStatus === "evidence");
+  const expectedHypotheses = item.findingIds.filter((id) => findings.get(id)?.evidenceStatus === "hypothesis");
+  if (item.findingIds.some((id) => !findings.has(id))
+    || !sameStringMembers(item.evidenceFindingIds, expectedEvidence)
+    || !sameStringMembers(item.hypothesisFindingIds, expectedHypotheses)
+    || item.evidenceStatus !== (expectedHypotheses.length === 0 ? "evidence" : "hypothesis")) {
+    throw new TypeError(`${label} evidence references are inconsistent`);
+  }
+}
+
+export function decodeResearchResourceRevision(value: unknown): ResearchResourceRevisionView {
+  const input = codecExactRecord(value, [
+    "protocol", "resource", "revision", "observed", "qualityState", "evidenceDirectionCount",
+    "hypothesisDirectionCount", "executiveSummary", "sources", "findings", "designPrinciples", "directions",
+    "openQuestions",
+  ], "Research Resource Revision");
+  if (input.protocol !== "dezin.research-resource-revision-view.v1") {
+    throw new TypeError("Research Resource Revision protocol is unsupported");
+  }
+  const sources = Array.isArray(input.sources) ? input.sources.map((raw, index): ResearchRevisionSourceView => {
+    const source = codecExactRecord(raw, [
+      "id", "kind", "title", "locator", "excerpt", "notes", "verification", "receiptId",
+    ], `Research source ${index}`);
+    const kind = codecEnum(source.kind, ["context", "web", "user"] as const, `Research source ${index} kind`);
+    return {
+      id: codecString(source.id, `Research source ${index} id`),
+      kind,
+      title: codecString(source.title, `Research source ${index} title`),
+      locator: kind === "web"
+        ? codecHttpUrl(source.locator, `Research source ${index} locator`)
+        : codecString(source.locator, `Research source ${index} locator`),
+      excerpt: codecString(source.excerpt, `Research source ${index} excerpt`),
+      notes: typeof source.notes === "string" ? source.notes : (() => { throw new TypeError(`Research source ${index} notes must be a string`); })(),
+      verification: codecEnum(source.verification, ["verified", "unverified"] as const, `Research source ${index} verification`),
+      receiptId: codecString(source.receiptId, `Research source ${index} receiptId`),
+    };
+  }) : (() => { throw new TypeError("Research sources must be an array"); })();
+  const findings = Array.isArray(input.findings) ? input.findings.map((raw, index): ResearchRevisionFindingView => {
+    const finding = codecExactRecord(raw, [
+      "id", "statement", "implication", "confidence", "evidenceStatus", "sourceIds", "verifiedSourceIds",
+      "unverifiedSourceIds", "supportReceiptIds", "groundedness",
+    ], `Research finding ${index}`);
+    const groundedness = codecExactRecord(
+      finding.groundedness,
+      ["verified", "verifier", "rationale", "supportReceiptIds"],
+      `Research finding ${index} groundedness`,
+    );
+    const rawVerifier = groundedness.verifier === null
+      ? null
+      : codecExactRecord(groundedness.verifier, ["id", "model"], `Research finding ${index} verifier`);
+    if (typeof groundedness.verified !== "boolean") throw new TypeError(`Research finding ${index} verified must be boolean`);
+    return {
+      id: codecString(finding.id, `Research finding ${index} id`),
+      statement: codecString(finding.statement, `Research finding ${index} statement`),
+      implication: codecString(finding.implication, `Research finding ${index} implication`),
+      confidence: codecEnum(finding.confidence, ["high", "medium", "low"] as const, `Research finding ${index} confidence`),
+      evidenceStatus: codecEnum(finding.evidenceStatus, ["evidence", "hypothesis"] as const, `Research finding ${index} evidenceStatus`),
+      sourceIds: codecStringArray(finding.sourceIds, `Research finding ${index} sourceIds`),
+      verifiedSourceIds: codecStringArray(finding.verifiedSourceIds, `Research finding ${index} verifiedSourceIds`),
+      unverifiedSourceIds: codecStringArray(finding.unverifiedSourceIds, `Research finding ${index} unverifiedSourceIds`),
+      supportReceiptIds: codecStringArray(finding.supportReceiptIds, `Research finding ${index} supportReceiptIds`),
+      groundedness: {
+        verified: groundedness.verified,
+        verifier: rawVerifier === null ? null : {
+          id: codecString(rawVerifier.id, `Research finding ${index} verifier id`),
+          ...(rawVerifier.model === undefined
+            ? {}
+            : { model: codecString(rawVerifier.model, `Research finding ${index} verifier model`) }),
+        },
+        rationale: codecString(groundedness.rationale, `Research finding ${index} groundedness rationale`),
+        supportReceiptIds: codecStringArray(
+          groundedness.supportReceiptIds,
+          `Research finding ${index} groundedness supportReceiptIds`,
+        ),
+      },
+    };
+  }) : (() => { throw new TypeError("Research findings must be an array"); })();
+  const designPrinciples = Array.isArray(input.designPrinciples)
+    ? input.designPrinciples.map((raw, index): ResearchRevisionPrincipleView => {
+        const principle = codecExactRecord(raw, [
+          "id", "title", "rationale", "findingIds", "evidenceStatus", "evidenceFindingIds", "hypothesisFindingIds",
+        ], `Research principle ${index}`);
+        return {
+          id: codecString(principle.id, `Research principle ${index} id`),
+          title: codecString(principle.title, `Research principle ${index} title`),
+          rationale: codecString(principle.rationale, `Research principle ${index} rationale`),
+          ...decodeResearchEvidenceReferences(principle, `Research principle ${index}`),
+        };
+      })
+    : (() => { throw new TypeError("Research principles must be an array"); })();
+  const directions = Array.isArray(input.directions)
+    ? input.directions.map((raw, index): ResearchRevisionDirectionView => {
+        const direction = codecExactRecord(raw, [
+          "id", "title", "thesis", "visualLanguage", "interactionPrinciples", "risks", "findingIds",
+          "evidenceStatus", "evidenceFindingIds", "hypothesisFindingIds",
+        ], `Research direction ${index}`);
+        return {
+          id: codecString(direction.id, `Research direction ${index} id`),
+          title: codecString(direction.title, `Research direction ${index} title`),
+          thesis: codecString(direction.thesis, `Research direction ${index} thesis`),
+          visualLanguage: codecStringArray(direction.visualLanguage, `Research direction ${index} visualLanguage`),
+          interactionPrinciples: codecStringArray(direction.interactionPrinciples, `Research direction ${index} interactionPrinciples`),
+          risks: codecStringArray(direction.risks, `Research direction ${index} risks`),
+          ...decodeResearchEvidenceReferences(direction, `Research direction ${index}`),
+        };
+      })
+    : (() => { throw new TypeError("Research directions must be an array"); })();
+  if (sources.length < 2 || findings.length < 3 || designPrinciples.length < 3 || directions.length < 2) {
+    throw new TypeError("Research Resource Revision does not meet the production schema minimums");
+  }
+  const sourceIds = sources.map((source) => source.id);
+  const sourceReceiptIds = sources.map((source) => source.receiptId);
+  assertUniqueStrings(sourceIds, "Research source ids");
+  assertUniqueStrings(sourceReceiptIds, "Research source receipt ids");
+  for (const [index, source] of sources.entries()) {
+    if (!/^research-evidence-[a-f0-9]{64}$/.test(source.receiptId)) {
+      throw new TypeError(`Research source ${index} receiptId is not canonical`);
+    }
+  }
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const findingIds = findings.map((finding) => finding.id);
+  assertUniqueStrings(findingIds, "Research finding ids");
+  const claimedSupportReceiptIds: string[] = [];
+  const expectedVerifier = findings.find((finding) => finding.groundedness.verifier !== null)?.groundedness.verifier ?? null;
+  for (const [index, finding] of findings.entries()) {
+    assertUniqueStrings(finding.sourceIds, `Research finding ${index} sourceIds`);
+    assertUniqueStrings(finding.verifiedSourceIds, `Research finding ${index} verifiedSourceIds`);
+    assertUniqueStrings(finding.unverifiedSourceIds, `Research finding ${index} unverifiedSourceIds`);
+    assertUniqueStrings(finding.supportReceiptIds, `Research finding ${index} supportReceiptIds`);
+    assertUniqueStrings(finding.groundedness.supportReceiptIds, `Research finding ${index} grounded supportReceiptIds`);
+    const expectedVerified = finding.sourceIds.filter((id) => sourceById.get(id)?.verification === "verified");
+    const expectedUnverified = finding.sourceIds.filter((id) => sourceById.get(id)?.verification === "unverified");
+    const evidence = finding.evidenceStatus === "evidence";
+    if (finding.sourceIds.some((id) => !sourceById.has(id))
+      || !sameStringMembers(finding.verifiedSourceIds, expectedVerified)
+      || !sameStringMembers(finding.unverifiedSourceIds, expectedUnverified)
+      || finding.supportReceiptIds.length < 1
+      || finding.supportReceiptIds.some((id) => !/^research-support-[a-f0-9]{64}$/.test(id))
+      || finding.groundedness.supportReceiptIds.some((id) => !finding.supportReceiptIds.includes(id))
+      || finding.groundedness.verified !== evidence
+      || !sameResearchVerifier(finding.groundedness.verifier, expectedVerifier)
+      || (evidence && (finding.groundedness.verifier === null
+        || expectedUnverified.length > 0
+        || !sameStringMembers(finding.groundedness.supportReceiptIds, finding.supportReceiptIds)))
+      || (!evidence && finding.confidence !== "low")) {
+      throw new TypeError(`Research finding ${index} evidence projection is inconsistent`);
+    }
+    claimedSupportReceiptIds.push(...finding.supportReceiptIds);
+  }
+  assertUniqueStrings(claimedSupportReceiptIds, "Research support receipt ids");
+  const findingById = new Map(findings.map((finding) => [finding.id, finding]));
+  assertUniqueStrings(designPrinciples.map((principle) => principle.id), "Research principle ids");
+  designPrinciples.forEach((principle, index) => {
+    assertResearchEvidenceReferences(principle, findingById, `Research principle ${index}`);
+  });
+  assertUniqueStrings(directions.map((direction) => direction.id), "Research direction ids");
+  directions.forEach((direction, index) => {
+    assertResearchEvidenceReferences(direction, findingById, `Research direction ${index}`);
+  });
+  const evidenceDirectionCount = directions.filter((direction) => direction.evidenceStatus === "evidence").length;
+  const hypothesisDirectionCount = directions.length - evidenceDirectionCount;
+  const qualityState = codecEnum(input.qualityState, ["grounded", "needs-review"] as const, "Research qualityState");
+  if (codecInteger(input.evidenceDirectionCount, "Research evidenceDirectionCount") !== evidenceDirectionCount
+    || codecInteger(input.hypothesisDirectionCount, "Research hypothesisDirectionCount") !== hypothesisDirectionCount
+    || qualityState !== (evidenceDirectionCount > 0 ? "grounded" : "needs-review")) {
+    throw new TypeError("Research quality projection is inconsistent");
+  }
+  const resource = decodeResource(input.resource);
+  const revision = decodeResourceRevision(input.revision);
+  const observed = decodeResourceRevisionViewObservation(input.observed);
+  if (resource.kind !== "research" || revision.workspaceId !== resource.workspaceId
+    || revision.resourceId !== resource.id || observed.headRevisionId !== resource.headRevisionId) {
+    throw new TypeError("Research Resource Revision ownership is inconsistent");
+  }
+  return {
+    protocol: input.protocol,
+    resource,
+    revision,
+    observed,
+    qualityState,
+    evidenceDirectionCount,
+    hypothesisDirectionCount,
+    executiveSummary: codecString(input.executiveSummary, "Research executiveSummary"),
+    sources,
+    findings,
+    designPrinciples,
+    directions,
+    openQuestions: codecStringArray(input.openQuestions, "Research openQuestions"),
+  };
+}
+
+function codecBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new TypeError(`${label} must be a boolean`);
+  return value;
+}
+
+function codecNullableText(value: unknown, label: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new TypeError(`${label} must be a string or null`);
+  return value;
+}
+
+function codecFiniteNullable(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`${label} must be finite or null`);
+  return value;
+}
+
+function codecArray(value: unknown, label: string, maximum: number): unknown[] {
+  if (!Array.isArray(value) || value.length > maximum) throw new TypeError(`${label} must be a bounded array`);
+  return value;
+}
+
+function codecSha256(value: unknown, label: string): string {
+  const checksum = codecString(value, label);
+  if (!/^[a-f0-9]{64}$/.test(checksum)) throw new TypeError(`${label} must be a SHA-256 checksum`);
+  return checksum;
+}
+
+function codecApiPath(value: unknown, label: string): string {
+  const path = codecString(value, label);
+  if (!path.startsWith("/api/") || path.includes("\\") || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new TypeError(`${label} must be a daemon API path`);
+  }
+  return path;
+}
+
+function codecHttpUrl(value: unknown, label: string): string {
+  const raw = codecString(value, label);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new TypeError(`${label} must be an HTTP(S) URL`);
+  }
+  const credentialParameter = /(?:^|[_-])(?:access[_-]?token|token|api[_-]?key|secret|signature|sig|auth|authorization|password|credential)(?:$|[_-])/i;
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password
+    || url.hash || url.href !== raw
+    || [...url.searchParams.keys()].some((key) => credentialParameter.test(key))) {
+    throw new TypeError(`${label} must be a canonical credential-free HTTP(S) URL`);
+  }
+  return raw;
+}
+
+function decodeResourceRevisionViewIdentity(value: unknown): ResourceRevisionViewIdentity {
+  const input = codecExactRecord(value, [
+    "id", "workspaceId", "resourceId", "sequence", "parentRevisionId", "summary", "checksum", "createdAt",
+  ], "Resource Revision view identity");
+  return {
+    id: codecString(input.id, "Resource Revision view id"),
+    workspaceId: codecString(input.workspaceId, "Resource Revision view workspaceId"),
+    resourceId: codecString(input.resourceId, "Resource Revision view resourceId"),
+    sequence: codecInteger(input.sequence, "Resource Revision view sequence", 1),
+    parentRevisionId: codecNullableString(input.parentRevisionId, "Resource Revision view parentRevisionId"),
+    summary: codecString(input.summary, "Resource Revision view summary"),
+    checksum: codecSha256(input.checksum, "Resource Revision view checksum"),
+    createdAt: codecTimestamp(input.createdAt, "Resource Revision view createdAt"),
+  };
+}
+
+function decodeResourceRevisionViewObservation(value: unknown): ResourceRevisionViewObservation {
+  const input = codecExactRecord(value, ["headRevisionId", "snapshotId"], "Resource Revision observation");
+  return {
+    headRevisionId: codecNullableString(input.headRevisionId, "Resource Revision observed Head"),
+    snapshotId: codecString(input.snapshotId, "Resource Revision observed Snapshot"),
+  };
+}
+
+function decodeResourceRevisionPayloadView(value: unknown): ResourceRevisionPayloadView {
+  const input = codecExactRecord(
+    value,
+    ["mimeType", "byteLength", "checksum", "previewKind", "url", "downloadUrl"],
+    "Resource Revision payload view",
+  );
+  const previewKind = codecEnum(
+    input.previewKind,
+    ["text", "image", "pdf", "video", "audio", "download"] as const,
+    "Resource Revision payload previewKind",
+  );
+  const url = input.url === null ? null : codecApiPath(input.url, "Resource Revision payload URL");
+  if ((previewKind === "image" || previewKind === "pdf" || previewKind === "video" || previewKind === "audio")
+    !== (url !== null)) {
+    throw new TypeError("Resource Revision payload inline URL does not match its preview kind");
+  }
+  return {
+    mimeType: codecString(input.mimeType, "Resource Revision payload MIME"),
+    byteLength: codecInteger(input.byteLength, "Resource Revision payload byteLength"),
+    checksum: codecSha256(input.checksum, "Resource Revision payload checksum"),
+    previewKind,
+    url,
+    downloadUrl: codecApiPath(input.downloadUrl, "Resource Revision payload download URL"),
+  };
+}
+
+function decodeMoodboardContent(value: unknown): MoodboardResourceRevisionContentView {
+  const input = codecExactRecord(value, [
+    "board", "nodes", "assets", "totalNodeCount", "totalAssetCount", "nodesTruncated", "assetsTruncated",
+  ], "Moodboard Revision content");
+  const board = codecExactRecord(input.board, ["id", "name", "coverAssetId"], "Moodboard Revision board");
+  const nodes = codecArray(input.nodes, "Moodboard Revision nodes", 256).map((raw, index): MoodboardRevisionNodeView => {
+    const node = codecExactRecord(raw, [
+      "id", "type", "label", "text", "x", "y", "width", "height", "assetId",
+    ], `Moodboard Revision node ${index}`);
+    return {
+      id: codecString(node.id, `Moodboard Revision node ${index} id`),
+      type: codecString(node.type, `Moodboard Revision node ${index} type`),
+      label: typeof node.label === "string" ? node.label : (() => { throw new TypeError(`Moodboard Revision node ${index} label must be a string`); })(),
+      text: typeof node.text === "string" ? node.text : (() => { throw new TypeError(`Moodboard Revision node ${index} text must be a string`); })(),
+      x: codecFiniteNullable(node.x, `Moodboard Revision node ${index} x`),
+      y: codecFiniteNullable(node.y, `Moodboard Revision node ${index} y`),
+      width: codecFiniteNullable(node.width, `Moodboard Revision node ${index} width`),
+      height: codecFiniteNullable(node.height, `Moodboard Revision node ${index} height`),
+      assetId: codecNullableString(node.assetId, `Moodboard Revision node ${index} assetId`),
+    };
+  });
+  const assets = codecArray(input.assets, "Moodboard Revision Assets", 128).map((raw, index): MoodboardRevisionAssetView => {
+    const asset = codecExactRecord(raw, [
+      "id", "kind", "fileName", "mimeType", "width", "height", "byteLength", "checksum", "url", "downloadUrl",
+    ], `Moodboard Revision Asset ${index}`);
+    return {
+      id: codecString(asset.id, `Moodboard Revision Asset ${index} id`),
+      kind: codecString(asset.kind, `Moodboard Revision Asset ${index} kind`),
+      fileName: codecString(asset.fileName, `Moodboard Revision Asset ${index} fileName`),
+      mimeType: codecString(asset.mimeType, `Moodboard Revision Asset ${index} MIME`),
+      width: codecFiniteNullable(asset.width, `Moodboard Revision Asset ${index} width`),
+      height: codecFiniteNullable(asset.height, `Moodboard Revision Asset ${index} height`),
+      byteLength: codecInteger(asset.byteLength, `Moodboard Revision Asset ${index} byteLength`),
+      checksum: codecSha256(asset.checksum, `Moodboard Revision Asset ${index} checksum`),
+      url: asset.url === null ? null : codecApiPath(asset.url, `Moodboard Revision Asset ${index} URL`),
+      downloadUrl: codecApiPath(asset.downloadUrl, `Moodboard Revision Asset ${index} download URL`),
+    };
+  });
+  const totalNodeCount = codecInteger(input.totalNodeCount, "Moodboard Revision totalNodeCount");
+  const totalAssetCount = codecInteger(input.totalAssetCount, "Moodboard Revision totalAssetCount");
+  const nodesTruncated = codecBoolean(input.nodesTruncated, "Moodboard Revision nodesTruncated");
+  const assetsTruncated = codecBoolean(input.assetsTruncated, "Moodboard Revision assetsTruncated");
+  if (totalNodeCount < nodes.length || totalAssetCount < assets.length
+    || nodesTruncated !== (totalNodeCount > nodes.length)
+    || assetsTruncated !== (totalAssetCount > assets.length)) {
+    throw new TypeError("Moodboard Revision projection counts are inconsistent");
+  }
+  return {
+    board: {
+      id: codecString(board.id, "Moodboard Revision board id"),
+      name: codecString(board.name, "Moodboard Revision board name"),
+      coverAssetId: codecNullableString(board.coverAssetId, "Moodboard Revision board coverAssetId"),
+    },
+    nodes,
+    assets,
+    totalNodeCount,
+    totalAssetCount,
+    nodesTruncated,
+    assetsTruncated,
+  };
+}
+
+function decodeSharinganContent(value: unknown): SharinganCaptureResourceRevisionContentView {
+  const input = codecExactRecord(value, ["source", "exporter", "pages"], "Sharingan Revision content");
+  const source = codecExactRecord(input.source, ["requestedUrl", "finalUrl", "capturedAt"], "Sharingan Revision source");
+  const exporter = codecExactRecord(input.exporter, ["id", "version"], "Sharingan Revision exporter");
+  if (exporter.version !== 1) throw new TypeError("Sharingan Revision exporter version is unsupported");
+  const pages = codecArray(input.pages, "Sharingan Revision pages", 8).map((raw, pageIndex): SharinganCapturePageView => {
+    const page = codecExactRecord(raw, [
+      "title", "requestedUrl", "finalUrl", "viewport", "document", "screenshots", "dom", "styleTokens", "links",
+    ], `Sharingan Revision page ${pageIndex}`);
+    const dimensions = (rawValue: unknown, label: string) => {
+      const value = codecExactRecord(rawValue, ["width", "height"], label);
+      return {
+        width: codecInteger(value.width, `${label} width`, 1),
+        height: codecInteger(value.height, `${label} height`, 1),
+      };
+    };
+    const screenshots = codecArray(page.screenshots, `Sharingan Revision page ${pageIndex} screenshots`, 16)
+      .map((rawScreenshot, screenshotIndex): SharinganCaptureScreenshotView => {
+        const screenshot = codecExactRecord(rawScreenshot, [
+          "id", "label", "width", "height", "url", "downloadUrl",
+        ], `Sharingan Revision screenshot ${screenshotIndex}`);
+        return {
+          id: codecString(screenshot.id, `Sharingan Revision screenshot ${screenshotIndex} id`),
+          label: codecString(screenshot.label, `Sharingan Revision screenshot ${screenshotIndex} label`),
+          width: codecInteger(screenshot.width, `Sharingan Revision screenshot ${screenshotIndex} width`, 1),
+          height: codecInteger(screenshot.height, `Sharingan Revision screenshot ${screenshotIndex} height`, 1),
+          url: codecApiPath(screenshot.url, `Sharingan Revision screenshot ${screenshotIndex} URL`),
+          downloadUrl: codecApiPath(screenshot.downloadUrl, `Sharingan Revision screenshot ${screenshotIndex} download URL`),
+        };
+      });
+    const dom = codecExactRecord(page.dom, ["nodeCount", "tags"], `Sharingan Revision page ${pageIndex} DOM`);
+    const tokens = codecExactRecord(
+      page.styleTokens,
+      ["colors", "fontFamilies", "fontSizes", "radii", "shadows"],
+      `Sharingan Revision page ${pageIndex} style tokens`,
+    );
+    return {
+      title: codecString(page.title, `Sharingan Revision page ${pageIndex} title`),
+      requestedUrl: codecHttpUrl(page.requestedUrl, `Sharingan Revision page ${pageIndex} requestedUrl`),
+      finalUrl: codecHttpUrl(page.finalUrl, `Sharingan Revision page ${pageIndex} finalUrl`),
+      viewport: dimensions(page.viewport, `Sharingan Revision page ${pageIndex} viewport`),
+      document: dimensions(page.document, `Sharingan Revision page ${pageIndex} document`),
+      screenshots,
+      dom: {
+        nodeCount: codecInteger(dom.nodeCount, `Sharingan Revision page ${pageIndex} DOM nodeCount`),
+        tags: codecStringArray(dom.tags, `Sharingan Revision page ${pageIndex} DOM tags`),
+      },
+      styleTokens: {
+        colors: codecStringArray(tokens.colors, `Sharingan Revision page ${pageIndex} colors`),
+        fontFamilies: codecStringArray(tokens.fontFamilies, `Sharingan Revision page ${pageIndex} fontFamilies`),
+        fontSizes: codecStringArray(tokens.fontSizes, `Sharingan Revision page ${pageIndex} fontSizes`),
+        radii: codecStringArray(tokens.radii, `Sharingan Revision page ${pageIndex} radii`),
+        shadows: codecStringArray(tokens.shadows, `Sharingan Revision page ${pageIndex} shadows`),
+      },
+      links: codecStringArray(page.links, `Sharingan Revision page ${pageIndex} links`),
+    };
+  });
+  return {
+    source: {
+      requestedUrl: codecHttpUrl(source.requestedUrl, "Sharingan Revision source requestedUrl"),
+      finalUrl: codecHttpUrl(source.finalUrl, "Sharingan Revision source finalUrl"),
+      capturedAt: codecTimestamp(source.capturedAt, "Sharingan Revision source capturedAt"),
+    },
+    exporter: { id: codecString(exporter.id, "Sharingan Revision exporter id"), version: 1 },
+    pages,
+  };
+}
+
+function codecEffectValue(value: unknown, label: string): EffectRevisionParameterValue {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    throw new TypeError(`${label} must be a string, number, or boolean`);
+  }
+  if (typeof value === "number" && !Number.isFinite(value)) throw new TypeError(`${label} must be finite`);
+  return value;
+}
+
+function decodeEffectContent(value: unknown): EffectResourceRevisionContentView {
+  const input = codecExactRecord(value, ["definition", "fixture"], "Effect Revision content");
+  const definition = codecExactRecord(input.definition, [
+    "id", "name", "origin", "category", "summary", "parameters", "presets", "code",
+  ], "Effect Revision definition");
+  const parameters = codecArray(definition.parameters, "Effect Revision parameters", 128)
+    .map((raw, index): EffectRevisionParameterView => {
+      const parameter = codecExactRecord(raw, [
+        "id", "label", "type", "defaultValue", "min", "max", "step", "options", "description",
+      ], `Effect Revision parameter ${index}`);
+      const optionalFinite = (field: "min" | "max" | "step"): number | undefined => (
+        parameter[field] === undefined
+          ? undefined
+          : codecFiniteNullable(parameter[field], `Effect Revision parameter ${index} ${field}`) ?? undefined
+      );
+      return {
+        id: codecString(parameter.id, `Effect Revision parameter ${index} id`),
+        label: codecString(parameter.label, `Effect Revision parameter ${index} label`),
+        type: codecEnum(
+          parameter.type,
+          ["number", "color", "select", "boolean", "image"] as const,
+          `Effect Revision parameter ${index} type`,
+        ),
+        defaultValue: codecEffectValue(parameter.defaultValue, `Effect Revision parameter ${index} defaultValue`),
+        ...(optionalFinite("min") === undefined ? {} : { min: optionalFinite("min") }),
+        ...(optionalFinite("max") === undefined ? {} : { max: optionalFinite("max") }),
+        ...(optionalFinite("step") === undefined ? {} : { step: optionalFinite("step") }),
+        options: codecArray(parameter.options, `Effect Revision parameter ${index} options`, 64).map((rawOption, optionIndex) => {
+          const option = codecExactRecord(rawOption, ["label", "value"], `Effect Revision option ${optionIndex}`);
+          return {
+            label: codecString(option.label, `Effect Revision option ${optionIndex} label`),
+            value: codecString(option.value, `Effect Revision option ${optionIndex} value`),
+          };
+        }),
+        description: typeof parameter.description === "string"
+          ? parameter.description
+          : (() => { throw new TypeError(`Effect Revision parameter ${index} description must be a string`); })(),
+      };
+    });
+  const presets = codecArray(definition.presets, "Effect Revision presets", 64).map((raw, index) => {
+    const preset = codecExactRecord(raw, ["id", "name", "values"], `Effect Revision preset ${index}`);
+    const values = codecRecord(preset.values, `Effect Revision preset ${index} values`);
+    return {
+      id: codecString(preset.id, `Effect Revision preset ${index} id`),
+      name: codecString(preset.name, `Effect Revision preset ${index} name`),
+      values: Object.fromEntries(Object.entries(values).map(([key, item]) => [
+        key,
+        codecEffectValue(item, `Effect Revision preset ${index} value ${key}`),
+      ])),
+    };
+  });
+  const fixture = codecExactRecord(input.fixture, ["width", "height", "timesMs", "values"], "Effect Revision fixture");
+  if (fixture.width !== 640 || fixture.height !== 360
+    || !Array.isArray(fixture.timesMs) || fixture.timesMs.length !== 3
+    || fixture.timesMs[0] !== 0 || fixture.timesMs[1] !== 500 || fixture.timesMs[2] !== 1_000) {
+    throw new TypeError("Effect Revision fixture is not canonical");
+  }
+  const fixtureValues = codecRecord(fixture.values, "Effect Revision fixture values");
+  return {
+    definition: {
+      id: codecString(definition.id, "Effect Revision definition id"),
+      name: codecString(definition.name, "Effect Revision definition name"),
+      origin: codecEnum(definition.origin, ["built-in", "custom"] as const, "Effect Revision definition origin"),
+      category: codecString(definition.category, "Effect Revision definition category"),
+      summary: codecString(definition.summary, "Effect Revision definition summary"),
+      parameters,
+      presets,
+      code: codecString(definition.code, "Effect Revision definition code"),
+    },
+    fixture: {
+      width: 640,
+      height: 360,
+      timesMs: [0, 500, 1_000],
+      values: Object.fromEntries(Object.entries(fixtureValues).map(([key, item]) => [
+        key,
+        codecEffectValue(item, `Effect Revision fixture value ${key}`),
+      ])),
+    },
+  };
+}
+
+export function decodeResourceRevisionView(value: unknown): ResourceRevisionView {
+  const input = codecExactRecord(
+    value,
+    ["protocol", "kind", "resource", "revision", "observed", "payload", "content"],
+    "Resource Revision view",
+  );
+  if (input.protocol !== "dezin.resource-revision-view.v1") {
+    throw new TypeError("Resource Revision view protocol is unsupported");
+  }
+  const kind = codecEnum(input.kind, RESOURCE_KINDS, "Resource Revision view kind");
+  const resource = decodeResource(input.resource);
+  const revision = decodeResourceRevisionViewIdentity(input.revision);
+  const observed = decodeResourceRevisionViewObservation(input.observed);
+  const payload = decodeResourceRevisionPayloadView(input.payload);
+  if (resource.kind !== kind || resource.workspaceId !== revision.workspaceId || resource.id !== revision.resourceId) {
+    throw new TypeError("Resource Revision view ownership is inconsistent");
+  }
+  const common: ResourceRevisionViewBase = {
+    protocol: "dezin.resource-revision-view.v1",
+    resource,
+    revision,
+    observed,
+    payload,
+  };
+  if (kind === "moodboard") return { ...common, kind, content: decodeMoodboardContent(input.content) };
+  if (kind === "sharingan-capture") return { ...common, kind, content: decodeSharinganContent(input.content) };
+  if (kind === "effect") return { ...common, kind, content: decodeEffectContent(input.content) };
+  if (kind === "file") {
+    const content = codecExactRecord(input.content, ["fileName", "previewKind", "text", "textTruncated"], "File Revision content");
+    return {
+      ...common,
+      kind,
+      content: {
+        fileName: codecString(content.fileName, "File Revision fileName"),
+        previewKind: codecEnum(content.previewKind, ["text", "image", "pdf", "video", "audio", "download"] as const, "File Revision previewKind"),
+        text: codecNullableText(content.text, "File Revision text"),
+        textTruncated: codecBoolean(content.textTruncated, "File Revision textTruncated"),
+      },
+    };
+  }
+  if (kind === "asset") {
+    const content = codecExactRecord(input.content, [
+      "fileName", "mediaKind", "text", "textTruncated", "width", "height", "sourceType", "sourceId",
+    ], "Asset Revision content");
+    return {
+      ...common,
+      kind,
+      content: {
+        fileName: codecString(content.fileName, "Asset Revision fileName"),
+        mediaKind: codecEnum(content.mediaKind, ["text", "image", "pdf", "video", "audio", "download"] as const, "Asset Revision mediaKind"),
+        text: codecNullableText(content.text, "Asset Revision text"),
+        textTruncated: codecBoolean(content.textTruncated, "Asset Revision textTruncated"),
+        width: codecFiniteNullable(content.width, "Asset Revision width"),
+        height: codecFiniteNullable(content.height, "Asset Revision height"),
+        sourceType: codecString(content.sourceType, "Asset Revision sourceType"),
+        sourceId: codecString(content.sourceId, "Asset Revision sourceId"),
+      },
+    };
+  }
+  if (kind === "external-reference") {
+    const content = codecExactRecord(input.content, [
+      "sourceUrl", "finalUrl", "status", "previewKind", "text", "textTruncated",
+    ], "External Reference Revision content");
+    return {
+      ...common,
+      kind,
+      content: {
+        sourceUrl: codecHttpUrl(content.sourceUrl, "External Reference sourceUrl"),
+        finalUrl: codecHttpUrl(content.finalUrl, "External Reference finalUrl"),
+        status: codecInteger(content.status, "External Reference status", 100),
+        previewKind: codecEnum(content.previewKind, ["text", "image", "pdf", "video", "audio", "download"] as const, "External Reference previewKind"),
+        text: codecNullableText(content.text, "External Reference text"),
+        textTruncated: codecBoolean(content.textTruncated, "External Reference textTruncated"),
+      },
+    };
+  }
+  const researchContent = codecExactRecord(input.content, [
+    "qualityState", "evidenceDirectionCount", "hypothesisDirectionCount", "executiveSummary", "sources", "findings",
+    "designPrinciples", "directions", "openQuestions",
+  ], "Research Revision content");
+  const decoded = decodeResearchResourceRevision({
+    protocol: "dezin.research-resource-revision-view.v1",
+    resource,
+    revision: {
+      ...revision,
+      manifestPath: "client-safe-view",
+      metadata: {},
+      provenance: {},
+      createdByRunId: null,
+    },
+    ...researchContent,
+    observed,
+  });
+  const {
+    protocol: _protocol,
+    resource: _resource,
+    revision: _revision,
+    observed: _observed,
+    ...content
+  } = decoded;
+  return { ...common, kind: "research", content };
+}
+
+export function decodeResourceRevisionHistoryPage(value: unknown): ResourceRevisionHistoryPage {
+  const input = codecExactRecord(value, ["items", "nextCursor"], "Resource Revision history page");
+  const items = decodeArray(input.items, decodeResourceRevision, "Resource Revision history items");
+  for (let index = 1; index < items.length; index += 1) {
+    const previous = items[index - 1]!;
+    const current = items[index]!;
+    if (previous.createdAt < current.createdAt
+      || (previous.createdAt === current.createdAt && previous.id <= current.id)) {
+      throw new TypeError("Resource Revision history is not in stable descending order");
+    }
+  }
+  return {
+    items,
+    nextCursor: codecNullableString(input.nextCursor, "Resource Revision history nextCursor"),
+  };
+}
+
 export function decodeConversationScope(value: unknown): ConversationScope {
   const input = codecExactRecord(value, ["type", "id"], "Conversation scope");
   return {
@@ -1543,6 +2760,66 @@ function encodeCreateResourceInput(value: CreateResourceInput): CreateResourceIn
   };
 }
 
+function encodeMaterializeResourceInput(value: MaterializeResourceInput): MaterializeResourceInput {
+  const input = codecExactRecord(value, [
+    "kind", "title", "defaultPinPolicy", "baseGraphRevision", "expectedSnapshotId", "source", "reason",
+  ], "Materialize Resource request");
+  const resource = encodeCreateResourceInput({
+    kind: input.kind as WorkspaceResourceKind,
+    title: input.title as string,
+    defaultPinPolicy: input.defaultPinPolicy as ResourcePinPolicy,
+    baseGraphRevision: input.baseGraphRevision as number,
+    expectedSnapshotId: input.expectedSnapshotId as string,
+  });
+  const source = encodeOwnedResourceSource(input.source as ResourceRevisionOwnedSource);
+  const expectedKind: WorkspaceResourceKind = source.type === "moodboard"
+    ? "moodboard"
+    : source.type === "effect"
+      ? "effect"
+      : source.type === "asset"
+        ? "asset"
+        : source.type === "external-reference"
+          ? "external-reference"
+          : "file";
+  if (resource.kind !== expectedKind) {
+    throw new TypeError("Materialize Resource kind does not match its owned source type");
+  }
+  return {
+    ...resource,
+    source,
+    reason: codecBoundedString(input.reason, "Materialize Resource reason", 2_000),
+  };
+}
+
+function encodeCreateResearchDirectionArtifactIntentInput(
+  value: CreateResearchDirectionArtifactIntentInput,
+): CreateResearchDirectionArtifactIntentInput {
+  const input = codecExactRecord(value, [
+    "selectionRequestId",
+    "artifactId",
+    "expectedResourceHeadRevisionId",
+    "expectedGraphRevision",
+    "expectedSnapshotId",
+    "expectedLayoutChecksum",
+    "confirmHypothesis",
+  ], "Research direction Artifact intent request");
+  if (typeof input.confirmHypothesis !== "boolean") {
+    throw new TypeError("Research direction confirmHypothesis must be boolean");
+  }
+  return {
+    selectionRequestId: codecString(input.selectionRequestId, "Research direction selectionRequestId"),
+    artifactId: codecString(input.artifactId, "Research direction artifactId"),
+    expectedResourceHeadRevisionId: codecString(
+      input.expectedResourceHeadRevisionId,
+      "Research direction expectedResourceHeadRevisionId",
+    ),
+    expectedGraphRevision: codecInteger(input.expectedGraphRevision, "Research direction expectedGraphRevision"),
+    expectedSnapshotId: codecString(input.expectedSnapshotId, "Research direction expectedSnapshotId"),
+    expectedLayoutChecksum: codecString(input.expectedLayoutChecksum, "Research direction expectedLayoutChecksum"),
+    confirmHypothesis: input.confirmHypothesis,
+  };
+}
+
 function encodeUpdateResourceInput(value: UpdateResourceInput): UpdateResourceInput {
   const base = codecRecord(value, "Update Resource request");
   const action = codecEnum(base.action, ["rename", "set-default-pin-policy", "archive"] as const, "Update Resource action");
@@ -1650,6 +2927,45 @@ function decodeCreateResourceResult(value: unknown): CreateResourceResult {
   };
 }
 
+function decodeMaterializeResourceResult(value: unknown): MaterializeResourceResult {
+  const input = codecExactRecord(
+    value,
+    ["resource", "node", "revision", "graph", "snapshot"],
+    "Materialize Resource response",
+  );
+  const created = decodeCreateResourceResult(input);
+  const revision = decodeResourceRevision(input.revision);
+  if (revision.resourceId !== created.resource.id
+    || revision.workspaceId !== created.resource.workspaceId
+    || revision.sequence !== 1
+    || revision.parentRevisionId !== null
+    || created.resource.headRevisionId !== revision.id) {
+    throw new TypeError("Materialize Resource response does not describe one exact first published Revision");
+  }
+  if (created.node.resourceId !== created.resource.id
+    || created.node.workspaceId !== created.resource.workspaceId) {
+    throw new TypeError("Materialize Resource node ownership is inconsistent");
+  }
+  const graph = codecRecord(created.graph, "Materialize Resource graph");
+  if (codecString(graph.workspaceId, "Materialize Resource graph workspaceId") !== created.resource.workspaceId
+    || !codecArray(graph.nodes, "Materialize Resource graph nodes", 10_000).some((candidate) => {
+      const node = codecRecord(candidate, "Materialize Resource graph node");
+      return node.id === created.node.id && node.resourceId === created.resource.id && node.kind === "resource";
+    })) {
+    throw new TypeError("Materialize Resource graph does not contain its exact Resource node");
+  }
+  const snapshot = codecRecord(created.snapshot, "Materialize Resource Snapshot");
+  const resourceRevisions = codecRecord(
+    snapshot.resourceRevisions,
+    "Materialize Resource Snapshot Resource revisions",
+  );
+  if (codecString(snapshot.workspaceId, "Materialize Resource Snapshot workspaceId") !== created.resource.workspaceId
+    || resourceRevisions[created.resource.id] !== revision.id) {
+    throw new TypeError("Materialize Resource Snapshot does not pin its exact first Revision");
+  }
+  return { ...created, revision };
+}
+
 function decodeUpdateResourceResult(value: unknown): UpdateResourceResult {
   const input = codecRecord(value, "Update Resource response");
   const action = codecEnum(input.action, ["rename", "set-default-pin-policy", "archive"] as const, "Update Resource response action");
@@ -1671,17 +2987,41 @@ function encodeRunInput(input: RunInput): RunInput {
   };
 }
 
-/** Parse one SSE block ("data: {...}" possibly multi-line) into a RunEvent. */
-export function parseSseBlock(block: string): RunEvent | null {
+interface ParsedSseBlock {
+  event: string | null;
+  data: unknown;
+}
+
+function parseSseEnvelope(block: string): ParsedSseBlock | null {
+  const eventLine = block
+    .split("\n")
+    .find((line) => line.startsWith("event:"));
   const dataLines = block
     .split("\n")
     .filter((l) => l.startsWith("data:"))
     .map((l) => (l.startsWith("data: ") ? l.slice(6) : l.slice(5)));
   if (dataLines.length === 0) return null;
   try {
-    return JSON.parse(dataLines.join("\n")) as RunEvent;
+    return {
+      event: eventLine === undefined ? null : eventLine.slice(6).trim() || null,
+      data: JSON.parse(dataLines.join("\n")) as unknown,
+    };
   } catch {
     return null;
+  }
+}
+
+/** Parse one SSE block ("data: {...}" possibly multi-line) into a RunEvent. */
+export function parseSseBlock(block: string): RunEvent | null {
+  return (parseSseEnvelope(block)?.data as RunEvent | undefined) ?? null;
+}
+
+export class GenerationPlanStreamError extends Error {
+  readonly retryable = false;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "GenerationPlanStreamError";
   }
 }
 
@@ -1827,6 +3167,23 @@ export interface ApiClient {
   captureProjectCover(id: string, options?: { release?: boolean }): Promise<{ captured: boolean; reason?: string }>;
   getProject(id: string): Promise<Project>;
   getWorkspace(projectId: string): Promise<ProjectWorkspacePayload>;
+  workspaceAgentTurn(
+    projectId: string,
+    input: WorkspaceAgentTurnInput,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceProposal>;
+  artifactAgentTurn(
+    projectId: string,
+    artifactId: string,
+    input: ScopedAgentTurnInput,
+    signal?: AbortSignal,
+  ): Promise<ScopedAgentTurnReceipt>;
+  resourceAgentTurn(
+    projectId: string,
+    resourceId: string,
+    input: ScopedAgentTurnInput,
+    signal?: AbortSignal,
+  ): Promise<ScopedAgentTurnReceipt>;
   listWorkspaceProposals(projectId: string): Promise<WorkspaceProposal[]>;
   getWorkspaceProposal(projectId: string, proposalId: string): Promise<WorkspaceProposal>;
   createWorkspaceProposal(projectId: string, input: CreateWorkspaceProposalInput): Promise<WorkspaceProposal>;
@@ -1837,13 +3194,57 @@ export interface ApiClient {
     mode: WorkspaceProposalApprovalMode,
   ): Promise<ApprovedProposalResult>;
   rejectWorkspaceProposal(projectId: string, proposalId: string): Promise<WorkspaceProposal>;
+  listGenerationPlans(projectId: string): Promise<GenerationPlan[]>;
+  getLatestScopedArtifactPlanId(
+    projectId: string,
+    artifactId: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
+  getGenerationPlan(projectId: string, planId: string): Promise<GenerationPlanDetail>;
+  streamGenerationPlanEvents(
+    projectId: string,
+    planId: string,
+    signal?: AbortSignal,
+    options?: { after?: number },
+  ): AsyncGenerator<GenerationPlanEvent>;
+  cancelGenerationPlan(projectId: string, planId: string): Promise<GenerationPlanDetail>;
+  retryGenerationTask(
+    projectId: string,
+    planId: string,
+    taskId: string,
+    mode: GenerationTaskRetryMode,
+  ): Promise<GenerationPlanDetail>;
   applyWorkspaceGraphCommands(projectId: string, input: GraphCommandRequest): Promise<WorkspaceGraphMutationResult>;
   saveWorkspaceLayout(projectId: string, input: WorkspaceLayoutPatch): Promise<WorkspaceLayout>;
   listResources(projectId: string): Promise<Resource[]>;
   createResource(projectId: string, input: CreateResourceInput): Promise<CreateResourceResult>;
+  materializeResource(projectId: string, input: MaterializeResourceInput): Promise<MaterializeResourceResult>;
   getResource(projectId: string, resourceId: string): Promise<Resource>;
   updateResource(projectId: string, resourceId: string, input: UpdateResourceInput): Promise<UpdateResourceResult>;
   listResourceRevisions(projectId: string, resourceId: string): Promise<ResourceRevision[]>;
+  listResourceRevisionHistory(
+    projectId: string,
+    resourceId: string,
+    options?: { limit?: number; cursor?: string },
+  ): Promise<ResourceRevisionHistoryPage>;
+  getResourceRevisionView(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+  ): Promise<ResourceRevisionView>;
+  getResourceRevisionBlob(path: string, signal?: AbortSignal): Promise<Blob>;
+  getResearchResourceRevision(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+  ): Promise<ResearchResourceRevisionView>;
+  createResearchDirectionArtifactIntent(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+    directionId: string,
+    input: CreateResearchDirectionArtifactIntentInput,
+  ): Promise<ApprovedResearchDirectionArtifactIntentResult>;
   createResourceRevision(projectId: string, resourceId: string, input: CreateResourceRevisionInput): Promise<ResourceRevision>;
   publishResourceRevision(
     projectId: string,
@@ -1855,6 +3256,23 @@ export interface ApiClient {
   listArtifactTracks(projectId: string, artifactId: string): Promise<ArtifactTrack[]>;
   listArtifactRevisions(projectId: string, artifactId: string): Promise<ArtifactRevision[]>;
   getArtifactRevision(projectId: string, artifactId: string, revisionId: string): Promise<ArtifactRevision>;
+  listArtifactRevisionHistory(
+    projectId: string,
+    artifactId: string,
+    options?: { limit?: number; cursor?: string },
+  ): Promise<ArtifactRevisionHistoryPage>;
+  restoreArtifactRevision(
+    projectId: string,
+    artifactId: string,
+    revisionId: string,
+    input: ArtifactVersionActionExpectation,
+  ): Promise<ArtifactVersionActionResult>;
+  forkArtifactTrack(
+    projectId: string,
+    artifactId: string,
+    revisionId: string,
+    input: ForkArtifactTrackRequest,
+  ): Promise<ArtifactVersionActionResult>;
   applyArtifactMutation(projectId: string, artifactId: string, input: ArtifactMutationInput): Promise<ArtifactMutationResult>;
   getArtifactThumbnail(projectId: string, artifactId: string, revisionId: string, signal?: AbortSignal): Promise<Blob>;
   artifactThumbnailUrl(projectId: string, artifactId: string, revisionId: string): string;
@@ -2019,13 +3437,24 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return res.blob();
   }
 
-  async function* consumeSse(res: Response): AsyncGenerator<RunEvent> {
+  async function* consumeSse<T = RunEvent>(
+    res: Response,
+    options: { rejectErrorEvents?: boolean } = {},
+  ): AsyncGenerator<T> {
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
     if (!res.body) {
       // Environments without a streaming body: parse the whole text.
       for (const block of (await res.text()).split("\n\n")) {
-        const ev = parseSseBlock(block);
-        if (ev) yield ev;
+        const envelope = parseSseEnvelope(block);
+        if (envelope?.event === "error" && options.rejectErrorEvents) {
+          const payload = envelope.data as { error?: unknown };
+          throw new GenerationPlanStreamError(
+            typeof payload?.error === "string" && payload.error.trim()
+              ? payload.error.trim()
+              : "Generation Plan updates are unavailable.",
+          );
+        }
+        if (envelope) yield envelope.data as T;
       }
       return;
     }
@@ -2040,15 +3469,31 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       while ((idx = buffer.indexOf("\n\n")) >= 0) {
         const block = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        const ev = parseSseBlock(block);
-        if (ev) yield ev;
+        const envelope = parseSseEnvelope(block);
+        if (envelope?.event === "error" && options.rejectErrorEvents) {
+          const payload = envelope.data as { error?: unknown };
+          throw new GenerationPlanStreamError(
+            typeof payload?.error === "string" && payload.error.trim()
+              ? payload.error.trim()
+              : "Generation Plan updates are unavailable.",
+          );
+        }
+        if (envelope) yield envelope.data as T;
       }
     }
     buffer += decoder.decode();
     const tail = buffer.trim();
     if (tail) {
-      const ev = parseSseBlock(tail);
-      if (ev) yield ev;
+      const envelope = parseSseEnvelope(tail);
+      if (envelope?.event === "error" && options.rejectErrorEvents) {
+        const payload = envelope.data as { error?: unknown };
+        throw new GenerationPlanStreamError(
+          typeof payload?.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : "Generation Plan updates are unavailable.",
+        );
+      }
+      if (envelope) yield envelope.data as T;
     }
   }
 
@@ -2059,6 +3504,21 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   async function* reattachRun(runId: string, signal?: AbortSignal, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
     const after = typeof options.afterSeq === "number" && Number.isFinite(options.afterSeq) ? `?after=${encodeURIComponent(String(options.afterSeq))}` : "";
     yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, initWithDaemonToken({ signal })));
+  }
+
+  async function* streamGenerationPlanEvents(
+    projectId: string,
+    planId: string,
+    signal?: AbortSignal,
+    options: { after?: number } = {},
+  ): AsyncGenerator<GenerationPlanEvent> {
+    const after = typeof options.after === "number" && Number.isSafeInteger(options.after) && options.after >= 0
+      ? `?after=${enc(String(options.after))}`
+      : "";
+    yield* consumeSse<GenerationPlanEvent>(await f(
+      `${baseUrl}/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/events${after}`,
+      initWithDaemonToken({ signal }),
+    ), { rejectErrorEvents: true });
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
@@ -2112,6 +3572,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
 
   return {
     scanAgentsStream,
+    streamGenerationPlanEvents,
     listProjects: () => json<Project[]>("/api/projects"),
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
@@ -2137,6 +3598,23 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<{ captured: boolean; reason?: string }>(`/api/projects/${enc(id)}/cover/capture${options?.release ? "?release=1" : ""}`, { method: "POST" }),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
     getWorkspace: (projectId) => json<ProjectWorkspacePayload>(`/api/projects/${enc(projectId)}/workspace`),
+    workspaceAgentTurn: (projectId, input, signal) =>
+      json<WorkspaceProposal>(
+        `/api/projects/${enc(projectId)}/workspace/agent/turns`,
+        { ...jsonInit("POST", input), signal },
+      ),
+    artifactAgentTurn: (projectId, artifactId, input, signal) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/agent/turns`,
+        decodeScopedAgentTurnReceipt,
+        { ...jsonInit("POST", input), signal },
+      ),
+    resourceAgentTurn: (projectId, resourceId, input, signal) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/agent/turns`,
+        decodeScopedAgentTurnReceipt,
+        { ...jsonInit("POST", input), signal },
+      ),
     listWorkspaceProposals: (projectId) =>
       json<WorkspaceProposal[]>(`/api/projects/${enc(projectId)}/workspace/proposals`),
     getWorkspaceProposal: (projectId, proposalId) =>
@@ -2149,6 +3627,25 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<ApprovedProposalResult>(`/api/projects/${enc(projectId)}/workspace/proposals/${enc(proposalId)}/approve`, jsonInit("POST", { mode })),
     rejectWorkspaceProposal: (projectId, proposalId) =>
       json<WorkspaceProposal>(`/api/projects/${enc(projectId)}/workspace/proposals/${enc(proposalId)}/reject`, jsonInit("POST", {})),
+    listGenerationPlans: (projectId) =>
+      json<GenerationPlan[]>(`/api/projects/${enc(projectId)}/workspace/plans`),
+    getLatestScopedArtifactPlanId: (projectId, artifactId, signal) =>
+      json<{ planId: string | null }>(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/agent/latest-plan`,
+        signal === undefined ? undefined : { signal },
+      ).then(({ planId }) => planId),
+    getGenerationPlan: (projectId, planId) =>
+      json<GenerationPlanDetail>(`/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}`),
+    cancelGenerationPlan: (projectId, planId) =>
+      json<GenerationPlanDetail>(
+        `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/cancel`,
+        jsonInit("POST", {}),
+      ),
+    retryGenerationTask: (projectId, planId, taskId, mode) =>
+      json<GenerationPlanDetail>(
+        `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/tasks/${enc(taskId)}/retry`,
+        jsonInit("POST", { mode }),
+      ),
     applyWorkspaceGraphCommands: (projectId, input) =>
       json<WorkspaceGraphMutationResult>(`/api/projects/${enc(projectId)}/workspace/graph/commands`, jsonInit("POST", input)),
     saveWorkspaceLayout: (projectId, input) =>
@@ -2160,6 +3657,12 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         `/api/projects/${enc(projectId)}/resources`,
         decodeCreateResourceResult,
         jsonInit("POST", encodeCreateResourceInput(input)),
+      ),
+    materializeResource: (projectId, input) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/materialize`,
+        decodeMaterializeResourceResult,
+        jsonInit("POST", encodeMaterializeResourceInput(input)),
       ),
     getResource: (projectId, resourceId) =>
       jsonDecoded(`/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`, decodeResource),
@@ -2173,6 +3676,37 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       jsonDecoded(
         `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions`,
         (value) => decodeArray(value, decodeResourceRevision, "Resource Revisions"),
+      ),
+    listResourceRevisionHistory: (projectId, resourceId, options = {}) => {
+      const query: string[] = [];
+      if (options.limit !== undefined) query.push(`limit=${enc(String(options.limit))}`);
+      if (options.cursor !== undefined) query.push(`cursor=${enc(options.cursor)}`);
+      const suffix = query.length > 0 ? `?${query.join("&")}` : "";
+      return jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/history${suffix}`,
+        decodeResourceRevisionHistoryPage,
+      );
+    },
+    getResourceRevisionView: (projectId, resourceId, revisionId) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}`,
+        decodeResourceRevisionView,
+      ),
+    getResourceRevisionBlob: (path, signal) => {
+      if (!/^\/api\/projects\/[^/?#]+\/resources\/[^/?#]+\/revisions\/[^/?#]+\/(?:payload|embedded-assets\/[^/?#]+)(?:\?download=1)?$/.test(path)) {
+        throw new TypeError("Resource bytes must use a protected Resource Revision byte path");
+      }
+      return blob(path, signal === undefined ? undefined : { signal });
+    },
+    getResearchResourceRevision: (projectId, resourceId, revisionId) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}/research`,
+        decodeResearchResourceRevision,
+      ),
+    createResearchDirectionArtifactIntent: (projectId, resourceId, revisionId, directionId, input) =>
+      json<ApprovedResearchDirectionArtifactIntentResult>(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}/directions/${enc(directionId)}/artifact-intents`,
+        jsonInit("POST", encodeCreateResearchDirectionArtifactIntentInput(input)),
       ),
     createResourceRevision: (projectId, resourceId, input) =>
       jsonDecoded(
@@ -2194,6 +3728,25 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<ArtifactRevision[]>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions`),
     getArtifactRevision: (projectId, artifactId, revisionId) =>
       json<ArtifactRevision>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}`),
+    listArtifactRevisionHistory: (projectId, artifactId, options = {}) => {
+      const query: string[] = [];
+      if (options.limit !== undefined) query.push(`limit=${enc(String(options.limit))}`);
+      if (options.cursor !== undefined) query.push(`cursor=${enc(options.cursor)}`);
+      const suffix = query.length > 0 ? `?${query.join("&")}` : "";
+      return json<ArtifactRevisionHistoryPage>(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/history${suffix}`,
+      );
+    },
+    restoreArtifactRevision: (projectId, artifactId, revisionId, input) =>
+      json<ArtifactVersionActionResult>(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}/restore`,
+        jsonInit("POST", input),
+      ),
+    forkArtifactTrack: (projectId, artifactId, revisionId, input) =>
+      json<ArtifactVersionActionResult>(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}/fork-track`,
+        jsonInit("POST", input),
+      ),
     applyArtifactMutation: (projectId, artifactId, input) =>
       json<ArtifactMutationResult>(
         `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/mutations`,

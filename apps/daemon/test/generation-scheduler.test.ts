@@ -8,7 +8,11 @@ import {
   type GenerationTaskAttemptClaim,
   type GenerationTaskRecoverySummary,
 } from "../../../packages/core/src/index.ts";
-import { GenerationScheduler } from "../src/orchestration/generation-scheduler.ts";
+import {
+  GenerationScheduler,
+  GenerationTaskCancellationRequestedError,
+  type GenerationSchedulerOptions,
+} from "../src/orchestration/generation-scheduler.ts";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -167,6 +171,456 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 50
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
 }
+
+function claimWithTimeout(timeoutMs: number): GenerationTaskAttemptClaim {
+  const claim = claimedAttemptFixture();
+  return {
+    ...claim,
+    task: {
+      ...claim.task,
+      resourceLimits: {
+        ...claim.task.resourceLimits,
+        timeoutMs,
+      },
+    },
+  };
+}
+
+function deadlineSchedulerHarness(input: {
+  timeoutMs: number;
+  heartbeatMs?: number;
+  abortSettlementMs?: number;
+  execute(claim: GenerationTaskAttemptClaim, signal: AbortSignal): Promise<unknown>;
+  heartbeat?: (
+    claim: GenerationTaskAttemptClaim,
+    heartbeatCall: number,
+  ) => GenerationTaskAttemptClaim;
+}) {
+  const attempt = queuedAttemptFixture();
+  const claim = claimWithTimeout(input.timeoutMs);
+  const executionSignals: AbortSignal[] = [];
+  const deadlineAcknowledgements: Array<{ claim: GenerationTaskAttemptClaim; deadline: unknown }> = [];
+  const cancellationAcknowledgements: unknown[] = [];
+  let admitted = false;
+  let heartbeatCalls = 0;
+  let releaseCalls = 0;
+  const executor = {
+    async execute(inputClaim: GenerationTaskAttemptClaim, signal: AbortSignal): Promise<unknown> {
+      executionSignals.push(signal);
+      return input.execute(inputClaim, signal);
+    },
+    async acknowledgeDeadlineExceeded(
+      inputClaim: GenerationTaskAttemptClaim,
+      deadline: unknown,
+    ): Promise<void> {
+      deadlineAcknowledgements.push({ claim: inputClaim, deadline });
+    },
+    async acknowledgeCancellation(
+      inputClaim: GenerationTaskAttemptClaim,
+      cancellation: unknown,
+    ): Promise<void> {
+      assert.strictEqual(inputClaim, claim);
+      cancellationAcknowledgements.push(cancellation);
+    },
+  };
+  const schedulerOptions: GenerationSchedulerOptions = {
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => admitted ? [] : [attempt],
+      tryClaimGenerationTaskAttempt: () => {
+        admitted = true;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return input.heartbeat?.(claim, heartbeatCalls) ?? claim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor,
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: input.heartbeatMs ?? 20_000,
+    pollMs: 1_000,
+    ...(input.abortSettlementMs === undefined ? {} : { abortSettlementMs: input.abortSettlementMs }),
+  };
+  const scheduler = new GenerationScheduler(schedulerOptions);
+  return {
+    scheduler,
+    claim,
+    executionSignals,
+    deadlineAcknowledgements,
+    cancellationAcknowledgements,
+    heartbeatCalls: () => heartbeatCalls,
+    releaseCalls: () => releaseCalls,
+  };
+}
+
+test("GenerationScheduler enforces the claimed frozen timeout for a hanging executor", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateSettlement = deferred();
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 20,
+    execute: async () => {
+      executionStarted.resolve();
+      await allowLateSettlement.promise;
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    await waitFor(
+      () => harness.deadlineAcknowledgements.length === 1,
+      "the frozen Generation Task timeout did not terminalize the hanging executor",
+    );
+
+    assert.equal(harness.executionSignals.length, 1);
+    assert.equal(harness.executionSignals[0]?.aborted, true);
+    const reason = harness.executionSignals[0]?.reason as Record<string, unknown>;
+    assert.equal(reason?.name, "GenerationTaskDeadlineExceededError");
+    assert.equal(reason?.failureClass, "agent-transport");
+    assert.equal(reason?.timeoutMs, 20);
+    assert.equal(Object.isFrozen(reason), true);
+    assert.strictEqual(harness.deadlineAcknowledgements[0]?.claim, harness.claim);
+    assert.strictEqual(harness.deadlineAcknowledgements[0]?.deadline, reason);
+    assert.equal(harness.heartbeatCalls(), 1, "timeout persistence must first prove the exact lease");
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateSettlement.resolve();
+    await harness.scheduler.stop();
+  }
+});
+
+test("GenerationScheduler stops heartbeats after the frozen deadline wins", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateSettlement = deferred();
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 35,
+    heartbeatMs: 5,
+    execute: async () => {
+      executionStarted.resolve();
+      await allowLateSettlement.promise;
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    await waitFor(
+      () => harness.deadlineAcknowledgements.length === 1,
+      "deadline failure was not persisted",
+    );
+    const callsAtDeadline = harness.heartbeatCalls();
+    assert.ok(callsAtDeadline >= 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    assert.equal(harness.heartbeatCalls(), callsAtDeadline);
+    assert.equal(harness.deadlineAcknowledgements.length, 1);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateSettlement.resolve();
+    await harness.scheduler.stop();
+  }
+});
+
+test("GenerationScheduler does not persist a timeout after the exact lease is lost", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateSettlement = deferred();
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 20,
+    execute: async () => {
+      executionStarted.resolve();
+      await allowLateSettlement.promise;
+    },
+    heartbeat() {
+      throw new GenerationTaskLeaseFenceError(
+        "task-page-home",
+        1,
+        "the timeout no longer owns this Attempt",
+      );
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    await waitFor(() => harness.releaseCalls() === 1, "the fenced timeout did not settle");
+
+    assert.equal(harness.executionSignals[0]?.aborted, true);
+    assert.equal(harness.heartbeatCalls(), 1);
+    assert.equal(harness.deadlineAcknowledgements.length, 0);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateSettlement.resolve();
+    await harness.scheduler.stop();
+  }
+});
+
+test("GenerationScheduler fences a late executor resolution from any post-timeout write", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateResolution = deferred();
+  let lateWrites = 0;
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 20,
+    execute: async (_claim, signal) => {
+      executionStarted.resolve();
+      await allowLateResolution.promise;
+      if (!signal.aborted) lateWrites += 1;
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    await waitFor(
+      () => harness.deadlineAcknowledgements.length === 1,
+      "deadline failure was not persisted before the executor resolved",
+    );
+    allowLateResolution.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(lateWrites, 0);
+    assert.equal(harness.deadlineAcknowledgements.length, 1);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateResolution.resolve();
+    await harness.scheduler.stop();
+  }
+});
+
+test("GenerationScheduler clears the frozen deadline after normal execution", async () => {
+  const executionFinished = deferred();
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 40,
+    heartbeatMs: 20,
+    execute: async () => {
+      executionFinished.resolve();
+    },
+  });
+
+  harness.scheduler.start();
+  await harness.scheduler.tick();
+  await executionFinished.promise;
+  await waitFor(() => harness.releaseCalls() === 1, "normal execution did not settle");
+  await new Promise<void>((resolve) => setTimeout(resolve, 60));
+  await harness.scheduler.stop();
+
+  assert.equal(harness.executionSignals[0]?.aborted, false);
+  assert.equal(harness.deadlineAcknowledgements.length, 0);
+  assert.equal(harness.heartbeatCalls(), 0);
+  assert.equal(harness.releaseCalls(), 1);
+});
+
+test("GenerationScheduler keeps durable cancellation authoritative when it wins before the deadline", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const cleanupStarted = deferred();
+  const allowCleanup = deferred();
+  let durablyCancelled = false;
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 35,
+    execute: (_claim, signal) => {
+      executionStarted.resolve();
+      return new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => {
+          cleanupStarted.resolve();
+          void allowCleanup.promise.then(resolve);
+        }, { once: true });
+      });
+    },
+    heartbeat(claim) {
+      if (!durablyCancelled) return claim;
+      return {
+        ...claim,
+        task: { ...claim.task, status: "cancel-requested" },
+        attempt: { ...claim.attempt, status: "cancel-requested" },
+      };
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    durablyCancelled = true;
+    harness.scheduler.requestCancellation("project-1", harness.claim.attempt.planId);
+    await cleanupStarted.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 55));
+    assert.equal(harness.deadlineAcknowledgements.length, 0);
+    assert.equal(harness.cancellationAcknowledgements.length, 0);
+
+    allowCleanup.resolve();
+    await waitFor(
+      () => harness.cancellationAcknowledgements.length === 1,
+      "durable cancellation was not acknowledged after cleanup",
+    );
+    assert.deepEqual(harness.cancellationAcknowledgements, [{
+      reason: "plan-cancelled",
+      planId: harness.claim.attempt.planId,
+      blockedByTaskId: null,
+    }]);
+    assert.equal(harness.deadlineAcknowledgements.length, 0);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowCleanup.resolve();
+    await harness.scheduler.stop();
+  }
+});
+
+test("GenerationScheduler keeps the deadline authoritative over a cancellation requested from its abort", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  let durablyCancelled = false;
+  let harness!: ReturnType<typeof deadlineSchedulerHarness>;
+  harness = deadlineSchedulerHarness({
+    timeoutMs: 20,
+    execute: (_claim, signal) => {
+      executionStarted.resolve();
+      return new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => {
+          durablyCancelled = true;
+          harness.scheduler.requestCancellation("project-1", harness.claim.attempt.planId);
+          resolve();
+        }, { once: true });
+      });
+    },
+    heartbeat(claim) {
+      if (!durablyCancelled) return claim;
+      return {
+        ...claim,
+        task: { ...claim.task, status: "cancel-requested" },
+        attempt: { ...claim.attempt, status: "cancel-requested" },
+      };
+    },
+  });
+
+  harness.scheduler.start();
+  await harness.scheduler.tick();
+  await executionStarted.promise;
+  await waitFor(
+    () => harness.deadlineAcknowledgements.length === 1,
+    "a later cancellation replaced the already-fired deadline",
+  );
+  await harness.scheduler.stop();
+
+  assert.equal(harness.executionSignals[0]?.reason?.name, "GenerationTaskDeadlineExceededError");
+  assert.equal(harness.heartbeatCalls(), 1);
+  assert.equal(harness.deadlineAcknowledgements.length, 1);
+  assert.equal(harness.cancellationAcknowledgements.length, 0);
+  assert.equal(harness.releaseCalls(), 1);
+});
+
+test("GenerationScheduler stop is bounded when an executor ignores the supervisor abort", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateSettlement = deferred();
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 1_000,
+    abortSettlementMs: 20,
+    execute: async () => {
+      executionStarted.resolve();
+      await allowLateSettlement.promise;
+    },
+  });
+  let stopPromise: Promise<void> | null = null;
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    stopPromise = harness.scheduler.stop();
+    const stoppedWithinBound = await Promise.race([
+      stopPromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+
+    assert.equal(stoppedWithinBound, true);
+    assert.equal(harness.executionSignals[0]?.aborted, true);
+    assert.equal(harness.deadlineAcknowledgements.length, 0);
+    assert.equal(harness.cancellationAcknowledgements.length, 0);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateSettlement.resolve();
+    await stopPromise;
+  }
+});
+
+test("GenerationScheduler durably acknowledges cancellation when its executor ignores abort", {
+  timeout: 1_500,
+}, async () => {
+  const executionStarted = deferred();
+  const allowLateSettlement = deferred();
+  let durablyCancelled = false;
+  const harness = deadlineSchedulerHarness({
+    timeoutMs: 1_000,
+    abortSettlementMs: 20,
+    execute: async () => {
+      executionStarted.resolve();
+      await allowLateSettlement.promise;
+    },
+    heartbeat(claim) {
+      if (!durablyCancelled) return claim;
+      return {
+        ...claim,
+        task: { ...claim.task, status: "cancel-requested" },
+        attempt: { ...claim.attempt, status: "cancel-requested" },
+      };
+    },
+  });
+
+  try {
+    harness.scheduler.start();
+    await harness.scheduler.tick();
+    await executionStarted.promise;
+    durablyCancelled = true;
+    harness.scheduler.requestCancellation("project-1", harness.claim.attempt.planId);
+    await waitFor(
+      () => harness.cancellationAcknowledgements.length === 1,
+      "hanging executor prevented durable cancellation acknowledgement",
+    );
+
+    assert.deepEqual(harness.cancellationAcknowledgements, [{
+      reason: "plan-cancelled",
+      planId: harness.claim.attempt.planId,
+      blockedByTaskId: null,
+    }]);
+    assert.equal(harness.deadlineAcknowledgements.length, 0);
+    assert.equal(harness.releaseCalls(), 1);
+  } finally {
+    allowLateSettlement.resolve();
+    await harness.scheduler.stop();
+  }
+});
 
 test("GenerationScheduler coalesces startup-barrier wakeups without touching durable admission before start", async () => {
   const attempt = queuedAttemptFixture();
@@ -796,13 +1250,19 @@ test("GenerationScheduler stops renewing and aborts a cancel-requested Attempt",
   const claim = claimedAttemptFixture(attempt);
   const cancelRequestedClaim: GenerationTaskAttemptClaim = {
     ...claim,
-    task: { ...claim.task, status: "cancel-requested" },
+    task: {
+      ...claim.task,
+      status: "cancel-requested",
+      blockedReason: "Cancellation requested by failed prerequisite task-failed",
+      blockedByTaskId: "task-failed",
+    },
     attempt: { ...claim.attempt, status: "cancel-requested" },
   };
   const executionStarted = deferred();
   const executionAborted = deferred<unknown>();
   let heartbeatCalls = 0;
   let releaseCalls = 0;
+  let acknowledgedCancellation: unknown = null;
   const scheduler = new GenerationScheduler({
     store: {
       recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
@@ -836,6 +1296,10 @@ test("GenerationScheduler stops renewing and aborts a cancel-requested Attempt",
           }, { once: true });
         });
       },
+      async acknowledgeCancellation(input, cancellation) {
+        assert.strictEqual(input, claim);
+        acknowledgedCancellation = cancellation;
+      },
     },
     events: { notify() {} },
     projectIdForWorkspace: () => "project-1",
@@ -859,8 +1323,332 @@ test("GenerationScheduler stops renewing and aborts a cancel-requested Attempt",
   await scheduler.stop();
 
   assert.match(String(reason), /cancellation requested/i);
+  assert.deepEqual(acknowledgedCancellation, {
+    reason: "prerequisite-failed",
+    planId: claim.attempt.planId,
+    blockedByTaskId: "task-failed",
+  });
   assert.equal(heartbeatCalls, 1);
   assert.equal(releaseCalls, 1);
+});
+
+test("GenerationScheduler immediately acknowledges a scoped user cancellation without treating shutdown as cancel", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const cancelRequestedClaim: GenerationTaskAttemptClaim = {
+    ...claim,
+    task: { ...claim.task, status: "cancel-requested" },
+    attempt: { ...claim.attempt, status: "cancel-requested" },
+  };
+  const executionStarted = deferred();
+  const executionAborted = deferred<unknown>();
+  const cancellationAcknowledged = deferred();
+  let admitted = false;
+  let heartbeatCalls = 0;
+  let releaseCalls = 0;
+  let acknowledgedCancellation: unknown = null;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => admitted ? [] : [attempt],
+      tryClaimGenerationTaskAttempt: () => {
+        admitted = true;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return cancelRequestedClaim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      execute(_claim, signal) {
+        executionStarted.resolve();
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            executionAborted.resolve(signal.reason);
+            reject(signal.reason);
+          }, { once: true });
+        });
+      },
+      async acknowledgeCancellation(input, cancellation) {
+        assert.strictEqual(input, claim);
+        acknowledgedCancellation = cancellation;
+        cancellationAcknowledged.resolve();
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: 20_000,
+  });
+
+  scheduler.start();
+  await scheduler.tick();
+  await executionStarted.promise;
+  scheduler.requestCancellation("other-project", claim.attempt.planId);
+  assert.equal(heartbeatCalls, 0, "a foreign Project cannot abort the live claim");
+  scheduler.requestCancellation("project-1", claim.attempt.planId);
+  const reason = await executionAborted.promise;
+  await cancellationAcknowledged.promise;
+  await waitFor(() => releaseCalls === 1, "acknowledged cancellation did not settle claim cleanup");
+  await scheduler.stop();
+
+  assert.ok(reason instanceof GenerationTaskCancellationRequestedError);
+  assert.deepEqual(acknowledgedCancellation, {
+    reason: "plan-cancelled",
+    planId: claim.attempt.planId,
+    blockedByTaskId: null,
+  });
+  assert.equal(heartbeatCalls, 1, "immediate cancellation observes the exact durable lease once");
+  assert.equal(releaseCalls, 1);
+});
+
+test("GenerationScheduler acknowledges a cross-process publication fence after observing durable cancellation exactly once", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const cancelRequestedClaim: GenerationTaskAttemptClaim = {
+    ...claim,
+    task: { ...claim.task, status: "cancel-requested" },
+    attempt: { ...claim.attempt, status: "cancel-requested" },
+  };
+  const publicationStarted = deferred();
+  const allowPublicationFence = deferred();
+  let admitted = false;
+  let durablyCancelled = false;
+  let heartbeatCalls = 0;
+  let acknowledgementCalls = 0;
+  let releaseCalls = 0;
+  let reportedErrors = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => admitted ? [] : [attempt],
+      tryClaimGenerationTaskAttempt: () => {
+        admitted = true;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return durablyCancelled ? cancelRequestedClaim : claim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      async execute() {
+        publicationStarted.resolve();
+        await allowPublicationFence.promise;
+        throw new GenerationTaskLeaseFenceError(
+          claim.attempt.taskId,
+          claim.attempt.attempt,
+          "durable cancellation fenced publication",
+        );
+      },
+      async acknowledgeCancellation(input, cancellation) {
+        assert.strictEqual(input, claim);
+        acknowledgementCalls += 1;
+        assert.deepEqual(cancellation, {
+          reason: "plan-cancelled",
+          planId: claim.attempt.planId,
+          blockedByTaskId: null,
+        });
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: 20_000,
+    onError: () => {
+      reportedErrors += 1;
+    },
+  });
+
+  scheduler.start();
+  await scheduler.tick();
+  await publicationStarted.promise;
+  durablyCancelled = true;
+  allowPublicationFence.resolve();
+  await waitFor(() => releaseCalls === 1, "the publication-fenced cancellation did not settle");
+  await scheduler.stop();
+
+  assert.equal(heartbeatCalls, 1, "the scheduler must observe the exact durable lease before expiry");
+  assert.equal(acknowledgementCalls, 1);
+  assert.equal(reportedErrors, 0);
+});
+
+test("GenerationScheduler does not acknowledge shutdown alone as durable cancellation", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const executionStarted = deferred();
+  let admitted = false;
+  let heartbeatCalls = 0;
+  let acknowledgementCalls = 0;
+  let releaseCalls = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => admitted ? [] : [attempt],
+      tryClaimGenerationTaskAttempt: () => {
+        admitted = true;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return claim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      execute(_input, signal) {
+        executionStarted.resolve();
+        return new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+      async acknowledgeCancellation() {
+        acknowledgementCalls += 1;
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: 20_000,
+  });
+
+  scheduler.start();
+  await scheduler.tick();
+  await executionStarted.promise;
+  await scheduler.stop();
+
+  assert.equal(heartbeatCalls, 0);
+  assert.equal(acknowledgementCalls, 0);
+});
+
+test("GenerationScheduler acknowledges durable cancellation that arrives during shutdown cleanup", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const cancelRequestedClaim: GenerationTaskAttemptClaim = {
+    ...claim,
+    task: { ...claim.task, status: "cancel-requested" },
+    attempt: { ...claim.attempt, status: "cancel-requested" },
+  };
+  const executionStarted = deferred();
+  const cleanupStarted = deferred();
+  const allowCleanup = deferred();
+  let admitted = false;
+  let durablyCancelled = false;
+  let heartbeatCalls = 0;
+  let acknowledgementCalls = 0;
+  let releaseCalls = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => admitted ? [] : [attempt],
+      tryClaimGenerationTaskAttempt: () => {
+        admitted = true;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return durablyCancelled ? cancelRequestedClaim : claim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      execute(_input, signal) {
+        executionStarted.resolve();
+        return new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            cleanupStarted.resolve();
+            void allowCleanup.promise.then(resolve);
+          }, { once: true });
+        });
+      },
+      async acknowledgeCancellation(input, cancellation) {
+        assert.strictEqual(input, claim);
+        acknowledgementCalls += 1;
+        assert.deepEqual(cancellation, {
+          reason: "plan-cancelled",
+          planId: claim.attempt.planId,
+          blockedByTaskId: null,
+        });
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: 20_000,
+  });
+
+  scheduler.start();
+  await scheduler.tick();
+  await executionStarted.promise;
+  const stopPromise = scheduler.stop();
+  await cleanupStarted.promise;
+  durablyCancelled = true;
+  scheduler.requestCancellation("project-1", claim.attempt.planId);
+  allowCleanup.resolve();
+  await waitFor(() => releaseCalls === 1, "durable cancellation was not settled after cleanup");
+  await stopPromise;
+
+  assert.equal(heartbeatCalls, 1);
+  assert.equal(acknowledgementCalls, 1);
 });
 
 test("GenerationScheduler stop prevents admission after an in-flight maintenance pass", async () => {

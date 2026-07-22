@@ -890,6 +890,30 @@ function sourceTags(source: string, sourcePath: string): ParsedSourceTag[] {
   return scanJsxAst(source, sourcePath);
 }
 
+/**
+ * Lists only statically-authored design markers from a bounded immutable source
+ * blob. Dynamic JSX expressions are deliberately excluded because they cannot
+ * prove one stable design-node identity without executing mutable application
+ * code.
+ */
+export function listStaticDesignNodeLocators(
+  source: string,
+  sourcePathInput: string,
+): DesignNodeLocator[] {
+  if (Buffer.byteLength(source, "utf8") === 0
+    || Buffer.byteLength(source, "utf8") > MAX_DIRECT_MUTATION_SOURCE_BYTES
+    || source.includes("\0")) {
+    throw new ArtifactMutationValidationError(
+      "design-node selection source must be bounded non-empty UTF-8 text without NUL bytes",
+    );
+  }
+  const sourcePath = boundedString(sourcePathInput, "design-node selection sourcePath", SOURCE_PATH_LIMIT);
+  return sourceTags(source, sourcePath).flatMap((tag) => tag.markerValues.map((designNodeId) => ({
+    designNodeId: boundedString(designNodeId, "design-node selection marker"),
+    sourcePath,
+  })));
+}
+
 function locateStartTag(source: string, sourcePath: string, locator: DesignNodeLocator): LocatedStartTag {
   if (typeof locator.designNodeId !== "string" || locator.designNodeId.length === 0 || locator.designNodeId.length > 256) {
     throw new ArtifactMutationValidationError("locator designNodeId must be a bounded non-empty string");

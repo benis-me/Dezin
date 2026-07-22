@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -97,9 +100,9 @@ function emptyGeneration() {
   };
 }
 
-function createCheckpointFixture(label: string) {
+function createCheckpointFixture(label: string, databasePath = ":memory:") {
   const control = controlledClock(`checkpoint-publication-${label}`);
-  const store = new Store(":memory:", control.clock);
+  const store = new Store(databasePath, control.clock);
   const project = store.createProject({ name: `Checkpoint publication ${label}`, mode: "standard" });
   const foundation = store.workspace.ensureWorkspaceRecord(project.id);
 
@@ -855,6 +858,487 @@ test("checkpoint publication refuses semantically harmful drift after validation
       fixture.store.close();
     }
   });
+});
+
+test("harmful checkpoint drift reconciles into a fresh validation and checkpoint round", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dezin-checkpoint-revalidation-"));
+  const databasePath = join(directory, "workspace.db");
+  const fixture = createCheckpointFixture("harmful-drift-roundtrip", databasePath);
+  try {
+    const beforeDrift = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+    const revision = fixture.store.workspace.createResourceRevisionCandidateForProject(
+      fixture.project.id,
+      fixture.resourceId,
+      {
+        revisionId: `resource-drift-${fixture.checkpoint.id}`,
+        parentRevisionId: fixture.resourceRevision.id,
+        manifestPath: `resource-revisions/${fixture.checkpoint.id}/roundtrip.json`,
+        summary: "Resource authority changed after the first validation",
+        metadata: { roundtrip: true },
+        checksum: checksum(`${fixture.checkpoint.id}:resource-drift-roundtrip`),
+        provenance: { source: "checkpoint-drift-roundtrip-test" },
+      },
+    );
+    const drift = fixture.store.workspace.publishResourceRevisionForProject(
+      fixture.project.id,
+      fixture.resourceId,
+      revision.id,
+      {
+        expectedHeadRevisionId: fixture.resourceRevision.id,
+        expectedSnapshotId: beforeDrift.activeSnapshotId,
+        reason: "Advance validation authority to S2",
+      },
+    );
+    assert.notEqual(drift.id, fixture.validationResult.validation.snapshotId);
+    assertCheckpointNeedsRebase(fixture, drift);
+
+    const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.checkpoint.id,
+    );
+    assert.equal(disposition.kind, "full");
+    if (disposition.kind !== "full") assert.fail("checkpoint drift must require a full round");
+    assert.equal(disposition.status, "materialization-pending");
+    assert.equal(disposition.rebaseCount, 1);
+
+    const afterDisposition = durableCheckpointState(fixture);
+    fixture.store.close();
+    fixture.store = new Store(databasePath, fixture.control.clock);
+    assert.deepEqual(
+      fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.checkpoint.id,
+      ),
+      disposition,
+    );
+    assert.deepEqual(durableCheckpointState(fixture), afterDisposition);
+
+    let detail = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    const validationTask = detail.tasks.find((candidate) => candidate.id === fixture.validation.id);
+    const checkpointTask = detail.tasks.find((candidate) => candidate.id === fixture.checkpoint.id);
+    assert.ok(validationTask);
+    assert.ok(checkpointTask);
+    assert.equal(validationTask.status, "materialization-pending");
+    assert.equal(validationTask.resultSnapshotId, null);
+    assert.equal(checkpointTask.status, "materialization-pending");
+    assert.deepEqual(
+      fixture.store.workspace.listGenerationTaskIdsReadyForMaterializationForProject(
+        fixture.project.id,
+        fixture.plan.id,
+      ),
+      [fixture.validation.id],
+    );
+
+    const validationObservation = fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.validation.id,
+    );
+    assert.equal(validationObservation.attempt, fixture.validationAttempt.attempt + 1);
+    assert.equal(validationObservation.expectedSnapshotId, drift.id);
+    const secondValidationAttempt = fixture.store.workspace.createGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        ...validationObservation,
+        contextPackId: null,
+        sourceCommitHash: null,
+        sourceTreeHash: null,
+        retryContextPolicy: "same-context",
+        executionMode: "full",
+      },
+    );
+    fixture.control.set(110_000);
+    const validationClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: fixture.validation.id,
+      attempt: secondValidationAttempt.attempt,
+      ownerId: "checkpoint-revalidation-worker",
+      now: 110_000,
+      leaseMs: 30_000,
+    });
+    assert.ok(validationClaim);
+    fixture.control.set(110_001);
+    const secondValidationResult = fixture.store.workspace.completeGenerationTaskValidationForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        lease: validationClaim.lease,
+        validation: buildGenerationTaskPrototypeValidationResult({
+          task: validationClaim.task,
+          attempt: validationClaim.attempt,
+          snapshot: drift,
+          artifactRevisions: [],
+          resourceRevisions: [],
+        }),
+      },
+    );
+    assert.equal(secondValidationResult.snapshot.id, drift.id);
+    assert.notEqual(secondValidationResult.evidenceHash, fixture.validationResult.evidenceHash);
+
+    const checkpointObservation = fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.checkpoint.id,
+    );
+    assert.equal(checkpointObservation.attempt, fixture.attempt.attempt + 1);
+    assert.equal(checkpointObservation.expectedSnapshotId, drift.id);
+    assert.deepEqual(checkpointObservation.dependencyOutputs, [{
+      taskId: fixture.validation.id,
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: drift.id,
+    }]);
+    const secondCheckpointAttempt = fixture.store.workspace.createGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        ...checkpointObservation,
+        contextPackId: null,
+        sourceCommitHash: null,
+        sourceTreeHash: null,
+        retryContextPolicy: "same-context",
+        executionMode: "full",
+      },
+    );
+    fixture.control.set(120_000);
+    const checkpointClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: fixture.checkpoint.id,
+      attempt: secondCheckpointAttempt.attempt,
+      ownerId: "checkpoint-roundtrip-worker",
+      now: 120_000,
+      leaseMs: 30_000,
+    });
+    assert.ok(checkpointClaim);
+    fixture.control.set(120_001);
+    const result = checkpointApi(fixture.store).publishGenerationPlanCheckpointForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      checkpointInput(checkpointClaim),
+    );
+    assert.equal(result.status, "succeeded");
+    if (result.status !== "succeeded") assert.fail("freshly validated checkpoint did not publish");
+    assert.equal(result.snapshot.parentSnapshotId, drift.id);
+    assert.deepEqual(result.snapshot.provenance, {
+      kind: "plan-checkpoint",
+      proposalId: fixture.proposal.id,
+      planId: fixture.plan.id,
+      checkpointId: fixture.checkpoint.id,
+      validatedSnapshotId: drift.id,
+      validationEvidenceHash: secondValidationResult.evidenceHash,
+    });
+
+    detail = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    assert.equal(
+      detail.tasks.find((candidate) => candidate.id === fixture.validation.id)?.currentAttempt,
+      fixture.validationAttempt.attempt + 1,
+    );
+    assert.equal(
+      detail.tasks.find((candidate) => candidate.id === fixture.checkpoint.id)?.currentAttempt,
+      fixture.attempt.attempt + 1,
+    );
+    assert.deepEqual(
+      rawRows(
+        fixture.store,
+        `SELECT attempt, snapshot_id FROM generation_task_validation_results
+         WHERE task_id = ? ORDER BY attempt`,
+        fixture.validation.id,
+      ),
+      [
+        { attempt: fixture.validationAttempt.attempt, snapshot_id: fixture.baseSnapshot.id },
+        { attempt: secondValidationAttempt.attempt, snapshot_id: drift.id },
+      ],
+    );
+  } finally {
+    fixture.store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Plan cancellation preserves immutable checkpoint revalidation evidence before its fresh Attempt materializes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dezin-checkpoint-revalidation-cancel-"));
+  const databasePath = join(directory, "workspace.db");
+  const fixture = createCheckpointFixture("cancel-pending-revalidation", databasePath);
+  try {
+    const workspace = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+    const kernel = fixture.store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: { accent: "#ff0055" },
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "Cancel the fresh checkpoint validation round",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    });
+    const drift = fixture.store.workspace.publishKernelRevision(kernel.id, {
+      expectedKernelRevisionId: workspace.activeKernelRevisionId,
+      expectedSnapshotId: workspace.activeSnapshotId,
+    });
+    assertCheckpointNeedsRebase(fixture, drift);
+    const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.checkpoint.id,
+    );
+    assert.equal(disposition.kind, "full");
+
+    const validationAttemptHistory = rawRows(
+      fixture.store,
+      `SELECT * FROM generation_task_attempts
+       WHERE task_id = ? ORDER BY attempt`,
+      fixture.validation.id,
+    );
+    const checkpointAttemptHistory = rawRows(
+      fixture.store,
+      `SELECT * FROM generation_task_attempts
+       WHERE task_id = ? ORDER BY attempt`,
+      fixture.checkpoint.id,
+    );
+    const validationEvidenceHistory = rawRows(
+      fixture.store,
+      `SELECT * FROM generation_task_validation_results
+       WHERE task_id = ? ORDER BY attempt`,
+      fixture.validation.id,
+    );
+    const snapshotCount = fixture.store.workspace.listSnapshots(fixture.project.id).length;
+
+    fixture.control.set(130_000);
+    const cancelled = fixture.store.workspace.cancelGenerationPlanForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    assert.equal(cancelled.plan.status, "cancelled");
+    assert.equal(cancelled.plan.finishedAt, 130_000);
+    const cancelledValidation = cancelled.tasks.find((task) => task.id === fixture.validation.id);
+    const cancelledCheckpoint = cancelled.tasks.find((task) => task.id === fixture.checkpoint.id);
+    assert.ok(cancelledValidation);
+    assert.ok(cancelledCheckpoint);
+    assert.equal(cancelledValidation.status, "cancelled");
+    assert.equal(cancelledValidation.currentAttempt, fixture.validationAttempt.attempt);
+    assert.equal(cancelledValidation.resultSnapshotId, null);
+    assert.equal(cancelledCheckpoint.status, "cancelled");
+    assert.equal(cancelledCheckpoint.currentAttempt, fixture.attempt.attempt);
+    assert.equal(cancelledCheckpoint.resultSnapshotId, null);
+    assert.equal(
+      fixture.store.workspace.getGenerationTaskAttemptForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.validation.id,
+        fixture.validationAttempt.attempt,
+      )?.status,
+      "succeeded",
+    );
+    assert.equal(
+      fixture.store.workspace.getGenerationTaskAttemptForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.checkpoint.id,
+        fixture.attempt.attempt,
+      )?.status,
+      "needs-rebase",
+    );
+    assert.deepEqual(
+      rawRows(
+        fixture.store,
+        `SELECT * FROM generation_task_attempts
+         WHERE task_id = ? ORDER BY attempt`,
+        fixture.validation.id,
+      ),
+      validationAttemptHistory,
+    );
+    assert.deepEqual(
+      rawRows(
+        fixture.store,
+        `SELECT * FROM generation_task_attempts
+         WHERE task_id = ? ORDER BY attempt`,
+        fixture.checkpoint.id,
+      ),
+      checkpointAttemptHistory,
+    );
+    assert.deepEqual(
+      rawRows(
+        fixture.store,
+        `SELECT * FROM generation_task_validation_results
+         WHERE task_id = ? ORDER BY attempt`,
+        fixture.validation.id,
+      ),
+      validationEvidenceHistory,
+    );
+    assert.equal(
+      fixture.store.workspace.getWorkspace(fixture.project.id)?.activeSnapshotId,
+      drift.id,
+    );
+    assert.equal(fixture.store.workspace.listSnapshots(fixture.project.id).length, snapshotCount);
+    assert.deepEqual(
+      generationEvents(fixture, "task-cancelled")
+        .filter((event) => event.taskId === fixture.validation.id
+          || event.taskId === fixture.checkpoint.id)
+        .map((event) => ({ taskId: event.taskId, attempt: event.payload.attempt })),
+      [
+        { taskId: fixture.validation.id, attempt: fixture.validationAttempt.attempt },
+        { taskId: fixture.checkpoint.id, attempt: fixture.attempt.attempt },
+      ],
+    );
+    assert.equal(generationEvents(fixture, "plan-cancel-requested").length, 1);
+    assert.equal(generationEvents(fixture, "plan-cancelled").length, 1);
+
+    const durableCancellation = durableCheckpointState(fixture);
+    fixture.store.close();
+    fixture.store = new Store(databasePath, fixture.control.clock);
+    assert.deepEqual(
+      fixture.store.workspace.getGenerationPlanDetailForProject(
+        fixture.project.id,
+        fixture.plan.id,
+      ),
+      cancelled,
+    );
+    assert.deepEqual(
+      fixture.store.workspace.cancelGenerationPlanForProject(
+        fixture.project.id,
+        fixture.plan.id,
+      ),
+      cancelled,
+    );
+    assert.deepEqual(durableCheckpointState(fixture), durableCancellation);
+  } finally {
+    fixture.store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a forged cancelled checkpoint revalidation state has no cancellation authority", () => {
+  const fixture = createCheckpointFixture("forged-cancelled-revalidation");
+  try {
+    const workspace = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+    const kernel = fixture.store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: { accent: "#7700ff" },
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "Forge a cancelled checkpoint validation round",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    });
+    const drift = fixture.store.workspace.publishKernelRevision(kernel.id, {
+      expectedKernelRevisionId: workspace.activeKernelRevisionId,
+      expectedSnapshotId: workspace.activeSnapshotId,
+    });
+    assertCheckpointNeedsRebase(fixture, drift);
+    fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.checkpoint.id,
+    );
+
+    const forged = fixture.store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'cancelled', blocked_reason = ?, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = 'cancelled', error_json = ?,
+           next_eligible_at = NULL, finished_at = ?
+       WHERE id = ? AND status = 'materialization-pending'`,
+    ).run(
+      `Cancelled with Generation Plan ${fixture.plan.id}`,
+      JSON.stringify({ code: "generation-plan-cancelled", planId: fixture.plan.id }),
+      140_000,
+      fixture.validation.id,
+    );
+    assert.equal(Number(forged.changes), 1);
+    assert.throws(
+      () => fixture.store.workspace.getGenerationPlanDetailForProject(
+        fixture.project.id,
+        fixture.plan.id,
+      ),
+      /cancelled.*succeeded|checkpoint revalidation/i,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("checkpoint revalidation authority reset is schema-fenced and transaction-atomic", () => {
+  const fixture = createCheckpointFixture("revalidation-atomicity");
+  try {
+    const beforeForgery = durableCheckpointState(fixture);
+    assert.throws(
+      () => fixture.store.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'materialization-pending', pending_context_policy = 'same-context',
+             result_snapshot_id = NULL, finished_at = NULL
+         WHERE id = ?`,
+      ).run(fixture.validation.id),
+      /write-once/i,
+    );
+    assert.deepEqual(durableCheckpointState(fixture), beforeForgery);
+
+    const workspace = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+    const kernel = fixture.store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: { accent: "#6633ff" },
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "Force a fresh validation round",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    });
+    const drift = fixture.store.workspace.publishKernelRevision(kernel.id, {
+      expectedKernelRevisionId: workspace.activeKernelRevisionId,
+      expectedSnapshotId: workspace.activeSnapshotId,
+    });
+    assertCheckpointNeedsRebase(fixture, drift);
+    fixture.store.db.exec(
+      `CREATE TRIGGER reject_checkpoint_revalidation_task_move
+       BEFORE UPDATE OF status ON generation_tasks
+       WHEN OLD.id = '${fixture.checkpoint.id}'
+         AND OLD.status = 'needs-rebase'
+         AND NEW.status = 'materialization-pending'
+       BEGIN
+         SELECT RAISE(ABORT, 'injected checkpoint revalidation move failure');
+       END`,
+    );
+    const beforeReconcile = durableCheckpointState(fixture);
+    assert.throws(
+      () => fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.checkpoint.id,
+      ),
+      /injected checkpoint revalidation move failure/,
+    );
+    assert.deepEqual(durableCheckpointState(fixture), beforeReconcile);
+  } finally {
+    fixture.store.close();
+  }
 });
 
 test("checkpoint publication requires the validation result and its exact terminal event", async (t) => {

@@ -33,24 +33,37 @@ export interface ArtifactRunInfrastructureInput {
   readonly projectId: string;
   readonly claim: GenerationTaskAttemptClaim;
   readonly contextPack: ContextPack;
+  readonly hasExactSharinganCapture: boolean;
   readonly repositoryDir: string;
   readonly worktreeDir: string;
 }
 
 export interface ArtifactRunPreparationOptions {
   readonly contextPacks: Pick<ContextPackRepository, "get">;
-  readonly projectIdForWorkspace: (workspaceId: string) => string | Promise<string>;
-  readonly repositoryDirForWorkspace: (workspaceId: string) => string | Promise<string>;
-  readonly createRunner: (input: ArtifactRunInfrastructureInput) => AgentRunner | Promise<AgentRunner>;
+  readonly projectIdForWorkspace: (
+    workspaceId: string,
+    signal: AbortSignal,
+  ) => string | Promise<string>;
+  readonly repositoryDirForWorkspace: (
+    workspaceId: string,
+    signal: AbortSignal,
+  ) => string | Promise<string>;
+  readonly createRunner: (
+    input: ArtifactRunInfrastructureInput,
+    signal: AbortSignal,
+  ) => AgentRunner | Promise<AgentRunner>;
   readonly createQualityEvaluator: (
     input: ArtifactRunInfrastructureInput,
+    signal: AbortSignal,
   ) => StandardArtifactQualityEvaluatorPort | Promise<StandardArtifactQualityEvaluatorPort>;
   /** Existing design-agent prompt (design system, skills, craft rules), before the immutable Task overlay. */
   readonly baseSystemPrompt: (
     input: Omit<ArtifactRunInfrastructureInput, "repositoryDir" | "worktreeDir">,
+    signal: AbortSignal,
   ) => string | Promise<string>;
   readonly environment?: (
     input: ArtifactRunInfrastructureInput,
+    signal: AbortSignal,
   ) => Readonly<NodeJS.ProcessEnv> | Promise<Readonly<NodeJS.ProcessEnv>>;
   /** Task 16 composes immutable Sharingan ResourceRevision storage behind this exact-only port. */
   readonly sharinganCaptures?: SharinganCaptureRevisionMaterializerPort;
@@ -63,6 +76,42 @@ export class ArtifactRunPreparationError extends Error {
     super(message);
     this.name = "ArtifactRunPreparationError";
     this.failureClass = failureClass;
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Artifact run preparation aborted", "AbortError");
+}
+
+function checkAbort(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
+function preparationCleanupFailure(primaryError: unknown, cleanupErrors: readonly unknown[]): unknown {
+  if (cleanupErrors.length === 0) return primaryError;
+  return new AggregateError(
+    [primaryError, ...cleanupErrors],
+    "Artifact run preparation failed and candidate cleanup failed",
+    { cause: primaryError },
+  );
+}
+
+async function invokeWithAbort<T>(
+  signal: AbortSignal,
+  operation: () => T | PromiseLike<T>,
+): Promise<T> {
+  checkAbort(signal);
+  const value = Promise.resolve().then(operation);
+  let listener: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    listener = () => reject(abortReason(signal));
+    signal.addEventListener("abort", listener, { once: true });
+  });
+  try {
+    checkAbort(signal);
+    return await Promise.race([value, aborted]);
+  } finally {
+    if (listener !== null) signal.removeEventListener("abort", listener);
   }
 }
 
@@ -207,11 +256,6 @@ function qualityFinding(value: Record<string, unknown>, index: number): QualityF
   };
 }
 
-function isSharinganContext(pack: ContextPack): boolean {
-  return pack.items.some((item) => item.ref.kind === "resource"
-    && item.ref.resourceKind === "sharingan-capture");
-}
-
 function sharinganCaptureReference(
   claim: GenerationTaskAttemptClaim,
   pack: ContextPack,
@@ -274,6 +318,7 @@ function validateSharinganFence(
     || typeof fence.fingerprint !== "string" || !SHA256.test(fence.fingerprint)
     || typeof fence.verify !== "function"
     || typeof fence.withoutMaterializedBundle !== "function"
+    || typeof fence.withoutMaterializedAssets !== "function"
     || typeof fence.dispose !== "function"
     || !reference
     || reference.workspaceId !== expected.workspaceId
@@ -304,6 +349,7 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
     const payload = artifactPayload(claim);
     const pack = requireContextPack(claim, this.options.contextPacks);
     const captureReference = sharinganCaptureReference(claim, pack);
+    const hasExactSharinganCapture = captureReference !== null;
     if (captureReference !== null && !this.options.sharinganCaptures) {
       throw new ContextIntegrityError("Sharingan Capture Revision materializer is unavailable");
     }
@@ -313,11 +359,17 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
         `Artifact Attempt ${claim.attempt.taskId}/${claim.attempt.attempt} has a legacy unresolved Source Base`,
       );
     }
-    const projectId = await this.options.projectIdForWorkspace(claim.task.workspaceId);
+    const projectId = await invokeWithAbort(
+      signal,
+      () => this.options.projectIdForWorkspace(claim.task.workspaceId, signal),
+    );
     if (typeof projectId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(projectId)) {
       throw new ArtifactRunPreparationError("Artifact run Project owner is invalid");
     }
-    const repositoryDir = await this.options.repositoryDirForWorkspace(claim.task.workspaceId);
+    const repositoryDir = await invokeWithAbort(
+      signal,
+      () => this.options.repositoryDirForWorkspace(claim.task.workspaceId, signal),
+    );
     const attempt: ArtifactCandidateAttempt = {
       workspaceId: claim.task.workspaceId,
       taskId: claim.task.id,
@@ -332,11 +384,14 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
     let transaction: ArtifactRunPreparation["transaction"] = rawTransaction;
     try {
       if (captureReference !== null) {
-        captureFence = await this.options.sharinganCaptures!.materializeExactRevision({
-          reference: captureReference,
-          worktreeDir: rawTransaction.dir,
+        captureFence = await invokeWithAbort(
           signal,
-        });
+          () => this.options.sharinganCaptures!.materializeExactRevision({
+            reference: captureReference,
+            worktreeDir: rawTransaction.dir,
+            signal,
+          }),
+        );
         validateSharinganFence(captureReference, captureFence);
         await captureFence.verify(signal);
         transaction = fenceArtifactCandidateTransaction(rawTransaction, captureFence);
@@ -345,15 +400,30 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
         projectId,
         claim,
         contextPack: pack,
+        hasExactSharinganCapture,
         repositoryDir,
         worktreeDir: transaction.dir,
       });
       // Keep setup sequential so a rejected factory cannot leave another
       // in-flight factory using a worktree that cleanup has already removed.
-      const runner = await this.options.createRunner(infrastructure);
-      const evaluator = await this.options.createQualityEvaluator(infrastructure);
-      const basePrompt = await this.options.baseSystemPrompt({ projectId, claim, contextPack: pack });
-      const env = await this.options.environment?.(infrastructure);
+      const runner = await invokeWithAbort(
+        signal,
+        () => this.options.createRunner(infrastructure, signal),
+      );
+      const evaluator = await invokeWithAbort(
+        signal,
+        () => this.options.createQualityEvaluator(infrastructure, signal),
+      );
+      const basePrompt = await invokeWithAbort(
+        signal,
+        () => this.options.baseSystemPrompt(infrastructure, signal),
+      );
+      const env = this.options.environment === undefined
+        ? undefined
+        : await invokeWithAbort(
+          signal,
+          () => this.options.environment!(infrastructure, signal),
+        );
       return {
         projectId,
         runner,
@@ -374,17 +444,32 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
           maxRepairRounds,
           prior.quality.score,
           payload.brief.proposalRationale,
-          { isSharingan: isSharinganContext(pack) },
+          { isSharingan: hasExactSharinganCapture },
         ),
       };
     } catch (error) {
+      const cleanupErrors: unknown[] = [];
       if (transaction === rawTransaction) {
-        await captureFence?.dispose().catch(() => {});
-        await rawTransaction.dispose().catch(() => {});
+        if (captureFence !== undefined) {
+          try {
+            await captureFence.dispose();
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+        }
+        try {
+          await rawTransaction.dispose();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
       } else {
-        await transaction.dispose().catch(() => {});
+        try {
+          await transaction.dispose();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
       }
-      throw error;
+      throw preparationCleanupFailure(error, cleanupErrors);
     }
   }
 }

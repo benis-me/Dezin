@@ -31,6 +31,32 @@
   align-items: center;
 }
 
+.dezin-project-canvas__header-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+}
+
+.dezin-project-canvas__present {
+  display: flex;
+  height: 26px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding-inline: 8px;
+  color: var(--foreground);
+  background: color-mix(in oklch, var(--surface) 92%, var(--foreground) 2%);
+  font-size: 0.625rem;
+  font-weight: 560;
+}
+
+.dezin-project-canvas__present:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
 .dezin-project-canvas__identity {
   gap: 8px;
 }

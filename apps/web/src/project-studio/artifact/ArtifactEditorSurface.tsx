@@ -5,12 +5,14 @@ import type {
   ArtifactMutationResult,
   ArtifactRevision,
   ArtifactTrack,
+  ArtifactVersionActionResult,
   PreviewTarget,
   WorkspaceArtifact,
   WorkspaceRenderFrameSpec,
 } from "../../lib/api.ts";
 import { ArtifactHeader } from "./ArtifactHeader.tsx";
 import { ArtifactPreviewSurface } from "./ArtifactPreviewSurface.tsx";
+import { ArtifactVersions } from "./ArtifactVersions.tsx";
 import "./artifact-editor.css";
 import { useArtifactPreview } from "./useArtifactPreview.ts";
 import { usePreviewBridge } from "./usePreviewBridge.ts";
@@ -28,6 +30,9 @@ export interface ArtifactEditorController {
   tracks: ArtifactTrack[];
   revisions: ArtifactRevision[];
   revision: ArtifactRevision | null;
+  headRevisionId: string | null;
+  snapshotId: string | null;
+  pinnedRevisionId: string | null;
   preview: ReturnType<typeof useArtifactPreview>;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
   selection: ReturnType<typeof usePreviewBridge>["selection"];
@@ -131,6 +136,7 @@ export function useArtifactEditorController({
   const [headRevisionId, setHeadRevisionId] = useState(activeRevisionId);
   const [snapshotId, setSnapshotId] = useState(activeSnapshotId);
   const [publishedRevision, setPublishedRevision] = useState<ArtifactRevision | null>(null);
+  const [fetchedRevision, setFetchedRevision] = useState<ArtifactRevision | null>(null);
   const [activeFrameId, setActiveFrameId] = useState(artifact?.kind === "component" ? COMPONENT_FRAME.id : PAGE_FRAME.id);
   const [zoom, setZoomState] = useState(0.65);
   const [presentation, setPresentation] = useState(false);
@@ -187,8 +193,35 @@ export function useArtifactEditorController({
     projectId,
     target,
     expectedArtifactId: artifactId ?? undefined,
+    expectedRevisionId: target?.kind === "artifact-current"
+      ? activeRevisionId ?? undefined
+      : undefined,
     enabled: artifactId !== null && artifact !== null,
   });
+  const pinnedRevisionId = targetOverride?.kind === "artifact-revision" ? targetOverride.revisionId : null;
+  const bundledPinnedRevision = pinnedRevisionId === null
+    ? null
+    : revisions.find((candidate) => candidate.id === pinnedRevisionId) ?? null;
+  useEffect(() => {
+    if (pinnedRevisionId === null || artifactId === null || bundledPinnedRevision !== null) {
+      setFetchedRevision(null);
+      return;
+    }
+    const controller = new AbortController();
+    let disposed = false;
+    setFetchedRevision(null);
+    void Promise.resolve()
+      .then(() => api.getArtifactRevision(projectId, artifactId, pinnedRevisionId))
+      .then((candidate) => {
+        if (disposed || controller.signal.aborted) return;
+        if (candidate.id === pinnedRevisionId && candidate.artifactId === artifactId) setFetchedRevision(candidate);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [api, artifactId, bundledPinnedRevision, pinnedRevisionId, projectId]);
   const previewRevisionId = preview.status === "ready" ? preview.resolved.revisionId : null;
   const previewTargetKey = preview.status === "ready" ? preview.resolved.targetKey : null;
   const previewAssemblyHash = preview.status === "ready" ? preview.resolved.assemblyHash : null;
@@ -206,10 +239,14 @@ export function useArtifactEditorController({
           bridgeNonce: previewBridgeNonce,
       }
   ), [previewAssemblyHash, previewBridgeNonce, previewLeaseId, previewRevisionId, previewTargetKey]);
-  const revision = publishedRevision
-    ?? revisions.find((candidate) => candidate.id === preview.resolved?.revisionId)
-    ?? revisions.find((candidate) => candidate.id === headRevisionId)
-    ?? null;
+  const resolvedRevision = revisions.find((candidate) => candidate.id === preview.resolved?.revisionId)
+    ?? (fetchedRevision?.id === preview.resolved?.revisionId ? fetchedRevision : null);
+  const revision = preview.readOnly
+    ? resolvedRevision
+    : publishedRevision
+      ?? resolvedRevision
+      ?? revisions.find((candidate) => candidate.id === headRevisionId)
+      ?? null;
   const frames = useMemo(
     () => parseFrames(preview.resolved?.renderSpec ?? revision?.renderSpec ?? null, artifact?.kind),
     [artifact?.kind, preview.resolved?.renderSpec, revision?.renderSpec],
@@ -302,6 +339,9 @@ export function useArtifactEditorController({
     tracks,
     revisions,
     revision,
+    headRevisionId,
+    snapshotId,
+    pinnedRevisionId,
     preview: controlledPreview,
     iframeRef,
     selection: bridge.selection,
@@ -332,12 +372,19 @@ export function useArtifactEditorController({
 export function ArtifactEditorSurface({
   editor,
   onBack,
+  onReturnToHead = () => {},
+  onViewRevision = () => {},
+  onVersionPublished,
 }: {
   editor: ArtifactEditorController;
   onBack: () => void;
+  onReturnToHead?: () => void;
+  onViewRevision?: (revisionId: string) => void;
+  onVersionPublished?: (result: ArtifactVersionActionResult) => void;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [keepPreviewFitted, setKeepPreviewFitted] = useState(true);
+  const [versionsMode, setVersionsMode] = useState<"versions" | "compare" | null>(null);
   const fitPreview = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -407,6 +454,10 @@ export function ArtifactEditorSurface({
         onZoomChange={setManualZoom}
         onFitPreview={requestFitPreview}
         onTogglePresentation={() => editor.setPresentation(!editor.presentation)}
+        pinnedRevisionId={editor.pinnedRevisionId}
+        onOpenVersions={() => setVersionsMode("versions")}
+        onOpenCompare={() => setVersionsMode("compare")}
+        onReturnToHead={onReturnToHead}
       />
       <ArtifactPreviewSurface
         artifact={editor.artifact}
@@ -426,6 +477,24 @@ export function ArtifactEditorSurface({
         onRetryFrame={editor.retryFrame}
         onPreviewLoad={editor.onPreviewLoad}
       />
+      {editor.artifactId ? (
+        <ArtifactVersions
+          open={versionsMode !== null}
+          initialMode={versionsMode ?? "versions"}
+          projectId={editor.projectId}
+          artifactId={editor.artifactId}
+          tracks={editor.tracks}
+          headRevisionId={editor.headRevisionId}
+          snapshotId={editor.snapshotId}
+          pinnedRevisionId={editor.pinnedRevisionId}
+          onClose={() => setVersionsMode(null)}
+          onViewRevision={(revisionId) => {
+            setVersionsMode(null);
+            onViewRevision(revisionId);
+          }}
+          onVersionPublished={onVersionPublished}
+        />
+      ) : null}
     </section>
   );
 }

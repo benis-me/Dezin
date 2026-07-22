@@ -24,6 +24,10 @@ export function ArtifactHeader({
   onZoomChange,
   onFitPreview,
   onTogglePresentation,
+  pinnedRevisionId,
+  onOpenVersions,
+  onOpenCompare,
+  onReturnToHead,
 }: {
   artifact: WorkspaceArtifact | null;
   artifactId: string | null;
@@ -39,6 +43,10 @@ export function ArtifactHeader({
   onZoomChange: (zoom: number) => void;
   onFitPreview: () => void;
   onTogglePresentation: () => void;
+  pinnedRevisionId: string | null;
+  onOpenVersions: () => void;
+  onOpenCompare: () => void;
+  onReturnToHead: () => void;
 }) {
   const name = artifact?.name ?? "Artifact unavailable";
   return (
@@ -56,7 +64,7 @@ export function ArtifactHeader({
             {artifactId ? <span title={artifactId}>{artifactId.length > 18 ? artifactId.slice(0, 8) : artifactId}</span> : null}
             {artifactId ? <span aria-hidden>·</span> : null}
             <span>{revisionSequence === null ? "No revision" : `Revision ${revisionSequence}`}</span>
-            {readOnly ? <strong>Historical / read-only</strong> : <strong>Current head</strong>}
+            {pinnedRevisionId ? <strong>Pinned Revision · read-only</strong> : readOnly ? <strong>Read-only preview</strong> : <strong>Current Head</strong>}
           </div>
         </div>
       </div>
@@ -94,11 +102,17 @@ export function ArtifactHeader({
             <Focus aria-hidden size={14} strokeWidth={1.7} />
           </button>
         </div>
-        <button type="button" className="artifact-action" disabled title="Version controls arrive in the artifact history slice">
+        {pinnedRevisionId ? (
+          <button type="button" className="artifact-action artifact-action--return" onClick={onReturnToHead}>
+            <ArrowLeft aria-hidden size={14} />
+            Return to Head
+          </button>
+        ) : null}
+        <button type="button" className="artifact-action" disabled={!artifactId} onClick={onOpenVersions}>
           <History aria-hidden size={14} />
           Versions
         </button>
-        <button type="button" className="artifact-action" disabled title="Compare arrives in the artifact history slice">
+        <button type="button" className="artifact-action" disabled={!artifactId} onClick={onOpenCompare}>
           <ScanSearch aria-hidden size={14} />
           Compare
         </button>

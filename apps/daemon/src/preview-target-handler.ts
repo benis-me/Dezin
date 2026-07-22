@@ -47,7 +47,7 @@ async function requireReadyWorkspace(
     return false;
   }
   try {
-    const result = await ensureStandardProjectWorkspace(deps, projectId);
+    const result = await ensureStandardProjectWorkspace(deps, projectId, { readMode: "compact" });
     if (result.status === "unsupported") {
       sendJson(res, 409, {
         error: "Preview Target APIs require a Standard project",

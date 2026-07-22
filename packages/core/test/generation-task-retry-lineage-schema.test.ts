@@ -27,6 +27,72 @@ function insertWorkspaceTask(
   );
 }
 
+function appendTaskMaterializedEvent(
+  store: Store,
+  input: { taskId: string; planId: string; workspaceId: string; attempt: number; createdAt: number },
+): void {
+  const sequence = Number((store.db.prepare(
+    "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM generation_plan_events WHERE plan_id = ?",
+  ).get(input.planId) as { sequence: number }).sequence) + 1;
+  store.db.prepare(
+    `INSERT INTO generation_plan_events (
+       plan_id, workspace_id, sequence, task_id, type, payload_json, created_at
+     ) VALUES (?, ?, ?, ?, 'task-materialized', ?, ?)`,
+  ).run(
+    input.planId,
+    input.workspaceId,
+    sequence,
+    input.taskId,
+    JSON.stringify({ attempt: input.attempt }),
+    input.createdAt,
+  );
+}
+
+function claimValidationAttempt(
+  store: Store,
+  input: { taskId: string; planId: string; workspaceId: string; attempt: number; now: number },
+): void {
+  const ownerId = `retry-lineage-owner-${input.attempt}`;
+  const leaseToken = `retry-lineage-lease-${input.attempt}`;
+  const leaseExpiresAt = input.now + 1_000;
+  store.db.prepare(
+    `INSERT INTO generation_task_claims (
+       claim_key, claim_kind, task_id, plan_id, attempt, workspace_id,
+       owner_id, lease_token, lease_expires_at, created_at
+     ) VALUES ('capacity:render-qa:1', 'capacity', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.taskId,
+    input.planId,
+    input.attempt,
+    input.workspaceId,
+    ownerId,
+    leaseToken,
+    leaseExpiresAt,
+    input.now,
+  );
+  store.db.prepare(
+    `UPDATE generation_task_attempts
+     SET status = 'running', owner_id = ?, lease_token = ?, lease_expires_at = ?,
+         heartbeat_at = ?, started_at = ?
+     WHERE task_id = ? AND plan_id = ? AND attempt = ?`,
+  ).run(
+    ownerId,
+    leaseToken,
+    leaseExpiresAt,
+    input.now,
+    input.now,
+    input.taskId,
+    input.planId,
+    input.attempt,
+  );
+  store.db.prepare(
+    "UPDATE generation_tasks SET status = 'running' WHERE id = ? AND plan_id = ?",
+  ).run(input.taskId, input.planId);
+  store.db.prepare(
+    "UPDATE generation_plans SET status = 'running' WHERE id = ? AND status = 'queued'",
+  ).run(input.planId);
+}
+
 test("retry lineage preserves the active-Snapshot gate and seals only exact historical successors", () => {
   const store = new Store();
   try {
@@ -104,6 +170,13 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
        WHERE task_id = ? AND attempt = 1`,
     ).run(retryTaskId);
     store.db.prepare("UPDATE generation_tasks SET status = 'queued' WHERE id = ?").run(retryTaskId);
+    appendTaskMaterializedEvent(store, {
+      taskId: retryTaskId,
+      planId,
+      workspaceId: workspace.id,
+      attempt: 1,
+      createdAt: 41,
+    });
 
     store.db.prepare(
       `INSERT INTO workspace_graph_revisions (
@@ -143,11 +216,20 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
       "ordinary materialization must remain pinned to the active Snapshot",
     );
 
+    claimValidationAttempt(store, {
+      taskId: retryTaskId,
+      planId,
+      workspaceId: workspace.id,
+      attempt: 1,
+      now: 100,
+    });
+
     store.db.prepare(
       `UPDATE generation_task_attempts
        SET status = 'retryable-failed', failure_class = 'build-infrastructure',
            error_json = '{"code":"lease-expired"}', next_eligible_at = 1000,
-           started_at = 100, finished_at = 200
+           owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, finished_at = 200
        WHERE task_id = ? AND attempt = 1`,
     ).run(retryTaskId);
     store.db.prepare(
@@ -155,6 +237,9 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
        SET status = 'retry-wait', failure_class = 'build-infrastructure',
            error_json = '{"code":"lease-expired"}', next_eligible_at = 1000
        WHERE id = ?`,
+    ).run(retryTaskId);
+    store.db.prepare(
+      "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = 1",
     ).run(retryTaskId);
 
     assert.throws(
@@ -175,6 +260,86 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
       ),
       /exact|successor|retry/i,
     );
+    const retryPollutants: Array<{
+      blockedReason?: string;
+      candidateEvidenceHash?: string;
+      candidateEvidenceJson?: string;
+      createdAt?: number;
+      errorJson?: string;
+      failureClass?: string;
+      finishedAt?: number;
+      heartbeatAt?: number;
+      label: string;
+      leaseExpiresAt?: number;
+      leaseToken?: string;
+      nextEligibleAt?: number;
+      ownerId?: string;
+      startedAt?: number;
+    }> = [
+      { label: "blocked", blockedReason: "forged retry block" },
+      {
+        label: "failure",
+        failureClass: "build-infrastructure",
+        errorJson: "{}",
+        nextEligibleAt: 1_000,
+      },
+      {
+        label: "candidate",
+        candidateEvidenceJson: "{}",
+        candidateEvidenceHash: "a".repeat(64),
+      },
+      {
+        label: "lease-terminal",
+        ownerId: "forged-retry-owner",
+        leaseToken: "forged-retry-lease",
+        leaseExpiresAt: 1_200,
+        heartbeatAt: 201,
+        startedAt: 201,
+        finishedAt: 202,
+      },
+      { label: "negative-created", createdAt: -1 },
+    ];
+    for (const pollutant of retryPollutants) {
+      assert.throws(
+        () => store.db.prepare(
+          `INSERT INTO generation_task_attempts (
+             task_id, plan_id, workspace_id, attempt, attempt_origin, predecessor_attempt,
+             automatic_retry_index, target_artifact_id, target_track_id, target_resource_id,
+             base_revision_id, expected_snapshot_id, context_pack_id, kernel_revision_id,
+             execution_mode, payload_json, input_hash, pinned_resource_revision_ids_json,
+             component_dependency_revision_ids_json, retry_context_policy, status,
+             blocked_reason, failure_class, error_json, next_eligible_at,
+             candidate_evidence_json, candidate_evidence_hash,
+             owner_id, lease_token, lease_expires_at, heartbeat_at,
+             started_at, finished_at, materialization_sealed, created_at
+           ) VALUES (?, ?, ?, 2, 'same-input-retry', 1, 1, NULL, NULL, NULL, NULL,
+             ?, NULL, ?, 'full', '{}', ?, '[]', '[]', 'same-context', 'queued',
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        ).run(
+          retryTaskId,
+          planId,
+          workspace.id,
+          workspace.activeSnapshotId,
+          workspace.activeKernelRevisionId,
+          `input-attempt-2-${pollutant.label}`,
+          pollutant.blockedReason ?? null,
+          pollutant.failureClass ?? null,
+          pollutant.errorJson ?? null,
+          pollutant.nextEligibleAt ?? null,
+          pollutant.candidateEvidenceJson ?? null,
+          pollutant.candidateEvidenceHash ?? null,
+          pollutant.ownerId ?? null,
+          pollutant.leaseToken ?? null,
+          pollutant.leaseExpiresAt ?? null,
+          pollutant.heartbeatAt ?? null,
+          pollutant.startedAt ?? null,
+          pollutant.finishedAt ?? null,
+          pollutant.createdAt ?? 201,
+        ),
+        /exact fenced successor/i,
+        pollutant.label,
+      );
+    }
     insertAttempt.run(
       retryTaskId,
       planId,
@@ -209,10 +374,31 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
     );
 
     store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'queued', failure_class = NULL, error_json = NULL, next_eligible_at = NULL
+       WHERE id = ? AND plan_id = ?`,
+    ).run(retryTaskId, planId);
+    appendTaskMaterializedEvent(store, {
+      taskId: retryTaskId,
+      planId,
+      workspaceId: workspace.id,
+      attempt: 2,
+      createdAt: 202,
+    });
+    claimValidationAttempt(store, {
+      taskId: retryTaskId,
+      planId,
+      workspaceId: workspace.id,
+      attempt: 2,
+      now: 300,
+    });
+
+    store.db.prepare(
       `UPDATE generation_task_attempts
        SET status = 'needs-rebase', failure_class = 'publication-conflict',
            error_json = '{"code":"head-moved"}', next_eligible_at = NULL,
-           started_at = 300, finished_at = 301
+           owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, finished_at = 301
        WHERE task_id = ? AND attempt = 2`,
     ).run(retryTaskId);
     store.db.prepare(
@@ -220,6 +406,9 @@ test("retry lineage preserves the active-Snapshot gate and seals only exact hist
        SET status = 'needs-rebase', failure_class = 'publication-conflict',
            error_json = '{"code":"head-moved"}', next_eligible_at = NULL
        WHERE id = ?`,
+    ).run(retryTaskId);
+    store.db.prepare(
+      "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = 2",
     ).run(retryTaskId);
     insertAttempt.run(
       retryTaskId,

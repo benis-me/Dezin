@@ -35,7 +35,7 @@ function targetIdentity(target: PreviewTarget | null): string {
     case "run-candidate":
       return `${target.kind}:${target.projectId}:${target.runId}`;
     case "workspace-flow":
-      return `${target.kind}:${target.projectId}:${target.snapshotId}:${target.startArtifactId}`;
+      return `${target.kind}:${target.projectId}:${target.snapshotId}:${target.startArtifactId}:${target.stateKey ?? ""}`;
     case "component-state":
       return `${target.kind}:${target.projectId}:${target.revisionId}:${target.variantKey}:${target.stateKey}`;
   }
@@ -54,9 +54,15 @@ function resolutionError(
   resolved: ResolvedPreviewTarget,
   projectId: string,
   expectedArtifactId: string | undefined,
+  expectedRevisionId: string | undefined,
+  expectedWorkspaceId: string | undefined,
+  expectedRenderSpec: Readonly<Record<string, unknown>> | undefined,
 ): string | null {
   if (resolved.projectId !== projectId) return "Resolved preview belongs to a different project.";
   if (resolved.requestedKind !== target.kind) return "Resolved preview kind does not match the requested target.";
+  if (expectedWorkspaceId !== undefined && resolved.workspaceId !== expectedWorkspaceId) {
+    return "Resolved preview does not match the frozen Snapshot workspace.";
+  }
   const targetArtifactId = target.kind === "artifact-current"
     ? target.artifactId
     : target.kind === "workspace-flow"
@@ -75,8 +81,18 @@ function resolutionError(
     && resolved.revisionId !== target.revisionId) {
     return "Resolved preview revision does not match the requested target.";
   }
+  if (expectedRevisionId !== undefined && resolved.revisionId !== expectedRevisionId) {
+    return "Resolved preview does not match the frozen Snapshot Revision.";
+  }
+  if (expectedRenderSpec !== undefined
+    && canonicalJson(resolved.renderSpec) !== canonicalJson(expectedRenderSpec)) {
+    return "Resolved preview does not match the frozen Snapshot RenderSpec.";
+  }
   if (target.kind === "workspace-flow" && resolved.snapshotId !== target.snapshotId) {
     return "Resolved preview Snapshot does not match the requested target.";
+  }
+  if (target.kind === "workspace-flow" && resolved.stateKey !== (target.stateKey ?? null)) {
+    return "Resolved preview state does not match the requested frozen target.";
   }
   if (target.kind === "run-candidate" && resolved.runId !== target.runId) {
     return "Resolved preview run does not match the requested target.";
@@ -137,11 +153,17 @@ export function useArtifactPreview({
   projectId,
   target,
   expectedArtifactId,
+  expectedRevisionId,
+  expectedWorkspaceId,
+  expectedRenderSpec,
   enabled = true,
 }: {
   projectId: string;
   target: PreviewTarget | null;
   expectedArtifactId?: string;
+  expectedRevisionId?: string;
+  expectedWorkspaceId?: string;
+  expectedRenderSpec?: Readonly<Record<string, unknown>>;
   enabled?: boolean;
 }): ArtifactPreviewController {
   const api = useApi();
@@ -151,7 +173,8 @@ export function useArtifactPreview({
   const targetRef = useRef(target);
   targetRef.current = target;
   const identity = useMemo(() => targetIdentity(target), [target]);
-  const requestKey = `${identity}\u0000${expectedArtifactId ?? ""}\u0000${attempt}`;
+  const expectedRenderSpecKey = expectedRenderSpec === undefined ? "" : canonicalJson(expectedRenderSpec);
+  const requestKey = `${identity}\u0000${expectedArtifactId ?? ""}\u0000${expectedRevisionId ?? ""}\u0000${expectedWorkspaceId ?? ""}\u0000${expectedRenderSpecKey}\u0000${attempt}`;
   const readOnly = target !== null && target.kind !== "artifact-current";
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
 
@@ -263,7 +286,15 @@ export function useArtifactPreview({
       .then(async (resolved) => {
         if (!isCurrent()) return;
         resolvedTarget = resolved;
-        const mismatch = resolutionError(currentTarget, resolved, projectId, expectedArtifactId);
+        const mismatch = resolutionError(
+          currentTarget,
+          resolved,
+          projectId,
+          expectedArtifactId,
+          expectedRevisionId,
+          expectedWorkspaceId,
+          expectedRenderSpec,
+        );
         if (mismatch) throw new Error(mismatch);
         commit({ status: "loading", resolved, lease: null, error: null });
         const acquired = await api.acquirePreviewTargetLease(projectId, resolved, acquisitionController.signal);
@@ -307,7 +338,16 @@ export function useArtifactPreview({
       if (ownedLease !== null) release(ownedLease);
       ownedLease = null;
     };
-  }, [api, enabled, expectedArtifactId, projectId, requestKey]);
+  }, [
+    api,
+    enabled,
+    expectedArtifactId,
+    expectedRenderSpec,
+    expectedRevisionId,
+    expectedWorkspaceId,
+    projectId,
+    requestKey,
+  ]);
 
   const visibleState = !enabled || target === null
     ? IDLE_STATE

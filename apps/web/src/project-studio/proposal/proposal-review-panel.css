@@ -102,6 +102,93 @@
   color: var(--muted-foreground);
 }
 
+.dezin-proposal-review__quality {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 9px;
+  padding: 11px 14px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dezin-proposal-review__quality-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dezin-proposal-review__quality-heading h3 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: 0.01em;
+}
+
+.dezin-proposal-review__quality-heading > span {
+  padding: 2px 5px;
+  border: 1px solid var(--foreground);
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.065em;
+  text-transform: uppercase;
+}
+
+.dezin-proposal-review__quality-frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.dezin-proposal-review__quality-frames > span {
+  display: grid;
+  min-width: 78px;
+  gap: 1px;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+}
+
+.dezin-proposal-review__quality-frames strong {
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dezin-proposal-review__quality-frames small {
+  color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+}
+
+.dezin-proposal-review__quality dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+}
+
+.dezin-proposal-review__quality dl > div {
+  display: grid;
+  gap: 2px;
+}
+
+.dezin-proposal-review__quality dt {
+  color: var(--muted-foreground);
+  font-size: 8px;
+}
+
+.dezin-proposal-review__quality dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 9px;
+  font-weight: 570;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dezin-proposal-review__changes {
   min-height: 0;
   flex: 1 1 auto;

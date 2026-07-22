@@ -1,4 +1,7 @@
-import type { GenerationTaskRecoverySummary } from "../../../../packages/core/src/index.ts";
+import {
+  GenerationPlanCompileError,
+  type GenerationTaskRecoverySummary,
+} from "../../../../packages/core/src/index.ts";
 
 export interface GenerationPlanRecoveryDeps {
   store: {
@@ -51,10 +54,12 @@ function warn(
 export async function recoverGenerationPlans(
   deps: GenerationPlanRecoveryDeps,
 ): Promise<GenerationTaskRecoverySummary> {
+  const admissionBlockers: unknown[] = [];
   let shells: readonly { id: string }[] = [];
   try {
     shells = deps.store.listApprovedGenerationPlanShells();
   } catch (error) {
+    admissionBlockers.push(error);
     warn(
       deps,
       { operation: "list-approved-shells", error },
@@ -66,6 +71,7 @@ export async function recoverGenerationPlans(
     try {
       await deps.planService.compileAndEnqueueApprovedShell(shell.id);
     } catch (error) {
+      if (!(error instanceof GenerationPlanCompileError)) admissionBlockers.push(error);
       warn(
         deps,
         { operation: "compile-approved-shell", planId: shell.id, error },
@@ -93,6 +99,12 @@ export async function recoverGenerationPlans(
       deps,
       { operation: "reconcile-needs-rebase", error },
       "generation Task rebase reconciliation failed during startup",
+    );
+  }
+  if (admissionBlockers.length > 0) {
+    throw new AggregateError(
+      admissionBlockers,
+      "approved Generation Plan recovery did not reach a durable terminal or executable state",
     );
   }
   return {

@@ -9,7 +9,8 @@ export type ResourceKind =
   | "effect"
   | "external-reference";
 
-export type BaseResourceKind = Exclude<ResourceKind, "research" | "sharingan-capture">;
+/** Resource kinds backed by the shared immutable payload contract. */
+export type BaseResourceKind = ResourceKind;
 
 export interface AgentScope {
   type: "workspace" | "artifact" | "resource";
@@ -40,8 +41,24 @@ export interface AgentTurnRequest {
   message: string;
   explicitContext: readonly ContextItemRef[];
   graphRevision: number;
+  turnId?: string;
   baseRevisionId?: string;
   selection?: readonly SelectionRef[];
+}
+
+export const AGENT_TURN_ID_PATTERN = /^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** @deprecated Use the scope-neutral Agent turn identifier contract. */
+export const SCOPED_AGENT_TURN_ID_PATTERN = AGENT_TURN_ID_PATTERN;
+
+export function normalizeAgentTurnId(value: unknown): string {
+  if (typeof value !== "string" || !AGENT_TURN_ID_PATTERN.test(value)) {
+    throw new ContextIntegrityError("Agent turnId must be canonical turn-<lowercase UUID v4>");
+  }
+  return value;
+}
+
+export function normalizeScopedAgentTurnId(value: unknown): string {
+  return normalizeAgentTurnId(value);
 }
 
 export type ContextItemClass =
@@ -476,7 +493,7 @@ export function normalizeAgentTurnRequest(value: unknown): AgentTurnRequest {
   exactRuntimeFields(
     input,
     ["scope", "intent", "message", "explicitContext", "graphRevision"],
-    ["baseRevisionId", "selection"],
+    ["turnId", "baseRevisionId", "selection"],
     "Agent turn request",
   );
   const scope = runtimeRecord(input.scope, "Agent turn scope");
@@ -546,6 +563,7 @@ export function normalizeAgentTurnRequest(value: unknown): AgentTurnRequest {
     message: input.message,
     explicitContext,
     graphRevision: input.graphRevision as number,
+    ...(input.turnId === undefined ? {} : { turnId: normalizeAgentTurnId(input.turnId) }),
     ...(input.baseRevisionId === undefined
       ? {}
       : { baseRevisionId: runtimeId(input.baseRevisionId, "Agent turn base Revision id") }),

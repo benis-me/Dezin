@@ -8,7 +8,8 @@ import type { RenderFrameSpec, Store } from "../../../packages/core/src/index.ts
 import { stablePreviewHash } from "./render-assembly.ts";
 
 const CACHE_VERSION = 1;
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_PNG_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BYTES = MAX_PNG_IMAGE_BYTES;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
@@ -522,6 +523,21 @@ async function probePng(bytes: Buffer, signal?: AbortSignal): Promise<ImageDimen
   await validatePngScanlines(compressed, compressedByteLength, layout, signal);
   throwIfAborted(signal);
   return assertImageDimensions(width, height);
+}
+
+/**
+ * Fully validates one bounded PNG, including chunks, CRCs, decoded scanline
+ * layout, dimensions, pixel budget, and cancellation during inflation.
+ */
+export async function inspectBoundedPngImage(
+  value: Uint8Array,
+  signal?: AbortSignal,
+): Promise<Readonly<ImageDimensions>> {
+  throwIfAborted(signal);
+  if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > MAX_PNG_IMAGE_BYTES) {
+    throw new Error("PNG bytes exceed the bounded image budget");
+  }
+  return probePng(Buffer.from(value), signal);
 }
 
 function probeImageDimensions(

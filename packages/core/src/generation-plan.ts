@@ -15,6 +15,7 @@ import type {
   GenerationTaskKind,
   GenerationTaskResourceLimits,
   GenerationTaskTarget,
+  ResourceKind,
   ResourceGenerationTaskPayloadV2,
   WorkspaceGenerationArtifactPlan,
   WorkspaceGenerationCapability,
@@ -31,6 +32,7 @@ export type GenerationPlanCompileErrorCode =
   | "proposal-identity-mismatch"
   | "proposal-base-mismatch"
   | "unsupported-proposal"
+  | "unsupported-resource-kind"
   | "duplicate-id"
   | "invalid-reference"
   | "cyclic-task-graph";
@@ -89,6 +91,16 @@ const CHECKPOINT_LIMITS: GenerationTaskResourceLimits = {
   maxOutputBytes: 1024 * 1024,
   capacityClasses: [],
 };
+
+const AGENT_GENERATABLE_RESOURCE_KINDS: ReadonlySet<ResourceKind> = new Set([
+  "research",
+  "moodboard",
+  "sharingan-capture",
+]);
+
+export function isAgentGeneratableResourceKind(kind: ResourceKind): boolean {
+  return AGENT_GENERATABLE_RESOURCE_KINDS.has(kind);
+}
 
 function compileError(
   code: GenerationPlanCompileErrorCode,
@@ -207,7 +219,21 @@ function validateGenerationPayload(
   assertUnique(generation.prototypeIntents, (intent) => intent.edgeId, "prototype edge id");
   assertUnique(generation.dependencyPlans, dependencyKey, "dependency identity");
 
+  for (const operation of generation.resourceOperations) {
+    if (operation.revisionPolicy.kind === "generate"
+      && !isAgentGeneratableResourceKind(operation.kind)) {
+      compileError(
+        "unsupported-resource-kind",
+        `generation Resource kind ${operation.kind} requires an explicit owned source and cannot be Agent-generated`,
+        { resourceId: operation.resourceId, resourceKind: operation.kind },
+      );
+    }
+  }
+
   const operations = new Set(generation.resourceOperations.map((operation) => operation.resourceId));
+  const operationsByResourceId = new Map(
+    generation.resourceOperations.map((operation) => [operation.resourceId, operation] as const),
+  );
   const artifactPlans = new Map(generation.artifactPlans.map((plan) => [plan.artifactId, plan]));
   const availableArtifacts = new Map<string, "component" | "page">();
   for (const node of proposal.baseGraph.nodes) {
@@ -266,6 +292,31 @@ function validateGenerationPayload(
     for (const frameId of plan.responsiveFrameIds) {
       if (!frames.has(frameId)) {
         compileError("invalid-reference", `missing generation responsive Frame ${frameId}`, { frameId });
+      }
+    }
+    const selection = plan.researchDirectionSelection;
+    if (selection !== undefined) {
+      const selectedOperation = operationsByResourceId.get(selection.resourceId);
+      const ownsSelectedResearch = generation.dependencyPlans.some((dependency) => (
+        dependency.kind === "resource"
+        && dependency.ownerArtifactId === plan.artifactId
+        && dependency.resourceId === selection.resourceId
+      ));
+      if (selection.protocol !== "dezin.research-direction-selection.v1" || selection.version !== 1
+        || selectedOperation?.kind !== "research" || selectedOperation.operation !== "reuse"
+        || selectedOperation.revisionPolicy.kind !== "exact"
+        || selectedOperation.revisionPolicy.resourceRevisionId !== selection.revisionId
+        || !ownsSelectedResearch) {
+        compileError(
+          "invalid-reference",
+          `generation Artifact ${plan.artifactId} selected Research direction must reference its exact existing Revision dependency`,
+          {
+            artifactId: plan.artifactId,
+            resourceId: selection.resourceId,
+            revisionId: selection.revisionId,
+            directionId: selection.directionId,
+          },
+        );
       }
     }
   }

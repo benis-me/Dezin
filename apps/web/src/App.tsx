@@ -45,19 +45,32 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
           key={route.id}
           projectId={route.id}
           artifactId={null}
+          artifactRevisionId={null}
+          resourceId={null}
+          resourceRevisionId={null}
           legacyFallback={WorkspaceScreen}
           onOpenSettings={onOpenSettings}
         />
       );
     case "project-canvas":
     case "project-artifact":
+    case "project-artifact-revision":
+    case "project-resource":
+    case "project-resource-revision":
       // key by projectId: switching projects must give a FRESH instance (full state reset), not reuse
       // one component whose refs (activeConv, abortRef, running/queue) leak from the previous project.
       return (
         <ProjectStudioScreen
           key={route.id}
           projectId={route.id}
-          artifactId={route.name === "project-artifact" ? route.artifactId : null}
+          artifactId={route.name === "project-artifact" || route.name === "project-artifact-revision"
+            ? route.artifactId
+            : null}
+          artifactRevisionId={route.name === "project-artifact-revision" ? route.revisionId : null}
+          resourceId={route.name === "project-resource" || route.name === "project-resource-revision"
+            ? route.resourceId
+            : null}
+          resourceRevisionId={route.name === "project-resource-revision" ? route.revisionId : null}
           legacyFallback={WorkspaceScreen}
           onOpenSettings={onOpenSettings}
         />
@@ -111,7 +124,9 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
 }
 
 function routeLifetimeKey(route: Route): string {
-  if (route.name === "project" || route.name === "project-canvas" || route.name === "project-artifact") {
+  if (route.name === "project" || route.name === "project-canvas" || route.name === "project-artifact"
+    || route.name === "project-artifact-revision" || route.name === "project-resource"
+    || route.name === "project-resource-revision") {
     return `project:${route.id}`;
   }
   return routeToPath(route);

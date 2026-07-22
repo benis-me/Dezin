@@ -60,7 +60,8 @@ function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapsho
     throw new ContextIntegrityError("Moodboard Resource bundle is not valid UTF-8 JSON");
   }
   const bundle = plainRecord(parsed, "Moodboard Resource bundle");
-  if (bundle.format !== "dezin-moodboard-resource-bundle" || bundle.version !== 1
+  if (bundle.format !== "dezin-moodboard-resource-bundle"
+    || (bundle.version !== 1 && bundle.version !== 2)
     || !Array.isArray(bundle.nodes) || !Array.isArray(bundle.messages) || !Array.isArray(bundle.assets)) {
     throw new ContextIntegrityError("Moodboard Resource bundle format is invalid");
   }

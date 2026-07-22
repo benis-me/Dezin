@@ -502,14 +502,31 @@ function createPinnedPageAttempt(
 
 function createPublicationOnlyAttempt(store: Store, label: string) {
   const fixture = createPinnedPageAttempt(store, label);
+  const claim = store.workspace.tryClaimGenerationTaskAttempt({
+    taskId: fixture.task.id,
+    attempt: fixture.attempt.attempt,
+    ownerId: `publication-only-setup-${label}`,
+    now: 90_000,
+    leaseMs: 30_000,
+  });
+  assert.ok(claim);
   store.db.prepare(
     `UPDATE generation_task_attempts
-     SET status = 'needs-rebase', started_at = 90_000, finished_at = 90_001
+     SET status = 'needs-rebase', failure_class = 'publication-conflict',
+         error_json = '{"code":"publication-conflict"}',
+         owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+         heartbeat_at = NULL, finished_at = 90_001
      WHERE task_id = ? AND attempt = ?`,
   ).run(fixture.task.id, fixture.attempt.attempt);
   store.db.prepare(
-    "UPDATE generation_tasks SET status = 'needs-rebase' WHERE id = ? AND plan_id = ?",
+    `UPDATE generation_tasks
+     SET status = 'needs-rebase', failure_class = 'publication-conflict',
+         error_json = '{"code":"publication-conflict"}'
+     WHERE id = ? AND plan_id = ?`,
   ).run(fixture.task.id, fixture.plan.id);
+  store.db.prepare(
+    "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = ?",
+  ).run(fixture.task.id, fixture.attempt.attempt);
   store.workspace.recordGenerationTaskMaterializationFailureForProject(
     fixture.project.id,
     fixture.plan.id,

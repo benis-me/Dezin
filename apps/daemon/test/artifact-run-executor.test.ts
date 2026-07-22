@@ -106,6 +106,8 @@ class CaptureFence implements SharinganCaptureBundleFence {
   readonly fingerprint = "b".repeat(64);
   readonly reference;
   tampered = false;
+  assetsHidden = false;
+  assetIsolationCount = 0;
   verifyCount = 0;
 
   constructor(overrides: { revisionId?: string } = {}) {
@@ -131,6 +133,17 @@ class CaptureFence implements SharinganCaptureBundleFence {
 
   async withoutMaterializedBundle<Result>(operation: () => Promise<Result>): Promise<Result> {
     return operation();
+  }
+
+  async withoutMaterializedAssets<Result>(operation: () => Promise<Result>): Promise<Result> {
+    assert.equal(this.assetsHidden, false);
+    this.assetsHidden = true;
+    this.assetIsolationCount += 1;
+    try {
+      return await operation();
+    } finally {
+      this.assetsHidden = false;
+    }
   }
 
   async dispose(): Promise<void> {}
@@ -634,6 +647,32 @@ test("ArtifactRunExecutor fails closed when QA tampers with the pinned Sharingan
   assert.equal(transaction.disposeCount, 1);
 });
 
+test("ArtifactRunExecutor hides runtime-served Sharingan assets for the complete QA evaluation", async () => {
+  const fence = new CaptureFence();
+  const transaction = new Transaction({
+    fingerprints: ["base", "candidate"],
+    candidates: [CANDIDATE_A],
+  });
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        return preparation({
+          transaction,
+          runner: new Runner([{ text: "candidate", artifactHtml: "" }]),
+          qualities: [quality({ passed: true, score: 100 })],
+          sharinganCapture: fence,
+          onEvaluate: () => { assert.equal(fence.assetsHidden, true); },
+        });
+      },
+    },
+  });
+
+  await executor.execute(claim({ sharingan: true }), new AbortController().signal);
+  assert.equal(fence.assetIsolationCount, 1);
+  assert.equal(fence.assetsHidden, false);
+  assert.equal(transaction.disposeCount, 1);
+});
+
 test("ArtifactRunExecutor disposes when prepare returns a transaction at the abort boundary", async () => {
   const transaction = new Transaction({ fingerprints: [], candidates: [] });
   const runner = new Runner([]);
@@ -649,6 +688,36 @@ test("ArtifactRunExecutor disposes when prepare returns a transaction at the abo
   });
 
   await assert.rejects(executor.execute(claim(), controller.signal), /stop after preparation/);
+  assert.equal(runner.inputs.length, 0);
+  assert.equal(transaction.disposeCount, 1);
+});
+
+test("ArtifactRunExecutor preserves abort as the primary cause when disposal also fails", async () => {
+  const transaction = new Transaction({ fingerprints: [], candidates: [] });
+  const cleanupError = new Error("worktree cleanup failed after abort");
+  transaction.disposeError = cleanupError;
+  const runner = new Runner([]);
+  const controller = new AbortController();
+  const abortError = new Error("stop after preparation");
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        const result = preparation({ transaction, runner, qualities: [] });
+        controller.abort(abortError);
+        return result;
+      },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim(), controller.signal),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.cause, abortError);
+      assert.deepEqual(error.errors, [abortError, cleanupError]);
+      return true;
+    },
+  );
   assert.equal(runner.inputs.length, 0);
   assert.equal(transaction.disposeCount, 1);
 });
@@ -754,7 +823,7 @@ test("ArtifactRunExecutor rejects hostile or unbounded history and environment d
   }
 });
 
-test("a primary execution failure is preserved when disposal also fails", async () => {
+test("a primary execution failure is preserved and disposal failure is durably exposed", async () => {
   const transaction = new Transaction({ fingerprints: ["same", "same"], candidates: [] });
   transaction.disposeError = new Error("dispose failed");
   const reported: unknown[] = [];
@@ -771,7 +840,17 @@ test("a primary execution failure is preserved when disposal also fails", async 
     reportError: (error) => reported.push(error),
   });
 
-  await assert.rejects(executor.execute(claim(), new AbortController().signal), /without changing project files/);
+  await assert.rejects(
+    executor.execute(claim(), new AbortController().signal),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.cause, error.errors[0]);
+      assert.match(String(error.errors[0]), /without changing project files/);
+      assert.equal(error.errors[1], transaction.disposeError);
+      assert.match(error.message, /cleanup failed/i);
+      return true;
+    },
+  );
   assert.equal(transaction.disposeCount, 1);
   assert.deepEqual(reported, [transaction.disposeError]);
 });

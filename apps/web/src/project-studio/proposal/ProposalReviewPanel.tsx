@@ -272,6 +272,10 @@ export function ProposalReviewPanel({
   const assumptionsInvalid = review.status === "validation-error"
     && review.source === "edit"
     && review.invalidEditFields?.includes("assumptions") === true;
+  const qualityContract = proposal?.generation.kind === "workspace-generation"
+    && proposal.generation.artifactPlans.length > 0
+    ? proposal.generation
+    : null;
 
   useEffect(() => {
     const nextProposalId = proposal?.id ?? null;
@@ -339,6 +343,9 @@ export function ProposalReviewPanel({
           <AlertTriangle size={15} aria-hidden />
           <div><h2 tabIndex={-1}>Proposal unavailable</h2><p>{review.message}</p></div>
         </div>
+        <footer className="dezin-proposal-review__footer">
+          <button type="button" className="dezin-proposal-review__secondary" onClick={onClose}>Close review</button>
+        </footer>
       </section>
     );
   }
@@ -360,7 +367,9 @@ export function ProposalReviewPanel({
           <result.Icon size={16} aria-hidden />
           <h2 ref={headingRef} tabIndex={-1}>{result.label}</h2>
           <p>{result.message}</p>
-          <button type="button" onClick={onClose}>Close review</button>
+          <button type="button" onClick={onClose}>
+            {review.status === "approved" && review.plan ? "View build plan" : "Close review"}
+          </button>
         </div>
       </section>
     );
@@ -464,6 +473,39 @@ export function ProposalReviewPanel({
           />
         </label>
       </div>
+
+      {qualityContract ? (
+        <section className="dezin-proposal-review__quality" aria-label="Effective quality contract">
+          <div className="dezin-proposal-review__quality-heading">
+            <h3>Quality contract</h3>
+            <span>Enforced</span>
+          </div>
+          <div className="dezin-proposal-review__quality-frames" aria-label="Required review frames">
+            {qualityContract.responsiveFrames
+              .filter((frame) => qualityContract.qualityProfile.requiredFrameIds.includes(frame.id))
+              .map((frame) => (
+                <span key={frame.id}>
+                  <strong>{frame.name}</strong>
+                  <small>{frame.width} × {frame.height}</small>
+                </span>
+              ))}
+          </div>
+          <dl>
+            <div>
+              <dt>Runtime</dt>
+              <dd>{qualityContract.qualityProfile.requireRuntimeChecks ? "Required" : "Optional"}</dd>
+            </div>
+            <div>
+              <dt>Visual review</dt>
+              <dd>{qualityContract.qualityProfile.requireVisualReview ? "Required" : "Optional"}</dd>
+            </div>
+            <div>
+              <dt>Blocks on</dt>
+              <dd>{qualityContract.qualityProfile.blockingSeverities.join(" · ") || "None"}</dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
 
       <div className="dezin-proposal-review__changes">
         <div className="dezin-proposal-review__section-heading">

@@ -5,6 +5,7 @@ import {
   AgentComposerContextCards,
   moveContextItem,
   removeContextItem,
+  serializeDaemonOwnedComposerContext,
   serializeLegacyPrototypeComposerContext,
   serializeStructuredComposerContext,
   upsertContextItems,
@@ -39,6 +40,22 @@ test("context item helpers dedupe, remove, and reorder by id", () => {
   expect(moveContextItem(baseItems, "text-context:fig", "file:.refs/cloud.png")).toEqual([baseItems[2], baseItems[0], baseItems[1]]);
 });
 
+test("scoped Agent context accepts only immutable daemon-owned identities", () => {
+  expect(serializeDaemonOwnedComposerContext([{
+    id: "artifact:checkout:revision-7",
+    type: "context-ref",
+    title: "Checkout",
+    ref: { kind: "artifact", id: "artifact-checkout", revisionId: "revision-7" },
+  }])).toEqual([{ kind: "artifact", id: "artifact-checkout", revisionId: "revision-7" }]);
+  expect(() => serializeDaemonOwnedComposerContext([{
+    id: "artifact:checkout:head",
+    type: "context-ref",
+    title: "Moving Checkout Head",
+    ref: { kind: "artifact", id: "artifact-checkout" },
+  }])).toThrow(/immutable Revision/);
+  expect(() => serializeDaemonOwnedComposerContext([baseItems[0]!])).toThrow(/cannot safely resolve/);
+});
+
 test("structured composer context keeps references and selection out of the visible message", () => {
   const items: AgentComposerContextItem<{ selector: string; note?: string }>[] = [
     ...baseItems,
@@ -58,6 +75,12 @@ test("structured composer context keeps references and selection out of the visi
       nodeId: "hero",
       nodeType: "section",
       body: "A trusted server resolver owns the node body.",
+    },
+    {
+      id: "artifact:checkout:revision-7",
+      type: "context-ref",
+      title: "Checkout",
+      ref: { kind: "artifact", id: "artifact-checkout", revisionId: "revision-7" },
     },
   ];
 
@@ -96,6 +119,7 @@ test("structured composer context keeps references and selection out of the visi
         content: "A trusted server resolver owns the node body.",
         trustLevel: "untrusted",
       },
+      { kind: "artifact", id: "artifact-checkout", revisionId: "revision-7" },
     ],
     selection: [
       { kind: "element", id: ".hero-title", locator: { selector: ".hero-title", note: "Make it sharper" } },

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -161,26 +161,19 @@ test("runtime Frame audit fails the exact Frame whose rendered application throw
   ], JSON.stringify(report));
   assert.ok(report.findings.some((finding) => finding.id === "visual-runtime-error@broken"));
 
-  const reviewer = join(root, "reviewer.js");
-  const reviewerCalls = join(root, "reviewer-calls.jsonl");
-  writeFileSync(
-    reviewer,
-    `#!/usr/bin/env node
-const fs = require("fs");
-fs.appendFileSync(${JSON.stringify(reviewerCalls)}, JSON.stringify(process.argv.slice(2)) + "\\n");
-console.log(JSON.stringify({findings:[]}));
-`,
-    { mode: 0o755 },
-  );
+  const reviewPrompts: string[] = [];
   const reviewedReport = await auditVisualArtifactReport({
     htmlPath,
     projectRoot: root,
     screenshotPath,
     renderUrl: `${pathToFileURL(htmlPath).href}#dezin-bridge=${NONCE}`,
-    settings: { visualQaEnabled: true, agentCommand: reviewer } as never,
-    agentCommand: reviewer,
+    settings: { visualQaEnabled: true, agentCommand: "claude" } as never,
+    agentCommand: "claude",
     renderFrames: frames,
     signal: new AbortController().signal,
+  }, async (request) => {
+    reviewPrompts.push(request.message);
+    return { providerId: "claude", text: '{"findings":[]}' };
   });
   assert.deepEqual(reviewedReport.frames.map((frame) => [frame.frameId, frame.status, frame.reviewed]), [
     ["healthy", "passed", true],
@@ -188,12 +181,10 @@ console.log(JSON.stringify({findings:[]}));
   ], JSON.stringify(reviewedReport));
   assert.ok(reviewedReport.findings.some((finding) => finding.id === "visual-reviewed"),
     "a captured failed runtime Frame must still receive visual assessment");
-  const reviewPrompts = readFileSync(reviewerCalls, "utf8")
-    .trim().split("\n").map((line) => JSON.parse(line).join(" ") as string);
   assert.equal(reviewPrompts.length, 2);
-  assert.match(reviewPrompts[0]!, /Exact Task Frame: healthy .*800.*600.*ready/s,
+  assert.match(reviewPrompts[0]!, /"id": "healthy"[\s\S]*"width": 800[\s\S]*"height": 600[\s\S]*"initialState": "ready"/,
     "the reviewer prompt must name the exact healthy Frame contract");
-  assert.match(reviewPrompts[1]!, /Exact Task Frame: broken .*390.*844.*broken/s,
+  assert.match(reviewPrompts[1]!, /"id": "broken"[\s\S]*"width": 390[\s\S]*"height": 844[\s\S]*"initialState": "broken"/,
     "the reviewer prompt must name the exact broken Frame contract");
   assert.doesNotMatch(reviewPrompts[0]!, /broken runtime frame/,
     "the healthy Frame reviewer must not receive another Frame's runtime signals");

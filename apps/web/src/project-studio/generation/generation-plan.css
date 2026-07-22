@@ -1,0 +1,561 @@
+.dezin-generation-plan__container,
+.dezin-generation-plan {
+  height: 100%;
+  min-height: 0;
+}
+
+.dezin-generation-plan__container {
+  position: relative;
+}
+
+.dezin-generation-plan {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 11px;
+}
+
+.dezin-generation-plan__header {
+  display: flex;
+  min-height: 52px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dezin-generation-plan__heading {
+  min-width: 0;
+}
+
+.dezin-generation-plan__header-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.dezin-generation-plan__close {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.dezin-generation-plan__close:hover {
+  background: var(--surface-2);
+  color: var(--foreground);
+}
+
+.dezin-generation-plan__close:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.dezin-generation-plan--placeholder > .dezin-generation-plan__close {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+}
+
+.dezin-generation-plan--placeholder {
+  position: relative;
+}
+
+.dezin-generation-plan__heading > span,
+.dezin-generation-plan__selector > span {
+  display: block;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono-stack);
+  font-size: 8px;
+  font-weight: 560;
+  letter-spacing: 0.09em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.dezin-generation-plan__heading h2 {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 610;
+  letter-spacing: -0.018em;
+  line-height: 1;
+}
+
+.dezin-generation-plan__plan-state {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.dezin-generation-plan__plan-state i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.dezin-generation-plan__plan-state[data-state="active"] {
+  color: var(--foreground);
+}
+
+.dezin-generation-plan__plan-state[data-state="active"] i {
+  border-style: dashed;
+  animation: dezin-plan-spin 1.2s linear infinite;
+}
+
+.dezin-generation-plan__plan-state[data-state="success"] {
+  color: var(--success);
+}
+
+.dezin-generation-plan__plan-state[data-state="success"] i {
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.dezin-generation-plan__plan-state[data-state="failure"] {
+  color: var(--destructive);
+}
+
+.dezin-generation-plan__plan-state[data-state="failure"] i {
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+
+.dezin-generation-plan__overview {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 9px;
+  padding: 11px 14px 12px;
+  border-bottom: 1px solid var(--border);
+  background:
+    linear-gradient(90deg, color-mix(in oklch, var(--surface-2) 68%, transparent), transparent 72%);
+}
+
+.dezin-generation-plan__overview-copy {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dezin-generation-plan__overview-copy strong {
+  font-size: 10px;
+  font-weight: 590;
+}
+
+.dezin-generation-plan__overview-copy span {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono-stack);
+  font-size: 8px;
+  letter-spacing: 0.035em;
+}
+
+.dezin-generation-plan__overview-copy span[data-connection="live"]::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin: 0 4px 1px 0;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.dezin-generation-plan__progress {
+  display: grid;
+  grid-auto-columns: minmax(5px, 1fr);
+  grid-auto-flow: column;
+  gap: 3px;
+  height: 3px;
+}
+
+.dezin-generation-plan__progress i {
+  min-width: 0;
+  background: var(--border-strong);
+}
+
+.dezin-generation-plan__progress i[data-state="success"] {
+  background: var(--success);
+}
+
+.dezin-generation-plan__progress i[data-state="active"] {
+  background: repeating-linear-gradient(90deg, var(--foreground) 0 4px, transparent 4px 7px);
+}
+
+.dezin-generation-plan__progress i[data-state="failure"] {
+  background: var(--destructive);
+}
+
+.dezin-generation-plan__progress i[data-state="cancelled"] {
+  background: repeating-linear-gradient(135deg, var(--border-strong) 0 2px, transparent 2px 4px);
+}
+
+.dezin-generation-plan__plan-message {
+  margin: 0;
+  padding: 7px 8px;
+  border-left: 2px solid var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 6%, transparent);
+  color: var(--foreground-2);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.dezin-generation-plan__selector {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.dezin-generation-plan__selector select {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  outline: none;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.dezin-generation-plan__selector select:focus-visible,
+.dezin-generation-plan button:focus-visible,
+.dezin-generation-plan a:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.dezin-generation-plan__tasks {
+  position: relative;
+  display: block;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 0 14px;
+  list-style: none;
+  content-visibility: auto;
+}
+
+.dezin-generation-plan__tasks::before {
+  position: absolute;
+  top: 20px;
+  bottom: 24px;
+  left: 21px;
+  width: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.dezin-generation-plan__task {
+  position: relative;
+  display: grid;
+  grid-template-columns: 43px minmax(0, 1fr);
+  min-width: 0;
+  padding: 9px 12px 10px 0;
+}
+
+.dezin-generation-plan__task + .dezin-generation-plan__task {
+  border-top: 1px solid color-mix(in oklch, var(--border) 65%, transparent);
+}
+
+.dezin-generation-plan__task-marker {
+  z-index: 1;
+  align-self: start;
+  justify-self: center;
+  width: 9px;
+  height: 9px;
+  margin-top: 3px;
+  border: 1px solid var(--muted-foreground);
+  background: var(--background);
+}
+
+.dezin-generation-plan__task-marker[data-state="active"] {
+  border-radius: 50%;
+  border-style: dashed;
+  border-color: var(--foreground);
+  animation: dezin-plan-spin 1.2s linear infinite;
+}
+
+.dezin-generation-plan__task-marker[data-state="success"] {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.dezin-generation-plan__task-marker[data-state="failure"] {
+  border-color: var(--destructive);
+  transform: rotate(45deg);
+}
+
+.dezin-generation-plan__task-marker[data-state="cancelled"] {
+  border-style: dashed;
+  opacity: 0.65;
+}
+
+.dezin-generation-plan__task-body {
+  min-width: 0;
+}
+
+.dezin-generation-plan__task-topline {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dezin-generation-plan__task-topline > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dezin-generation-plan__task-topline > div > span {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono-stack);
+  font-size: 8px;
+  font-weight: 580;
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+}
+
+.dezin-generation-plan__task-topline strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 610;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dezin-generation-plan__task-status {
+  flex: 0 0 auto;
+  max-width: 84px;
+  color: var(--muted-foreground);
+  font-size: 8px;
+  line-height: 1.3;
+  text-align: right;
+}
+
+.dezin-generation-plan__task[data-state="failure"] .dezin-generation-plan__task-status {
+  color: var(--destructive);
+}
+
+.dezin-generation-plan__task[data-state="success"] .dezin-generation-plan__task-status {
+  color: var(--success);
+}
+
+.dezin-generation-plan__task-meta,
+.dezin-generation-plan__task-message {
+  margin: 5px 0 0;
+}
+
+.dezin-generation-plan__task-meta {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono-stack);
+  font-size: 8px;
+}
+
+.dezin-generation-plan__task-message {
+  padding: 6px 7px;
+  border-left: 2px solid var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 6%, transparent);
+  color: var(--foreground-2);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.dezin-generation-plan__artifact-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 7px;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  text-decoration: none;
+}
+
+.dezin-generation-plan__artifact-link:hover {
+  color: var(--foreground);
+}
+
+.dezin-generation-plan__retry-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.dezin-generation-plan__retry-actions button,
+.dezin-generation-plan__cancel {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dezin-generation-plan__retry-actions button {
+  min-height: 25px;
+  padding: 0 5px;
+}
+
+.dezin-generation-plan__retry-actions button:hover,
+.dezin-generation-plan__cancel:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.dezin-generation-plan button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.dezin-generation-plan__footer {
+  display: flex;
+  min-height: 38px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 11px 7px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.dezin-generation-plan__identity,
+.dezin-generation-plan__settled {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono-stack);
+  font-size: 8px;
+}
+
+.dezin-generation-plan__identity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dezin-generation-plan__settled {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+}
+
+.dezin-generation-plan__cancel {
+  min-height: 23px;
+  padding: 0 7px;
+  color: var(--muted-foreground);
+}
+
+.dezin-generation-plan__action-error {
+  position: absolute;
+  right: 8px;
+  bottom: 43px;
+  left: 8px;
+  z-index: 2;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--destructive);
+  background: var(--background);
+  color: var(--destructive);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.dezin-generation-plan--placeholder {
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  text-align: center;
+}
+
+.dezin-generation-plan--placeholder h2 {
+  margin: 13px 0 0;
+  font-size: 12px;
+  font-weight: 610;
+}
+
+.dezin-generation-plan--placeholder p {
+  max-width: 190px;
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.dezin-generation-plan__empty-mark,
+.dezin-generation-plan__placeholder-lines {
+  display: grid;
+  width: 34px;
+  gap: 4px;
+}
+
+.dezin-generation-plan__empty-mark i,
+.dezin-generation-plan__placeholder-lines i {
+  display: block;
+  height: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--background);
+}
+
+.dezin-generation-plan__empty-mark i:nth-child(2) {
+  width: 72%;
+}
+
+.dezin-generation-plan__empty-mark i:nth-child(3) {
+  width: 43%;
+}
+
+.dezin-generation-plan__placeholder-lines i {
+  animation: dezin-plan-pulse 1.4s ease-in-out infinite alternate;
+}
+
+.dezin-generation-plan__placeholder-lines i:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.dezin-generation-plan__placeholder-lines i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes dezin-plan-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes dezin-plan-pulse {
+  to { background: var(--border); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dezin-generation-plan__plan-state[data-state="active"] i,
+  .dezin-generation-plan__task-marker[data-state="active"],
+  .dezin-generation-plan__placeholder-lines i {
+    animation: none;
+  }
+}

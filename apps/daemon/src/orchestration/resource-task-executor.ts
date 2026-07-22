@@ -406,7 +406,7 @@ function buildPreparedCandidate(
       parentRevisionId: claim.attempt.baseRevisionId,
       manifestPath: receipt.manifestPath,
       summary: receipt.summary,
-      metadata: { adapter: receipt.metadata, payload: payloadIdentity },
+      metadata: { mimeType: receipt.mimeType, adapter: receipt.metadata, payload: payloadIdentity },
       checksum: receipt.manifestChecksum,
       provenance: {
         kind: "generation-task-resource",
@@ -994,13 +994,17 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
     || typeof adapter.kind !== "string" || !RESOURCE_KINDS.has(adapter.kind as ResourceKind)) {
     invalidPayload("Resource Task adapter identity is invalid");
   }
-  const operation = exactRecord(payload.operation, [
+  const rawOperation = payload.operation;
+  const operationHasDispatchContext = rawOperation !== null && typeof rawOperation === "object"
+    && Object.prototype.hasOwnProperty.call(rawOperation, "dispatchContextPackId");
+  const operation = exactRecord(rawOperation, [
     "operation",
     "nodeId",
     "resourceId",
     "kind",
     "title",
     "revisionPolicy",
+    ...(operationHasDispatchContext ? ["dispatchContextPackId"] : []),
   ], "Resource Task operation");
   if (operation.operation !== "create" && operation.operation !== "revise") {
     invalidPayload("Resource Task operation must be create or revise");
@@ -1008,6 +1012,12 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   const nodeId = canonicalText(operation.nodeId, "Resource Task node id", 512);
   const resourceId = canonicalText(operation.resourceId, "Resource Task Resource id", 512);
   const title = canonicalText(operation.title, "Resource Task title", 4_096);
+  const dispatchContextPackId = operation.dispatchContextPackId === undefined
+    ? undefined
+    : canonicalText(operation.dispatchContextPackId, "Resource Task dispatch Context Pack id", 77);
+  if (dispatchContextPackId !== undefined && !/^context-pack-[0-9a-f]{64}$/.test(dispatchContextPackId)) {
+    invalidPayload("Resource Task dispatch Context Pack id is invalid");
+  }
   if (typeof operation.kind !== "string" || !RESOURCE_KINDS.has(operation.kind as ResourceKind)) {
     invalidPayload("Resource Task Resource kind is unsupported");
   }
@@ -1089,6 +1099,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
       kind: operation.kind as ResourceKind,
       title,
       revisionPolicy: Object.freeze({ kind: "generate" as const }),
+      ...(dispatchContextPackId === undefined ? {} : { dispatchContextPackId }),
     }),
     brief: Object.freeze({
       proposalRationale,

@@ -1143,6 +1143,54 @@ test("Resource Head or Snapshot drift preserves the candidate and records one ne
   });
 });
 
+test("Snapshot-only Resource drift appends a publication-only successor with retained payload evidence", () => {
+  const fixture = createStagedResourceCandidateFixture("resource-rebase-publication-only");
+  try {
+    const latestSnapshot = driftSnapshotOnly(fixture);
+    resourceCandidateApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      publicationInput(fixture),
+    );
+    const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.task.id,
+    );
+    assert.equal(disposition.kind, "publication-only");
+    if (disposition.kind !== "publication-only") assert.fail("expected publication-only Resource rebase");
+    assert.equal(disposition.successorAttempt.expectedSnapshotId, latestSnapshot.id);
+    assert.equal(disposition.successorAttempt.candidateRevisionId, null);
+    assert.equal(
+      disposition.successorAttempt.candidateResourceRevisionId,
+      fixture.staged.resourceRevision.id,
+    );
+    assert.deepEqual(
+      disposition.successorAttempt.candidateEvidence,
+      fixture.staged.attempt.candidateEvidence,
+    );
+    fixture.control.set(100_010);
+    const claim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: fixture.task.id,
+      attempt: disposition.successorAttempt.attempt,
+      ownerId: "resource-publication-only-rebase-worker",
+      now: 100_010,
+      leaseMs: 30_000,
+    });
+    assert.ok(claim);
+    fixture.control.set(100_011);
+    const published = resourceCandidateApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: claim.lease },
+    );
+    assert.equal(published.status, "succeeded");
+    assert.equal(currentTaskAndAttempt(fixture).task.status, "succeeded");
+  } finally {
+    fixture.store.close();
+  }
+});
+
 test("Resource publication rejects wrong, expired, and incomplete claim fences without writes", async (t) => {
   await t.test("wrong lease token", () => {
     const fixture = createStagedResourceCandidateFixture("publish-wrong-token");

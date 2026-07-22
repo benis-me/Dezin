@@ -408,7 +408,7 @@ test("visual QA run emits a start event before visual QA results", async () => {
   await withRunServer(
     runner,
     async ({ base, store }) => {
-      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "codebuddy", visualQaModel: "hunyuan" });
+      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "claude", visualQaModel: "claude-sonnet-4-6" });
       const project = await createProject(base);
       const res = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -422,8 +422,8 @@ test("visual QA run emits a start event before visual QA results", async () => {
       const resultIndex = events.findIndex((event) => event.type === "visual-qa");
       assert.ok(startIndex >= 0);
       assert.ok(resultIndex > startIndex);
-      assert.equal(events[startIndex]?.agentCommand, "codebuddy");
-      assert.equal(events[startIndex]?.model, "hunyuan");
+      assert.equal(events[startIndex]?.agentCommand, "claude");
+      assert.equal(events[startIndex]?.model, "claude-sonnet-4-6");
     },
     {
       visualQa: async () => [{ severity: "P2", id: "visual-ai-review-1", message: "CTA clips.", fix: "Allow wrapping." }],
@@ -532,7 +532,7 @@ test("visual QA run persists a visual review transcript record", async () => {
   await withRunServer(
     runner,
     async ({ base, store }) => {
-      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "codebuddy", visualQaModel: "hunyuan" });
+      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "claude", visualQaModel: "claude-sonnet-4-6" });
       const project = await createProject(base);
       const res = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -564,8 +564,8 @@ test("visual QA run persists a visual review transcript record", async () => {
         };
       };
       assert.equal(parsed.visualReview?.status, "complete");
-      assert.equal(parsed.visualReview?.agentCommand, "codebuddy");
-      assert.equal(parsed.visualReview?.model, "hunyuan");
+      assert.equal(parsed.visualReview?.agentCommand, "claude");
+      assert.equal(parsed.visualReview?.model, "claude-sonnet-4-6");
       const run = store.listRuns(project.id)[0];
       assert.ok(run);
       assert.match(
@@ -576,7 +576,7 @@ test("visual QA run persists a visual review transcript record", async () => {
       assert.equal(evidence.status, 200);
       assert.equal(await evidence.text(), "round zero pixels");
       assert.equal(parsed.visualReview?.findings?.[0]?.message, "CTA clips.");
-      assert.match(parsed.visualReview?.process?.[1]?.summary ?? "", /codebuddy \/ hunyuan/);
+      assert.match(parsed.visualReview?.process?.[1]?.summary ?? "", /claude \/ claude-sonnet-4-6/);
     },
     {
       visualQa: async (input) => {
@@ -1163,8 +1163,8 @@ test("prototype run folds visual QA findings into score, result, and persisted r
       assert.equal(visual.findings && Array.isArray(visual.findings), true);
       assert.equal(done.score, 92);
       assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "visual-horizontal-overflow");
-      assert.equal(visualInput?.agentCommand, "codex");
-      assert.equal(visualInput?.model, "gpt-5");
+      assert.equal(visualInput?.agentCommand, "claude");
+      assert.equal(visualInput?.model, undefined);
       assert.equal(visualInput?.brief, "make a hero");
       assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
       assert.deepEqual(visualInput?.conversationHistory?.map((m) => m.content), [
@@ -3617,8 +3617,8 @@ test("standard run persists visual QA findings and score when enabled", async ()
     async ({ base, dataDir, store }) => {
       store.updateSettings({
         visualQaEnabled: true,
-        visualQaAgentCommand: "codebuddy",
-        visualQaModel: "hunyuan",
+        visualQaAgentCommand: "claude",
+        visualQaModel: "claude-sonnet-4-6",
         autoImproveEnabled: false,
       });
       const project = store.createProject({ name: "Std", mode: "standard" });
@@ -3643,8 +3643,8 @@ test("standard run persists visual QA findings and score when enabled", async ()
       assert.equal(visualInput?.projectRoot, standardRunWorktreeDir(dataDir, project.id, done.runId as string));
       assert.notEqual(visualInput?.projectRoot, expectedDir, "visual QA reads only the isolated Run worktree");
       assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
-      assert.equal(visualInput?.agentCommand, "codebuddy");
-      assert.equal(visualInput?.model, "hunyuan");
+      assert.equal(visualInput?.agentCommand, "claude");
+      assert.equal(visualInput?.model, "claude-sonnet-4-6");
       assert.deepEqual(visualInput?.conversationHistory?.map((m) => m.content), ["make it better", "changed"]);
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.score, 92);

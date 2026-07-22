@@ -345,6 +345,7 @@ function validatePreparation(
       || resolve(sharinganCapture.worktreeDir) !== resolve(preparation.transaction.dir)
       || typeof sharinganCapture.verify !== "function"
       || typeof sharinganCapture.withoutMaterializedBundle !== "function"
+      || typeof sharinganCapture.withoutMaterializedAssets !== "function"
       || typeof sharinganCapture.dispose !== "function"
       || !reference
       || reference.workspaceId !== claim.task.workspaceId
@@ -435,7 +436,10 @@ function fenceEvaluator(
     async evaluate(input: Parameters<StandardArtifactQualityEvaluatorPort["evaluate"]>[0]) {
       await verifySharinganCapture(fence, signal, "before quality evaluation");
       try {
-        const result = await evaluator.evaluate(input);
+        const result = await fence.withoutMaterializedAssets(
+          () => evaluator.evaluate(input),
+          signal,
+        );
         await verifySharinganCapture(fence, signal, "after quality evaluation");
         return result;
       } catch (error) {
@@ -573,6 +577,11 @@ export class ArtifactRunExecutor implements ArtifactGenerationTaskLeafExecutor {
         } catch (error) {
           if (primaryError === null) throw error;
           this.reportBestEffort(error);
+          throw new AggregateError(
+            [primaryError, error],
+            "Artifact execution failed and candidate cleanup failed",
+            { cause: primaryError },
+          );
         }
       }
     }

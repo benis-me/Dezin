@@ -30,7 +30,7 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
       {editor.preview.readOnly ? (
         <div role="status" aria-label="Historical preview is read-only" className="artifact-inspector__readonly">
           <LockKeyhole aria-hidden size={14} />
-          <span>Historical revision. Restore or fork it before editing.</span>
+          <span>This exact Revision is immutable. Restore it as a new Revision or fork a Track; saved history is never rewritten.</span>
         </div>
       ) : null}
 

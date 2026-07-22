@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Store, type StoreClock } from "../src/index.ts";
+import {
+  buildGenerationTaskPrototypeValidationResult,
+  Store,
+  type StoreClock,
+} from "../src/index.ts";
 
 function fakeClock(): StoreClock {
   let now = 30_000;
@@ -142,7 +146,7 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
     plan.id,
     validation.id,
   );
-  store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
+  const validationAttempt = store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...validationObservation,
     contextPackId: null,
     sourceCommitHash: null,
@@ -150,21 +154,28 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
-  store.db.prepare(
-    `UPDATE generation_task_attempts
-     SET status = 'succeeded', started_at = 30_099, finished_at = 30_100
-     WHERE task_id = ? AND attempt = 1`,
-  ).run(validation.id);
-  store.db.prepare(
-    `UPDATE generation_tasks
-     SET status = 'succeeded', finished_at = 30_100
-     WHERE id = ? AND plan_id = ?`,
-  ).run(validation.id, plan.id);
-  store.db.prepare(
-    `INSERT INTO generation_plan_events
-       (plan_id, workspace_id, sequence, task_id, type, payload_json, created_at)
-     VALUES (?, ?, 3, ?, 'task-succeeded', '{}', 30_100)`,
-  ).run(plan.id, plan.workspaceId, validation.id);
+  const validationClaim = store.workspace.tryClaimGenerationTaskAttempt({
+    taskId: validation.id,
+    attempt: validationAttempt.attempt,
+    ownerId: "dependency-output-validation-owner",
+    now: validationAttempt.createdAt,
+    leaseMs: 30_000,
+  });
+  assert.ok(validationClaim);
+  const validationSnapshot = store.workspace.listSnapshots(project.id)
+    .find((snapshot) => snapshot.id === validationAttempt.expectedSnapshotId);
+  assert.ok(validationSnapshot);
+  const validationResult = buildGenerationTaskPrototypeValidationResult({
+    task: validation,
+    attempt: validationAttempt,
+    snapshot: validationSnapshot,
+    artifactRevisions: [],
+    resourceRevisions: [],
+  });
+  store.workspace.completeGenerationTaskValidationForProject(project.id, plan.id, {
+    lease: validationClaim.lease,
+    validation: validationResult,
+  });
 
   assert.deepEqual(
     store.workspace.listGenerationTaskIdsReadyForMaterializationForProject(project.id, plan.id),
@@ -179,7 +190,7 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
     taskId: validation.id,
     resultRevisionId: null,
     resultResourceRevisionId: null,
-    resultSnapshotId: null,
+    resultSnapshotId: validationSnapshot.id,
   }]);
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...observation,
@@ -849,14 +860,31 @@ test("a needs-rebase successor materialization failure preserves publication-onl
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
+  const firstClaim = store.workspace.tryClaimGenerationTaskAttempt({
+    taskId: validation.id,
+    attempt: firstAttempt.attempt,
+    ownerId: "materialization-needs-rebase-owner",
+    now: 30_100,
+    leaseMs: 30_000,
+  });
+  assert.ok(firstClaim);
   store.db.prepare(
     `UPDATE generation_task_attempts
-     SET status = 'needs-rebase', started_at = 30_100, finished_at = 30_101
+     SET status = 'needs-rebase', failure_class = 'publication-conflict',
+         error_json = '{"code":"publication-conflict"}',
+         owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+         heartbeat_at = NULL, finished_at = 30_101
      WHERE task_id = ? AND attempt = ?`,
   ).run(validation.id, firstAttempt.attempt);
   store.db.prepare(
-    "UPDATE generation_tasks SET status = 'needs-rebase' WHERE id = ? AND plan_id = ?",
+    `UPDATE generation_tasks
+     SET status = 'needs-rebase', failure_class = 'publication-conflict',
+         error_json = '{"code":"publication-conflict"}'
+     WHERE id = ? AND plan_id = ?`,
   ).run(validation.id, plan.id);
+  store.db.prepare(
+    "DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = ?",
+  ).run(validation.id, firstAttempt.attempt);
 
   const failure = store.workspace.recordGenerationTaskMaterializationFailureForProject(
     project.id,

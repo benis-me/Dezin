@@ -25,6 +25,7 @@ const WORKSPACE_ID = "workspace-resource-executor";
 const PLAN_ID = "plan-resource-executor";
 const TASK_ID = "task-resource-executor";
 const RESOURCE_ID = "resource-generated-hero";
+const DISPATCH_CONTEXT_PACK_ID = `context-pack-${"a".repeat(64)}`;
 
 function taskFixture(): GenerationTask {
   return {
@@ -46,6 +47,7 @@ function taskFixture(): GenerationTask {
           kind: "asset",
           title: "Generated hero",
           revisionPolicy: { kind: "generate" },
+          dispatchContextPackId: DISPATCH_CONTEXT_PACK_ID,
         },
         brief: {
           proposalRationale: "Create a focused visual hero for the approved concept.",
@@ -279,6 +281,7 @@ test("selects the exact frozen adapter while the executor authors durable Resour
   );
   assert.equal(result.revision.checksum, "a".repeat(64));
   assert.deepEqual(result.revision.metadata, {
+    mimeType: "text/plain",
     adapter: { width: 1440 },
     payload: { mimeType: "text/plain", byteSize: 14, checksum: "b".repeat(64) },
   });
@@ -359,6 +362,7 @@ test("parses only the exact frozen v2 adapter and Resource operation contract", 
       kind: "asset",
       title: "Generated hero",
       revisionPolicy: { kind: "generate" },
+      dispatchContextPackId: DISPATCH_CONTEXT_PACK_ID,
     },
     brief: {
       proposalRationale: "Create a focused visual hero for the approved concept.",
@@ -383,6 +387,7 @@ test("rejects extra fields at every v2 payload boundary", () => {
     { ...payload, forged: true },
     { ...payload, adapter: { ...adapter, fallback: "latest" } },
     { ...payload, operation: { ...operation, revisionId: "adapter-forged" } },
+    { ...payload, operation: { ...operation, dispatchContextPackId: `context-pack-${"A".repeat(64)}` } },
     { ...payload, operation: { ...operation, revisionPolicy: { ...revisionPolicy, path: "/tmp/escape" } } },
   ];
   for (const candidate of cases) {

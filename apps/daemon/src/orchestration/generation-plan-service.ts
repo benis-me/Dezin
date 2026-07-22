@@ -18,7 +18,7 @@ import { classifyGenerationTaskError } from "./generation-task-failure.ts";
 
 export interface GenerationPlanStorePort {
   compileApprovedGenerationPlanForProject(projectId: string, planId: string): GenerationPlanDetail;
-  listGenerationPlans(projectId: string): GenerationPlan[];
+  listActiveGenerationPlanIdsForProject(projectId: string): string[];
   listGenerationTaskIdsReadyForMaterializationForProject(projectId: string, planId: string): string[];
   getGenerationPlanDetailForProject(projectId: string, planId: string): GenerationPlanDetail;
   observeGenerationTaskMaterializationForProject(
@@ -232,11 +232,22 @@ export class GenerationPlanService {
     signal: AbortSignal = NEVER_ABORTED_SIGNAL,
   ): Promise<GenerationPlanMaterializationSummary> {
     checkAbort(signal);
-    const summary = await awaitWithAbort(
+    const disposition = await awaitWithAbort(
       this.options.rebaseReconciler.reconcileNeedsRebaseTasks(signal),
       signal,
     );
-    return { planIds: [...new Set(summary.planIds)].sort(compareBinary) };
+    checkAbort(signal);
+    // latest-context rebase is deliberately excluded from the generic pass:
+    // it must first receive a dedicated durable disposition. Once the Core
+    // reconciler has moved it to awaiting-context-refresh, resolve and CAS the
+    // new Context/Source input here so it cannot remain ownerless forever.
+    const refreshed = await this.materializeTasks(
+      (_projectId, _planId, task) => task.status === "awaiting-context-refresh",
+      signal,
+    );
+    return {
+      planIds: [...new Set([...disposition.planIds, ...refreshed.planIds])].sort(compareBinary),
+    };
   }
 
   async materializeReadyTaskAttempts(
@@ -258,25 +269,25 @@ export class GenerationPlanService {
     const projects = [...new Set(this.options.projectLookup.listProjectIds())].sort(compareBinary);
     for (const projectId of projects) {
       checkAbort(signal);
-      const plans = this.options.store.listGenerationPlans(projectId)
-        .filter((plan) => plan.constructionSealed && ACTIVE_PLAN_STATUSES.has(plan.status))
-        .sort((left, right) => compareBinary(left.id, right.id));
-      for (const plan of plans) {
+      const planIds = [...new Set(
+        this.options.store.listActiveGenerationPlanIdsForProject(projectId),
+      )].sort(compareBinary);
+      for (const planId of planIds) {
         checkAbort(signal);
         const readyTaskIds = this.options.store
-          .listGenerationTaskIdsReadyForMaterializationForProject(projectId, plan.id);
+          .listGenerationTaskIdsReadyForMaterializationForProject(projectId, planId);
         if (readyTaskIds.length === 0) continue;
-        const detail = this.options.store.getGenerationPlanDetailForProject(projectId, plan.id);
+        const detail = this.options.store.getGenerationPlanDetailForProject(projectId, planId);
         const taskById = new Map(detail.tasks.map((task) => [task.id, task]));
         const tasks = [...new Set(readyTaskIds)]
           .map((taskId) => taskById.get(taskId))
           .filter((task): task is GenerationTask => task !== undefined
-            && acceptsTask(projectId, plan.id, task));
+            && acceptsTask(projectId, planId, task));
         if (tasks.length === 0) continue;
-        touchedPlanIds.add(plan.id);
+        touchedPlanIds.add(planId);
         for (const task of tasks) {
           checkAbort(signal);
-          await this.materializeTask(projectId, plan.id, task, signal);
+          await this.materializeTask(projectId, planId, task, signal);
         }
       }
     }
@@ -312,6 +323,7 @@ export class GenerationPlanService {
     signal: AbortSignal,
   ): Promise<void> {
     let phase: MaterializationPhase = "observe";
+    let observedExecutionEpoch: number | null = null;
     try {
       checkAbort(signal);
       const observation = this.options.store.observeGenerationTaskMaterializationForProject(
@@ -319,6 +331,7 @@ export class GenerationPlanService {
         planId,
         task.id,
       );
+      observedExecutionEpoch = observation.executionEpoch ?? 0;
       const policy = retryContextPolicy(task);
       const previousAttempt = task.currentAttempt > 0
         ? this.options.store.getGenerationTaskAttemptForProject(
@@ -357,32 +370,18 @@ export class GenerationPlanService {
 
       let sourceBase: Readonly<GenerationTaskSourceBase> | null = null;
       if (task.target.type === "artifact") {
-        if (policy === "same-context" && task.currentAttempt > 0) {
-          if (previousAttempt?.sourceCommitHash === null
-            || previousAttempt?.sourceTreeHash === null
-            || previousAttempt === null) {
-            throw new GenerationPlanServiceInvariantError(
-              `Generation Task ${task.id} cannot reuse a missing prior Source Base from a legacy Attempt`,
-            );
-          }
-          sourceBase = immutableSourceBase({
-            sourceCommitHash: previousAttempt.sourceCommitHash,
-            sourceTreeHash: previousAttempt.sourceTreeHash,
-          }, `Generation Task ${task.id} prior Attempt`);
-        } else {
-          phase = "source-base";
-          checkAbort(signal);
-          const resolved = await awaitWithAbort(
-            this.options.sourceBaseResolver.resolve({
-              projectId,
-              planId,
-              task,
-              observation,
-            }, signal),
-            signal,
-          );
-          sourceBase = immutableSourceBase(resolved, `Generation Task ${task.id} Source Base resolver`);
-        }
+        phase = "source-base";
+        checkAbort(signal);
+        const resolved = await awaitWithAbort(
+          this.options.sourceBaseResolver.resolve({
+            projectId,
+            planId,
+            task,
+            observation,
+          }, signal),
+          signal,
+        );
+        sourceBase = immutableSourceBase(resolved, `Generation Task ${task.id} Source Base resolver`);
       }
 
       phase = "create";
@@ -397,7 +396,7 @@ export class GenerationPlanService {
       });
     } catch (error) {
       if (signal.aborted) throw abortReason(signal);
-      if (phase !== "context" && this.taskWasAdvanced(projectId, planId, task)) return;
+      if (this.taskWasAdvanced(projectId, planId, task, observedExecutionEpoch)) return;
       try {
         this.options.store.recordGenerationTaskMaterializationFailureForProject(projectId, planId, {
           taskId: task.id,
@@ -408,16 +407,25 @@ export class GenerationPlanService {
           nextEligibleAt: null,
         });
       } catch (recordError) {
-        if (!this.taskWasAdvanced(projectId, planId, task)) this.reportError(recordError);
+        if (!this.taskWasAdvanced(projectId, planId, task, observedExecutionEpoch)) {
+          this.reportError(recordError);
+        }
       }
       this.reportError(error);
     }
   }
 
-  private taskWasAdvanced(projectId: string, planId: string, observed: GenerationTask): boolean {
+  private taskWasAdvanced(
+    projectId: string,
+    planId: string,
+    observed: GenerationTask,
+    observedExecutionEpoch: number | null,
+  ): boolean {
     try {
       const detail = this.options.store.getGenerationPlanDetailForProject(projectId, planId);
       if (!ACTIVE_PLAN_STATUSES.has(detail.plan.status)) return true;
+      if (observedExecutionEpoch !== null
+        && (detail.plan.executionEpoch ?? 0) !== observedExecutionEpoch) return true;
       const current = detail.tasks.find((task) => task.id === observed.id);
       if (current === undefined) return true;
       return current.currentAttempt !== observed.currentAttempt

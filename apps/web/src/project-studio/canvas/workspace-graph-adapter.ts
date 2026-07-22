@@ -28,6 +28,8 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   name: string;
   artifactId: string | null;
   resourceId: string | null;
+  resourceKind?: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference" | null;
+  resourceQualityState?: "grounded" | "needs-review" | null;
   revisionId: string | null;
   thumbnailUrl: string | null;
   zoomLevel: SemanticZoomLevel;
@@ -35,7 +37,7 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   outgoingCount: number;
   qualityState: "passed" | "needs-attention" | "failed" | "unassessed" | "not-applicable";
   qualityScore: number | null;
-  generationState: "idle" | "queued" | "running" | "complete" | "failed";
+  generationState: "idle" | "awaiting-selection" | "queued" | "running" | "complete" | "failed";
   collapsed: boolean;
   parentGroupId: string | null;
   onToggleCollapsed?: (groupId: string, collapsed: boolean) => void;
@@ -57,6 +59,12 @@ export interface WorkspaceGraphView {
   edgeFilter: WorkspaceEdgeFilter;
   projectId?: string;
   artifactRevisionIds?: Readonly<Record<string, string | null>>;
+  resourceRevisionStates?: Readonly<Record<string, {
+    revisionId: string;
+    resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
+    qualityState: "grounded" | "needs-review" | null;
+  }>>;
+  awaitingSelectionResourceIds?: ReadonlySet<string>;
   selectedNodeIds?: ReadonlySet<string>;
   selectedEdgeIds?: ReadonlySet<string>;
   onToggleCollapsed?: WorkspaceFlowNodeData["onToggleCollapsed"];
@@ -157,6 +165,8 @@ function adaptGroup(
       name: group.label,
       artifactId: null,
       resourceId: null,
+      resourceKind: null,
+      resourceQualityState: null,
       revisionId: null,
       thumbnailUrl: null,
       zoomLevel: semanticZoomLevel(view.zoom),
@@ -181,13 +191,16 @@ function adaptGraphNode(
   counts: ReadonlyMap<string, NodeRelationCount>,
   view: WorkspaceGraphView,
 ): WorkspaceFlowNode {
-  const revisionId = node.kind === "resource" ? null : view.artifactRevisionIds?.[node.artifactId] ?? null;
+  const resourceState = node.kind === "resource" ? view.resourceRevisionStates?.[node.resourceId] : undefined;
+  const revisionId = node.kind === "resource"
+    ? resourceState?.revisionId ?? null
+    : view.artifactRevisionIds?.[node.artifactId] ?? null;
   const quality = node.kind === "resource" ? null : node.quality ?? null;
   const size = WORKSPACE_NODE_SIZES[node.kind];
   return {
     id: node.id,
     type: node.kind,
-    ariaLabel: `${node.kind} ${node.name}, incoming ${counts.get(node.id)?.incoming ?? 0}, outgoing ${counts.get(node.id)?.outgoing ?? 0}, quality ${node.kind === "resource" ? "not applicable" : quality?.state ?? "unassessed"}`,
+    ariaLabel: `${node.kind} ${node.name}, incoming ${counts.get(node.id)?.incoming ?? 0}, outgoing ${counts.get(node.id)?.outgoing ?? 0}, quality ${node.kind === "resource" ? resourceState?.qualityState ?? "unassessed" : quality?.state ?? "unassessed"}`,
     position: { x: layoutObject.x, y: layoutObject.y },
     parentId: layoutObject.parentGroupId ?? undefined,
     extent: layoutObject.parentGroupId ? "parent" : undefined,
@@ -200,6 +213,8 @@ function adaptGraphNode(
       name: node.name,
       artifactId: node.kind === "resource" ? null : node.artifactId,
       resourceId: node.kind === "resource" ? node.resourceId : null,
+      resourceKind: node.kind === "resource" ? resourceState?.resourceKind ?? null : null,
+      resourceQualityState: node.kind === "resource" ? resourceState?.qualityState ?? null : null,
       revisionId,
       thumbnailUrl: immutableThumbnailUrl(view.projectId, node, revisionId),
       zoomLevel: semanticZoomLevel(view.zoom),
@@ -207,7 +222,9 @@ function adaptGraphNode(
       outgoingCount: counts.get(node.id)?.outgoing ?? 0,
       qualityState: node.kind === "resource" ? "not-applicable" : quality?.state ?? "unassessed",
       qualityScore: node.kind === "resource" ? null : quality?.score ?? null,
-      generationState: "idle",
+      generationState: node.kind === "resource" && view.awaitingSelectionResourceIds?.has(node.resourceId)
+        ? "awaiting-selection"
+        : "idle",
       collapsed: false,
       parentGroupId: layoutObject.parentGroupId,
     },

@@ -910,6 +910,26 @@ async function mimePayloadIsValid(
   }
 }
 
+/** Validate an already bounded embedded payload with the same MIME rules as exact Revision bytes. */
+export async function verifyBoundedResourcePayloadBytes(
+  bytes: Uint8Array,
+  mimeType: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const normalized = normalizedMime(mimeType, "Embedded Resource MIME");
+  if (bytes.byteLength > MAX_RESOURCE_PAYLOAD_BYTES) {
+    throw new ResourceRevisionPayloadError("Embedded Resource payload exceeds its byte limit");
+  }
+  if ((normalized === "application/json" || normalized === "image/svg+xml" || normalized.startsWith("text/"))
+    && bytes.byteLength > MAX_TEXT_PAYLOAD_BYTES) {
+    throw new ResourceRevisionPayloadError("Embedded text Resource payload exceeds its MIME validation bound");
+  }
+  if (!await mimePayloadIsValid(Buffer.from(bytes), bytes.byteLength, normalized, signal)) {
+    throw new ResourceRevisionPayloadError("Embedded Resource payload bytes do not match the declared MIME");
+  }
+}
+
 async function writeFully(
   destination: Awaited<ReturnType<typeof open>>,
   bytes: Buffer,

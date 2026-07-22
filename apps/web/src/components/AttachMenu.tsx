@@ -30,6 +30,11 @@ export function AttachMenu({
   onReference,
   onReferenceMoodboard,
   onReferenceEffect,
+  workspaceReferences = [],
+  onReferenceWorkspaceItem,
+  allowLocalPaths = true,
+  allowProjectReference = true,
+  allowFigImport = true,
 }: {
   fileActionLabel?: string;
   onAttachFile?: () => void;
@@ -38,6 +43,11 @@ export function AttachMenu({
   onReference?: (project: Project) => void;
   onReferenceMoodboard?: (board: Moodboard) => void;
   onReferenceEffect?: (effect: EffectCard) => void;
+  workspaceReferences?: Array<{ id: string; label: string; detail?: string }>;
+  onReferenceWorkspaceItem?: (id: string) => void;
+  allowLocalPaths?: boolean;
+  allowProjectReference?: boolean;
+  allowFigImport?: boolean;
 }) {
   const { toast } = useToast();
   const api = useApi();
@@ -45,13 +55,18 @@ export function AttachMenu({
   const [projects, setProjects] = useState<Project[]>([]);
   const [moodboards, setMoodboards] = useState<Moodboard[]>([]);
   const [effects, setEffects] = useState<EffectCard[]>([]);
+  const loadProjectReferences = allowProjectReference && onReference !== undefined;
   useEffect(() => {
+    if (!loadProjectReferences) return;
     let alive = true;
-    void api.listProjects().then((p) => alive && setProjects(p.filter((x) => !x.archivedAt))).catch(() => {});
+    void Promise.resolve()
+      .then(() => api.listProjects())
+      .then((p) => alive && setProjects(p.filter((x) => !x.archivedAt)))
+      .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [api]);
+  }, [api, loadProjectReferences]);
   useEffect(() => {
     let alive = true;
     void api
@@ -116,35 +131,63 @@ export function AttachMenu({
           <Paperclip size={15} strokeWidth={1.75} />
           {fileActionLabel}
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void pick("folder", "Attach folder")}>
-          <FolderPlus size={15} strokeWidth={1.75} />
-          Attach folder
-        </DropdownMenuItem>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger className="whitespace-nowrap">
-            <Layers size={15} strokeWidth={1.75} />
-            Reference a project
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
-            {projects.length === 0 ? (
-              <DropdownMenuItem disabled>No other projects</DropdownMenuItem>
-            ) : (
-              projects.map((p) => (
-                <DropdownMenuItem key={p.id} onClick={() => onReference?.(p)}>
-                  <span className="truncate">{p.name}</span>
-                </DropdownMenuItem>
-              ))
-            )}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Code</DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => void pick("folder", "Link local code")}>
-          <FolderGit2 size={15} strokeWidth={1.75} />
-          Link local code…
-        </DropdownMenuItem>
+        {allowLocalPaths ? (
+          <DropdownMenuItem onClick={() => void pick("folder", "Attach folder")}>
+            <FolderPlus size={15} strokeWidth={1.75} />
+            Attach folder
+          </DropdownMenuItem>
+        ) : null}
+        {allowProjectReference ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="whitespace-nowrap">
+              <Layers size={15} strokeWidth={1.75} />
+              Reference a project
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+              {projects.length === 0 ? (
+                <DropdownMenuItem disabled>No other projects</DropdownMenuItem>
+              ) : (
+                projects.map((p) => (
+                  <DropdownMenuItem key={p.id} onClick={() => onReference?.(p)}>
+                    <span className="truncate">{p.name}</span>
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
+        {allowLocalPaths ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Code</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => void pick("folder", "Link local code")}>
+              <FolderGit2 size={15} strokeWidth={1.75} />
+              Link local code…
+            </DropdownMenuItem>
+          </>
+        ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Designs</DropdownMenuLabel>
+        {onReferenceWorkspaceItem ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="whitespace-nowrap">
+              <Layers size={15} strokeWidth={1.75} />
+              Reference a workspace item
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-72 w-64 overflow-y-auto">
+              {workspaceReferences.length === 0 ? (
+                <DropdownMenuItem disabled>No versioned workspace items</DropdownMenuItem>
+              ) : workspaceReferences.map((item) => (
+                <DropdownMenuItem key={item.id} onClick={() => onReferenceWorkspaceItem(item.id)}>
+                  <span className="min-w-0">
+                    <span className="block truncate">{item.label}</span>
+                    {item.detail ? <span className="block truncate text-[10px] text-muted-foreground">{item.detail}</span> : null}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
         {onReferenceMoodboard ? (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger className="whitespace-nowrap">
@@ -183,10 +226,12 @@ export function AttachMenu({
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         ) : null}
-        <DropdownMenuItem onClick={() => figInputRef.current?.click()}>
-          <FileUp size={15} strokeWidth={1.75} />
-          Upload .fig file
-        </DropdownMenuItem>
+        {allowFigImport ? (
+          <DropdownMenuItem onClick={() => figInputRef.current?.click()}>
+            <FileUp size={15} strokeWidth={1.75} />
+            Upload .fig file
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

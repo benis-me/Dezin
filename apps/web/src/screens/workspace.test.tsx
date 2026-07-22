@@ -12,7 +12,7 @@ import { normalizeTranscriptMessages, runCardStackPosition } from "./workspace-t
 import { sortRunsNewestFirst } from "./workspace-versions.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { PreviewLeaseInfo, RunEvent, RunSummary, VersionPreview } from "../lib/api.ts";
-import { previewBridgeNonceForSrc } from "../lib/preview-channel.ts";
+import { previewBridgeNonceForSrc, previewDocumentSrc } from "../lib/preview-channel.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
@@ -45,6 +45,10 @@ const BRIDGE_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
 
 function bridgedUrl(url: string, nonce = BRIDGE_NONCE): string {
   return `${url}${url.includes("#") ? "&" : "#"}dezin-bridge=${nonce}`;
+}
+
+function renderedPreviewUrl(url: string): string {
+  return previewDocumentSrc(bridgedUrl(url));
 }
 
 function previewLease(url: string, leaseId = "preview-lease"): PreviewLeaseInfo {
@@ -128,6 +132,7 @@ test("workspace helper modules preserve transcript and version ordering semantic
 interface PreviewBridgeConnection {
   port: MessagePort;
   received: Array<Record<string, unknown>>;
+  nonce: string;
 }
 
 const previewBridgePorts = new WeakMap<HTMLIFrameElement, PreviewBridgeConnection>();
@@ -143,23 +148,25 @@ function connectPreviewBridge(
   const bootstrap = calls.find(([message]) =>
     (message as { type?: string }).type === "bridge-init");
   const port = bootstrap?.[2]?.[0] as MessagePort | undefined;
+  const nonce = (bootstrap?.[0] as { nonce?: unknown } | undefined)?.nonce;
   postMessage.mockRestore();
   if (!port) throw new Error("Preview bridge did not transfer its capability port.");
+  if (typeof nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(nonce)) {
+    throw new Error("Preview bridge did not keep a valid parent-held capability.");
+  }
   const received: Array<Record<string, unknown>> = [];
-  const connection = { port, received };
+  const connection = { port, received, nonce };
   previewBridgePorts.set(iframe, connection);
   activePreviewBridgePorts.add(port);
   port.onmessage = (event) => received.push(event.data as Record<string, unknown>);
   port.start();
-  const nonce = previewBridgeNonceForSrc(iframe.src);
   port.postMessage({ source: "dezin", type: "bridge-ready", nonce, protocol: 1 });
   return connection;
 }
 
 function dispatchPreviewMessage(data: Record<string, unknown>): void {
   const iframe = screen.getByTitle("Artifact preview") as HTMLIFrameElement;
-  const { port } = connectPreviewBridge(iframe);
-  const nonce = previewBridgeNonceForSrc(iframe.src);
+  const { port, nonce } = connectPreviewBridge(iframe);
   port.postMessage({ source: "dezin", nonce, protocol: 1, ...data });
 }
 
@@ -347,7 +354,7 @@ test("leaving a standard workspace releases its exact preview lease", async () =
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledWith("p1"));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    bridgedUrl("http://127.0.0.1:5300/p1"),
+    renderedPreviewUrl("http://127.0.0.1:5300/p1"),
   ));
   unmount();
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("preview-lease"));
@@ -405,13 +412,13 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   );
 
   const iframe = await screen.findByTitle("Artifact preview");
-  await waitFor(() => expect(iframe.getAttribute("src")).toBe(bridgedUrl("http://127.0.0.1:5300/p1")));
+  await waitFor(() => expect(iframe.getAttribute("src")).toBe(renderedPreviewUrl("http://127.0.0.1:5300/p1")));
 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
   expect(screen.getByTitle("Artifact preview").getAttribute("src") ?? "").toMatch(
-    /^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+#dezin-bridge=/,
+    /^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+$/,
   );
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
 });
@@ -2248,7 +2255,6 @@ test("clicking a marked target asks the preview to focus that element", async ()
 
   const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
   const bridge = connectPreviewBridge(iframe);
-  const nonce = previewBridgeNonceForSrc(iframe.src);
   fireEvent.click(screen.getByRole("button", { name: "Marked target section.hero > h1" }));
 
   await waitFor(() => expect(bridge.received).toContainEqual(expect.objectContaining({
@@ -2256,7 +2262,7 @@ test("clicking a marked target asks the preview to focus that element", async ()
       selector: "section.hero > h1",
       rect: { x: 24, y: 40, w: 320, h: 48 },
       source: "dezin-parent",
-      nonce,
+      nonce: bridge.nonce,
       protocol: 1,
     })));
   const inspect = screen.getByLabelText("Inspect panel");
@@ -2429,7 +2435,6 @@ test("inspect and selection modes keep the preview iframe mounted and use two-st
 
   const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
   const bridge = connectPreviewBridge(iframe);
-  const nonce = previewBridgeNonceForSrc(iframe.src);
 
   fireEvent.click(screen.getByLabelText("Inspect preview"));
   expect(await screen.findByLabelText("Inspect panel")).toBeInTheDocument();
@@ -2439,7 +2444,7 @@ test("inspect and selection modes keep the preview iframe mounted and use two-st
     source: "dezin-parent",
     type: "select-mode",
     on: true,
-    nonce,
+    nonce: bridge.nonce,
     protocol: 1,
   })));
   expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
@@ -2815,7 +2820,7 @@ test("switching a version updates Preview, Files, and Quality to that run", asyn
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
   expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/),
   );
 
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
@@ -2857,7 +2862,7 @@ test("a saved Prototype source failure keeps Preview usable and shows an indepen
 
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/),
   ));
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
 
@@ -2897,7 +2902,7 @@ test("a saved Prototype Preview switches before its source resolves and Files re
 
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/),
   ));
   expect(screen.queryByText("Loading version preview")).toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
@@ -3009,8 +3014,8 @@ test("version compare uses the active branch's live surface instead of substitut
 
   const oldFrame = await screen.findByTitle("Main v1");
   const currentFrame = await screen.findByTitle("Main live");
-  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/));
-  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^\/projects\/p1\/preview\/\?t=\d+#dezin-bridge=/));
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^\/projects\/p1\/preview\/\?t=\d+$/));
 });
 
 test("a stale Compare request cannot clear the newer comparison's busy state", async () => {
@@ -3088,7 +3093,7 @@ test("refreshing a viewed standard version keeps the version preview instead of 
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/),
   ));
 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
@@ -3096,7 +3101,7 @@ test("refreshing a viewed standard version keeps the version preview instead of 
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledTimes(2));
   expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/),
   );
   expect(getDevServerUrl).toHaveBeenCalledTimes(1);
 });
@@ -3135,14 +3140,14 @@ test("restoring a standard version reacquires the live dev-server preview and re
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/before")));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/before")));
   await waitFor(() => expect(listFiles).toHaveBeenCalledTimes(1));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Restore Main v1" }));
 
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r-old"));
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5301/restored")));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5301/restored")));
   await waitFor(() => expect(listFiles).toHaveBeenCalledTimes(2));
 });
 
@@ -3183,7 +3188,7 @@ test("a restored Standard version keeps its historical viewer lease when the cur
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5400\/historical\?t=/)));
@@ -3241,7 +3246,7 @@ test("viewing a standard version resolves the dev-server URL before rendering th
 
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/),
   ));
   expect(screen.getByTitle("Artifact preview").getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version preview")).toBeNull();
@@ -3278,13 +3283,13 @@ test("standard preview switching and unmount release the exact main and version 
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("main-lease"));
   expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/),
   );
 
   view.unmount();
@@ -3336,12 +3341,12 @@ test("an invalid saved-version capability releases its lease and preserves the d
   );
 
   const frame = await screen.findByTitle("Artifact preview");
-  await waitFor(() => expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  await waitFor(() => expect(frame).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("invalid-version-lease"));
-  expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current"));
+  expect(frame).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current"));
   expect(releasePreviewLease).not.toHaveBeenCalledWith("main-lease");
 });
 
@@ -3368,12 +3373,12 @@ test("a Standard saved-version response without a complete lease is rejected", a
   );
 
   const frame = await screen.findByTitle("Artifact preview");
-  await waitFor(() => expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  await waitFor(() => expect(frame).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
   expect(await screen.findByText("Couldn't load that version preview.")).toBeInTheDocument();
-  expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current"));
+  expect(frame).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current"));
   expect(releasePreviewLease).not.toHaveBeenCalledWith("main-lease");
 });
 
@@ -3407,7 +3412,7 @@ test("a failed saved-version switch does not cancel a pending live preview", asy
   });
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
     "src",
-    bridgedUrl("http://127.0.0.1:5300/current"),
+    renderedPreviewUrl("http://127.0.0.1:5300/current"),
   ));
   expect(releasePreviewLease).not.toHaveBeenCalledWith("late-main-lease");
 });
@@ -3480,7 +3485,7 @@ test("a failed Standard version switch keeps the previously verified version and
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", renderedPreviewUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5401\/old/)));
@@ -3606,8 +3611,8 @@ test("standard version compare resolves the saved and live dev-server URLs befor
 
   const oldFrame = await screen.findByTitle("Main v1");
   const currentFrame = await screen.findByTitle("Main live");
-  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/));
-  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5402\/\?t=\d+#dezin-bridge=/));
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5402\/\?t=\d+$/));
   expect(oldFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(currentFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version comparison")).toBeNull();
@@ -3756,7 +3761,7 @@ test("renewing a displayed Standard version keeps the canonical lease identity",
     const frame = await screen.findByTitle("Artifact preview");
     await waitFor(() => expect(frame).toHaveAttribute(
       "src",
-      expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+#dezin-bridge=/),
+      expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+$/),
     ));
     expect(renewalTick).toBeTypeOf("function");
 
@@ -3766,7 +3771,7 @@ test("renewing a displayed Standard version keeps the canonical lease identity",
     });
 
     await waitFor(() => expect(renewPreviewLease).toHaveBeenCalledWith("version-lease", expect.any(AbortSignal)));
-    expect(frame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+#dezin-bridge=/));
+    expect(frame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+$/));
     expect(releasePreviewLease).not.toHaveBeenCalledWith("version-lease");
   } finally {
     intervalSpy.mockRestore();
@@ -3805,7 +3810,7 @@ test("a renewal failure near expiry reacquires the main preview before the lease
       </ApiProvider>,
     );
 
-    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expiring.url));
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", previewDocumentSrc(expiring.url)));
     expect(renewalTick).toBeTypeOf("function");
     act(() => renewalTick?.());
     await waitFor(() => expect(renewPreviewLease).toHaveBeenCalledWith("main-old", expect.any(AbortSignal)));
@@ -3819,7 +3824,7 @@ test("a renewal failure near expiry reacquires the main preview before the lease
     await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
       "src",
-      bridgedUrl("http://127.0.0.1:5301/new"),
+      renderedPreviewUrl("http://127.0.0.1:5301/new"),
     ));
     expect(releasePreviewLease).toHaveBeenCalledWith("main-old");
   } finally {
@@ -3857,7 +3862,7 @@ test("a renewal response without a safe future expiry is rejected and reacquired
       </ApiProvider>,
     );
 
-    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", first.url));
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", previewDocumentSrc(first.url)));
     await act(async () => {
       renewalTick?.();
       await Promise.resolve();
@@ -3866,7 +3871,7 @@ test("a renewal response without a safe future expiry is rejected and reacquired
     await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
       "src",
-      bridgedUrl("http://127.0.0.1:5301/new"),
+      renderedPreviewUrl("http://127.0.0.1:5301/new"),
     ));
     expect(releasePreviewLease).toHaveBeenCalledWith("main-old");
   } finally {
@@ -3951,17 +3956,20 @@ test("branch comparison gives both opaque previews independent bridge capabiliti
 
   const main = await screen.findByTitle<HTMLIFrameElement>("Main");
   const exploration = await screen.findByTitle<HTMLIFrameElement>("Exploration");
-  const mainNonce = previewBridgeNonceForSrc(main.src);
-  const explorationNonce = previewBridgeNonceForSrc(exploration.src);
-  expect(mainNonce).not.toBeNull();
-  expect(explorationNonce).not.toBeNull();
-  expect(explorationNonce).not.toBe(mainNonce);
-  expect(main).toHaveAttribute("src", expect.stringMatching(/variants\/main\/preview\/\?t=\d+#dezin-bridge=/));
-  expect(exploration).toHaveAttribute("src", expect.stringMatching(/variants\/branch\/preview\/\?t=\d+#dezin-bridge=/));
+  expect(previewBridgeNonceForSrc(main.src)).toBeNull();
+  expect(previewBridgeNonceForSrc(exploration.src)).toBeNull();
+  expect(main).toHaveAttribute("src", expect.stringMatching(/variants\/main\/preview\/\?t=\d+$/));
+  expect(exploration).toHaveAttribute("src", expect.stringMatching(/variants\/branch\/preview\/\?t=\d+$/));
 
-  for (const [frame, nonce] of [[main, mainNonce], [exploration, explorationNonce]] as const) {
+  const handshakeNonces: string[] = [];
+  for (const frame of [main, exploration]) {
     const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
     fireEvent.load(frame);
+    const bridgeInit = postMessage.mock.calls.find(([message]) =>
+      (message as { type?: string }).type === "bridge-init");
+    const nonce = (bridgeInit?.[0] as { nonce?: unknown } | undefined)?.nonce;
+    expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    handshakeNonces.push(nonce as string);
     expect(postMessage).toHaveBeenCalledWith(
       { source: "dezin-parent", type: "bridge-init", nonce, protocol: 1 },
       expect.any(String),
@@ -3969,6 +3977,7 @@ test("branch comparison gives both opaque previews independent bridge capabiliti
     );
     postMessage.mockRestore();
   }
+  expect(handshakeNonces[1]).not.toBe(handshakeNonces[0]);
 });
 
 test("artifact header keeps Versions, divider, and tabs tight", async () => {
@@ -4460,7 +4469,7 @@ test("prototype preview-update stream events refresh the preview during generati
     fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
     fireEvent.click(screen.getByLabelText("Send"));
     expect((await screen.findByTitle("Artifact preview")).getAttribute("src")).toMatch(
-      /^\/projects\/p1\/preview\/\?t=123456#dezin-bridge=[A-Za-z0-9_-]{43}$/,
+      /^\/projects\/p1\/preview\/\?t=123456$/,
     );
   } finally {
     release?.();
@@ -4500,7 +4509,7 @@ test("preview and completion events update data without stealing the active arti
   await waitFor(() => expect(quality).toHaveAttribute("aria-selected", "true"));
   fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
   expect((await screen.findByTitle("Artifact preview")).getAttribute("src")).toMatch(
-    /^\/projects\/p1\/preview\/\?t=123456#dezin-bridge=[A-Za-z0-9_-]{43}$/,
+    /^\/projects\/p1\/preview\/\?t=123456$/,
   );
   fireEvent.click(quality);
 
@@ -4578,7 +4587,7 @@ test("standard preview-update stream events use the live dev-server URL and refr
     await waitFor(() =>
       expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
         "src",
-        bridgedUrl("http://127.0.0.1:5310/"),
+        renderedPreviewUrl("http://127.0.0.1:5310/"),
       ),
     );
     expect(getDevServerUrl).toHaveBeenCalledTimes(2);

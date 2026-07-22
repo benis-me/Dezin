@@ -9,6 +9,7 @@ import {
   type LegacyWorkspaceSeed,
   type Store,
   type WorkspaceBundle,
+  type WorkspaceBundleReadMode,
 } from "../../../packages/core/src/index.ts";
 import { projectDir } from "./serve-static.ts";
 
@@ -19,6 +20,7 @@ export interface WorkspaceMigrationDeps {
 
 export interface WorkspaceMigrationOptions {
   afterVerification?: (seed: LegacyWorkspaceSeed, attempt: number) => void | Promise<void>;
+  readMode?: WorkspaceBundleReadMode;
 }
 
 export type EnsureStandardProjectWorkspaceResult =
@@ -129,10 +131,23 @@ export async function ensureStandardProjectWorkspace(
   projectId: string,
   options: WorkspaceMigrationOptions = {},
 ): Promise<EnsureStandardProjectWorkspaceResult> {
+  const readMode = options.readMode ?? "compact";
   for (let attempt = 1; attempt <= MAX_SEED_ATTEMPTS; attempt += 1) {
     try {
-      const existing = deps.store.workspace.getBundleByProjectId(projectId);
+      const migrationRead = deps.store.workspace.readWorkspaceForLegacyMigration(projectId, readMode);
+      const existing = migrationRead?.bundle ?? null;
+      if (existing?.workspace.mode === "prototype") {
+        return {
+          status: "unsupported",
+          code: "workspace_requires_standard_project",
+          projectId,
+          projectMode: "prototype",
+        };
+      }
       if (existing?.artifacts.some((artifact) => artifact.legacyWrapped)) {
+        return { status: "ready", ...existing };
+      }
+      if (existing !== null && migrationRead?.canonicalEmptyFoundation === false) {
         return { status: "ready", ...existing };
       }
       const facts = deps.store.workspace.readLegacyStandardWorkspaceFacts(projectId);
@@ -162,7 +177,7 @@ export async function ensureStandardProjectWorkspace(
         successfulRuns,
       };
       await options.afterVerification?.(seed, attempt);
-      const bundle = deps.store.workspace.ensureLegacyStandardWorkspace(seed);
+      const bundle = deps.store.workspace.ensureLegacyStandardWorkspace(seed, readMode);
       return { status: "ready", ...bundle };
     } catch (error) {
       if (attempt < MAX_SEED_ATTEMPTS && (error instanceof LegacyWorkspaceSeedDriftError || isSqliteBusy(error))) {
