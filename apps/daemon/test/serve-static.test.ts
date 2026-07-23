@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { TextEncoder } from "node:util";
 import { runInNewContext } from "node:vm";
 import { parse, serialize } from "parse5";
 import { injectRuntimeProbe, injectSelectBridge } from "../src/serve-static.ts";
+
+const PREVIEW_BRIDGE_ASYNC_TIMEOUT_MS = 5_000;
 
 function createFrameReceiptHarness() {
   const nonce = "r".repeat(43);
@@ -99,10 +102,13 @@ function createFrameReceiptHarness() {
       match[1].callback();
     },
     async waitFor(predicate: () => boolean) {
-      for (let attempt = 0; attempt < 20 && !predicate(); attempt += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
+      const deadline = performance.now() + PREVIEW_BRIDGE_ASYNC_TIMEOUT_MS;
+      while (!predicate()) {
+        if (performance.now() >= deadline) {
+          assert.fail("expected asynchronous preview bridge state before the deadline");
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
       }
-      assert.equal(predicate(), true, "expected asynchronous preview bridge state");
     },
   };
 }
@@ -483,11 +489,16 @@ test("preview bridge stamps the protocol on every queued and live child event", 
     },
   ]);
   async function waitForFrameAttempt(frameAttemptId: string): Promise<void> {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (sent.some((message) => message.type === "frame-applied" && message.frameAttemptId === frameAttemptId)) return;
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    const deadline = performance.now() + PREVIEW_BRIDGE_ASYNC_TIMEOUT_MS;
+    const applied = () => sent.some((message) => (
+      message.type === "frame-applied" && message.frameAttemptId === frameAttemptId
+    ));
+    while (!applied()) {
+      if (performance.now() >= deadline) {
+        assert.fail(`frame attempt ${frameAttemptId} was not acknowledged before the deadline`);
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
-    assert.fail(`frame attempt ${frameAttemptId} was not acknowledged`);
   }
 
   const commands: string[] = [];

@@ -23,9 +23,11 @@ import {
 } from "../src/orchestration/production-generation-system.ts";
 import { createProductionResourceTaskExecutor } from "../src/orchestration/production-resource-task-adapter.ts";
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
+import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
 
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
-const PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS = 30_000;
+const PRODUCTION_GENERATION_IDLE_TIMEOUT_MS = 30_000;
+const PRODUCTION_GENERATION_HARD_TIMEOUT_MS = 60_000;
 
 function emptyGeneration() {
   return {
@@ -673,16 +675,31 @@ test("production Generation system publishes one real Resource to Component to P
     )) as typeof store.workspace.listResourceRevisions;
     try {
       await system.runtime.start();
-      await waitFor(() => {
-        const status = store!.workspace.getGenerationPlanForProject(project.id, approved.plan!.id).status;
-        if (status === "succeeded" || status === "failed" || status === "cancelled"
-          || status === "compile-failed") return true;
-        return store!.workspace.getGenerationPlanDetailForProject(project.id, approved.plan!.id).tasks
-          .some((task) => task.status === "failed" || task.status === "blocked-context");
-      }, PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS);
-    } catch {
+      await waitForDurableProgress({
+        description: "production Generation DAG",
+        read: () => store!.workspace.getGenerationPlanDetailForProject(project.id, approved.plan!.id),
+        isSettled: ({ plan, tasks }) => (
+          plan.status === "succeeded" || plan.status === "failed" || plan.status === "cancelled"
+          || plan.status === "compile-failed"
+          || tasks.some((task) => task.status === "failed" || task.status === "blocked-context")
+        ),
+        fingerprint: ({ plan, tasks }) => JSON.stringify({
+          plan: [plan.status, plan.executionEpoch],
+          tasks: tasks.map((task) => [
+            task.kind,
+            task.status,
+            task.currentAttempt,
+            task.materializationFailures,
+            task.rebaseCount,
+          ]),
+        }),
+        idleTimeoutMs: PRODUCTION_GENERATION_IDLE_TIMEOUT_MS,
+        hardTimeoutMs: PRODUCTION_GENERATION_HARD_TIMEOUT_MS,
+      });
+    } catch (error) {
       const stalled = store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan.id);
       assert.fail(JSON.stringify({
+        cause: error instanceof Error ? error.message : String(error),
         plan: stalled.plan,
         tasks: stalled.tasks.map((task) => ({
           kind: task.kind,

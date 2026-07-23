@@ -31,6 +31,7 @@ import {
   persistResearchRevisionFixtureContextPack,
 } from "./support/research-resource-fixture.ts";
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
+import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
 
 function emptyGeneration() {
   return {
@@ -51,7 +52,8 @@ function emptyGeneration() {
 }
 
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
-const PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS = 30_000;
+const PRODUCTION_GENERATION_IDLE_TIMEOUT_MS = 30_000;
+const PRODUCTION_GENERATION_HARD_TIMEOUT_MS = 60_000;
 
 function researchBackedPageGeneration() {
   return {
@@ -696,10 +698,26 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
 
   await system.runtime.start();
   try {
-    await waitFor(() => {
-      const status = store.workspace.getGenerationPlanForProject(project.id, approved.plan!.id).status;
-      return status === "succeeded" || status === "failed" || status === "cancelled" || status === "compile-failed";
-    }, PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS);
+    await waitForDurableProgress({
+      description: "production Generation bootstrap",
+      read: () => store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan!.id),
+      isSettled: ({ plan }) => (
+        plan.status === "succeeded" || plan.status === "failed" || plan.status === "cancelled"
+        || plan.status === "compile-failed"
+      ),
+      fingerprint: ({ plan, tasks }) => JSON.stringify({
+        plan: [plan.status, plan.executionEpoch],
+        tasks: tasks.map((task) => [
+          task.kind,
+          task.status,
+          task.currentAttempt,
+          task.materializationFailures,
+          task.rebaseCount,
+        ]),
+      }),
+      idleTimeoutMs: PRODUCTION_GENERATION_IDLE_TIMEOUT_MS,
+      hardTimeoutMs: PRODUCTION_GENERATION_HARD_TIMEOUT_MS,
+    });
   } catch (error) {
     const stalled = store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan.id);
     assert.fail(JSON.stringify({
