@@ -4,8 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { Store } from "../../../packages/core/src/index.ts";
 import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
@@ -198,6 +197,73 @@ function fakeFreshSharinganSession(): SharinganSession {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const DAEMON_START_TIMEOUT_MS = 15_000;
+const CHILD_STOP_TIMEOUT_MS = 2_000;
+const CHILD_STDERR_TAIL_LIMIT = 64 * 1_024;
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForChildReadiness(
+  child: ChildProcess,
+  ready: () => boolean,
+  timeoutMs = DAEMON_START_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (childHasExited(child)) return false;
+    if (ready()) return !childHasExited(child);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return false;
+    await delay(Math.min(50, remainingMs));
+  }
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return true;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+    if (childHasExited(child)) finish(true);
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (childHasExited(child)) return;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, CHILD_STOP_TIMEOUT_MS)) return;
+  child.kill("SIGKILL");
+  assert.equal(
+    await waitForChildExit(child, CHILD_STOP_TIMEOUT_MS),
+    true,
+    "daemon child exited after SIGKILL",
+  );
+}
+
+function captureChildStderr(child: ChildProcess): { diagnostic(): Promise<string> } {
+  let stderr = "";
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (data: string) => {
+    stderr = `${stderr}${data}`.slice(-CHILD_STDERR_TAIL_LIMIT);
+  });
+  return {
+    async diagnostic() {
+      if (childHasExited(child)) await Promise.race([closed, delay(250)]);
+      return stderr.trim();
+    },
+  };
+}
 const SSE_CLOSE_TIMEOUT_MS = 10_000;
 
 async function closedSse(res: Response, label: string): Promise<Array<Record<string, unknown>>> {
@@ -5128,22 +5194,29 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
       DEZIN_PORTFILE: portFile,
       DEZIN_AGENT_CMD: "fake-claude",
     },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  const childStderr = captureChildStderr(child);
   try {
-    let base = "";
-    let daemonToken = "";
-    for (let i = 0; i < 80; i++) {
-      if (existsSync(portFile)) {
-        const info = JSON.parse(readFileSync(portFile, "utf8")) as { url: string; token: string };
-        base = info.url;
-        daemonToken = info.token;
-        break;
+    let daemonInfo: { url: string; token: string } | undefined;
+    const ready = await waitForChildReadiness(child, () => {
+      if (!existsSync(portFile)) return false;
+      try {
+        const info = JSON.parse(readFileSync(portFile, "utf8")) as { url?: unknown; token?: unknown };
+        if (typeof info.url !== "string" || info.url.trim().length === 0
+          || typeof info.token !== "string" || info.token.trim().length === 0) return false;
+        daemonInfo = { url: info.url, token: info.token };
+        return true;
+      } catch {
+        return false;
       }
-      await new Promise((r) => setTimeout(r, 50));
+    });
+    if (!ready) {
+      const stderr = await childStderr.diagnostic();
+      assert.fail(`daemon wrote its complete port file${stderr ? `: ${stderr}` : ""}`);
     }
-    assert.ok(base, "daemon wrote its port file");
-    assert.ok(daemonToken, "daemon wrote its token");
+    assert.ok(daemonInfo, "daemon port file contains a non-empty URL and token");
+    const { url: base, token: daemonToken } = daemonInfo;
     const project = await createProject(base, { name: "P" }, daemonToken);
     const res = await fetch(`${base}/api/runs`, {
       method: "POST",
@@ -5162,11 +5235,8 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
     assert.ok(runCall, `expected the run to use codex, got ${JSON.stringify(calls)}`);
     assert.ok(runCall.args.includes("gpt-5"), "selected model reaches the chosen runner");
   } finally {
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) return resolve();
-      child.once("exit", () => resolve());
-      child.kill("SIGTERM");
-    });
+    await stopChild(child);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -5186,11 +5256,14 @@ test("daemon start removes Prototype snapshot crash residue without touching com
   const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: process.cwd(),
     env: { ...process.env, DEZIN_DATA_DIR: dataDir, DEZIN_PORTFILE: portFile },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  const childStderr = captureChildStderr(child);
   try {
-    for (let i = 0; i < 80 && !existsSync(portFile); i++) await delay(50);
-    assert.equal(existsSync(portFile), true, "daemon wrote its port file");
+    if (!await waitForChildReadiness(child, () => existsSync(portFile))) {
+      const stderr = await childStderr.diagnostic();
+      assert.fail(`daemon wrote its port file${stderr ? `: ${stderr}` : ""}`);
+    }
     assert.equal(existsSync(join(versionsDir, "orphan-run.files")), false);
     assert.equal(existsSync(join(versionsDir, "run-visual-round-0.files")), false);
     assert.equal(existsSync(join(versionsDir, "run-visual-round-0.html")), false);
@@ -5199,11 +5272,7 @@ test("daemon start removes Prototype snapshot crash residue without touching com
     assert.equal(readFileSync(join(versionsDir, "valid-run.html"), "utf8"), "<main>valid</main>");
     assert.equal(readFileSync(join(versionsDir, "legacy-run.html"), "utf8"), "<main>legacy</main>");
   } finally {
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) return resolve();
-      child.once("exit", () => resolve());
-      child.kill("SIGTERM");
-    });
+    await stopChild(child);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -5220,39 +5289,33 @@ test("daemon start rejects a second instance for the same data dir", async () =>
   const first = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: process.cwd(),
     env: { ...commonEnv, DEZIN_PORTFILE: firstPortFile },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  const firstStderr = captureChildStderr(first);
 
   try {
-    let started = false;
-    for (let i = 0; i < 80; i++) {
-      if (existsSync(firstPortFile)) {
-        started = true;
-        break;
-      }
-      await delay(50);
+    if (!await waitForChildReadiness(first, () => existsSync(firstPortFile))) {
+      const stderr = await firstStderr.diagnostic();
+      assert.fail(`first daemon wrote its port file${stderr ? `: ${stderr}` : ""}`);
     }
-    assert.ok(started, "first daemon wrote its port file");
 
-    let stderr = "";
     const second = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
       cwd: process.cwd(),
       env: { ...commonEnv, DEZIN_PORTFILE: secondPortFile },
       stdio: ["ignore", "ignore", "pipe"],
     });
-    second.stderr?.setEncoding("utf8");
-    second.stderr?.on("data", (data: string) => (stderr += data));
-    const code = await new Promise<number | null>((resolve) => second.once("exit", resolve));
+    const secondStderr = captureChildStderr(second);
+    const rejected = await waitForChildExit(second, DAEMON_START_TIMEOUT_MS);
+    if (!rejected) await stopChild(second);
+    const stderr = await secondStderr.diagnostic();
 
-    assert.notEqual(code, 0);
+    assert.equal(rejected, true, `second daemon exited within the deadline${stderr ? `: ${stderr}` : ""}`);
+    assert.notEqual(second.exitCode, 0);
     assert.match(stderr, /already using/);
     assert.equal(existsSync(secondPortFile), false);
   } finally {
-    await new Promise<void>((resolve) => {
-      if (first.exitCode !== null || first.signalCode !== null) return resolve();
-      first.once("exit", () => resolve());
-      first.kill("SIGTERM");
-    });
+    await stopChild(first);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

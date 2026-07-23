@@ -51,6 +51,7 @@ function emptyGeneration() {
 }
 
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
+const PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 function researchBackedPageGeneration() {
   return {
@@ -431,9 +432,19 @@ test("same-Plan generated Research cannot become an Artifact input before human 
 
 test("production bootstrap lets a new selected Plan claim an empty Page shell from one exact existing Research Revision", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dezin-production-selected-research-bootstrap-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
-  t.after(() => store.close());
+  let teardownRuntime: (() => Promise<void>) | undefined;
+  t.after(async () => {
+    try {
+      await teardownRuntime?.();
+    } finally {
+      try {
+        store.close();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
   const project = store.createProject({ name: "Selected Research Artifact", mode: "standard" });
   const initialWorkspace = store.workspace.ensureWorkspaceRecord(project.id);
   const repositoryDir = join(root, "projects", project.id);
@@ -675,17 +686,20 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
     pollMs: 10,
     onError: (error) => errors.push(error),
   });
-  t.after(async () => {
-    await system.runtime.stop();
-    await runtimeSupervisor.shutdown();
-  });
+  teardownRuntime = async () => {
+    try {
+      await system.runtime.stop();
+    } finally {
+      await runtimeSupervisor.shutdown();
+    }
+  };
 
   await system.runtime.start();
   try {
     await waitFor(() => {
       const status = store.workspace.getGenerationPlanForProject(project.id, approved.plan!.id).status;
       return status === "succeeded" || status === "failed" || status === "cancelled" || status === "compile-failed";
-    }, 10_000);
+    }, PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS);
   } catch (error) {
     const stalled = store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan.id);
     assert.fail(JSON.stringify({

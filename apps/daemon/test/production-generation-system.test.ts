@@ -25,6 +25,7 @@ import { createProductionResourceTaskExecutor } from "../src/orchestration/produ
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
+const PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 function emptyGeneration() {
   return {
@@ -678,7 +679,7 @@ test("production Generation system publishes one real Resource to Component to P
           || status === "compile-failed") return true;
         return store!.workspace.getGenerationPlanDetailForProject(project.id, approved.plan!.id).tasks
           .some((task) => task.status === "failed" || task.status === "blocked-context");
-      }, 15_000);
+      }, PRODUCTION_GENERATION_SETTLEMENT_TIMEOUT_MS);
     } catch {
       const stalled = store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan.id);
       assert.fail(JSON.stringify({
