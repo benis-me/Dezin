@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
@@ -276,6 +276,7 @@ test("releaseProject waits, releases resources, and removes all project-owned st
   const targetPaths = [
     join(dataDir, ".runs", `${mainRun.id}.jsonl`),
     join(dataDir, ".runs", branchRun.id, "bundle.txt"),
+    join(dataDir, "generation-task-evidence", project.id, "task-1", "round-0", "desktop.png"),
     join(dataDir, "worktrees", project.id, branch.id, "artifact.txt"),
     join(dataDir, "version-worktrees", project.id, branchRun.id, "artifact.txt"),
     join(dataDir, "version-evidence", project.id, branchRun.id, "visual", "round-0.png"),
@@ -283,6 +284,7 @@ test("releaseProject waits, releases resources, and removes all project-owned st
   ];
   const retainedPaths = [
     join(dataDir, ".runs", `${otherRun.id}.jsonl`),
+    join(dataDir, "generation-task-evidence", otherProject.id, "task-2", "round-0", "desktop.png"),
     join(dataDir, "version-evidence", otherProject.id, otherRun.id, "visual", "round-0.png"),
     join(dataDir, "projects", otherProject.id, "index.html"),
   ];
@@ -343,6 +345,131 @@ test("releaseProject waits, releases resources, and removes all project-owned st
   assert.ok(retainedPaths.every(existsSync));
   assert.ok(store.getProject(otherProject.id));
   assert.ok(store.getRun(otherRun.id));
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject rejects a symlinked Generation evidence directory without deleting its target or project", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Project" });
+  const outsideDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-outside-"));
+  const outsideFile = join(outsideDir, "must-survive.png");
+  const evidenceRoot = join(dataDir, "generation-task-evidence");
+  const evidenceProjectDir = join(evidenceRoot, project.id);
+  mkdirSync(evidenceRoot, { recursive: true });
+  writeFileSync(outsideFile, "outside");
+  symlinkSync(outsideDir, evidenceProjectDir, "dir");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+
+  await assert.rejects(
+    supervisor.releaseProject(project.id),
+    /symbolic link/i,
+  );
+
+  assert.ok(store.getProject(project.id), "cleanup rejection must preserve the project row");
+  assert.equal(existsSync(evidenceProjectDir), true, "the rejected evidence link remains for explicit recovery");
+  assert.equal(existsSync(outsideFile), true, "cleanup must never follow the evidence link");
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject rejects a symlinked Generation evidence root without deleting outside dataDir", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Project" });
+  const outsideRoot = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-outside-"));
+  const outsideProjectDir = join(outsideRoot, project.id);
+  const outsideFile = join(outsideProjectDir, "must-survive.png");
+  mkdirSync(outsideProjectDir, { recursive: true });
+  writeFileSync(outsideFile, "outside");
+  symlinkSync(outsideRoot, join(dataDir, "generation-task-evidence"), "dir");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+
+  await assert.rejects(
+    supervisor.releaseProject(project.id),
+    /symbolic link/i,
+  );
+
+  assert.ok(store.getProject(project.id), "cleanup rejection must preserve the project row");
+  assert.equal(existsSync(outsideFile), true, "cleanup must not traverse an evidence-root link");
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject removes nested evidence links without following them", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Project" });
+  const evidenceProjectDir = join(dataDir, "generation-task-evidence", project.id);
+  const outsideDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-outside-"));
+  const outsideFile = join(outsideDir, "must-survive.png");
+  mkdirSync(evidenceProjectDir, { recursive: true });
+  writeFileSync(outsideFile, "outside");
+  symlinkSync(outsideDir, join(evidenceProjectDir, "nested-link"), "dir");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+
+  await supervisor.releaseProject(project.id);
+
+  assert.equal(store.getProject(project.id), null);
+  assert.equal(existsSync(evidenceProjectDir), false, "the owned evidence tree is removed");
+  assert.equal(existsSync(outsideFile), true, "recursive cleanup must not follow nested links");
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject propagates Generation evidence cleanup failure and preserves the project row", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Project" });
+  const evidenceRoot = join(dataDir, "generation-task-evidence");
+  writeFileSync(evidenceRoot, "invalid-root");
+  let resourcesReleased = false;
+  const supervisor = new RuntimeSupervisor({
+    dataDir,
+    store,
+    releaseProjectResources: () => {
+      resourcesReleased = true;
+    },
+  });
+
+  await assert.rejects(
+    supervisor.releaseProject(project.id),
+    /not a directory/i,
+  );
+
+  assert.equal(resourcesReleased, true, "resource release keeps the existing pre-delete ordering");
+  assert.ok(store.getProject(project.id), "a failed owned-path deletion must not delete the database project");
+  assert.equal(existsSync(evidenceRoot), true, "the invalid path remains available for explicit recovery");
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject rejects unsafe project ids before deleting any dataDir path", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const sentinel = join(dataDir, "outside", "must-survive.txt");
+  mkdirSync(join(sentinel, ".."), { recursive: true });
+  writeFileSync(sentinel, "outside");
+  let resourcesReleased = false;
+  const supervisor = new RuntimeSupervisor({
+    dataDir,
+    store,
+    releaseProjectResources: () => {
+      resourcesReleased = true;
+    },
+  });
+
+  for (const projectId of ["../outside", "other/nested", "other\\nested", "unsafe\0id"]) {
+    await assert.rejects(
+      supervisor.releaseProject(projectId),
+      /Generation evidence path/i,
+    );
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(existsSync(sentinel), true, "path validation must run before any recursive deletion starts");
+  assert.equal(resourcesReleased, false, "invalid ownership must be rejected before releasing project resources");
   await supervisor.shutdown();
   store.close();
 });

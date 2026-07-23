@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildGenerationTaskPrototypeValidationResult,
+  generationTaskCandidateEvidenceHash,
   Store,
   type StoreClock,
 } from "../src/index.ts";
@@ -206,6 +207,296 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
     observation.dependencyOutputs,
   );
   store.close();
+});
+
+test("prototype-connected Page materialization observes the predecessor's published Revision Snapshot", () => {
+  const store = new Store(":memory:", fakeClock());
+  try {
+    const project = store.createProject({ name: "Prototype Page materialization order", mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: foundation.graphRevision,
+      expectedSnapshotId: foundation.activeSnapshotId,
+      commands: [
+        {
+          id: "add-prototype-page-a",
+          type: "add-node",
+          node: {
+            id: "prototype-page-node-a",
+            kind: "page",
+            name: "Page A",
+            artifactId: "prototype-page-a",
+            createIdentity: { initialTrackId: "prototype-page-track-a" },
+          },
+        },
+        {
+          id: "add-prototype-page-b",
+          type: "add-node",
+          node: {
+            id: "prototype-page-node-b",
+            kind: "page",
+            name: "Page B",
+            artifactId: "prototype-page-b",
+            createIdentity: { initialTrackId: "prototype-page-track-b" },
+          },
+        },
+      ],
+    });
+    const workspace = store.workspace.getWorkspace(project.id)!;
+    const createBase = (artifactId: string, trackId: string, character: string) => (
+      store.workspace.createArtifactRevision({
+        artifactId,
+        trackId,
+        parentRevisionId: null,
+        sourceCommitHash: character.repeat(40),
+        sourceTreeHash: (character === "a" ? "1" : "2").repeat(40),
+        kernelRevisionId: workspace.activeKernelRevisionId,
+        renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+        quality: { state: "passed", score: 100, findings: [] },
+        contextPackHash: null,
+        dependencies: [],
+        resourcePins: [],
+      })
+    );
+    const baseA = createBase("prototype-page-a", "prototype-page-track-a", "a");
+    const snapshotA = store.workspace.publishArtifactRevision(baseA.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    });
+    const baseB = createBase("prototype-page-b", "prototype-page-track-b", "b");
+    store.workspace.publishArtifactRevision(baseB.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: snapshotA.id,
+    });
+
+    const proposalWorkspace = store.workspace.getWorkspace(project.id)!;
+    const layout = store.workspace.getLayout(project.id);
+    const proposal = store.workspace.createProposal({
+      projectId: project.id,
+      kind: "workspace-generation",
+      baseGraphRevision: proposalWorkspace.graphRevision,
+      baseSnapshotId: proposalWorkspace.activeSnapshotId,
+      layoutId: layout.layoutId,
+      baseLayoutChecksum: layout.checksum,
+      operations: [{
+        id: "add-prototype-page-edge",
+        type: "add-edge",
+        edge: {
+          id: "prototype-page-edge",
+          workspaceId: foundation.id,
+          kind: "prototype",
+          sourceNodeId: "prototype-page-node-b",
+          targetNodeId: "prototype-page-node-a",
+        },
+      }],
+      layoutOperations: [],
+      generation: {
+        ...emptyGeneration(),
+        artifactPlans: [
+          {
+            operation: "revise",
+            nodeId: "prototype-page-node-a",
+            artifactId: "prototype-page-a",
+            kind: "page",
+            name: "Page A",
+            trackId: "prototype-page-track-a",
+            baseRevisionId: baseA.id,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: ["desktop"],
+          },
+          {
+            operation: "revise",
+            nodeId: "prototype-page-node-b",
+            artifactId: "prototype-page-b",
+            kind: "page",
+            name: "Page B",
+            trackId: "prototype-page-track-b",
+            baseRevisionId: baseB.id,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: ["desktop"],
+          },
+        ],
+        prototypeIntents: [{
+          edgeId: "prototype-page-edge",
+          sourceArtifactId: "prototype-page-b",
+          targetArtifactId: "prototype-page-a",
+          trigger: "click",
+        }],
+      },
+      rationale: "Keep connected Pages in one frozen design-context sequence",
+      assumptions: [],
+    });
+    const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+    assert.ok(approved.plan);
+    const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+    const first = compiled.tasks.find((task) => task.target.id === "prototype-page-a")!;
+    const second = compiled.tasks.find((task) => task.target.id === "prototype-page-b")!;
+    assert.deepEqual(second.dependencyIds, [first.id]);
+    assert.deepEqual(
+      store.workspace.listGenerationTaskIdsReadyForMaterializationForProject(project.id, compiled.plan.id),
+      [first.id],
+    );
+
+    const firstObservation = store.workspace.observeGenerationTaskMaterializationForProject(
+      project.id,
+      compiled.plan.id,
+      first.id,
+    );
+    const firstSnapshot = store.workspace.getSnapshotForProject(
+      project.id,
+      firstObservation.expectedSnapshotId,
+    )!;
+    const contextHash = "c".repeat(64);
+    const kernel = store.workspace.getKernelRevision(firstObservation.kernelRevisionId)!;
+    const baseChecksum = store.workspace.getArtifactRevisionContextChecksum(baseA.id)!;
+    const context = store.workspace.persistContextPack({
+      id: `context-pack-${contextHash}`,
+      workspaceId: proposalWorkspace.id,
+      graphRevision: firstSnapshot.graphRevision,
+      target: { type: "artifact", id: "prototype-page-a" },
+      intent: "generate",
+      messageChecksum: "d".repeat(64),
+      items: [
+        {
+          ref: { kind: "kernel", id: kernel.id, revisionId: kernel.id },
+          resolvedKind: "kernel-revision",
+          kernelRevisionId: kernel.id,
+          checksum: kernel.checksum,
+          reason: "design-kernel",
+          trustLevel: "system",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+        {
+          ref: { kind: "artifact", id: "prototype-page-a", revisionId: baseA.id },
+          resolvedKind: "artifact-revision",
+          artifactRevisionId: baseA.id,
+          checksum: baseChecksum,
+          reason: "target-base",
+          trustLevel: "trusted",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+      ],
+      omissions: [],
+      tokenEstimate: 2,
+      manifestPath: "context-packs/prototype-page-a.json",
+      hash: contextHash,
+    });
+    const firstAttempt = store.workspace.createGenerationTaskAttemptForProject(
+      project.id,
+      compiled.plan.id,
+      {
+        ...firstObservation,
+        contextPackId: context.id,
+        sourceCommitHash: baseA.sourceCommitHash,
+        sourceTreeHash: baseA.sourceTreeHash,
+        retryContextPolicy: "same-context",
+        executionMode: "full",
+      },
+    );
+    const claim = store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: first.id,
+      attempt: firstAttempt.attempt,
+      ownerId: "prototype-page-order-worker",
+      now: firstAttempt.createdAt,
+      leaseMs: 30_000,
+    });
+    assert.ok(claim);
+    const successor = store.workspace.createArtifactRevision({
+      artifactId: "prototype-page-a",
+      trackId: "prototype-page-track-a",
+      parentRevisionId: baseA.id,
+      sourceCommitHash: "e".repeat(40),
+      sourceTreeHash: "f".repeat(40),
+      kernelRevisionId: firstObservation.kernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+      quality: { state: "passed", score: 100, findings: [] },
+      contextPackHash: context.hash,
+      dependencies: [],
+      resourcePins: [],
+    });
+    const successorSnapshot = store.workspace.publishArtifactRevision(successor.id, {
+      expectedHeadRevisionId: baseA.id,
+      expectedSnapshotId: firstAttempt.expectedSnapshotId,
+    });
+    const candidateEvidence = { quality: "passed" };
+    const candidateEvidenceHash = generationTaskCandidateEvidenceHash({
+      taskId: first.id,
+      planId: compiled.plan.id,
+      workspaceId: proposalWorkspace.id,
+      attempt: firstAttempt.attempt,
+      candidateRevisionId: successor.id,
+      candidateResourceRevisionId: null,
+      candidateEvidence,
+    });
+    store.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'succeeded', candidate_revision_id = ?, candidate_evidence_json = ?,
+           candidate_evidence_hash = ?, owner_id = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, finished_at = 40_000
+       WHERE task_id = ? AND plan_id = ? AND attempt = ?`,
+    ).run(
+      successor.id,
+      JSON.stringify(candidateEvidence),
+      candidateEvidenceHash,
+      first.id,
+      compiled.plan.id,
+      firstAttempt.attempt,
+    );
+    store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', result_revision_id = ?, result_snapshot_id = ?, finished_at = 40_000
+       WHERE id = ? AND plan_id = ?`,
+    ).run(successor.id, successorSnapshot.id, first.id, compiled.plan.id);
+    store.db.prepare("DELETE FROM generation_task_claims WHERE task_id = ? AND attempt = ?")
+      .run(first.id, firstAttempt.attempt);
+    const sequence = Number((store.db.prepare(
+      "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM generation_plan_events WHERE plan_id = ?",
+    ).get(compiled.plan.id) as { sequence: number }).sequence) + 1;
+    store.db.prepare(
+      `INSERT INTO generation_plan_events
+         (plan_id, workspace_id, sequence, task_id, type, payload_json, created_at)
+       VALUES (?, ?, ?, ?, 'task-succeeded', ?, 40_000)`,
+    ).run(
+      compiled.plan.id,
+      proposalWorkspace.id,
+      sequence,
+      first.id,
+      JSON.stringify({
+        attempt: firstAttempt.attempt,
+        resultResourceRevisionId: null,
+        resultRevisionId: successor.id,
+        resultSnapshotId: successorSnapshot.id,
+      }),
+    );
+
+    const secondObservation = store.workspace.observeGenerationTaskMaterializationForProject(
+      project.id,
+      compiled.plan.id,
+      second.id,
+    );
+    assert.equal(secondObservation.expectedSnapshotId, successorSnapshot.id);
+    assert.deepEqual(secondObservation.dependencyOutputs, [{
+      taskId: first.id,
+      resultRevisionId: successor.id,
+      resultResourceRevisionId: null,
+      resultSnapshotId: successorSnapshot.id,
+    }]);
+    assert.equal(
+      store.workspace.getSnapshotForProject(project.id, secondObservation.expectedSnapshotId)
+        ?.artifactRevisions["prototype-page-a"],
+      successor.id,
+    );
+  } finally {
+    store.close();
+  }
 });
 
 test("a stale materialization observation rolls back the Attempt, Task pointer, pins, and event", () => {

@@ -55,6 +55,24 @@ function emptyGeneration() {
   };
 }
 
+type CandidateResourceKind = "asset" | "sharingan-capture";
+
+interface CandidateContextResource {
+  id: string;
+  kind: CandidateResourceKind;
+  revisionId: string;
+  revisionChecksum: string;
+}
+
+interface CandidateFixtureOptions {
+  primaryResourceKind?: CandidateResourceKind;
+  extraSharinganResourceCount?: number;
+  pinExtraSharinganResources?: boolean;
+  includeSharinganOmission?: boolean;
+  sharinganOmissionDeclaredKind?: CandidateResourceKind;
+  duplicatePrimaryContextResource?: boolean;
+}
+
 function persistArtifactContextPack(
   store: Store,
   input: {
@@ -64,12 +82,18 @@ function persistArtifactContextPack(
     targetArtifactId: string;
     kernelRevisionId: string;
     artifacts: Array<{ artifactId: string; revisionId: string; reason: string }>;
-    resource?: {
-      id: string;
-      kind: "asset";
-      revisionId: string;
-      revisionChecksum: string;
-    };
+    resource?: CandidateContextResource;
+    resources?: CandidateContextResource[];
+    omissions?: Array<{
+      ref: {
+        kind: "resource";
+        id: string;
+        resourceKind: CandidateResourceKind;
+        revisionId?: string;
+      };
+      reason: string;
+      tokenEstimate: number;
+    }>;
   },
 ) {
   const kernel = store.workspace.getKernelRevision(input.kernelRevisionId);
@@ -90,25 +114,27 @@ function persistArtifactContextPack(
       provided: true,
     };
   });
-  const resourceItem = input.resource
-    ? [{
-        ref: {
-          kind: "resource" as const,
-          id: input.resource.id,
-          resourceKind: input.resource.kind,
-          revisionId: input.resource.revisionId,
-        },
-        resolvedKind: "resource-revision" as const,
-        resourceRevisionId: input.resource.revisionId,
-        checksum: input.resource.revisionChecksum,
-        reason: "resource-pin",
-        trustLevel: "trusted" as const,
-        boundary: {},
-        tokenEstimate: 1,
-        provenance: {},
-        provided: true,
-      }]
-    : [];
+  const resources = [
+    ...(input.resource === undefined ? [] : [input.resource]),
+    ...(input.resources ?? []),
+  ];
+  const resourceItems = resources.map((resource) => ({
+    ref: {
+      kind: "resource" as const,
+      id: resource.id,
+      resourceKind: resource.kind,
+      revisionId: resource.revisionId,
+    },
+    resolvedKind: "resource-revision" as const,
+    resourceRevisionId: resource.revisionId,
+    checksum: resource.revisionChecksum,
+    reason: "resource-pin",
+    trustLevel: "trusted" as const,
+    boundary: {},
+    tokenEstimate: 1,
+    provenance: {},
+    provided: true,
+  }));
   const items = [
     {
       ref: { kind: "kernel" as const, id: kernel.id, revisionId: kernel.id },
@@ -123,7 +149,7 @@ function persistArtifactContextPack(
       provided: true,
     },
     ...artifactItems,
-    ...resourceItem,
+    ...resourceItems,
   ];
   const hash = checksum(`${input.id}:pack`);
   return store.workspace.persistContextPack({
@@ -134,14 +160,25 @@ function persistArtifactContextPack(
     intent: "generate",
     messageChecksum: checksum(`${input.id}:message`),
     items,
-    omissions: [],
+    omissions: input.omissions ?? [],
     tokenEstimate: items.length,
     manifestPath: `context-packs/${input.id}.json`,
     hash,
   });
 }
 
-function createCandidateFixture(label: string) {
+function createCandidateFixture(
+  label: string,
+  resourceKindOrOptions: CandidateResourceKind | CandidateFixtureOptions = "asset",
+) {
+  const options = typeof resourceKindOrOptions === "string"
+    ? { primaryResourceKind: resourceKindOrOptions }
+    : resourceKindOrOptions;
+  const resourceKind = options.primaryResourceKind ?? "asset";
+  const extraSharinganResourceCount = options.extraSharinganResourceCount ?? 0;
+  if (!Number.isSafeInteger(extraSharinganResourceCount) || extraSharinganResourceCount < 0) {
+    throw new Error("Candidate fixture extra Sharingan Resource count is invalid");
+  }
   const control = controlledClock(`candidate-${label}`);
   const store = new Store(":memory:", control.clock);
   const project = store.createProject({ name: `Candidate staging ${label}`, mode: "standard" });
@@ -201,36 +238,58 @@ function createCandidateFixture(label: string) {
     expectedHeadRevisionId: null,
     expectedSnapshotId: pageSnapshot.id,
   });
-  const createdResource = store.workspace.createResourceForProject(project.id, {
-    kind: "asset",
-    title: "Exact candidate asset",
-    defaultPinPolicy: "pin-current",
-    baseGraphRevision: componentSnapshot.graphRevision,
-    expectedSnapshotId: componentSnapshot.id,
-  });
-  const resourceRevision = store.workspace.createResourceRevisionCandidateForProject(
-    project.id,
-    createdResource.resource.id,
-    {
-      revisionId: `candidate-resource-revision-${label}`,
-      parentRevisionId: null,
-      manifestPath: `resource-revisions/${label}/manifest.json`,
-      summary: "Exact resource input",
-      metadata: { mimeType: "image/png" },
-      checksum: checksum(`${label}:resource-revision`),
-      provenance: { source: "generation-task-candidate-store-test" },
-    },
+  let resourceBaseSnapshot = componentSnapshot;
+  const createFixtureResource = (kind: CandidateResourceKind, suffix: string) => {
+    const created = store.workspace.createResourceForProject(project.id, {
+      kind,
+      title: `Exact candidate ${kind} ${suffix}`,
+      defaultPinPolicy: "pin-current",
+      baseGraphRevision: resourceBaseSnapshot.graphRevision,
+      expectedSnapshotId: resourceBaseSnapshot.id,
+    });
+    const revision = store.workspace.createResourceRevisionCandidateForProject(
+      project.id,
+      created.resource.id,
+      {
+        revisionId: suffix === "primary"
+          ? `candidate-resource-revision-${label}`
+          : `candidate-resource-revision-${label}-${suffix}`,
+        parentRevisionId: null,
+        manifestPath: `resource-revisions/${label}/${suffix}/manifest.json`,
+        summary: "Exact resource input",
+        metadata: { mimeType: "image/png" },
+        checksum: checksum(`${label}:resource-revision:${suffix}`),
+        provenance: { source: "generation-task-candidate-store-test" },
+      },
+    );
+    resourceBaseSnapshot = store.workspace.publishResourceRevisionForProject(
+      project.id,
+      created.resource.id,
+      revision.id,
+      {
+        expectedHeadRevisionId: null,
+        expectedSnapshotId: created.snapshot.id,
+        reason: "Publish exact candidate resource",
+      },
+    );
+    return { created, revision };
+  };
+  const primaryResource = createFixtureResource(resourceKind, "primary");
+  const extraSharinganResources = Array.from(
+    { length: extraSharinganResourceCount },
+    (_, index) => createFixtureResource("sharingan-capture", `sharingan-${index + 1}`),
   );
-  store.workspace.publishResourceRevisionForProject(
-    project.id,
-    createdResource.resource.id,
-    resourceRevision.id,
-    {
-      expectedHeadRevisionId: null,
-      expectedSnapshotId: createdResource.snapshot.id,
-      reason: "Publish exact candidate resource",
-    },
-  );
+  const pinnedResources = [
+    primaryResource,
+    ...(options.pinExtraSharinganResources ? extraSharinganResources : []),
+  ];
+  const contextResources = [
+    primaryResource,
+    ...(options.duplicatePrimaryContextResource ? [primaryResource] : []),
+    ...extraSharinganResources,
+  ];
+  const createdResource = primaryResource.created;
+  const resourceRevision = primaryResource.revision;
 
   const workspace = store.workspace.getWorkspace(project.id)!;
   const layout = store.workspace.getLayout(project.id);
@@ -245,14 +304,14 @@ function createCandidateFixture(label: string) {
     layoutOperations: [],
     generation: {
       ...emptyGeneration(),
-      resourceOperations: [{
+      resourceOperations: pinnedResources.map(({ created, revision }) => ({
         operation: "reuse",
-        nodeId: createdResource.node.id,
-        resourceId: createdResource.resource.id,
-        kind: createdResource.resource.kind,
-        title: createdResource.resource.title,
-        revisionPolicy: { kind: "exact", resourceRevisionId: resourceRevision.id },
-      }],
+        nodeId: created.node.id,
+        resourceId: created.resource.id,
+        kind: created.resource.kind,
+        title: created.resource.title,
+        revisionPolicy: { kind: "exact" as const, resourceRevisionId: revision.id },
+      })),
       artifactPlans: [
         {
           operation: "revise",
@@ -292,11 +351,11 @@ function createCandidateFixture(label: string) {
           overrides: { emphasis: "high" },
           status: "linked",
         },
-        {
+        ...pinnedResources.map(({ created }) => ({
           kind: "resource",
           ownerArtifactId: `candidate-page-${label}`,
-          resourceId: createdResource.resource.id,
-        },
+          resourceId: created.resource.id,
+        } as const)),
       ],
     },
     rationale: "Stage a Page only after its Component output is pinned",
@@ -430,11 +489,13 @@ function createCandidateFixture(label: string) {
     resultSnapshotId: componentSuccessorSnapshot.id,
   }]);
   assert.equal(pageObservation.componentPins[0]?.revisionId, componentSuccessor.id);
-  assert.deepEqual(pageObservation.resourcePins, [{
-    resourceId: createdResource.resource.id,
-    revisionId: resourceRevision.id,
-    sourceTaskId: null,
-  }]);
+  assert.deepEqual(pageObservation.resourcePins, pinnedResources
+    .map(({ created, revision }) => ({
+      resourceId: created.resource.id,
+      revisionId: revision.id,
+      sourceTaskId: null,
+    }))
+    .sort((left, right) => left.resourceId.localeCompare(right.resourceId)));
   const pageContext = persistArtifactContextPack(store, {
     id: `candidate-page-context-${label}`,
     workspaceId: workspace.id,
@@ -449,12 +510,22 @@ function createCandidateFixture(label: string) {
         reason: "generated-component-pin",
       },
     ],
-    resource: {
-      id: createdResource.resource.id,
-      kind: "asset",
-      revisionId: resourceRevision.id,
-      revisionChecksum: resourceRevision.checksum,
-    },
+    resources: contextResources.map(({ created, revision }) => ({
+      id: created.resource.id,
+      kind: created.resource.kind as CandidateResourceKind,
+      revisionId: revision.id,
+      revisionChecksum: revision.checksum,
+    })),
+    omissions: options.includeSharinganOmission ? [{
+      ref: {
+        kind: "resource",
+        id: `omitted-sharingan-resource-${label}`,
+        resourceKind: options.sharinganOmissionDeclaredKind ?? "sharingan-capture",
+        revisionId: `omitted-sharingan-revision-${label}`,
+      },
+      reason: "omitted Sharingan source",
+      tokenEstimate: 1,
+    }] : [],
   });
   const pageAttempt = store.workspace.createGenerationTaskAttemptForProject(
     project.id,
@@ -490,6 +561,7 @@ function createCandidateFixture(label: string) {
     componentSuccessor,
     resource: createdResource.resource,
     resourceRevision,
+    extraSharinganResources,
     pageContext,
     claim,
   };
@@ -499,6 +571,7 @@ function candidateInput(
   label: string,
   claim: GenerationTaskAttemptClaim,
   projectId: string,
+  includeSourceVisualEvidence = false,
 ): StageGenerationTaskCandidateInput {
   const contextPackId = claim.attempt.contextPackId;
   if (!contextPackId?.startsWith("context-pack-")) {
@@ -549,6 +622,48 @@ function candidateInput(
       storageKey,
     };
   });
+  const sourceSha256 = checksum(`${label}:visual:source`);
+  const sourceByteLength = 2_048;
+  const sourceCapture = {
+    scope: "source" as const,
+    sourceAttemptId: "quality-round-0-source",
+    width: 1_440,
+    height: 1_800,
+  };
+  const sourceStorageKey = [
+    "generation-task-evidence",
+    projectId,
+    claim.task.workspaceId,
+    claim.task.planId,
+    claim.task.id,
+    `attempt-${claim.attempt.attempt}`,
+    "visual",
+    `round-0-source-${sourceSha256}.png`,
+  ].join("/");
+  const sourceReviewEvidence = {
+    ...sourceCapture,
+    sha256: sourceSha256,
+    byteLength: sourceByteLength,
+    storageKey: sourceStorageKey,
+  };
+  const sourcePin = claim.attempt.resourcePins[0];
+  const sourceAuthority = sourcePin ? {
+    resourceId: sourcePin.resourceId,
+    revisionId: sourcePin.revisionId,
+    revisionChecksum: checksum(`${label}:resource-revision:primary`),
+  } : null;
+  const visualReview = {
+    status: "passed",
+    fidelity: 0.97,
+    evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
+      frameId: frame.id,
+      frameAttemptId: frame.frameAttemptId,
+      sha256,
+      byteLength,
+      storageKey,
+    })),
+    ...(includeSourceVisualEvidence ? { sourceEvidence: sourceReviewEvidence } : {}),
+  };
   const qualityEvidence = {
     protocol: "dezin.standard-artifact-quality.v1",
     candidate: {
@@ -567,21 +682,58 @@ function candidateInput(
       height: frame.height,
       status: "passed",
       reviewed: true,
+      captureIdentity: {
+        sha256: checksum(`${label}:visual:${frame.id}`),
+        byteLength: 1_024,
+        width: frame.width,
+        height: frame.height,
+      },
     })),
     round: 0,
     runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
-    visualReview: {
-      status: "passed",
-      fidelity: 0.97,
-      evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
-        frameId: frame.id,
-        frameAttemptId: frame.frameAttemptId,
-        sha256,
-        byteLength,
-        storageKey,
-      })),
-    },
+    visualReview,
     visualEvidence,
+    ...(includeSourceVisualEvidence ? {
+      sourceCaptureResult: {
+        ...sourceCapture,
+        status: "passed",
+        reviewed: true,
+        captureIdentity: {
+          sha256: sourceSha256,
+          byteLength: sourceByteLength,
+          width: sourceCapture.width,
+          height: sourceCapture.height,
+        },
+      },
+      sourceVisualEvidence: {
+        protocol: "dezin.generation-task-source-visual-evidence.v1",
+        owner: visualEvidence[0]!.owner,
+        capture: sourceCapture,
+        sourceAuthority,
+        round: 0,
+        mediaType: "image/png",
+        sha256: sourceSha256,
+        byteLength: sourceByteLength,
+        storageKey: sourceStorageKey,
+      },
+    } : {}),
+  };
+  const evaluationManifest = {
+    protocol: "dezin.artifact-run-evaluation-manifest.v1",
+    candidate: qualityEvidence.candidate,
+    round: 0,
+    passed: true,
+    score: candidate.quality.score,
+    qualityState: candidate.quality.state,
+    findingsDigest: checksum(JSON.stringify(candidate.quality.findings)),
+    frameResults: qualityEvidence.frameResults,
+    runtimeChecks: qualityEvidence.runtimeChecks,
+    reviewSummary: qualityEvidence.visualReview,
+    visualEvidence: qualityEvidence.visualEvidence,
+    ...(includeSourceVisualEvidence ? {
+      sourceCaptureResult: qualityEvidence.sourceCaptureResult,
+      sourceVisualEvidence: qualityEvidence.sourceVisualEvidence,
+    } : {}),
   };
   return {
     lease: {
@@ -617,6 +769,7 @@ function candidateInput(
         treeHash: candidate.sourceTreeHash,
         passed: true,
         score: candidate.quality.score,
+        evaluationManifest,
       }],
       qualityEvidence,
     },
@@ -627,8 +780,12 @@ function inputForClaim(
   label: string,
   claim: GenerationTaskAttemptClaim,
   projectId: string,
+  includeSourceVisualEvidence = false,
 ): StageGenerationTaskCandidateInput {
-  return { ...candidateInput(label, claim, projectId), lease: claim.lease };
+  return {
+    ...candidateInput(label, claim, projectId, includeSourceVisualEvidence),
+    lease: claim.lease,
+  };
 }
 
 function candidateDurableState(store: Store, projectId: string, planId: string, taskId: string) {
@@ -881,6 +1038,440 @@ test("staging an Artifact candidate atomically seals a derived Revision without 
       },
       createdAt: after.candidateEvents.at(-1)?.createdAt,
     });
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging requires source evidence from an exact Sharingan pin and Context", () => {
+  const fixture = createCandidateFixture("sharingan-source-required", "sharingan-capture");
+  try {
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim("sharingan-source-required", fixture.claim, fixture.project.id),
+      ),
+      GenerationTaskQualityGateError,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+      "failed source evidence validation must not stage any candidate state",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging rejects an unpinned Sharingan Context source with zero writes", () => {
+  const fixture = createCandidateFixture("sharingan-context-unpinned", {
+    primaryResourceKind: "asset",
+    extraSharinganResourceCount: 1,
+    pinExtraSharinganResources: false,
+  });
+  try {
+    assert.equal(
+      fixture.claim.attempt.resourcePins.some((pin) => (
+        fixture.extraSharinganResources.some(({ created }) => created.resource.id === pin.resourceId)
+      )),
+      false,
+    );
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim("sharingan-context-unpinned", fixture.claim, fixture.project.id),
+      ),
+      /Sharingan Capture.*exactly match|source authority/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging rejects multiple exact Sharingan pins with zero writes", () => {
+  const fixture = createCandidateFixture("sharingan-pins-ambiguous", {
+    primaryResourceKind: "sharingan-capture",
+    extraSharinganResourceCount: 1,
+    pinExtraSharinganResources: true,
+  });
+  try {
+    assert.equal(fixture.claim.attempt.resourcePins.length, 2);
+    assert.equal(
+      fixture.pageContext.items.filter((item) => item.ref.kind === "resource"
+        && item.ref.resourceKind === "sharingan-capture").length,
+      2,
+    );
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim(
+          "sharingan-pins-ambiguous",
+          fixture.claim,
+          fixture.project.id,
+          true,
+        ),
+      ),
+      /Sharingan Capture source authority is ambiguous/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging rejects multiple Sharingan Context sources with one pin and zero writes", () => {
+  const fixture = createCandidateFixture("sharingan-context-ambiguous", {
+    primaryResourceKind: "sharingan-capture",
+    extraSharinganResourceCount: 1,
+    pinExtraSharinganResources: false,
+  });
+  try {
+    assert.equal(fixture.claim.attempt.resourcePins.length, 1);
+    assert.equal(
+      fixture.pageContext.items.filter((item) => item.ref.kind === "resource"
+        && item.ref.resourceKind === "sharingan-capture").length,
+      2,
+    );
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim(
+          "sharingan-context-ambiguous",
+          fixture.claim,
+          fixture.project.id,
+          true,
+        ),
+      ),
+      /Sharingan Capture source authority is ambiguous/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging rejects Sharingan omissions beside an exact source with zero writes", () => {
+  const fixture = createCandidateFixture("sharingan-source-omitted", {
+    primaryResourceKind: "sharingan-capture",
+    includeSharinganOmission: true,
+  });
+  try {
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim(
+          "sharingan-source-omitted",
+          fixture.claim,
+          fixture.project.id,
+          true,
+        ),
+      ),
+      /Sharingan Capture source authority is ambiguous/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging re-resolves an omitted Resource kind before trusting source authority", () => {
+  const fixture = createCandidateFixture("sharingan-omission-kind-drift", {
+    primaryResourceKind: "asset",
+    includeSharinganOmission: true,
+    sharinganOmissionDeclaredKind: "asset",
+  });
+  try {
+    const omission = fixture.pageContext.omissions[0];
+    assert.ok(omission?.ref.kind === "resource");
+    fixture.store.db.prepare(
+      `INSERT INTO resources (
+         id, workspace_id, kind, title, head_revision_id, default_pin_policy,
+         archived_at, created_at, updated_at
+       ) VALUES (?, ?, 'sharingan-capture', 'Late Sharingan source', NULL,
+         'follow-head', NULL, 100000, 100000)`,
+    ).run(omission.ref.id, fixture.workspace.id);
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        inputForClaim("sharingan-omission-kind-drift", fixture.claim, fixture.project.id),
+      ),
+      /Context Pack omission.*Resource kind|Sharingan Capture source authority|ownership/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate replay and publication revalidate late omitted Resource identity drift", () => {
+  const fixture = createCandidateFixture("sharingan-omission-publication-drift", {
+    primaryResourceKind: "asset",
+    includeSharinganOmission: true,
+    sharinganOmissionDeclaredKind: "asset",
+  });
+  try {
+    const input = inputForClaim(
+      "sharingan-omission-publication-drift",
+      fixture.claim,
+      fixture.project.id,
+    );
+    const staged = fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      input,
+    );
+    assert.equal(staged.attempt.status, "candidate-ready");
+    const omission = fixture.pageContext.omissions[0];
+    assert.ok(omission?.ref.kind === "resource");
+    fixture.store.db.prepare(
+      `INSERT INTO resources (
+         id, workspace_id, kind, title, head_revision_id, default_pin_policy,
+         archived_at, created_at, updated_at
+       ) VALUES (?, ?, 'sharingan-capture', 'Late Sharingan source', NULL,
+         'follow-head', NULL, 100000, 100000)`,
+    ).run(omission.ref.id, fixture.workspace.id);
+    const beforeReplay = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        input,
+      ),
+      /Context Pack omission.*Resource kind|Sharingan Capture source authority|ownership/i,
+    );
+    assert.throws(
+      () => fixture.store.workspace.publishGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        { lease: fixture.claim.lease },
+      ),
+      /Context Pack omission.*Resource kind|Sharingan Capture source authority|ownership/i,
+    );
+    assert.deepEqual(
+      candidateDurableState(
+        fixture.store,
+        fixture.project.id,
+        fixture.plan.id,
+        fixture.pageTask.id,
+      ),
+      beforeReplay,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging and publication revalidate one exact Sharingan source", () => {
+  const fixture = createCandidateFixture("sharingan-source-exact", "sharingan-capture");
+  try {
+    const input = inputForClaim(
+      "sharingan-source-exact",
+      fixture.claim,
+      fixture.project.id,
+      true,
+    );
+    const staged = fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      input,
+    );
+    assert.equal(staged.attempt.status, "candidate-ready");
+    assert.deepEqual(staged.attempt.candidateEvidence, input.evidence);
+
+    const published = fixture.store.workspace.publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: fixture.claim.lease },
+    );
+    assert.equal(published.status, "succeeded");
+    assert.equal(published.artifactRevision.id, staged.artifactRevision.id);
+
+    const replayed = fixture.store.workspace.publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: fixture.claim.lease },
+    );
+    assert.equal(replayed.status, "succeeded");
+    assert.equal(replayed.artifactRevision.id, staged.artifactRevision.id);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact source authority coalesces the same exact Sharingan Revision across Context classes", () => {
+  const fixture = createCandidateFixture("sharingan-source-cross-class", {
+    primaryResourceKind: "sharingan-capture",
+    duplicatePrimaryContextResource: true,
+  });
+  try {
+    assert.equal(
+      fixture.pageContext.items.filter((item) => item.ref.kind === "resource"
+        && item.ref.resourceKind === "sharingan-capture").length,
+      2,
+      "Core receives the class-erased duplicate of one exact daemon Context authority",
+    );
+    const staged = fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      inputForClaim(
+        "sharingan-source-cross-class",
+        fixture.claim,
+        fixture.project.id,
+        true,
+      ),
+    );
+    assert.equal(staged.attempt.status, "candidate-ready");
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate staging rejects unrelated or fabricated Sharingan source authority", () => {
+  const fixture = createCandidateFixture("sharingan-source-authority-forged", "sharingan-capture");
+  try {
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    for (const [field, value] of [
+      ["resourceId", "resource-sharingan-foreign"],
+      ["revisionId", "resource-revision-sharingan-foreign"],
+      ["revisionChecksum", "0".repeat(64)],
+    ] as const) {
+      const input = inputForClaim(
+        "sharingan-source-authority-forged",
+        fixture.claim,
+        fixture.project.id,
+        true,
+      );
+      const evidence = input.evidence as {
+        qualityEvidence: {
+          sourceVisualEvidence: {
+            sourceAuthority: Record<string, string>;
+          };
+        };
+      };
+      evidence.qualityEvidence.sourceVisualEvidence.sourceAuthority = {
+        ...evidence.qualityEvidence.sourceVisualEvidence.sourceAuthority,
+        [field]: value,
+      };
+      assert.throws(
+        () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+          fixture.project.id,
+          fixture.plan.id,
+          input,
+        ),
+        /source descriptor|source authority/i,
+        field,
+      );
+      assert.deepEqual(
+        candidateDurableState(
+          fixture.store,
+          fixture.project.id,
+          fixture.plan.id,
+          fixture.pageTask.id,
+        ),
+        before,
+        `${field} substitution must not stage candidate state`,
+      );
+    }
   } finally {
     fixture.store.close();
   }

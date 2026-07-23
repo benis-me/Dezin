@@ -1671,7 +1671,8 @@ export async function handleRestoreArtifactRevision(
   if (!ready) return;
   const artifact = requireArtifact(ready, params.artifactId!);
   const source = deps.store.workspace.getArtifactRevision(params.revisionId!);
-  if (!source || source.workspaceId !== ready.workspace.id || source.artifactId !== artifact.id) {
+  if (!source || source.workspaceId !== ready.workspace.id || source.artifactId !== artifact.id
+    || !deps.store.workspace.isArtifactRevisionPublished(source.id)) {
     throw new HttpError(404, "revision not found");
   }
   const input = await parseArtifactVersionActionBody(req, source.id, "restore");
@@ -1693,7 +1694,8 @@ export async function handleForkArtifactTrack(
   if (!ready) return;
   const artifact = requireArtifact(ready, params.artifactId!);
   const source = deps.store.workspace.getArtifactRevision(params.revisionId!);
-  if (!source || source.workspaceId !== ready.workspace.id || source.artifactId !== artifact.id) {
+  if (!source || source.workspaceId !== ready.workspace.id || source.artifactId !== artifact.id
+    || !deps.store.workspace.isArtifactRevisionPublished(source.id)) {
     throw new HttpError(404, "revision not found");
   }
   const input = await parseArtifactVersionActionBody(req, source.id, "fork-track");
@@ -1713,7 +1715,7 @@ export async function handleListArtifactRevisions(
   const ready = await requireReadyWorkspace(res, deps, params.id!);
   if (!ready) return;
   const artifact = requireArtifact(ready, params.artifactId!);
-  sendJson(res, 200, deps.store.workspace.listRevisions(params.id!, artifact.id));
+  sendJson(res, 200, deps.store.workspace.listPublishedRevisions(params.id!, artifact.id));
 }
 
 export async function handleGetArtifactRevision(
@@ -1728,6 +1730,9 @@ export async function handleGetArtifactRevision(
   const revision = deps.store.workspace.getArtifactRevision(params.revisionId!);
   if (!revision || revision.workspaceId !== ready.workspace.id) throw new HttpError(404, "revision not found");
   if (revision.artifactId !== artifact.id) throw new HttpError(404, "revision not found");
+  if (!deps.store.workspace.isArtifactRevisionPublished(revision.id)) {
+    throw new HttpError(404, "revision not found");
+  }
   sendJson(res, 200, revision);
 }
 

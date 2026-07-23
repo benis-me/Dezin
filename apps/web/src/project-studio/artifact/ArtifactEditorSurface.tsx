@@ -487,6 +487,7 @@ export function ArtifactEditorSurface({
           headRevisionId={editor.headRevisionId}
           snapshotId={editor.snapshotId}
           pinnedRevisionId={editor.pinnedRevisionId}
+          preferredFrame={editor.activeFrame}
           onClose={() => setVersionsMode(null)}
           onViewRevision={(revisionId) => {
             setVersionsMode(null);

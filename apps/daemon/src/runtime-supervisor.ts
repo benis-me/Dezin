@@ -1,6 +1,6 @@
 import type { Store } from "../../../packages/core/src/index.ts";
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, rm } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PreviewLeaseManager } from "./preview-lease.ts";
 
 export type RuntimeScope = {
@@ -62,6 +62,64 @@ function matchesOperationScope(operation: RuntimeScope, scope: RuntimeScope): bo
     && (scope.artifactId === undefined || operation.artifactId === scope.artifactId)
     && (scope.planId === undefined || operation.planId === scope.planId)
     && (scope.taskId === undefined || operation.taskId === scope.taskId);
+}
+
+function missingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function projectEvidencePath(dataDir: string, projectId: string): string {
+  if (
+    projectId.length === 0
+    || projectId === "."
+    || projectId === ".."
+    || projectId.includes("/")
+    || projectId.includes("\\")
+    || projectId.includes("\0")
+  ) {
+    throw new Error(`Generation evidence path requires one project id segment: ${projectId}`);
+  }
+  const root = resolve(dataDir, "generation-task-evidence");
+  const target = resolve(root, projectId);
+  const ownedRelativePath = relative(root, target);
+  if (
+    ownedRelativePath.length === 0
+    || ownedRelativePath === ".."
+    || ownedRelativePath.startsWith(`..${sep}`)
+    || isAbsolute(ownedRelativePath)
+  ) {
+    throw new Error(`Generation evidence path escapes its data directory: ${projectId}`);
+  }
+  return target;
+}
+
+async function removeProjectGenerationEvidence(dataDir: string, projectId: string): Promise<void> {
+  const root = resolve(dataDir, "generation-task-evidence");
+  const target = projectEvidencePath(dataDir, projectId);
+  let rootStats;
+  try {
+    rootStats = await lstat(root);
+  } catch (error) {
+    if (missingPath(error)) return;
+    throw error;
+  }
+  if (rootStats.isSymbolicLink()) {
+    throw new Error(`Refusing to traverse a symbolic link as the Generation evidence root: ${root}`);
+  }
+  if (!rootStats.isDirectory()) {
+    throw new Error(`Generation evidence root is not a directory: ${root}`);
+  }
+  let targetStats;
+  try {
+    targetStats = await lstat(target);
+  } catch (error) {
+    if (missingPath(error)) return;
+    throw error;
+  }
+  if (targetStats.isSymbolicLink()) {
+    throw new Error(`Refusing to remove a symbolic link as project Generation evidence: ${target}`);
+  }
+  await rm(target, { recursive: true, force: true });
 }
 
 export class RuntimeSupervisor {
@@ -217,6 +275,7 @@ export class RuntimeSupervisor {
   }
 
   async releaseProject(projectId: string): Promise<void> {
+    projectEvidencePath(this.options.dataDir, projectId);
     const scope = { projectId };
     this.blockedProjects.add(projectId);
     this.cancelRuns(scope);
@@ -232,6 +291,7 @@ export class RuntimeSupervisor {
       rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "version-evidence", projectId), { recursive: true, force: true }),
+      removeProjectGenerationEvidence(this.options.dataDir, projectId),
       rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
       ...runIds.flatMap((runId) => [
         rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),

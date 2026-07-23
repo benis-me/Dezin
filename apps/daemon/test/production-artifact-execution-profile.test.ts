@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
@@ -33,6 +33,10 @@ import {
   semanticSharinganCaptureFiles,
   type SemanticSharinganFixtureOptions,
 } from "./support/sharingan-capture-fixture.ts";
+import {
+  createResearchRevisionFixture,
+  persistResearchRevisionFixtureContextPack,
+} from "./support/research-resource-fixture.ts";
 
 const PROJECT_ID = "project-profile";
 const WORKSPACE_ID = "workspace-profile";
@@ -118,6 +122,154 @@ function settings() {
     autoImproveEnabled: true,
     autoImproveMaxRounds: 3,
   };
+}
+
+type ResearchRevisionFixture = ReturnType<typeof createResearchRevisionFixture>;
+type ResearchFixtureDirection = ResearchRevisionFixture["bundle"]["directions"][number];
+
+async function artifactResearchValidationFixture(
+  t: TestContext,
+  mutateDirection: (direction: ResearchFixtureDirection) => void,
+  legacyVersion?: 1 | 2,
+) {
+  const root = await mkdtemp(join(tmpdir(), "dezin-artifact-research-validation-"));
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const store = new Store(join(root, "store.db"));
+  t.after(async () => {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const designSystem = {
+    id: "research-validation-system",
+    name: "Research Validation System",
+    category: "Editorial",
+    summary: "Evidence-led restraint",
+    designMd: "# Research Validation System\nKeep evidence adjacent to decisions.",
+    tokensCss: ":root { --color-accent: #123456; }",
+    craft: { applies: [] },
+  };
+  const project = store.createProject({
+    name: "Research validation",
+    mode: "standard",
+    designSystemId: designSystem.id,
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "research",
+    title: "Pinned Research",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const researchContextPack = persistResearchRevisionFixtureContextPack({
+    store,
+    manifestRoot: dataDir,
+    workspaceId: workspace.id,
+    resourceId: created.resource.id,
+    graphRevision: store.workspace.getWorkspace(project.id)!.graphRevision,
+  });
+  const researchFixture = createResearchRevisionFixture({
+    workspaceId: workspace.id,
+    resourceId: created.resource.id,
+    contextPack: researchContextPack,
+  });
+  const selectedDirection = researchFixture.bundle.directions[0]!;
+  mutateDirection(selectedDirection);
+  const payload = legacyVersion === undefined
+    ? researchFixture.bundle
+    : {
+        format: researchFixture.bundle.format,
+        version: legacyVersion,
+        scope: {
+          workspaceId: workspace.id,
+          resourceId: created.resource.id,
+        },
+        directions: researchFixture.bundle.directions.map((direction) => {
+          const {
+            evidenceStatus: _evidenceStatus,
+            evidenceFindingIds: _evidenceFindingIds,
+            hypothesisFindingIds: _hypothesisFindingIds,
+            ...legacyDirection
+          } = direction;
+          return legacyVersion === 1 ? legacyDirection : direction;
+        }),
+      };
+  const revisionId = "research-revision-evidence-validation";
+  const sealed = await sealResourceRevisionPayload({
+    storageRoot: dataDir,
+    workspaceId: workspace.id,
+    resourceId: created.resource.id,
+    revisionId,
+    mimeType: "application/json",
+    bytes: Buffer.from(`${stableStringify(payload)}\n`, "utf8"),
+  });
+  const revision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    created.resource.id,
+    {
+      revisionId,
+      parentRevisionId: null,
+      manifestPath: sealed.manifestPath,
+      summary: "Pinned Research",
+      metadata: {
+        ...researchFixture.metadata,
+        mimeType: sealed.mimeType,
+        byteSize: sealed.byteSize,
+        payloadChecksum: sealed.payloadChecksum,
+      },
+      checksum: sealed.manifestChecksum,
+      provenance: researchFixture.provenance,
+    },
+  );
+  store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "research-validation-fixture",
+  });
+  const loader = createProductionArtifactExecutionProfileLoader({
+    store,
+    dataDir,
+    designRegistry: new DesignRegistry([designSystem]),
+    repositoryDirForWorkspace: () => root,
+  });
+  const request = {
+    projectId: project.id,
+    planId: PLAN_ID,
+    task: {
+      id: TASK_ID,
+      planId: PLAN_ID,
+      workspaceId: workspace.id,
+      kind: "page",
+      target: {
+        type: "artifact",
+        workspaceId: workspace.id,
+        id: ARTIFACT_ID,
+        trackId: "track-profile",
+      },
+      payload: {
+        artifactPlan: {
+          researchDirectionSelection: {
+            protocol: "dezin.research-direction-selection.v1",
+            version: 1,
+            resourceId: created.resource.id,
+            revisionId: revision.id,
+            directionId: selectedDirection.id,
+          },
+        },
+        brief: { proposalRationale: "Use only grounded Research evidence." },
+      },
+      qaProfile: { requireVisualReview: false },
+    },
+    observation: {
+      resourcePins: [{
+        resourceId: created.resource.id,
+        revisionId: revision.id,
+        sourceTaskId: null,
+      }],
+    },
+  } as unknown as Parameters<typeof loader>[0];
+  return { loader, request };
 }
 
 function profile(overrides: {
@@ -257,7 +409,7 @@ function profile(overrides: {
 
 function packWithProfile(executionProfile: FrozenArtifactExecutionProfile): ContextPack {
   const targetContent = stableStringify({
-    protocol: "dezin.generation-target-context.v2",
+    protocol: "dezin.generation-target-context.v3",
     projectId: PROJECT_ID,
     workspaceId: WORKSPACE_ID,
     planId: PLAN_ID,
@@ -287,6 +439,7 @@ function packWithProfile(executionProfile: FrozenArtifactExecutionProfile): Cont
     expectedSnapshotId: "snapshot-profile",
     graphRevision: 1,
     kernelRevisionId: "kernel-profile",
+    relevantPrototypeRelations: [],
     artifactExecutionProfile: executionProfile,
   });
   const target: ResolvedContextItem = {
@@ -632,6 +785,53 @@ test("Artifact execution profile extraction is exact-owned and fails closed on p
 
   const target = pack.items[0]!;
   const parsed = JSON.parse(target.content) as Record<string, unknown>;
+  const resealTarget = (nextTarget: Record<string, unknown>): ContextPack => {
+    const content = stableStringify(nextTarget);
+    return sealContextPack({
+      ...pack,
+      items: [{ ...target, content, checksum: checksumBytes(content) }, ...pack.items.slice(1)],
+    });
+  };
+  assert.throws(
+    () => requireArtifactExecutionProfile(resealTarget({ ...parsed, unexpectedField: true }), expected),
+    /target Context fields are invalid/i,
+  );
+  const plannedRelation = (edgeId: string) => ({
+    edgeId,
+    source: {
+      nodeId: "node-profile",
+      artifactId: ARTIFACT_ID,
+      kind: "page",
+      name: "Profile",
+      revisionId: "revision-profile",
+    },
+    target: {
+      nodeId: "node-peer",
+      artifactId: "artifact-peer",
+      kind: "component",
+      name: "Peer",
+      revisionId: null,
+    },
+    targetArtifactRole: "source",
+    status: "planned",
+    binding: null,
+    transition: null,
+    brokenReason: null,
+  });
+  assert.throws(
+    () => requireArtifactExecutionProfile(resealTarget({
+      ...parsed,
+      relevantPrototypeRelations: [{ ...plannedRelation("edge-a"), unexpectedField: true }],
+    }), expected),
+    /prototype relation.*fields are invalid/i,
+  );
+  assert.throws(
+    () => requireArtifactExecutionProfile(resealTarget({
+      ...parsed,
+      relevantPrototypeRelations: [plannedRelation("edge-b"), plannedRelation("edge-a")],
+    }), expected),
+    /canonical edge-id order/i,
+  );
   const tamperedProfile = structuredClone(parsed.artifactExecutionProfile) as Record<string, unknown>;
   tamperedProfile.checksum = "d".repeat(64);
   parsed.artifactExecutionProfile = tamperedProfile;
@@ -905,27 +1105,24 @@ test("production materialization freezes Project, settings, design, skill, Resea
     baseGraphRevision: workspace.graphRevision,
     expectedSnapshotId: workspace.activeSnapshotId,
   });
-  const immutableDirection = {
-    id: "quiet-checkout",
-    title: "Quiet checkout",
-    thesis: "Editorial calm with a persistent order rail.",
-    visualLanguage: ["restrained contrast", "precise typographic hierarchy"],
-    interactionPrinciples: ["progressive disclosure"],
-    risks: ["density may hide urgency"],
-    findingIds: ["finding-order-comparison"],
-    evidenceStatus: "evidence",
-    evidenceFindingIds: ["finding-order-comparison"],
-    hypothesisFindingIds: [],
-  };
-  await writeFile(join(repositoryDir, "research-resource.json"), `${stableStringify({
-    format: "dezin-research-resource-bundle",
-    version: 2,
-    scope: {
-      workspaceId: workspace.id,
-      resourceId: created.resource.id,
-    },
-    directions: [immutableDirection],
-  })}\n`, "utf8");
+  const researchContextPack = persistResearchRevisionFixtureContextPack({
+    store,
+    manifestRoot: dataDir,
+    workspaceId: workspace.id,
+    resourceId: created.resource.id,
+    graphRevision: store.workspace.getWorkspace(project.id)!.graphRevision,
+  });
+  const researchFixture = createResearchRevisionFixture({
+    workspaceId: workspace.id,
+    resourceId: created.resource.id,
+    contextPack: researchContextPack,
+  });
+  const immutableDirection = researchFixture.bundle.directions[0]!;
+  await writeFile(
+    join(repositoryDir, "research-resource.json"),
+    `${stableStringify(researchFixture.bundle)}\n`,
+    "utf8",
+  );
   const snapshot = await resourceAdapters.require("research").snapshot({
     workspaceId: workspace.id,
     resourceId: created.resource.id,
@@ -938,7 +1135,7 @@ test("production materialization freezes Project, settings, design, skill, Resea
       path: "research-resource.json",
       mimeType: "application/json",
     },
-    provenance: { source: "test" },
+    provenance: researchFixture.provenance,
     createdAt: 1,
   });
   const revision = store.workspace.createResourceRevisionCandidateForProject(
@@ -949,9 +1146,14 @@ test("production materialization freezes Project, settings, design, skill, Resea
       parentRevisionId: null,
       manifestPath: snapshot.manifestPath,
       summary: "Frozen Research",
-      metadata: { mimeType: snapshot.mimeType },
+      metadata: {
+        ...researchFixture.metadata,
+        mimeType: snapshot.mimeType,
+        byteSize: snapshot.byteSize,
+        payloadChecksum: snapshot.payloadChecksum,
+      },
       checksum: snapshot.checksum,
-      provenance: { source: "test" },
+      provenance: researchFixture.provenance,
     },
   );
   store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
@@ -968,19 +1170,28 @@ test("production materialization freezes Project, settings, design, skill, Resea
     baseGraphRevision: workspaceAfterFirstResearch.graphRevision,
     expectedSnapshotId: workspaceAfterFirstResearch.activeSnapshotId,
   });
+  const otherResearchContextPack = persistResearchRevisionFixtureContextPack({
+    store,
+    manifestRoot: dataDir,
+    workspaceId: workspace.id,
+    resourceId: otherCreated.resource.id,
+    graphRevision: store.workspace.getWorkspace(project.id)!.graphRevision,
+  });
+  const otherResearchFixture = createResearchRevisionFixture({
+    workspaceId: workspace.id,
+    resourceId: otherCreated.resource.id,
+    contextPack: otherResearchContextPack,
+  });
   const sameNamedOtherDirection = {
-    ...immutableDirection,
+    ...otherResearchFixture.bundle.directions[0]!,
     thesis: "A different pinned Revision happens to reuse the same local direction id.",
   };
-  await writeFile(join(repositoryDir, "other-research-resource.json"), `${stableStringify({
-    format: "dezin-research-resource-bundle",
-    version: 2,
-    scope: {
-      workspaceId: workspace.id,
-      resourceId: otherCreated.resource.id,
-    },
-    directions: [sameNamedOtherDirection],
-  })}\n`, "utf8");
+  otherResearchFixture.bundle.directions[0] = sameNamedOtherDirection;
+  await writeFile(
+    join(repositoryDir, "other-research-resource.json"),
+    `${stableStringify(otherResearchFixture.bundle)}\n`,
+    "utf8",
+  );
   const otherSnapshot = await resourceAdapters.require("research").snapshot({
     workspaceId: workspace.id,
     resourceId: otherCreated.resource.id,
@@ -993,7 +1204,7 @@ test("production materialization freezes Project, settings, design, skill, Resea
       path: "other-research-resource.json",
       mimeType: "application/json",
     },
-    provenance: { source: "test" },
+    provenance: otherResearchFixture.provenance,
     createdAt: 2,
   });
   const otherRevision = store.workspace.createResourceRevisionCandidateForProject(
@@ -1004,9 +1215,14 @@ test("production materialization freezes Project, settings, design, skill, Resea
       parentRevisionId: null,
       manifestPath: otherSnapshot.manifestPath,
       summary: "Other Frozen Research",
-      metadata: { mimeType: otherSnapshot.mimeType },
+      metadata: {
+        ...otherResearchFixture.metadata,
+        mimeType: otherSnapshot.mimeType,
+        byteSize: otherSnapshot.byteSize,
+        payloadChecksum: otherSnapshot.payloadChecksum,
+      },
       checksum: otherSnapshot.checksum,
-      provenance: { source: "test" },
+      provenance: otherResearchFixture.provenance,
     },
   );
   store.workspace.publishResourceRevisionForProject(project.id, otherCreated.resource.id, otherRevision.id, {
@@ -1212,6 +1428,46 @@ test("production materialization freezes Project, settings, design, skill, Resea
     0,
     "multi-artifact direction selection never consults the legacy mutable Project repository",
   );
+});
+
+test("Artifact execution rejects a Research direction that references a missing finding", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, (direction) => {
+    direction.findingIds = ["finding-missing"];
+    direction.evidenceStatus = "evidence";
+    direction.evidenceFindingIds = ["finding-missing"];
+    direction.hypothesisFindingIds = [];
+  });
+
+  await assert.rejects(
+    async () => await fixture.loader(fixture.request, new AbortController().signal),
+    /Research direction quiet-confidence finding evidence is inconsistent/i,
+  );
+});
+
+test("Artifact execution rejects a Research direction that relabels a hypothesis finding as evidence", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, (direction) => {
+    direction.findingIds = ["finding-celebration"];
+    direction.evidenceStatus = "evidence";
+    direction.evidenceFindingIds = ["finding-celebration"];
+    direction.hypothesisFindingIds = [];
+  });
+
+  await assert.rejects(
+    async () => await fixture.loader(fixture.request, new AbortController().signal),
+    /Research direction quiet-confidence finding evidence is inconsistent/i,
+  );
+});
+
+test("Artifact execution keeps pinned legacy Research v1/v2 directions usable as hypotheses", async (t) => {
+  for (const version of [1, 2] as const) {
+    const fixture = await artifactResearchValidationFixture(t, () => {}, version);
+    const frozen = await fixture.loader(fixture.request, new AbortController().signal);
+    const direction = JSON.parse(frozen.researchDirection!.content) as ResearchFixtureDirection;
+    assert.equal(direction.id, "quiet-confidence");
+    assert.equal(direction.evidenceStatus, "hypothesis");
+    assert.deepEqual(direction.evidenceFindingIds, []);
+    assert.deepEqual(direction.hypothesisFindingIds, ["finding-comparison", "finding-summary"]);
+  }
 });
 
 test("a Sharingan Project does not apply exact-Capture semantics to an unlinked Artifact Task", async (t) => {

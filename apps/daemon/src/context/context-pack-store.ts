@@ -56,6 +56,13 @@ function binaryCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function contextClassRefIdentity(
+  contextClass: ContextPack["items"][number]["contextClass"],
+  ref: ContextPack["items"][number]["ref"],
+): string {
+  return stableStringify({ contextClass, ref });
+}
+
 function inside(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
@@ -390,6 +397,8 @@ function validateDraft(draft: ContextPackDraft): void {
   let hasExactTarget = false;
   let previousClassOrder = -1;
   let previousItemOrderKey: string | null = null;
+  const providedItemIdentities = new Set<string>();
+  const providedClassRefIdentities = new Set<string>();
   for (let ordinal = 0; ordinal < draft.items.length; ordinal += 1) {
     const item = draft.items[ordinal]!;
     if (!item || typeof item !== "object" || typeof item.content !== "string"
@@ -414,6 +423,18 @@ function validateDraft(draft: ContextPackDraft): void {
         && normalizedRef.kind === "kernel" && exactRevisionId !== undefined)
       || (item.resolvedKind === "inline" && normalizedRef.kind === "inline");
     if (!exactIdentity) throw new ContextIntegrityError(`Context Pack item ${ordinal} exact identity is invalid`);
+    const providedIdentity = stableStringify({
+      contextClass: item.contextClass,
+      resolvedKind: item.resolvedKind,
+      ref: normalizedRef,
+    });
+    if (providedItemIdentities.has(providedIdentity)) {
+      throw new ContextIntegrityError(
+        `Context Pack item ${ordinal} duplicates a provided Context identity`,
+      );
+    }
+    providedItemIdentities.add(providedIdentity);
+    providedClassRefIdentities.add(contextClassRefIdentity(item.contextClass, normalizedRef));
     const currentClassOrder = CONTEXT_CLASS_ORDER.get(item.contextClass)!;
     const itemOrderKey = stableStringify({
       contextClass: item.contextClass,
@@ -505,6 +526,7 @@ function validateDraft(draft: ContextPackDraft): void {
   if (!hasSystemKernel || !hasExactTarget) {
     throw new ContextIntegrityError("Context Pack is missing its required system Kernel or exact target");
   }
+  const omissionIdentities = new Set<string>();
   for (const omission of draft.omissions) {
     if (!omission || typeof omission !== "object" || typeof omission.reason !== "string"
       || !Number.isSafeInteger(omission.tokenEstimate) || omission.tokenEstimate < 1) {
@@ -518,6 +540,16 @@ function validateDraft(draft: ContextPackDraft): void {
       || !isWellFormedContextText(omission.reason)
       || Buffer.byteLength(omission.reason, "utf8") > 2_000) {
       throw new ContextIntegrityError("Context Pack omission is not canonical");
+    }
+    const omissionIdentity = contextClassRefIdentity(omission.contextClass, normalizedRef);
+    if (omissionIdentities.has(omissionIdentity)) {
+      throw new ContextIntegrityError("Context Pack contains a duplicate omission identity");
+    }
+    omissionIdentities.add(omissionIdentity);
+    if (providedClassRefIdentities.has(omissionIdentity)) {
+      throw new ContextIntegrityError(
+        "Context Pack exact reference cannot be both provided and omitted in one priority class",
+      );
     }
   }
   if (!Number.isSafeInteger(draft.tokenEstimate) || total !== draft.tokenEstimate) {
@@ -780,6 +812,43 @@ function exactRevisionPins(item: ContextPack["items"][number]): {
   };
 }
 
+function projectedCoreOmissions(pack: ContextPack): PersistContextPackInput["omissions"] {
+  const providedRefIdentities = new Set(pack.items.map((item) => stableStringify(coreRef(item.ref))));
+  const byRefIdentity = new Map<string, {
+    classOrder: number;
+    selectionKey: string;
+    value: PersistContextPackInput["omissions"][number];
+  }>();
+  for (const omission of pack.omissions) {
+    const ref = coreRef(omission.ref);
+    const refIdentity = stableStringify(ref);
+    if (providedRefIdentities.has(refIdentity)) continue;
+    const candidate = {
+      classOrder: CONTEXT_CLASS_ORDER.get(omission.contextClass) ?? Number.MAX_SAFE_INTEGER,
+      selectionKey: stableStringify({
+        contextClass: omission.contextClass,
+        reason: omission.reason,
+        tokenEstimate: omission.tokenEstimate,
+      }),
+      value: {
+        ref,
+        reason: omission.reason,
+        tokenEstimate: omission.tokenEstimate,
+      },
+    };
+    const existing = byRefIdentity.get(refIdentity);
+    if (existing === undefined
+      || candidate.classOrder < existing.classOrder
+      || (candidate.classOrder === existing.classOrder
+        && binaryCompare(candidate.selectionKey, existing.selectionKey) < 0)) {
+      byRefIdentity.set(refIdentity, candidate);
+    }
+  }
+  return [...byRefIdentity.entries()]
+    .sort(([left], [right]) => binaryCompare(left, right))
+    .map(([, projected]) => projected.value);
+}
+
 function toCorePersistInput(pack: ContextPack): PersistContextPackInput {
   return {
     id: pack.id,
@@ -800,11 +869,10 @@ function toCorePersistInput(pack: ContextPack): PersistContextPackInput {
       provenance: { ...structuredClone(item.provenance) },
       provided: item.provided,
     })),
-    omissions: pack.omissions.map((omission) => ({
-      ref: coreRef(omission.ref),
-      reason: omission.reason,
-      tokenEstimate: omission.tokenEstimate,
-    })),
+    // Core intentionally erases daemon priority classes. Project class-aware
+    // omissions so one class cannot hide a ref retained by another, and retain
+    // only the highest-priority deterministic reason for duplicate omitted refs.
+    omissions: projectedCoreOmissions(pack),
     tokenEstimate: pack.tokenEstimate,
     manifestPath: pack.manifestPath,
     hash: pack.hash,

@@ -644,22 +644,24 @@ test("workspace-flow stateKey resolves and revalidates only an exact frozen Revi
       /RenderSpec state missing-state/i,
     );
 
-    const duplicate = fixture.createRevision({
+    const multiViewport = fixture.createRevision({
       renderSpec: {
         entry: "index.html",
         frames: [
-          { id: "one", name: "One", width: 1440, height: 900, initialState: "duplicate" },
-          { id: "two", name: "Two", width: 1440, height: 900, initialState: "duplicate" },
+          { id: "desktop", name: "Desktop", width: 1440, height: 900, initialState: "checkout-ready" },
+          { id: "mobile", name: "Mobile", width: 390, height: 844, initialState: "checkout-ready" },
         ],
       },
     });
-    await assert.rejects(resolvePreviewTarget(fixture, {
+    const multiViewportTarget = await resolvePreviewTarget(fixture, {
       kind: "workspace-flow",
       projectId: fixture.projectId,
-      snapshotId: duplicate.snapshotId,
+      snapshotId: multiViewport.snapshotId,
       startArtifactId: fixture.artifactId,
-      stateKey: "duplicate",
-    }), /ambiguous/i);
+      stateKey: "checkout-ready",
+    });
+    assert.equal(multiViewportTarget.stateKey, "checkout-ready");
+    assert.deepEqual(revalidateResolvedPreviewTarget(fixture, multiViewportTarget), multiViewportTarget);
   } finally {
     fixture.close();
   }
@@ -714,6 +716,88 @@ test("current, revision, candidate, and flow targets resolve to immutable owned 
     });
     assert.equal(nextCurrent.revisionId, second.revisionId);
     assert.notEqual(nextCurrent.targetKey, current.targetKey);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("formal Revision previews reject unpublished candidates while run-candidate preview remains available", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const published = fixture.createRevision();
+    const conversation = fixture.store.createConversation(fixture.projectId);
+    const run = fixture.store.createRun(fixture.projectId, conversation.id);
+    const committed = fixture.commit("unpublished candidate preview");
+    const candidate = fixture.store.workspace.createArtifactRevision({
+      artifactId: fixture.artifactId,
+      trackId: fixture.trackId,
+      parentRevisionId: published.revisionId,
+      sourceCommitHash: committed.commitHash,
+      sourceTreeHash: committed.sourceTreeHash,
+      kernelRevisionId: fixture.store.workspace.getWorkspace(fixture.projectId)!.activeKernelRevisionId,
+      renderSpec: { entry: "index.html", frames: [{ id: "desktop", width: 1440, height: 900 }] },
+      quality: { state: "unassessed", score: null, findings: [] },
+      producedByRunId: run.id,
+      dependencies: [],
+      resourcePins: [],
+    });
+
+    await assert.rejects(resolvePreviewTarget(fixture, {
+      kind: "artifact-revision",
+      projectId: fixture.projectId,
+      revisionId: candidate.id,
+    }), /published|Snapshot|formal Revision/i);
+    const runCandidate = await resolvePreviewTarget(fixture, {
+      kind: "run-candidate",
+      projectId: fixture.projectId,
+      runId: run.id,
+    });
+    assert.equal(runCandidate.revisionId, candidate.id);
+    assert.equal(runCandidate.snapshotId, null);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("explicit historical Track preview rejects a forged unpublished Head", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const published = fixture.createRevision();
+    const committed = fixture.commit("unpublished historical Track candidate");
+    const candidate = fixture.store.workspace.createArtifactRevision({
+      artifactId: fixture.artifactId,
+      trackId: fixture.trackId,
+      parentRevisionId: published.revisionId,
+      sourceCommitHash: committed.commitHash,
+      sourceTreeHash: committed.sourceTreeHash,
+      kernelRevisionId: fixture.store.workspace.getWorkspace(fixture.projectId)!.activeKernelRevisionId,
+      renderSpec: { entry: "index.html", frames: [{ id: "desktop", width: 1440, height: 900 }] },
+      quality: { state: "unassessed", score: null, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const fork = fixture.store.workspace.forkArtifactTrackForProject(
+      fixture.projectId,
+      fixture.artifactId,
+      {
+        sourceRevisionId: published.revisionId,
+        name: "Active fork",
+        expectedHeadRevisionId: published.revisionId,
+        expectedSnapshotId: published.snapshotId,
+      },
+    );
+    assert.notEqual(fork.track.id, fixture.trackId);
+
+    fixture.store.db.prepare(
+      "UPDATE artifact_tracks SET head_revision_id = ? WHERE id = ?",
+    ).run(candidate.id, fixture.trackId);
+
+    await assert.rejects(resolvePreviewTarget(fixture, {
+      kind: "artifact-current",
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      trackId: fixture.trackId,
+    }), /published|Snapshot|formal Revision/i);
   } finally {
     fixture.close();
   }
@@ -1889,6 +1973,12 @@ test("plain linked Component pins resolve and materialize their exact Revision s
       componentRevisionId: pinnedRevisionId,
       overrides: {},
     }]);
+    const published = fixture.store.workspace.publishArtifactRevision(pageRevisionId, {
+      expectedHeadRevisionId: fixture.headRevisionId,
+      expectedSnapshotId: fixture.snapshotId,
+    });
+    fixture.headRevisionId = pageRevisionId;
+    fixture.snapshotId = published.id;
 
     const resolved = await resolvePreviewTarget(fixture, {
       kind: "artifact-revision",

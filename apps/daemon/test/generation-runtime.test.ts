@@ -122,6 +122,13 @@ test("GenerationRuntime recovers durable plans and Artifact refs before schedule
         };
       },
     },
+    evidenceRecovery: {
+      async recover(signal) {
+        assert.equal(signal.aborted, false);
+        order.push("recover-generation-evidence");
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+    },
     scheduler: {
       start() {
         order.push("scheduler-start");
@@ -146,6 +153,7 @@ test("GenerationRuntime recovers durable plans and Artifact refs before schedule
     "reconcile-rebase",
     "recover-artifact-refs",
     "recover-resource-payloads",
+    "recover-generation-evidence",
     "scheduler-start",
   ]);
   assert.equal(timers.pending.length, 1);

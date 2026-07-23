@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type {
@@ -19,6 +20,7 @@ import {
   SharinganCaptureReferenceError,
   type SharinganCaptureBundleFence,
 } from "../src/orchestration/sharingan-capture-reference.ts";
+import { stableStringify } from "../src/context/context-types.ts";
 import type {
   StandardArtifactCandidateIdentity,
   StandardArtifactQualityResult,
@@ -33,6 +35,11 @@ const SOURCE_COMMIT = "1".repeat(40);
 const SOURCE_TREE = "2".repeat(40);
 const CANDIDATE_A = { commitHash: "3".repeat(40), treeHash: "4".repeat(40) };
 const CANDIDATE_B = { commitHash: "5".repeat(40), treeHash: "6".repeat(40) };
+const SOURCE_AUTHORITY = {
+  resourceId: "resource-sharingan-1",
+  revisionId: "resource-revision-sharingan-1",
+  revisionChecksum: "8".repeat(64),
+};
 const ATTEMPT_REF = artifactCandidateAttemptRef({
   workspaceId: "workspace-1",
   taskId: "task-page-checkout",
@@ -289,9 +296,16 @@ function quality(input: {
 function exactQualityEvidence(
   candidate: StandardArtifactCandidateIdentity,
   round: number,
+  options: {
+    frameStatus?: "passed" | "failed";
+    reviewStatus?: "passed" | "failed";
+    sourceStatus?: "passed" | "failed";
+  } = {},
 ): Record<string, unknown> {
   const frame = { id: "desktop", name: "Desktop", width: 1_440, height: 900 };
   const frameAttemptId = `quality-round-${round}-desktop`;
+  const frameStatus = options.frameStatus ?? "passed";
+  const reviewStatus = options.reviewStatus ?? "passed";
   const sha256 = `${round === 0 ? "a" : "b"}`.repeat(64);
   const storageKey = [
     "generation-task-evidence",
@@ -320,12 +334,42 @@ function exactQualityEvidence(
       frameAttemptId,
       width: frame.width,
       height: frame.height,
-      status: "passed",
+      status: frameStatus,
       reviewed: true,
+      captureIdentity: {
+        sha256,
+        byteLength: 1_024,
+        width: frame.width,
+        height: frame.height,
+      },
     }],
     round,
-    runtimeChecks: [{ id: "frame:desktop", status: "passed" }],
-    visualReview: { status: "passed", fidelity: 0.98, evidence: [summary] },
+    runtimeChecks: [{ id: "frame:desktop", status: frameStatus }],
+    visualReview: {
+      status: reviewStatus,
+      fidelity: reviewStatus === "passed" ? 0.98 : 0.42,
+      evidence: [summary],
+      ...(options.sourceStatus ? {
+        sourceEvidence: {
+          scope: "source",
+          sourceAttemptId: `quality-round-${round}-source`,
+          width: 1_440,
+          height: 900,
+          sha256: `${round === 0 ? "c" : "d"}`.repeat(64),
+          byteLength: 2_048,
+          storageKey: [
+            "generation-task-evidence",
+            "project-1",
+            "workspace-1",
+            "plan-1",
+            "task-page-checkout",
+            "attempt-1",
+            "visual",
+            `round-${round}-source-${`${round === 0 ? "c" : "d"}`.repeat(64)}.png`,
+          ].join("/"),
+        },
+      } : {}),
+    },
     visualEvidence: [{
       protocol: "dezin.generation-task-visual-evidence.v1",
       owner: {
@@ -346,6 +390,81 @@ function exactQualityEvidence(
       byteLength: 1_024,
       storageKey,
     }],
+    ...(options.sourceStatus ? {
+      sourceCaptureResult: {
+        scope: "source",
+        sourceAttemptId: `quality-round-${round}-source`,
+        width: 1_440,
+        height: 900,
+        status: options.sourceStatus,
+        reviewed: true,
+        captureIdentity: {
+          sha256: `${round === 0 ? "c" : "d"}`.repeat(64),
+          byteLength: 2_048,
+          width: 1_440,
+          height: 900,
+        },
+      },
+      sourceVisualEvidence: {
+        protocol: "dezin.generation-task-source-visual-evidence.v1",
+        owner: {
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          planId: "plan-1",
+          taskId: "task-page-checkout",
+          attempt: 1,
+          candidateCommitHash: candidate.commitHash,
+          candidateTreeHash: candidate.treeHash,
+          contextPackId: `context-pack-${CONTEXT_HASH}`,
+          contextPackHash: CONTEXT_HASH,
+        },
+        capture: {
+          scope: "source",
+          sourceAttemptId: `quality-round-${round}-source`,
+          width: 1_440,
+          height: 900,
+        },
+        sourceAuthority: SOURCE_AUTHORITY,
+        round,
+        mediaType: "image/png",
+        sha256: `${round === 0 ? "c" : "d"}`.repeat(64),
+        byteLength: 2_048,
+        storageKey: [
+          "generation-task-evidence",
+          "project-1",
+          "workspace-1",
+          "plan-1",
+          "task-page-checkout",
+          "attempt-1",
+          "visual",
+          `round-${round}-source-${`${round === 0 ? "c" : "d"}`.repeat(64)}.png`,
+        ].join("/"),
+      },
+    } : {}),
+  };
+}
+
+function expectedEvaluationManifest(
+  candidate: StandardArtifactCandidateIdentity,
+  round: number,
+  result: StandardArtifactQualityResult,
+  evidence: Record<string, unknown>,
+): Record<string, unknown> {
+  const quality = result.quality as { state: string; findings: unknown[] };
+  return {
+    protocol: "dezin.artifact-run-evaluation-manifest.v1",
+    candidate,
+    round,
+    passed: result.passed,
+    score: result.score,
+    qualityState: quality.state,
+    findingsDigest: createHash("sha256").update(stableStringify(quality.findings)).digest("hex"),
+    frameResults: evidence.frameResults,
+    runtimeChecks: evidence.runtimeChecks,
+    reviewSummary: evidence.visualReview,
+    visualEvidence: evidence.visualEvidence,
+    ...(evidence.sourceCaptureResult ? { sourceCaptureResult: evidence.sourceCaptureResult } : {}),
+    ...(evidence.sourceVisualEvidence ? { sourceVisualEvidence: evidence.sourceVisualEvidence } : {}),
   };
 }
 
@@ -353,6 +472,7 @@ function preparation(input: {
   transaction: Transaction;
   runner: Runner;
   qualities: StandardArtifactQualityResult[];
+  evidenceOptions?: Array<Parameters<typeof exactQualityEvidence>[2]>;
   contextPackId?: string;
   contextPackHash?: string;
   sourceCommitHash?: string;
@@ -372,7 +492,11 @@ function preparation(input: {
         input.onEvaluate?.();
         return {
           ...result,
-          evidence: exactQualityEvidence(evaluation.candidate, evaluation.round),
+          evidence: exactQualityEvidence(
+            evaluation.candidate,
+            evaluation.round,
+            input.evidenceOptions?.[evaluation.round],
+          ),
         };
       },
     },
@@ -429,6 +553,9 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
   assert.equal(result.artifactId, "page-checkout");
   assert.equal(result.trackId, "track-main");
   assert.deepEqual(result.quality, { state: "passed", score: 97, findings: [] });
+  const failedQuality = quality({ passed: false, score: 88, repairs: [{ id: "overflow" }] });
+  const selectedQuality = quality({ passed: true, score: 97 });
+  const failedQualityEvidence = exactQualityEvidence(CANDIDATE_A, 0);
   const selectedQualityEvidence = exactQualityEvidence(CANDIDATE_B, 1);
   assert.deepEqual(result.evidence, {
     runtimeChecks: selectedQualityEvidence.runtimeChecks,
@@ -447,12 +574,37 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
     candidateRetentionRef: transaction.attemptRef,
     selectedRound: 1,
     versions: [
-      { round: 0, commitHash: CANDIDATE_A.commitHash, treeHash: CANDIDATE_A.treeHash, passed: false, score: 88 },
-      { round: 1, commitHash: CANDIDATE_B.commitHash, treeHash: CANDIDATE_B.treeHash, passed: true, score: 97 },
+      {
+        round: 0,
+        commitHash: CANDIDATE_A.commitHash,
+        treeHash: CANDIDATE_A.treeHash,
+        passed: false,
+        score: 88,
+        evaluationManifest: expectedEvaluationManifest(
+          CANDIDATE_A,
+          0,
+          failedQuality,
+          failedQualityEvidence,
+        ),
+      },
+      {
+        round: 1,
+        commitHash: CANDIDATE_B.commitHash,
+        treeHash: CANDIDATE_B.treeHash,
+        passed: true,
+        score: 97,
+        evaluationManifest: expectedEvaluationManifest(
+          CANDIDATE_B,
+          1,
+          selectedQuality,
+          selectedQualityEvidence,
+        ),
+      },
     ],
     qualityEvidence: selectedQualityEvidence,
   });
   validateGenerationTaskArtifactQualityGate({
+    requireSourceVisualEvidence: false,
     qaProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -484,6 +636,189 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
   assert.equal(runner.inputs[1]?.message, "Repair exact findings, round 1.");
   assert.ok(events.includes("quality:1"));
   assert.deepEqual(reported, []);
+});
+
+test("ArtifactRunExecutor keeps failed Sharingan source and Frame descriptors reachable by round", async () => {
+  const transaction = new Transaction({
+    fingerprints: ["base", "failed", "failed", "passed"],
+    candidates: [CANDIDATE_A, CANDIDATE_B],
+  });
+  const failedQuality = quality({ passed: false, score: 61, repairs: [{ id: "source-overflow" }] });
+  const passedQuality = quality({ passed: true, score: 96 });
+  const fence = new CaptureFence();
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        return preparation({
+          transaction,
+          runner: new Runner([
+            { text: "failed", artifactHtml: "" },
+            { text: "passed", artifactHtml: "" },
+          ]),
+          qualities: [failedQuality, passedQuality],
+          evidenceOptions: [
+            { frameStatus: "failed", reviewStatus: "failed", sourceStatus: "failed" },
+            { sourceStatus: "passed" },
+          ],
+          sharinganCapture: fence,
+        });
+      },
+    },
+  });
+
+  const result = await executor.execute(claim({ sharingan: true }), new AbortController().signal);
+  const versions = result.evidence.versions as Array<Record<string, unknown>>;
+  const failedManifest = versions[0]!.evaluationManifest as Record<string, unknown>;
+  const failedFrameEvidence = failedManifest.visualEvidence as Array<Record<string, unknown>>;
+  const failedSourceEvidence = failedManifest.sourceVisualEvidence as Record<string, unknown>;
+
+  assert.equal(failedManifest.passed, false);
+  assert.deepEqual(failedManifest.candidate, CANDIDATE_A);
+  assert.equal(failedManifest.round, 0);
+  assert.equal(failedFrameEvidence[0]?.round, 0);
+  assert.equal(
+    (failedFrameEvidence[0]?.owner as Record<string, unknown>).candidateCommitHash,
+    CANDIDATE_A.commitHash,
+  );
+  assert.equal(failedSourceEvidence.round, 0);
+  assert.equal(
+    (failedSourceEvidence.owner as Record<string, unknown>).candidateCommitHash,
+    CANDIDATE_A.commitHash,
+  );
+  assert.equal(
+    (failedManifest.sourceCaptureResult as Record<string, unknown>).status,
+    "failed",
+  );
+  assert.deepEqual(
+    versions[1]!.evaluationManifest,
+    expectedEvaluationManifest(
+      CANDIDATE_B,
+      1,
+      passedQuality,
+      exactQualityEvidence(CANDIDATE_B, 1, { sourceStatus: "passed" }),
+    ),
+  );
+});
+
+test("ArtifactRunExecutor enforces the cumulative run-evidence budget while retaining manifests", async () => {
+  const transaction = new Transaction({
+    fingerprints: ["base", "candidate"],
+    candidates: [CANDIDATE_A],
+  });
+  const selectedQuality = quality({ passed: true, score: 98 });
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        const prepared = preparation({
+          transaction,
+          runner: new Runner([{ text: "candidate", artifactHtml: "" }]),
+          qualities: [],
+        });
+        return {
+          ...prepared,
+          evaluator: {
+            async evaluate(input) {
+              const evidence = exactQualityEvidence(input.candidate, input.round);
+              (evidence.visualReview as Record<string, unknown>).boundedPadding = "x".repeat(400_000);
+              return { ...selectedQuality, evidence };
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim(), new AbortController().signal),
+    (error) => error instanceof ArtifactRunExecutorError
+      && error.code === "invalid-evidence"
+      && error.failureClass === "qa",
+  );
+  assert.equal(transaction.disposeCount, 1);
+});
+
+test("ArtifactRunExecutor classifies cyclic quality findings as invalid evidence", async () => {
+  const transaction = new Transaction({
+    fingerprints: ["base", "candidate"],
+    candidates: [CANDIDATE_A],
+  });
+  const selectedQuality = quality({ passed: true, score: 98 });
+  const cyclicFinding: Record<string, unknown> = { id: "cyclic-finding" };
+  cyclicFinding.self = cyclicFinding;
+  selectedQuality.quality = {
+    ...selectedQuality.quality,
+    findings: [cyclicFinding],
+  };
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        return preparation({
+          transaction,
+          runner: new Runner([{ text: "candidate", artifactHtml: "" }]),
+          qualities: [selectedQuality],
+        });
+      },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim(), new AbortController().signal),
+    (error) => error instanceof ArtifactRunExecutorError
+      && error.code === "invalid-evidence"
+      && error.failureClass === "qa",
+  );
+  assert.equal(transaction.disposeCount, 1);
+});
+
+test("ArtifactRunExecutor classifies cyclic visual evidence as invalid evidence", async () => {
+  const transaction = new Transaction({
+    fingerprints: ["base", "failed", "failed", "passed"],
+    candidates: [CANDIDATE_A, CANDIDATE_B],
+  });
+  const failedQuality = quality({ passed: false, score: 60, repairs: [{ id: "repair" }] });
+  const selectedQuality = quality({ passed: true, score: 98 });
+  const executor = new ArtifactRunExecutor({
+    preparation: {
+      async prepare() {
+        const prepared = preparation({
+          transaction,
+          runner: new Runner([
+            { text: "failed", artifactHtml: "" },
+            { text: "passed", artifactHtml: "" },
+          ]),
+          qualities: [],
+        });
+        return {
+          ...prepared,
+          evaluator: {
+            async evaluate(input) {
+              if (input.round === 0) {
+                const evidence = exactQualityEvidence(input.candidate, input.round, {
+                  frameStatus: "failed",
+                  reviewStatus: "failed",
+                });
+                const descriptor = (evidence.visualEvidence as Array<Record<string, unknown>>)[0]!;
+                descriptor.self = descriptor;
+                return { ...failedQuality, evidence };
+              }
+              return {
+                ...selectedQuality,
+                evidence: exactQualityEvidence(input.candidate, input.round),
+              };
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim(), new AbortController().signal),
+    (error) => error instanceof ArtifactRunExecutorError
+      && error.code === "invalid-evidence"
+      && error.failureClass === "qa",
+  );
+  assert.equal(transaction.disposeCount, 1);
 });
 
 test("ArtifactRunExecutor restores the best passing round before returning it", async () => {

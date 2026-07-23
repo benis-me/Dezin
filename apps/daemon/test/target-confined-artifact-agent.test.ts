@@ -117,6 +117,7 @@ function infrastructure(worktreeDir: string): ArtifactRunInfrastructureInput {
     claim: claim(),
     contextPack: contextPack(),
     hasExactSharinganCapture: false,
+    sharinganReference: null,
     repositoryDir: join(worktreeDir, "repository"),
     worktreeDir,
   };

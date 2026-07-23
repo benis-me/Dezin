@@ -282,6 +282,22 @@ function snapshotForRevision(
   return snapshot;
 }
 
+function publishedSnapshotForRevision(
+  deps: PreviewTargetResolverDeps,
+  projectId: string,
+  workspaceId: string,
+  artifactId: string,
+  revisionId: string,
+): WorkspaceSnapshotRecord {
+  const snapshot = snapshotForRevision(deps, projectId, workspaceId, artifactId, revisionId);
+  if (snapshot === null) {
+    throw new PreviewTargetNotFoundError(
+      "Preview Target formal Revision was not published in a sealed Workspace Snapshot",
+    );
+  }
+  return snapshot;
+}
+
 function ownedRevision(
   deps: PreviewTargetResolverDeps,
   workspaceId: string,
@@ -316,9 +332,6 @@ function validateWorkspaceFlowState(renderSpec: Record<string, unknown>, stateKe
   }
   if (matches === 0) {
     throw new PreviewTargetValidationError(`Preview Target flow RenderSpec state ${stateKey} does not exist`);
-  }
-  if (matches > 1) {
-    throw new PreviewTargetValidationError(`Preview Target flow RenderSpec state ${stateKey} is ambiguous`);
   }
 }
 
@@ -416,7 +429,13 @@ function resolveRevision(
       const revision = ownedRevision(deps, workspaceId, track.headRevisionId);
       return {
         revision,
-        snapshot: snapshotForRevision(deps, target.projectId, workspaceId, artifact.id, revision.id),
+        snapshot: publishedSnapshotForRevision(
+          deps,
+          target.projectId,
+          workspaceId,
+          artifact.id,
+          revision.id,
+        ),
         boundedCurrent: false,
         variantKey: null,
         stateKey: null,
@@ -427,7 +446,7 @@ function resolveRevision(
       const revision = ownedRevision(deps, workspaceId, target.revisionId);
       return {
         revision,
-        snapshot: snapshotForRevision(
+        snapshot: publishedSnapshotForRevision(
           deps,
           target.projectId,
           workspaceId,
@@ -508,7 +527,7 @@ function resolveRevision(
       }
       return {
         revision,
-        snapshot: snapshotForRevision(
+        snapshot: publishedSnapshotForRevision(
           deps,
           target.projectId,
           workspaceId,

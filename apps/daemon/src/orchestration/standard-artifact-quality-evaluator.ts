@@ -37,16 +37,26 @@ import { sharinganReviewReference } from "../sharingan-capture.ts";
 import {
   auditVisualArtifactReport,
   visualQaFrameAttemptId,
+  visualQaSourceAttemptId,
   type VisualQaInput,
   type VisualQaReport,
+  type VisualQaSourceCaptureResult,
 } from "../visual-qa.ts";
 import type { ArtifactRunInfrastructureInput } from "./artifact-run-preparation.ts";
 import { verifyArtifactCandidateObject } from "./artifact-candidate-transaction.ts";
 import { collectStandardLintSurface } from "../standard-lint-surface.ts";
+import type { PngEvidenceIdentity } from "../png-evidence.ts";
 import { validateGenerationTaskPayload } from "./generation-task-contracts.ts";
 import {
+  generationTaskVisualEvidenceFrameStorageSegment,
+  persistGenerationTaskVisualEvidenceBatch,
+  persistGenerationTaskSourceVisualEvidence,
   persistGenerationTaskVisualEvidence,
+  type GenerationTaskSourceVisualEvidenceDescriptor,
   type GenerationTaskVisualEvidenceDescriptor,
+  type PersistGenerationTaskVisualEvidenceBatchInput,
+  type PersistGenerationTaskVisualEvidenceBatchResult,
+  type PersistGenerationTaskSourceVisualEvidenceInput,
   type PersistGenerationTaskVisualEvidenceInput,
 } from "./generation-task-visual-evidence.ts";
 import type {
@@ -59,6 +69,7 @@ import { inspectCandidateSidecarReferences } from "./standard-artifact-sidecar-r
 const MAX_FINDINGS = 10_000;
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
 const GIT_OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_OWNER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const RUNTIME_FAILURE_IDS = new Set([
   "visual-artifact-missing",
@@ -114,6 +125,13 @@ export interface ProductionStandardArtifactQualityEvaluatorDependencies {
   persistEvidence(
     input: PersistGenerationTaskVisualEvidenceInput,
   ): Promise<GenerationTaskVisualEvidenceDescriptor | undefined>;
+  persistSourceEvidence?(
+    input: PersistGenerationTaskSourceVisualEvidenceInput,
+  ): Promise<GenerationTaskSourceVisualEvidenceDescriptor | undefined>;
+  /** Production atomic persistence boundary for one complete visual-review round. */
+  persistEvidenceBatch?(
+    input: PersistGenerationTaskVisualEvidenceBatchInput,
+  ): Promise<PersistGenerationTaskVisualEvidenceBatchResult>;
   /** Overrideable scratch allocation boundary for storage fault handling/tests. */
   createCaptureDir?(): Promise<string>;
   sharinganReference(
@@ -294,6 +312,8 @@ const DEFAULT_DEPENDENCIES: ProductionStandardArtifactQualityEvaluatorDependenci
   },
   visualQa: auditVisualArtifactReport,
   persistEvidence: persistGenerationTaskVisualEvidence,
+  persistSourceEvidence: persistGenerationTaskSourceVisualEvidence,
+  persistEvidenceBatch: persistGenerationTaskVisualEvidenceBatch,
   sharinganReference: sharinganReviewReference,
 });
 
@@ -493,11 +513,17 @@ function exactFrameResults(
   const seen = new Set<string>();
   return frames.map((frame, index) => {
     const current = report.frames.find((result) => result.frameId === frame.id);
+    const captureIdentity = current?.captureIdentity === undefined
+      ? undefined
+      : exactCaptureIdentity(current.captureIdentity, frame.width, frame.height, `Frame ${frame.id}`);
+    const hasScreenshot = typeof current?.screenshotPath === "string" && current.screenshotPath.length > 0;
     if (!current || seen.has(current.frameId)
       || current.frameAttemptId !== visualQaFrameAttemptId(attemptPrefix, frame, index)
       || current.width !== frame.width || current.height !== frame.height
       || (current.status !== "passed" && current.status !== "failed")
-      || typeof current.reviewed !== "boolean") {
+      || typeof current.reviewed !== "boolean"
+      || hasScreenshot !== Boolean(captureIdentity)
+      || (current.status === "passed" && !hasScreenshot)) {
       throw new ProductionStandardArtifactQualityEvaluatorError(
         "visual-infrastructure",
         `Exact Frame QA result for ${frame.id} is missing or does not match its immutable contract`,
@@ -506,6 +532,73 @@ function exactFrameResults(
     seen.add(current.frameId);
     return current;
   });
+}
+
+function exactCaptureIdentity(
+  value: PngEvidenceIdentity,
+  minimumWidth: number,
+  minimumHeight: number,
+  label: string,
+): PngEvidenceIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).length !== 4
+    || !Object.hasOwn(value, "sha256")
+    || !Object.hasOwn(value, "byteLength")
+    || !Object.hasOwn(value, "width")
+    || !Object.hasOwn(value, "height")
+    || !/^[a-f0-9]{64}$/.test(value.sha256)
+    || !Number.isSafeInteger(value.byteLength) || value.byteLength < 57 || value.byteLength > 16 * 1024 * 1024
+    || !Number.isSafeInteger(value.width) || value.width < minimumWidth || value.width > 32_768
+    || !Number.isSafeInteger(value.height) || value.height < minimumHeight || value.height > 32_768) {
+    throw new ProductionStandardArtifactQualityEvaluatorError(
+      "visual-infrastructure",
+      `${label} capture identity is missing or does not cover its immutable viewport`,
+      "provider",
+    );
+  }
+  return structuredClone(value);
+}
+
+function exactSourceCaptureResult(
+  report: VisualQaReport,
+  attemptPrefix: string,
+  screenshotPath: string,
+  sharingan: boolean,
+): VisualQaSourceCaptureResult | undefined {
+  const current = report.sourceCapture;
+  if (!sharingan) {
+    if (current !== undefined) {
+      throw new ProductionStandardArtifactQualityEvaluatorError(
+        "visual-infrastructure",
+        "Visual QA returned source-scoped evidence for a non-Sharingan Task",
+      );
+    }
+    return undefined;
+  }
+  if (!current || current.scope !== "source"
+    || current.sourceAttemptId !== visualQaSourceAttemptId(attemptPrefix)
+    || !Number.isSafeInteger(current.width) || current.width < 320 || current.width > 3_000
+    || !Number.isSafeInteger(current.height) || current.height < 320 || current.height > 3_000
+    || (current.status !== "passed" && current.status !== "failed")
+    || current.screenshotPath !== screenshotPath
+    || !current.captureIdentity
+    || current.reviewed !== true) {
+    throw new ProductionStandardArtifactQualityEvaluatorError(
+      "visual-infrastructure",
+      "Sharingan source-parity QA did not return one exact reviewed source capture",
+      "provider",
+    );
+  }
+  return {
+    ...structuredClone(current),
+    captureIdentity: exactCaptureIdentity(
+      current.captureIdentity,
+      current.width,
+      current.height,
+      "Sharingan source-parity",
+    ),
+  };
 }
 
 function exactEvidence(
@@ -520,19 +613,55 @@ function exactEvidence(
     expected.owner.taskId,
     `attempt-${expected.owner.attempt}`,
     "visual",
-    `round-${expected.round}-${expected.frame.id}-`,
+    `round-${expected.round}-${generationTaskVisualEvidenceFrameStorageSegment(expected.frame.id)}-`,
   ].join("/");
   if (!descriptor || descriptor.protocol !== "dezin.generation-task-visual-evidence.v1"
     || !isDeepStrictEqual(descriptor.owner, expected.owner)
     || !isDeepStrictEqual(descriptor.frame, expected.frame)
     || descriptor.round !== expected.round
     || descriptor.mediaType !== "image/png"
+    || descriptor.sha256 !== expected.expectedIdentity.sha256
+    || descriptor.byteLength !== expected.expectedIdentity.byteLength
     || !/^[a-f0-9]{64}$/.test(descriptor.sha256)
     || !Number.isSafeInteger(descriptor.byteLength) || descriptor.byteLength < 1
     || descriptor.storageKey !== `${prefix}${descriptor.sha256}.png`) {
     throw new ProductionStandardArtifactQualityEvaluatorError(
       "evidence-unavailable",
       `Durable visual evidence for Frame ${expected.frame.id} has invalid ownership or content identity`,
+      "storage",
+    );
+  }
+  return structuredClone(descriptor);
+}
+
+function exactSourceEvidence(
+  descriptor: GenerationTaskSourceVisualEvidenceDescriptor,
+  expected: PersistGenerationTaskSourceVisualEvidenceInput,
+): GenerationTaskSourceVisualEvidenceDescriptor {
+  const prefix = [
+    "generation-task-evidence",
+    expected.owner.projectId,
+    expected.owner.workspaceId,
+    expected.owner.planId,
+    expected.owner.taskId,
+    `attempt-${expected.owner.attempt}`,
+    "visual",
+    `round-${expected.round}-source-`,
+  ].join("/");
+  if (!descriptor || descriptor.protocol !== "dezin.generation-task-source-visual-evidence.v1"
+    || !isDeepStrictEqual(descriptor.owner, expected.owner)
+    || !isDeepStrictEqual(descriptor.capture, expected.capture)
+    || !isDeepStrictEqual(descriptor.sourceAuthority, expected.sourceAuthority)
+    || descriptor.round !== expected.round
+    || descriptor.mediaType !== "image/png"
+    || descriptor.sha256 !== expected.expectedIdentity.sha256
+    || descriptor.byteLength !== expected.expectedIdentity.byteLength
+    || !/^[a-f0-9]{64}$/.test(descriptor.sha256)
+    || !Number.isSafeInteger(descriptor.byteLength) || descriptor.byteLength < 1
+    || descriptor.storageKey !== `${prefix}${descriptor.sha256}.png`) {
+    throw new ProductionStandardArtifactQualityEvaluatorError(
+      "evidence-unavailable",
+      "Durable Sharingan source visual evidence has invalid ownership or content identity",
       "storage",
     );
   }
@@ -580,6 +709,7 @@ implements StandardArtifactQualityEvaluatorPort {
   private readonly dependencies: ProductionStandardArtifactQualityEvaluatorDependencies;
   private readonly payload: ArtifactGenerationTaskPayloadV2;
   private readonly sharingan: boolean;
+  private readonly sourceAuthority: PersistGenerationTaskSourceVisualEvidenceInput["sourceAuthority"] | null;
 
   constructor(options: ProductionStandardArtifactQualityEvaluatorOptions) {
     if (!options || typeof options !== "object" || Array.isArray(options)
@@ -594,6 +724,25 @@ implements StandardArtifactQualityEvaluatorPort {
         "Production Standard Artifact quality evaluator options are invalid",
       );
     }
+    const sharinganReference = options.infrastructure.sharinganReference;
+    if ((sharinganReference !== null && (!sharinganReference
+      || typeof sharinganReference !== "object"
+      || !SAFE_OWNER_ID.test(sharinganReference.workspaceId)
+      || !SAFE_OWNER_ID.test(sharinganReference.resourceId)
+      || !SAFE_OWNER_ID.test(sharinganReference.revisionId)
+      || !SHA256.test(sharinganReference.revisionChecksum)
+      || !SHA256.test(sharinganReference.contextPackHash)
+      || sharinganReference.contextPackId !== `context-pack-${sharinganReference.contextPackHash}`))
+      || options.infrastructure.hasExactSharinganCapture !== (sharinganReference !== null)
+      || (sharinganReference !== null
+        && (sharinganReference.workspaceId !== options.infrastructure.claim.task.workspaceId
+          || sharinganReference.contextPackId !== options.infrastructure.contextPack.id
+          || sharinganReference.contextPackHash !== options.infrastructure.contextPack.hash))) {
+      throw new ProductionStandardArtifactQualityEvaluatorError(
+        "invalid-input",
+        "Production Standard Artifact quality evaluator Sharingan authority is invalid",
+      );
+    }
     this.payload = artifactPayload(options.infrastructure);
     this.infrastructure = options.infrastructure;
     this.projectId = options.projectId;
@@ -605,7 +754,12 @@ implements StandardArtifactQualityEvaluatorPort {
     this.expectedSharinganRequestedUrl = options.expectedSharinganRequestedUrl;
     this.qualityIgnores = structuredClone(options.qualityIgnores ?? []);
     this.dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
-    this.sharingan = options.infrastructure.hasExactSharinganCapture;
+    this.sharingan = sharinganReference !== null;
+    this.sourceAuthority = sharinganReference === null ? null : {
+      resourceId: sharinganReference.resourceId,
+      revisionId: sharinganReference.revisionId,
+      revisionChecksum: sharinganReference.revisionChecksum,
+    };
   }
 
   async evaluate(input: {
@@ -645,7 +799,9 @@ implements StandardArtifactQualityEvaluatorPort {
       : this.settings;
     const rawVisualFindings: QualityFinding[] = [];
     const durableEvidence: GenerationTaskVisualEvidenceDescriptor[] = [];
+    let durableSourceEvidence: GenerationTaskSourceVisualEvidenceDescriptor | undefined;
     let frameResults: VisualQaReport["frames"] = [];
+    let sourceCaptureResult: VisualQaSourceCaptureResult | undefined;
     let lease: PreviewLease | undefined;
     let primaryError: unknown = null;
 
@@ -722,6 +878,12 @@ implements StandardArtifactQualityEvaluatorPort {
         rawVisualFindings.push(...canonicalFindings(report.findings));
         throwInfrastructureFinding(rawVisualFindings);
         frameResults = exactFrameResults(report, this.payload.responsiveFrames, attemptPrefix);
+        sourceCaptureResult = exactSourceCaptureResult(
+          report,
+          attemptPrefix,
+          screenshotPath,
+          this.sharingan,
+        );
         if (reviewEnabled && (!producedDesignReview(rawVisualFindings)
           || frameResults.some((frame) => !frame.reviewed))) {
           throw new ProductionStandardArtifactQualityEvaluatorError(
@@ -748,6 +910,41 @@ implements StandardArtifactQualityEvaluatorPort {
         // assessed every Frame; Core intentionally rejects visual evidence
         // without its matching visual-review authority.
         if (reviewEnabled) {
+          const evidenceOwner = {
+            projectId: this.projectId,
+            workspaceId: this.infrastructure.claim.task.workspaceId,
+            planId: this.infrastructure.claim.task.planId,
+            taskId: this.infrastructure.claim.task.id,
+            attempt: this.infrastructure.claim.attempt.attempt,
+            candidateCommitHash: input.candidate.commitHash,
+            candidateTreeHash: input.candidate.treeHash,
+            contextPackId: this.infrastructure.contextPack.id,
+            contextPackHash: this.infrastructure.contextPack.hash,
+          };
+          let sourcePersistenceInput: PersistGenerationTaskSourceVisualEvidenceInput | undefined;
+          if (this.sharingan) {
+            if (this.sourceAuthority === null) {
+              throw new ProductionStandardArtifactQualityEvaluatorError(
+                "invalid-input",
+                "Sharingan quality evaluation has no exact source authority",
+              );
+            }
+            sourcePersistenceInput = {
+              dataDir: this.dataDir,
+              owner: evidenceOwner,
+              capture: {
+                scope: "source",
+                sourceAttemptId: sourceCaptureResult!.sourceAttemptId,
+                width: sourceCaptureResult!.width,
+                height: sourceCaptureResult!.height,
+              },
+              sourceAuthority: structuredClone(this.sourceAuthority),
+              round: input.round,
+              sourcePath: sourceCaptureResult!.screenshotPath!,
+              expectedIdentity: sourceCaptureResult!.captureIdentity!,
+            };
+          }
+          const framePersistenceInputs: PersistGenerationTaskVisualEvidenceInput[] = [];
           for (const [index, frame] of this.payload.responsiveFrames.entries()) {
             const result = frameResults[index]!;
             if (!result.screenshotPath) {
@@ -757,46 +954,117 @@ implements StandardArtifactQualityEvaluatorPort {
                 "storage",
               );
             }
-            const persistenceInput: PersistGenerationTaskVisualEvidenceInput = {
+            framePersistenceInputs.push({
               dataDir: this.dataDir,
-              owner: {
-                projectId: this.projectId,
-                workspaceId: this.infrastructure.claim.task.workspaceId,
-                planId: this.infrastructure.claim.task.planId,
-                taskId: this.infrastructure.claim.task.id,
-                attempt: this.infrastructure.claim.attempt.attempt,
-                candidateCommitHash: input.candidate.commitHash,
-                candidateTreeHash: input.candidate.treeHash,
-                contextPackId: this.infrastructure.contextPack.id,
-                contextPackHash: this.infrastructure.contextPack.hash,
-              },
+              owner: evidenceOwner,
               frame: {
                 ...structuredClone(frame),
                 frameAttemptId: result.frameAttemptId,
               },
               round: input.round,
               sourcePath: result.screenshotPath,
-            };
-            let descriptor: GenerationTaskVisualEvidenceDescriptor | undefined;
+              expectedIdentity: result.captureIdentity!,
+            });
+          }
+          const persistBatch = this.dependencies.persistEvidenceBatch;
+          if (persistBatch) {
+            let batch: PersistGenerationTaskVisualEvidenceBatchResult;
             try {
-              descriptor = await this.dependencies.persistEvidence(persistenceInput);
+              batch = await persistBatch({
+                dataDir: this.dataDir,
+                owner: evidenceOwner,
+                round: input.round,
+                signal: input.signal,
+                frames: framePersistenceInputs.map((item) => ({
+                  frame: item.frame,
+                  sourcePath: item.sourcePath,
+                  expectedIdentity: item.expectedIdentity,
+                })),
+                ...(sourcePersistenceInput === undefined ? {} : {
+                  source: {
+                    capture: sourcePersistenceInput.capture,
+                    sourceAuthority: sourcePersistenceInput.sourceAuthority,
+                    sourcePath: sourcePersistenceInput.sourcePath,
+                    expectedIdentity: sourcePersistenceInput.expectedIdentity,
+                  },
+                }),
+              });
             } catch (error) {
               if (input.signal.aborted) throw abortReason(input.signal);
               throw new ProductionStandardArtifactQualityEvaluatorError(
                 "evidence-unavailable",
-                `Visual evidence for Frame ${frame.id} could not be retained: ${error instanceof Error ? error.message : "storage failure"}`,
+                `Visual evidence batch could not be retained: ${error instanceof Error ? error.message : "storage failure"}`,
                 "storage",
               );
             }
             checkAbort(input.signal);
-            if (!descriptor) {
+            if (batch.frames.length !== framePersistenceInputs.length
+              || (sourcePersistenceInput === undefined) !== (batch.source === undefined)) {
               throw new ProductionStandardArtifactQualityEvaluatorError(
                 "evidence-unavailable",
-                `Visual evidence for Frame ${frame.id} is empty or unavailable`,
+                "Visual evidence batch returned an incomplete descriptor set",
                 "storage",
               );
             }
-            durableEvidence.push(exactEvidence(descriptor, persistenceInput));
+            for (const [index, persistenceInput] of framePersistenceInputs.entries()) {
+              durableEvidence.push(exactEvidence(batch.frames[index]!, persistenceInput));
+            }
+            if (sourcePersistenceInput !== undefined) {
+              durableSourceEvidence = exactSourceEvidence(batch.source!, sourcePersistenceInput);
+            }
+          } else {
+            if (sourcePersistenceInput !== undefined) {
+              const persistSourceEvidence = this.dependencies.persistSourceEvidence;
+              if (!persistSourceEvidence) {
+                throw new ProductionStandardArtifactQualityEvaluatorError(
+                  "evidence-unavailable",
+                  "Sharingan source visual evidence persistence is unavailable",
+                  "storage",
+                );
+              }
+              let descriptor: GenerationTaskSourceVisualEvidenceDescriptor | undefined;
+              try {
+                descriptor = await persistSourceEvidence(sourcePersistenceInput);
+              } catch (error) {
+                if (input.signal.aborted) throw abortReason(input.signal);
+                throw new ProductionStandardArtifactQualityEvaluatorError(
+                  "evidence-unavailable",
+                  `Sharingan source visual evidence could not be retained: ${error instanceof Error ? error.message : "storage failure"}`,
+                  "storage",
+                );
+              }
+              checkAbort(input.signal);
+              if (!descriptor) {
+                throw new ProductionStandardArtifactQualityEvaluatorError(
+                  "evidence-unavailable",
+                  "Sharingan source visual evidence is empty or unavailable",
+                  "storage",
+                );
+              }
+              durableSourceEvidence = exactSourceEvidence(descriptor, sourcePersistenceInput);
+            }
+            for (const persistenceInput of framePersistenceInputs) {
+              let descriptor: GenerationTaskVisualEvidenceDescriptor | undefined;
+              try {
+                descriptor = await this.dependencies.persistEvidence(persistenceInput);
+              } catch (error) {
+                if (input.signal.aborted) throw abortReason(input.signal);
+                throw new ProductionStandardArtifactQualityEvaluatorError(
+                  "evidence-unavailable",
+                  `Visual evidence for Frame ${persistenceInput.frame.id} could not be retained: ${error instanceof Error ? error.message : "storage failure"}`,
+                  "storage",
+                );
+              }
+              checkAbort(input.signal);
+              if (!descriptor) {
+                throw new ProductionStandardArtifactQualityEvaluatorError(
+                  "evidence-unavailable",
+                  `Visual evidence for Frame ${persistenceInput.frame.id} is empty or unavailable`,
+                  "storage",
+                );
+              }
+              durableEvidence.push(exactEvidence(descriptor, persistenceInput));
+            }
           }
         }
       }
@@ -901,6 +1169,7 @@ implements StandardArtifactQualityEvaluatorPort {
         height: frame.height,
         status: frame.status,
         reviewed: frame.reviewed,
+        ...(frame.captureIdentity ? { captureIdentity: structuredClone(frame.captureIdentity) } : {}),
       })),
       round: input.round,
       ...(runtimeEnabled ? {
@@ -920,9 +1189,32 @@ implements StandardArtifactQualityEvaluatorPort {
             byteLength: descriptor.byteLength,
             storageKey: descriptor.storageKey,
           })),
+          ...(durableSourceEvidence ? {
+            sourceEvidence: {
+              scope: durableSourceEvidence.capture.scope,
+              sourceAttemptId: durableSourceEvidence.capture.sourceAttemptId,
+              width: durableSourceEvidence.capture.width,
+              height: durableSourceEvidence.capture.height,
+              sha256: durableSourceEvidence.sha256,
+              byteLength: durableSourceEvidence.byteLength,
+              storageKey: durableSourceEvidence.storageKey,
+            },
+          } : {}),
         },
       } : {}),
       ...(durableEvidence.length > 0 ? { visualEvidence: durableEvidence } : {}),
+      ...(sourceCaptureResult ? {
+        sourceCaptureResult: {
+          scope: sourceCaptureResult.scope,
+          sourceAttemptId: sourceCaptureResult.sourceAttemptId,
+          width: sourceCaptureResult.width,
+          height: sourceCaptureResult.height,
+          status: sourceCaptureResult.status,
+          reviewed: sourceCaptureResult.reviewed,
+          captureIdentity: structuredClone(sourceCaptureResult.captureIdentity!),
+        },
+      } : {}),
+      ...(durableSourceEvidence ? { sourceVisualEvidence: durableSourceEvidence } : {}),
     };
     return {
       passed,

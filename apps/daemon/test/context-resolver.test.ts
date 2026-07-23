@@ -659,6 +659,84 @@ test("ContextPackStore persists immutable manifests and appends sequenced usage 
   }
 });
 
+test("ContextPackStore enforces canonical provided and omitted reference identities", async () => {
+  const harness = await makeHarness({
+    explicit: async (id) => inlineCandidate({ id, contextClass: "explicit", content: "required" }) as never,
+  });
+  try {
+    const pack = await harness.resolver.resolve(inlineRequest);
+    const explicit = pack.items.find((item) => item.contextClass === "explicit");
+    assert.ok(explicit);
+    const draft = () => ({
+      workspaceId: pack.workspaceId,
+      graphRevision: pack.graphRevision,
+      target: pack.target,
+      intent: pack.intent,
+      messageChecksum: pack.messageChecksum,
+      items: pack.items.map((item) => ({ ...structuredClone(item) })),
+      omissions: pack.omissions.map((omission) => ({ ...structuredClone(omission) })),
+      tokenEstimate: pack.tokenEstimate,
+    });
+
+    const duplicateItem = draft();
+    duplicateItem.items.push({
+      ...structuredClone(explicit),
+      ordinal: duplicateItem.items.length,
+    });
+    duplicateItem.tokenEstimate += explicit.tokenEstimate;
+    assert.throws(
+      () => harness.packStore.persist(duplicateItem),
+      /duplicate.*provided|provided.*identity/i,
+    );
+
+    const crossClassItem = draft();
+    crossClassItem.items.push({
+      ...structuredClone(explicit),
+      ordinal: crossClassItem.items.length,
+      contextClass: "indirect",
+    });
+    crossClassItem.tokenEstimate += explicit.tokenEstimate;
+    assert.doesNotThrow(() => harness.packStore.persist(crossClassItem));
+
+    const overlapping = draft();
+    overlapping.items.push({
+      ...structuredClone(explicit),
+      ordinal: overlapping.items.length,
+      contextClass: "indirect",
+    });
+    overlapping.tokenEstimate += explicit.tokenEstimate;
+    overlapping.omissions.push({
+      ref: structuredClone(explicit.ref),
+      contextClass: "indirect",
+      reason: "same exact ref cannot be both provided and omitted",
+      tokenEstimate: 1,
+    });
+    assert.throws(
+      () => harness.packStore.persist(overlapping),
+      /provided.*omitted|overlap/i,
+    );
+
+    const duplicateOmission = draft();
+    duplicateOmission.omissions.push({
+      ref: structuredClone(explicit.ref),
+      contextClass: "indirect",
+      reason: "first omission",
+      tokenEstimate: 1,
+    }, {
+      ref: structuredClone(explicit.ref),
+      contextClass: "indirect",
+      reason: "same class and exact ref is one omission identity",
+      tokenEstimate: 1,
+    });
+    assert.throws(
+      () => harness.packStore.persist(duplicateOmission),
+      /duplicate.*omission/i,
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("all base adapters freeze complete owned sources and reject missing Moodboard Asset bytes", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dezin-context-adapters-"));
   const workspaceRoot = join(root, "workspace");
@@ -1024,6 +1102,51 @@ test("production Core repository bridge round-trips full prompt content through 
   assert.match(pack.manifestPath, /^context-packs\//);
   const reloaded = repository.get(pack.workspaceId, pack.id);
   assert.deepEqual(reloaded, pack);
+
+  const targetItem = pack.items.find((item) => item.contextClass === "target");
+  assert.ok(targetItem);
+  const classAwareItems = pack.items.map((item) => item.contextClass === "explicit"
+    ? { ...structuredClone(item), ref: structuredClone(targetItem.ref) }
+    : structuredClone(item));
+  const sharedOmissionRef = { kind: "inline" as const, id: "shared-omission" };
+  const classAwarePack = packStore.persist({
+    workspaceId: pack.workspaceId,
+    graphRevision: pack.graphRevision,
+    target: pack.target,
+    intent: pack.intent,
+    messageChecksum: pack.messageChecksum,
+    items: classAwareItems,
+    omissions: [{
+      ref: structuredClone(targetItem.ref),
+      contextClass: "indirect",
+      reason: "the same ref remains provided by higher-priority classes",
+      tokenEstimate: 1,
+    }, {
+      ref: sharedOmissionRef,
+      contextClass: "conversation",
+      reason: "highest-priority omission survives class erasure",
+      tokenEstimate: 2,
+    }, {
+      ref: sharedOmissionRef,
+      contextClass: "indirect",
+      reason: "lower-priority duplicate is projected away",
+      tokenEstimate: 3,
+    }],
+    tokenEstimate: classAwareItems.reduce((total, item) => total + item.tokenEstimate, 0),
+  });
+  const projected = storedPacks.at(-1);
+  assert.ok(projected);
+  assert.equal(
+    projected.items.filter((item) => stableStringify(item.ref) === stableStringify(targetItem.ref)).length,
+    2,
+    "Core keeps duplicate provided rows created by distinct daemon priority classes",
+  );
+  assert.deepEqual(projected.omissions, [{
+    ref: sharedOmissionRef,
+    reason: "highest-priority omission survives class erasure",
+    tokenEstimate: 2,
+  }]);
+  assert.deepEqual(repository.get(classAwarePack.workspaceId, classAwarePack.id), classAwarePack);
 });
 
 test("Context storage refuses symlink directories and hardlinked immutable manifests", async (t) => {

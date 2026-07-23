@@ -22,3 +22,19 @@ test("unrelated ignores keep everything; empty ignores are a no-op", () => {
   assert.equal(applyIgnores(findings, [{ ruleId: "nested-cards" }]).length, 2);
   assert.equal(applyIgnores(findings, []).length, 2);
 });
+
+test("a legacy bare rule ignore applies to scoped visual findings without broadening a scoped ignore", () => {
+  const findings = [
+    f("visual-horizontal-overflow@source", "main"),
+    f("visual-horizontal-overflow@mobile", "main"),
+    f("visual-text-clipped@source", "p"),
+  ];
+  assert.deepEqual(
+    applyIgnores(findings, [{ ruleId: "visual-horizontal-overflow" }]).map((finding) => finding.id),
+    ["visual-text-clipped@source"],
+  );
+  assert.deepEqual(
+    applyIgnores(findings, [{ ruleId: "visual-horizontal-overflow@source" }]).map((finding) => finding.id),
+    ["visual-horizontal-overflow@mobile", "visual-text-clipped@source"],
+  );
+});

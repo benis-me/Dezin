@@ -1,24 +1,35 @@
 import { types as nodeUtilTypes } from "node:util";
 
 import type { GenerationTaskFailureClass } from "../../../../packages/core/src/index.ts";
-import { GitArtifactCandidateRetention } from "./artifact-candidate-retention.ts";
+import {
+  GitArtifactCandidateRetention,
+  type GitArtifactCandidateRetentionOptions,
+} from "./artifact-candidate-retention.ts";
 import {
   GenerationTaskPublication,
   type GenerationTaskPublicationOptions,
   type GenerationTaskPublicationStorePort,
 } from "./task-publication.ts";
+import {
+  GenerationTaskEvidenceLifecycle,
+  type GenerationTaskEvidenceLifecycleStorePort,
+} from "./generation-task-evidence-lifecycle.ts";
 
 const SAFE_OWNER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PUBLICATION_OPTION_FIELDS = Object.freeze([
   "store",
   "repositoryDirForWorkspace",
+  "dataDir",
+  "sourceAuthorityForRevision",
   "projectIdForWorkspace",
   "notifyPlan",
 ] as const);
 
 export interface ProductionTaskPublicationAdapterOptions {
-  readonly store: GenerationTaskPublicationStorePort;
+  readonly store: GenerationTaskPublicationStorePort & GenerationTaskEvidenceLifecycleStorePort;
   readonly repositoryDirForWorkspace: (workspaceId: string) => string | Promise<string>;
+  readonly dataDir: string;
+  readonly sourceAuthorityForRevision: GitArtifactCandidateRetentionOptions["sourceAuthorityForRevision"];
   readonly projectIdForWorkspace: GenerationTaskPublicationOptions["projectIdForWorkspace"];
   readonly notifyPlan: GenerationTaskPublicationOptions["notifyPlan"];
 }
@@ -90,7 +101,9 @@ function publicationOptions(value: unknown): Record<typeof PUBLICATION_OPTION_FI
   }
 }
 
-function pinnedStore(value: unknown): GenerationTaskPublicationStorePort | null {
+function pinnedStore(
+  value: unknown,
+): (GenerationTaskPublicationStorePort & GenerationTaskEvidenceLifecycleStorePort) | null {
   const getArtifactRevision = dataMethod<GenerationTaskPublicationStorePort["getArtifactRevision"]>(
     value,
     "getArtifactRevision",
@@ -110,11 +123,15 @@ function pinnedStore(value: unknown): GenerationTaskPublicationStorePort | null 
   const finishGenerationTaskAttemptForProject = dataMethod<
     GenerationTaskPublicationStorePort["finishGenerationTaskAttemptForProject"]
   >(value, "finishGenerationTaskAttemptForProject");
+  const getGenerationTaskAttemptForProject = dataMethod<
+    GenerationTaskEvidenceLifecycleStorePort["getGenerationTaskAttemptForProject"]
+  >(value, "getGenerationTaskAttemptForProject");
   if (getArtifactRevision === null || stageGenerationTaskCandidateForProject === null
     || publishGenerationTaskCandidateForProject === null
     || completeGenerationTaskValidationForProject === null
     || publishGenerationPlanCheckpointForProject === null
-    || finishGenerationTaskAttemptForProject === null) return null;
+    || finishGenerationTaskAttemptForProject === null
+    || getGenerationTaskAttemptForProject === null) return null;
   return Object.freeze({
     getArtifactRevision,
     stageGenerationTaskCandidateForProject,
@@ -122,6 +139,7 @@ function pinnedStore(value: unknown): GenerationTaskPublicationStorePort | null 
     completeGenerationTaskValidationForProject,
     publishGenerationPlanCheckpointForProject,
     finishGenerationTaskAttemptForProject,
+    getGenerationTaskAttemptForProject,
   });
 }
 
@@ -145,7 +163,12 @@ export function createProductionGenerationTaskPublication(
       "build-infrastructure",
     );
   }
-  if (typeof configuration.repositoryDirForWorkspace !== "function") {
+  if (typeof configuration.repositoryDirForWorkspace !== "function"
+    || typeof configuration.dataDir !== "string"
+    || configuration.dataDir.length === 0
+    || configuration.dataDir !== configuration.dataDir.trim()
+    || configuration.dataDir.includes("\0")
+    || typeof configuration.sourceAuthorityForRevision !== "function") {
     throw new ProductionTaskPublicationAdapterError(
       "PRODUCTION_TASK_RETENTION_UNAVAILABLE",
       "Production Artifact candidate retention repository adapter is unavailable",
@@ -155,11 +178,28 @@ export function createProductionGenerationTaskPublication(
   const repositoryDirForWorkspace = configuration.repositoryDirForWorkspace as (
     workspaceId: string,
   ) => string | Promise<string>;
+  const dataDir = configuration.dataDir;
+  const sourceAuthorityForRevision = configuration.sourceAuthorityForRevision as (
+    GitArtifactCandidateRetentionOptions["sourceAuthorityForRevision"]
+  );
   const projectIdForWorkspace = configuration.projectIdForWorkspace as (
     workspaceId: string,
   ) => string;
   const notifyPlan = configuration.notifyPlan as (planId: string) => void;
   const artifactRetention = new GitArtifactCandidateRetention({
+    dataDir,
+    async sourceAuthorityForRevision(input, signal) {
+      try {
+        return await Reflect.apply(sourceAuthorityForRevision, options, [input, signal]);
+      } catch (error) {
+        throw new ProductionTaskPublicationAdapterError(
+          "PRODUCTION_TASK_RETENTION_UNAVAILABLE",
+          "Production source evidence Resource Revision authority could not be resolved",
+          "build-infrastructure",
+          error,
+        );
+      }
+    },
     async repositoryDirForWorkspace(workspaceId) {
       let directory: string;
       try {
@@ -182,9 +222,11 @@ export function createProductionGenerationTaskPublication(
       return directory;
     },
   });
+  const evidenceLifecycle = new GenerationTaskEvidenceLifecycle({ dataDir, store });
   return new GenerationTaskPublication({
     store,
     artifactRetention,
+    evidenceLifecycle,
     projectIdForWorkspace(workspaceId) {
       const projectId = Reflect.apply(projectIdForWorkspace, options, [workspaceId]);
       if (typeof projectId !== "string" || !SAFE_OWNER_ID.test(projectId)) {
@@ -198,6 +240,12 @@ export function createProductionGenerationTaskPublication(
     },
     notifyPlan(planId) {
       Reflect.apply(notifyPlan, options, [planId]);
+    },
+    reportEvidenceCleanupError(error) {
+      console.warn(
+        "[dezin:generation-task-evidence] post-publication mutable cache cleanup failed",
+        error,
+      );
     },
   });
 }

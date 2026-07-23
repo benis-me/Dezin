@@ -7,6 +7,10 @@ import type {
 } from "../../../packages/core/src/index.ts";
 import type { ArtifactCandidateRetentionPort } from "../src/orchestration/artifact-candidate-retention.ts";
 import {
+  artifactRevisionEvidenceRef,
+  type ArtifactRevisionEvidenceBundleReceipt,
+} from "../src/orchestration/artifact-candidate-transaction.ts";
+import {
   GenerationTaskPublication,
   type GenerationTaskPublicationStorePort,
 } from "../src/orchestration/task-publication.ts";
@@ -82,6 +86,35 @@ function artifactResult(): ArtifactPreparedCandidate {
   };
 }
 
+function evidenceReceiptFixture(): ArtifactRevisionEvidenceBundleReceipt {
+  return {
+    ref: artifactRevisionEvidenceRef("workspace-1", "artifact-revision-home"),
+    commitHash: "d".repeat(40),
+    treeHash: "e".repeat(40),
+    manifestSha256: "f".repeat(64),
+    subject: {
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+      revisionId: "artifact-revision-home",
+      artifactId: "artifact-home",
+      trackId: "track-main",
+      candidate: { commitHash: "a".repeat(40), treeHash: "b".repeat(40) },
+      contextPackHash: "c".repeat(64),
+      attempt: {
+        workspaceId: "workspace-1",
+        taskId: "task-page-home",
+        attempt: 2,
+        inputHash: "1".repeat(64),
+        createdAt: 100,
+        sourceCommitHash: "2".repeat(40),
+        sourceTreeHash: "3".repeat(40),
+      },
+      candidateEvidenceSha256: "4".repeat(64),
+      entries: [],
+    },
+  };
+}
+
 function resourceResult(): ResourcePreparedCandidate {
   return {
     kind: "resource-candidate",
@@ -130,7 +163,7 @@ function recordingStore(calls: Array<{ name: string; args: unknown[] }>): Genera
     },
     publishGenerationTaskCandidateForProject(...args) {
       calls.push({ name: "publish", args });
-      return {} as never;
+      return { status: "succeeded" } as never;
     },
     completeGenerationTaskValidationForProject(...args) {
       calls.push({ name: "validation", args });
@@ -151,8 +184,16 @@ function recordingRetention(
   calls: Array<{ name: string; args: unknown[] }>,
 ): ArtifactCandidateRetentionPort {
   return {
+    async verify(...args) {
+      calls.push({ name: "verify", args });
+    },
+    async verifyPublication(...args) {
+      calls.push({ name: "verify-publication", args });
+      return evidenceReceiptFixture();
+    },
     async promote(...args) {
       calls.push({ name: "promote", args });
+      return evidenceReceiptFixture();
     },
     async release(...args) {
       calls.push({ name: "release", args });
@@ -179,8 +220,10 @@ test("GenerationTaskPublication stages then publishes an exact Artifact result",
 
   await publication.publishPreparedResult(claim, result, new AbortController().signal);
 
-  assert.deepEqual(calls.map((call) => call.name), ["stage", "promote", "release", "publish"]);
-  assert.deepEqual(calls[0]?.args, ["project-1", "plan-1", {
+  assert.deepEqual(calls.map((call) => call.name), [
+    "verify", "stage", "promote", "release", "verify-publication", "publish",
+  ]);
+  assert.deepEqual(calls[1]?.args, ["project-1", "plan-1", {
     lease: claim.lease,
     candidate: {
       kind: "artifact",
@@ -191,8 +234,237 @@ test("GenerationTaskPublication stages then publishes an exact Artifact result",
     },
     evidence: result.evidence,
   }]);
-  assert.deepEqual(calls[3]?.args, ["project-1", "plan-1", { lease: claim.lease }]);
+  assert.deepEqual(calls[5]?.args, ["project-1", "plan-1", { lease: claim.lease }]);
   assert.deepEqual(notifications, ["plan-1", "plan-1"]);
+});
+
+test("post-publish mutable evidence cleanup is receipt-driven, ordered after notification, and best-effort", async () => {
+  const order: string[] = [];
+  const store = recordingStore([]);
+  store.stageGenerationTaskCandidateForProject = () => {
+    order.push("stage");
+    return { attempt: {} as never, artifactRevision: artifactRevision(), resourceRevision: null };
+  };
+  store.publishGenerationTaskCandidateForProject = () => {
+    order.push("publish");
+    return { status: "succeeded" } as never;
+  };
+  const receipt = evidenceReceiptFixture();
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async verify() { order.push("verify"); },
+      async promote() { order.push("promote"); return receipt; },
+      async release(_input, exactReceipt) {
+        assert.equal(exactReceipt, receipt);
+        order.push("release");
+      },
+      async verifyPublication(_input, exactReceipt) {
+        assert.equal(exactReceipt, receipt);
+        order.push("verify-publication");
+        return receipt;
+      },
+    },
+    evidenceLifecycle: {
+      async quarantineAttempt() {
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+      async quarantineDurablePublishedEvidence(input) {
+        assert.equal(input.receipt, receipt);
+        assert.deepEqual({
+          projectId: input.projectId,
+          workspaceId: input.workspaceId,
+          planId: input.planId,
+          taskId: input.taskId,
+          attempt: input.attempt,
+        }, {
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          planId: "plan-1",
+          taskId: "task-page-home",
+          attempt: 2,
+        });
+        order.push("cleanup");
+        throw new Error("mutable cache is already absent");
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() { order.push("notify"); },
+    reportEvidenceCleanupError(error) {
+      assert.match(String(error), /already absent/);
+      order.push("cleanup-reported");
+    },
+  });
+
+  await publication.publishPreparedResult(
+    claimFixture(),
+    artifactResult(),
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(order, [
+    "verify",
+    "stage",
+    "notify",
+    "promote",
+    "release",
+    "verify-publication",
+    "publish",
+    "notify",
+    "cleanup",
+    "cleanup-reported",
+  ]);
+});
+
+test("runtime-only publication treats a verified zero-PNG receipt as cleanup success", async () => {
+  let cleanupCalls = 0;
+  let cleanupErrors = 0;
+  const receipt = evidenceReceiptFixture();
+  const publication = new GenerationTaskPublication({
+    store: recordingStore([]),
+    artifactRetention: {
+      async verify() {},
+      async promote() { return receipt; },
+      async release() {},
+      async verifyPublication() { return receipt; },
+    },
+    evidenceLifecycle: {
+      async quarantineAttempt() {
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+      async quarantineDurablePublishedEvidence(input) {
+        assert.deepEqual(input.receipt.subject.entries, []);
+        cleanupCalls += 1;
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+    reportEvidenceCleanupError() { cleanupErrors += 1; },
+  });
+
+  await publication.publishPreparedResult(
+    claimFixture(),
+    artifactResult(),
+    new AbortController().signal,
+  );
+  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanupErrors, 0);
+});
+
+test("full Artifact needs-rebase preserves mutable evidence for a publication-only successor", async () => {
+  const claim = claimFixture();
+  const receipt = evidenceReceiptFixture();
+  const publicationOutcomes = ["needs-rebase", "succeeded"] as const;
+  let publicationIndex = 0;
+  let mutableEvidenceAvailable = true;
+  let promoteCalls = 0;
+  let cleanupCalls = 0;
+  const store = recordingStore([]);
+  store.publishGenerationTaskCandidateForProject = () => ({
+    status: publicationOutcomes[publicationIndex++],
+  }) as never;
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async verify() {
+        assert.equal(mutableEvidenceAvailable, true);
+      },
+      async promote() {
+        assert.equal(mutableEvidenceAvailable, true);
+        promoteCalls += 1;
+        return receipt;
+      },
+      async release() {},
+      async verifyPublication() { return receipt; },
+    },
+    evidenceLifecycle: {
+      async quarantineAttempt() {
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+      async quarantineDurablePublishedEvidence() {
+        mutableEvidenceAvailable = false;
+        cleanupCalls += 1;
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  });
+
+  await publication.publishPreparedResult(claim, artifactResult(), new AbortController().signal);
+
+  assert.equal(mutableEvidenceAvailable, true);
+  assert.equal(cleanupCalls, 0);
+  await publication.publishRecordedCandidate({
+    ...claim,
+    attempt: {
+      ...claim.attempt,
+      executionMode: "publication-only",
+      candidateRevisionId: artifactRevision().id,
+      candidateEvidence: artifactResult().evidence,
+    },
+  }, new AbortController().signal);
+  assert.equal(promoteCalls, 2);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(mutableEvidenceAvailable, false);
+});
+
+test("publication-only Artifact needs-rebase preserves mutable evidence for the next publication retry", async () => {
+  const claim = claimFixture();
+  const publicationClaim = {
+    ...claim,
+    attempt: {
+      ...claim.attempt,
+      executionMode: "publication-only" as const,
+      candidateRevisionId: artifactRevision().id,
+      candidateEvidence: artifactResult().evidence,
+    },
+  };
+  const receipt = evidenceReceiptFixture();
+  const publicationOutcomes = ["needs-rebase", "succeeded"] as const;
+  let publicationIndex = 0;
+  let mutableEvidenceAvailable = true;
+  let promoteCalls = 0;
+  let cleanupCalls = 0;
+  const store = recordingStore([]);
+  store.publishGenerationTaskCandidateForProject = () => ({
+    status: publicationOutcomes[publicationIndex++],
+  }) as never;
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async verify() {},
+      async promote() {
+        assert.equal(mutableEvidenceAvailable, true);
+        promoteCalls += 1;
+        return receipt;
+      },
+      async release() {},
+      async verifyPublication() { return receipt; },
+    },
+    evidenceLifecycle: {
+      async quarantineAttempt() {
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+      async quarantineDurablePublishedEvidence() {
+        mutableEvidenceAvailable = false;
+        cleanupCalls += 1;
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  });
+
+  await publication.publishRecordedCandidate(publicationClaim, new AbortController().signal);
+
+  assert.equal(mutableEvidenceAvailable, true);
+  assert.equal(cleanupCalls, 0);
+  await publication.publishRecordedCandidate(publicationClaim, new AbortController().signal);
+  assert.equal(promoteCalls, 2);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(mutableEvidenceAvailable, false);
 });
 
 test("GenerationTaskPublication routes Resource and validation results without leaking wrapper fields", async () => {
@@ -309,14 +581,55 @@ test("GenerationTaskPublication routes publication-only, checkpoint, and failure
     "get-artifact-revision",
     "promote",
     "release",
+    "verify-publication",
     "publish",
     "checkpoint",
     "failure",
   ]);
-  assert.deepEqual(calls[5]?.args, ["project-1", "plan-1", {
+  assert.deepEqual(calls[6]?.args, ["project-1", "plan-1", {
     lease: claim.lease,
     failure,
   }]);
+});
+
+test("GenerationTaskPublication isolates unbound evidence only after the failure is durable", async () => {
+  const claim = claimFixture();
+  const order: string[] = [];
+  const store = recordingStore([]);
+  store.finishGenerationTaskAttemptForProject = () => {
+    order.push("failure-durable");
+    return {} as never;
+  };
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: recordingRetention([]),
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+    evidenceLifecycle: {
+      async quarantineDurablePublishedEvidence() {
+        return { scanned: 0, retained: 0, quarantined: 0, restored: 0, removed: 0, failed: 0 };
+      },
+      async quarantineAttempt(input, signal) {
+        assert.equal(signal.aborted, false);
+        assert.deepEqual(input, {
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          planId: "plan-1",
+          taskId: "task-page-home",
+          attempt: 2,
+        });
+        order.push("evidence-quarantined");
+        return { scanned: 1, retained: 0, quarantined: 1, restored: 0, removed: 0, failed: 0 };
+      },
+    },
+  });
+
+  await publication.finishFailure(claim, {
+    failureClass: "qa",
+    error: { code: "visual-regression" },
+  });
+
+  assert.deepEqual(order, ["failure-durable", "evidence-quarantined"]);
 });
 
 test("GenerationTaskPublication never performs a second write after a Store error", async () => {
@@ -365,7 +678,9 @@ test("Artifact publication releases the Attempt ref before an atomic Core publis
   const publication = new GenerationTaskPublication({
     store,
     artifactRetention: {
-      async promote() { calls.push("promote"); },
+      async verify() { calls.push("verify"); },
+      async verifyPublication() { calls.push("verify-publication"); return evidenceReceiptFixture(); },
+      async promote() { calls.push("promote"); return evidenceReceiptFixture(); },
       async release() { calls.push("release"); },
     },
     projectIdForWorkspace: () => "project-1",
@@ -376,7 +691,121 @@ test("Artifact publication releases the Attempt ref before an atomic Core publis
     publication.publishPreparedResult(claim, artifactResult(), new AbortController().signal),
     /response lost after commit/,
   );
-  assert.deepEqual(calls, ["stage", "promote", "release", "publish-committed"]);
+  assert.deepEqual(calls, [
+    "verify", "stage", "promote", "release", "verify-publication", "publish-committed",
+  ]);
+});
+
+test("durable evidence rejection stops full and publication-only flows before release or Core publish", async (t) => {
+  for (const mode of ["full", "publication-only"] as const) {
+    await t.test(mode, async () => {
+      const calls: Array<{ name: string; args: unknown[] }> = [];
+      const publication = new GenerationTaskPublication({
+        store: recordingStore(calls),
+        artifactRetention: {
+          async verify(...args) {
+            calls.push({ name: "verify", args });
+            throw new Error("durable PNG evidence unavailable");
+          },
+          async verifyPublication(...args) {
+            calls.push({ name: "verify-publication", args });
+            return evidenceReceiptFixture();
+          },
+          async promote(...args) {
+            calls.push({ name: "promote", args });
+            throw new Error("durable PNG evidence unavailable");
+          },
+          async release(...args) {
+            calls.push({ name: "release", args });
+          },
+        },
+        projectIdForWorkspace: () => "project-1",
+        notifyPlan() {},
+      });
+      const claim = claimFixture();
+      if (mode === "publication-only") {
+        claim.attempt.executionMode = "publication-only";
+        claim.attempt.candidateRevisionId = artifactRevision().id;
+        claim.attempt.candidateEvidence = artifactResult().evidence;
+      }
+
+      await assert.rejects(
+        mode === "full"
+          ? publication.publishPreparedResult(
+            claim,
+            artifactResult(),
+            new AbortController().signal,
+          )
+          : publication.publishRecordedCandidate(claim, new AbortController().signal),
+        /durable PNG evidence unavailable/i,
+      );
+      assert.deepEqual(
+        calls.map((call) => call.name),
+        mode === "full" ? ["verify"] : ["get-artifact-revision", "promote"],
+      );
+    });
+  }
+});
+
+test("evidence deleted by the ref-release hook is rechecked before either Core publish path", async (t) => {
+  for (const mode of ["full", "publication-only"] as const) {
+    await t.test(mode, async () => {
+      const calls: string[] = [];
+      let evidencePresent = true;
+      const store = recordingStore([]);
+      store.stageGenerationTaskCandidateForProject = () => {
+        calls.push("stage");
+        return { attempt: {} as never, artifactRevision: artifactRevision(), resourceRevision: null };
+      };
+      store.getArtifactRevision = () => {
+        calls.push("get-artifact-revision");
+        return artifactRevision();
+      };
+      store.publishGenerationTaskCandidateForProject = () => {
+        calls.push("publish");
+        return {} as never;
+      };
+      const publication = new GenerationTaskPublication({
+        store,
+        artifactRetention: {
+          async verify() { calls.push("verify"); },
+          async promote() { calls.push("promote"); return evidenceReceiptFixture(); },
+          async release() {
+            calls.push("release");
+            evidencePresent = false;
+          },
+          async verifyPublication() {
+            calls.push("verify-publication");
+            if (!evidencePresent) throw new Error("PNG evidence deleted after ref release");
+            return evidenceReceiptFixture();
+          },
+        },
+        projectIdForWorkspace: () => "project-1",
+        notifyPlan() {},
+      });
+      const exactClaim = claimFixture();
+      if (mode === "publication-only") {
+        exactClaim.attempt.executionMode = "publication-only";
+        exactClaim.attempt.candidateRevisionId = artifactRevision().id;
+        exactClaim.attempt.candidateEvidence = artifactResult().evidence;
+      }
+
+      await assert.rejects(
+        mode === "full"
+          ? publication.publishPreparedResult(
+            exactClaim,
+            artifactResult(),
+            new AbortController().signal,
+          )
+          : publication.publishRecordedCandidate(exactClaim, new AbortController().signal),
+        /deleted after ref release/i,
+      );
+      assert.deepEqual(calls, mode === "full"
+        ? ["verify", "stage", "promote", "release", "verify-publication"]
+        : ["get-artifact-revision", "promote", "release", "verify-publication"]);
+      assert.equal(calls.includes("publish"), false);
+    });
+  }
 });
 
 test("Artifact publication never enters Core when durable Attempt-ref release fails", async () => {
@@ -390,7 +819,9 @@ test("Artifact publication never enters Core when durable Attempt-ref release fa
   const publication = new GenerationTaskPublication({
     store,
     artifactRetention: {
-      async promote() { calls.push("promote"); },
+      async verify() { calls.push("verify"); },
+      async verifyPublication() { calls.push("verify-publication"); return evidenceReceiptFixture(); },
+      async promote() { calls.push("promote"); return evidenceReceiptFixture(); },
       async release() {
         calls.push("release");
         throw new Error("ref release failed");
@@ -404,7 +835,7 @@ test("Artifact publication never enters Core when durable Attempt-ref release fa
     publication.publishPreparedResult(claim, artifactResult(), new AbortController().signal),
     /ref release failed/,
   );
-  assert.deepEqual(calls, ["promote", "release"]);
+  assert.deepEqual(calls, ["verify", "promote", "release"]);
 });
 
 test("publication-only response loss cannot strand its original Attempt ref", async () => {
@@ -418,7 +849,9 @@ test("publication-only response loss cannot strand its original Attempt ref", as
   const publication = new GenerationTaskPublication({
     store,
     artifactRetention: {
-      async promote() { calls.push("promote"); },
+      async verify() { calls.push("verify"); },
+      async verifyPublication() { calls.push("verify-publication"); return evidenceReceiptFixture(); },
+      async promote() { calls.push("promote"); return evidenceReceiptFixture(); },
       async release() { calls.push("release"); },
     },
     projectIdForWorkspace: () => "project-1",
@@ -438,5 +871,5 @@ test("publication-only response loss cannot strand its original Attempt ref", as
     publication.publishRecordedCandidate(publicationClaim, new AbortController().signal),
     /publication replay response lost/,
   );
-  assert.deepEqual(calls, ["promote", "release", "publish-committed"]);
+  assert.deepEqual(calls, ["promote", "release", "verify-publication", "publish-committed"]);
 });

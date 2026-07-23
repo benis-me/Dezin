@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import {
   extractAskUserQuestion,
   extractFinalSummary,
@@ -36,7 +36,11 @@ export interface SharinganSourceRegion {
 }
 
 export interface SharinganRegionPlan {
+  protocol?: unknown;
   version?: unknown;
+  captureIdentity?: unknown;
+  regionBudget?: unknown;
+  candidateCount?: unknown;
   sourceUrl?: unknown;
   viewport?: unknown;
   document?: unknown;
@@ -74,6 +78,11 @@ interface SharinganRegionFailure {
 }
 
 const SHARINGAN_REGION_MAX_ATTEMPTS = 2;
+const SHARINGAN_REGION_MAX_SUBAGENTS = 8;
+const SHARINGAN_REGION_PLAN_PROTOCOL = "dezin.sharingan-region-plan.v2";
+const SHARINGAN_ENTRY_CAPTURE_IDENTITY_PROTOCOL = "dezin.sharingan-entry-capture-identity.v2";
+const SHARINGAN_SOURCE_SCAFFOLD_PROTOCOL = "dezin.sharingan-source-scaffold.v1";
+const SHA256 = /^[a-f0-9]{64}$/;
 
 async function readSharinganRegionPlan(root: string): Promise<SharinganRegionPlan | null> {
   const text = await readFile(join(root, ".sharingan", "region-plan.json"), "utf8").catch(() => "");
@@ -85,18 +94,65 @@ async function readSharinganRegionPlan(root: string): Promise<SharinganRegionPla
   }
 }
 
+function isCurrentSharinganRegionPlan(value: SharinganRegionPlan | null): value is SharinganRegionPlan {
+  if (!value || value.protocol !== SHARINGAN_REGION_PLAN_PROTOCOL || value.version !== 2) return false;
+  if (!Array.isArray(value.regions)) return false;
+  if (!value.captureIdentity || typeof value.captureIdentity !== "object"
+    || Array.isArray(value.captureIdentity)) return false;
+  const captureIdentity = value.captureIdentity as Record<string, unknown>;
+  if (Object.keys(captureIdentity).length !== 6
+    || captureIdentity.protocol !== SHARINGAN_ENTRY_CAPTURE_IDENTITY_PROTOCOL
+    || typeof captureIdentity.pagesManifestSha256 !== "string" || !SHA256.test(captureIdentity.pagesManifestSha256)
+    || typeof captureIdentity.pagesEntrySha256 !== "string" || !SHA256.test(captureIdentity.pagesEntrySha256)
+    || typeof captureIdentity.renderMapSha256 !== "string" || !SHA256.test(captureIdentity.renderMapSha256)
+    || typeof captureIdentity.assetsSha256 !== "string" || !SHA256.test(captureIdentity.assetsSha256)
+    || typeof captureIdentity.screenshotsSha256 !== "string" || !SHA256.test(captureIdentity.screenshotsSha256)) {
+    return false;
+  }
+  const regionBudget = value.regionBudget;
+  const candidateCount = value.candidateCount;
+  return typeof regionBudget === "number"
+    && Number.isSafeInteger(regionBudget)
+    && regionBudget > 0
+    && regionBudget <= SHARINGAN_REGION_MAX_SUBAGENTS
+    && typeof candidateCount === "number"
+    && Number.isSafeInteger(candidateCount)
+    && candidateCount >= 0
+    && value.regions.length === Math.min(candidateCount, regionBudget);
+}
+
+function sharinganRegionPlanFromSourceScaffold(value: string): SharinganRegionPlan | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const scaffold = parsed as Record<string, unknown>;
+  if (scaffold.protocol !== SHARINGAN_SOURCE_SCAFFOLD_PROTOCOL
+    || !scaffold.regionPlan || typeof scaffold.regionPlan !== "object" || Array.isArray(scaffold.regionPlan)) {
+    return null;
+  }
+  const plan = scaffold.regionPlan as SharinganRegionPlan;
+  return isCurrentSharinganRegionPlan(plan) ? plan : null;
+}
+
 async function ensureSharinganRegionPlan(root: string): Promise<SharinganRegionPlan | null> {
   const existing = await readSharinganRegionPlan(root);
-  if (Array.isArray(existing?.regions) && existing.regions.length) return existing;
-
   const probe = join(root, ".sharingan", "probe.mjs");
-  if (!existsSync(probe)) return existing;
-  await execFileAsync(process.execPath, [probe, "source-scaffold"], {
+  if (!existsSync(probe)) return null;
+  const result = await execFileAsync(process.execPath, [probe, "source-scaffold", "--stdout"], {
     cwd: root,
     timeout: 30_000,
     maxBuffer: 10_000_000,
+    encoding: "utf8",
   }).catch(() => null);
-  return readSharinganRegionPlan(root);
+  const generated = result ? sharinganRegionPlanFromSourceScaffold(String(result.stdout)) : null;
+  if (!generated) return null;
+  return isCurrentSharinganRegionPlan(existing) && isDeepStrictEqual(existing, generated)
+    ? existing
+    : generated;
 }
 
 function safeSharinganRegionId(value: unknown, fallback: string): string {
@@ -138,20 +194,118 @@ function sharinganUnknownList(value: unknown, max: number): unknown[] {
   return Array.isArray(value) ? value.slice(0, max) : [];
 }
 
-export function sharinganRegionsForSubagents(plan: SharinganRegionPlan, maxRegions = 8): SharinganPreparedRegion[] {
+function sharinganRegionSignalScore(region: SharinganPreparedRegion): number {
+  const counts = region.counts && typeof region.counts === "object"
+    ? region.counts as Record<string, unknown>
+    : {};
+  const count = (key: string): number => {
+    const value = Number(counts[key]);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  };
+  return (
+    count("images") * 8 +
+    count("vectors") * 6 +
+    count("texts") * 3 +
+    count("boxes") +
+    region.assets.length * 4 +
+    region.media.length * 4 +
+    region.vectors.length * 3 +
+    region.textRuns.length * 2 +
+    region.paintBoxes.length
+  );
+}
+
+function sharinganRegionBudget(plan: SharinganRegionPlan, requested: number | undefined): number {
+  if (requested !== undefined) {
+    return Number.isFinite(requested)
+      ? Math.min(SHARINGAN_REGION_MAX_SUBAGENTS, Math.max(0, Math.floor(requested)))
+      : 0;
+  }
+  const declared = Number(plan.regionBudget);
+  return Number.isSafeInteger(declared) && declared > 0 && declared <= SHARINGAN_REGION_MAX_SUBAGENTS
+    ? declared
+    : SHARINGAN_REGION_MAX_SUBAGENTS;
+}
+
+function selectSharinganRegionsForBudget(
+  regions: SharinganPreparedRegion[],
+  maxRegions: number,
+  documentHeight: number | null,
+): SharinganPreparedRegion[] {
+  if (!maxRegions || !regions.length) return [];
+  if (regions.length <= maxRegions) return regions;
+  if (maxRegions === 1) return [regions[0]!];
+  if (maxRegions === 2) return [regions[0]!, regions.at(-1)!];
+
+  const centerY = (region: SharinganPreparedRegion): number | null => region.bbox === null
+    ? null
+    : region.bbox.y + region.bbox.h / 2;
+  const measuredBottom = regions.reduce((bottom, region) => region.bbox === null
+    ? bottom
+    : Math.max(bottom, region.bbox.y + region.bbox.h), 0);
+  const verticalExtent = Math.max(documentHeight ?? 0, measuredBottom);
+  const interiorSlots = maxRegions - 2;
+  const selectedIndexes = new Set<number>([0, regions.length - 1]);
+  if (verticalExtent > 0) {
+    const buckets = Array.from({ length: interiorSlots }, () => [] as number[]);
+    for (let index = 1; index < regions.length - 1; index += 1) {
+      const center = centerY(regions[index]!);
+      if (center === null || !Number.isFinite(center)) continue;
+      const slot = Math.min(
+        interiorSlots - 1,
+        Math.max(0, Math.floor((Math.max(0, center) / verticalExtent) * interiorSlots)),
+      );
+      buckets[slot]!.push(index);
+    }
+    for (let slot = 0; slot < interiorSlots; slot += 1) {
+      const targetY = ((slot + 0.5) * verticalExtent) / interiorSlots;
+      const best = buckets[slot]!.sort((left, right) => {
+        const scoreDelta = sharinganRegionSignalScore(regions[right]!) - sharinganRegionSignalScore(regions[left]!);
+        if (scoreDelta !== 0) return scoreDelta;
+        const distanceDelta = Math.abs((centerY(regions[left]!) ?? targetY) - targetY)
+          - Math.abs((centerY(regions[right]!) ?? targetY) - targetY);
+        return distanceDelta || left - right;
+      })[0];
+      if (best !== undefined) selectedIndexes.add(best);
+    }
+  }
+  if (selectedIndexes.size < maxRegions) {
+    const remaining = Array.from({ length: regions.length - 2 }, (_, offset) => offset + 1)
+      .filter((index) => !selectedIndexes.has(index))
+      .sort((left, right) => {
+        const scoreDelta = sharinganRegionSignalScore(regions[right]!) - sharinganRegionSignalScore(regions[left]!);
+        return scoreDelta || left - right;
+      });
+    for (const index of remaining) {
+      selectedIndexes.add(index);
+      if (selectedIndexes.size >= maxRegions) break;
+    }
+  }
+  return [...selectedIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => regions[index]!);
+}
+
+function sharinganPlanDocumentHeight(plan: SharinganRegionPlan): number | null {
+  if (!plan.document || typeof plan.document !== "object") return null;
+  const height = Number((plan.document as Record<string, unknown>).height);
+  return Number.isFinite(height) && height > 0 ? height : null;
+}
+
+export function sharinganRegionsForSubagents(plan: SharinganRegionPlan, maxRegions?: number): SharinganPreparedRegion[] {
   const rawRegions = Array.isArray(plan.regions) ? (plan.regions as SharinganSourceRegion[]) : [];
   const used = new Set<string>();
-  const out: SharinganPreparedRegion[] = [];
+  const prepared: SharinganPreparedRegion[] = [];
   for (const raw of rawRegions) {
     if (!raw || typeof raw !== "object") continue;
-    const fallback = `region-${out.length + 1}`;
+    const fallback = `region-${prepared.length + 1}`;
     let id = safeSharinganRegionId(raw.id, fallback);
-    if (used.has(id)) id = `${id}-${out.length + 1}`;
+    if (used.has(id)) id = `${id}-${prepared.length + 1}`;
     used.add(id);
     const texts = sharinganStringList(raw.texts, 18);
     const assets = sharinganStringList(raw.assets, 14);
     const refs = Array.isArray(raw.refs) ? raw.refs.slice(0, 24) : [];
-    out.push({
+    prepared.push({
       id,
       label: String(raw.label || texts[0] || fallback).trim().slice(0, 80),
       bbox: sharinganRegionBox(raw.bbox),
@@ -165,9 +319,12 @@ export function sharinganRegionsForSubagents(plan: SharinganRegionPlan, maxRegio
       styleTokens: raw.styleTokens ?? {},
       refs,
     });
-    if (out.length >= maxRegions) break;
   }
-  return out;
+  return selectSharinganRegionsForBudget(
+    prepared,
+    sharinganRegionBudget(plan, maxRegions),
+    sharinganPlanDocumentHeight(plan),
+  );
 }
 
 function sharinganRegionSubagentPrompt(region: SharinganPreparedRegion, index: number, total: number): string {

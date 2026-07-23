@@ -13,6 +13,7 @@ import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
+import { immutableProbeCliScript } from "../src/sharingan-probe-cli.ts";
 import {
   standardRunBranchName,
   standardRunWorktreeDir,
@@ -217,22 +218,140 @@ function writeValidSharinganEvidence(dir: string, sourceUrl = "https://example.c
   const sharinganDir = join(dir, ".sharingan");
   const screenshotPath = join(sharinganDir, "source-desktop.png");
   const renderMapPath = join(sharinganDir, "source-render-map.json");
+  const assetsPath = join(sharinganDir, "source-assets.json");
   mkdirSync(sharinganDir, { recursive: true });
+  const declaredPlan = (() => {
+    try {
+      return JSON.parse(readFileSync(join(sharinganDir, "region-plan.json"), "utf8")) as { regions?: unknown };
+    } catch {
+      return null;
+    }
+  })();
+  const declaredRegions = Array.isArray(declaredPlan?.regions)
+    ? declaredPlan.regions as Array<Record<string, unknown>>
+    : [];
+  const elements: Array<Record<string, unknown>> = [];
+  const capturedAssets: Array<{ kind: "img"; url: string; local: string; alt: string }> = [];
+  const finite = (value: unknown, fallback: number): number => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  };
+  const boxFrom = (value: unknown, fallback: { x: number; y: number; w: number; h: number }) => {
+    const box = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+    return {
+      x: finite(box.x, fallback.x),
+      y: finite(box.y, fallback.y),
+      w: Math.max(1, finite(box.w, fallback.w)),
+      h: Math.max(1, finite(box.h, fallback.h)),
+    };
+  };
+  for (const [regionIndex, region] of declaredRegions.entries()) {
+    const regionBox = boxFrom(region.bbox, { x: 0, y: regionIndex * 240, w: 1200, h: 160 });
+    elements.push({
+      selector: `section.fixture-region-${regionIndex + 1}`,
+      tag: "section",
+      text: "",
+      box: regionBox,
+      style: { backgroundColor: `rgb(${240 - regionIndex}, ${240 - regionIndex}, ${240 - regionIndex})` },
+    });
+
+    const rawTextRuns = Array.isArray(region.textRuns) ? region.textRuns as Array<Record<string, unknown>> : [];
+    const rawTexts: Array<Record<string, unknown>> = rawTextRuns.length > 0
+      ? rawTextRuns
+      : (Array.isArray(region.texts) ? region.texts : []).map((text, textIndex) => ({
+          text,
+          box: {
+            x: regionBox.x + 20,
+            y: regionBox.y + Math.max(8, regionBox.h / 2 - 12 + textIndex * 24),
+            w: Math.max(64, regionBox.w - 40),
+            h: 20,
+          },
+        }));
+    for (const [textIndex, textRun] of rawTexts.entries()) {
+      elements.push({
+        selector: `.fixture-region-${regionIndex + 1}-text-${textIndex + 1}`,
+        tag: textIndex === 0 ? "h2" : "span",
+        text: String(textRun.text ?? ""),
+        box: boxFrom(textRun.box, {
+          x: regionBox.x + 20,
+          y: regionBox.y + Math.max(8, regionBox.h / 2 - 12 + textIndex * 24),
+          w: Math.max(64, regionBox.w - 40),
+          h: 20,
+        }),
+        style: {
+          fontSize: String(textRun.fontSize ?? "16px"),
+          fontWeight: String(textRun.fontWeight ?? "400"),
+          lineHeight: String(textRun.lineHeight ?? "normal"),
+          letterSpacing: String(textRun.letterSpacing ?? "normal"),
+          textAlign: String(textRun.textAlign ?? "left"),
+          color: String(textRun.color ?? "rgb(20, 20, 20)"),
+        },
+      });
+    }
+
+    const rawMedia = Array.isArray(region.media) ? region.media as Array<Record<string, unknown>> : [];
+    const assetPaths = Array.isArray(region.assets)
+      ? region.assets.map((asset) => String(asset)).filter(Boolean)
+      : [];
+    const media = rawMedia.length > 0
+      ? rawMedia
+      : assetPaths.map((src, mediaIndex) => ({
+          src,
+          box: {
+            x: regionBox.x + 40 + mediaIndex * 80,
+            y: regionBox.y + Math.max(8, regionBox.h / 2 - 32),
+            w: 64,
+            h: 64,
+          },
+          objectFit: "cover",
+        }));
+    for (const [mediaIndex, item] of media.entries()) {
+      const local = String(item.src ?? assetPaths[mediaIndex] ?? "");
+      if (!local) continue;
+      const remote = `https://assets.example.test/region-${regionIndex + 1}-${mediaIndex + 1}`;
+      capturedAssets.push({ kind: "img", url: remote, local, alt: "" });
+      elements.push({
+        selector: `.fixture-region-${regionIndex + 1}-media-${mediaIndex + 1}`,
+        tag: "img",
+        text: "",
+        src: remote,
+        currentSrc: remote,
+        box: boxFrom(item.box, {
+          x: regionBox.x + 40 + mediaIndex * 80,
+          y: regionBox.y + Math.max(8, regionBox.h / 2 - 32),
+          w: 64,
+          h: 64,
+        }),
+        style: { objectFit: String(item.objectFit ?? "cover") },
+      });
+    }
+  }
+  if (elements.length === 0) {
+    elements.push({
+      selector: "body",
+      tag: "body",
+      text: "Captured source",
+      box: { x: 0, y: 0, w: 1200, h: 800 },
+      style: {},
+    });
+  }
+  const documentHeight = Math.max(
+    800,
+    ...elements.map((element) => {
+      const box = element.box as { y?: number; h?: number } | undefined;
+      return finite(box?.y, 0) + finite(box?.h, 0);
+    }),
+  );
   writeFileSync(screenshotPath, VALID_SOURCE_PNG);
+  writeFileSync(assetsPath, JSON.stringify(capturedAssets));
   writeFileSync(
     renderMapPath,
     JSON.stringify({
       viewport: { width: 1200, height: 800 },
-      document: { width: 1200, height: 800 },
-      elements: [
-        {
-          selector: "body",
-          tag: "body",
-          text: "Captured source",
-          box: { x: 0, y: 0, w: 1200, h: 800 },
-          style: {},
-        },
-      ],
+      document: { width: 1200, height: documentHeight },
+      elements,
     }),
   );
   writeFileSync(
@@ -244,10 +363,19 @@ function writeValidSharinganEvidence(dir: string, sourceUrl = "https://example.c
           url: sourceUrl,
           screenshots: { desktop: ".sharingan/source-desktop.png" },
           renderMap: ".sharingan/source-render-map.json",
+          assets: ".sharingan/source-assets.json",
         },
       ],
     }),
   );
+  writeFileSync(join(sharinganDir, "probe.mjs"), immutableProbeCliScript());
+  const scaffold = JSON.parse(execFileSync(
+    process.execPath,
+    [join(sharinganDir, "probe.mjs"), "source-scaffold", "--stdout"],
+    { cwd: dir, encoding: "utf8" },
+  )) as { regionPlan?: unknown };
+  assert.ok(scaffold.regionPlan && typeof scaffold.regionPlan === "object", "fixture probe must derive a source-bound region plan");
+  writeFileSync(join(sharinganDir, "region-plan.json"), JSON.stringify(scaffold.regionPlan));
 }
 
 function createSharinganRegionFixture(dataDir: string, store: Store, regions: unknown[]): { project: ReturnType<Store["createProject"]>; dir: string } {
@@ -259,7 +387,14 @@ function createSharinganRegionFixture(dataDir: string, store: Store, regions: un
   writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
   writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
   writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
-  writeFileSync(join(dir, ".sharingan", "region-plan.json"), JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions }));
+  writeFileSync(join(dir, ".sharingan", "region-plan.json"), JSON.stringify({
+    protocol: "dezin.sharingan-region-plan.v2",
+    version: 2,
+    regionBudget: 8,
+    candidateCount: regions.length,
+    sourceUrl: "https://example.com",
+    regions,
+  }));
   writeValidSharinganEvidence(dir);
   commitAll(dir, "base");
   return { project, dir };
@@ -4084,7 +4219,10 @@ test("Sharingan standard run delegates source regions to isolated subagents befo
       writeFileSync(
         join(dir, ".sharingan", "region-plan.json"),
         JSON.stringify({
-          version: 1,
+          protocol: "dezin.sharingan-region-plan.v2",
+          version: 2,
+          regionBudget: 8,
+          candidateCount: 2,
           sourceUrl: "https://example.com",
           regions: [
             {
@@ -4128,7 +4266,7 @@ test("Sharingan standard run delegates source regions to isolated subagents befo
       assert.match(headerCall?.message ?? "", /Header/);
       assert.match(headerCall?.message ?? "", /textRuns/);
       assert.match(headerCall?.message ?? "", /rgb\(255,255,255\)/);
-      assert.match(heroCall?.message ?? "", /Hero/);
+      assert.match(heroCall?.message ?? "", /Region: Create/);
       assert.match(heroCall?.message ?? "", /media/);
       assert.match(heroCall?.message ?? "", /\/_assets\/hero\.png/);
       assert.match(mainCall?.message ?? "", /SHARINGAN MAIN INTEGRATION/);
@@ -4472,7 +4610,14 @@ test("Sharingan variant runs sync the root capture bundle before region subagent
       writeFileSync(join(dir, "public", "_assets", "hero.png"), "PNGDATA");
       writeFileSync(
         join(dir, ".sharingan", "region-plan.json"),
-        JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions: [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: ["/_assets/hero.png"] }] }),
+        JSON.stringify({
+          protocol: "dezin.sharingan-region-plan.v2",
+          version: 2,
+          regionBudget: 8,
+          candidateCount: 1,
+          sourceUrl: "https://example.com",
+          regions: [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: ["/_assets/hero.png"] }],
+        }),
       );
       writeValidSharinganEvidence(dir);
 

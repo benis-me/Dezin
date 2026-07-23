@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import { resourceAdapters } from "../src/context/adapters/index.ts";
 import { stableStringify } from "../src/context/context-types.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 import { createProductionGenerationBootstrap } from "../src/orchestration/production-generation-bootstrap.ts";
+import { persistGenerationTaskVisualEvidence } from "../src/orchestration/generation-task-visual-evidence.ts";
 import type {
   ProductionResearchGroundednessRequest,
   ProductionResearchWebEvidenceRequest,
@@ -24,6 +26,11 @@ import {
 import { visualQaFrameAttemptId } from "../src/visual-qa.ts";
 import { resolveResourceRevisionPayloadDescriptor } from "../src/resource-revision-payload.ts";
 import type { SafeBoundedExternalFetcher } from "../src/resource-revision-source.ts";
+import {
+  createResearchRevisionFixture,
+  persistResearchRevisionFixtureContextPack,
+} from "./support/research-resource-fixture.ts";
+import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 
 function emptyGeneration() {
   return {
@@ -446,28 +453,34 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
     baseGraphRevision: initialWorkspace.graphRevision,
     expectedSnapshotId: initialWorkspace.activeSnapshotId,
   });
+  const researchContextPack = persistResearchRevisionFixtureContextPack({
+    store,
+    manifestRoot: root,
+    workspaceId: initialWorkspace.id,
+    resourceId: created.resource.id,
+    graphRevision: store.workspace.getWorkspace(project.id)!.graphRevision,
+  });
+  const researchFixture = createResearchRevisionFixture({
+    workspaceId: initialWorkspace.id,
+    resourceId: created.resource.id,
+    contextPack: researchContextPack,
+  });
   const selectedDirection = {
+    ...researchFixture.bundle.directions[0]!,
     id: "direction-primary",
     title: "Quiet confidence",
     thesis: "A calm editorial checkout with an always-visible commitment rail.",
     visualLanguage: ["warm neutral canvas", "precise rule-led hierarchy"],
     interactionPrinciples: ["progressive disclosure with stable totals"],
     risks: ["Restraint can obscure urgency without clear state contrast."],
-    findingIds: ["finding-cost", "finding-state", "finding-sequence"],
-    evidenceStatus: "evidence",
-    evidenceFindingIds: ["finding-cost", "finding-state", "finding-sequence"],
-    hypothesisFindingIds: [],
   };
+  researchFixture.bundle.directions[0] = selectedDirection;
   const sourcePath = "selected-research.json";
-  await writeFile(join(repositoryDir, sourcePath), `${stableStringify({
-    format: "dezin-research-resource-bundle",
-    version: 3,
-    scope: {
-      workspaceId: initialWorkspace.id,
-      resourceId: created.resource.id,
-    },
-    directions: [selectedDirection],
-  })}\n`, "utf8");
+  await writeFile(
+    join(repositoryDir, sourcePath),
+    `${stableStringify(researchFixture.bundle)}\n`,
+    "utf8",
+  );
   const payload = await resourceAdapters.require("research").snapshot({
     workspaceId: initialWorkspace.id,
     resourceId: created.resource.id,
@@ -476,7 +489,7 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
     workspaceRoot: repositoryDir,
     snapshotRoot: root,
     source: { type: "owned-file", path: sourcePath, mimeType: "application/json" },
-    provenance: { source: "production-generation-bootstrap-test" },
+    provenance: researchFixture.provenance,
     createdAt: 1,
   });
   const researchRevision = store.workspace.createResourceRevisionCandidateForProject(
@@ -488,12 +501,13 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
       manifestPath: payload.manifestPath,
       summary: "Exact selected checkout Research",
       metadata: {
+        ...researchFixture.metadata,
         mimeType: payload.mimeType,
         byteLength: payload.byteSize,
         payloadChecksum: payload.payloadChecksum,
       },
       checksum: payload.checksum,
-      provenance: payload.provenance,
+      provenance: researchFixture.provenance,
     },
   );
   store.workspace.publishResourceRevisionForProject(
@@ -603,6 +617,26 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
     async visualQa(input) {
       assert.equal(input.runtimeOnly, false);
       observedDirectionSpec = input.directionSpec;
+      const frames = await Promise.all(input.renderFrames.map(async (frame, index) => {
+        const screenshotPath = join(root, `quality-${frame.id}.png`);
+        const bytes = sharinganFixturePng(frame.width, frame.height);
+        await writeFile(screenshotPath, bytes);
+        return {
+          frameId: frame.id,
+          frameAttemptId: visualQaFrameAttemptId(input.frameAttemptIdPrefix, frame, index),
+          width: frame.width,
+          height: frame.height,
+          status: "passed" as const,
+          screenshotPath,
+          captureIdentity: {
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            byteLength: bytes.byteLength,
+            width: frame.width,
+            height: frame.height,
+          },
+          reviewed: true,
+        };
+      }));
       return {
         findings: [{
           severity: "P2" as const,
@@ -610,39 +644,10 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
           message: "Every immutable quality frame was reviewed.",
           fix: "No action required.",
         }],
-        frames: input.renderFrames.map((frame, index) => ({
-          frameId: frame.id,
-          frameAttemptId: visualQaFrameAttemptId(input.frameAttemptIdPrefix, frame, index),
-          width: frame.width,
-          height: frame.height,
-          status: "passed" as const,
-          screenshotPath: join(root, `quality-${frame.id}.png`),
-          reviewed: true,
-        })),
+        frames,
       };
     },
-    async persistEvidence(input) {
-      const sha256 = "e".repeat(64);
-      return {
-        protocol: "dezin.generation-task-visual-evidence.v1" as const,
-        owner: input.owner,
-        frame: input.frame,
-        round: input.round,
-        mediaType: "image/png" as const,
-        sha256,
-        byteLength: 67,
-        storageKey: [
-          "generation-task-evidence",
-          input.owner.projectId,
-          input.owner.workspaceId,
-          input.owner.planId,
-          input.owner.taskId,
-          `attempt-${input.owner.attempt}`,
-          "visual",
-          `round-${input.round}-${input.frame.id}-${sha256}.png`,
-        ].join("/"),
-      };
-    },
+    persistEvidence: persistGenerationTaskVisualEvidence,
     sharinganReference() {
       return undefined;
     },

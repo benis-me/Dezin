@@ -155,6 +155,21 @@ export interface ProjectAgentPromptResult {
   readonly designSystemName: string | null;
 }
 
+const ARTIFACT_RENDER_FRAME_CONTRACT = `## Dezin Render Frame consumption contract
+
+The Viewer and visual QA may render the artifact in explicit states by dispatching a
+\`dezin:frame-change\` CustomEvent. When \`event.detail.consumption\` exists:
+
+1. Apply the requested initialState and fixture to the rendered DOM before acknowledging.
+   In React, acknowledge from an effect that runs after the matching state has committed,
+   not directly from the event listener that schedules the state update.
+2. Then dispatch \`dezin:frame-consumed\` with a CustomEvent whose detail contains exactly:
+   \`{ source: "dezin-artifact", nonce, frameAttemptId, digest }\`.
+3. Copy \`nonce\`, \`frameAttemptId\`, and the canonical state/fixture \`digest\` exactly from
+   \`event.detail.consumption\`. Never reuse a receipt from an older Frame attempt.
+
+Do not acknowledge a Frame you ignored, only styled cosmetically, or failed to render.`;
+
 /**
  * Shared production prompt composition for legacy single-artifact Runs and
  * Generation Plan Artifact leaves. Keeping this boundary shared prevents the
@@ -185,7 +200,7 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
         ...(designSystem?.craft?.applies ?? []),
       ]));
   const craft = hasExactSharinganCapture ? null : loadCraftSections(craftSlugs);
-  const systemPrompt = hasExactSharinganCapture
+  const baseSystemPrompt = hasExactSharinganCapture
     ? buildSharinganSystemPrompt()
     : composeSystemPrompt({
         designSystem: designSystem ?? registry.default(),
@@ -205,6 +220,7 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
         mode: project.mode,
         dials: inferDials(brief),
       });
+  const systemPrompt = `${baseSystemPrompt}\n\n---\n\n${ARTIFACT_RENDER_FRAME_CONTRACT}`;
   return Object.freeze({
     systemPrompt,
     skill,

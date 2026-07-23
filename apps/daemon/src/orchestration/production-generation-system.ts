@@ -1,5 +1,7 @@
 import type {
   GenerationTask,
+  GenerationTaskSourceVisualEvidenceAuthority,
+  Resource,
   ResourceRevision,
   Store,
   WorkspaceSnapshotRecord,
@@ -185,6 +187,42 @@ function prototypeValidationStore(
   };
 }
 
+export interface ProductionSharinganSourceAuthorityStore {
+  getResourceForProject(projectId: string, resourceId: string): Resource | null;
+  getResourceRevisionForWorkspace(workspaceId: string, revisionId: string): ResourceRevision | null;
+}
+
+/**
+ * Resolves source evidence only through the owning immutable Sharingan Resource
+ * and its exact Revision. Descriptor-supplied checksums never become authority.
+ */
+export function productionSharinganSourceAuthority(input: {
+  store: ProductionSharinganSourceAuthorityStore;
+  projectId: string;
+  workspaceId: string;
+  resourceId: string;
+  revisionId: string;
+}): GenerationTaskSourceVisualEvidenceAuthority | null {
+  const resource = input.store.getResourceForProject(input.projectId, input.resourceId);
+  if (resource === null
+    || resource.id !== input.resourceId
+    || resource.workspaceId !== input.workspaceId
+    || resource.kind !== "sharingan-capture") return null;
+  const revision = input.store.getResourceRevisionForWorkspace(
+    input.workspaceId,
+    input.revisionId,
+  );
+  if (revision === null
+    || revision.id !== input.revisionId
+    || revision.workspaceId !== input.workspaceId
+    || revision.resourceId !== resource.id) return null;
+  return {
+    resourceId: resource.id,
+    revisionId: revision.id,
+    revisionChecksum: revision.checksum,
+  };
+}
+
 /**
  * Complete production Task 12 composition: one Store, one broker, one Plan
  * service, one bounded scheduler, and the real publication/recovery lifecycle.
@@ -222,6 +260,19 @@ export function createProductionGenerationSystem(
   const publication = createProductionGenerationTaskPublication({
     store: options.store.workspace,
     repositoryDirForWorkspace: options.repositoryDirForWorkspace,
+    dataDir: options.dataDir,
+    sourceAuthorityForRevision({ workspaceId, resourceId, revisionId }, signal) {
+      checkAbort(signal);
+      const authority = productionSharinganSourceAuthority({
+        store: options.store.workspace,
+        projectId: ownership.projectIdForWorkspace(workspaceId),
+        workspaceId,
+        resourceId,
+        revisionId,
+      });
+      checkAbort(signal);
+      return authority;
+    },
     projectIdForWorkspace: (workspaceId) => ownership.projectIdForWorkspace(workspaceId),
     notifyPlan: (planId) => events.notify(planId),
   });

@@ -27,6 +27,7 @@ import {
   parseFrames,
   useArtifactEditorController,
 } from "./artifact/ArtifactEditorSurface.tsx";
+import { selectVersionComparisonFrame } from "./artifact/ArtifactVersions.tsx";
 import { buildPreviewFrameCommand, PREVIEW_FRAME_ACK_TIMEOUT_MS } from "./artifact/usePreviewBridge.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
@@ -713,6 +714,30 @@ test("frame commands fail closed before crossing the preview capability boundary
     { id: "compact", name: "Duplicate", width: 400, height: 800 },
     { id: "too-large", name: "Too large", width: 99_999, height: 800 },
   ] }, "page")).toEqual([{ id: "compact", name: "Compact", width: 390, height: 844 }]);
+});
+
+test("selects the current exact viewport when comparing immutable Revisions", () => {
+  const mobile = {
+    id: "checkout-mobile",
+    name: "Checkout mobile",
+    width: 390,
+    height: 844,
+    initialState: "checkout-ready",
+    fixture: { cartCount: 2 },
+    background: "#f4f1eb",
+  };
+  const comparedRevision: ArtifactRevision = {
+    ...revision,
+    id: "revision-compared",
+    renderSpec: {
+      frames: [
+        { id: "checkout-desktop", name: "Checkout desktop", width: 1280, height: 800, initialState: "checkout-ready" },
+        mobile,
+      ],
+    },
+  };
+
+  expect(selectVersionComparisonFrame(comparedRevision, mobile)).toEqual(mobile);
 });
 
 test("the Fit preview control applies the measured zoom to the active frame", async () => {
@@ -2489,6 +2514,9 @@ test("compares immutable Revisions and publishes restore and fork actions with e
     { expectedHeadRevisionId: revision.id, expectedSnapshotId: "snapshot-1" },
   ));
   expect(onVersionPublished).toHaveBeenCalledWith(restored);
+  await waitFor(() => expect(
+    screen.queryByRole("dialog", { name: "Artifact versions" }),
+  ).not.toBeInTheDocument());
 
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   const forkDialog = await screen.findByRole("dialog", { name: "Artifact versions" });

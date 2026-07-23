@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 
-import { stableStringify } from "../../src/context/context-types.ts";
+import type { Store } from "../../../../packages/core/src/index.ts";
+import {
+  checksumBytes,
+  estimateContextTokens,
+  stableStringify,
+  type ContextPack,
+} from "../../src/context/context-types.ts";
+import {
+  ContextPackStore,
+  createWorkspaceContextPackRepository,
+} from "../../src/context/context-pack-store.ts";
 
 const checksum = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -14,12 +24,14 @@ export function createResearchRevisionFixture(input: {
   resourceId: string;
   parentRevisionId?: string | null;
   verifiedLocator?: string;
+  contextPack?: Pick<ContextPack, "id" | "hash" | "graphRevision">;
 }) {
   const taskId = "task-research-fixture";
   const planId = "plan-research-fixture";
   const inputHash = "a".repeat(64);
-  const contextPackId = "context-research-fixture";
-  const contextPackHash = "b".repeat(64);
+  const contextPackId = input.contextPack?.id ?? "context-research-fixture";
+  const contextPackHash = input.contextPack?.hash ?? "b".repeat(64);
+  const contextPackGraphRevision = input.contextPack?.graphRevision ?? 1;
   const verifiedLocator = input.verifiedLocator ?? "https://example.test/checkout-study";
   const verifiedExcerpt = "Participants compared delivery and total cost before committing.";
   const unverifiedExcerpt = "One participant may prefer a more expressive confirmation moment.";
@@ -207,7 +219,7 @@ export function createResearchRevisionFixture(input: {
     format: "dezin-research-resource-bundle",
     version: 3,
     scope,
-    contextPack: { id: contextPackId, hash: contextPackHash, graphRevision: 1 },
+    contextPack: { id: contextPackId, hash: contextPackHash, graphRevision: contextPackGraphRevision },
     brief: {
       proposalRationale: "Ground the checkout direction in immutable evidence.",
       assumptions: [],
@@ -296,4 +308,60 @@ export function createResearchRevisionFixture(input: {
       adapterProvenance,
     },
   };
+}
+
+export function persistResearchRevisionFixtureContextPack(input: {
+  store: Store;
+  manifestRoot: string;
+  workspaceId: string;
+  resourceId: string;
+  graphRevision: number;
+}): ContextPack {
+  const systemContent = "Research fixture system Kernel";
+  const targetContent = "Generate the exact Research Resource fixture";
+  const tokenEstimate = estimateContextTokens(systemContent) + estimateContextTokens(targetContent);
+  const repository = createWorkspaceContextPackRepository(input.store.workspace, {
+    manifestRoot: input.manifestRoot,
+  });
+  return new ContextPackStore({ manifestRoot: input.manifestRoot, repository }).persist({
+    workspaceId: input.workspaceId,
+    graphRevision: input.graphRevision,
+    target: { type: "resource", id: input.resourceId },
+    intent: "generate",
+    messageChecksum: checksumBytes("Research fixture Context Pack"),
+    items: [
+      {
+        ordinal: 0,
+        contextClass: "system-kernel",
+        ref: { kind: "inline", id: "research-fixture-system-kernel" },
+        resolvedKind: "inline",
+        content: systemContent,
+        checksum: checksumBytes(systemContent),
+        reason: "Fixture system Kernel",
+        trustLevel: "system",
+        boundary: { source: "system-kernel:research-fixture", readOnly: true, mayGrantCapabilities: false },
+        capabilities: [],
+        tokenEstimate: estimateContextTokens(systemContent),
+        provenance: { protocol: "dezin.research-fixture-context.v1" },
+        provided: true,
+      },
+      {
+        ordinal: 1,
+        contextClass: "target",
+        ref: { kind: "inline", id: input.resourceId },
+        resolvedKind: "inline",
+        content: targetContent,
+        checksum: checksumBytes(targetContent),
+        reason: "Fixture Research target",
+        trustLevel: "trusted",
+        boundary: { source: "generation-task:research-fixture", readOnly: true, mayGrantCapabilities: false },
+        capabilities: [],
+        tokenEstimate: estimateContextTokens(targetContent),
+        provenance: { protocol: "dezin.research-fixture-context.v1" },
+        provided: true,
+      },
+    ],
+    omissions: [],
+    tokenEstimate,
+  });
 }

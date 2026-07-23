@@ -1918,6 +1918,10 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
       dependencies: [],
       resourcePins: [],
     });
+    const revisionASnapshot = store.workspace.publishArtifactRevision(revisionA.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: readyA.activeSnapshot.id,
+    });
 
     const artifacts = await fetch(`${base}/api/projects/${projectA.id}/artifacts`);
     assert.equal(artifacts.status, 200);
@@ -1932,7 +1936,7 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
     )).status, 200);
     const snapshots = await fetch(`${base}/api/projects/${projectA.id}/workspace/snapshots`);
     assert.equal(snapshots.status, 200);
-    assert.equal((await snapshots.json() as Array<{ id: string }>).length, 2);
+    assert.equal((await snapshots.json() as Array<{ id: string }>).length, 3);
     assert.equal((await fetch(
       `${base}/api/projects/${projectA.id}/workspace/snapshots/${readyA.activeSnapshot.id}`,
     )).status, 200);
@@ -1951,7 +1955,7 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
 
     store.workspace.applyGraphCommands(projectA.id, {
       baseGraphRevision: readyA.graph.revision,
-      expectedSnapshotId: readyA.activeSnapshot.id,
+      expectedSnapshotId: revisionASnapshot.id,
       commands: [{
         id: "add-second-owned-page",
         type: "add-node",
@@ -2046,6 +2050,48 @@ test("Artifact history is lazy and paged while restore and fork publish new immu
       expectedHeadRevisionId: first.id,
       expectedSnapshotId: firstSnapshot.id,
     });
+    const unpublished = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: track.id,
+      parentRevisionId: second.id,
+      sourceCommitHash: "e".repeat(40),
+      sourceTreeHash: "f".repeat(40),
+      kernelRevisionId: initial.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }] },
+      quality: { state: "passed", score: 99, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+
+    const formalRevisionList = await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions`,
+    );
+    assert.equal(formalRevisionList.status, 200);
+    assert.deepEqual(
+      (await formalRevisionList.json() as Array<{ id: string }>).map(({ id }) => id),
+      [first.id, second.id],
+      "an unpublished candidate must not appear in formal Revision history",
+    );
+    assert.equal((await fetch(
+      `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions/${unpublished.id}`,
+    )).status, 404);
+    for (const action of ["restore", "fork-track"] as const) {
+      const response = await fetch(
+        `${base}/api/projects/${project.id}/artifacts/${artifact.id}/revisions/${unpublished.id}/${action}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(action === "restore"
+            ? { expectedHeadRevisionId: second.id, expectedSnapshotId: secondSnapshot.id }
+            : {
+                name: "Unpublished candidate fork",
+                expectedHeadRevisionId: second.id,
+                expectedSnapshotId: secondSnapshot.id,
+              }),
+        },
+      );
+      assert.equal(response.status, 404);
+    }
 
     const overview = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
       activeSnapshot: { id: string };

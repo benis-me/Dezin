@@ -5,20 +5,31 @@ import type {
 } from "../../../../packages/core/src/index.ts";
 import {
   artifactCandidateRetentionDescriptor,
+  verifyRetainedArtifactRevisionEvidenceBundle,
 } from "./artifact-candidate-retention.ts";
 import {
   ArtifactCandidateRefConflictError,
   ArtifactCandidateRevisionRefNotRetainedError,
+  ArtifactCandidateValidationError,
+  artifactRevisionEvidenceRef,
   artifactRevisionHistoryRef,
   artifactRevisionRef,
   releaseArtifactCandidateAttemptRef,
   releaseOrphanArtifactCandidateAttemptRef,
+  type ArtifactRevisionEvidenceBundleReceipt,
 } from "./artifact-candidate-transaction.ts";
 import {
   recoverArtifactCandidateRefs,
   type ArtifactCandidateRefRecoveryEvent,
   type ArtifactCandidateRefRecoverySummary,
 } from "./artifact-candidate-ref-recovery.ts";
+import type { GenerationTaskEvidenceLifecycle } from "./generation-task-evidence-lifecycle.ts";
+
+export interface ArtifactCandidateEvidenceCleanupErrorIdentity {
+  readonly taskId: string;
+  readonly attempt: number;
+  readonly revisionId: string;
+}
 
 export interface ArtifactCandidateRefRecoveryAdapterOptions {
   readonly store: {
@@ -30,6 +41,14 @@ export interface ArtifactCandidateRefRecoveryAdapterOptions {
   readonly repositoryDirForWorkspace: (workspaceId: string) => string | Promise<string>;
   readonly limit?: number;
   readonly observe?: (event: ArtifactCandidateRefRecoveryEvent) => void;
+  readonly evidenceLifecycle?: Pick<
+    GenerationTaskEvidenceLifecycle,
+    "quarantineDurablePublishedEvidence"
+  >;
+  readonly reportEvidenceCleanupError?: (
+    error: unknown,
+    identity: ArtifactCandidateEvidenceCleanupErrorIdentity,
+  ) => void;
 }
 
 export interface ArtifactCandidateRefRecovery {
@@ -55,6 +74,34 @@ async function repositoryDir(
   return dir;
 }
 
+async function cleanupPublishedEvidence(
+  options: ArtifactCandidateRefRecoveryAdapterOptions,
+  entry: Extract<CoreArtifactCandidateRefRecoveryEntry, { retentionKind: "retained-candidate" }>,
+  receipt: ArtifactRevisionEvidenceBundleReceipt,
+): Promise<void> {
+  if (options.evidenceLifecycle === undefined || entry.attempt.status !== "succeeded") return;
+  try {
+    await options.evidenceLifecycle.quarantineDurablePublishedEvidence({
+      projectId: receipt.subject.projectId,
+      workspaceId: receipt.subject.workspaceId,
+      planId: entry.task.planId,
+      taskId: receipt.subject.attempt.taskId,
+      attempt: receipt.subject.attempt.attempt,
+      receipt,
+    }, new AbortController().signal);
+  } catch (error) {
+    try {
+      options.reportEvidenceCleanupError?.(error, {
+        taskId: entry.task.id,
+        attempt: entry.attempt.attempt,
+        revisionId: entry.revision.id,
+      });
+    } catch {
+      // The exact Core/Git publication proof is already durable; observation is best effort.
+    }
+  }
+}
+
 async function releaseRecoveryEntry(
   options: ArtifactCandidateRefRecoveryAdapterOptions,
   entry: CoreArtifactCandidateRefRecoveryEntry,
@@ -66,6 +113,8 @@ async function releaseRecoveryEntry(
   | "revision-ref-conflict"
   | "revision-history-ref-missing"
   | "revision-history-ref-conflict"
+  | "revision-evidence-ref-missing"
+  | "revision-evidence-ref-conflict"
 > {
   const dir = await repositoryDir(options, entry.task.workspaceId, signal);
   if (entry.retentionKind === "orphan-attempt") {
@@ -92,6 +141,29 @@ async function releaseRecoveryEntry(
     artifactRevision: entry.revision,
     evidence: entry.attempt.candidateEvidence,
   });
+  let evidenceReceipt: ArtifactRevisionEvidenceBundleReceipt;
+  try {
+    evidenceReceipt = await verifyRetainedArtifactRevisionEvidenceBundle({
+      repositoryDir: dir,
+      task: entry.task,
+      attempt: entry.attempt,
+      artifactRevision: entry.revision,
+      evidence: entry.attempt.candidateEvidence,
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) throw abortReason(signal);
+    if (error instanceof ArtifactCandidateRevisionRefNotRetainedError
+      && error.ref === artifactRevisionEvidenceRef(entry.task.workspaceId, entry.revision.id)) {
+      return error.state === "missing"
+        ? "revision-evidence-ref-missing"
+        : "revision-evidence-ref-conflict";
+    }
+    if (error instanceof ArtifactCandidateValidationError) {
+      return "revision-evidence-ref-conflict";
+    }
+    throw error;
+  }
   try {
     const released = await releaseArtifactCandidateAttemptRef({
       repositoryDir: dir,
@@ -104,9 +176,11 @@ async function releaseRecoveryEntry(
       },
       history: descriptor.history,
       historyHead: descriptor.historyHead,
+      evidence: evidenceReceipt,
       signal,
     });
     checkAbort(signal);
+    await cleanupPublishedEvidence(options, entry, evidenceReceipt);
     return released ? "released" : "already-released";
   } catch (error) {
     if (signal.aborted) throw abortReason(signal);

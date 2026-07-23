@@ -1,10 +1,111 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { TextEncoder } from "node:util";
 import { runInNewContext } from "node:vm";
 import { parse, serialize } from "parse5";
 import { injectRuntimeProbe, injectSelectBridge } from "../src/serve-static.ts";
+
+function createFrameReceiptHarness() {
+  const nonce = "r".repeat(43);
+  const html = injectRuntimeProbe("<html><head></head><body>rendered preview content</body></html>");
+  const source = html.match(/<script data-dezin-runtime-probe>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const sent: Array<Record<string, unknown>> = [];
+  const timers = new Map<number, { callback: () => void; delay: number }>();
+  let timerSequence = 0;
+  const style = () => ({
+    background: "",
+    transition: "",
+    animation: "",
+    getPropertyValue(name: "background" | "transition" | "animation") { return this[name]; },
+    getPropertyPriority() { return ""; },
+    setProperty(name: "background" | "transition" | "animation", value: string) { this[name] = value; },
+  });
+  const rootStyle = style();
+  const bodyStyle = style();
+  const parent = {};
+  const window = {
+    origin: "null",
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void) {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    dispatchEvent(event: { type: string; detail: unknown }) {
+      for (const listener of listeners.get(event.type) ?? []) listener(event as unknown as Record<string, unknown>);
+      return true;
+    },
+  } as Record<string, unknown>;
+  const port = {
+    postMessage(message: Record<string, unknown>) { sent.push(message); },
+    start() {},
+    onmessage: null as null | ((event: { data: unknown }) => void),
+  };
+  function FakeXhr() {}
+  Reflect.set(FakeXhr, "prototype", {});
+  runInNewContext(source, {
+    window,
+    parent,
+    location: { hash: `#dezin-bridge=${nonce}` },
+    document: {
+      readyState: "complete",
+      documentElement: { style: rootStyle, setAttribute() {} },
+      body: { scrollHeight: 100, innerText: "rendered preview content", style: bodyStyle },
+    },
+    console: { error() {} },
+    XMLHttpRequest: FakeXhr,
+    CSS: { supports: () => true },
+    CustomEvent: class {
+      type: string;
+      detail: unknown;
+      constructor(type: string, init: { detail?: unknown } = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    },
+    crypto: webcrypto,
+    TextEncoder,
+    setTimeout(callback: () => void, delay: number) {
+      timerSequence += 1;
+      timers.set(timerSequence, { callback, delay });
+      return timerSequence;
+    },
+    clearTimeout(timer: number) { timers.delete(timer); },
+    isFinite,
+  });
+  listeners.get("message")?.[0]?.({
+    data: { source: "dezin-parent", type: "bridge-init", protocol: 1, nonce },
+    source: parent,
+    origin: "null",
+    ports: [port],
+    isTrusted: true,
+  });
+  return {
+    nonce,
+    sent,
+    listeners,
+    send(frame: Record<string, unknown>) {
+      port.onmessage?.({ data: { source: "dezin-parent", type: "set-frame", protocol: 1, nonce, ...frame } });
+    },
+    dispatch(type: string, detail: unknown) {
+      (window.dispatchEvent as (event: { type: string; detail: unknown }) => boolean)({ type, detail });
+    },
+    runTimer(delay: number) {
+      const match = [...timers.entries()].find(([, timer]) => timer.delay === delay);
+      assert.ok(match, `expected a ${delay}ms timer`);
+      timers.delete(match[0]);
+      match[1].callback();
+    },
+    async waitFor(predicate: () => boolean) {
+      for (let attempt = 0; attempt < 20 && !predicate(); attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(predicate(), true, "expected asynchronous preview bridge state");
+    },
+  };
+}
 
 test("preview bridge requires a nonce-bound parent handshake and never emits to wildcard", () => {
   const out = injectRuntimeProbe(injectSelectBridge("<html><head></head><body><button>Pick</button></body></html>"));
@@ -255,7 +356,7 @@ test("the public picker bridge ignores prototype descriptors and never intercept
   assert.equal(sent.length, count);
 });
 
-test("preview bridge stamps the protocol on every queued and live child event", () => {
+test("preview bridge stamps the protocol on every queued and live child event", async () => {
   const nonce = "a".repeat(43);
   const html = injectRuntimeProbe("<html><head></head><body></body></html>");
   const source = html.match(/<script data-dezin-runtime-probe>([\s\S]*?)<\/script>/)?.[1];
@@ -342,6 +443,8 @@ test("preview bridge stamps the protocol on every queued and live child event", 
         this.detail = init.detail;
       }
     },
+    crypto: webcrypto,
+    TextEncoder,
     setTimeout,
     clearTimeout,
     isFinite,
@@ -361,6 +464,31 @@ test("preview bridge stamps the protocol on every queued and live child event", 
   };
   listeners.get("message")?.[0]?.(init);
   bridge.send({ source: "dezin", type: "scroll", top: 2, left: 0 });
+
+  listeners.set("dezin:frame-change", [
+    ...(listeners.get("dezin:frame-change") ?? []),
+    (event) => {
+      const frame = event.detail as Record<string, unknown>;
+      const consumption = frame.consumption as Record<string, unknown> | undefined;
+      if (!consumption) return;
+      (window.dispatchEvent as (receipt: { type: string; detail: unknown }) => boolean)({
+        type: "dezin:frame-consumed",
+        detail: {
+          source: "dezin-artifact",
+          nonce: consumption.nonce,
+          frameAttemptId: consumption.frameAttemptId,
+          digest: consumption.digest,
+        },
+      });
+    },
+  ]);
+  async function waitForFrameAttempt(frameAttemptId: string): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (sent.some((message) => message.type === "frame-applied" && message.frameAttemptId === frameAttemptId)) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.fail(`frame attempt ${frameAttemptId} was not acknowledged`);
+  }
 
   const commands: string[] = [];
   bridge.listen((message) => commands.push(String(message.type)));
@@ -393,6 +521,7 @@ test("preview bridge stamps the protocol on every queued and live child event", 
       background: "#112233",
     },
   });
+  await waitForFrameAttempt("frame-attempt-1");
 
   assert.deepEqual(sent.slice(0, 3).map((message) => message.type), [
     "bridge-ready",
@@ -423,7 +552,7 @@ test("preview bridge stamps the protocol on every queued and live child event", 
   assert.equal(bodyStyle.transition, "none");
   assert.equal(rootStyle.animation, "none");
   assert.equal(bodyStyle.animation, "none");
-  assert.deepEqual(dispatched.map((event) => event.type), ["dezin:frame-change"]);
+  assert.deepEqual(dispatched.map((event) => event.type), ["dezin:frame-change", "dezin:frame-consumed"]);
   assert.equal(sent.at(-1)?.type, "frame-applied");
   assert.equal(sent.at(-1)?.frameAttemptId, "frame-attempt-1");
   assert.equal(sent.some((message) => message.message === "Failure before frame context 0"), false);
@@ -458,19 +587,28 @@ test("preview bridge stamps the protocol on every queued and live child event", 
     },
   });
   assert.equal(JSON.stringify(window.__DEZIN_RENDER_FRAME__), applied);
-  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched.length, 2);
   assert.equal(sent.at(-1)?.type, "frame-rejected");
   assert.equal(sent.at(-1)?.frameAttemptId, "frame-attempt-invalid");
   assert.equal(sent.at(-1)?.reason, "invalid-fixture");
 
   port.onmessage?.({
-    data: { source: "dezin-parent", type: "set-frame", protocol: 1, nonce, frameId: "kernel-mobile" },
+    data: {
+      source: "dezin-parent",
+      type: "set-frame",
+      protocol: 1,
+      nonce,
+      frameId: "kernel-mobile",
+      frameAttemptId: "frame-attempt-kernel",
+    },
   });
+  await waitForFrameAttempt("frame-attempt-kernel");
   assert.deepEqual(
     JSON.parse(JSON.stringify(window.__DEZIN_RENDER_FRAME__)),
     {
       protocol: "dezin-frame-v1",
       frameId: "kernel-mobile",
+      frameAttemptId: "frame-attempt-kernel",
       initialState: "ready",
       fixture: { source: "kernel" },
       background: "#f5f5f4",
@@ -479,7 +617,7 @@ test("preview bridge stamps the protocol on every queued and live child event", 
   assert.equal(rootStyle.background, "#f5f5f4");
   assert.equal(bodyStyle.background, "transparent");
   assert.equal(sent.at(-1)?.type, "frame-applied");
-  assert.equal(sent.at(-1)?.reason, "applied");
+  assert.equal(sent.at(-1)?.reason, "consumed");
 
   port.onmessage?.({
     data: {
@@ -550,6 +688,104 @@ test("preview bridge rejects malformed or oversized frame state without changing
   assert.match(out, /dezin:frame-change/);
   assert.match(out, /65536/);
   assert.match(out, /4096/);
+});
+
+test("stateful Frames wait for an exact Artifact consumption receipt and fail closed on timeout", async () => {
+  const harness = createFrameReceiptHarness();
+  let challenge: Record<string, unknown> | null = null;
+  harness.listeners.set("dezin:frame-change", [
+    ...(harness.listeners.get("dezin:frame-change") ?? []),
+    (event) => { challenge = event.detail as Record<string, unknown>; },
+  ]);
+
+  harness.send({
+    frameId: "checkout",
+    frameAttemptId: "attempt-timeout",
+    initialState: "ready",
+    fixture: { z: 2, nested: { beta: true, alpha: 1 } },
+  });
+  await harness.waitFor(() => challenge !== null);
+
+  assert.equal(harness.sent.some((message) => message.type === "frame-applied"), false);
+  assert.deepEqual((challenge!.consumption as Record<string, unknown>).digest,
+    createHash("sha256").update(
+      '{"fixture":{"nested":{"alpha":1,"beta":true},"z":2},"initialState":"ready"}',
+    ).digest("hex"));
+
+  harness.runTimer(1_000);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.sent.at(-1))), {
+    source: "dezin",
+    type: "frame-rejected",
+    frameId: "checkout",
+    frameAttemptId: "attempt-timeout",
+    reason: "frame-consumption-timeout",
+    nonce: harness.nonce,
+    protocol: 1,
+  });
+
+  harness.send({ frameId: "missing-attempt", initialState: "ready" });
+  assert.equal(harness.sent.at(-1)?.type, "frame-rejected");
+  assert.equal(harness.sent.at(-1)?.reason, "missing-frame-attempt");
+});
+
+test("stateful Frames ACK only an exact receipt and ignore a replay from an older attempt", async () => {
+  const harness = createFrameReceiptHarness();
+  const challenges: Array<Record<string, unknown>> = [];
+  harness.listeners.set("dezin:frame-change", [
+    ...(harness.listeners.get("dezin:frame-change") ?? []),
+    (event) => { challenges.push(event.detail as Record<string, unknown>); },
+  ]);
+
+  harness.send({ frameId: "checkout", frameAttemptId: "attempt-1", fixture: { count: 1 } });
+  await harness.waitFor(() => challenges.length === 1);
+  harness.send({ frameId: "checkout", frameAttemptId: "attempt-2", fixture: { count: 2 } });
+  await harness.waitFor(() => challenges.length === 2);
+  const first = challenges[0]!.consumption as Record<string, unknown>;
+  const second = challenges[1]!.consumption as Record<string, unknown>;
+
+  harness.dispatch("dezin:frame-consumed", {
+    source: "dezin",
+    nonce: second.nonce,
+    frameAttemptId: "attempt-2",
+    digest: second.digest,
+  });
+  harness.dispatch("dezin:frame-consumed", {
+    source: "dezin-artifact",
+    nonce: second.nonce,
+    frameAttemptId: "attempt-2",
+    digest: second.digest,
+    extra: true,
+  });
+  assert.equal(harness.sent.some((message) => message.type === "frame-applied"), false);
+
+  harness.dispatch("dezin:frame-consumed", {
+    source: "dezin-artifact",
+    nonce: first.nonce,
+    frameAttemptId: "attempt-1",
+    digest: first.digest,
+  });
+  assert.equal(harness.sent.some((message) => message.type === "frame-applied"), false);
+
+  harness.dispatch("dezin:frame-consumed", {
+    source: "dezin-artifact",
+    nonce: second.nonce,
+    frameAttemptId: "attempt-2",
+    digest: "0".repeat(64),
+  });
+  assert.equal(harness.sent.at(-1)?.type, "frame-rejected");
+  assert.equal(harness.sent.at(-1)?.reason, "frame-consumption-mismatch");
+
+  harness.send({ frameId: "checkout", frameAttemptId: "attempt-3", fixture: { count: 3 } });
+  await harness.waitFor(() => challenges.length === 3);
+  const third = challenges[2]!.consumption as Record<string, unknown>;
+  harness.dispatch("dezin:frame-consumed", {
+    source: "dezin-artifact",
+    nonce: third.nonce,
+    frameAttemptId: "attempt-3",
+    digest: third.digest,
+  });
+  assert.equal(harness.sent.at(-1)?.type, "frame-applied");
+  assert.equal(harness.sent.at(-1)?.reason, "consumed");
 });
 
 test("preview bridge rejects malformed, oversized, target-bearing, and extra-field prototype commands", () => {

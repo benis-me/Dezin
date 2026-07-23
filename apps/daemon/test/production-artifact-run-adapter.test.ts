@@ -259,6 +259,13 @@ function qualityDependencies(calls: string[]): ProductionStandardArtifactQuality
           height: frame.height,
           status: "passed" as const,
           reviewed: false,
+          screenshotPath: join(tmpdir(), `dezin-production-frame-${frame.id}.png`),
+          captureIdentity: {
+            sha256: "a".repeat(64),
+            byteLength: 67,
+            width: frame.width,
+            height: frame.height,
+          },
         })),
       };
     },

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeUtilTypes } from "node:util";
 import { resolve } from "node:path";
 
@@ -13,6 +14,7 @@ import type {
   ArtifactGenerationTaskLeafExecutor,
   ArtifactPreparedCandidate,
 } from "./generation-task-executor.ts";
+import { stableStringify } from "../context/context-types.ts";
 import { validateGenerationTaskPayload } from "./generation-task-contracts.ts";
 import { artifactCandidateAttemptRef } from "./artifact-candidate-transaction.ts";
 import type { SharinganCaptureBundleFence } from "./sharingan-capture-reference.ts";
@@ -36,6 +38,10 @@ const MAX_ENV_ENTRIES = 256;
 const MAX_ENV_KEY_BYTES = 1024;
 const MAX_ENV_VALUE_BYTES = 64 * 1024;
 const MAX_ENV_BYTES = 1024 * 1024;
+const MAX_EVALUATION_VERSIONS = 256;
+const MAX_EVALUATION_FRAMES = 64;
+const MAX_EVALUATION_FINDINGS_BYTES = 1024 * 1024;
+const MAX_ARTIFACT_RUN_EVIDENCE_BYTES = 1024 * 1024;
 
 export interface ArtifactRunCandidateTransactionPort
   extends StandardArtifactCandidateTransactionPort {
@@ -90,7 +96,8 @@ export class ArtifactRunExecutorError extends Error {
     | "invalid-preparation"
     | "context-mismatch"
     | "source-base-mismatch"
-    | "reference-mismatch";
+    | "reference-mismatch"
+    | "invalid-evidence";
   readonly failureClass: GenerationTaskFailureClass;
 
   constructor(
@@ -451,16 +458,183 @@ function fenceEvaluator(
   });
 }
 
+function invalidEvaluation(message: string): never {
+  throw new ArtifactRunExecutorError("invalid-evidence", message, "qa");
+}
+
+function evaluationRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || nodeUtilTypes.isProxy(value)) {
+    return invalidEvaluation(`${label} must be a non-proxy plain object`);
+  }
+  let prototype: object | null;
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
+  } catch {
+    return invalidEvaluation(`${label} could not be inspected safely`);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    return invalidEvaluation(`${label} must be a plain object`);
+  }
+  const result = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]!;
+    if (typeof key !== "string" || !descriptor.enumerable || !("value" in descriptor)) {
+      return invalidEvaluation(`${label} must contain only enumerable data fields`);
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function evaluationArray(
+  value: unknown,
+  label: string,
+  maximum = MAX_EVALUATION_FRAMES,
+): unknown[] {
+  if (!Array.isArray(value) || nodeUtilTypes.isProxy(value)
+    || Object.getPrototypeOf(value) !== Array.prototype) {
+    return invalidEvaluation(`${label} must be a non-proxy array`);
+  }
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+  } catch {
+    return invalidEvaluation(`${label} could not be inspected safely`);
+  }
+  const lengthDescriptor = descriptors.length;
+  const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : null;
+  if (!Number.isSafeInteger(length) || length < 0 || length > maximum) {
+    return invalidEvaluation(`${label} exceeds its bounded length`);
+  }
+  const expectedKeys = new Set(["length", ...Array.from({ length }, (_, index) => String(index))]);
+  if (Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !expectedKeys.has(key))) {
+    return invalidEvaluation(`${label} contains extra or sparse fields`);
+  }
+  return Array.from({ length }, (_, index) => {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      return invalidEvaluation(`${label}[${index}] must be enumerable data`);
+    }
+    return structuredClone(descriptor.value);
+  });
+}
+
+function optionalEvaluationValue(
+  record: Record<string, unknown>,
+  key: string,
+  clone: (value: unknown) => unknown,
+): { present: boolean; value?: unknown } {
+  if (!Object.hasOwn(record, key)) return { present: false };
+  return { present: true, value: clone(record[key]) };
+}
+
+function evaluationManifest(version: StandardArtifactExecutionVersion): Record<string, unknown> {
+  const evidence = evaluationRecord(version.quality.evidence, `Artifact round ${version.round} quality evidence`);
+  const quality = evaluationRecord(version.quality.quality, `Artifact round ${version.round} quality result`);
+  const candidate = evaluationRecord(evidence.candidate, `Artifact round ${version.round} evidence candidate`);
+  if (evidence.protocol !== "dezin.standard-artifact-quality.v1"
+    || evidence.round !== version.round
+    || candidate.commitHash !== version.candidate.commitHash
+    || candidate.treeHash !== version.candidate.treeHash
+    || quality.score !== version.quality.score
+    || (quality.state !== "passed" && quality.state !== "needs-attention" && quality.state !== "failed")) {
+    return invalidEvaluation(`Artifact round ${version.round} quality identity is inconsistent`);
+  }
+
+  const findings = evaluationArray(
+    quality.findings,
+    `Artifact round ${version.round} quality findings`,
+    10_000,
+  );
+  let canonicalFindings: string;
+  try {
+    canonicalFindings = stableStringify(findings);
+  } catch {
+    return invalidEvaluation(`Artifact round ${version.round} quality findings are not bounded canonical JSON`);
+  }
+  if (Buffer.byteLength(canonicalFindings, "utf8") > MAX_EVALUATION_FINDINGS_BYTES) {
+    return invalidEvaluation(`Artifact round ${version.round} quality findings exceed their digest budget`);
+  }
+  const frameResults = evaluationArray(
+    evidence.frameResults,
+    `Artifact round ${version.round} Frame results`,
+  );
+  const runtimeChecks = optionalEvaluationValue(
+    evidence,
+    "runtimeChecks",
+    (value) => evaluationArray(value, `Artifact round ${version.round} runtime checks`),
+  );
+  const visualReview = optionalEvaluationValue(
+    evidence,
+    "visualReview",
+    (value) => structuredClone(evaluationRecord(value, `Artifact round ${version.round} visual review`)),
+  );
+  const visualEvidence = optionalEvaluationValue(
+    evidence,
+    "visualEvidence",
+    (value) => evaluationArray(value, `Artifact round ${version.round} visual evidence`),
+  );
+  const sourceCaptureResult = optionalEvaluationValue(
+    evidence,
+    "sourceCaptureResult",
+    (value) => structuredClone(evaluationRecord(value, `Artifact round ${version.round} source capture`)),
+  );
+  const sourceVisualEvidence = optionalEvaluationValue(
+    evidence,
+    "sourceVisualEvidence",
+    (value) => structuredClone(evaluationRecord(value, `Artifact round ${version.round} source visual evidence`)),
+  );
+  const manifest: Record<string, unknown> = {
+    protocol: "dezin.artifact-run-evaluation-manifest.v1",
+    candidate: structuredClone(version.candidate),
+    round: version.round,
+    passed: version.quality.passed,
+    score: version.quality.score,
+    qualityState: quality.state,
+    findingsDigest: createHash("sha256").update(canonicalFindings).digest("hex"),
+    frameResults,
+    ...(runtimeChecks.present ? { runtimeChecks: runtimeChecks.value } : {}),
+    ...(visualReview.present ? { reviewSummary: visualReview.value } : {}),
+    ...(visualEvidence.present ? { visualEvidence: visualEvidence.value } : {}),
+    ...(sourceCaptureResult.present ? { sourceCaptureResult: sourceCaptureResult.value } : {}),
+    ...(sourceVisualEvidence.present ? { sourceVisualEvidence: sourceVisualEvidence.value } : {}),
+  };
+  if (evaluationBytes(
+    manifest,
+    `Artifact round ${version.round} evaluation manifest`,
+  ) > MAX_ARTIFACT_RUN_EVIDENCE_BYTES) {
+    return invalidEvaluation(`Artifact round ${version.round} evaluation manifest exceeds its byte budget`);
+  }
+  return manifest;
+}
+
+function evaluationBytes(value: unknown, label: string): number {
+  try {
+    return Buffer.byteLength(stableStringify(value), "utf8");
+  } catch {
+    return invalidEvaluation(`${label} is not bounded canonical JSON`);
+  }
+}
+
 function executionEvidence(
   claim: GenerationTaskAttemptClaim,
   preparation: ArtifactRunPreparation,
   versions: readonly StandardArtifactExecutionVersion[],
   selected: StandardArtifactExecutionVersion,
 ): Record<string, unknown> {
+  if (versions.length < 1 || versions.length > MAX_EVALUATION_VERSIONS) {
+    return invalidEvaluation("Artifact evaluation history exceeds its bounded version count");
+  }
   const gateEvidence = selected.quality.evidence;
   const runtimeChecks = Object.getOwnPropertyDescriptor(gateEvidence, "runtimeChecks");
   const visualReview = Object.getOwnPropertyDescriptor(gateEvidence, "visualReview");
-  return {
+  const evidenceBase = {
     ...(runtimeChecks && "value" in runtimeChecks
       ? { runtimeChecks: structuredClone(runtimeChecks.value) }
       : {}),
@@ -483,15 +657,34 @@ function executionEvidence(
     },
     candidateRetentionRef: preparation.transaction.attemptRef,
     selectedRound: selected.round,
-    versions: versions.map((version) => ({
+    versions: [] as Record<string, unknown>[],
+    qualityEvidence: structuredClone(gateEvidence),
+  };
+  let evidenceBytes = evaluationBytes(evidenceBase, "Artifact run evidence");
+  for (const version of versions) {
+    const retainedVersion = {
       round: version.round,
       commitHash: version.candidate.commitHash,
       treeHash: version.candidate.treeHash,
       passed: version.quality.passed,
       score: version.quality.score,
-    })),
-    qualityEvidence: gateEvidence,
-  };
+      evaluationManifest: evaluationManifest(version),
+    };
+    const retainedBytes = evaluationBytes(
+      retainedVersion,
+      `Artifact round ${version.round} retained evaluation`,
+    );
+    evidenceBytes += retainedBytes + (evidenceBase.versions.length === 0 ? 0 : 1);
+    if (evidenceBytes > MAX_ARTIFACT_RUN_EVIDENCE_BYTES) {
+      return invalidEvaluation("Artifact run evidence exceeds its prepared-candidate byte budget");
+    }
+    evidenceBase.versions.push(retainedVersion);
+  }
+  const evidence = evidenceBase;
+  if (evaluationBytes(evidence, "Artifact run evidence") > MAX_ARTIFACT_RUN_EVIDENCE_BYTES) {
+    return invalidEvaluation("Artifact run evidence exceeds its prepared-candidate byte budget");
+  }
+  return evidence;
 }
 
 /**

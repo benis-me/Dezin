@@ -10,14 +10,14 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import { resourceAdapters } from "../src/context/adapters/index.ts";
 import { ensureStandardProjectWorkspace } from "../src/workspace-migration.ts";
-import { createResearchRevisionFixture } from "./support/research-resource-fixture.ts";
+import {
+  createResearchRevisionFixture,
+  persistResearchRevisionFixtureContextPack,
+} from "./support/research-resource-fixture.ts";
 
 const SELECTION_ID = "selection-00000000-0000-4000-8000-000000000011";
 const HYPOTHESIS_SELECTION_ID = "selection-00000000-0000-4000-8000-000000000012";
 
-function researchBundle(workspaceId: string, resourceId: string) {
-  return createResearchRevisionFixture({ workspaceId, resourceId });
-}
 async function withServer(run: (input: {
   base: string;
   dataDir: string;
@@ -82,7 +82,18 @@ async function seed(store: Store, dataDir: string) {
     baseGraphRevision: initial.graphRevision,
     expectedSnapshotId: initial.activeSnapshotId,
   });
-  const fixture = researchBundle(initial.id, research.resource.id);
+  const contextPack = persistResearchRevisionFixtureContextPack({
+    store,
+    manifestRoot: dataDir,
+    workspaceId: initial.id,
+    resourceId: research.resource.id,
+    graphRevision: store.workspace.getWorkspace(project.id)!.graphRevision,
+  });
+  const fixture = createResearchRevisionFixture({
+    workspaceId: initial.id,
+    resourceId: research.resource.id,
+    contextPack,
+  });
   await writeFile(
     join(repository, "research.json"),
     `${JSON.stringify(fixture.bundle)}\n`,

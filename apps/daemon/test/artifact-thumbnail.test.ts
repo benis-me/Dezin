@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 import { Store } from "../../../packages/core/src/index.ts";
 import {
@@ -15,6 +16,8 @@ const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+const DAEMON_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function pngCrc32(bytes: Uint8Array): number {
   let crc = 0xffff_ffff;
@@ -104,7 +107,7 @@ function runThumbnailChild(script: string): Promise<{ rendered: boolean; cacheHi
       "--input-type=module",
       "-e",
       script,
-    ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    ], { cwd: DAEMON_ROOT, stdio: ["ignore", "pipe", "pipe"] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -551,6 +554,42 @@ test("thumbnail ownership and image validation fail closed before anything is ca
     });
     assert.equal(renders, 2);
     assert.equal(valid.cacheHit, false);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("formal Revision thumbnails reject unpublished candidates before rendering", async () => {
+  const fixture = createThumbnailFixture();
+  try {
+    const candidate = fixture.store.workspace.createArtifactRevision({
+      artifactId: fixture.artifactId,
+      trackId: fixture.revision.trackId,
+      parentRevisionId: fixture.revision.id,
+      sourceCommitHash: "commit-unpublished",
+      sourceTreeHash: "tree-unpublished",
+      kernelRevisionId: fixture.revision.kernelRevisionId,
+      renderSpec: {
+        entry: "index.html",
+        frames: [{ id: "desktop", width: 1440, height: 900 }],
+      },
+      quality: { state: "unassessed", score: null, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    let renders = 0;
+
+    await assert.rejects(getOrCreateArtifactThumbnail({
+      store: fixture.store,
+      dataDir: fixture.dataDir,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      revisionId: candidate.id,
+    }, (target) => {
+      renders += 1;
+      return renderedPng(target);
+    }), /published|Snapshot|owned immutable Artifact Revision thumbnail target/i);
+    assert.equal(renders, 0);
   } finally {
     fixture.close();
   }

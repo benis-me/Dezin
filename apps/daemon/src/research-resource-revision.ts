@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { TextDecoder } from "node:util";
 
 import type {
   ResearchEvidenceStatus,
@@ -12,7 +13,8 @@ import type {
   ResearchRevisionSourceView,
   Store,
 } from "../../../packages/core/src/index.ts";
-import { stableStringify } from "./context/context-types.ts";
+import { stableStringify, type ContextPack } from "./context/context-types.ts";
+import { createWorkspaceContextPackRepository } from "./context/context-pack-store.ts";
 import {
   ResourceRevisionPayloadError,
   resolveResourceRevisionPayloadDescriptor,
@@ -141,6 +143,20 @@ function sameMembers(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((item) => right.includes(item));
 }
 
+function parseResearchJson(bytes: Buffer): unknown {
+  let textValue: string;
+  try {
+    textValue = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return fail("Research Revision payload is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(textValue) as unknown;
+  } catch {
+    return fail("Research Revision payload is not valid JSON");
+  }
+}
+
 interface ResearchBundleContextPack {
   id: string;
   hash: string;
@@ -209,7 +225,11 @@ function locatedExcerpt(value: unknown, label: string): {
   return { text: excerptText, utf8Start, utf8End };
 }
 
-function decodeSources(value: unknown, contextPack: ResearchBundleContextPack): DecodedResearchSource[] {
+function decodeSources(
+  value: unknown,
+  contextPack: ResearchBundleContextPack,
+  authority: ContextPack,
+): DecodedResearchSource[] {
   const ids = new Set<string>();
   const receiptIds = new Set<string>();
   return array(value, "Research sources", 2, 64).map((raw, index) => {
@@ -246,6 +266,13 @@ function decodeSources(value: unknown, contextPack: ResearchBundleContextPack): 
       if (binding.contextPackId !== contextPack.id || binding.contextPackHash !== contextPack.hash) {
         return fail(`Research source ${id} Context Pack binding is inconsistent`);
       }
+      const authorityItem = authority.items[binding.itemOrdinal];
+      if (!authorityItem
+        || authorityItem.ordinal !== binding.itemOrdinal
+        || authorityItem.checksum !== binding.itemChecksum
+        || authorityItem.provided !== true) {
+        return fail(`Research source ${id} Context item is not anchored to its immutable authority`);
+      }
       locator = text(source.locator, `Research source ${id} locator`, 16_384);
       if (locator !== `context-pack:${contextPack.id}#item:${binding.itemOrdinal}`) {
         return fail(`Research source ${id} Context locator is inconsistent`);
@@ -268,6 +295,7 @@ function decodeReceipts(
   value: unknown,
   sources: readonly DecodedResearchSource[],
   contextPack: ResearchBundleContextPack,
+  authority: ContextPack,
 ): DecodedResearchReceipt[] {
   const sourceById = new Map(sources.map((source) => [source.view.id, source]));
   const ids = new Set<string>();
@@ -332,6 +360,19 @@ function decodeReceipts(
       sha256(item.contextPackHash, `Research evidence receipt ${index} Context Pack hash`);
       sha256(item.contextItemChecksum, `Research evidence receipt ${index} Context item checksum`);
       const location = locatedExcerpt(item.excerpt, `Research evidence receipt ${index} excerpt`);
+      const authorityItem = authority.items[source.binding.itemOrdinal];
+      const authorityBytes = authorityItem === undefined
+        ? null
+        : Buffer.from(authorityItem.content, "utf8");
+      const excerptBytes = Buffer.from(location.text, "utf8");
+      if (authorityItem === undefined
+        || authorityItem.ordinal !== source.binding.itemOrdinal
+        || authorityItem.checksum !== source.binding.itemChecksum
+        || authorityBytes === null
+        || location.utf8End > authorityBytes.byteLength
+        || !authorityBytes.subarray(location.utf8Start, location.utf8End).equals(excerptBytes)) {
+        return fail(`Research evidence receipt ${index} excerpt is not anchored to its immutable Context item`);
+      }
       excerpt = { ...location };
     }
     if (excerpt.text !== source.view.excerpt) {
@@ -640,7 +681,11 @@ function decodeBundleScope(
   };
 }
 
-function decodeBundleContextPack(value: unknown, scope: ResearchBundleScope): ResearchBundleContextPack {
+function decodeBundleContextPack(
+  value: unknown,
+  scope: ResearchBundleScope,
+  authority: ContextPack | null,
+): ResearchBundleContextPack {
   const contextPack = exactRecord(value, ["id", "hash", "graphRevision"], "Research Context Pack identity");
   const decoded = {
     id: identifier(contextPack.id, "Research Context Pack id"),
@@ -648,6 +693,13 @@ function decodeBundleContextPack(value: unknown, scope: ResearchBundleScope): Re
     graphRevision: safeInteger(contextPack.graphRevision, "Research Context Pack graph revision"),
   };
   if (decoded.id !== scope.contextPackId) return fail("Research Context Pack identity is inconsistent");
+  if (authority === null
+    || authority.id !== decoded.id
+    || authority.workspaceId !== scope.workspaceId
+    || authority.hash !== decoded.hash
+    || authority.graphRevision !== decoded.graphRevision) {
+    return fail("Research Context Pack identity is not anchored to its immutable authority");
+  }
   return decoded;
 }
 
@@ -765,23 +817,120 @@ function validateResearchMetadata(input: {
   return expectedQuality;
 }
 
-function decodeResearchBundle(input: {
-  bytes: Buffer;
-  workspaceId: string;
-  resourceId: string;
-  parentRevisionId: string | null;
-  revisionMetadata: Record<string, unknown>;
-  revisionProvenance: Record<string, unknown>;
-}): Omit<ResearchResourceRevisionView, "protocol" | "resource" | "revision" | "observed"> {
+export interface ResearchRevisionPayloadValidationInput {
+  readonly bytes: Buffer;
+  readonly workspaceId: string;
+  readonly resourceId: string;
+  readonly parentRevisionId: string | null;
+  readonly revisionMetadata: Record<string, unknown>;
+  readonly revisionProvenance: Record<string, unknown>;
+  /** Exact daemon Context Pack reconstructed from its immutable manifest and Core row. */
+  readonly contextPack: ContextPack | null;
+}
+
+export interface ResearchRevisionDirectionSelectionInput extends ResearchRevisionPayloadValidationInput {
+  readonly directionId: string;
+}
+
+export function researchRevisionContextPackId(provenance: Record<string, unknown>): string | null {
+  try {
+    const outer = record(provenance, "Research Revision provenance");
+    const production = record(outer.adapterProvenance, "Research production provenance");
+    return identifier(production.contextPackId, "Research production Context Pack id");
+  } catch (error) {
+    if (error instanceof ResearchResourceRevisionError) return null;
+    throw error;
+  }
+}
+
+function selectLegacyResearchRevisionDirection(
+  input: ResearchRevisionDirectionSelectionInput,
+  bundle: Record<string, unknown>,
+): ResearchRevisionDirectionView {
+  if (bundle.version !== 1 && bundle.version !== 2) {
+    return fail("Research Revision payload protocol is unsupported");
+  }
+  const scope = record(bundle.scope, "Legacy Research Revision scope");
+  if (scope.workspaceId !== input.workspaceId || scope.resourceId !== input.resourceId) {
+    return fail("Legacy Research Revision payload scope does not match its immutable owner");
+  }
+  const directionId = identifier(input.directionId, "Research direction selection id");
+  const matches = array(bundle.directions, "Legacy Research directions", 1, 16)
+    .map((value, index): ResearchRevisionDirectionView => {
+      const baseFields = [
+        "id", "title", "thesis", "visualLanguage", "interactionPrinciples", "risks", "findingIds",
+      ];
+      const direction = exactRecord(
+        value,
+        bundle.version === 1
+          ? baseFields
+          : [...baseFields, "evidenceStatus", "evidenceFindingIds", "hypothesisFindingIds"],
+        `Legacy Research direction ${index}`,
+      );
+      const id = identifier(direction.id, `Legacy Research direction ${index} id`);
+      const findingIds = stringArray(direction.findingIds, `Legacy Research direction ${id} findings`, 1, 32);
+      if (bundle.version === 2) {
+        const evidenceFindingIds = stringArray(
+          direction.evidenceFindingIds,
+          `Legacy Research direction ${id} evidence findings`,
+          0,
+          32,
+        );
+        const hypothesisFindingIds = stringArray(
+          direction.hypothesisFindingIds,
+          `Legacy Research direction ${id} hypothesis findings`,
+          0,
+          32,
+        );
+        const partition = [...evidenceFindingIds, ...hypothesisFindingIds];
+        const status = evidenceStatus(direction.evidenceStatus, `Legacy Research direction ${id} evidence status`);
+        if (partition.length !== findingIds.length
+          || new Set(partition).size !== partition.length
+          || partition.some((findingId) => !findingIds.includes(findingId))
+          || (status === "evidence") !== (hypothesisFindingIds.length === 0)) {
+          return fail(`Legacy Research direction ${id} evidence is inconsistent`);
+        }
+      }
+      // Legacy bundles predate canonical receipts and groundedness attestations.
+      // Keep the selected design direction usable for queued/retry work, but
+      // never carry a legacy self-asserted evidence label across the v3 trust boundary.
+      return {
+        id,
+        title: text(direction.title, `Legacy Research direction ${id} title`),
+        thesis: text(direction.thesis, `Legacy Research direction ${id} thesis`),
+        visualLanguage: stringArray(
+          direction.visualLanguage,
+          `Legacy Research direction ${id} visual language`,
+          1,
+          16,
+        ),
+        interactionPrinciples: stringArray(
+          direction.interactionPrinciples,
+          `Legacy Research direction ${id} interaction principles`,
+          1,
+          16,
+        ),
+        risks: stringArray(direction.risks, `Legacy Research direction ${id} risks`, 1, 16),
+        findingIds,
+        evidenceStatus: "hypothesis",
+        evidenceFindingIds: [],
+        hypothesisFindingIds: findingIds,
+      };
+    })
+    .filter((direction) => direction.id === directionId);
+  if (matches.length !== 1) {
+    return fail("Chosen Research direction is missing or ambiguous in its pinned Revision");
+  }
+  return matches[0]!;
+}
+
+function decodeResearchBundle(
+  input: ResearchRevisionPayloadValidationInput,
+): Omit<ResearchResourceRevisionView, "protocol" | "resource" | "revision" | "observed"> {
   if (input.bytes.byteLength === 0 || input.bytes.byteLength > MAX_RESEARCH_VIEW_BYTES) {
     return fail("Research Revision payload exceeds the Viewer bound");
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.bytes.toString("utf8"));
-  } catch {
-    return fail("Research Revision payload is not valid JSON");
-  }
+  const parsed = parseResearchJson(input.bytes);
   const bundle = exactRecord(parsed, [
     "format", "version", "scope", "contextPack", "brief", "executiveSummary", "sources", "receipts",
     "supportReceipts", "findings", "designPrinciples", "directions", "openQuestions",
@@ -790,11 +939,11 @@ function decodeResearchBundle(input: {
     return fail("Research Revision payload protocol is unsupported");
   }
   const scope = decodeBundleScope(bundle.scope, input);
-  const contextPack = decodeBundleContextPack(bundle.contextPack, scope);
+  const contextPack = decodeBundleContextPack(bundle.contextPack, scope, input.contextPack);
   validateResearchBrief(bundle.brief, scope);
-  const decodedSources = decodeSources(bundle.sources, contextPack);
+  const decodedSources = decodeSources(bundle.sources, contextPack, input.contextPack!);
   const sources = decodedSources.map((source) => source.view);
-  const receipts = decodeReceipts(bundle.receipts, decodedSources, contextPack);
+  const receipts = decodeReceipts(bundle.receipts, decodedSources, contextPack, input.contextPack!);
   const supportReceipts = decodeSupportReceipts(bundle.supportReceipts, receipts);
   const groundednessVerifier = decodeResearchProvenance({
     provenance: input.revisionProvenance,
@@ -851,6 +1000,32 @@ function decodeResearchBundle(input: {
     directions,
     openQuestions: stringArray(bundle.openQuestions, "Research open questions", 0, 64),
   };
+}
+
+/**
+ * Validates the complete canonical Research v3 payload, metadata, provenance,
+ * receipts, findings, and evidence partitions before exposing one direction.
+ */
+export function selectResearchRevisionDirection(
+  input: ResearchRevisionDirectionSelectionInput,
+): ResearchRevisionDirectionView {
+  if (input.bytes.byteLength === 0 || input.bytes.byteLength > MAX_RESEARCH_VIEW_BYTES) {
+    return fail("Research Revision payload exceeds the Viewer bound");
+  }
+  const envelope = record(parseResearchJson(input.bytes), "Research Revision payload");
+  if (envelope.format !== "dezin-research-resource-bundle") {
+    return fail("Research Revision payload protocol is unsupported");
+  }
+  if (envelope.version === 1 || envelope.version === 2) {
+    return selectLegacyResearchRevisionDirection(input, envelope);
+  }
+  const directionId = identifier(input.directionId, "Research direction selection id");
+  const content = decodeResearchBundle(input);
+  const matches = content.directions.filter((direction) => direction.id === directionId);
+  if (matches.length !== 1) {
+    return fail("Chosen Research direction is missing or ambiguous in its pinned Revision");
+  }
+  return matches[0]!;
 }
 
 export async function readResearchResourceRevision(input: {
@@ -913,6 +1088,12 @@ export async function readResearchResourceRevision(input: {
       throw error;
     }
     input.signal?.throwIfAborted();
+    const contextPackId = researchRevisionContextPackId(revision.provenance);
+    const contextPack = contextPackId === null
+      ? null
+      : createWorkspaceContextPackRepository(input.store.workspace, {
+          manifestRoot: input.dataDir,
+        }).get(resource.workspaceId, contextPackId);
     const content = decodeResearchBundle({
       bytes: await readFile(destination),
       workspaceId: resource.workspaceId,
@@ -920,6 +1101,7 @@ export async function readResearchResourceRevision(input: {
       parentRevisionId: revision.parentRevisionId,
       revisionMetadata: revision.metadata,
       revisionProvenance: revision.provenance,
+      contextPack,
     });
     return {
       protocol: "dezin.research-resource-revision-view.v1",

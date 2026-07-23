@@ -3,8 +3,9 @@
 // the captured bundle, INSTEAD of hand-writing curl/python. `BASE` is baked in when this file is
 // copied into a project's .sharingan/ ; the daemon token comes from the environment. Run as:
 //   node .sharingan/probe.mjs <command> [args]
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const BASE = "__BASE__";
 const RUN_ID = "__RUN_ID__";
@@ -449,7 +450,185 @@ function uniqueShort(items, max = 12) {
   return out;
 }
 
-function sourceRegionPlan(page, manifest, data) {
+const SHARINGAN_REGION_BUDGET = 8;
+
+function capturedSidecarPath(path, label) {
+  if (typeof path !== "string" || !path) fail(`${label} path is invalid`);
+  let captureRoot;
+  let candidate;
+  try {
+    captureRoot = realpathSync(resolve(".sharingan"));
+    candidate = realpathSync(resolve(path));
+  } catch {
+    fail(`${label} is unavailable`);
+  }
+  const inside = relative(captureRoot, candidate);
+  if (!inside || inside === ".." || inside.startsWith(`..${sep}`)
+    || isAbsolute(inside)) {
+    fail(`${label} is outside the pinned .sharingan capture root`);
+  }
+  return candidate;
+}
+
+function capturedJsonSnapshot(path, label) {
+  const sourcePath = capturedSidecarPath(path, label);
+  let bytes;
+  try {
+    bytes = readFileSync(sourcePath);
+  } catch {
+    fail(`${label} is unavailable`);
+  }
+  try {
+    return { path: sourcePath, identityPath: path, bytes, value: JSON.parse(bytes.toString("utf8")) };
+  } catch {
+    fail(`${label} is not valid JSON`);
+  }
+}
+
+function capturedBinarySnapshot(path, label) {
+  const sourcePath = capturedSidecarPath(path, label);
+  try {
+    return { path: sourcePath, identityPath: path, bytes: readFileSync(sourcePath) };
+  } catch {
+    fail(`${label} is unavailable`);
+  }
+}
+
+function capturedScreenshotSnapshots(page) {
+  if (!page.screenshots || typeof page.screenshots !== "object" || Array.isArray(page.screenshots)) return [];
+  return Object.entries(page.screenshots)
+    .filter(([, path]) => typeof path === "string" && path.length > 0)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([name, path]) => ({ name, ...capturedBinarySnapshot(path, `captured ${name} screenshot`) }));
+}
+
+function assertCapturedSnapshotsStable(snapshots) {
+  for (const snapshot of snapshots) {
+    let current;
+    try {
+      current = readFileSync(snapshot.path);
+    } catch {
+      fail(`captured source changed while source-scaffold was deriving its region plan: ${snapshot.path}`);
+    }
+    if (!snapshot.bytes.equals(current)) {
+      fail(`captured source changed while source-scaffold was deriving its region plan: ${snapshot.path}`);
+    }
+  }
+}
+
+function sourceCaptureIdentity(page, manifest, pagesSnapshot, renderMapSnapshot, assetsSnapshot, screenshotSnapshots) {
+  if (!page || typeof page !== "object" || Array.isArray(page)
+    || typeof page.renderMap !== "string" || !page.renderMap
+    || typeof page.assets !== "string" || !page.assets) {
+    fail("captured entry is missing its exact render-map or asset inventory");
+  }
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const entryIdentity = JSON.stringify({
+    requestedSourceUrl: manifest && Object.prototype.hasOwnProperty.call(manifest, "requestedSourceUrl")
+      ? manifest.requestedSourceUrl
+      : null,
+    sourceUrl: manifest && Object.prototype.hasOwnProperty.call(manifest, "sourceUrl")
+      ? manifest.sourceUrl
+      : manifest && Object.prototype.hasOwnProperty.call(manifest, "entryUrl")
+        ? manifest.entryUrl
+        : null,
+    page,
+  });
+  const screenshotIdentity = JSON.stringify(screenshotSnapshots.map((snapshot) => ({
+    name: snapshot.name,
+    path: snapshot.identityPath,
+    sha256: digest(snapshot.bytes),
+  })));
+  return {
+    protocol: "dezin.sharingan-entry-capture-identity.v2",
+    pagesManifestSha256: digest(pagesSnapshot.bytes),
+    pagesEntrySha256: digest(Buffer.from(entryIdentity, "utf8")),
+    renderMapSha256: digest(renderMapSnapshot.bytes),
+    assetsSha256: digest(assetsSnapshot.bytes),
+    screenshotsSha256: digest(Buffer.from(screenshotIdentity, "utf8")),
+  };
+}
+
+function regionSignalScore(region) {
+  const count = (key) => {
+    const value = Number(region && region.counts && region.counts[key]);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  };
+  return (
+    count("images") * 8 +
+    count("vectors") * 6 +
+    count("texts") * 3 +
+    count("boxes") +
+    asArray(region && region.assets).length * 4 +
+    asArray(region && region.media).length * 4 +
+    asArray(region && region.vectors).length * 3 +
+    asArray(region && region.textRuns).length * 2 +
+    asArray(region && region.paintBoxes).length
+  );
+}
+
+function selectRegionsForBudget(regions, maxRegions, documentHeight) {
+  const budget = Number.isFinite(maxRegions) ? Math.max(0, Math.floor(maxRegions)) : 0;
+  if (!budget || !regions.length) return [];
+  if (regions.length <= budget) return regions;
+  if (budget === 1) return [regions[0]];
+  if (budget === 2) return [regions[0], regions[regions.length - 1]];
+
+  const centerY = (region) => {
+    const y = Number(region && region.bbox && region.bbox.y);
+    const height = Number(region && region.bbox && region.bbox.h);
+    return Number.isFinite(y) && Number.isFinite(height) ? y + height / 2 : null;
+  };
+  const measuredBottom = regions.reduce((bottom, region) => {
+    const y = Number(region && region.bbox && region.bbox.y);
+    const height = Number(region && region.bbox && region.bbox.h);
+    return Number.isFinite(y) && Number.isFinite(height) ? Math.max(bottom, y + height) : bottom;
+  }, 0);
+  const declaredHeight = Number(documentHeight);
+  const verticalExtent = Math.max(Number.isFinite(declaredHeight) && declaredHeight > 0 ? declaredHeight : 0, measuredBottom);
+  const interiorSlots = budget - 2;
+  const selectedIndexes = new Set([0, regions.length - 1]);
+  if (verticalExtent > 0) {
+    const buckets = Array.from({ length: interiorSlots }, () => []);
+    for (let index = 1; index < regions.length - 1; index += 1) {
+      const center = centerY(regions[index]);
+      if (center === null) continue;
+      const slot = Math.min(
+        interiorSlots - 1,
+        Math.max(0, Math.floor((Math.max(0, center) / verticalExtent) * interiorSlots)),
+      );
+      buckets[slot].push(index);
+    }
+    for (let slot = 0; slot < interiorSlots; slot += 1) {
+      const targetY = ((slot + 0.5) * verticalExtent) / interiorSlots;
+      const best = buckets[slot].sort((left, right) => {
+        const scoreDelta = regionSignalScore(regions[right]) - regionSignalScore(regions[left]);
+        if (scoreDelta !== 0) return scoreDelta;
+        const distanceDelta = Math.abs((centerY(regions[left]) ?? targetY) - targetY)
+          - Math.abs((centerY(regions[right]) ?? targetY) - targetY);
+        return distanceDelta || left - right;
+      })[0];
+      if (best !== undefined) selectedIndexes.add(best);
+    }
+  }
+  if (selectedIndexes.size < budget) {
+    const remaining = Array.from({ length: regions.length - 2 }, (_, offset) => offset + 1)
+      .filter((index) => !selectedIndexes.has(index))
+      .sort((left, right) => {
+        const scoreDelta = regionSignalScore(regions[right]) - regionSignalScore(regions[left]);
+        return scoreDelta || left - right;
+      });
+    for (const index of remaining) {
+      selectedIndexes.add(index);
+      if (selectedIndexes.size >= budget) break;
+    }
+  }
+  return [...selectedIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => regions[index]);
+}
+
+function sourceRegionPlan(page, manifest, data, captureIdentity) {
   const bandHeight = 200;
   const groups = new Map();
   const newGroup = (band) => ({
@@ -537,10 +716,10 @@ function sourceRegionPlan(page, manifest, data) {
   data.images.forEach((item, index) => add("image", item, index));
   data.vectors.forEach((item, index) => add("vector", item, index));
   data.texts.forEach((item, index) => add("text", item, index));
-  const regions = Array.from(groups.values())
+  const candidates = Array.from(groups.values())
     .filter((group) => group.bbox)
-    .sort((a, b) => a.band - b.band || a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x)
-    .slice(0, 12)
+    .sort((a, b) => a.band - b.band || a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x);
+  const regions = selectRegionsForBudget(candidates, SHARINGAN_REGION_BUDGET, data.document && data.document.height)
     .map((group, index) => {
       const texts = uniqueShort(group.texts, 14);
       return {
@@ -559,7 +738,11 @@ function sourceRegionPlan(page, manifest, data) {
       };
     });
   return {
-    version: 1,
+    protocol: "dezin.sharingan-region-plan.v2",
+    version: 2,
+    captureIdentity,
+    regionBudget: SHARINGAN_REGION_BUDGET,
+    candidateCount: candidates.length,
     sourceUrl: data.pageUrl || page.url || manifest.entryUrl || "",
     viewport: data.viewport,
     document: data.document,
@@ -574,11 +757,19 @@ function sourceScaffold(outputMode = ".sharingan") {
   if (outputMode !== ".sharingan" && outputMode !== "--stdout") {
     fail("source-scaffold accepts only --stdout for immutable Tasks (omit it only for legacy mutable Runs)");
   }
-  const manifest = readJson(join(".sharingan", "pages.json"), null);
+  const pagesSnapshot = capturedJsonSnapshot(join(".sharingan", "pages.json"), "captured pages manifest");
+  const manifest = pagesSnapshot.value;
   const page = manifestEntryPage(manifest);
   if (!page) fail("no captured page in .sharingan/pages.json");
-  const map = readJson(page.renderMap, {});
-  const assetsRaw = readJson(page.assets, []);
+  if (typeof page.renderMap !== "string" || !page.renderMap
+    || typeof page.assets !== "string" || !page.assets) {
+    fail("captured entry is missing its exact render-map or asset inventory");
+  }
+  const renderMapSnapshot = capturedJsonSnapshot(page.renderMap, "captured entry render-map");
+  const assetsSnapshot = capturedJsonSnapshot(page.assets, "captured entry asset inventory");
+  const screenshotSnapshots = capturedScreenshotSnapshots(page);
+  const map = renderMapSnapshot.value;
+  const assetsRaw = assetsSnapshot.value;
   const assets = asArray(Array.isArray(assetsRaw.assets) ? assetsRaw.assets : assetsRaw).filter((a) => a && a.local);
   const elements = Array.isArray(map.elements) ? map.elements : [];
   const viewport = map.viewport || { width: 1440, height: 900 };
@@ -688,7 +879,21 @@ function sourceScaffold(outputMode = ".sharingan") {
     })),
   };
 
-  const regionPlan = sourceRegionPlan(page, manifest, data);
+  const captureIdentity = sourceCaptureIdentity(
+    page,
+    manifest,
+    pagesSnapshot,
+    renderMapSnapshot,
+    assetsSnapshot,
+    screenshotSnapshots,
+  );
+  const regionPlan = sourceRegionPlan(page, manifest, data, captureIdentity);
+  assertCapturedSnapshotsStable([
+    pagesSnapshot,
+    renderMapSnapshot,
+    assetsSnapshot,
+    ...screenshotSnapshots,
+  ]);
   if (outputMode === "--stdout") {
     const output = JSON.stringify({
       protocol: "dezin.sharingan-source-scaffold.v1",

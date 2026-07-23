@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiProvider } from "../../lib/api-context.tsx";
-import type { PreviewTarget, ResolvedPreviewTarget } from "../../lib/api.ts";
+import type { ArtifactRevision, PreviewTarget, ResolvedPreviewTarget } from "../../lib/api.ts";
 import { makeFakeApi } from "../../test/fake-api.ts";
 import { createPrototypeFlowSession } from "./prototype-flow.ts";
 import { PrototypeFlowViewer } from "./PrototypeFlowViewer.tsx";
@@ -15,9 +15,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function resolved(target: Extract<PreviewTarget, { kind: "workspace-flow" }>): ResolvedPreviewTarget {
+function resolved(
+  target: Extract<PreviewTarget, { kind: "workspace-flow" }>,
+  revisions: readonly ArtifactRevision[] = flowRevisions(),
+): ResolvedPreviewTarget {
   const revisionId = target.startArtifactId === "page-a" ? "revision-a" : "revision-b";
-  const renderSpec = flowRevisions().find((revision) => revision.id === revisionId)?.renderSpec ?? {};
+  const renderSpec = revisions.find((revision) => revision.id === revisionId)?.renderSpec ?? {};
   return {
     version: 1,
     targetKey: `${target.snapshotId}:${target.startArtifactId}:${revisionId}`,
@@ -179,6 +182,9 @@ test("applies and acknowledges the frozen default RenderSpec frame before declar
   );
 
   const frame = await screen.findByTitle("Alpha flow preview") as HTMLIFrameElement;
+  const viewport = frame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]');
+  expect(viewport).not.toBeNull();
+  expect(viewport).toHaveStyle({ visibility: "hidden" });
   const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
   fireEvent.load(frame);
   const bootstrap = (postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>).find(
@@ -201,7 +207,33 @@ test("applies and acknowledges the frozen default RenderSpec frame before declar
     frameId: command.frameId,
     frameAttemptId: command.frameAttemptId,
   });
+  await waitFor(() => expect(viewport).toHaveStyle({ visibility: "visible" }));
   port.close();
+});
+
+test("renders the active Page inside its exact declared Frame viewport instead of the dialog viewport", async () => {
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], flowRevisions());
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(target as Extract<PreviewTarget, { kind: "workspace-flow" }>),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: "lease-page-a-exact-viewport",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  const iframe = await screen.findByTitle("Alpha flow preview");
+  const viewport = iframe.closest<HTMLElement>('[data-prototype-frame-id="desktop"]');
+  expect(viewport).not.toBeNull();
+  expect(viewport).toHaveStyle({ width: "1280px", height: "800px" });
+  expect(viewport).toHaveStyle({ transform: "scale(0.8)" });
+  expect(screen.getByLabelText("Frozen prototype identity")).toHaveTextContent("Frame Desktop · 1280 × 800");
 });
 
 test("surfaces an initial bridge-readiness deadline instead of leaving the first Page silently unprepared", async () => {
@@ -223,9 +255,13 @@ test("surfaces an initial bridge-readiness deadline instead of leaving the first
   );
 
   await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-  expect(screen.getByTitle("Alpha flow preview")).toBeInTheDocument();
+  const frame = screen.getByTitle("Alpha flow preview");
+  const viewport = frame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]');
+  expect(viewport).toHaveStyle({ visibility: "hidden" });
   await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
   expect(screen.getByRole("alert")).toHaveTextContent("did not become ready");
+  expect(viewport).toHaveStyle({ visibility: "hidden" });
+  expect(screen.getByText("Exact Frame unavailable")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Retry exact Page preparation" })).toBeEnabled();
 });
 
@@ -290,6 +326,7 @@ test("surfaces a rejected initial RenderSpec frame and retries with a fresh exac
   });
 
   expect(await screen.findByRole("alert")).toHaveTextContent("fixture-contract-mismatch");
+  expect(firstFrame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]')).toHaveStyle({ visibility: "hidden" });
   fireEvent.click(screen.getByRole("button", { name: "Retry exact Page preparation" }));
   await waitFor(() => expect(screen.getByTitle("Alpha flow preview")).not.toBe(firstFrame));
   const retryFrame = screen.getByTitle("Alpha flow preview") as HTMLIFrameElement;
@@ -304,6 +341,7 @@ test("surfaces a rejected initial RenderSpec frame and retries with a fresh exac
   retryPort.start();
   retryPort.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
   await waitFor(() => expect(retryReceived.some((message) => message.type === "set-frame")).toBe(true));
+  expect(retryFrame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]')).toHaveStyle({ visibility: "hidden" });
   const applied = retryReceived.find((message) => message.type === "set-frame")!;
   retryPort.postMessage({
     source: "dezin",
@@ -314,6 +352,7 @@ test("surfaces a rejected initial RenderSpec frame and retries with a fresh exac
     frameAttemptId: applied.frameAttemptId,
   });
   await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  expect(retryFrame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]')).toHaveStyle({ visibility: "visible" });
   firstPort.close();
   retryPort.close();
 });
@@ -521,7 +560,7 @@ test("cross-Page navigation applies one five-second deadline across lease acquis
   port.close();
 });
 
-test("same-Page targetState uses the exact target and acknowledged frame without reloading or releasing its lease", async () => {
+test("same-Page targetState preserves the exact viewport without reloading or releasing its lease", async () => {
   const snapshot = flowSnapshot();
   snapshot.graph.edges.unshift({
     id: "edge-same-page-state",
@@ -541,9 +580,16 @@ test("same-Page targetState uses the exact target and acknowledged frame without
       },
     },
   });
-  const session = createPrototypeFlowSession(snapshot, ["node-a"], flowRevisions());
+  const revisions = flowRevisions();
+  const pageRevision = revisions.find((revision) => revision.id === "revision-a")!;
+  pageRevision.renderSpec.thumbnailFrameId = "mobile";
+  (pageRevision.renderSpec.frames as Array<Record<string, unknown>>).push(
+    { id: "mobile", name: "Mobile", width: 390, height: 844 },
+    { id: "confirmed-mobile", name: "Confirmed mobile", width: 393, height: 852, initialState: "confirmed" },
+  );
+  const session = createPrototypeFlowSession(snapshot, ["node-a"], revisions);
   const resolvePreviewTarget = vi.fn(async (_projectId: string, target: PreviewTarget) => (
-    resolved(target as Extract<PreviewTarget, { kind: "workspace-flow" }>)
+    resolved(target as Extract<PreviewTarget, { kind: "workspace-flow" }>, revisions)
   ));
   const acquirePreviewTargetLease = vi.fn(async (_projectId, exact) => ({
     leaseId: "lease-page-a",
@@ -575,7 +621,7 @@ test("same-Page targetState uses the exact target and acknowledged frame without
   port.start();
   port.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
   await waitFor(() => expect(received.some((message) => message.type === "set-prototype-bindings")).toBe(true));
-  const defaultFrame = received.find((message) => message.type === "set-frame" && message.frameId === "desktop")!;
+  const defaultFrame = received.find((message) => message.type === "set-frame" && message.frameId === "mobile")!;
   port.postMessage({
     source: "dezin",
     type: "frame-applied",
@@ -604,8 +650,10 @@ test("same-Page targetState uses the exact target and acknowledged frame without
     startArtifactId: "page-a",
     stateKey: "confirmed",
   }, expect.any(AbortSignal)));
-  await waitFor(() => expect(received.some((message) => message.type === "set-frame" && message.initialState === "confirmed")).toBe(true));
-  const confirmed = received.find((message) => message.type === "set-frame" && message.initialState === "confirmed")!;
+  await waitFor(() => expect(received.some((message) => (
+    message.type === "set-frame" && message.frameId === "confirmed-mobile" && message.initialState === "confirmed"
+  ))).toBe(true));
+  const confirmed = received.find((message) => message.type === "set-frame" && message.frameId === "confirmed-mobile")!;
   expect(confirmed.frameAttemptId).toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect(screen.queryByText("State confirmed")).not.toBeInTheDocument();
   port.postMessage({
@@ -631,9 +679,9 @@ test("same-Page targetState uses the exact target and acknowledged frame without
   reconnectPort.start();
   reconnectPort.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
   await waitFor(() => expect(reconnectReceived.some((message) => (
-    message.type === "set-frame" && message.initialState === "confirmed"
+    message.type === "set-frame" && message.frameId === "confirmed-mobile" && message.initialState === "confirmed"
   ))).toBe(true));
-  const reapplied = reconnectReceived.find((message) => message.type === "set-frame" && message.initialState === "confirmed")!;
+  const reapplied = reconnectReceived.find((message) => message.type === "set-frame" && message.frameId === "confirmed-mobile")!;
   expect(screen.getByText("State confirmed")).toBeInTheDocument();
   await act(async () => {
     reconnectPort.postMessage({
@@ -648,8 +696,8 @@ test("same-Page targetState uses the exact target and acknowledged frame without
   });
 
   fireEvent.click(screen.getByRole("button", { name: "Back in prototype flow" }));
-  await waitFor(() => expect(reconnectReceived.some((message) => message.type === "set-frame" && message.frameId === "desktop")).toBe(true));
-  const reset = [...reconnectReceived].reverse().find((message) => message.type === "set-frame" && message.frameId === "desktop")!;
+  await waitFor(() => expect(reconnectReceived.some((message) => message.type === "set-frame" && message.frameId === "mobile")).toBe(true));
+  const reset = [...reconnectReceived].reverse().find((message) => message.type === "set-frame" && message.frameId === "mobile")!;
   reconnectPort.postMessage({
     source: "dezin",
     type: "frame-applied",
@@ -1045,16 +1093,36 @@ test("same-Page resolution that ignores abort still fails within the shared five
   port.close();
 });
 
-test("cross-Page targetState swaps atomically only after the pending frame acknowledgement", async () => {
+test("cross-Page targetState preserves the exact viewport and swaps only after its acknowledgement", async () => {
   const snapshot = flowSnapshot();
   const edge = snapshot.graph.edges.find((candidate) => candidate.id === "edge-click");
   if (edge?.kind !== "prototype" || edge.prototype.status !== "interactive") throw new Error("interactive fixture required");
   edge.prototype.binding.targetState = "receipt-ready";
-  const session = createPrototypeFlowSession(snapshot, ["node-a"], flowRevisions());
+  const revisions = flowRevisions();
+  const sourceRevision = revisions.find((revision) => revision.id === "revision-a")!;
+  const targetRevision = revisions.find((revision) => revision.id === "revision-b")!;
+  sourceRevision.renderSpec.thumbnailFrameId = "mobile";
+  (sourceRevision.renderSpec.frames as Array<Record<string, unknown>>).push({
+    id: "mobile",
+    name: "Mobile",
+    width: 390,
+    height: 844,
+  });
+  (targetRevision.renderSpec.frames as Array<Record<string, unknown>>).push({
+    id: "receipt-mobile",
+    name: "Receipt mobile",
+    width: 393,
+    height: 852,
+    initialState: "receipt-ready",
+  });
+  const session = createPrototypeFlowSession(snapshot, ["node-a"], revisions);
   const releasePreviewTargetLease = vi.fn(async (_leaseId: string) => {});
   render(
     <ApiProvider client={makeFakeApi({
-      resolvePreviewTarget: async (_projectId, target) => resolved(target as Extract<PreviewTarget, { kind: "workspace-flow" }>),
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+        revisions,
+      ),
       acquirePreviewTargetLease: async (_projectId, exact) => ({
         leaseId: `lease-${exact.artifactId}-${exact.stateKey ?? "default"}`,
         url: `http://preview.local/${exact.artifactId}#dezin-bridge=${NONCE}`,
@@ -1096,8 +1164,13 @@ test("cross-Page targetState swaps atomically only after the pending frame ackno
   betaPort.onmessage = (event) => betaReceived.push(event.data as Record<string, unknown>);
   betaPort.start();
   betaPort.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
-  await waitFor(() => expect(betaReceived.some((message) => message.type === "set-frame" && message.initialState === "receipt-ready")).toBe(true));
-  const stateCommand = betaReceived.find((message) => message.type === "set-frame" && message.initialState === "receipt-ready")!;
+  await waitFor(() => expect(betaReceived.some((message) => (
+    message.type === "set-frame"
+      && message.frameId === "receipt-mobile"
+      && message.initialState === "receipt-ready"
+  ))).toBe(true));
+  const stateCommand = betaReceived.find((message) => message.type === "set-frame" && message.frameId === "receipt-mobile")!;
+  expect(beta.closest('[data-prototype-frame-id="receipt-mobile"]')).not.toBeNull();
   expect(screen.getByLabelText("Frozen prototype identity")).toHaveTextContent("Alpha");
   expect(releasePreviewTargetLease).not.toHaveBeenCalledWith("lease-page-a-default");
   betaPort.postMessage({

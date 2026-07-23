@@ -91,7 +91,9 @@ export type ArtifactCandidateRefReleaseDisposition =
   | "revision-ref-missing"
   | "revision-ref-conflict"
   | "revision-history-ref-missing"
-  | "revision-history-ref-conflict";
+  | "revision-history-ref-conflict"
+  | "revision-evidence-ref-missing"
+  | "revision-evidence-ref-conflict";
 
 export interface ArtifactCandidateRefRecoverySummary {
   scanned: number;
@@ -129,8 +131,8 @@ export interface ArtifactCandidateRefRecoveryOptions {
   };
   readonly retention: {
     /**
-     * Retained candidates require exact immutable selected and history-head
-     * Revision refs before their Attempt ref is deleted. Orphans require the
+     * Retained candidates require exact immutable selected, history-head, and
+     * evidence Revision refs before their Attempt ref is deleted. Orphans require the
      * terminal/no-candidate Core proof and an atomic compare-delete of only
      * their canonical Attempt ref.
      */

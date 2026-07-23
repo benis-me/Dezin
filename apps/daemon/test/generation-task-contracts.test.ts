@@ -305,6 +305,13 @@ test("validates Artifact plans, identities, sorted unique sets, and dependency u
     [(payload: any) => { payload.dependencyPlans.unshift({ kind: "resource", ownerArtifactId: "page-home", resourceId: "resource-a" }); }, /sorted/i],
     [(payload: any) => { payload.responsiveFrames.reverse(); }, /sorted/i],
     [(payload: any) => { payload.responsiveFrames[0].width = 0; }, /positive/i],
+    [(payload: any) => { payload.responsiveFrames[0].width = 1440.5; }, /integer|capture/i],
+    [(payload: any) => { payload.responsiveFrames[0].height = 16_385; }, /capture|dimension|16384/i],
+    [(payload: any) => {
+      payload.responsiveFrames[0].width = 8_193;
+      payload.responsiveFrames[0].height = 8_192;
+    }, /pixel|capture/i],
+    [(payload: any) => { payload.responsiveFrames[0].name = "n".repeat(513); }, /name|512|length/i],
     [(payload: any) => { payload.responsiveFrames[0].initialState = "bad\nstate"; }, /control/i],
     [(payload: any) => { payload.responsiveFrames[0].extra = true; }, /fields/i],
     [(payload: any) => { payload.responsiveFrames.pop(); }, /frame ids/i],

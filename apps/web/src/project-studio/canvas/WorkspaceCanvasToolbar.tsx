@@ -50,6 +50,8 @@ export function WorkspaceCanvasToolbar({
   canGroup,
   canUngroup,
   canDeleteGroup,
+  canDeleteRelationship,
+  relationshipDeleteLabel,
   onToolChange,
   onEdgeFilterChange,
   onToggleOutline,
@@ -57,6 +59,7 @@ export function WorkspaceCanvasToolbar({
   onGroup,
   onUngroup,
   onDeleteGroup,
+  onDeleteRelationship,
 }: {
   tool: CanvasTool;
   edgeFilter: WorkspaceEdgeFilter;
@@ -64,6 +67,8 @@ export function WorkspaceCanvasToolbar({
   canGroup: boolean;
   canUngroup: boolean;
   canDeleteGroup: boolean;
+  canDeleteRelationship: boolean;
+  relationshipDeleteLabel: string;
   onToolChange: (tool: CanvasTool) => void;
   onEdgeFilterChange: (filter: WorkspaceEdgeFilter) => void;
   onToggleOutline: () => void;
@@ -71,6 +76,7 @@ export function WorkspaceCanvasToolbar({
   onGroup: () => void;
   onUngroup: () => void;
   onDeleteGroup: () => void;
+  onDeleteRelationship: () => void;
 }) {
   return (
     <nav className="dezin-canvas-toolbar" aria-label="Canvas tools">
@@ -102,7 +108,10 @@ export function WorkspaceCanvasToolbar({
 
       <span className="dezin-canvas-toolbar__rule" aria-hidden />
 
-      <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Relationship visibility">
+      <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Relationship tools">
+        <ToolButton label={relationshipDeleteLabel} disabled={!canDeleteRelationship} onClick={onDeleteRelationship}>
+          <Trash2 size={14} />
+        </ToolButton>
         <ToolButton label="Show prototype flow" active={edgeFilter === "flow"} onClick={() => onEdgeFilterChange("flow")}>
           <GitBranch size={14} />
         </ToolButton>

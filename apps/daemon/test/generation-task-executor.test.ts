@@ -337,6 +337,12 @@ function artifactResultFor(claim: GenerationTaskAttemptClaim): ArtifactPreparedC
         height: 900,
         status: "passed",
         reviewed: true,
+        captureIdentity: {
+          sha256,
+          byteLength: 1_024,
+          width: 1_440,
+          height: 900,
+        },
       }],
       round,
       runtimeChecks: [{ id: "frame:desktop", status: "passed" }],

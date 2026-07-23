@@ -26,6 +26,10 @@ import { freezeResourceExecutionProfile } from "../src/orchestration/production-
 import { createProductionResourceRuntimePorts } from "../src/orchestration/production-resource-runtime.ts";
 import { decodeSharinganCaptureResourceBundle } from "../src/orchestration/sharingan-capture-resource-bundle.ts";
 import { createProductionSafeBoundedExternalFetcher } from "../src/production-safe-external-fetch.ts";
+import {
+  ResearchResourceRevisionError,
+  selectResearchRevisionDirection,
+} from "../src/research-resource-revision.ts";
 import { semanticSharinganCaptureFiles } from "./support/sharingan-capture-fixture.ts";
 
 const CONTEXT_CONTENT = "Create a rigorous editorial design direction for a climate data product.";
@@ -537,6 +541,85 @@ test("Research generation consumes one exact Context Pack and emits structured t
   assert.equal(JSON.parse(requests[0]!.message).protocol, "dezin.research-generation-prompt.v3");
   assert.ok(requests[0]!.maxOutputBytes >= result.bytes.byteLength);
   assert.equal(requests[0]!.signal.aborted, false);
+
+  const authority = pack("resource-1", "research");
+  const validationBundle = structuredClone(bundle);
+  validationBundle.brief.targetInstructions.title = validationBundle.scope.title;
+  const validationInput = {
+    bytes: Buffer.from(stableStringify(validationBundle), "utf8"),
+    directionId: "direction-1",
+    workspaceId: "workspace-1",
+    resourceId: "resource-1",
+    parentRevisionId: "resource-revision-0",
+    revisionMetadata: { adapter: result.metadata },
+    revisionProvenance: {
+      kind: "generation-task-resource",
+      planId: "plan-1",
+      taskId: "task-1",
+      attempt: 2,
+      inputHash: "d".repeat(64),
+      adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
+      adapterProvenance: result.provenance,
+    },
+    contextPack: authority,
+  } as const;
+  assert.equal(selectResearchRevisionDirection(validationInput).id, "direction-1");
+  for (const mutate of [
+    (candidate: any) => { candidate.graphRevision += 1; },
+    (candidate: any) => { candidate.items[0].ordinal = 1; },
+    (candidate: any) => { candidate.items[0].checksum = "f".repeat(64); },
+  ]) {
+    const changedAuthority = structuredClone(authority) as any;
+    mutate(changedAuthority);
+    assert.throws(
+      () => selectResearchRevisionDirection({ ...validationInput, contextPack: changedAuthority }),
+      (error: unknown) => error instanceof ResearchResourceRevisionError
+        && /immutable authority|Context item/i.test(error.message),
+    );
+  }
+});
+
+test("legacy Research v1/v2 directions remain selectable but cross the v3 boundary only as hypotheses", () => {
+  const baseDirection = {
+    id: "legacy-direction",
+    title: "Legacy direction",
+    thesis: "Preserve an already approved direction while requiring new evidence for future claims.",
+    visualLanguage: ["measured hierarchy", "restrained contrast"],
+    interactionPrinciples: ["keep the primary action stable"],
+    risks: ["Legacy evidence cannot be independently replayed."],
+    findingIds: ["legacy-finding"],
+  };
+  for (const version of [1, 2] as const) {
+    const direction = version === 1
+      ? baseDirection
+      : {
+          ...baseDirection,
+          evidenceStatus: "evidence",
+          evidenceFindingIds: ["legacy-finding"],
+          hypothesisFindingIds: [],
+        };
+    const selected = selectResearchRevisionDirection({
+      bytes: Buffer.from(JSON.stringify({
+        format: "dezin-research-resource-bundle",
+        version,
+        scope: { workspaceId: "workspace-1", resourceId: "resource-1" },
+        directions: [direction],
+      }), "utf8"),
+      directionId: direction.id,
+      workspaceId: "workspace-1",
+      resourceId: "resource-1",
+      parentRevisionId: null,
+      revisionMetadata: {},
+      revisionProvenance: {},
+      contextPack: null,
+    });
+    assert.deepEqual(selected, {
+      ...baseDirection,
+      evidenceStatus: "hypothesis",
+      evidenceFindingIds: [],
+      hypothesisFindingIds: ["legacy-finding"],
+    });
+  }
 });
 
 test("production Research composition promotes safe HTTP evidence to verified receipts", async (t) => {

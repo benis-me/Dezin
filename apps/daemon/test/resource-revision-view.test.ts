@@ -14,7 +14,10 @@ import {
   verifyBoundedResourcePayloadBytes,
 } from "../src/resource-revision-payload.ts";
 import { semanticSharinganCaptureFiles } from "./support/sharingan-capture-fixture.ts";
-import { createResearchRevisionFixture } from "./support/research-resource-fixture.ts";
+import {
+  createResearchRevisionFixture,
+  persistResearchRevisionFixtureContextPack,
+} from "./support/research-resource-fixture.ts";
 
 async function fixture(t: test.TestContext) {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-resource-view-"));
@@ -34,10 +37,22 @@ async function addRevision(
     kind: ResourceKind;
     resourceId: string;
     revisionId: string;
-    bytes: Uint8Array | ((identity: { workspaceId: string; resourceId: string }) => Uint8Array | Promise<Uint8Array>);
+    bytes: Uint8Array | ((identity: {
+      workspaceId: string;
+      resourceId: string;
+      contextPack: ReturnType<typeof persistResearchRevisionFixtureContextPack> | null;
+    }) => Uint8Array | Promise<Uint8Array>);
     mimeType: string;
-    provenance?: Record<string, unknown> | ((identity: { workspaceId: string; resourceId: string }) => Record<string, unknown>);
-    metadata?: Record<string, unknown> | ((identity: { workspaceId: string; resourceId: string }) => Record<string, unknown>);
+    provenance?: Record<string, unknown> | ((identity: {
+      workspaceId: string;
+      resourceId: string;
+      contextPack: ReturnType<typeof persistResearchRevisionFixtureContextPack> | null;
+    }) => Record<string, unknown>);
+    metadata?: Record<string, unknown> | ((identity: {
+      workspaceId: string;
+      resourceId: string;
+      contextPack: ReturnType<typeof persistResearchRevisionFixtureContextPack> | null;
+    }) => Record<string, unknown>);
   },
 ) {
   const current = f.store.workspace.getWorkspace(f.project.id)!;
@@ -48,10 +63,19 @@ async function addRevision(
     baseGraphRevision: current.graphRevision,
     expectedSnapshotId: current.activeSnapshotId,
   });
+  const contextPack = input.kind === "research"
+    ? persistResearchRevisionFixtureContextPack({
+        store: f.store,
+        manifestRoot: f.dataDir,
+        workspaceId: f.workspace.id,
+        resourceId: created.resource.id,
+        graphRevision: f.store.workspace.getWorkspace(f.project.id)!.graphRevision,
+      })
+    : null;
+  const identity = { workspaceId: f.workspace.id, resourceId: created.resource.id, contextPack };
   const bytes = typeof input.bytes === "function"
-    ? await input.bytes({ workspaceId: f.workspace.id, resourceId: created.resource.id })
+    ? await input.bytes(identity)
     : input.bytes;
-  const identity = { workspaceId: f.workspace.id, resourceId: created.resource.id };
   const provenance = typeof input.provenance === "function" ? input.provenance(identity) : input.provenance ?? {};
   const metadata = typeof input.metadata === "function" ? input.metadata(identity) : input.metadata ?? {};
   const snapshot = await snapshotBytes({
@@ -411,13 +435,17 @@ test("unified exact Research Revision view preserves the verified provenance pro
     kind: "research",
     resourceId: "resource-research",
     revisionId: "revision-research",
-    bytes: ({ workspaceId, resourceId }) => Buffer.from(
-      `${JSON.stringify(createResearchRevisionFixture({ workspaceId, resourceId }).bundle)}\n`,
+    bytes: ({ workspaceId, resourceId, contextPack }) => Buffer.from(
+      `${JSON.stringify(createResearchRevisionFixture({ workspaceId, resourceId, contextPack: contextPack! }).bundle)}\n`,
       "utf8",
     ),
     mimeType: "application/json",
-    metadata: ({ workspaceId, resourceId }) => createResearchRevisionFixture({ workspaceId, resourceId }).metadata,
-    provenance: ({ workspaceId, resourceId }) => createResearchRevisionFixture({ workspaceId, resourceId }).provenance,
+    metadata: ({ workspaceId, resourceId, contextPack }) => createResearchRevisionFixture({
+      workspaceId, resourceId, contextPack: contextPack!,
+    }).metadata,
+    provenance: ({ workspaceId, resourceId, contextPack }) => createResearchRevisionFixture({
+      workspaceId, resourceId, contextPack: contextPack!,
+    }).provenance,
   });
 
   const view = await readResourceRevisionView({
@@ -441,13 +469,17 @@ test("an archived Research Resource keeps its exact immutable Revision readable"
     kind: "research",
     resourceId: "resource-archived-research",
     revisionId: "revision-archived-research",
-    bytes: ({ workspaceId, resourceId }) => Buffer.from(
-      `${JSON.stringify(createResearchRevisionFixture({ workspaceId, resourceId }).bundle)}\n`,
+    bytes: ({ workspaceId, resourceId, contextPack }) => Buffer.from(
+      `${JSON.stringify(createResearchRevisionFixture({ workspaceId, resourceId, contextPack: contextPack! }).bundle)}\n`,
       "utf8",
     ),
     mimeType: "application/json",
-    metadata: ({ workspaceId, resourceId }) => createResearchRevisionFixture({ workspaceId, resourceId }).metadata,
-    provenance: ({ workspaceId, resourceId }) => createResearchRevisionFixture({ workspaceId, resourceId }).provenance,
+    metadata: ({ workspaceId, resourceId, contextPack }) => createResearchRevisionFixture({
+      workspaceId, resourceId, contextPack: contextPack!,
+    }).metadata,
+    provenance: ({ workspaceId, resourceId, contextPack }) => createResearchRevisionFixture({
+      workspaceId, resourceId, contextPack: contextPack!,
+    }).provenance,
   });
   const beforePublish = f.store.workspace.getWorkspace(f.project.id)!;
   const published = f.store.workspace.publishResourceRevisionForProject(
@@ -487,8 +519,8 @@ test("Research projection rejects non-canonical receipts, missing attestations, 
   const cases = [
     {
       id: "receipt",
-      fixture: (workspaceId: string, resourceId: string) => {
-        const value = createResearchRevisionFixture({ workspaceId, resourceId });
+      fixture: (workspaceId: string, resourceId: string, contextPack: NonNullable<ReturnType<typeof persistResearchRevisionFixtureContextPack>>) => {
+        const value = createResearchRevisionFixture({ workspaceId, resourceId, contextPack });
         value.bundle.receipts[0]!.checksum = "0".repeat(64);
         return value;
       },
@@ -496,14 +528,15 @@ test("Research projection rejects non-canonical receipts, missing attestations, 
     },
     {
       id: "metadata",
-      fixture: (workspaceId: string, resourceId: string) => createResearchRevisionFixture({ workspaceId, resourceId }),
+      fixture: (workspaceId: string, resourceId: string, contextPack: NonNullable<ReturnType<typeof persistResearchRevisionFixtureContextPack>>) => createResearchRevisionFixture({ workspaceId, resourceId, contextPack }),
       metadata: false,
     },
     {
       id: "locator",
-      fixture: (workspaceId: string, resourceId: string) => createResearchRevisionFixture({
+      fixture: (workspaceId: string, resourceId: string, contextPack: NonNullable<ReturnType<typeof persistResearchRevisionFixtureContextPack>>) => createResearchRevisionFixture({
         workspaceId,
         resourceId,
+        contextPack,
         verifiedLocator: "https://example.test/study?access_token=not-for-the-viewer",
       }),
       metadata: true,
@@ -514,15 +547,19 @@ test("Research projection rejects non-canonical receipts, missing attestations, 
       kind: "research",
       resourceId: `resource-invalid-${item.id}`,
       revisionId: `revision-invalid-${item.id}`,
-      bytes: ({ workspaceId, resourceId }) => Buffer.from(
-        `${JSON.stringify(item.fixture(workspaceId, resourceId).bundle)}\n`,
+      bytes: ({ workspaceId, resourceId, contextPack }) => Buffer.from(
+        `${JSON.stringify(item.fixture(workspaceId, resourceId, contextPack!).bundle)}\n`,
         "utf8",
       ),
       mimeType: "application/json",
-      metadata: ({ workspaceId, resourceId }) => item.metadata
-        ? item.fixture(workspaceId, resourceId).metadata
+      metadata: ({ workspaceId, resourceId, contextPack }) => item.metadata
+        ? item.fixture(workspaceId, resourceId, contextPack!).metadata
         : {},
-      provenance: ({ workspaceId, resourceId }) => item.fixture(workspaceId, resourceId).provenance,
+      provenance: ({ workspaceId, resourceId, contextPack }) => item.fixture(
+        workspaceId,
+        resourceId,
+        contextPack!,
+      ).provenance,
     });
     await assert.rejects(
       readResourceRevisionView({

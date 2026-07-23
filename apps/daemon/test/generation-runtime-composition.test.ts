@@ -84,6 +84,7 @@ test("production Generation composition binds durable ref/payload recovery and l
     "startup-plan-recovery",
     "startup-artifact-ref-recovery",
     "startup-resource-payload-recovery",
+    "startup-generation-evidence-recovery",
   ]);
 
   await runtime.stop();
@@ -132,6 +133,7 @@ test("production startup recovery barrier binds real durable cleanup without adm
   assert.deepEqual(phases, [
     "startup-artifact-ref-recovery",
     "startup-resource-payload-recovery",
+    "startup-generation-evidence-recovery",
   ]);
   await barrier.stop();
   assert.deepEqual(store.listProjects(), [], "recovery barrier must leave Store closure to daemon shutdown");

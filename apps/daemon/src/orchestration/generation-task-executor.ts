@@ -476,6 +476,7 @@ function validatePreparedResult(
       ),
     };
     validateGenerationTaskArtifactQualityGate({
+      requireSourceVisualEvidence: null,
       qaProfile: task.qaProfile,
       plannedFrames: task.payload.responsiveFrames,
       renderSpec: normalized.renderSpec,

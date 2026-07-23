@@ -34,6 +34,7 @@ export interface ArtifactRunInfrastructureInput {
   readonly claim: GenerationTaskAttemptClaim;
   readonly contextPack: ContextPack;
   readonly hasExactSharinganCapture: boolean;
+  readonly sharinganReference: ImmutableSharinganCaptureReference | null;
   readonly repositoryDir: string;
   readonly worktreeDir: string;
 }
@@ -401,6 +402,7 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
         claim,
         contextPack: pack,
         hasExactSharinganCapture,
+        sharinganReference: captureReference,
         repositoryDir,
         worktreeDir: transaction.dir,
       });

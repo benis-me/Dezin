@@ -1216,7 +1216,8 @@ function resolveTarget(input: GetArtifactThumbnailInput): {
   const revision = input.store.workspace.getArtifactRevision(revisionId);
   if (!workspace || !artifact || !revision || artifact.archivedAt !== null
     || artifact.workspaceId !== workspace.id || revision.workspaceId !== workspace.id
-    || revision.artifactId !== artifact.id || revision.artifactRoot !== artifact.sourceRoot) {
+    || revision.artifactId !== artifact.id || revision.artifactRoot !== artifact.sourceRoot
+    || !input.store.workspace.isArtifactRevisionPublished(revision.id)) {
     throw new ArtifactThumbnailNotFoundError("owned immutable Artifact Revision thumbnail target was not found");
   }
   const renderSpecChecksum = stablePreviewHash("dezin-render-spec-v1", revision.renderSpec);

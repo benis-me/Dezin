@@ -746,7 +746,15 @@ test("production thumbnail rendering acquires the exact immutable Revision, capt
       entry: "src/App.jsx",
       thumbnailFrameId: "desktop",
       frames: [
-        { id: "desktop", name: "Desktop", width: 1440, height: 900, background: "#123456" },
+        {
+          id: "desktop",
+          name: "Desktop",
+          width: 1440,
+          height: 900,
+          initialState: "catalog-ready",
+          fixture: { navigation: { open: true }, cartCount: 2 },
+          background: "#123456",
+        },
         { id: "mobile", name: "Mobile", width: 390, height: 844 },
       ],
     },
@@ -773,6 +781,9 @@ test("production thumbnail rendering acquires the exact immutable Revision, capt
           width: 1440,
           height: 900,
           frameId: "desktop",
+          frameAttemptId: `thumbnail-${fixture.revisionId.slice(0, 118)}`,
+          initialState: "catalog-ready",
+          fixture: { navigation: { open: true }, cartCount: 2 },
           background: "#123456",
         });
         assert.equal(signal?.aborted, false);
@@ -795,7 +806,62 @@ test("production thumbnail rendering acquires the exact immutable Revision, capt
   }
 });
 
-test("production thumbnail rendering fails closed when a required interaction state cannot be applied", async () => {
+test("production thumbnail rendering applies an explicitly requested matching Frame state with an isolated fixture", async () => {
+  const fixture = createFixture({
+    renderSpec: {
+      entry: "src/App.jsx",
+      thumbnailFrameId: "desktop",
+      frames: [{
+        id: "desktop",
+        name: "Desktop",
+        width: 1024,
+        height: 768,
+        initialState: "catalog-ready",
+        fixture: { navigation: { open: true }, cartCount: 2 },
+        background: "#f7f5ef",
+      }],
+    },
+  });
+  let captures = 0;
+  try {
+    await withServer(fixture, {
+      ensureDevServer: async () => ({
+        leaseId: "thumbnail-state-lease",
+        url: "http://127.0.0.1:65535/immutable-preview",
+        expiresAt: Date.now() + 30_000,
+        async release() {},
+      }),
+      artifactThumbnailCapture: async (_url, outPath, frame) => {
+        captures += 1;
+        assert.deepEqual(frame, {
+          width: 1024,
+          height: 768,
+          frameId: "desktop",
+          frameAttemptId: `thumbnail-${fixture.revisionId.slice(0, 118)}`,
+          initialState: "catalog-ready",
+          fixture: { navigation: { open: true }, cartCount: 2 },
+          background: "#f7f5ef",
+        });
+        const capturedFixture = frame.fixture as { navigation: { open: boolean }; cartCount: number };
+        capturedFixture.navigation.open = false;
+        capturedFixture.cartCount = 99;
+        writeFileSync(outPath, transparentPng(frame.width, frame.height));
+        return true;
+      },
+    } as Partial<AppDeps>, async (base) => {
+      const response = await fetch(thumbnailUrl(base, fixture, "?frame=desktop&state=catalog-ready"));
+      assert.equal(response.status, 200);
+    });
+    assert.equal(captures, 1);
+    const retained = fixture.store.workspace.getArtifactRevision(fixture.revisionId)!;
+    const retainedFrame = (retained.renderSpec.frames as Array<Record<string, unknown>>)[0]!;
+    assert.deepEqual(retainedFrame.fixture, { navigation: { open: true }, cartCount: 2 });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("production thumbnail rendering fails closed for an unknown requested interaction state", async () => {
   const fixture = createFixture();
   let captures = 0;
   try {
@@ -807,7 +873,78 @@ test("production thumbnail rendering fails closed when a required interaction st
     } as Partial<AppDeps>, async (base) => {
       const response = await fetch(thumbnailUrl(base, fixture, "?state=hover"));
       assert.equal(response.status, 422);
-      assert.equal((await response.json() as { code: string }).code, "artifact_thumbnail_invalid");
+      const payload = await response.json() as { code: string; error: string };
+      assert.equal(payload.code, "artifact_thumbnail_invalid");
+      assert.match(payload.error, /does not match the immutable RenderSpec frame state/);
+    });
+    assert.equal(captures, 0);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("production thumbnail rendering rejects a requested state that conflicts with the immutable Frame", async () => {
+  const fixture = createFixture({
+    renderSpec: {
+      entry: "src/App.jsx",
+      thumbnailFrameId: "desktop",
+      frames: [{
+        id: "desktop",
+        name: "Desktop",
+        width: 1440,
+        height: 900,
+        initialState: "catalog-ready",
+      }],
+    },
+  });
+  let captures = 0;
+  try {
+    await withServer(fixture, {
+      artifactThumbnailCapture: async () => {
+        captures += 1;
+        return true;
+      },
+    } as Partial<AppDeps>, async (base) => {
+      const response = await fetch(thumbnailUrl(base, fixture, "?state=checkout-ready"));
+      assert.equal(response.status, 422);
+      const payload = await response.json() as { code: string; error: string };
+      assert.equal(payload.code, "artifact_thumbnail_invalid");
+      assert.match(payload.error, /does not match the immutable RenderSpec frame state/);
+    });
+    assert.equal(captures, 0);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("production thumbnail rendering rejects a derived thumbnail state that conflicts with the immutable Frame", async () => {
+  const fixture = createFixture({
+    renderSpec: {
+      entry: "src/App.jsx",
+      thumbnailFrameId: "desktop",
+      thumbnailStateKey: "checkout-ready",
+      frames: [{
+        id: "desktop",
+        name: "Desktop",
+        width: 1440,
+        height: 900,
+        initialState: "catalog-ready",
+      }],
+    },
+  });
+  let captures = 0;
+  try {
+    await withServer(fixture, {
+      artifactThumbnailCapture: async () => {
+        captures += 1;
+        return true;
+      },
+    } as Partial<AppDeps>, async (base) => {
+      const response = await fetch(thumbnailUrl(base, fixture));
+      assert.equal(response.status, 422);
+      const payload = await response.json() as { code: string; error: string };
+      assert.equal(payload.code, "artifact_thumbnail_invalid");
+      assert.match(payload.error, /does not match the immutable RenderSpec frame state/);
     });
     assert.equal(captures, 0);
   } finally {

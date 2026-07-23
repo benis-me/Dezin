@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { GenerationTaskAttemptClaim } from "../../../packages/core/src/index.ts";
 import type { ResourcePreparedCandidate } from "../src/orchestration/generation-task-executor.ts";
+import type { GenerationTaskEvidenceLifecycleStorePort } from "../src/orchestration/generation-task-evidence-lifecycle.ts";
 import {
   GenerationTaskPublication,
   type GenerationTaskPublicationStorePort,
@@ -10,8 +11,17 @@ import {
 
 interface ProductionTaskPublicationModule {
   createProductionGenerationTaskPublication(options: {
-    store: GenerationTaskPublicationStorePort;
+    store: GenerationTaskPublicationStorePort & GenerationTaskEvidenceLifecycleStorePort;
     repositoryDirForWorkspace(workspaceId: string): string | Promise<string>;
+    dataDir: string;
+    sourceAuthorityForRevision(
+      input: { workspaceId: string; resourceId: string; revisionId: string },
+      signal: AbortSignal,
+    ): {
+      resourceId: string;
+      revisionId: string;
+      revisionChecksum: string;
+    } | null;
     projectIdForWorkspace(workspaceId: string): string;
     notifyPlan(planId: string): void;
   }): GenerationTaskPublication;
@@ -63,7 +73,9 @@ function result(): ResourcePreparedCandidate {
   };
 }
 
-function store(calls: string[]): GenerationTaskPublicationStorePort {
+function store(
+  calls: string[],
+): GenerationTaskPublicationStorePort & GenerationTaskEvidenceLifecycleStorePort {
   return {
     getArtifactRevision() { return null; },
     stageGenerationTaskCandidateForProject(projectId, planId, input) {
@@ -77,6 +89,7 @@ function store(calls: string[]): GenerationTaskPublicationStorePort {
     completeGenerationTaskValidationForProject() { return {} as never; },
     publishGenerationPlanCheckpointForProject() { return {} as never; },
     finishGenerationTaskAttemptForProject() { return {} as never; },
+    getGenerationTaskAttemptForProject() { return null; },
   };
 }
 
@@ -85,9 +98,15 @@ test("production TaskPublication factory binds durable publication and requires 
   assert.equal(typeof module.createProductionGenerationTaskPublication, "function");
   if (typeof module.createProductionGenerationTaskPublication !== "function") return;
   const calls: string[] = [];
+  let authorityReads = 0;
   const publication = module.createProductionGenerationTaskPublication({
     store: store(calls),
     repositoryDirForWorkspace: (workspaceId) => `/projects/${workspaceId}`,
+    dataDir: "/data",
+    sourceAuthorityForRevision() {
+      authorityReads += 1;
+      return null;
+    },
     projectIdForWorkspace: () => "project-1",
     notifyPlan: (planId) => calls.push(`notify:${planId}`),
   });
@@ -101,6 +120,7 @@ test("production TaskPublication factory binds durable publication and requires 
     "publish:project-1:plan-1",
     "notify:plan-1",
   ]);
+  assert.equal(authorityReads, 0, "Resource publication must not read Artifact source authority");
 });
 
 test("production TaskPublication factory fails closed when the retention repository adapter is missing", async () => {
@@ -114,6 +134,8 @@ test("production TaskPublication factory fails closed when the retention reposit
     () => createPublication({
       store: store([]),
       repositoryDirForWorkspace: undefined as never,
+      dataDir: "/data",
+      sourceAuthorityForRevision: () => null,
       projectIdForWorkspace: () => "project-1",
       notifyPlan() {},
     }),
@@ -143,9 +165,54 @@ test("production TaskPublication factory rejects accessor-backed Store ports wit
     () => createPublication({
       store: hostileStore as never,
       repositoryDirForWorkspace: () => "/projects/workspace-1",
+      dataDir: "/data",
+      sourceAuthorityForRevision: () => null,
       projectIdForWorkspace: () => "project-1",
       notifyPlan() {},
     }),
+    (error: unknown) => error instanceof ErrorType
+      && (error as Error & { code?: string }).code
+        === "PRODUCTION_TASK_PUBLICATION_CONFIGURATION_INVALID",
+  );
+  assert.equal(invoked, false);
+});
+
+test("production TaskPublication factory fails closed without durable evidence ownership", async (t) => {
+  const module = await productionModule();
+  const createPublication = module.createProductionGenerationTaskPublication;
+  const ErrorType = module.ProductionTaskPublicationAdapterError;
+  if (typeof createPublication !== "function" || typeof ErrorType !== "function") return;
+  const base = {
+    store: store([]),
+    repositoryDirForWorkspace: () => "/projects/workspace-1",
+    dataDir: "/data",
+    sourceAuthorityForRevision: () => null,
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  };
+  for (const testCase of [
+    { name: "missing data directory", options: { ...base, dataDir: undefined as never } },
+    { name: "missing authority resolver", options: { ...base, sourceAuthorityForRevision: undefined as never } },
+  ]) {
+    await t.test(testCase.name, () => {
+      assert.throws(
+        () => createPublication(testCase.options),
+        (error: unknown) => error instanceof ErrorType
+          && (error as Error & { code?: string }).code === "PRODUCTION_TASK_RETENTION_UNAVAILABLE",
+      );
+    });
+  }
+
+  let invoked = false;
+  const accessorBacked = Object.defineProperty({ ...base }, "sourceAuthorityForRevision", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return () => null;
+    },
+  });
+  assert.throws(
+    () => createPublication(accessorBacked),
     (error: unknown) => error instanceof ErrorType
       && (error as Error & { code?: string }).code
         === "PRODUCTION_TASK_PUBLICATION_CONFIGURATION_INVALID",

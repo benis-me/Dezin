@@ -115,6 +115,7 @@ import {
 import {
   generationTaskArtifactCandidateRetentionRef,
   validateGenerationTaskArtifactQualityGate,
+  type GenerationTaskSourceVisualEvidenceAuthority,
 } from "./generation-task-quality.ts";
 import {
   buildGenerationTaskPrototypeValidationResult,
@@ -1386,6 +1387,34 @@ function normalizeContextOmission(value: unknown, index: number): ContextOmissio
   };
 }
 
+function contextPackRefIdentity(ref: ContextItemRef): string {
+  return canonicalJsonText(ref, "Context Pack reference identity");
+}
+
+function validateContextPackReferenceIntegrity(
+  items: readonly { ref: ContextItemRef }[],
+  omissions: readonly ContextOmission[],
+): void {
+  // Core intentionally does not retain daemon priority classes. At this class-erased
+  // persistence boundary, an exact ref is globally either available or omitted.
+  // Duplicate provided refs remain legal because distinct daemon priority classes
+  // may intentionally project to separate evidence rows with the same exact ref.
+  const providedRefs = new Set(items.map((item) => contextPackRefIdentity(item.ref)));
+  const omittedRefs = new Set<string>();
+  for (const omission of omissions) {
+    const identity = contextPackRefIdentity(omission.ref);
+    if (omittedRefs.has(identity)) {
+      throw new WorkspaceStoreCodecError("Context Pack contains a duplicate omission identity");
+    }
+    omittedRefs.add(identity);
+    if (providedRefs.has(identity)) {
+      throw new WorkspaceStoreCodecError(
+        "Context Pack exact reference cannot be both provided and omitted",
+      );
+    }
+  }
+}
+
 function resolvedContextKind(value: unknown, label: string): ResolvedContextKind {
   if (value === "artifact-revision" || value === "resource-revision" || value === "kernel-revision" || value === "inline") {
     return value;
@@ -1449,6 +1478,8 @@ export function normalizePersistContextPackInput(value: unknown): PersistContext
     throw new WorkspaceStoreCodecError("Context Pack omissions must be a bounded array");
   }
   const items = input.items.map(normalizePersistContextPackItem);
+  const omissions = input.omissions.map(normalizeContextOmission);
+  validateContextPackReferenceIntegrity(items, omissions);
   const tokenEstimate = boundarySafeInteger(input.tokenEstimate, "Context Pack token estimate");
   let resolvedTokenEstimate = 0;
   for (const item of items) {
@@ -1468,7 +1499,7 @@ export function normalizePersistContextPackInput(value: unknown): PersistContext
     intent: agentIntent(input.intent, "Context Pack intent"),
     messageChecksum: boundaryChecksum(input.messageChecksum, "Context Pack message checksum"),
     items,
-    omissions: input.omissions.map(normalizeContextOmission),
+    omissions,
     tokenEstimate,
     manifestPath: boundaryRelativePath(input.manifestPath, "Context Pack manifest path"),
     hash: boundaryChecksum(input.hash, "Context Pack hash"),
@@ -1673,6 +1704,8 @@ function asContextPack(row: Row, itemRows: Row[]): ContextPack {
     }
   }
   const tokenEstimate = boundarySafeInteger(row.token_estimate, "Context Pack token estimate");
+  const omissions = asContextOmissions(row.omissions_json);
+  validateContextPackReferenceIntegrity(items, omissions);
   let resolvedTokenEstimate = 0;
   for (const item of items) {
     if (item.tokenEstimate > Number.MAX_SAFE_INTEGER - resolvedTokenEstimate) {
@@ -1691,7 +1724,7 @@ function asContextPack(row: Row, itemRows: Row[]): ContextPack {
     intent: agentIntent(row.intent, "Context Pack intent"),
     messageChecksum: boundaryChecksum(row.message_checksum, "Context Pack message checksum"),
     items,
-    omissions: asContextOmissions(row.omissions_json),
+    omissions,
     tokenEstimate,
     manifestPath: boundaryRelativePath(row.manifest_path, "Context Pack manifest path"),
     hash: boundaryChecksum(row.hash, "Context Pack hash"),
@@ -3106,6 +3139,9 @@ export class WorkspaceStore {
     return this.transactionImmediate(() => {
       this.requireWorkspaceById(input.workspaceId);
       this.requireGraphRevision(input.workspaceId, input.graphRevision);
+      for (const omission of input.omissions) {
+        this.resolveContextOmissionResourceKindInTransaction(input.workspaceId, omission);
+      }
       const existing = this.findContextPackByHash(input.workspaceId, input.hash);
       if (existing) {
         if (contextPackMatchesPersistInput(existing, input)) return existing;
@@ -6328,6 +6364,8 @@ export class WorkspaceStore {
           );
         }
         validateGenerationTaskArtifactQualityGate({
+          requireSourceVisualEvidence:
+            this.generationTaskAttemptSourceVisualEvidenceAuthorityInTransaction(attempt),
           qaProfile: task.qaProfile,
           plannedFrames: attempt.payload.responsiveFrames ?? [],
           renderSpec: input.candidate.renderSpec,
@@ -8174,6 +8212,10 @@ export class WorkspaceStore {
     });
   }
 
+  isArtifactRevisionPublished(revisionId: string): boolean {
+    return this.transactionRead(() => this.artifactRevisionWasPublished(revisionId));
+  }
+
   listArtifactRevisionsProducedByRun(
     projectId: string,
     runId: string,
@@ -8523,6 +8565,7 @@ export class WorkspaceStore {
         || source.artifactId !== artifact.id) {
         throw new WorkspaceGraphValidationError("source Artifact Revision is not owned by the request Artifact");
       }
+      this.assertArtifactVersionSourceWasPublished(source);
       if (artifact.archivedAt !== null || artifact.activeTrackId === null) {
         throw new WorkspaceGraphValidationError("Artifact does not have an editable active Track");
       }
@@ -8579,6 +8622,7 @@ export class WorkspaceStore {
         || source.artifactId !== artifact.id) {
         throw new WorkspaceGraphValidationError("source Artifact Revision is not owned by the request Artifact");
       }
+      this.assertArtifactVersionSourceWasPublished(source);
       if (artifact.archivedAt !== null || artifact.activeTrackId === null) {
         throw new WorkspaceGraphValidationError("Artifact does not have an editable active Track");
       }
@@ -8955,6 +8999,42 @@ export class WorkspaceStore {
     });
   }
 
+  listPublishedRevisions(projectId: string, artifactId: string): ArtifactRevisionRecord[] {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT revision.*, artifact.source_root AS owning_source_root
+         FROM artifact_revisions revision
+         JOIN workspace_artifacts artifact
+           ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
+         WHERE revision.workspace_id = ? AND revision.artifact_id = ?
+           AND EXISTS (
+             SELECT 1
+             FROM workspace_snapshot_artifacts mapping
+             JOIN workspace_snapshots snapshot
+               ON snapshot.id = mapping.snapshot_id
+              AND snapshot.workspace_id = mapping.workspace_id
+             WHERE mapping.workspace_id = revision.workspace_id
+               AND mapping.artifact_id = revision.artifact_id
+               AND mapping.revision_id = revision.id
+               AND snapshot.sealed = 1
+           )
+         ORDER BY revision.created_at ASC, revision.id ASC`,
+      ).all(workspace.id, artifactId) as Row[];
+      const context = this.readContext();
+      const revisions = rows.map((row) => {
+        const revision = asOwnedArtifactRevision(row);
+        context.artifactRevisions.set(revision.id, revision);
+        return revision;
+      });
+      return revisions.map((revision) => {
+        this.validateArtifactRevisionLineage(revision);
+        return revision;
+      });
+    });
+  }
+
   listArtifactRevisionHistoryPage(
     projectId: string,
     artifactId: string,
@@ -8985,7 +9065,19 @@ export class WorkspaceStore {
          FROM artifact_revisions revision
          JOIN workspace_artifacts artifact
            ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
-         WHERE revision.workspace_id = ? AND revision.artifact_id = ? ${cursorSql}
+         WHERE revision.workspace_id = ? AND revision.artifact_id = ?
+           AND EXISTS (
+             SELECT 1
+             FROM workspace_snapshot_artifacts mapping
+             JOIN workspace_snapshots snapshot
+               ON snapshot.id = mapping.snapshot_id
+              AND snapshot.workspace_id = mapping.workspace_id
+             WHERE mapping.workspace_id = revision.workspace_id
+               AND mapping.artifact_id = revision.artifact_id
+               AND mapping.revision_id = revision.id
+               AND snapshot.sealed = 1
+           )
+           ${cursorSql}
          ORDER BY revision.created_at DESC, revision.id DESC
          LIMIT ?`,
       ).all(...args) as Row[];
@@ -11244,6 +11336,146 @@ export class WorkspaceStore {
     return pack.hash;
   }
 
+  private generationTaskAttemptSourceVisualEvidenceAuthorityInTransaction(
+    attempt: GenerationTaskAttempt,
+  ): false | GenerationTaskSourceVisualEvidenceAuthority {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task source visual evidence lookup requires a transaction");
+    }
+    if (attempt.target.type !== "artifact") return false;
+    if (attempt.contextPackId === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Artifact Attempt has no frozen Context Pack`,
+      );
+    }
+    const pack = this.getContextPack(attempt.workspaceId, attempt.contextPackId);
+    if (!pack) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Context Pack is not resolvable`,
+      );
+    }
+    if (pack.intent !== "generate"
+      || pack.target.type !== "artifact"
+      || pack.target.id !== attempt.target.id) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Context Pack is not scoped to its Artifact`,
+      );
+    }
+    const sharinganPins: Array<{
+      resourceId: string;
+      revisionId: string;
+      revisionChecksum: string;
+    }> = [];
+    for (const pin of attempt.resourcePins) {
+      const exact = this.db.prepare(
+        `SELECT resource.kind, revision.checksum
+         FROM resources resource
+         JOIN resource_revisions revision
+           ON revision.resource_id = resource.id
+          AND revision.workspace_id = resource.workspace_id
+         WHERE resource.id = ? AND resource.workspace_id = ? AND revision.id = ?`,
+      ).get(pin.resourceId, attempt.workspaceId, pin.revisionId) as {
+        kind: string;
+        checksum: string;
+      } | undefined;
+      if (!exact) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${attempt.taskId}/${attempt.attempt} Resource pin is not exact`,
+        );
+      }
+      if (exact.kind !== "sharingan-capture") continue;
+      sharinganPins.push({
+        resourceId: pin.resourceId,
+        revisionId: pin.revisionId,
+        revisionChecksum: exact.checksum,
+      });
+    }
+    const sharinganItemsByAuthority = new Map<string, typeof pack.items>();
+    for (const item of pack.items) {
+      if (item.ref.kind !== "resource" || item.ref.resourceKind !== "sharingan-capture") continue;
+      if (item.ref.revisionId === undefined) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${attempt.taskId}/${attempt.attempt} Sharingan Capture Context is not exact`,
+        );
+      }
+      const key = canonicalJsonText({
+        resourceId: item.ref.id,
+        revisionId: item.ref.revisionId,
+        revisionChecksum: item.checksum,
+      }, "Sharingan Capture source authority");
+      const items = sharinganItemsByAuthority.get(key) ?? [];
+      items.push(item);
+      sharinganItemsByAuthority.set(key, items);
+    }
+    let hasSharinganOmission = false;
+    for (const omission of pack.omissions) {
+      if (omission.ref.kind !== "resource") continue;
+      const actualKind = this.resolveContextOmissionResourceKindInTransaction(
+        attempt.workspaceId,
+        omission,
+      );
+      const isSharingan = actualKind === "sharingan-capture"
+        || (actualKind === null && omission.ref.resourceKind === "sharingan-capture");
+      if (!isSharingan) continue;
+      if (actualKind === null || omission.ref.revisionId === undefined) {
+        hasSharinganOmission = true;
+        continue;
+      }
+      const omittedRevision = this.db.prepare(
+        `SELECT checksum FROM resource_revisions
+         WHERE id = ? AND resource_id = ? AND workspace_id = ?`,
+      ).get(
+        omission.ref.revisionId,
+        omission.ref.id,
+        attempt.workspaceId,
+      ) as { checksum: string } | undefined;
+      if (!omittedRevision) {
+        hasSharinganOmission = true;
+        continue;
+      }
+      const omittedKey = canonicalJsonText({
+        resourceId: omission.ref.id,
+        revisionId: omission.ref.revisionId,
+        revisionChecksum: omittedRevision.checksum,
+      }, "omitted Sharingan Capture source authority");
+      if (!sharinganItemsByAuthority.has(omittedKey)) hasSharinganOmission = true;
+    }
+    if (hasSharinganOmission || sharinganPins.length > 1 || sharinganItemsByAuthority.size > 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Sharingan Capture source authority is ambiguous`,
+      );
+    }
+    if (sharinganPins.length === 0 && sharinganItemsByAuthority.size === 0) return false;
+    if (sharinganPins.length !== 1 || sharinganItemsByAuthority.size !== 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Sharingan Capture pins and Context must exactly match`,
+      );
+    }
+    const pin = sharinganPins[0]!;
+    const [authorityKey, sharinganItems] = [...sharinganItemsByAuthority.entries()][0]!;
+    const pinKey = canonicalJsonText(pin, "pinned Sharingan Capture source authority");
+    if (authorityKey !== pinKey) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Sharingan Capture pins and Context must exactly match`,
+      );
+    }
+    for (const item of sharinganItems) {
+      if (!item.provided
+        || item.resolvedKind !== "resource-revision"
+        || item.resourceRevisionId !== pin.revisionId
+        || item.checksum !== pin.revisionChecksum
+        || item.ref.kind !== "resource"
+        || item.ref.id !== pin.resourceId
+        || item.ref.resourceKind !== "sharingan-capture"
+        || item.ref.revisionId !== pin.revisionId) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${attempt.taskId}/${attempt.attempt} Sharingan Capture pins and Context must exactly match`,
+        );
+      }
+    }
+    return { ...pin };
+  }
+
   private generationTaskResourceCandidateProvenanceInTransaction(
     attempt: GenerationTaskAttempt,
   ): Record<string, unknown> {
@@ -11396,6 +11628,8 @@ export class WorkspaceStore {
       );
     }
     validateGenerationTaskArtifactQualityGate({
+      requireSourceVisualEvidence:
+        this.generationTaskAttemptSourceVisualEvidenceAuthorityInTransaction(sourceAttempt),
       qaProfile: task.qaProfile,
       plannedFrames: attempt.payload.responsiveFrames ?? [],
       renderSpec: artifactRevision.renderSpec,
@@ -14544,6 +14778,28 @@ export class WorkspaceStore {
     return revision;
   }
 
+  private assertArtifactVersionSourceWasPublished(revision: ArtifactRevisionRecord): void {
+    if (!this.artifactRevisionWasPublished(revision.id)) {
+      throw new WorkspaceGraphValidationError(
+        "Artifact version source must have been published in a sealed Snapshot",
+      );
+    }
+  }
+
+  private artifactRevisionWasPublished(revisionId: string): boolean {
+    const published = this.db.prepare(
+      `SELECT 1
+       FROM workspace_snapshot_artifacts mapping
+       JOIN workspace_snapshots snapshot
+         ON snapshot.id = mapping.snapshot_id
+        AND snapshot.workspace_id = mapping.workspace_id
+       WHERE mapping.revision_id = ?
+         AND snapshot.sealed = 1
+       LIMIT 1`,
+    ).get(revisionId);
+    return Boolean(published);
+  }
+
   private loadKernelRevision(revisionId: string): SharedDesignKernelRevision | null {
     const context = this.readContext();
     const cached = context.kernelRevisions.get(revisionId);
@@ -14960,6 +15216,32 @@ export class WorkspaceStore {
         throw new WorkspaceGraphValidationError("Context Pack Kernel Revision ownership is invalid");
       }
     }
+  }
+
+  private resolveContextOmissionResourceKindInTransaction(
+    workspaceId: string,
+    omission: ContextOmission,
+  ): ResourceKind | null {
+    if (!this.db.isTransaction) {
+      throw new Error("Context Pack omission Resource lookup requires a transaction");
+    }
+    if (omission.ref.kind !== "resource") return null;
+    const row = this.db.prepare(
+      "SELECT workspace_id, kind FROM resources WHERE id = ?",
+    ).get(omission.ref.id) as { workspace_id: string; kind: string } | undefined;
+    if (!row) return null;
+    if (row.workspace_id !== workspaceId) {
+      throw new WorkspaceGraphValidationError(
+        "Context Pack omission Resource belongs to another Workspace",
+      );
+    }
+    const actualKind = resourceKind(row.kind, "Context Pack omission Resource kind");
+    if (omission.ref.resourceKind !== actualKind) {
+      throw new WorkspaceGraphValidationError(
+        "Context Pack omission declared Resource kind does not match its authoritative Resource",
+      );
+    }
+    return actualKind;
   }
 
   private validateArtifactRevisionPins(

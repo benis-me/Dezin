@@ -1,5 +1,11 @@
 import { types as nodeUtilTypes } from "node:util";
-import type { GenerationTask } from "../../../../packages/core/src/index.ts";
+import {
+  isExactRenderFrameCaptureViewport,
+  RENDER_FRAME_CAPTURE_DIMENSION_LIMIT,
+  RENDER_FRAME_CAPTURE_PIXEL_LIMIT,
+  RENDER_FRAME_NAME_LIMIT,
+  type GenerationTask,
+} from "../../../../packages/core/src/index.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
 const ARRAY_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Array.prototype));
@@ -403,9 +409,19 @@ function validateFrame(value: unknown, label: string): string {
     label,
   );
   const id = viewerText(frame.id, `${label} id`, VIEWER_BRIDGE_FRAME_TEXT_LIMIT);
-  canonicalString(frame.name, `${label} name`);
-  positiveNumber(frame.width, `${label} width`);
-  positiveNumber(frame.height, `${label} height`);
+  const name = canonicalString(frame.name, `${label} name`);
+  if (name.length > RENDER_FRAME_NAME_LIMIT) {
+    fail(`${label} name exceeds the length limit of ${RENDER_FRAME_NAME_LIMIT}`);
+  }
+  const width = positiveNumber(frame.width, `${label} width`);
+  const height = positiveNumber(frame.height, `${label} height`);
+  if (!isExactRenderFrameCaptureViewport(width, height)) {
+    fail(
+      `${label} capture dimensions must be positive integers no larger than `
+      + `${RENDER_FRAME_CAPTURE_DIMENSION_LIMIT} and cannot exceed the `
+      + `${RENDER_FRAME_CAPTURE_PIXEL_LIMIT} pixel budget`,
+    );
+  }
   if (Object.hasOwn(frame, "initialState")) {
     viewerText(frame.initialState, `${label} initialState`, VIEWER_BRIDGE_FRAME_TEXT_LIMIT);
   }

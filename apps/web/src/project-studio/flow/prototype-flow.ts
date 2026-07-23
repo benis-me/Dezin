@@ -6,13 +6,20 @@ import type {
   WorkspaceRenderFrameSpec,
   WorkspaceSnapshot,
 } from "../../lib/api.ts";
+import {
+  readFrozenPrototypeRenderFrames,
+  resolveFrozenPrototypeRelations,
+  selectFrozenPrototypeRenderFrame,
+  type FrozenPrototypeEndpoint,
+  type ResolvedFrozenPrototypeRelation,
+  type ResolvedPrototypeTransition,
+} from "../../../../../packages/core/src/prototype-relation.ts";
 
 const MAX_BINDINGS = 64;
 const MAX_BINDING_ID = 128;
 const MAX_DESIGN_NODE_ID = 256;
 const MAX_SOURCE_PATH = 1_024;
 const MAX_SELECTOR = 4_096;
-const MAX_TRANSITION_MS = 2_000;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 type PrototypeWorkspaceEdge = Extract<WorkspaceEdge, { kind: "prototype" }>;
@@ -32,10 +39,13 @@ export interface PrototypeFlowSession {
   readonly workspaceId: string;
   readonly graphRevision: number;
   readonly startArtifactId: string;
+  readonly startFrameId: string | null;
   readonly pages: readonly FrozenPrototypeFlowPage[];
   readonly artifactRevisions: Readonly<Record<string, string | null>>;
   readonly prototypeEdges: readonly Readonly<PrototypeWorkspaceEdge>[];
   readonly bindingEdgeIds: Readonly<Record<string, string>>;
+  readonly prototypeEndpoints: readonly Readonly<FrozenPrototypeEndpoint>[];
+  readonly relationResolutions: Readonly<Record<string, ResolvedFrozenPrototypeRelation>>;
 }
 
 export interface PrototypeBindingDescriptor {
@@ -93,6 +103,7 @@ export type FrozenPrototypeEdgeValidation =
       targetRevisionId: string;
       targetState: string | null;
       targetFrame: Readonly<WorkspaceRenderFrameSpec> | null;
+      transition: Readonly<ResolvedPrototypeTransition>;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -183,44 +194,8 @@ function deepFreezeJson<T>(value: T): T {
   return Object.freeze(value);
 }
 
-function cloneFrame(frame: WorkspaceRenderFrameSpec): Readonly<WorkspaceRenderFrameSpec> {
-  const fixture = frame.fixture === undefined ? undefined : deepFreezeJson(structuredClone(frame.fixture));
-  return Object.freeze({
-    id: frame.id,
-    name: frame.name,
-    width: frame.width,
-    height: frame.height,
-    ...(frame.initialState === undefined ? {} : { initialState: frame.initialState }),
-    ...(fixture === undefined ? {} : { fixture }),
-    ...(frame.background === undefined ? {} : { background: frame.background }),
-  });
-}
-
 function framesForRevision(revision: ArtifactRevision | undefined): readonly Readonly<WorkspaceRenderFrameSpec>[] | null {
-  if (revision === undefined || !Array.isArray(revision.renderSpec.frames) || revision.renderSpec.frames.length > 64) return null;
-  const frames: WorkspaceRenderFrameSpec[] = [];
-  const ids = new Set<string>();
-  for (const value of revision.renderSpec.frames) {
-    if (!isRecord(value)) return null;
-    if (!boundedString(value.id, 256) || value.id !== value.id.trim() || ids.has(value.id)
-      || !boundedString(value.name, 256)
-      || typeof value.width !== "number" || !Number.isFinite(value.width) || value.width <= 0 || value.width > 16_384
-      || typeof value.height !== "number" || !Number.isFinite(value.height) || value.height <= 0 || value.height > 16_384
-      || (value.initialState !== undefined && !boundedString(value.initialState, 256))
-      || (value.fixture !== undefined && !isRecord(value.fixture))
-      || (value.background !== undefined && typeof value.background !== "string")) return null;
-    ids.add(value.id);
-    frames.push({
-      id: value.id,
-      name: value.name.trim(),
-      width: value.width,
-      height: value.height,
-      ...(value.initialState === undefined ? {} : { initialState: value.initialState }),
-      ...(value.fixture === undefined ? {} : { fixture: structuredClone(value.fixture) }),
-      ...(value.background === undefined ? {} : { background: value.background }),
-    });
-  }
-  return frames.length > 0 ? Object.freeze(frames.map(cloneFrame)) : null;
+  return revision === undefined ? null : readFrozenPrototypeRenderFrames(revision.renderSpec);
 }
 
 function renderSpecForRevision(revision: ArtifactRevision | undefined): Readonly<Record<string, unknown>> | null {
@@ -231,6 +206,30 @@ function bindingFor(edge: Readonly<PrototypeWorkspaceEdge>): WorkspacePrototypeB
   return edge.prototype.status === "interactive" || edge.prototype.status === "broken"
     ? edge.prototype.binding
     : undefined;
+}
+
+function frozenPrototypeEndpoints(
+  snapshot: WorkspaceSnapshot,
+  revisions: readonly ArtifactRevision[],
+): readonly Readonly<FrozenPrototypeEndpoint>[] {
+  return Object.freeze(snapshot.graph.nodes.flatMap((node): FrozenPrototypeEndpoint[] => {
+    if (node.kind !== "page") return [];
+    const revisionId = snapshot.artifactRevisions[node.artifactId] ?? null;
+    const revision = revisionId === null
+      ? undefined
+      : revisions.find((candidate) => candidate.id === revisionId
+        && candidate.workspaceId === snapshot.workspaceId
+        && candidate.artifactId === node.artifactId);
+    const frames = framesForRevision(revision);
+    return [Object.freeze({
+      nodeId: node.id,
+      artifactId: node.artifactId,
+      revisionId,
+      targetStates: frames === null
+        ? null
+        : Object.freeze(frames.flatMap((frame) => frame.initialState === undefined ? [] : [frame.initialState])),
+    })];
+  }));
 }
 
 export function presentablePrototypeFlowPages(
@@ -268,9 +267,21 @@ export function createPrototypeFlowSession(
   const pages = presentablePrototypeFlowPages(snapshot, revisions).map((page) => Object.freeze({ ...page }));
   if (pages.length === 0) throw new Error("This Snapshot has no revision-backed Page to present.");
   const selected = selectedNodeIds.map((nodeId) => pages.find((page) => page.nodeId === nodeId)).find(Boolean);
+  const startPage = selected ?? pages[0]!;
+  const thumbnailFrameId = typeof startPage.renderSpec?.thumbnailFrameId === "string"
+    ? startPage.renderSpec.thumbnailFrameId
+    : null;
+  const startFrame = startPage.frames?.find((frame) => frame.id === thumbnailFrameId)
+    ?? startPage.frames?.[0]
+    ?? null;
   const prototypeEdges = snapshot.graph.edges
     .filter((edge): edge is PrototypeWorkspaceEdge => edge.kind === "prototype")
     .map(clonePrototypeEdge);
+  const prototypeEndpoints = frozenPrototypeEndpoints(snapshot, revisions);
+  const relationResolutions = Object.freeze(Object.fromEntries(
+    [...resolveFrozenPrototypeRelations({ endpoints: prototypeEndpoints, edges: prototypeEdges })]
+      .map(([edgeId, resolution]) => [edgeId, deepFreezeJson(resolution)]),
+  ));
   const artifactRevisions = Object.freeze(Object.fromEntries(
     Object.entries(snapshot.artifactRevisions).map(([artifactId, revisionId]) => [artifactId, revisionId]),
   ));
@@ -285,86 +296,61 @@ export function createPrototypeFlowSession(
     snapshotId: snapshot.id,
     workspaceId: snapshot.workspaceId,
     graphRevision: snapshot.graphRevision,
-    startArtifactId: selected?.artifactId ?? pages[0]!.artifactId,
+    startArtifactId: startPage.artifactId,
+    startFrameId: startFrame?.id ?? null,
     pages: Object.freeze(pages),
     artifactRevisions,
     prototypeEdges: Object.freeze(prototypeEdges),
     bindingEdgeIds: Object.freeze(bindingEdgeIds),
+    prototypeEndpoints,
+    relationResolutions,
   });
 }
 
 function sourceNodeArtifactId(session: PrototypeFlowSession, edge: Readonly<PrototypeWorkspaceEdge>): string | null {
-  return session.pages.find((page) => page.nodeId === edge.sourceNodeId)?.artifactId ?? null;
-}
-
-function baseEdgeValidation(
-  session: PrototypeFlowSession,
-  edge: Readonly<PrototypeWorkspaceEdge>,
-): FrozenPrototypeEdgeValidation {
-  if (edge.prototype.status === "planned") return { status: "planned", detail: "No binding yet." };
-  if (edge.prototype.status === "broken") return { status: "broken", detail: edge.prototype.brokenReason };
-  const binding = edge.prototype.binding;
-  const sourcePage = session.pages.find((page) => page.nodeId === edge.sourceNodeId);
-  if (sourcePage === undefined || binding.sourceArtifactId !== sourcePage.artifactId) {
-    return { status: "broken", detail: "Prototype source does not match the frozen graph." };
-  }
-  if (binding.sourceRevisionId !== sourcePage.revisionId
-    || session.artifactRevisions[sourcePage.artifactId] !== sourcePage.revisionId) {
-    return { status: "broken", detail: "Prototype source Revision is stale for this frozen Snapshot." };
-  }
-  const locator = parseLocator(binding.sourceLocator);
-  if (locator === null || (binding.trigger !== "click" && binding.trigger !== "submit")) {
-    return { status: "broken", detail: "Prototype source locator or trigger is invalid." };
-  }
-  const targetPage = session.pages.find((page) => page.nodeId === edge.targetNodeId);
-  if (targetPage === undefined || binding.targetArtifactId !== targetPage.artifactId) {
-    return { status: "broken", detail: "Prototype target does not match the frozen graph." };
-  }
-  const targetRevisionId = session.artifactRevisions[targetPage.artifactId];
-  if (typeof targetRevisionId !== "string" || targetRevisionId !== targetPage.revisionId) {
-    return { status: "broken", detail: "Prototype target has no exact Revision in this frozen Snapshot." };
-  }
-  let targetFrame: Readonly<WorkspaceRenderFrameSpec> | null = null;
-  if (binding.targetState !== undefined) {
-    const matches = targetPage.frames?.filter((frame) => frame.initialState === binding.targetState) ?? [];
-    if (matches.length !== 1) {
-      return {
-        status: "broken",
-        detail: matches.length > 1
-          ? `Target RenderSpec state ${binding.targetState} is ambiguous.`
-          : `Target RenderSpec state ${binding.targetState} does not exist in Revision ${targetRevisionId}.`,
-      };
-    }
-    targetFrame = matches[0]!;
-  }
-  return {
-    status: "interactive",
-    binding,
-    sourceArtifactId: sourcePage.artifactId,
-    sourceRevisionId: sourcePage.revisionId,
-    targetArtifactId: targetPage.artifactId,
-    targetRevisionId,
-    targetState: binding.targetState ?? null,
-    targetFrame,
-  };
+  return session.prototypeEndpoints.find((endpoint) => endpoint.nodeId === edge.sourceNodeId)?.artifactId ?? null;
 }
 
 export function validateFrozenPrototypeEdge(
   session: PrototypeFlowSession,
   edge: Readonly<PrototypeWorkspaceEdge>,
+  currentFrame: Readonly<WorkspaceRenderFrameSpec> | null = null,
 ): FrozenPrototypeEdgeValidation {
-  const validation = baseEdgeValidation(session, edge);
-  if (validation.status !== "interactive") return validation;
-  const collisions = session.prototypeEdges.filter((candidate) => {
-    const other = baseEdgeValidation(session, candidate);
-    return other.status === "interactive"
-      && other.sourceArtifactId === validation.sourceArtifactId
-      && other.binding.trigger === validation.binding.trigger
-      && sameLocator(other.binding.sourceLocator, validation.binding.sourceLocator);
-  });
-  return collisions.length > 1
-    ? { status: "broken", detail: `Ambiguous prototype binding: ${collisions.length} exact matches.` }
-    : validation;
+  const resolution = session.relationResolutions[edge.id];
+  if (resolution === undefined) {
+    return { status: "broken", detail: "Prototype edge is missing from this frozen Snapshot." };
+  }
+  if (resolution.status !== "interactive") {
+    return { status: resolution.status, detail: resolution.detail };
+  }
+  const targetPage = session.pages.find((page) => page.artifactId === resolution.targetArtifactId
+    && page.revisionId === resolution.targetRevisionId);
+  if (targetPage === undefined) {
+    return { status: "broken", detail: "Prototype target has no exact Revision in this frozen Snapshot." };
+  }
+  const targetFrame = resolution.targetState === null && currentFrame === null
+    ? null
+    : selectFrozenPrototypeRenderFrame(targetPage.frames, {
+        currentFrame,
+        targetState: resolution.targetState,
+      });
+  if (resolution.targetState !== null && targetFrame === null) {
+    return {
+      status: "broken",
+      detail: `Target RenderSpec state ${resolution.targetState} does not exist in Revision ${resolution.targetRevisionId}.`,
+    };
+  }
+  return {
+    status: "interactive",
+    binding: resolution.binding,
+    sourceArtifactId: resolution.sourceArtifactId,
+    sourceRevisionId: resolution.sourceRevisionId,
+    targetArtifactId: resolution.targetArtifactId,
+    targetRevisionId: resolution.targetRevisionId,
+    targetState: resolution.targetState,
+    targetFrame,
+    transition: resolution.transition,
+  };
 }
 
 export function buildPrototypeModeCommand(
@@ -418,35 +404,25 @@ export function parsePrototypeActivation(value: unknown, nonce: string): Prototy
   };
 }
 
-function normalizedTransition(binding: WorkspacePrototypeBinding): {
-  type: "none" | "fade" | "slide";
-  durationMs: number;
-  easing?: string;
-} {
-  const transition = binding.transition;
-  if (!transition || transition.type === "none") return { type: "none", durationMs: 0 };
-  const durationMs = typeof transition.durationMs === "number" && Number.isFinite(transition.durationMs)
-    ? Math.min(MAX_TRANSITION_MS, Math.max(0, Math.round(transition.durationMs)))
-    : 180;
-  const easing = boundedString(transition.easing, 128) ? transition.easing : undefined;
-  return {
-    type: transition.type === "slide" ? "slide" : "fade",
-    durationMs,
-    ...(easing === undefined ? {} : { easing }),
-  };
-}
-
 export function resolvePrototypeActivation(
   session: PrototypeFlowSession,
   sourceArtifactId: string,
   activation: PrototypeActivation,
+  currentFrameId: string | null = null,
 ): PrototypeActivationResult {
   const edgeId = session.bindingEdgeIds[activation.bindingId];
   const edge = session.prototypeEdges.find((candidate) => candidate.id === edgeId);
   if (edge === undefined) {
     return { kind: "blocked", reason: "Prototype binding did not match this frozen Snapshot." };
   }
-  const validation = validateFrozenPrototypeEdge(session, edge);
+  const sourcePage = session.pages.find((page) => page.artifactId === sourceArtifactId);
+  const currentFrame = currentFrameId === null
+    ? null
+    : sourcePage?.frames?.find((frame) => frame.id === currentFrameId) ?? null;
+  if (currentFrameId !== null && currentFrame === null) {
+    return { kind: "blocked", reason: "Prototype activation did not match the current exact Frame." };
+  }
+  const validation = validateFrozenPrototypeEdge(session, edge, currentFrame);
   if (validation.status !== "interactive") {
     return { kind: "blocked", reason: validation.detail };
   }
@@ -462,7 +438,7 @@ export function resolvePrototypeActivation(
     targetRevisionId: validation.targetRevisionId,
     targetState: validation.targetState,
     targetFrame: validation.targetFrame,
-    transition: normalizedTransition(validation.binding),
+    transition: validation.transition,
   };
 }
 

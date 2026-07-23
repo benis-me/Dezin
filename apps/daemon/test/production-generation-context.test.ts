@@ -5,8 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { GenerationTaskContextRequest } from "../src/orchestration/generation-plan-service.ts";
-import type { WorkspaceGraph, WorkspaceSnapshot } from "../../../packages/core/src/index.ts";
+import type {
+  ArtifactRevisionRecord,
+  WorkspaceGraph,
+  WorkspaceSnapshot,
+} from "../../../packages/core/src/index.ts";
 import {
+  buildRelevantPrototypeRelations,
   freezeArtifactExecutionProfile,
   freezeResourceExecutionProfile,
   type GenerationContextWorkspacePort,
@@ -59,6 +64,136 @@ const TARGET_ARTIFACT_ID = "artifact-page";
 const TARGET_TRACK_ID = "track-page";
 const KERNEL_REVISION_ID = "kernel-revision-1";
 const KERNEL_CHECKSUM = "1".repeat(64);
+
+function prototypeRevision(
+  id: string,
+  artifactId: string,
+  renderSpec: Record<string, unknown> = {},
+): ArtifactRevisionRecord {
+  return {
+    id,
+    workspaceId: WORKSPACE_ID,
+    artifactId,
+    trackId: `track-${artifactId}`,
+    sequence: 1,
+    parentRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    artifactRoot: `workspaces/${artifactId}`,
+    kernelRevisionId: KERNEL_REVISION_ID,
+    renderSpec,
+    quality: {},
+    contextPackHash: null,
+    producedByRunId: null,
+    legacyRunId: null,
+    createdAt: 1,
+  };
+}
+
+test("Generation Context derives frozen prototype status and effective transitions from the Viewer contract", () => {
+  const nodes: WorkspaceGraph["nodes"] = ["a", "b", "c", "d"].map((id) => ({
+    id: `node-${id}`,
+    workspaceId: WORKSPACE_ID,
+    kind: "page",
+    name: `Page ${id.toUpperCase()}`,
+    artifactId: `artifact-${id}`,
+  }));
+  const binding = (
+    sourceArtifactId: string,
+    sourceRevisionId: string,
+    targetArtifactId: string,
+    designNodeId: string,
+    options: { targetState?: string; durationMs?: number } = {},
+  ) => ({
+    sourceArtifactId,
+    sourceRevisionId,
+    sourceLocator: { designNodeId },
+    trigger: "click" as const,
+    targetArtifactId,
+    ...(options.targetState === undefined ? {} : { targetState: options.targetState }),
+    transition: { type: "fade" as const, ...(options.durationMs === undefined ? {} : { durationMs: options.durationMs }) },
+  });
+  const graph: WorkspaceGraph = {
+    workspaceId: WORKSPACE_ID,
+    revision: 4,
+    nodes,
+    edges: [{
+      id: "edge-duplicate-a",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-a",
+      targetNodeId: "node-b",
+      kind: "prototype",
+      prototype: { status: "interactive", binding: binding("artifact-a", "revision-a", "artifact-b", "same") },
+    }, {
+      id: "edge-duplicate-b",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-a",
+      targetNodeId: "node-c",
+      kind: "prototype",
+      prototype: { status: "interactive", binding: binding("artifact-a", "revision-a", "artifact-c", "same") },
+    }, {
+      id: "edge-missing-state",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-b",
+      targetNodeId: "node-a",
+      kind: "prototype",
+      prototype: {
+        status: "interactive",
+        binding: binding("artifact-b", "revision-b", "artifact-a", "missing-state", {
+          targetState: "absent",
+          durationMs: 10_000,
+        }),
+      },
+    }, {
+      id: "edge-missing-target",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-a",
+      targetNodeId: "node-d",
+      kind: "prototype",
+      prototype: { status: "interactive", binding: binding("artifact-a", "revision-a", "artifact-d", "missing-target") },
+    }, {
+      id: "edge-stale",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-a",
+      targetNodeId: "node-b",
+      kind: "prototype",
+      prototype: {
+        status: "interactive",
+        binding: binding("artifact-a", "revision-old", "artifact-b", "stale", { durationMs: 180.5 }),
+      },
+    }],
+  };
+  const snapshot = {
+    artifactRevisions: {
+      "artifact-a": "revision-a",
+      "artifact-b": "revision-b",
+      "artifact-c": "revision-c",
+      "artifact-d": null,
+    },
+  };
+  const revisions = new Map([
+    ["revision-a", prototypeRevision("revision-a", "artifact-a", {
+      frames: [{ id: "ready", name: "Ready", width: 1_440, height: 900, initialState: "ready" }],
+    })],
+    ["revision-b", prototypeRevision("revision-b", "artifact-b")],
+    ["revision-c", prototypeRevision("revision-c", "artifact-c")],
+  ]);
+
+  const relations = buildRelevantPrototypeRelations({
+    graph,
+    snapshot,
+    targetArtifactId: "artifact-a",
+    getArtifactRevision: (revisionId) => revisions.get(revisionId) ?? null,
+  });
+  const byId = new Map(relations.map((relation) => [relation.edgeId, relation]));
+  assert.match(byId.get("edge-stale")?.brokenReason ?? "", /stale/i);
+  assert.deepEqual(byId.get("edge-stale")?.transition, { type: "fade", durationMs: 181, easing: null });
+  assert.match(byId.get("edge-missing-target")?.brokenReason ?? "", /no exact Revision/i);
+  assert.match(byId.get("edge-missing-state")?.brokenReason ?? "", /does not exist/i);
+  assert.deepEqual(byId.get("edge-missing-state")?.transition, { type: "fade", durationMs: 2_000, easing: null });
+  assert.match(byId.get("edge-duplicate-a")?.brokenReason ?? "", /Ambiguous prototype binding: 2 exact matches/i);
+  assert.equal(byId.get("edge-duplicate-b")?.status, "broken");
+});
 
 function executionProfile(projectName: string, hasExactSharinganCapture = false) {
   const settings = {
@@ -357,6 +492,7 @@ test("production Context resolution freezes Task Snapshot pins including Researc
       createdAt: 21,
     }],
   ]);
+  const unpublishedArtifactRevisionIds = new Set<string>();
   const resources = new Map<string, "moodboard" | "research" | "sharingan-capture">([
     ["resource-moodboard", "moodboard"],
     ["resource-research", "research"],
@@ -369,14 +505,53 @@ test("production Context resolution freezes Task Snapshot pins including Researc
     nodes: [
       { id: "node-page", workspaceId: WORKSPACE_ID, kind: "page", name: "Checkout", artifactId: TARGET_ARTIFACT_ID },
       { id: "node-confirmation", workspaceId: WORKSPACE_ID, kind: "page", name: "Confirmation", artifactId: "artifact-confirmation" },
+      { id: "node-planned", workspaceId: WORKSPACE_ID, kind: "page", name: "Receipt", artifactId: "artifact-planned" },
+      { id: "node-unrelated-a", workspaceId: WORKSPACE_ID, kind: "page", name: "Unrelated A", artifactId: "artifact-unrelated-a" },
+      { id: "node-unrelated-b", workspaceId: WORKSPACE_ID, kind: "page", name: "Unrelated B", artifactId: "artifact-unrelated-b" },
     ],
     edges: [{
-      id: "edge-confirmation",
+      id: "edge-z-unrelated",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-unrelated-a",
+      targetNodeId: "node-unrelated-b",
+      kind: "prototype",
+      prototype: { status: "planned" },
+    }, {
+      id: "edge-c-broken",
       workspaceId: WORKSPACE_ID,
       sourceNodeId: "node-page",
       targetNodeId: "node-confirmation",
       kind: "prototype",
+      prototype: { status: "broken", brokenReason: "Source binding was removed" },
+    }, {
+      id: "edge-b-new-peer",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-page",
+      targetNodeId: "node-planned",
+      kind: "prototype",
       prototype: { status: "planned" },
+    }, {
+      id: "edge-a-incoming",
+      workspaceId: WORKSPACE_ID,
+      sourceNodeId: "node-confirmation",
+      targetNodeId: "node-page",
+      kind: "prototype",
+      prototype: {
+        status: "interactive",
+        binding: {
+          sourceArtifactId: "artifact-confirmation",
+          sourceRevisionId: "revision-neighbor",
+          sourceLocator: {
+            designNodeId: "continue-button",
+            sourcePath: "src/confirmation.tsx",
+            selector: "[data-action='continue']",
+          },
+          trigger: "click",
+          targetArtifactId: TARGET_ARTIFACT_ID,
+          targetState: "review",
+          transition: { type: "fade", durationMs: 180, easing: "ease-out" },
+        },
+      },
     }],
   };
   const snapshot: WorkspaceSnapshot = {
@@ -394,11 +569,13 @@ test("production Context resolution freezes Task Snapshot pins including Researc
     artifactTracks: {
       [TARGET_ARTIFACT_ID]: TARGET_TRACK_ID,
       "artifact-confirmation": "track-confirmation",
+      "artifact-planned": "track-planned",
       "artifact-component": "track-component",
     },
     artifactRevisions: {
       [TARGET_ARTIFACT_ID]: null,
       "artifact-confirmation": "revision-neighbor",
+      "artifact-planned": null,
       "artifact-component": "revision-component",
     },
     resourceRevisions: {
@@ -462,6 +639,7 @@ test("production Context resolution freezes Task Snapshot pins including Researc
       updatedAt: 1,
     }),
     getArtifactRevision: (id: string) => artifactRevisions.get(id) ?? null,
+    isArtifactRevisionPublished: (id: string) => !unpublishedArtifactRevisionIds.has(id),
     getArtifactRevisionContextChecksum: (id: string) => artifactChecksums.get(id) ?? null,
     listArtifactRevisionDependencies: () => [],
     listArtifactRevisionResourcePins: () => [],
@@ -618,6 +796,58 @@ test("production Context resolution freezes Task Snapshot pins including Researc
   });
   let frozenExecution = executionProfile("Frozen checkout", true);
   const module = await import("../src/orchestration/production-generation-context.ts");
+  const currentItems = dispatchPack.items
+    .filter((item) => item.contextClass === "system-kernel" || item.contextClass === "target")
+    .map((item, ordinal) => ({ ...structuredClone(item), ordinal }));
+  const dispatchExplicit = dispatchItems.find((item) => item.contextClass === "explicit");
+  assert.ok(dispatchExplicit);
+  const mergedDispatch = module.mergeDispatchEvidence({
+    ...structuredClone(dispatchPack),
+    intent: "generate",
+    items: currentItems,
+    omissions: [{
+      ref: structuredClone(dispatchExplicit.ref),
+      contextClass: "explicit",
+      reason: "the dispatch later reintroduced this exact ref",
+      tokenEstimate: 1,
+    }],
+    tokenEstimate: currentItems.reduce((total, item) => total + item.tokenEstimate, 0),
+  }, dispatchPack, packStore);
+  assert.ok(mergedDispatch.items.some((item) => item.contextClass === "explicit"
+    && stableStringify(item.ref) === stableStringify(dispatchExplicit.ref)));
+  assert.equal(
+    mergedDispatch.omissions.some((omission) => (
+      stableStringify(omission.ref) === stableStringify(dispatchExplicit.ref)
+    )),
+    false,
+    "dispatch-provided exact refs must be removed from current omissions",
+  );
+  const coalescedDispatch = module.mergeDispatchEvidence({
+    ...structuredClone(dispatchPack),
+    intent: "generate",
+  }, dispatchPack, packStore);
+  assert.equal(
+    coalescedDispatch.items.filter((item) => item.contextClass === "explicit"
+      && stableStringify(item.ref) === stableStringify(dispatchExplicit.ref)).length,
+    1,
+    "identical dispatch evidence may coalesce only by exact semantic identity",
+  );
+  const conflictingItems = dispatchPack.items.map((item) => item.contextClass === "explicit"
+    ? {
+      ...structuredClone(item),
+      content: `${item.content}\nconflicting-current-value`,
+      checksum: checksumBytes(`${item.content}\nconflicting-current-value`),
+    }
+    : structuredClone(item));
+  assert.throws(
+    () => module.mergeDispatchEvidence({
+      ...structuredClone(dispatchPack),
+      intent: "generate",
+      items: conflictingItems,
+      tokenEstimate: conflictingItems.reduce((total, item) => total + item.tokenEstimate, 0),
+    }, dispatchPack, packStore),
+    /dispatch evidence conflicts/i,
+  );
   const resolver = new module.ProductionGenerationTaskContextResolver({
     workspace,
     packStore,
@@ -643,11 +873,108 @@ test("production Context resolution freezes Task Snapshot pins including Researc
   assert.ok(first.items.some((item) => item.contextClass === "system-kernel"
     && item.ref.kind === "kernel" && item.ref.revisionId === KERNEL_REVISION_ID
     && item.checksum === KERNEL_CHECKSUM));
-  assert.ok(first.items.some((item) => item.contextClass === "target"
-    && item.ref.kind === "inline" && item.ref.id === TARGET_ARTIFACT_ID
-    && item.content.includes("Create a precise checkout flow")
-    && item.content.includes("dezin.artifact-execution-profile.v4")
-    && item.content.includes(frozenExecution.prompt.rendererProtocol)));
+  const targetItem = first.items.find((item) => item.contextClass === "target");
+  assert.ok(targetItem);
+  assert.equal(targetItem.ref.kind, "inline");
+  assert.equal(targetItem.ref.id, TARGET_ARTIFACT_ID);
+  assert.match(targetItem.content, /Create a precise checkout flow/);
+  assert.match(targetItem.content, /dezin\.artifact-execution-profile\.v4/);
+  assert.match(targetItem.content, new RegExp(frozenExecution.prompt.rendererProtocol.replaceAll(".", "\\.")));
+  const frozenTarget = JSON.parse(targetItem.content) as Record<string, unknown>;
+  assert.equal(frozenTarget.protocol, "dezin.generation-target-context.v3");
+  assert.deepEqual(Object.keys(frozenTarget).sort(), [
+    "artifactExecutionProfile",
+    "capabilities",
+    "expectedSnapshotId",
+    "graphRevision",
+    "kernelRevisionId",
+    "payload",
+    "planId",
+    "projectId",
+    "protocol",
+    "qaProfile",
+    "relevantPrototypeRelations",
+    "resourceLimits",
+    "target",
+    "taskId",
+    "taskKind",
+    "workspaceId",
+  ]);
+  assert.deepEqual(frozenTarget.relevantPrototypeRelations, [{
+    edgeId: "edge-a-incoming",
+    source: {
+      nodeId: "node-confirmation",
+      artifactId: "artifact-confirmation",
+      kind: "page",
+      name: "Confirmation",
+      revisionId: "revision-neighbor",
+    },
+    target: {
+      nodeId: "node-page",
+      artifactId: TARGET_ARTIFACT_ID,
+      kind: "page",
+      name: "Checkout",
+      revisionId: null,
+    },
+    targetArtifactRole: "target",
+    status: "broken",
+    binding: {
+      sourceArtifactId: "artifact-confirmation",
+      sourceRevisionId: "revision-neighbor",
+      sourceLocator: {
+        designNodeId: "continue-button",
+        sourcePath: "src/confirmation.tsx",
+        selector: "[data-action='continue']",
+      },
+      trigger: "click",
+      targetArtifactId: TARGET_ARTIFACT_ID,
+      targetState: "review",
+    },
+    transition: { type: "fade", durationMs: 180, easing: "ease-out" },
+    brokenReason: "Prototype target has no exact Revision in this frozen Snapshot.",
+  }, {
+    edgeId: "edge-b-new-peer",
+    source: {
+      nodeId: "node-page",
+      artifactId: TARGET_ARTIFACT_ID,
+      kind: "page",
+      name: "Checkout",
+      revisionId: null,
+    },
+    target: {
+      nodeId: "node-planned",
+      artifactId: "artifact-planned",
+      kind: "page",
+      name: "Receipt",
+      revisionId: null,
+    },
+    targetArtifactRole: "source",
+    status: "planned",
+    binding: null,
+    transition: null,
+    brokenReason: null,
+  }, {
+    edgeId: "edge-c-broken",
+    source: {
+      nodeId: "node-page",
+      artifactId: TARGET_ARTIFACT_ID,
+      kind: "page",
+      name: "Checkout",
+      revisionId: null,
+    },
+    target: {
+      nodeId: "node-confirmation",
+      artifactId: "artifact-confirmation",
+      kind: "page",
+      name: "Confirmation",
+      revisionId: "revision-neighbor",
+    },
+    targetArtifactRole: "source",
+    status: "broken",
+    binding: null,
+    transition: null,
+    brokenReason: "Source binding was removed",
+  }]);
   assert.ok(!first.items.some((item) => item.content.includes("must-not-persist")));
   for (const [resourceId, revisionId, kind] of [
     ["resource-moodboard", "revision-moodboard", "moodboard"],
@@ -662,9 +989,12 @@ test("production Context resolution freezes Task Snapshot pins including Researc
   assert.ok(first.items.some((item) => item.contextClass === "explicit"
     && item.ref.kind === "artifact" && item.ref.id === "artifact-component"
     && item.ref.revisionId === "revision-component"));
-  assert.ok(first.items.some((item) => item.contextClass === "prototype-neighbor"
+  const prototypeNeighbor = first.items.find((item) => item.contextClass === "prototype-neighbor"
     && item.ref.kind === "artifact" && item.ref.id === "artifact-confirmation"
-    && item.ref.revisionId === "revision-neighbor"));
+    && item.ref.revisionId === "revision-neighbor");
+  assert.ok(prototypeNeighbor);
+  assert.deepEqual(prototypeNeighbor.provenance.prototypeEdgeIds, ["edge-a-incoming", "edge-c-broken"]);
+  assert.equal(Object.hasOwn(prototypeNeighbor.provenance, "prototypeEdgeId"), false);
   const dispatchEvidence = first.items.filter((item) => item.contextClass === "selection"
     || (item.contextClass === "explicit" && item.ref.id === "resource-dispatch-extra"));
   assert.equal(dispatchEvidence.length, 2);
@@ -679,6 +1009,13 @@ test("production Context resolution freezes Task Snapshot pins including Researc
     assert.deepEqual(actual.boundary, expected.boundary);
     assert.deepEqual(actual.provenance, expected.provenance);
   }
+
+  unpublishedArtifactRevisionIds.add("revision-component");
+  await assert.rejects(
+    () => resolver.resolve(request(), new AbortController().signal),
+    /Artifact Revision revision-component.*unpublished/i,
+  );
+  unpublishedArtifactRevisionIds.delete("revision-component");
 
   const missingDispatch = structuredClone(dispatchedRequest);
   (missingDispatch.task.payload.artifactPlan as Record<string, unknown>).dispatchContextPackId =
@@ -793,7 +1130,7 @@ test("production Context resolution freezes Task Snapshot pins including Researc
       && item.ref.id === "resource-dispatch-extra")?.content,
     dispatchExplicitContent,
   );
-  assert.deepEqual(graphReads, [7, 7, 7, 7, 7, 7, 7, 7, 7, 8]);
+  assert.deepEqual(graphReads, [7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8]);
 
   const resourceTask = structuredClone(request()) as any;
   resourceTask.task = {
@@ -851,5 +1188,10 @@ test("production Context resolution freezes Task Snapshot pins including Researc
   assert.ok(resourceFirst.items.some((item) => item.contextClass === "target"
     && item.content.includes("dezin.resource-execution-profile.v3")
     && item.content.includes("dezin.research-generation-prompt.v3")));
+  const resourceTarget = JSON.parse(resourceFirst.items.find(
+    (item) => item.contextClass === "target",
+  )!.content) as Record<string, unknown>;
+  assert.equal(resourceTarget.protocol, "dezin.generation-target-context.v2");
+  assert.equal(Object.hasOwn(resourceTarget, "relevantPrototypeRelations"), false);
   assert.ok(!resourceFirst.items.some((item) => item.content.includes("resource-secret")));
 });

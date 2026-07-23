@@ -20,11 +20,16 @@ import {
   WorkspaceStoreResourceTaskPayloadReferenceGuard,
 } from "./resource-task-payload-recovery.ts";
 import { OwnedResourceTaskPayloadStaging } from "./resource-task-payload-staging.ts";
+import {
+  GenerationTaskEvidenceLifecycle,
+  type GenerationTaskEvidenceLifecycleStorePort,
+} from "./generation-task-evidence-lifecycle.ts";
 import type { GenerationPlanRecoveryDeps } from "./recovery.ts";
 
 export type ProductionGenerationWorkspaceStore =
   ArtifactCandidateRefRecoveryAdapterOptions["store"]
   & ResourcePayloadCleanupStorePort
+  & GenerationTaskEvidenceLifecycleStorePort
   & Pick<GenerationPlanRecoveryDeps["store"], "recoverExpiredGenerationTaskAttempts">
   & {
     listGenerationPlans(projectId: string): readonly {
@@ -70,6 +75,7 @@ export interface ProductionGenerationRuntimeOptions {
 function recoveryAdapters(options: ProductionGenerationRecoveryCompositionOptions): {
   artifactRefRecovery: ReturnType<typeof createArtifactCandidateRefRecovery>;
   resourcePayloadRecovery: OwnedResourceTaskPayloadRecovery;
+  evidenceRecovery: GenerationTaskEvidenceLifecycle;
 } {
   const references = new WorkspaceStoreResourceTaskPayloadReferenceGuard({
     store: options.workspaceStore,
@@ -79,17 +85,30 @@ function recoveryAdapters(options: ProductionGenerationRecoveryCompositionOption
     references,
     journal: references,
   });
+  const evidenceRecovery = new GenerationTaskEvidenceLifecycle({
+    dataDir: options.dataDir,
+    store: options.workspaceStore,
+  });
   return {
     artifactRefRecovery: createArtifactCandidateRefRecovery({
       store: options.workspaceStore,
       repositoryDirForWorkspace: options.repositoryDirForWorkspace,
       limit: options.artifactRefRecoveryLimit,
       observe: options.observeArtifactRefRecovery,
+      evidenceLifecycle: evidenceRecovery,
+      reportEvidenceCleanupError(error, identity) {
+        console.warn(
+          "[dezin:generation-task-evidence] startup publication cache cleanup failed",
+          identity,
+          error,
+        );
+      },
     }),
     resourcePayloadRecovery: new OwnedResourceTaskPayloadRecovery({
       staging,
       store: options.workspaceStore,
     }),
+    evidenceRecovery,
   };
 }
 

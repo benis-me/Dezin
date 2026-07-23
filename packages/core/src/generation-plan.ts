@@ -482,6 +482,21 @@ function taskPayloadForArtifact(
 }
 
 export function assertAcyclicTaskGraph(tasks: readonly GenerationTaskIntent[]): void {
+  stableTopologicalTaskOrder(tasks);
+}
+
+function taskOrderKey(task: GenerationTaskIntent): string {
+  const targetKind = task.target.type === "artifact"
+    ? `artifact:${task.target.id}`
+    : task.target.type === "resource"
+      ? `resource:${task.target.id}`
+      : `workspace:${task.target.id}`;
+  return `${targetKind}\0${task.kind}\0${task.id}`;
+}
+
+function stableTopologicalTaskOrder(
+  tasks: readonly GenerationTaskIntent[],
+): GenerationTaskIntent[] {
   const taskById = new Map<string, GenerationTaskIntent>();
   for (const task of tasks) {
     if (taskById.has(task.id)) {
@@ -508,25 +523,120 @@ export function assertAcyclicTaskGraph(tasks: readonly GenerationTaskIntent[]): 
   }
   const ready = [...indegree]
     .filter(([, degree]) => degree === 0)
-    .map(([id]) => id)
-    .sort(compareBinary);
-  let visited = 0;
-  for (let index = 0; index < ready.length; index += 1) {
-    const taskId = ready[index]!;
-    visited += 1;
+    .map(([id]) => id);
+  const result: GenerationTaskIntent[] = [];
+  while (ready.length > 0) {
+    ready.sort((left, right) => compareBinary(
+      taskOrderKey(taskById.get(left)!),
+      taskOrderKey(taskById.get(right)!),
+    ));
+    const taskId = ready.shift()!;
+    result.push(taskById.get(taskId)!);
     for (const dependentId of (dependents.get(taskId) ?? []).sort(compareBinary)) {
       const degree = indegree.get(dependentId)! - 1;
       indegree.set(dependentId, degree);
       if (degree === 0) ready.push(dependentId);
     }
   }
-  if (visited !== tasks.length) {
+  if (result.length !== tasks.length) {
     const cyclicTaskIds = [...indegree]
       .filter(([, degree]) => degree > 0)
       .map(([id]) => id)
       .sort(compareBinary);
     compileError("cyclic-task-graph", "Generation Task dependencies cannot form a cycle", { cyclicTaskIds });
   }
+  return result;
+}
+
+function prototypeConnectedPlannedPageComponents(
+  generation: WorkspaceGenerationPayload,
+): string[][] {
+  const plannedPages = new Set(generation.artifactPlans
+    .filter((plan) => plan.kind === "page")
+    .map((plan) => plan.artifactId));
+  const adjacency = new Map<string, Set<string>>();
+  const neighbors = (artifactId: string): Set<string> => {
+    const current = adjacency.get(artifactId);
+    if (current) return current;
+    const created = new Set<string>();
+    adjacency.set(artifactId, created);
+    return created;
+  };
+  for (const intent of generation.prototypeIntents) {
+    neighbors(intent.sourceArtifactId).add(intent.targetArtifactId);
+    neighbors(intent.targetArtifactId).add(intent.sourceArtifactId);
+  }
+
+  const visited = new Set<string>();
+  const components: string[][] = [];
+  for (const start of [...plannedPages].sort(compareBinary)) {
+    if (visited.has(start)) continue;
+    const pending = [start];
+    const plannedMembers: string[] = [];
+    visited.add(start);
+    while (pending.length > 0) {
+      const current = pending.shift()!;
+      if (plannedPages.has(current)) plannedMembers.push(current);
+      for (const neighbor of [...(adjacency.get(current) ?? [])].sort(compareBinary)) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        pending.push(neighbor);
+      }
+    }
+    if (plannedMembers.length > 1) components.push(plannedMembers.sort(compareBinary));
+  }
+  return components;
+}
+
+function orderPrototypeConnectedPageTasks(
+  tasks: readonly GenerationTaskIntent[],
+  generation: WorkspaceGenerationPayload,
+): GenerationTaskIntent[] {
+  const topological = stableTopologicalTaskOrder(tasks);
+  const position = new Map(topological.map((task, index) => [task.id, index]));
+  const pageTaskByArtifactId = new Map(tasks.flatMap((task) => (
+    task.kind === "page" && task.target.type === "artifact"
+      ? [[task.target.id, task] as const]
+      : []
+  )));
+  const addedDependencies = new Map<string, Set<string>>();
+  for (const component of prototypeConnectedPlannedPageComponents(generation)) {
+    const ordered = component
+      .map((artifactId) => pageTaskByArtifactId.get(artifactId))
+      .filter((task): task is GenerationTaskIntent => task !== undefined)
+      .sort((left, right) => (position.get(left.id)! - position.get(right.id)!));
+    for (let index = 1; index < ordered.length; index += 1) {
+      const task = ordered[index]!;
+      const previous = ordered[index - 1]!;
+      const dependencies = addedDependencies.get(task.id) ?? new Set<string>();
+      dependencies.add(previous.id);
+      addedDependencies.set(task.id, dependencies);
+    }
+  }
+  if (addedDependencies.size === 0) return [...tasks];
+  const orderedTasks = tasks.map((task) => {
+    const additions = addedDependencies.get(task.id);
+    if (!additions || [...additions].every((dependencyId) => task.dependencyIds.includes(dependencyId))) {
+      return task;
+    }
+    return deepFreeze(normalizeGenerationTaskIntent({
+      id: task.id,
+      ordinal: task.ordinal,
+      workspaceId: task.workspaceId,
+      planId: task.planId,
+      kind: task.kind,
+      target: task.target,
+      dependencyIds: [...new Set([...task.dependencyIds, ...additions])].sort(compareBinary),
+      payload: task.payload,
+      capabilities: task.capabilities,
+      qaProfile: task.qaProfile,
+      resourceLimits: task.resourceLimits,
+    }));
+  });
+  // The spanning order is a linear extension of the existing Task DAG, so it
+  // cannot introduce a cycle. Keep the assertion here as a fail-closed fence.
+  assertAcyclicTaskGraph(orderedTasks);
+  return orderedTasks;
 }
 
 function normalizedDependencyRows(
@@ -653,7 +763,10 @@ export function compileGenerationPlan(input: {
     });
   });
 
-  const generatedTasks = [...resourceTasks, ...artifactTasks];
+  const generatedTasks = orderPrototypeConnectedPageTasks(
+    [...resourceTasks, ...artifactTasks],
+    generation,
+  );
   const workspaceTarget: GenerationTaskTarget = {
     type: "workspace",
     workspaceId: input.shell.workspaceId,

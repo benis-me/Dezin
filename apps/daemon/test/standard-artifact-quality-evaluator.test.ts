@@ -6,11 +6,15 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  generationTaskArtifactCandidateRetentionRef,
   validateGenerationTaskArtifactQualityGate,
+  type QualityFinding,
   type Settings,
 } from "../../../packages/core/src/index.ts";
 import type { ContextPack } from "../src/context/context-types.ts";
 import type { ArtifactRunInfrastructureInput } from "../src/orchestration/artifact-run-preparation.ts";
+import { visualQaFrameAttemptId } from "../src/visual-qa.ts";
+import { generationTaskVisualEvidenceFrameStorageSegment } from "../src/orchestration/generation-task-visual-evidence.ts";
 import {
   ProductionStandardArtifactQualityEvaluator,
   ProductionStandardArtifactQualityEvaluatorError,
@@ -20,6 +24,11 @@ import {
 
 const CONTEXT_HASH = "c".repeat(64);
 const CANDIDATE = { commitHash: "3".repeat(40), treeHash: "4".repeat(40) };
+const SOURCE_AUTHORITY = Object.freeze({
+  resourceId: "capture-1",
+  revisionId: "capture-revision-1",
+  revisionChecksum: "e".repeat(64),
+});
 const FRAME = {
   id: "checkout-desktop",
   name: "Checkout desktop",
@@ -172,12 +181,21 @@ function infrastructure(input: {
         contextPackId: contextPack.id,
         sourceCommitHash: "1".repeat(40),
         sourceTreeHash: "2".repeat(40),
-        resourcePins: [],
+        resourcePins: input.sharingan ? [{
+          resourceId: SOURCE_AUTHORITY.resourceId,
+          revisionId: SOURCE_AUTHORITY.revisionId,
+        }] : [],
         componentPins: [],
       },
     } as unknown as ArtifactRunInfrastructureInput["claim"],
     contextPack,
     hasExactSharinganCapture: input.sharingan === true,
+    sharinganReference: input.sharingan ? {
+      workspaceId: "workspace-1",
+      contextPackId: contextPack.id,
+      contextPackHash: contextPack.hash,
+      ...SOURCE_AUTHORITY,
+    } : null,
     repositoryDir: "/repo",
     worktreeDir: "/repo/worktree",
   };
@@ -202,19 +220,42 @@ function reviewedFinding() {
 
 function visualReport(
   input: Parameters<ProductionStandardArtifactQualityEvaluatorDependencies["visualQa"]>[0],
-  findings = [reviewedFinding()],
+  findings: QualityFinding[] = [reviewedFinding()],
 ) {
   return {
     findings,
     frames: input.renderFrames.map((frame, index) => ({
       frameId: frame.id,
-      frameAttemptId: `${input.frameAttemptIdPrefix}-${index}-${frame.id}`,
+      frameAttemptId: visualQaFrameAttemptId(input.frameAttemptIdPrefix, frame, index),
       width: frame.width,
       height: frame.height,
       status: "passed" as const,
       screenshotPath: `/captures/${frame.id}.png`,
+      captureIdentity: {
+        sha256: "e".repeat(64),
+        byteLength: 67,
+        width: frame.width,
+        height: frame.height,
+      },
       reviewed: input.runtimeOnly !== true,
     })),
+    ...(input.isSharingan ? {
+      sourceCapture: {
+        scope: "source" as const,
+        sourceAttemptId: `${input.frameAttemptIdPrefix}-source`,
+        width: 1440,
+        height: 900,
+        status: "passed" as const,
+        screenshotPath: input.screenshotPath,
+        captureIdentity: {
+          sha256: "f".repeat(64),
+          byteLength: 67,
+          width: 1440,
+          height: 900,
+        },
+        reviewed: input.runtimeOnly !== true,
+      },
+    } : {}),
   };
 }
 
@@ -225,6 +266,7 @@ function dependencies(overrides: Partial<ProductionStandardArtifactQualityEvalua
     release: 0,
     visual: 0,
     persist: 0,
+    persistSource: 0,
     references: 0,
     visualInput: null as Parameters<ProductionStandardArtifactQualityEvaluatorDependencies["visualQa"]>[0] | null,
     runtimeInput: null as Parameters<ProductionStandardArtifactQualityEvaluatorDependencies["acquireRuntime"]>[0] | null,
@@ -271,7 +313,31 @@ function dependencies(overrides: Partial<ProductionStandardArtifactQualityEvalua
           input.owner.taskId,
           `attempt-${input.owner.attempt}`,
           "visual",
-          `round-${input.round}-${input.frame.id}-${sha256}.png`,
+          `round-${input.round}-${generationTaskVisualEvidenceFrameStorageSegment(input.frame.id)}-${sha256}.png`,
+        ].join("/"),
+      };
+    },
+    async persistSourceEvidence(input) {
+      calls.persistSource += 1;
+      const sha256 = "f".repeat(64);
+      return {
+        protocol: "dezin.generation-task-source-visual-evidence.v1" as const,
+        owner: input.owner,
+        capture: input.capture,
+        sourceAuthority: input.sourceAuthority,
+        round: input.round,
+        mediaType: "image/png" as const,
+        sha256,
+        byteLength: 67,
+        storageKey: [
+          "generation-task-evidence",
+          input.owner.projectId,
+          input.owner.workspaceId,
+          input.owner.planId,
+          input.owner.taskId,
+          `attempt-${input.owner.attempt}`,
+          "visual",
+          `round-${input.round}-source-${sha256}.png`,
         ].join("/"),
       };
     },
@@ -343,6 +409,45 @@ test("production evaluator audits the exact immutable frames and emits publishab
   assert.equal(deps.calls.acquire, 1);
   assert.equal(deps.calls.release, 1);
   assert.equal(deps.calls.persist, 1);
+});
+
+test("production evaluator preserves a Viewer-safe Unicode Frame id while validating its hashed evidence locator", async () => {
+  const unicodeFrame = { ...FRAME, id: "结账 · 宽屏", name: "结账宽屏" };
+  const infra = infrastructure();
+  const payload = infra.claim.task.payload as {
+    artifactPlan: { responsiveFrameIds: string[] };
+    responsiveFrames: Array<typeof FRAME>;
+  };
+  payload.artifactPlan.responsiveFrameIds = [unicodeFrame.id];
+  payload.responsiveFrames = [unicodeFrame];
+  (infra.claim.task.qaProfile as { requiredFrameIds: string[] }).requiredFrameIds = [unicodeFrame.id];
+  const deps = dependencies();
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, true);
+  const [descriptor] = result.evidence.visualEvidence as Array<{
+    frame: { id: string };
+    storageKey: string;
+  }>;
+  assert.equal(descriptor?.frame.id, unicodeFrame.id);
+  assert.match(
+    descriptor?.storageKey ?? "",
+    new RegExp(`/round-0-frame-[a-f0-9]{64}-${"e".repeat(64)}\\.png$`),
+  );
 });
 
 test("production evaluator applies persisted rule and selector quality ignores only to advisory findings", async () => {
@@ -423,6 +528,22 @@ test("production evaluator rejects an unsafe Store Project owner before acquirin
     () => new ProductionStandardArtifactQualityEvaluator({
       infrastructure: infra,
       projectId: "../substituted-project",
+      settings,
+      dataDir: "/data",
+      agentCommand: "claude",
+      dependencies: dependencies().value,
+    }),
+    (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+      && error.code === "invalid-input",
+  );
+});
+
+test("production evaluator rejects Sharingan boolean state without its immutable reference", () => {
+  const infra = infrastructure({ sharingan: true });
+  assert.throws(
+    () => new ProductionStandardArtifactQualityEvaluator({
+      infrastructure: { ...infra, sharinganReference: null },
+      projectId: "project-1",
       settings,
       dataDir: "/data",
       agentCommand: "claude",
@@ -530,6 +651,12 @@ test("runtime-only quality checks probe every exact Frame instead of treating le
           height: FRAME.height,
           status: "failed",
           screenshotPath: `/captures/${FRAME.id}.png`,
+          captureIdentity: {
+            sha256: "e".repeat(64),
+            byteLength: 67,
+            width: FRAME.width,
+            height: FRAME.height,
+          },
           reviewed: false,
         }],
       };
@@ -571,6 +698,13 @@ test("a passing runtime-only assessment crosses the exact Core quality gate with
           width: frame.width,
           height: frame.height,
           status: "passed" as const,
+          screenshotPath: `/captures/${frame.id}.png`,
+          captureIdentity: {
+            sha256: "e".repeat(64),
+            byteLength: 67,
+            width: frame.width,
+            height: frame.height,
+          },
           reviewed: false,
         })),
       };
@@ -597,6 +731,7 @@ test("a passing runtime-only assessment crosses the exact Core quality gate with
   assert.equal(Object.hasOwn(result.evidence, "visualEvidence"), false);
   assert.equal(Object.hasOwn(result.evidence, "visualReview"), false);
   assert.doesNotThrow(() => validateGenerationTaskArtifactQualityGate({
+    requireSourceVisualEvidence: false,
     qaProfile: infra.claim.task.qaProfile,
     plannedFrames: (infra.claim.task.payload as { responsiveFrames: unknown[] }).responsiveFrames,
     renderSpec: result.renderSpec,
@@ -626,6 +761,13 @@ test("the Standard Artifact baseline mounts every Frame even when optional QA fl
             width: frame.width,
             height: frame.height,
             status: "passed" as const,
+            screenshotPath: `/captures/${frame.id}.png`,
+            captureIdentity: {
+              sha256: "e".repeat(64),
+              byteLength: 67,
+              width: frame.width,
+              height: frame.height,
+            },
             reviewed: false,
           })),
         };
@@ -652,6 +794,7 @@ test("the Standard Artifact baseline mounts every Frame even when optional QA fl
     assert.equal(result.passed, true);
     assert.deepEqual(result.evidence.runtimeChecks, [{ id: `frame:${FRAME.id}`, status: "passed" }]);
     assert.doesNotThrow(() => validateGenerationTaskArtifactQualityGate({
+      requireSourceVisualEvidence: false,
       qaProfile: infra.claim.task.qaProfile,
       plannedFrames: (infra.claim.task.payload as { responsiveFrames: unknown[] }).responsiveFrames,
       renderSpec: result.renderSpec,
@@ -706,6 +849,7 @@ test("the Standard Artifact baseline mounts every Frame even when optional QA fl
 
     assert.equal(result.passed, false);
     assert.throws(() => validateGenerationTaskArtifactQualityGate({
+      requireSourceVisualEvidence: false,
       qaProfile: infra.claim.task.qaProfile,
       plannedFrames: (infra.claim.task.payload as { responsiveFrames: unknown[] }).responsiveFrames,
       renderSpec: result.renderSpec,
@@ -758,6 +902,12 @@ test("reviewer infrastructure failure is typed as provider while genuine design 
           height: FRAME.height,
           status: "passed",
           screenshotPath: `/captures/${FRAME.id}.png`,
+          captureIdentity: {
+            sha256: "e".repeat(64),
+            byteLength: 67,
+            width: FRAME.width,
+            height: FRAME.height,
+          },
           reviewed: false,
         }],
       };
@@ -875,6 +1025,445 @@ test("Sharingan forces exact source review and treats every mismatch as repairab
   assert.equal((result.evidence.visualReview as { status: string }).status, "failed");
   assert.equal((result.evidence.visualReview as { fidelity: number }).fidelity, result.score / 100);
   assert.equal((result.evidence.visualReview as { evidence: unknown[] }).evidence.length, 1);
+  assert.deepEqual(result.evidence.sourceCaptureResult, {
+    scope: "source",
+    sourceAttemptId: "quality-round-0-source",
+    width: 1440,
+    height: 900,
+    status: "passed",
+    reviewed: true,
+    captureIdentity: {
+      sha256: "f".repeat(64),
+      byteLength: 67,
+      width: 1440,
+      height: 900,
+    },
+  });
+  assert.equal(
+    (result.evidence.sourceVisualEvidence as { protocol: string }).protocol,
+    "dezin.generation-task-source-visual-evidence.v1",
+  );
+  assert.deepEqual(
+    (result.evidence.sourceVisualEvidence as { sourceAuthority: unknown }).sourceAuthority,
+    SOURCE_AUTHORITY,
+  );
+  assert.deepEqual(
+    (result.evidence.visualReview as { evidence: Array<{ frameId: string }> }).evidence.map((entry) => entry.frameId),
+    [FRAME.id],
+    "source evidence remains outside the immutable Task Frame evidence array",
+  );
+  assert.equal(
+    (result.evidence.visualReview as { sourceEvidence: { sourceAttemptId: string } }).sourceEvidence.sourceAttemptId,
+    "quality-round-0-source",
+  );
+  assert.equal(deps.calls.persist, 1, "Task Frame evidence is persisted independently");
+  assert.equal(deps.calls.persistSource, 1, "source-parity evidence is persisted independently");
+});
+
+test("a passing Sharingan assessment crosses the Core gate with independently bound source evidence", async () => {
+  const infra = infrastructure({ sharingan: true });
+  const deps = dependencies({
+    sharinganReference() {
+      return {
+        screenshotPath: "/repo/worktree/.sharingan/source.png",
+        renderMapPath: "/repo/worktree/.sharingan/render-map.json",
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, true);
+  const attempt = infra.claim.attempt;
+  assert.doesNotThrow(() => validateGenerationTaskArtifactQualityGate({
+    requireSourceVisualEvidence: SOURCE_AUTHORITY,
+    qaProfile: infra.claim.task.qaProfile,
+    plannedFrames: (infra.claim.task.payload as { responsiveFrames: unknown[] }).responsiveFrames,
+    renderSpec: result.renderSpec,
+    quality: result.quality,
+    evidence: result.evidence,
+    expectedEvidenceOwner: {
+      projectId: "project-1",
+      workspaceId: infra.claim.task.workspaceId,
+      planId: infra.claim.task.planId,
+      taskId: infra.claim.task.id,
+      attempt: attempt.attempt,
+      candidateCommitHash: CANDIDATE.commitHash,
+      candidateTreeHash: CANDIDATE.treeHash,
+      contextPackId: infra.contextPack.id,
+      contextPackHash: infra.contextPack.hash,
+      inputHash: attempt.inputHash,
+      attemptCreatedAt: attempt.createdAt,
+      sourceBase: {
+        commitHash: attempt.sourceCommitHash,
+        treeHash: attempt.sourceTreeHash,
+      },
+      candidateRetentionRef: generationTaskArtifactCandidateRetentionRef({
+        workspaceId: infra.claim.task.workspaceId,
+        taskId: infra.claim.task.id,
+        attempt: attempt.attempt,
+        inputHash: attempt.inputHash,
+      }),
+    },
+  }));
+});
+
+test("Sharingan rejects any stale or inexact source capture before durable evidence persistence", async (t) => {
+  const cases = [
+    { name: "missing", omit: true, patch: {} },
+    { name: "wrong attempt", patch: { sourceAttemptId: "quality-round-0-source-stale" } },
+    { name: "undersized viewport", patch: { width: 319 } },
+    { name: "oversized viewport", patch: { height: 3_001 } },
+    { name: "stale screenshot", patch: { screenshotPath: "/captures/stale-source.png" } },
+    { name: "unreviewed", patch: { reviewed: false } },
+    { name: "missing capture identity", patch: { captureIdentity: undefined } },
+    {
+      name: "capture pixels do not cover source viewport",
+      patch: { captureIdentity: { sha256: "f".repeat(64), byteLength: 67, width: 1439, height: 900 } },
+    },
+    {
+      name: "capture hash is malformed",
+      patch: { captureIdentity: { sha256: "not-a-sha", byteLength: 67, width: 1440, height: 900 } },
+    },
+  ] as const;
+
+  for (const current of cases) {
+    await t.test(current.name, async () => {
+      const infra = infrastructure({ sharingan: true });
+      const deps = dependencies({
+        sharinganReference() {
+          return {
+            screenshotPath: "/repo/worktree/.sharingan/source.png",
+            renderMapPath: "/repo/worktree/.sharingan/render-map.json",
+          };
+        },
+        async visualQa(input) {
+          const report = visualReport(input);
+          return {
+            ...report,
+            sourceCapture: "omit" in current && current.omit
+              ? undefined
+              : { ...report.sourceCapture!, ...current.patch },
+          } as ReturnType<typeof visualReport>;
+        },
+      });
+      const evaluator = new ProductionStandardArtifactQualityEvaluator({
+        infrastructure: infra,
+        projectId: "project-1",
+        settings,
+        dataDir: "/data",
+        agentCommand: "claude",
+        dependencies: deps.value,
+      });
+
+      await assert.rejects(
+        evaluator.evaluate({
+          candidate: CANDIDATE,
+          dir: infra.worktreeDir,
+          round: 0,
+          signal: new AbortController().signal,
+        }),
+        (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+          && error.code === "visual-infrastructure"
+          && error.failureClass === "provider",
+      );
+      assert.equal(deps.calls.persistSource, 0);
+      assert.equal(deps.calls.persist, 0);
+    });
+  }
+});
+
+test("non-Sharingan quality evaluation rejects injected source-scoped evidence", async () => {
+  const infra = infrastructure();
+  const deps = dependencies({
+    async visualQa(input) {
+      return {
+        ...visualReport(input),
+        sourceCapture: {
+          scope: "source",
+          sourceAttemptId: `${input.frameAttemptIdPrefix}-source`,
+          width: 1440,
+          height: 900,
+          status: "passed",
+          screenshotPath: input.screenshotPath,
+          reviewed: true,
+        },
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  await assert.rejects(
+    evaluator.evaluate({
+      candidate: CANDIDATE,
+      dir: infra.worktreeDir,
+      round: 0,
+      signal: new AbortController().signal,
+    }),
+    (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+      && error.code === "visual-infrastructure",
+  );
+  assert.equal(deps.calls.persistSource, 0);
+  assert.equal(deps.calls.persist, 0);
+});
+
+test("quality evaluation rejects a captured Frame without one exact byte and pixel identity", async () => {
+  const infra = infrastructure();
+  const deps = dependencies({
+    async visualQa(input) {
+      const report = visualReport(input);
+      return {
+        ...report,
+        frames: report.frames.map((frame) => ({ ...frame, captureIdentity: undefined })),
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  await assert.rejects(evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+    && error.code === "visual-infrastructure");
+  assert.equal(deps.calls.persist, 0);
+});
+
+test("quality evaluation rejects a durable Frame descriptor for bytes not supplied to the reviewer", async () => {
+  const infra = infrastructure();
+  const deps = dependencies({
+    async persistEvidence(input) {
+      const sha256 = "a".repeat(64);
+      return {
+        protocol: "dezin.generation-task-visual-evidence.v1",
+        owner: input.owner,
+        frame: input.frame,
+        round: input.round,
+        mediaType: "image/png",
+        sha256,
+        byteLength: input.expectedIdentity.byteLength + 1,
+        storageKey: [
+          "generation-task-evidence",
+          input.owner.projectId,
+          input.owner.workspaceId,
+          input.owner.planId,
+          input.owner.taskId,
+          `attempt-${input.owner.attempt}`,
+          "visual",
+          `round-${input.round}-${input.frame.id}-${sha256}.png`,
+        ].join("/"),
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  await assert.rejects(evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+    && error.code === "evidence-unavailable"
+    && error.failureClass === "storage");
+});
+
+test("Sharingan rejects a durable source descriptor that is not bound to the reviewed capture", async () => {
+  const infra = infrastructure({ sharingan: true });
+  const deps = dependencies({
+    sharinganReference() {
+      return {
+        screenshotPath: "/repo/worktree/.sharingan/source.png",
+        renderMapPath: "/repo/worktree/.sharingan/render-map.json",
+      };
+    },
+    async persistSourceEvidence(input) {
+      const sha256 = "f".repeat(64);
+      return {
+        protocol: "dezin.generation-task-source-visual-evidence.v1",
+        owner: input.owner,
+        capture: { ...input.capture, width: input.capture.width + 1 },
+        sourceAuthority: input.sourceAuthority,
+        round: input.round,
+        mediaType: "image/png",
+        sha256,
+        byteLength: 67,
+        storageKey: [
+          "generation-task-evidence",
+          input.owner.projectId,
+          input.owner.workspaceId,
+          input.owner.planId,
+          input.owner.taskId,
+          `attempt-${input.owner.attempt}`,
+          "visual",
+          `round-${input.round}-source-${sha256}.png`,
+        ].join("/"),
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  await assert.rejects(
+    evaluator.evaluate({
+      candidate: CANDIDATE,
+      dir: infra.worktreeDir,
+      round: 0,
+      signal: new AbortController().signal,
+    }),
+    (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+      && error.code === "evidence-unavailable"
+      && error.failureClass === "storage",
+  );
+  assert.equal(deps.calls.persist, 0, "Frame evidence is not emitted after source binding fails");
+});
+
+test("Sharingan rejects a durable descriptor with unrelated source authority", async () => {
+  const infra = infrastructure({ sharingan: true });
+  const deps = dependencies({
+    sharinganReference() {
+      return {
+        screenshotPath: "/repo/worktree/.sharingan/source.png",
+        renderMapPath: "/repo/worktree/.sharingan/render-map.json",
+      };
+    },
+    async persistSourceEvidence(input) {
+      const sha256 = "f".repeat(64);
+      return {
+        protocol: "dezin.generation-task-source-visual-evidence.v1",
+        owner: input.owner,
+        capture: input.capture,
+        sourceAuthority: {
+          ...input.sourceAuthority,
+          revisionChecksum: "0".repeat(64),
+        },
+        round: input.round,
+        mediaType: "image/png",
+        sha256,
+        byteLength: 67,
+        storageKey: [
+          "generation-task-evidence",
+          input.owner.projectId,
+          input.owner.workspaceId,
+          input.owner.planId,
+          input.owner.taskId,
+          `attempt-${input.owner.attempt}`,
+          "visual",
+          `round-${input.round}-source-${sha256}.png`,
+        ].join("/"),
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  await assert.rejects(
+    evaluator.evaluate({
+      candidate: CANDIDATE,
+      dir: infra.worktreeDir,
+      round: 0,
+      signal: new AbortController().signal,
+    }),
+    (error: unknown) => error instanceof ProductionStandardArtifactQualityEvaluatorError
+      && error.code === "evidence-unavailable"
+      && error.failureClass === "storage",
+  );
+  assert.equal(deps.calls.persist, 0);
+});
+
+test("a reviewed failed Sharingan source capture remains durable quality evidence", async () => {
+  const infra = infrastructure({ sharingan: true });
+  const sourceRuntimeFailure = {
+    severity: "P1" as const,
+    id: "visual-runtime-error@source",
+    message: "The source-parity viewport overflowed during capture.",
+    fix: "Repair the source viewport overflow.",
+  };
+  const deps = dependencies({
+    sharinganReference() {
+      return {
+        screenshotPath: "/repo/worktree/.sharingan/source.png",
+        renderMapPath: "/repo/worktree/.sharingan/render-map.json",
+      };
+    },
+    async visualQa(input) {
+      const report = visualReport(input, [sourceRuntimeFailure, reviewedFinding()]);
+      return {
+        ...report,
+        sourceCapture: { ...report.sourceCapture!, status: "failed" as const },
+      };
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal((result.evidence.sourceCaptureResult as { status: string }).status, "failed");
+  assert.equal(deps.calls.persistSource, 1);
+  assert.equal(deps.calls.persist, 1);
+  assert.equal(
+    (result.evidence.sourceVisualEvidence as { protocol: string }).protocol,
+    "dezin.generation-task-source-visual-evidence.v1",
+  );
 });
 
 test("candidate substitution and dirty source are rejected before runtime execution", async () => {

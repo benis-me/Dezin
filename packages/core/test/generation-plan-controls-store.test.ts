@@ -321,13 +321,19 @@ function finishDiamondArtifactTask(
     },
     contextPack: { id: context.id, hash: context.hash },
     frames: candidate.renderSpec.frames,
-    frameResults: frames.map((frame) => ({
+    frameResults: frames.map((frame, index) => ({
       frameId: frame.id,
       frameAttemptId: `quality-round-0-${frame.id}`,
       width: frame.width,
       height: frame.height,
       status: "passed",
       reviewed: true,
+      captureIdentity: {
+        sha256: visualEvidence[index]!.sha256,
+        byteLength: visualEvidence[index]!.byteLength,
+        width: frame.width,
+        height: frame.height,
+      },
     })),
     round: 0,
     runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
@@ -343,6 +349,19 @@ function finishDiamondArtifactTask(
       })),
     },
     visualEvidence,
+  };
+  const evaluationManifest = {
+    protocol: "dezin.artifact-run-evaluation-manifest.v1",
+    candidate: qualityEvidence.candidate,
+    round: 0,
+    passed: true,
+    score: candidate.quality.score,
+    qualityState: candidate.quality.state,
+    findingsDigest: checksum(JSON.stringify(candidate.quality.findings)),
+    frameResults: qualityEvidence.frameResults,
+    runtimeChecks: qualityEvidence.runtimeChecks,
+    reviewSummary: qualityEvidence.visualReview,
+    visualEvidence: qualityEvidence.visualEvidence,
   };
   fixture.store.workspace.stageGenerationTaskCandidateForProject(
     fixture.project.id,
@@ -375,6 +394,7 @@ function finishDiamondArtifactTask(
           treeHash: candidate.sourceTreeHash,
           passed: true,
           score: candidate.quality.score,
+          evaluationManifest,
         }],
         qualityEvidence,
       },

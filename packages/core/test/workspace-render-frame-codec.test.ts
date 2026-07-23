@@ -131,6 +131,25 @@ test("Kernel and Proposal persistence reject render-frame text the Viewer bridge
   }
 });
 
+test("Kernel and Proposal persistence reject render frames the capture runtime cannot render exactly", () => {
+  const cases: Array<[string, RenderFrameSpec]> = [
+    ["fractional width", frame({ width: 1_440.5 })],
+    ["fractional height", frame({ height: 900.5 })],
+    ["width limit", frame({ width: 16_385 })],
+    ["height limit", frame({ height: 16_385 })],
+    ["pixel budget", frame({ width: 8_193, height: 8_192 })],
+    ["frame name length", frame({ name: "n".repeat(513) })],
+  ];
+
+  for (const [label, responsiveFrame] of cases) {
+    assertRejectedByEveryPersistenceBoundary(
+      responsiveFrame,
+      /responsive frame|capture|integer|dimension|pixel|512|length/i,
+      label,
+    );
+  }
+});
+
 test("Kernel and Proposal persistence enforce the Viewer bridge fixture clone budget", () => {
   const nodesOverBudget = {
     groups: Array.from({ length: 16 }, () => Array.from({ length: 256 }, () => 1)),
@@ -234,6 +253,8 @@ test("Kernel and Proposal persistence preserve legal bridge-boundary render fram
 
   const legalFrames = [
     responsiveFrame,
+    frame({ id: "Desktop 宽屏", name: "桌面 · 宽屏", width: 16_000, height: 4_000 }),
+    frame({ id: "maximum-width", width: 16_384, height: 1 }),
     frame({ fixture: nestedFixture(16) }),
     frame({ fixture: fixtureAtBridgeNodeLimit() }),
     frame({ fixture: objectWithKeys(256) }),

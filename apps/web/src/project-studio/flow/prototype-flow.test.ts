@@ -232,18 +232,39 @@ test("multiple frozen bindings with the same locator and trigger are ambiguous a
   ]);
 });
 
-test("presentation transitions stay within the none, fade, slide and bounded-duration surface", () => {
+test("presentation transitions use the shared rounded and bounded runtime contract", () => {
   const mutable = snapshot();
   const edge = mutable.graph.edges[0];
   if (edge?.kind !== "prototype" || edge.prototype.status !== "interactive") throw new Error("interactive fixture required");
-  edge.prototype.binding.transition = { type: "fade", durationMs: 99_999 };
+  edge.prototype.binding.transition = { type: "fade", durationMs: 180.5 };
   const session = createPrototypeFlowSession(mutable, ["node-a"]);
   const descriptor = buildPrototypeModeCommand(session, "page-a").bindings
     .find((candidate) => candidate.locator.designNodeId === "checkout")!;
 
   expect(resolvePrototypeActivation(session, "page-a", descriptor)).toEqual(expect.objectContaining({
     kind: "navigate",
+    transition: { type: "fade", durationMs: 181 },
+  }));
+
+  edge.prototype.binding.transition = { type: "fade", durationMs: 10_000 };
+  const cappedSession = createPrototypeFlowSession(mutable, ["node-a"]);
+  const cappedDescriptor = buildPrototypeModeCommand(cappedSession, "page-a").bindings
+    .find((candidate) => candidate.locator.designNodeId === "checkout")!;
+  expect(resolvePrototypeActivation(cappedSession, "page-a", cappedDescriptor)).toEqual(expect.objectContaining({
+    kind: "navigate",
     transition: { type: "fade", durationMs: 2_000 },
+  }));
+});
+
+test("an interactive label cannot hide a target with no exact frozen Revision", () => {
+  const mutable = snapshot();
+  mutable.artifactRevisions["page-b"] = null;
+  const session = createPrototypeFlowSession(mutable, ["node-a"], flowRevisions());
+
+  expect(prototypeFlowHealth(session, "page-a").items).toContainEqual(expect.objectContaining({
+    edgeId: "edge-click",
+    status: "broken",
+    detail: expect.stringMatching(/no exact Revision/i),
   }));
 });
 
@@ -275,6 +296,38 @@ test("targetState is frozen from the exact target Revision and missing states ar
     edgeId: "edge-missing-state",
     status: "broken",
     detail: expect.stringMatching(/not-in-render-spec|RenderSpec state/i),
+  }));
+});
+
+test("activation keeps the current viewport profile when one logical state has desktop and mobile Frames", () => {
+  const mutable = snapshot();
+  const edge = mutable.graph.edges[0];
+  if (edge?.kind !== "prototype" || edge.prototype.status !== "interactive") throw new Error("interactive fixture required");
+  edge.prototype.binding.targetState = "receipt-ready";
+  const revisions = flowRevisions();
+  const source = revisions.find((revision) => revision.id === "revision-a")!;
+  const target = revisions.find((revision) => revision.id === "revision-b")!;
+  (source.renderSpec.frames as Array<Record<string, unknown>>).push({
+    id: "mobile",
+    name: "Mobile",
+    width: 390,
+    height: 844,
+  });
+  (target.renderSpec.frames as Array<Record<string, unknown>>).push({
+    id: "receipt-mobile",
+    name: "Receipt mobile",
+    width: 393,
+    height: 852,
+    initialState: "receipt-ready",
+  });
+  const session = createPrototypeFlowSession(mutable, ["node-a"], revisions);
+  const descriptor = buildPrototypeModeCommand(session, "page-a").bindings
+    .find((candidate) => candidate.locator.designNodeId === "checkout")!;
+
+  expect(resolvePrototypeActivation(session, "page-a", descriptor, "mobile")).toEqual(expect.objectContaining({
+    kind: "navigate",
+    targetState: "receipt-ready",
+    targetFrame: expect.objectContaining({ id: "receipt-mobile", width: 393, height: 852 }),
   }));
 });
 

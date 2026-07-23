@@ -7,15 +7,20 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   ArtifactCandidateRefConflictError,
+  ArtifactCandidateValidationError,
   artifactCandidateAttemptRef,
+  artifactRevisionEvidenceRef,
   artifactRevisionHistoryRef,
   artifactRevisionRef,
   beginArtifactCandidateTransaction,
+  prepareArtifactRevisionEvidenceBundle,
   promoteArtifactCandidateRef,
   releaseArtifactCandidateAttemptRef,
   verifyArtifactCandidateObject,
+  verifyArtifactRevisionEvidenceBundle,
   type ArtifactCandidateAttempt,
   type ArtifactCandidateIdentity,
+  type PrepareArtifactRevisionEvidenceBundleInput,
 } from "../src/orchestration/artifact-candidate-transaction.ts";
 
 function expectedArtifactRevisionHistoryRef(revisionId: string): string {
@@ -30,6 +35,14 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", env }).trim();
 }
 
+function gitInput(cwd: string, args: readonly string[], input: string | Buffer): string {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith("GIT_")) delete env[key];
+  }
+  return execFileSync("git", args, { cwd, encoding: "utf8", env, input }).trim();
+}
+
 interface RepositoryFixture {
   root: string;
   baseCommitHash: string;
@@ -38,9 +51,12 @@ interface RepositoryFixture {
   attempt: ArtifactCandidateAttempt;
 }
 
-function repositoryFixture(options: { advanceHead?: boolean } = {}): RepositoryFixture {
+function repositoryFixture(options: {
+  advanceHead?: boolean;
+  objectFormat?: "sha1" | "sha256";
+} = {}): RepositoryFixture {
   const root = mkdtempSync(join(tmpdir(), "dezin-artifact-candidate-repo-"));
-  git(root, "init", "-q");
+  git(root, "init", "-q", `--object-format=${options.objectFormat ?? "sha1"}`);
   git(root, "config", "user.name", "Fixture");
   git(root, "config", "user.email", "fixture@dezin.local");
   writeFileSync(join(root, "page.txt"), "base\n");
@@ -75,6 +91,478 @@ function repositoryFixture(options: { advanceHead?: boolean } = {}): RepositoryF
 function removeFixture(root: string): void {
   rmSync(root, { recursive: true, force: true });
 }
+
+function evidenceBundleInput(
+  fixture: RepositoryFixture,
+  candidate: ArtifactCandidateIdentity,
+  revisionId: string,
+): PrepareArtifactRevisionEvidenceBundleInput {
+  const bytes = Buffer.from("strict visual evidence\n", "utf8");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const storageKey = [
+    "generation-task-evidence",
+    "project-1",
+    fixture.attempt.workspaceId,
+    "plan-1",
+    fixture.attempt.taskId,
+    `attempt-${fixture.attempt.attempt}`,
+    "visual",
+    `round-0-desktop-${sha256}.png`,
+  ].join("/");
+  return {
+    repositoryDir: fixture.root,
+    projectId: "project-1",
+    workspaceId: fixture.attempt.workspaceId,
+    revisionId,
+    artifactId: "artifact-page-1",
+    trackId: "track-main",
+    candidate,
+    contextPackHash: "c".repeat(64),
+    attempt: fixture.attempt,
+    candidateEvidenceSha256: "e".repeat(64),
+    entries: [{
+      kind: "frame",
+      round: 0,
+      storageKey,
+      sha256,
+      byteLength: bytes.byteLength,
+      descriptor: {
+        protocol: "dezin.generation-task-visual-evidence.v1",
+        round: 0,
+        mediaType: "image/png",
+        sha256,
+        byteLength: bytes.byteLength,
+        storageKey,
+      },
+      bytes,
+    }],
+  };
+}
+
+test("Artifact Revision evidence bundle is deterministic, exact, and atomically retained", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Evidence candidate" });
+    const revisionId = "revision-evidence-1";
+    const bundleInput = evidenceBundleInput(fixture, candidate, revisionId);
+    const prepared = await prepareArtifactRevisionEvidenceBundle(bundleInput);
+    const replay = await prepareArtifactRevisionEvidenceBundle(bundleInput);
+    assert.deepEqual(replay, prepared);
+    assert.equal(prepared.ref, artifactRevisionEvidenceRef(fixture.attempt.workspaceId, revisionId));
+    assert.equal(git(fixture.root, "for-each-ref", "--format=%(objectname)", prepared.ref), "");
+
+    await promoteArtifactCandidateRef({
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    });
+
+    assert.equal(git(fixture.root, "rev-parse", artifactRevisionRef(revisionId)), candidate.commitHash);
+    assert.equal(git(fixture.root, "rev-parse", artifactRevisionHistoryRef(revisionId)), candidate.commitHash);
+    assert.equal(git(fixture.root, "rev-parse", prepared.ref), prepared.commitHash);
+    assert.deepEqual(
+      await verifyArtifactRevisionEvidenceBundle({
+        ...bundleInput,
+        entries: bundleInput.entries.map(({ bytes: _bytes, ...entry }) => entry),
+      }),
+      prepared,
+    );
+    assert.deepEqual(
+      git(fixture.root, "ls-tree", "-r", "--name-only", prepared.treeHash).split("\n"),
+      [
+        "manifest.json",
+        `png/sha256/${bundleInput.entries[0]!.sha256.slice(0, 2)}/${bundleInput.entries[0]!.sha256}.png`,
+      ],
+    );
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Artifact Revision evidence bundle retains runtime-only candidates with an empty PNG inventory", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Evidence candidate" });
+    const input = evidenceBundleInput(fixture, candidate, "revision-empty-evidence");
+    const prepared = await prepareArtifactRevisionEvidenceBundle({ ...input, entries: [] });
+    assert.deepEqual(prepared.subject.entries, []);
+    assert.deepEqual(
+      git(fixture.root, "ls-tree", "-r", "--name-only", prepared.treeHash).split("\n"),
+      ["manifest.json"],
+    );
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Artifact Revision evidence bundle rejects contradictory identities for one SHA-256 blob", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Evidence candidate" });
+    const input = evidenceBundleInput(fixture, candidate, "revision-contradictory-evidence");
+    const original = input.entries[0]!;
+    const contradictoryLength = original.byteLength + 1;
+    await assert.rejects(
+      prepareArtifactRevisionEvidenceBundle({
+        ...input,
+        entries: [
+          original,
+          {
+            ...original,
+            kind: "source",
+            storageKey: `${original.storageKey}.source`,
+            byteLength: contradictoryLength,
+            descriptor: {
+              ...original.descriptor,
+              storageKey: `${original.storageKey}.source`,
+              byteLength: contradictoryLength,
+            },
+          },
+        ],
+      }),
+      /same SHA-256|contradictory/i,
+    );
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Artifact Revision evidence descriptors fail with a domain validation error", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Invalid evidence descriptor" });
+    const input = evidenceBundleInput(fixture, candidate, "revision-invalid-evidence-descriptor");
+    await assert.rejects(
+      prepareArtifactRevisionEvidenceBundle({
+        ...input,
+        entries: [{ ...input.entries[0]!, descriptor: undefined as never }],
+      }),
+      ArtifactCandidateValidationError,
+    );
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Attempt ref is retained when the exact Artifact Revision evidence ref is missing", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Evidence candidate" });
+    const revisionId = "revision-evidence-release-missing";
+    const prepared = await prepareArtifactRevisionEvidenceBundle(
+      evidenceBundleInput(fixture, candidate, revisionId),
+    );
+    await promoteArtifactCandidateRef({
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    });
+    git(fixture.root, "update-ref", "-d", prepared.ref, prepared.commitHash);
+
+    await assert.rejects(
+      releaseArtifactCandidateAttemptRef({
+        repositoryDir: fixture.root,
+        attempt: fixture.attempt,
+        revisionId,
+        candidate,
+        history: [candidate],
+        historyHead: candidate,
+        evidence: prepared,
+      }),
+      /evidence|retention ref/i,
+    );
+    assert.equal(git(fixture.root, "rev-parse", candidate.attemptRef), candidate.commitHash);
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Attempt ref is retained when the Artifact Revision evidence ref conflicts", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Evidence candidate" });
+    const revisionId = "revision-evidence-release-conflict";
+    const prepared = await prepareArtifactRevisionEvidenceBundle(
+      evidenceBundleInput(fixture, candidate, revisionId),
+    );
+    await promoteArtifactCandidateRef({
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    });
+    git(fixture.root, "update-ref", prepared.ref, fixture.baseCommitHash, prepared.commitHash);
+
+    await assert.rejects(
+      releaseArtifactCandidateAttemptRef({
+        repositoryDir: fixture.root,
+        attempt: fixture.attempt,
+        revisionId,
+        candidate,
+        history: [candidate],
+        historyHead: candidate,
+        evidence: prepared,
+      }),
+      /evidence|retention ref/i,
+    );
+    assert.equal(git(fixture.root, "rev-parse", candidate.attemptRef), candidate.commitHash);
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("promotion repairs an exact legacy Revision/history pair with its verified evidence bundle", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Legacy evidence candidate" });
+    const revisionId = "revision-evidence-legacy-repair";
+    const prepared = await prepareArtifactRevisionEvidenceBundle(
+      evidenceBundleInput(fixture, candidate, revisionId),
+    );
+    git(fixture.root, "update-ref", artifactRevisionRef(revisionId), candidate.commitHash);
+    git(fixture.root, "update-ref", artifactRevisionHistoryRef(revisionId), candidate.commitHash);
+    git(fixture.root, "update-ref", "-d", candidate.attemptRef, candidate.commitHash);
+
+    assert.equal(await promoteArtifactCandidateRef({
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    }), artifactRevisionRef(revisionId));
+    assert.equal(git(fixture.root, "rev-parse", prepared.ref), prepared.commitHash);
+    assert.equal(git(fixture.root, "for-each-ref", "--format=%(objectname)", candidate.attemptRef), "");
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("promotion rejects a self-consistent evidence commit whose tree contains an extra entry", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Extra-tree evidence candidate" });
+    const revisionId = "revision-evidence-extra-tree";
+    const prepared = await prepareArtifactRevisionEvidenceBundle(
+      evidenceBundleInput(fixture, candidate, revisionId),
+    );
+    const extraBlob = gitInput(
+      fixture.root,
+      ["hash-object", "-w", "--stdin"],
+      "not declared by the evidence manifest\n",
+    );
+    const forgedTree = gitInput(
+      fixture.root,
+      ["mktree"],
+      `${git(fixture.root, "ls-tree", prepared.treeHash)}\n100644 blob ${extraBlob}\textra.bin\n`,
+    );
+    const timestampSeconds = Math.floor(fixture.attempt.createdAt / 1_000);
+    const identity = `Dezin Evidence <daemon@dezin.local> ${timestampSeconds} +0000`;
+    const forgedCommit = gitInput(
+      fixture.root,
+      ["hash-object", "-w", "-t", "commit", "--stdin"],
+      [
+        `tree ${forgedTree}`,
+        `parent ${candidate.commitHash}`,
+        `author ${identity}`,
+        `committer ${identity}`,
+        "",
+        `Dezin Artifact Revision evidence ${prepared.manifestSha256}`,
+        "",
+      ].join("\n"),
+    );
+
+    await assert.rejects(
+      promoteArtifactCandidateRef({
+        repositoryDir: fixture.root,
+        attempt: fixture.attempt,
+        revisionId,
+        candidate,
+        history: [candidate],
+        historyHead: candidate,
+        evidence: { ...prepared, treeHash: forgedTree, commitHash: forgedCommit },
+      }),
+      /extra entries|exactly match/i,
+    );
+    assert.equal(git(fixture.root, "for-each-ref", "--format=%(objectname)", artifactRevisionRef(revisionId)), "");
+    assert.equal(git(fixture.root, "for-each-ref", "--format=%(objectname)", prepared.ref), "");
+    assert.equal(git(fixture.root, "rev-parse", candidate.attemptRef), candidate.commitHash);
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("retained evidence survives source deletion, idempotent lifecycle replay, and Git GC", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "Durable evidence candidate" });
+    const revisionId = "revision-evidence-gc";
+    const mutableEvidenceDir = join(fixture.root, "mutable-evidence-cache");
+    const mutableEvidencePath = join(mutableEvidenceDir, "desktop.png");
+    mkdirSync(mutableEvidenceDir);
+    writeFileSync(mutableEvidencePath, "mutable evidence bytes\n");
+    const bytes = readFileSync(mutableEvidencePath);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const baseInput = evidenceBundleInput(fixture, candidate, revisionId);
+    const baseEntry = baseInput.entries[0]!;
+    const storageKey = baseEntry.storageKey.replace(baseEntry.sha256, sha256);
+    const bundleInput: PrepareArtifactRevisionEvidenceBundleInput = {
+      ...baseInput,
+      entries: [{
+        ...baseEntry,
+        storageKey,
+        sha256,
+        byteLength: bytes.byteLength,
+        descriptor: {
+          ...baseEntry.descriptor,
+          storageKey,
+          sha256,
+          byteLength: bytes.byteLength,
+        },
+        bytes,
+      }],
+    };
+    const prepared = await prepareArtifactRevisionEvidenceBundle(bundleInput);
+    rmSync(mutableEvidenceDir, { recursive: true, force: true });
+
+    const lifecycle = {
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    } as const;
+    assert.equal(await promoteArtifactCandidateRef(lifecycle), artifactRevisionRef(revisionId));
+    assert.equal(await promoteArtifactCandidateRef(lifecycle), artifactRevisionRef(revisionId));
+    assert.equal(await releaseArtifactCandidateAttemptRef(lifecycle), true);
+    assert.equal(await releaseArtifactCandidateAttemptRef(lifecycle), false);
+
+    git(fixture.root, "reflog", "expire", "--expire=now", "--all");
+    git(fixture.root, "gc", "--prune=now");
+    assert.deepEqual(
+      await verifyArtifactRevisionEvidenceBundle({
+        repositoryDir: fixture.root,
+        ...prepared.subject,
+      }),
+      prepared,
+    );
+    assert.equal(git(fixture.root, "cat-file", "-t", prepared.commitHash), "commit");
+    assert.equal(git(fixture.root, "cat-file", "-t", prepared.treeHash), "tree");
+    assert.equal(git(fixture.root, "for-each-ref", "--format=%(objectname)", candidate.attemptRef), "");
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("Artifact Revision evidence lifecycle supports SHA-256 Git repositories", async () => {
+  const fixture = repositoryFixture({ objectFormat: "sha256" });
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  try {
+    writeFileSync(join(transaction.worktreeDir, "page.txt"), "candidate\n");
+    const candidate = await transaction.commitCandidate({ message: "SHA-256 evidence candidate" });
+    const revisionId = "revision-evidence-sha256";
+    const prepared = await prepareArtifactRevisionEvidenceBundle(
+      evidenceBundleInput(fixture, candidate, revisionId),
+    );
+    assert.equal(candidate.commitHash.length, 64);
+    assert.equal(candidate.treeHash.length, 64);
+    assert.equal(prepared.commitHash.length, 64);
+    assert.equal(prepared.treeHash.length, 64);
+
+    const lifecycle = {
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+      revisionId,
+      candidate,
+      history: [candidate],
+      historyHead: candidate,
+      evidence: prepared,
+    } as const;
+    await promoteArtifactCandidateRef(lifecycle);
+    assert.equal(await releaseArtifactCandidateAttemptRef(lifecycle), true);
+    assert.deepEqual(
+      await verifyArtifactRevisionEvidenceBundle({
+        repositoryDir: fixture.root,
+        ...prepared.subject,
+      }),
+      prepared,
+    );
+  } finally {
+    await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
 
 test("candidate transaction materializes and commits the immutable Attempt base without reading live HEAD", async () => {
   const fixture = repositoryFixture({ advanceHead: true });

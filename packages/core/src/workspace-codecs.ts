@@ -59,6 +59,12 @@ import type {
 } from "./workspace-types.ts";
 import type { Row } from "./store-codecs.ts";
 import type { ProjectMode } from "./types.ts";
+import {
+  isExactRenderFrameCaptureViewport,
+  RENDER_FRAME_CAPTURE_DIMENSION_LIMIT,
+  RENDER_FRAME_CAPTURE_PIXEL_LIMIT,
+  RENDER_FRAME_NAME_LIMIT,
+} from "./render-frame.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
 const ARRAY_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Array.prototype));
@@ -774,6 +780,19 @@ function normalizeKernelPayload(value: unknown, label: string): KernelPayload {
     allowFields(frame, ["id", "name", "width", "height", "initialState", "fixture", "background"], frameLabel);
     const width = positiveNumber(frame.width, `${frameLabel} width`);
     const height = positiveNumber(frame.height, `${frameLabel} height`);
+    if (!isExactRenderFrameCaptureViewport(width, height)) {
+      throw new WorkspaceStoreCodecError(
+        `${frameLabel} capture dimensions must be positive integers no larger than `
+        + `${RENDER_FRAME_CAPTURE_DIMENSION_LIMIT} and cannot exceed the `
+        + `${RENDER_FRAME_CAPTURE_PIXEL_LIMIT} pixel budget`,
+      );
+    }
+    const name = canonicalString(frame.name, `${frameLabel} name`);
+    if (name.length > RENDER_FRAME_NAME_LIMIT) {
+      throw new WorkspaceStoreCodecError(
+        `${frameLabel} name exceeds the length limit of ${RENDER_FRAME_NAME_LIMIT}`,
+      );
+    }
     const initialState = Object.hasOwn(frame, "initialState")
       ? canonicalViewerBridgeText(
         frame.initialState,
@@ -797,7 +816,7 @@ function normalizeKernelPayload(value: unknown, label: string): KernelPayload {
         `${frameLabel} id`,
         VIEWER_BRIDGE_FRAME_TEXT_LIMIT,
       ),
-      name: canonicalString(frame.name, `${frameLabel} name`),
+      name,
       width,
       height,
       ...(initialState === undefined ? {} : { initialState }),

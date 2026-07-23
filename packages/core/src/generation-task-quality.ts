@@ -1,13 +1,22 @@
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { isDeepStrictEqual } from "node:util";
+import {
+  generationTaskVisualEvidenceFrameStorageSegment,
+  isExactRenderFrameCaptureViewport,
+} from "./render-frame.ts";
 
 const MAX_JSON_DEPTH = 64;
 const MAX_JSON_NODES = 100_000;
 const MAX_FRAME_COUNT = 64;
-const MAX_FRAME_DIMENSION = 16_384;
-const MAX_FRAME_PIXELS = 268_435_456;
+const MAX_CAPTURE_DIMENSION = 32_768;
+const MAX_CAPTURE_PIXELS = 64_000_000;
+const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+const MAX_ARTIFACT_RUN_EVIDENCE_BYTES = 1024 * 1024;
 
 export interface GenerationTaskArtifactQualityGateInput {
+  /** Core supplies false or an exact frozen Sharingan Revision; daemon-only preflight passes null. */
+  requireSourceVisualEvidence: unknown;
   qaProfile: unknown;
   plannedFrames: unknown;
   renderSpec: unknown;
@@ -16,6 +25,17 @@ export interface GenerationTaskArtifactQualityGateInput {
   /** Core supplies this fence; daemon-only preflight may pass null. */
   expectedEvidenceOwner: unknown;
 }
+
+export interface GenerationTaskSourceVisualEvidenceAuthority {
+  resourceId: string;
+  revisionId: string;
+  revisionChecksum: string;
+}
+
+export type GenerationTaskSourceVisualEvidenceRequirement =
+  | false
+  | null
+  | GenerationTaskSourceVisualEvidenceAuthority;
 
 export class GenerationTaskQualityGateError extends Error {
   readonly failureClass = "qa" as const;
@@ -146,17 +166,24 @@ function text(value: unknown, label: string, maxLength = 8_192): string {
   return value;
 }
 
+const VIEWER_FRAME_TEXT_CONTROL = /[\u0000-\u001f\u007f]/;
+
+function renderFrameId(value: unknown, label: string): string {
+  const result = text(value, label, 256);
+  if (result !== result.trim() || VIEWER_FRAME_TEXT_CONTROL.test(result)) {
+    fail(`${label} is not a Viewer-safe Frame identifier`);
+  }
+  return result;
+}
+
 function validateFrame(value: unknown, index: number): Record<string, unknown> {
   const frame = value as Record<string, unknown>;
   const allowed = new Set(["id", "name", "width", "height", "initialState", "fixture", "background"]);
   if (Object.keys(frame).some((key) => !allowed.has(key))) {
     fail(`Artifact RenderSpec Frame ${index} contains unsupported fields`);
   }
-  const id = text(frame.id, `Artifact RenderSpec Frame ${index} id`, 256);
-  if (!Number.isSafeInteger(frame.width) || !Number.isSafeInteger(frame.height)
-    || (frame.width as number) < 1 || (frame.height as number) < 1
-    || (frame.width as number) > MAX_FRAME_DIMENSION || (frame.height as number) > MAX_FRAME_DIMENSION
-    || (frame.width as number) * (frame.height as number) > MAX_FRAME_PIXELS) {
+  const id = renderFrameId(frame.id, `Artifact RenderSpec Frame ${index} id`);
+  if (!isExactRenderFrameCaptureViewport(frame.width, frame.height)) {
     fail(`Artifact RenderSpec Frame ${id} dimensions are invalid`);
   }
   if (frame.name !== undefined) text(frame.name, `Artifact RenderSpec Frame ${id} name`, 512);
@@ -236,10 +263,16 @@ function validateFrames(input: {
   return frames;
 }
 
+interface ValidatedArtifactQuality {
+  state: "passed" | "needs-attention";
+  score: number;
+  findingsDigest: string;
+}
+
 function validateQuality(
   value: unknown,
   blockingSeverities: readonly string[],
-): number {
+): ValidatedArtifactQuality {
   const quality = record(value, "Artifact quality result");
   exactFields(quality, ["state", "score", "findings"], "Artifact quality result");
   if (quality.state !== "passed" && quality.state !== "needs-attention"
@@ -301,7 +334,13 @@ function validateQuality(
   if ((activeSeverities.length === 0) !== (quality.state === "passed")) {
     fail("Artifact quality state does not match its active findings");
   }
-  return quality.score;
+  return {
+    state: quality.state as ValidatedArtifactQuality["state"],
+    score: quality.score,
+    findingsDigest: createHash("sha256")
+      .update(JSON.stringify(quality.findings))
+      .digest("hex"),
+  };
 }
 
 interface ExpectedEvidenceOwner {
@@ -345,6 +384,60 @@ function sha256(value: unknown, label: string): string {
   const result = text(value, label, 64);
   if (!SHA256.test(result)) fail(`${label} must be a lowercase SHA-256 digest`);
   return result;
+}
+
+function sourceVisualEvidenceAuthority(
+  value: unknown,
+  label: string,
+): GenerationTaskSourceVisualEvidenceAuthority {
+  const authority = record(value, label);
+  exactFields(authority, ["resourceId", "revisionId", "revisionChecksum"], label);
+  return {
+    resourceId: evidenceId(authority.resourceId, `${label} Resource id`),
+    revisionId: evidenceId(authority.revisionId, `${label} Resource Revision id`),
+    revisionChecksum: sha256(authority.revisionChecksum, `${label} Resource Revision checksum`),
+  };
+}
+
+function sourceVisualEvidenceRequirement(
+  value: unknown,
+): GenerationTaskSourceVisualEvidenceRequirement {
+  if (value === false || value === null) return value;
+  return sourceVisualEvidenceAuthority(value, "Generation Task source visual evidence authority");
+}
+
+function requiresSourceVisualEvidence(
+  value: GenerationTaskSourceVisualEvidenceRequirement,
+): value is GenerationTaskSourceVisualEvidenceAuthority {
+  return value !== false && value !== null;
+}
+
+function captureIdentity(value: unknown, label: string, audited: {
+  width: number;
+  height: number;
+  sha256?: string;
+  byteLength?: number;
+}): { sha256: string; byteLength: number; width: number; height: number } {
+  const identity = record(value, label);
+  exactFields(identity, ["sha256", "byteLength", "width", "height"], label);
+  const checksum = sha256(identity.sha256, `${label} checksum`);
+  if (!Number.isSafeInteger(identity.byteLength) || Number(identity.byteLength) < 1
+    || Number(identity.byteLength) > MAX_CAPTURE_BYTES
+    || !Number.isSafeInteger(identity.width) || !Number.isSafeInteger(identity.height)
+    || Number(identity.width) < audited.width || Number(identity.height) < audited.height
+    || Number(identity.width) > MAX_CAPTURE_DIMENSION
+    || Number(identity.height) > MAX_CAPTURE_DIMENSION
+    || Number(identity.width) * Number(identity.height) > MAX_CAPTURE_PIXELS
+    || (audited.sha256 !== undefined && checksum !== audited.sha256)
+    || (audited.byteLength !== undefined && Number(identity.byteLength) !== audited.byteLength)) {
+    fail(`${label} does not match the reviewed PNG evidence`);
+  }
+  return {
+    sha256: checksum,
+    byteLength: Number(identity.byteLength),
+    width: Number(identity.width),
+    height: Number(identity.height),
+  };
 }
 
 export function generationTaskArtifactCandidateRetentionRef(input: {
@@ -481,10 +574,288 @@ function evidenceOwner(
   return owner;
 }
 
+interface ArtifactRunManifestContext {
+  owner: ExpectedEvidenceOwner;
+  frames: readonly Record<string, unknown>[];
+  requireRuntimeChecks: boolean;
+  requireVisualReview: boolean;
+  requireSourceVisualEvidence: GenerationTaskSourceVisualEvidenceRequirement;
+  round: number;
+  candidateCommitHash: string;
+  candidateTreeHash: string;
+  passed: boolean;
+  score: number;
+}
+
+function artifactRunEvaluationManifest(
+  value: unknown,
+  input: ArtifactRunManifestContext,
+): Record<string, unknown> {
+  const label = `Artifact run evaluation manifest ${input.round}`;
+  const manifest = record(value, label);
+  const hasRuntimeChecks = manifest.runtimeChecks !== undefined;
+  const hasReviewSummary = manifest.reviewSummary !== undefined;
+  const hasVisualEvidence = manifest.visualEvidence !== undefined;
+  const hasSourceCaptureResult = manifest.sourceCaptureResult !== undefined;
+  const hasSourceVisualEvidence = manifest.sourceVisualEvidence !== undefined;
+  exactFields(manifest, [
+    "protocol", "candidate", "round", "passed", "score", "qualityState",
+    "findingsDigest", "frameResults",
+    ...(hasRuntimeChecks ? ["runtimeChecks"] : []),
+    ...(hasReviewSummary ? ["reviewSummary"] : []),
+    ...(hasVisualEvidence ? ["visualEvidence"] : []),
+    ...(hasSourceCaptureResult ? ["sourceCaptureResult"] : []),
+    ...(hasSourceVisualEvidence ? ["sourceVisualEvidence"] : []),
+  ], label);
+  if ((input.requireRuntimeChecks && !hasRuntimeChecks)
+    || (input.requireVisualReview && (!hasReviewSummary || !hasVisualEvidence))) {
+    fail(`${label} omits evidence required by the immutable QA profile`);
+  }
+  const candidate = record(manifest.candidate, `${label} candidate`);
+  exactFields(candidate, ["commitHash", "treeHash"], `${label} candidate`);
+  const commitHash = gitObjectId(candidate.commitHash, `${label} candidate commit`);
+  const treeHash = gitObjectId(candidate.treeHash, `${label} candidate tree`);
+  sha256(manifest.findingsDigest, `${label} findings digest`);
+  if (manifest.protocol !== "dezin.artifact-run-evaluation-manifest.v1"
+    || manifest.round !== input.round
+    || manifest.passed !== input.passed
+    || manifest.score !== input.score
+    || commitHash !== input.candidateCommitHash
+    || treeHash !== input.candidateTreeHash
+    || commitHash.length !== treeHash.length
+    || (manifest.qualityState !== "passed"
+      && manifest.qualityState !== "needs-attention"
+      && manifest.qualityState !== "failed")
+    || (input.passed ? manifest.qualityState === "failed" : manifest.qualityState !== "failed")) {
+    fail(`${label} identity or outcome is invalid`);
+  }
+
+  const frameResults = array(manifest.frameResults, `${label} Frame results`);
+  if (frameResults.length !== input.frames.length || frameResults.length > MAX_FRAME_COUNT) {
+    fail(`${label} Frame results do not exactly cover the immutable Task Frames`);
+  }
+  const frameAttemptIds = new Set<string>();
+  const frameIdentities = new Map<string, ReturnType<typeof captureIdentity>>();
+  const normalizedFrameResults: Record<string, unknown>[] = [];
+  for (let index = 0; index < frameResults.length; index += 1) {
+    const result = record(frameResults[index], `${label} Frame result ${index}`);
+    const hasCaptureIdentity = result.captureIdentity !== undefined;
+    exactFields(result, [
+      "frameId", "frameAttemptId", "width", "height", "status", "reviewed",
+      ...(hasCaptureIdentity ? ["captureIdentity"] : []),
+    ], `${label} Frame result ${index}`);
+    const plannedFrame = input.frames[index]!;
+    const frameId = renderFrameId(result.frameId, `${label} Frame result ${index} id`);
+    const frameAttemptId = evidenceId(
+      result.frameAttemptId,
+      `${label} Frame result ${index} Attempt id`,
+    );
+    if (frameId !== plannedFrame.id || result.width !== plannedFrame.width
+      || result.height !== plannedFrame.height
+      || (result.status !== "passed" && result.status !== "failed")
+      || typeof result.reviewed !== "boolean"
+      || frameAttemptIds.has(frameAttemptId)
+      || ((result.status === "passed" || result.reviewed === true) && !hasCaptureIdentity)) {
+      fail(`${label} Frame result ${index} is invalid`);
+    }
+    frameAttemptIds.add(frameAttemptId);
+    if (hasCaptureIdentity) {
+      frameIdentities.set(frameId, captureIdentity(
+        result.captureIdentity,
+        `${label} Frame result ${index} PNG identity`,
+        { width: Number(plannedFrame.width), height: Number(plannedFrame.height) },
+      ));
+    }
+    normalizedFrameResults.push(result);
+  }
+
+  if (hasRuntimeChecks) {
+    const runtimeChecks = array(manifest.runtimeChecks, `${label} runtime checks`);
+    if (runtimeChecks.length !== input.frames.length) fail(`${label} runtime checks are incomplete`);
+    for (let index = 0; index < runtimeChecks.length; index += 1) {
+      const check = record(runtimeChecks[index], `${label} runtime check ${index}`);
+      exactFields(check, ["id", "status"], `${label} runtime check ${index}`);
+      const result = normalizedFrameResults[index]!;
+      if (check.id !== `frame:${String(result.frameId)}` || check.status !== result.status) {
+        fail(`${label} runtime check ${index} diverges from its Frame result`);
+      }
+    }
+  }
+
+  if (hasReviewSummary !== hasVisualEvidence) {
+    fail(`${label} review summary and Frame descriptors must be retained together`);
+  }
+  let review: Record<string, unknown> | null = null;
+  let summaries: unknown[] = [];
+  let sourceSummary: unknown;
+  if (hasReviewSummary) {
+    review = record(manifest.reviewSummary, `${label} review summary`);
+    const hasSourceSummary = review.sourceEvidence !== undefined;
+    exactFields(review, [
+      "status", "fidelity", "evidence", ...(hasSourceSummary ? ["sourceEvidence"] : []),
+    ], `${label} review summary`);
+    if ((review.status !== "passed" && review.status !== "failed")
+      || typeof review.fidelity !== "number" || !Number.isFinite(review.fidelity)
+      || review.fidelity < 0 || review.fidelity > 1
+      || (input.passed && review.status !== "passed")) {
+      fail(`${label} review summary is invalid`);
+    }
+    summaries = array(review.evidence, `${label} review Frame summaries`);
+    if (summaries.length !== input.frames.length) fail(`${label} review Frame summaries are incomplete`);
+    sourceSummary = hasSourceSummary ? review.sourceEvidence : undefined;
+  }
+
+  const storageKeys = new Set<string>();
+  if (hasVisualEvidence) {
+    const descriptors = array(manifest.visualEvidence, `${label} Frame descriptors`);
+    if (descriptors.length !== input.frames.length) fail(`${label} Frame descriptors are incomplete`);
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const plannedFrame = input.frames[index]!;
+      const result = normalizedFrameResults[index]!;
+      const summary = record(summaries[index], `${label} Frame review summary ${index}`);
+      exactFields(summary, [
+        "frameId", "frameAttemptId", "sha256", "byteLength", "storageKey",
+      ], `${label} Frame review summary ${index}`);
+      const frameId = renderFrameId(summary.frameId, `${label} Frame review summary ${index} id`);
+      const frameAttemptId = evidenceId(
+        summary.frameAttemptId,
+        `${label} Frame review summary ${index} Attempt id`,
+      );
+      const checksum = sha256(summary.sha256, `${label} Frame review summary ${index} checksum`);
+      if (!Number.isSafeInteger(summary.byteLength) || Number(summary.byteLength) < 1) {
+        fail(`${label} Frame review summary ${index} byte length is invalid`);
+      }
+      const storageKey = text(summary.storageKey, `${label} Frame review summary ${index} storage key`, 4_096);
+      const identity = frameIdentities.get(frameId);
+      if (frameId !== plannedFrame.id || frameId !== result.frameId
+        || frameAttemptId !== result.frameAttemptId || result.reviewed !== true
+        || !identity || identity.sha256 !== checksum
+        || identity.byteLength !== Number(summary.byteLength)
+        || storageKeys.has(storageKey)) {
+        fail(`${label} Frame review summary ${index} is inconsistent`);
+      }
+      storageKeys.add(storageKey);
+
+      const descriptor = record(descriptors[index], `${label} Frame descriptor ${index}`);
+      exactFields(descriptor, [
+        "protocol", "owner", "frame", "round", "mediaType", "sha256", "byteLength", "storageKey",
+      ], `${label} Frame descriptor ${index}`);
+      evidenceOwner(descriptor.owner, input.owner);
+      const descriptorFrame = record(descriptor.frame, `${label} Frame descriptor ${index} Frame`);
+      if (!isDeepStrictEqual(descriptorFrame, { ...plannedFrame, frameAttemptId })) {
+        fail(`${label} Frame descriptor ${index} diverges from the immutable Task Frame`);
+      }
+      const expectedStorageKey = [
+        "generation-task-evidence",
+        input.owner.projectId,
+        input.owner.workspaceId,
+        input.owner.planId,
+        input.owner.taskId,
+        `attempt-${input.owner.attempt}`,
+        "visual",
+        `round-${input.round}-${generationTaskVisualEvidenceFrameStorageSegment(frameId)}-${checksum}.png`,
+      ].join("/");
+      if (descriptor.protocol !== "dezin.generation-task-visual-evidence.v1"
+        || descriptor.round !== input.round || descriptor.mediaType !== "image/png"
+        || descriptor.sha256 !== checksum || descriptor.byteLength !== summary.byteLength
+        || descriptor.storageKey !== storageKey || storageKey !== expectedStorageKey) {
+        fail(`${label} Frame descriptor ${index} is inconsistent`);
+      }
+    }
+  }
+
+  const sourcePartCount = [
+    hasSourceCaptureResult,
+    hasSourceVisualEvidence,
+    sourceSummary !== undefined,
+  ].filter(Boolean).length;
+  if ((requiresSourceVisualEvidence(input.requireSourceVisualEvidence) && sourcePartCount !== 3)
+    || (input.requireSourceVisualEvidence === false && sourcePartCount !== 0)
+    || (input.requireSourceVisualEvidence === null && sourcePartCount !== 0 && sourcePartCount !== 3)) {
+    fail(`${label} source evidence is incomplete or unauthorized`);
+  }
+  if (sourcePartCount === 3) {
+    const result = record(manifest.sourceCaptureResult, `${label} source capture result`);
+    exactFields(result, [
+      "scope", "sourceAttemptId", "width", "height", "status", "reviewed", "captureIdentity",
+    ], `${label} source capture result`);
+    const sourceAttemptId = evidenceId(result.sourceAttemptId, `${label} source Attempt id`);
+    if (result.scope !== "source" || (result.status !== "passed" && result.status !== "failed")
+      || result.reviewed !== true
+      || !isExactRenderFrameCaptureViewport(result.width, result.height)
+      || frameAttemptIds.has(sourceAttemptId)
+      || (input.passed && result.status !== "passed")) {
+      fail(`${label} source capture result is invalid`);
+    }
+    const identity = captureIdentity(result.captureIdentity, `${label} source PNG identity`, {
+      width: Number(result.width),
+      height: Number(result.height),
+    });
+    const summary = record(sourceSummary, `${label} source review summary`);
+    exactFields(summary, [
+      "scope", "sourceAttemptId", "width", "height", "sha256", "byteLength", "storageKey",
+    ], `${label} source review summary`);
+    const checksum = sha256(summary.sha256, `${label} source review checksum`);
+    if (!Number.isSafeInteger(summary.byteLength) || Number(summary.byteLength) < 1) {
+      fail(`${label} source review byte length is invalid`);
+    }
+    const storageKey = text(summary.storageKey, `${label} source review storage key`, 4_096);
+    if (summary.scope !== "source" || summary.sourceAttemptId !== sourceAttemptId
+      || summary.width !== result.width || summary.height !== result.height
+      || identity.sha256 !== checksum || identity.byteLength !== Number(summary.byteLength)
+      || storageKeys.has(storageKey)) {
+      fail(`${label} source review summary is inconsistent`);
+    }
+    const descriptor = record(manifest.sourceVisualEvidence, `${label} source descriptor`);
+    exactFields(descriptor, [
+      "protocol", "owner", "capture", "sourceAuthority", "round", "mediaType", "sha256",
+      "byteLength", "storageKey",
+    ], `${label} source descriptor`);
+    evidenceOwner(descriptor.owner, input.owner);
+    const descriptorCapture = record(descriptor.capture, `${label} source descriptor capture`);
+    if (!isDeepStrictEqual(descriptorCapture, {
+      scope: "source",
+      sourceAttemptId,
+      width: Number(result.width),
+      height: Number(result.height),
+    })) fail(`${label} source descriptor capture is inconsistent`);
+    const expectedStorageKey = [
+      "generation-task-evidence",
+      input.owner.projectId,
+      input.owner.workspaceId,
+      input.owner.planId,
+      input.owner.taskId,
+      `attempt-${input.owner.attempt}`,
+      "visual",
+      `round-${input.round}-source-${checksum}.png`,
+    ].join("/");
+    const descriptorAuthority = sourceVisualEvidenceAuthority(
+      descriptor.sourceAuthority,
+      `${label} source descriptor authority`,
+    );
+    if (descriptor.protocol !== "dezin.generation-task-source-visual-evidence.v1"
+      || descriptor.round !== input.round || descriptor.mediaType !== "image/png"
+      || descriptor.sha256 !== checksum || descriptor.byteLength !== summary.byteLength
+      || descriptor.storageKey !== storageKey || storageKey !== expectedStorageKey
+      || (requiresSourceVisualEvidence(input.requireSourceVisualEvidence)
+        && !isDeepStrictEqual(descriptorAuthority, input.requireSourceVisualEvidence))) {
+      fail(`${label} source descriptor is inconsistent`);
+    }
+  }
+  if (input.passed && normalizedFrameResults.some((result) => result.status !== "passed")) {
+    fail(`${label} passed outcome retains a failed Frame`);
+  }
+  return manifest;
+}
+
 function artifactRunQualityEvidence(
   value: unknown,
   expected: ExpectedEvidenceOwner | null,
-  qualityScore: number,
+  quality: ValidatedArtifactQuality,
+  frames: readonly Record<string, unknown>[],
+  requireRuntimeChecks: boolean,
+  requireVisualReview: boolean,
+  requireSourceVisualEvidence: GenerationTaskSourceVisualEvidenceRequirement,
 ): { evidence: Record<string, unknown>; owner: ExpectedEvidenceOwner | null } {
   const envelope = record(value, "Artifact candidate evidence");
   if (envelope.protocol !== "dezin.artifact-run.v1") {
@@ -492,6 +863,15 @@ function artifactRunQualityEvidence(
       fail("Fenced Artifact evidence requires an immutable run envelope or exact visual ownership");
     }
     return { evidence: envelope, owner: expected };
+  }
+  let envelopeBytes: number;
+  try {
+    envelopeBytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+  } catch {
+    fail("Artifact run evidence could not be measured safely");
+  }
+  if (envelopeBytes > MAX_ARTIFACT_RUN_EVIDENCE_BYTES) {
+    fail("Artifact run evidence exceeds its byte budget");
   }
 
   const qualityEvidence = record(envelope.qualityEvidence, "Artifact run quality evidence");
@@ -547,7 +927,7 @@ function artifactRunQualityEvidence(
   }
   if (!Number.isSafeInteger(envelope.selectedRound) || Number(envelope.selectedRound) < 0
     || !Array.isArray(envelope.versions) || envelope.versions.length === 0
-    || envelope.versions.length > 1_000) {
+    || envelope.versions.length > 256) {
     fail("Artifact run version history is invalid");
   }
   const selectedRound = Number(envelope.selectedRound);
@@ -555,26 +935,80 @@ function artifactRunQualityEvidence(
   const selectedCommitHash = gitObjectId(candidate.commitHash, "Artifact run selected candidate commit");
   const selectedTreeHash = gitObjectId(candidate.treeHash, "Artifact run selected candidate tree");
   let selectedVersion: Record<string, unknown> | null = null;
+  let selectedManifest: Record<string, unknown> | null = null;
   for (let index = 0; index < envelope.versions.length; index += 1) {
-    const version = envelope.versions[index] as Record<string, unknown>;
-    exactFields(version, ["round", "commitHash", "treeHash", "passed", "score"],
+    const version = record(envelope.versions[index], `Artifact run version ${index}`);
+    exactFields(version, [
+      "round", "commitHash", "treeHash", "passed", "score", "evaluationManifest",
+    ],
       `Artifact run version ${index}`);
     const commitHash = gitObjectId(version.commitHash, `Artifact run version ${index} commit`);
     const treeHash = gitObjectId(version.treeHash, `Artifact run version ${index} tree`);
-    if (commitHash.length !== treeHash.length || version.round !== index
+    if (commitHash.length !== treeHash.length
+      || commitHash.length !== sourceCommitHash.length
+      || treeHash.length !== sourceTreeHash.length
+      || version.round !== index
       || typeof version.passed !== "boolean"
       || typeof version.score !== "number" || !Number.isFinite(version.score)
       || version.score < 0 || version.score > 100) {
       fail(`Artifact run version ${index} is invalid`);
     }
-    if (index === selectedRound) selectedVersion = version;
+    const manifestOwner: ExpectedEvidenceOwner = {
+      projectId,
+      workspaceId,
+      planId,
+      taskId,
+      attempt: Number(envelope.attempt),
+      attemptCreatedAt: Number(envelope.attemptCreatedAt),
+      inputHash,
+      sourceBase: { commitHash: sourceCommitHash, treeHash: sourceTreeHash },
+      candidateRetentionRef,
+      candidateCommitHash: commitHash,
+      candidateTreeHash: treeHash,
+      contextPackId,
+      contextPackHash,
+    };
+    const manifest = artifactRunEvaluationManifest(version.evaluationManifest, {
+      owner: manifestOwner,
+      frames,
+      requireRuntimeChecks,
+      requireVisualReview,
+      requireSourceVisualEvidence,
+      round: index,
+      candidateCommitHash: commitHash,
+      candidateTreeHash: treeHash,
+      passed: version.passed,
+      score: Number(version.score),
+    });
+    if (index === selectedRound) {
+      selectedVersion = version;
+      selectedManifest = manifest;
+    }
   }
-  if (selectedVersion === null || selectedVersion.passed !== true
+  if (selectedVersion === null || selectedManifest === null || selectedVersion.passed !== true
     || selectedVersion.commitHash !== selectedCommitHash
     || selectedVersion.treeHash !== selectedTreeHash
-    || selectedVersion.score !== qualityScore
-    || qualityEvidence.round !== selectedRound) {
+    || selectedVersion.score !== quality.score
+    || qualityEvidence.round !== selectedRound
+    || selectedManifest.qualityState !== quality.state
+    || selectedManifest.findingsDigest !== quality.findingsDigest) {
     fail("Artifact run selected version does not match its quality evidence");
+  }
+  for (const [manifestField, qualityField] of [
+    ["frameResults", "frameResults"],
+    ["runtimeChecks", "runtimeChecks"],
+    ["reviewSummary", "visualReview"],
+    ["visualEvidence", "visualEvidence"],
+    ["sourceCaptureResult", "sourceCaptureResult"],
+    ["sourceVisualEvidence", "sourceVisualEvidence"],
+  ] as const) {
+    const manifestHasField = Object.hasOwn(selectedManifest, manifestField);
+    const qualityHasField = Object.hasOwn(qualityEvidence, qualityField);
+    if (manifestHasField !== qualityHasField
+      || (manifestHasField
+        && !isDeepStrictEqual(selectedManifest[manifestField], qualityEvidence[qualityField]))) {
+      fail(`Artifact run selected evaluation manifest diverges from ${qualityField}`);
+    }
   }
   if ((hasRuntimeChecks && !isDeepStrictEqual(envelope.runtimeChecks, qualityEvidence.runtimeChecks))
     || (hasVisualReview && !isDeepStrictEqual(envelope.visualReview, qualityEvidence.visualReview))) {
@@ -619,22 +1053,35 @@ function artifactRunQualityEvidence(
 function validateEvidence(value: unknown, input: {
   requireRuntimeChecks: boolean;
   requireVisualReview: boolean;
+  requireSourceVisualEvidence: GenerationTaskSourceVisualEvidenceRequirement;
   frames: readonly Record<string, unknown>[];
   expectedOwner: ExpectedEvidenceOwner | null;
-  qualityScore: number;
+  quality: ValidatedArtifactQuality;
 }): void {
-  const unwrapped = artifactRunQualityEvidence(value, input.expectedOwner, input.qualityScore);
+  const unwrapped = artifactRunQualityEvidence(
+    value,
+    input.expectedOwner,
+    input.quality,
+    input.frames,
+    input.requireRuntimeChecks,
+    input.requireVisualReview,
+    input.requireSourceVisualEvidence,
+  );
   const evidence = unwrapped.evidence;
   const evidenceFence = unwrapped.owner;
   const baseFields = ["protocol", "candidate", "contextPack", "frames", "frameResults", "round"];
   const hasRuntimeChecks = evidence.runtimeChecks !== undefined;
   const hasVisualReview = evidence.visualReview !== undefined;
   const hasVisualEvidence = evidence.visualEvidence !== undefined;
+  const hasSourceCaptureResult = evidence.sourceCaptureResult !== undefined;
+  const hasSourceVisualEvidence = evidence.sourceVisualEvidence !== undefined;
   exactFields(evidence, [
     ...baseFields,
     ...(hasRuntimeChecks ? ["runtimeChecks"] : []),
     ...(hasVisualReview ? ["visualReview"] : []),
     ...(hasVisualEvidence ? ["visualEvidence"] : []),
+    ...(hasSourceCaptureResult ? ["sourceCaptureResult"] : []),
+    ...(hasSourceVisualEvidence ? ["sourceVisualEvidence"] : []),
   ], "Artifact candidate evidence");
   if (evidence.protocol !== "dezin.standard-artifact-quality.v1") {
     fail("Artifact candidate evidence protocol is invalid");
@@ -687,12 +1134,19 @@ function validateEvidence(value: unknown, input: {
 
   const visualReview = evidence.visualReview;
   const reviewedFrameAttemptIds = new Map<string, string>();
-  if (input.requireVisualReview || visualReview !== undefined) {
+  const reviewedFrameIdentities = new Map<string, { sha256: string; byteLength: number }>();
+  if (input.requireVisualReview || requiresSourceVisualEvidence(input.requireSourceVisualEvidence)
+    || visualReview !== undefined
+    || hasSourceCaptureResult || hasSourceVisualEvidence) {
     if (visualReview === null || typeof visualReview !== "object" || Array.isArray(visualReview)) {
       fail("Artifact candidate requires visual-review evidence");
     }
     const review = visualReview as Record<string, unknown>;
-    exactFields(review, ["status", "fidelity", "evidence"], "Artifact visual review");
+    const hasSourceReviewEvidence = review.sourceEvidence !== undefined;
+    exactFields(review, [
+      "status", "fidelity", "evidence",
+      ...(hasSourceReviewEvidence ? ["sourceEvidence"] : []),
+    ], "Artifact visual review");
     if (review.status !== "passed") fail("Artifact visual review did not pass");
     if (typeof review.fidelity !== "number" || !Number.isFinite(review.fidelity)
       || review.fidelity < 0 || review.fidelity > 1) {
@@ -713,7 +1167,7 @@ function validateEvidence(value: unknown, input: {
       exactFields(summary, [
         "frameId", "frameAttemptId", "sha256", "byteLength", "storageKey",
       ], `Artifact visual review evidence ${index}`);
-      const frameId = evidenceId(summary.frameId, `Artifact visual review evidence ${index} Frame id`);
+      const frameId = renderFrameId(summary.frameId, `Artifact visual review evidence ${index} Frame id`);
       const frameAttemptId = evidenceId(
         summary.frameAttemptId,
         `Artifact visual review evidence ${index} Frame Attempt id`,
@@ -729,6 +1183,10 @@ function validateEvidence(value: unknown, input: {
       frameAttemptIds.add(frameAttemptId);
       storageKeys.add(key);
       reviewedFrameAttemptIds.set(frameId, frameAttemptId);
+      reviewedFrameIdentities.set(frameId, {
+        sha256: checksum,
+        byteLength: Number(summary.byteLength),
+      });
 
       const descriptor = descriptors[index]!;
       exactFields(descriptor, [
@@ -761,10 +1219,141 @@ function validateEvidence(value: unknown, input: {
         owner.taskId,
         `attempt-${owner.attempt}`,
         "visual",
-        `round-${String(evidence.round)}-${frameId}-${checksum}.png`,
+        `round-${String(evidence.round)}-${generationTaskVisualEvidenceFrameStorageSegment(frameId)}-${checksum}.png`,
       ].join("/");
       if (key !== expectedStorageKey) {
         fail(`Artifact visual evidence descriptor ${frameId} storage ownership is invalid`);
+      }
+    }
+
+    const sourceEvidencePartCount = [
+      hasSourceCaptureResult,
+      hasSourceVisualEvidence,
+      hasSourceReviewEvidence,
+    ].filter(Boolean).length;
+    if ((requiresSourceVisualEvidence(input.requireSourceVisualEvidence)
+      && sourceEvidencePartCount !== 3)
+      || (input.requireSourceVisualEvidence === false && sourceEvidencePartCount !== 0)
+      || (input.requireSourceVisualEvidence === null
+        && sourceEvidencePartCount !== 0 && sourceEvidencePartCount !== 3)) {
+      fail("Artifact source visual evidence must include its exact capture, review, and descriptor");
+    }
+    if (sourceEvidencePartCount === 3) {
+      const result = record(evidence.sourceCaptureResult, "Artifact source capture result");
+      exactFields(result, [
+        "scope", "sourceAttemptId", "width", "height", "status", "reviewed", "captureIdentity",
+      ], "Artifact source capture result");
+      const sourceAttemptId = evidenceId(
+        result.sourceAttemptId,
+        "Artifact source capture Attempt id",
+      );
+      if (result.scope !== "source" || result.status !== "passed" || result.reviewed !== true) {
+        fail("Artifact source capture must be independently reviewed and passed");
+      }
+      if (!isExactRenderFrameCaptureViewport(result.width, result.height)) {
+        fail("Artifact source capture dimensions are invalid");
+      }
+      if (frameAttemptIds.has(sourceAttemptId)) {
+        fail("Artifact source capture Attempt identity collides with a Task Frame");
+      }
+      const sourceCapture = {
+        scope: "source",
+        sourceAttemptId,
+        width: Number(result.width),
+        height: Number(result.height),
+      };
+      const sourceCaptureIdentity = captureIdentity(
+        result.captureIdentity,
+        "Artifact source capture PNG identity",
+        { width: sourceCapture.width, height: sourceCapture.height },
+      );
+
+      const sourceSummary = record(
+        review.sourceEvidence,
+        "Artifact source visual review evidence",
+      );
+      exactFields(sourceSummary, [
+        "scope", "sourceAttemptId", "width", "height", "sha256", "byteLength", "storageKey",
+      ], "Artifact source visual review evidence");
+      const sourceChecksum = sha256(
+        sourceSummary.sha256,
+        "Artifact source visual review evidence checksum",
+      );
+      if (!Number.isSafeInteger(sourceSummary.byteLength) || Number(sourceSummary.byteLength) < 1) {
+        fail("Artifact source visual review evidence byte length is invalid");
+      }
+      if (sourceCaptureIdentity.sha256 !== sourceChecksum
+        || sourceCaptureIdentity.byteLength !== Number(sourceSummary.byteLength)) {
+        fail("Artifact source capture PNG identity does not match its review summary");
+      }
+      const sourceStorageKey = text(
+        sourceSummary.storageKey,
+        "Artifact source visual review evidence storage key",
+        4_096,
+      );
+      const summaryCapture = {
+        scope: sourceSummary.scope,
+        sourceAttemptId: sourceSummary.sourceAttemptId,
+        width: sourceSummary.width,
+        height: sourceSummary.height,
+      };
+      if (!isDeepStrictEqual(summaryCapture, sourceCapture)) {
+        fail("Artifact source visual review evidence does not match its capture result");
+      }
+
+      const sourceDescriptor = record(
+        evidence.sourceVisualEvidence,
+        "Artifact source visual evidence descriptor",
+      );
+      exactFields(sourceDescriptor, [
+        "protocol", "owner", "capture", "sourceAuthority", "round", "mediaType", "sha256",
+        "byteLength", "storageKey",
+      ], "Artifact source visual evidence descriptor");
+      if (sourceDescriptor.protocol !== "dezin.generation-task-source-visual-evidence.v1"
+        || sourceDescriptor.mediaType !== "image/png"
+        || sourceDescriptor.round !== evidence.round
+        || sourceDescriptor.sha256 !== sourceChecksum
+        || sourceDescriptor.byteLength !== sourceSummary.byteLength
+        || sourceDescriptor.storageKey !== sourceStorageKey) {
+        fail("Artifact source visual evidence descriptor does not match its review summary");
+      }
+      const sourceOwner = evidenceOwner(sourceDescriptor.owner, evidenceFence);
+      if (sourceOwner.candidateCommitHash !== candidateCommitHash
+        || sourceOwner.candidateTreeHash !== candidateTreeHash
+        || sourceOwner.contextPackId !== contextPackId
+        || sourceOwner.contextPackHash !== contextPackHash) {
+        fail("Artifact source visual evidence descriptor does not match its quality envelope");
+      }
+      const descriptorCapture = record(
+        sourceDescriptor.capture,
+        "Artifact source visual evidence descriptor capture",
+      );
+      exactFields(descriptorCapture, [
+        "scope", "sourceAttemptId", "width", "height",
+      ], "Artifact source visual evidence descriptor capture");
+      if (!isDeepStrictEqual(descriptorCapture, sourceCapture)) {
+        fail("Artifact source visual evidence descriptor does not match its capture result");
+      }
+      const descriptorAuthority = sourceVisualEvidenceAuthority(
+        sourceDescriptor.sourceAuthority,
+        "Artifact source visual evidence descriptor authority",
+      );
+      if (requiresSourceVisualEvidence(input.requireSourceVisualEvidence)
+        && !isDeepStrictEqual(descriptorAuthority, input.requireSourceVisualEvidence)) {
+        fail("Artifact source visual evidence descriptor does not match its exact source authority");
+      }
+      const expectedSourceStorageKey = [
+        "generation-task-evidence",
+        sourceOwner.projectId,
+        sourceOwner.workspaceId,
+        sourceOwner.planId,
+        sourceOwner.taskId,
+        `attempt-${sourceOwner.attempt}`,
+        "visual",
+        `round-${String(evidence.round)}-source-${sourceChecksum}.png`,
+      ].join("/");
+      if (sourceStorageKey !== expectedSourceStorageKey || storageKeys.has(sourceStorageKey)) {
+        fail("Artifact source visual evidence storage ownership is invalid");
       }
     }
   } else if (hasVisualEvidence) {
@@ -780,18 +1369,29 @@ function validateEvidence(value: unknown, input: {
   }
   for (let index = 0; index < frameResults.length; index += 1) {
     const result = frameResults[index] as Record<string, unknown>;
+    const hasCaptureIdentity = result.captureIdentity !== undefined;
     exactFields(result, [
       "frameId", "frameAttemptId", "width", "height", "status", "reviewed",
+      ...(hasCaptureIdentity ? ["captureIdentity"] : []),
     ], `Artifact candidate Frame result ${index}`);
     const frame = input.frames[index]!;
     if (result.frameId !== frame.id || result.width !== frame.width || result.height !== frame.height
       || result.status !== "passed"
       || typeof result.reviewed !== "boolean"
       || (hasVisualReview && (result.reviewed !== true
-        || result.frameAttemptId !== reviewedFrameAttemptIds.get(String(frame.id))))) {
+        || result.frameAttemptId !== reviewedFrameAttemptIds.get(String(frame.id))
+        || !hasCaptureIdentity))) {
       fail(`Artifact candidate Frame result ${index} does not match its immutable Task Frame`);
     }
     evidenceId(result.frameAttemptId, `Artifact candidate Frame result ${index} Attempt id`);
+    if (hasCaptureIdentity) {
+      const reviewedIdentity = reviewedFrameIdentities.get(String(frame.id));
+      captureIdentity(result.captureIdentity, `Artifact candidate Frame result ${index} PNG identity`, {
+        width: Number(frame.width),
+        height: Number(frame.height),
+        ...(reviewedIdentity ?? {}),
+      });
+    }
   }
 }
 
@@ -801,20 +1401,23 @@ export function validateGenerationTaskArtifactQualityGate(
   try {
     const input = record(unsafeInput, "Generation Task Artifact quality gate input");
     exactFields(input, [
-      "qaProfile", "plannedFrames", "renderSpec", "quality", "evidence", "expectedEvidenceOwner",
+      "requireSourceVisualEvidence", "qaProfile", "plannedFrames", "renderSpec", "quality",
+      "evidence", "expectedEvidenceOwner",
     ],
       "Generation Task Artifact quality gate input");
+    const sourceRequirement = sourceVisualEvidenceRequirement(input.requireSourceVisualEvidence);
     const profile = validateProfile(input.qaProfile);
     const frames = validateFrames({
       plannedFrames: input.plannedFrames,
       renderSpec: input.renderSpec,
       requiredFrameIds: profile.requiredFrameIds,
     });
-    const qualityScore = validateQuality(input.quality, profile.blockingSeverities);
+    const quality = validateQuality(input.quality, profile.blockingSeverities);
     validateEvidence(input.evidence, {
       ...profile,
+      requireSourceVisualEvidence: sourceRequirement,
       frames,
-      qualityScore,
+      quality,
       expectedOwner: expectedEvidenceOwner(input.expectedEvidenceOwner),
     });
   } catch (error) {

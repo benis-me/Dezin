@@ -65,11 +65,11 @@ const NOOP_VIEWPORT_CHANGE = () => {};
 const EMPTY_RESOURCE_REVISION_STATES = {} as const;
 const proposalNodeTypes = { ...workspaceNodeTypes, proposal: ProposalOverlay } satisfies NodeTypes;
 const proposalEdgeTypes = { ...workspaceEdgeTypes, proposal: ProposalOverlayEdge } satisfies EdgeTypes;
-const CANVAS_NODE_KEYBOARD_DESCRIPTION = "For Page and Component nodes, Enter opens the editor. For Resource nodes, Enter opens the exact revision viewer. Press Space to select; arrow keys move selected objects; Escape clears selection. Objects are not deleted with the keyboard.";
+const CANVAS_NODE_KEYBOARD_DESCRIPTION = "For Page and Component nodes, Enter opens the editor. For Resource nodes, Enter opens the exact revision viewer. Press Space to select; arrow keys move selected objects; Escape clears selection. Nodes are not deleted with the keyboard.";
 const CANVAS_ARIA_LABEL_CONFIG = {
   "node.a11yDescription.default": CANVAS_NODE_KEYBOARD_DESCRIPTION,
   "node.a11yDescription.keyboardDisabled": CANVAS_NODE_KEYBOARD_DESCRIPTION,
-  "edge.a11yDescription.default": "Press Enter or Space to select a relation; Escape clears selection. Relations are not deleted with the keyboard.",
+  "edge.a11yDescription.default": "Press Enter or Space to select a relationship. Delete or Backspace removes selected editable relationships; Escape clears selection. Uses relationships are derived and read-only.",
 } satisfies Partial<AriaLabelConfig>;
 
 function restoreDeleteButtonFocus(): void {
@@ -95,6 +95,11 @@ function sameViewport(left: Viewport, right: WorkspaceViewport): boolean {
 function freshGroupId(): string {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `group-${suffix}`;
+}
+
+function freshRemoveEdgeCommandId(edgeId: string): string {
+  const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `remove-edge-${edgeId}-${suffix}`;
 }
 
 function reducedMotion(): boolean {
@@ -170,6 +175,8 @@ export function ProjectCanvas({
   const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
   const viewportSaveJobsRef = useRef(0);
   const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
+  const relationshipMutationPendingRef = useRef(false);
+  const selectedEdgeGraphRevisionRef = useRef(graph.revision);
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
   const proposalViewportPreviewRef = useRef<{ proposalId: string; changeKey: string } | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
@@ -180,6 +187,7 @@ export function ProjectCanvas({
   const [zoom, setZoom] = useState(viewport.zoom);
   const [adapterZoom, setAdapterZoom] = useState(viewport.zoom);
   const [status, setStatus] = useState("Canvas ready");
+  const [relationshipMutationPending, setRelationshipMutationPending] = useState(false);
   const [pendingDeleteGroupId, setPendingDeleteGroupId] = useState<string | null>(null);
   const [reconcileVersion, setReconcileVersion] = useState(0);
   const [surfaceMeasured, setSurfaceMeasured] = useState(false);
@@ -209,6 +217,12 @@ export function ProjectCanvas({
       setFlowReady(false);
     }
   }, [surfaceMeasured]);
+
+  useEffect(() => {
+    if (selectedEdgeGraphRevisionRef.current === graph.revision) return;
+    selectedEdgeGraphRevisionRef.current = graph.revision;
+    setSelectedEdgeIds([]);
+  }, [graph.revision]);
 
   const canvasLayout = useMemo(() => materializeWorkspaceLayout(graph, layout), [graph, layout]);
   const authoritativeLayoutRef = useRef(canvasLayout);
@@ -643,6 +657,11 @@ export function ProjectCanvas({
     }
   }, []);
 
+  const handleEdgeFilterChange = useCallback((nextFilter: WorkspaceEdgeFilter) => {
+    setSelectedEdgeIds([]);
+    setEdgeFilter(nextFilter);
+  }, []);
+
   const handleViewportEnd = useCallback((event: MouseEvent | TouchEvent | null, next: Viewport) => {
     if (event === null) return;
     pendingViewportRef.current = next;
@@ -679,9 +698,60 @@ export function ProjectCanvas({
     );
   }, [persistLayout, selectedNodeIds]);
 
+  const selectedRelationships = useMemo(() => {
+    const selectedIds = new Set(selectedEdgeIds);
+    return graph.edges.filter((edge) => selectedIds.has(edge.id));
+  }, [graph.edges, selectedEdgeIds]);
+  const selectedRelationshipHasDerivedUse = selectedRelationships.some((edge) => edge.kind === "uses");
+  const canDeleteRelationship = selectedRelationships.length > 0
+    && !selectedRelationshipHasDerivedUse
+    && !relationshipMutationPending;
+  const relationshipDeleteLabel = selectedRelationshipHasDerivedUse
+    ? "Uses relationships are derived and read-only"
+    : "Delete selected relationship";
+
+  const deleteSelectedRelationships = useCallback(async (): Promise<void> => {
+    if (relationshipMutationPendingRef.current) return;
+    const selectedIds = new Set(selectedEdgeIds);
+    const selected = graph.edges.filter((edge) => selectedIds.has(edge.id));
+    if (selected.length === 0) return;
+    if (selected.some((edge) => edge.kind === "uses")) {
+      setStatus("Uses relationships are derived and read-only");
+      return;
+    }
+    const removedIds = new Set(selected.map((edge) => edge.id));
+    const commands = selected.map((edge): WorkspaceGraphCommand => ({
+      id: freshRemoveEdgeCommandId(edge.id),
+      type: "remove-edge",
+      edgeId: edge.id,
+    }));
+    relationshipMutationPendingRef.current = true;
+    setRelationshipMutationPending(true);
+    setStatus(commands.length === 1 ? "Removing relationship…" : `Removing ${commands.length} relationships…`);
+    try {
+      await onApplyGraphCommands(commands);
+      setSelectedEdgeIds((current) => current.filter((id) => !removedIds.has(id)));
+      setStatus(commands.length === 1 ? "Relationship removed" : `${commands.length} relationships removed`);
+    } catch (error) {
+      setStatus(error instanceof Error && error.message ? error.message : "Couldn't remove the relationship.");
+    } finally {
+      relationshipMutationPendingRef.current = false;
+      setRelationshipMutationPending(false);
+    }
+  }, [graph.edges, onApplyGraphCommands, selectedEdgeIds]);
+
   const handleKeyDownCapture = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
-    if (isCanvasShortcutTarget(event.target)) return;
     const key = event.key.toLowerCase();
+    const edgeTarget = event.target instanceof Element && Boolean(event.target.closest(".react-flow__edge"));
+    if ((key === "delete" || key === "backspace")
+      && selectedEdgeIds.length > 0
+      && (edgeTarget || !isCanvasShortcutTarget(event.target))) {
+      event.preventDefault();
+      event.stopPropagation();
+      void deleteSelectedRelationships();
+      return;
+    }
+    if (isCanvasShortcutTarget(event.target)) return;
     if (key === "enter") {
       if (event.target instanceof Element && event.target.closest(".react-flow__edge")) return;
       const focusedId = event.target instanceof Element
@@ -724,7 +794,7 @@ export function ProjectCanvas({
     event.preventDefault();
     event.stopPropagation();
     moveSelectionByKeyboard(delta[0], delta[1]);
-  }, [fitWorkspace, moveSelectionByKeyboard, nodes, onSelectionChange, openNode, selectedSet]);
+  }, [deleteSelectedRelationships, fitWorkspace, moveSelectionByKeyboard, nodes, onSelectionChange, openNode, selectedEdgeIds.length, selectedSet]);
 
   const groupObjects = useMemo(() => layoutObjectMap(canvasLayout), [canvasLayout]);
   const canGroup = selectedNodeIds.some((id) => groupObjects.has(id));
@@ -836,13 +906,16 @@ export function ProjectCanvas({
           canGroup={canGroup}
           canUngroup={canUngroup}
           canDeleteGroup={canDeleteGroup}
+          canDeleteRelationship={canDeleteRelationship}
+          relationshipDeleteLabel={relationshipDeleteLabel}
           onToolChange={setTool}
-          onEdgeFilterChange={setEdgeFilter}
+          onEdgeFilterChange={handleEdgeFilterChange}
           onToggleOutline={() => setOutlineOpen((open) => !open)}
           onFitView={fitWorkspace}
           onGroup={handleGroup}
           onUngroup={handleUngroup}
           onDeleteGroup={requestDeleteGroup}
+          onDeleteRelationship={() => void deleteSelectedRelationships()}
         />
 
         {outlineOpen && (

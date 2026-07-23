@@ -133,6 +133,11 @@ const FRAME_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
   "frame-too-large": "The selected preview frame exceeds the supported size limits.",
   "render-frame-unavailable": "This preview cannot apply design frame state.",
   "frame-event-unavailable": "This preview cannot notify the design about frame changes.",
+  "missing-frame-attempt": "The preview could not bind this design state to the current render attempt.",
+  "frame-consumption-unavailable": "This preview cannot verify that the design consumed the selected state.",
+  "frame-consumption-timeout": "The design did not confirm that it rendered the selected state.",
+  "frame-consumption-mismatch": "The design confirmed a different state than the one requested.",
+  "frame-consumption-superseded": "A newer design state replaced this render attempt.",
   "invalid-frame": "The preview could not apply the selected design frame.",
 };
 

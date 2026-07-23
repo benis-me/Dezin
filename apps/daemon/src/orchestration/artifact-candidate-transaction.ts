@@ -18,11 +18,18 @@ import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 
 import { agentSpawnEnv } from "../../../../packages/agent/src/index.ts";
+import { stableStringify } from "../context/context-types.ts";
 
 const GIT_OUTPUT_LIMIT = 256 * 1024 * 1024;
 const EMPTY_HOOKS_PATH = "/dev/null";
 const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const ZERO_BYTE = Buffer.from([0]);
+const SHA256 = /^[0-9a-f]{64}$/;
+const EVIDENCE_OWNER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const MAX_ARTIFACT_REVISION_EVIDENCE_ENTRIES = 2_048;
+const MAX_ARTIFACT_REVISION_EVIDENCE_ENTRY_BYTES = 16 * 1024 * 1024;
+const MAX_ARTIFACT_REVISION_EVIDENCE_TOTAL_BYTES = 256 * 1024 * 1024;
+const MAX_ARTIFACT_REVISION_EVIDENCE_MANIFEST_BYTES = 4 * 1024 * 1024;
 
 export interface ArtifactCandidateAttempt {
   workspaceId: string;
@@ -37,6 +44,64 @@ export interface ArtifactCandidateAttempt {
 export interface ArtifactCandidateIdentity {
   commitHash: string;
   treeHash: string;
+}
+
+export type ArtifactRevisionEvidenceKind = "frame" | "source";
+
+export interface ArtifactRevisionEvidenceEntryDescriptor {
+  readonly kind: ArtifactRevisionEvidenceKind;
+  readonly round: number;
+  readonly storageKey: string;
+  readonly sha256: string;
+  readonly byteLength: number;
+  readonly descriptor: Readonly<Record<string, unknown>>;
+}
+
+export interface ArtifactRevisionEvidenceEntryInput extends ArtifactRevisionEvidenceEntryDescriptor {
+  readonly bytes: Uint8Array;
+}
+
+export interface ArtifactRevisionEvidenceBundleSubject {
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly revisionId: string;
+  readonly artifactId: string;
+  readonly trackId: string;
+  readonly candidate: ArtifactCandidateIdentity;
+  readonly contextPackHash: string;
+  readonly attempt: ArtifactCandidateAttempt;
+  readonly candidateEvidenceSha256: string;
+  readonly entries: readonly ArtifactRevisionEvidenceEntryDescriptor[];
+}
+
+export interface PrepareArtifactRevisionEvidenceBundleInput extends Omit<
+  ArtifactRevisionEvidenceBundleSubject,
+  "entries"
+> {
+  readonly repositoryDir: string;
+  readonly entries: readonly ArtifactRevisionEvidenceEntryInput[];
+  readonly signal?: AbortSignal;
+}
+
+export interface VerifyArtifactRevisionEvidenceBundleInput extends ArtifactRevisionEvidenceBundleSubject {
+  readonly repositoryDir: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface ArtifactRevisionEvidenceBundleIdentity {
+  readonly ref: string;
+  readonly commitHash: string;
+  readonly treeHash: string;
+  readonly manifestSha256: string;
+}
+
+/**
+ * Complete verification receipt. The subject is intentionally carried with the Git identity so
+ * promotion/recovery can re-run exact manifest/tree/blob verification instead of trusting a token.
+ */
+export interface ArtifactRevisionEvidenceBundleReceipt
+extends ArtifactRevisionEvidenceBundleIdentity {
+  readonly subject: ArtifactRevisionEvidenceBundleSubject;
 }
 
 export interface ArtifactCandidateResult extends ArtifactCandidateIdentity {
@@ -78,6 +143,11 @@ export interface ArtifactCandidateLifecycleInput {
   history: readonly ArtifactCandidateIdentity[];
   /** Exact final Attempt head that retains every version, including rounds after the selection. */
   historyHead: ArtifactCandidateIdentity;
+  /**
+   * Immutable evidence bundle promoted atomically with the selected Revision and version history.
+   * Optional only while legacy callers migrate; production Artifact publication must provide it.
+   */
+  evidence?: ArtifactRevisionEvidenceBundleReceipt;
   signal?: AbortSignal;
 }
 
@@ -357,6 +427,20 @@ export function artifactRevisionHistoryRef(revisionIdInput: string): string {
   return `refs/dezin/artifact-revision-history/${createHash("sha256").update(revisionId).digest("hex")}`;
 }
 
+/** Canonical immutable visual-evidence bundle retained for one exact Artifact Revision. */
+export function artifactRevisionEvidenceRef(
+  workspaceIdInput: string,
+  revisionIdInput: string,
+): string {
+  const workspaceId = canonicalString(workspaceIdInput, "Artifact evidence Workspace id", 256);
+  const revisionId = canonicalString(revisionIdInput, "Artifact evidence Revision id", 256);
+  return `refs/dezin/artifact-revision-evidence/${safeRefDigest([
+    "artifact-revision-evidence-v1",
+    workspaceId,
+    revisionId,
+  ])}`;
+}
+
 async function resolveRepository(repositoryDir: string, signal?: AbortSignal): Promise<ResolvedRepository> {
   checkAbort(signal);
   const repositoryPath = canonicalString(repositoryDir, "Artifact repository path", 4_096);
@@ -424,6 +508,631 @@ export async function verifyArtifactCandidateObject(
 ): Promise<ArtifactCandidateIdentity> {
   const repository = await resolveRepository(input.repositoryDir, input.signal);
   return verifyObjectInRepository(repository, input.commitHash, input.treeHash, input.signal);
+}
+
+interface NormalizedArtifactRevisionEvidenceEntry extends ArtifactRevisionEvidenceEntryDescriptor {
+  descriptor: Readonly<Record<string, unknown>>;
+  blobPath: string;
+  bytes?: Buffer;
+}
+
+interface NormalizedArtifactRevisionEvidenceSubject {
+  projectId: string;
+  workspaceId: string;
+  revisionId: string;
+  artifactId: string;
+  trackId: string;
+  candidate: ArtifactCandidateIdentity;
+  contextPackHash: string;
+  attempt: ArtifactCandidateAttempt;
+  candidateEvidenceSha256: string;
+  entries: readonly NormalizedArtifactRevisionEvidenceEntry[];
+}
+
+function canonicalEvidenceOwnerId(value: unknown, label: string): string {
+  const exact = canonicalString(value, label, 256);
+  if (!EVIDENCE_OWNER_ID.test(exact)) {
+    throw new ArtifactCandidateValidationError(`${label} is invalid`);
+  }
+  return exact;
+}
+
+function canonicalSha256(value: unknown, label: string): string {
+  if (typeof value !== "string" || !SHA256.test(value)) {
+    throw new ArtifactCandidateValidationError(`${label} is not a canonical SHA-256 digest`);
+  }
+  return value;
+}
+
+function canonicalEvidenceText(value: unknown, label: string, maximum: number): string {
+  const exact = canonicalString(value, label, maximum);
+  if (exact !== exact.trim() || /[\u0000-\u001f\u007f]/.test(exact)) {
+    throw new ArtifactCandidateValidationError(`${label} is invalid`);
+  }
+  return exact;
+}
+
+function canonicalEvidenceDescriptor(
+  value: unknown,
+  label: string,
+): Readonly<Record<string, unknown>> {
+  let canonical: string;
+  try {
+    canonical = stableStringify(value);
+  } catch {
+    throw new ArtifactCandidateValidationError(`${label} is not canonical JSON`);
+  }
+  if (Buffer.byteLength(canonical, "utf8") > MAX_ARTIFACT_REVISION_EVIDENCE_MANIFEST_BYTES) {
+    throw new ArtifactCandidateValidationError(`${label} exceeds its canonical byte limit`);
+  }
+  const descriptor = JSON.parse(canonical) as unknown;
+  if (descriptor === null || typeof descriptor !== "object" || Array.isArray(descriptor)) {
+    throw new ArtifactCandidateValidationError(`${label} must be a JSON object`);
+  }
+  return descriptor as Readonly<Record<string, unknown>>;
+}
+
+function evidenceBlobPath(sha256: string): string {
+  return `png/sha256/${sha256.slice(0, 2)}/${sha256}.png`;
+}
+
+function normalizeArtifactRevisionEvidenceSubject(
+  input: ArtifactRevisionEvidenceBundleSubject | PrepareArtifactRevisionEvidenceBundleInput,
+  objectIdLength: 40 | 64,
+  requireBytes: boolean,
+): NormalizedArtifactRevisionEvidenceSubject {
+  const projectId = canonicalEvidenceOwnerId(input?.projectId, "Artifact evidence Project id");
+  const workspaceId = canonicalEvidenceOwnerId(input?.workspaceId, "Artifact evidence Workspace id");
+  const revisionId = canonicalEvidenceOwnerId(input?.revisionId, "Artifact evidence Revision id");
+  const artifactId = canonicalEvidenceOwnerId(input?.artifactId, "Artifact evidence Artifact id");
+  const trackId = canonicalEvidenceOwnerId(input?.trackId, "Artifact evidence Track id");
+  const attempt = canonicalAttempt(input?.attempt, objectIdLength);
+  const candidate = {
+    commitHash: canonicalObjectId(
+      input?.candidate?.commitHash,
+      "Artifact evidence candidate commit hash",
+      objectIdLength,
+    ),
+    treeHash: canonicalObjectId(
+      input?.candidate?.treeHash,
+      "Artifact evidence candidate tree hash",
+      objectIdLength,
+    ),
+  };
+  if (workspaceId !== attempt.workspaceId) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact evidence Workspace does not match its immutable Attempt",
+    );
+  }
+  const contextPackHash = canonicalSha256(
+    input?.contextPackHash,
+    "Artifact evidence Context Pack hash",
+  );
+  const candidateEvidenceSha256 = canonicalSha256(
+    input?.candidateEvidenceSha256,
+    "Artifact candidate evidence hash",
+  );
+  if (!Array.isArray(input?.entries)
+    || input.entries.length > MAX_ARTIFACT_REVISION_EVIDENCE_ENTRIES) {
+    throw new ArtifactCandidateValidationError("Artifact Revision evidence entry count is invalid");
+  }
+  const storageKeys = new Set<string>();
+  const blobByteLengths = new Map<string, number>();
+  let totalBytes = 0;
+  const entries = input.entries.map((unsafeEntry, index): NormalizedArtifactRevisionEvidenceEntry => {
+    if (unsafeEntry === null || typeof unsafeEntry !== "object" || Array.isArray(unsafeEntry)) {
+      throw new ArtifactCandidateValidationError(`Artifact Revision evidence entry ${index} is invalid`);
+    }
+    const entry = unsafeEntry as ArtifactRevisionEvidenceEntryDescriptor & { readonly bytes?: unknown };
+    if (entry.kind !== "frame" && entry.kind !== "source") {
+      throw new ArtifactCandidateValidationError(`Artifact Revision evidence entry ${index} kind is invalid`);
+    }
+    if (!Number.isSafeInteger(entry.round) || entry.round < 0) {
+      throw new ArtifactCandidateValidationError(`Artifact Revision evidence entry ${index} round is invalid`);
+    }
+    const storageKey = canonicalEvidenceText(
+      entry.storageKey,
+      `Artifact Revision evidence entry ${index} storage key`,
+      4_096,
+    );
+    if (storageKeys.has(storageKey)) {
+      throw new ArtifactCandidateValidationError("Artifact Revision evidence storage keys must be unique");
+    }
+    storageKeys.add(storageKey);
+    const sha256 = canonicalSha256(
+      entry.sha256,
+      `Artifact Revision evidence entry ${index} digest`,
+    );
+    if (!Number.isSafeInteger(entry.byteLength) || entry.byteLength < 1
+      || entry.byteLength > MAX_ARTIFACT_REVISION_EVIDENCE_ENTRY_BYTES) {
+      throw new ArtifactCandidateValidationError(
+        `Artifact Revision evidence entry ${index} byte length is invalid`,
+      );
+    }
+    const retainedByteLength = blobByteLengths.get(sha256);
+    if (retainedByteLength !== undefined && retainedByteLength !== entry.byteLength) {
+      throw new ArtifactCandidateValidationError(
+        "Artifact Revision evidence entries assign contradictory byte lengths to the same SHA-256 blob",
+      );
+    }
+    blobByteLengths.set(sha256, entry.byteLength);
+    const descriptor = canonicalEvidenceDescriptor(
+      entry.descriptor,
+      `Artifact Revision evidence entry ${index} descriptor`,
+    );
+    if (descriptor.round !== entry.round
+      || descriptor.storageKey !== storageKey
+      || descriptor.sha256 !== sha256
+      || descriptor.byteLength !== entry.byteLength) {
+      throw new ArtifactCandidateValidationError(
+        `Artifact Revision evidence entry ${index} diverges from its exact descriptor`,
+      );
+    }
+    let bytes: Buffer | undefined;
+    if (requireBytes) {
+      if (!(entry.bytes instanceof Uint8Array)) {
+        throw new ArtifactCandidateValidationError(
+          `Artifact Revision evidence entry ${index} bytes are unavailable`,
+        );
+      }
+      bytes = Buffer.from(entry.bytes);
+      if (bytes.byteLength !== entry.byteLength
+        || createHash("sha256").update(bytes).digest("hex") !== sha256) {
+        throw new ArtifactCandidateValidationError(
+          `Artifact Revision evidence entry ${index} bytes do not match their identity`,
+        );
+      }
+    }
+    totalBytes += entry.byteLength;
+    if (!Number.isSafeInteger(totalBytes)
+      || totalBytes > MAX_ARTIFACT_REVISION_EVIDENCE_TOTAL_BYTES) {
+      throw new ArtifactCandidateValidationError(
+        "Artifact Revision evidence bundle exceeds its total byte limit",
+      );
+    }
+    return {
+      kind: entry.kind,
+      round: entry.round,
+      storageKey,
+      sha256,
+      byteLength: entry.byteLength,
+      descriptor,
+      blobPath: evidenceBlobPath(sha256),
+      ...(bytes === undefined ? {} : { bytes }),
+    };
+  }).sort((left, right) => Buffer.compare(
+    Buffer.from(left.storageKey, "utf8"),
+    Buffer.from(right.storageKey, "utf8"),
+  ));
+  return {
+    projectId,
+    workspaceId,
+    revisionId,
+    artifactId,
+    trackId,
+    candidate,
+    contextPackHash,
+    attempt,
+    candidateEvidenceSha256,
+    entries,
+  };
+}
+
+function artifactRevisionEvidenceManifest(
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+): Readonly<Record<string, unknown>> {
+  return {
+    protocol: "dezin.artifact-revision-evidence.v1",
+    revision: {
+      projectId: subject.projectId,
+      workspaceId: subject.workspaceId,
+      revisionId: subject.revisionId,
+      artifactId: subject.artifactId,
+      trackId: subject.trackId,
+      sourceCommitHash: subject.candidate.commitHash,
+      sourceTreeHash: subject.candidate.treeHash,
+      contextPackHash: subject.contextPackHash,
+    },
+    originAttempt: {
+      workspaceId: subject.attempt.workspaceId,
+      taskId: subject.attempt.taskId,
+      attempt: subject.attempt.attempt,
+      inputHash: subject.attempt.inputHash,
+      createdAt: subject.attempt.createdAt,
+      sourceCommitHash: subject.attempt.sourceCommitHash,
+      sourceTreeHash: subject.attempt.sourceTreeHash,
+    },
+    candidateEvidenceSha256: subject.candidateEvidenceSha256,
+    entries: subject.entries.map((entry) => ({
+      kind: entry.kind,
+      round: entry.round,
+      storageKey: entry.storageKey,
+      sha256: entry.sha256,
+      byteLength: entry.byteLength,
+      blobPath: entry.blobPath,
+      descriptor: entry.descriptor,
+    })),
+  };
+}
+
+function artifactRevisionEvidencePublicSubject(
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+): ArtifactRevisionEvidenceBundleSubject {
+  return {
+    projectId: subject.projectId,
+    workspaceId: subject.workspaceId,
+    revisionId: subject.revisionId,
+    artifactId: subject.artifactId,
+    trackId: subject.trackId,
+    candidate: { ...subject.candidate },
+    contextPackHash: subject.contextPackHash,
+    attempt: { ...subject.attempt },
+    candidateEvidenceSha256: subject.candidateEvidenceSha256,
+    entries: subject.entries.map((entry) => ({
+      kind: entry.kind,
+      round: entry.round,
+      storageKey: entry.storageKey,
+      sha256: entry.sha256,
+      byteLength: entry.byteLength,
+      descriptor: structuredClone(entry.descriptor),
+    })),
+  };
+}
+
+function artifactRevisionEvidenceManifestBytes(
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+): Buffer {
+  const bytes = Buffer.from(stableStringify(artifactRevisionEvidenceManifest(subject)), "utf8");
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_ARTIFACT_REVISION_EVIDENCE_MANIFEST_BYTES) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence manifest exceeds its canonical byte limit",
+    );
+  }
+  return bytes;
+}
+
+interface EvidenceTreeNode {
+  readonly blobs: Map<string, string>;
+  readonly directories: Map<string, EvidenceTreeNode>;
+}
+
+function evidenceTreeNode(): EvidenceTreeNode {
+  return { blobs: new Map(), directories: new Map() };
+}
+
+function insertEvidenceTreeBlob(root: EvidenceTreeNode, path: string, objectId: string): void {
+  const parts = path.split("/");
+  let node = root;
+  for (const part of parts.slice(0, -1)) {
+    if (node.blobs.has(part)) {
+      throw new ArtifactCandidateValidationError("Artifact Revision evidence tree path collides");
+    }
+    let child = node.directories.get(part);
+    if (!child) {
+      child = evidenceTreeNode();
+      node.directories.set(part, child);
+    }
+    node = child;
+  }
+  const name = parts.at(-1)!;
+  if (node.blobs.has(name) || node.directories.has(name)) {
+    throw new ArtifactCandidateValidationError("Artifact Revision evidence tree path collides");
+  }
+  node.blobs.set(name, objectId);
+}
+
+async function hashRepositoryObject(
+  repository: ResolvedRepository,
+  type: "blob" | "commit",
+  bytes: Buffer,
+  write: boolean,
+  signal?: AbortSignal,
+): Promise<string> {
+  const objectId = await gitOutput(repository.root, [
+    "hash-object",
+    ...(write ? ["-w"] : []),
+    "-t",
+    type,
+    ...(type === "blob" ? ["--no-filters"] : []),
+    "--stdin",
+  ], { signal, input: bytes });
+  return canonicalObjectId(
+    objectId,
+    `Artifact Revision evidence ${type} hash`,
+    repository.objectIdLength,
+  );
+}
+
+async function writeEvidenceTreeNode(
+  repository: ResolvedRepository,
+  node: EvidenceTreeNode,
+  signal?: AbortSignal,
+): Promise<string> {
+  const names = [...node.blobs.keys(), ...node.directories.keys()].sort((left, right) => (
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+  ));
+  const records: Buffer[] = [];
+  for (const name of names) {
+    checkAbort(signal);
+    const child = node.directories.get(name);
+    const type = child ? "tree" : "blob";
+    const mode = child ? "040000" : "100644";
+    const objectId = child
+      ? await writeEvidenceTreeNode(repository, child, signal)
+      : node.blobs.get(name)!;
+    records.push(Buffer.concat([
+      Buffer.from(`${mode} ${type} ${objectId}\t`, "utf8"),
+      Buffer.from(name, "utf8"),
+      ZERO_BYTE,
+    ]));
+  }
+  const treeHash = await gitOutput(repository.root, ["mktree", "-z"], {
+    signal,
+    input: Buffer.concat(records),
+  });
+  return canonicalObjectId(
+    treeHash,
+    "Artifact Revision evidence tree hash",
+    repository.objectIdLength,
+  );
+}
+
+function artifactRevisionEvidenceCommitObjectBytes(
+  attempt: ArtifactCandidateAttempt,
+  candidateCommitHash: string,
+  treeHash: string,
+  manifestSha256: string,
+): Buffer {
+  const timestampSeconds = Math.floor(attempt.createdAt / 1_000);
+  const identity = `Dezin Evidence <daemon@dezin.local> ${timestampSeconds} +0000`;
+  return Buffer.from([
+    `tree ${treeHash}`,
+    `parent ${candidateCommitHash}`,
+    `author ${identity}`,
+    `committer ${identity}`,
+    "",
+    `Dezin Artifact Revision evidence ${manifestSha256}`,
+    "",
+  ].join("\n"), "utf8");
+}
+
+function artifactRevisionEvidenceCommitBytes(
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+  treeHash: string,
+  manifestSha256: string,
+): Buffer {
+  return artifactRevisionEvidenceCommitObjectBytes(
+    subject.attempt,
+    subject.candidate.commitHash,
+    treeHash,
+    manifestSha256,
+  );
+}
+
+function expectedEvidenceTreeRecords(
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+): Map<string, { mode: string; type: string }> {
+  const expected = new Map<string, { mode: string; type: string }>();
+  expected.set("manifest.json", { mode: "100644", type: "blob" });
+  const blobPaths = new Set(subject.entries.map((entry) => entry.blobPath));
+  for (const path of blobPaths) {
+    const parts = path.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      const prefix = parts.slice(0, index).join("/");
+      expected.set(prefix, { mode: "040000", type: "tree" });
+    }
+    expected.set(path, { mode: "100644", type: "blob" });
+  }
+  return expected;
+}
+
+async function verifyArtifactRevisionEvidenceBundleObjects(
+  repository: ResolvedRepository,
+  subject: NormalizedArtifactRevisionEvidenceSubject,
+  identity: ArtifactRevisionEvidenceBundleIdentity,
+  requireRef: boolean,
+  signal?: AbortSignal,
+): Promise<ArtifactRevisionEvidenceBundleIdentity> {
+  const ref = artifactRevisionEvidenceRef(subject.workspaceId, subject.revisionId);
+  const commitHash = canonicalObjectId(
+    identity?.commitHash,
+    "Artifact Revision evidence commit hash",
+    repository.objectIdLength,
+  );
+  const treeHash = canonicalObjectId(
+    identity?.treeHash,
+    "Artifact Revision evidence tree hash",
+    repository.objectIdLength,
+  );
+  const manifestBytes = artifactRevisionEvidenceManifestBytes(subject);
+  const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+  if (identity?.ref !== ref || identity?.manifestSha256 !== manifestSha256) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence identity does not match its immutable subject",
+    );
+  }
+  if (requireRef) {
+    const retainedCommitHash = await readRef(repository, ref, signal);
+    if (retainedCommitHash !== commitHash) {
+      throw new ArtifactCandidateRevisionRefNotRetainedError(ref, retainedCommitHash);
+    }
+  }
+  let commitType: string;
+  let treeType: string;
+  let rawCommit: Buffer;
+  try {
+    [commitType, treeType, rawCommit] = await Promise.all([
+      gitOutput(repository.root, ["cat-file", "-t", commitHash], { signal }),
+      gitOutput(repository.root, ["cat-file", "-t", treeHash], { signal }),
+      gitBuffer(repository.root, ["cat-file", "commit", commitHash], { signal }),
+    ]);
+  } catch {
+    checkAbort(signal);
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence commit or tree is not readable",
+    );
+  }
+  if (commitType !== "commit" || treeType !== "tree"
+    || !rawCommit.equals(artifactRevisionEvidenceCommitBytes(subject, treeHash, manifestSha256))) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence commit does not exactly bind its candidate, tree, and manifest",
+    );
+  }
+  const records = parseTreeRecords(
+    await gitBuffer(repository.root, ["ls-tree", "-r", "-t", "-z", "--full-tree", treeHash], { signal }),
+    repository.objectIdLength,
+  );
+  const expectedRecords = expectedEvidenceTreeRecords(subject);
+  const recordsByPath = new Map(records.map((record) => [record.path, record]));
+  if (records.length !== expectedRecords.size || recordsByPath.size !== records.length) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence tree contains missing, duplicate, or extra entries",
+    );
+  }
+  for (const [path, expected] of expectedRecords) {
+    const record = recordsByPath.get(path);
+    if (!record || record.mode !== expected.mode || record.type !== expected.type) {
+      throw new ArtifactCandidateValidationError(
+        "Artifact Revision evidence tree does not exactly match its manifest",
+      );
+    }
+  }
+  const manifestRecord = recordsByPath.get("manifest.json")!;
+  const storedManifest = await gitBuffer(
+    repository.root,
+    ["cat-file", "blob", manifestRecord.objectId],
+    { signal },
+  );
+  if (!storedManifest.equals(manifestBytes)
+    || createHash("sha256").update(storedManifest).digest("hex") !== manifestSha256) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence manifest is not the exact canonical manifest",
+    );
+  }
+  const entriesByHash = new Map<string, NormalizedArtifactRevisionEvidenceEntry>();
+  for (const entry of subject.entries) entriesByHash.set(entry.sha256, entry);
+  for (const entry of entriesByHash.values()) {
+    checkAbort(signal);
+    const record = recordsByPath.get(entry.blobPath)!;
+    const bytes = await gitBuffer(repository.root, ["cat-file", "blob", record.objectId], { signal });
+    if (bytes.byteLength !== entry.byteLength
+      || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+      throw new ArtifactCandidateValidationError(
+        `Artifact Revision evidence blob ${entry.sha256} failed content verification`,
+      );
+    }
+  }
+  return { ref, commitHash, treeHash, manifestSha256 };
+}
+
+export async function prepareArtifactRevisionEvidenceBundle(
+  input: PrepareArtifactRevisionEvidenceBundleInput,
+): Promise<ArtifactRevisionEvidenceBundleReceipt> {
+  const repository = await resolveRepository(input.repositoryDir, input.signal);
+  const subject = normalizeArtifactRevisionEvidenceSubject(input, repository.objectIdLength, true);
+  await verifyAttemptBase(repository, subject.attempt, input.signal);
+  await verifyObjectInRepository(
+    repository,
+    subject.candidate.commitHash,
+    subject.candidate.treeHash,
+    input.signal,
+  );
+  await assertCandidateFollowsAttemptBase(
+    repository,
+    subject.attempt,
+    subject.candidate.commitHash,
+    input.signal,
+  );
+  const manifestBytes = artifactRevisionEvidenceManifestBytes(subject);
+  const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+  const root = evidenceTreeNode();
+  insertEvidenceTreeBlob(
+    root,
+    "manifest.json",
+    await hashRepositoryObject(repository, "blob", manifestBytes, true, input.signal),
+  );
+  const blobs = new Map<string, Buffer>();
+  for (const entry of subject.entries) {
+    const bytes = entry.bytes!;
+    const existing = blobs.get(entry.sha256);
+    if (existing && !existing.equals(bytes)) {
+      throw new ArtifactCandidateValidationError(
+        "Artifact Revision evidence SHA-256 collision has inconsistent bytes",
+      );
+    }
+    blobs.set(entry.sha256, bytes);
+  }
+  for (const [sha256, bytes] of blobs) {
+    insertEvidenceTreeBlob(
+      root,
+      evidenceBlobPath(sha256),
+      await hashRepositoryObject(repository, "blob", bytes, true, input.signal),
+    );
+  }
+  const treeHash = await writeEvidenceTreeNode(repository, root, input.signal);
+  const commitBytes = artifactRevisionEvidenceCommitBytes(subject, treeHash, manifestSha256);
+  const commitHash = await hashRepositoryObject(repository, "commit", commitBytes, true, input.signal);
+  const identity = await verifyArtifactRevisionEvidenceBundleObjects(repository, subject, {
+    ref: artifactRevisionEvidenceRef(subject.workspaceId, subject.revisionId),
+    commitHash,
+    treeHash,
+    manifestSha256,
+  }, false, input.signal);
+  return { ...identity, subject: artifactRevisionEvidencePublicSubject(subject) };
+}
+
+export async function verifyArtifactRevisionEvidenceBundle(
+  input: VerifyArtifactRevisionEvidenceBundleInput,
+): Promise<ArtifactRevisionEvidenceBundleReceipt> {
+  const repository = await resolveRepository(input.repositoryDir, input.signal);
+  const subject = normalizeArtifactRevisionEvidenceSubject(input, repository.objectIdLength, false);
+  await verifyAttemptBase(repository, subject.attempt, input.signal);
+  await verifyObjectInRepository(
+    repository,
+    subject.candidate.commitHash,
+    subject.candidate.treeHash,
+    input.signal,
+  );
+  await assertCandidateFollowsAttemptBase(
+    repository,
+    subject.attempt,
+    subject.candidate.commitHash,
+    input.signal,
+  );
+  const ref = artifactRevisionEvidenceRef(subject.workspaceId, subject.revisionId);
+  const commitHash = await readRef(repository, ref, input.signal);
+  if (commitHash === null) throw new ArtifactCandidateRevisionRefNotRetainedError(ref, null);
+  let rawCommit: Buffer;
+  try {
+    rawCommit = await gitBuffer(repository.root, ["cat-file", "commit", commitHash], {
+      signal: input.signal,
+    });
+  } catch {
+    checkAbort(input.signal);
+    throw new ArtifactCandidateValidationError("Artifact Revision evidence commit is not readable");
+  }
+  const firstLineEnd = rawCommit.indexOf(10);
+  const treeLine = rawCommit.subarray(0, firstLineEnd < 0 ? rawCommit.length : firstLineEnd)
+    .toString("ascii");
+  const treeMatch = /^tree ([0-9a-f]+)$/.exec(treeLine);
+  if (!treeMatch) {
+    throw new ArtifactCandidateValidationError("Artifact Revision evidence commit tree is invalid");
+  }
+  const treeHash = canonicalObjectId(
+    treeMatch[1],
+    "Artifact Revision evidence tree hash",
+    repository.objectIdLength,
+  );
+  const manifestSha256 = createHash("sha256")
+    .update(artifactRevisionEvidenceManifestBytes(subject))
+    .digest("hex");
+  const identity = await verifyArtifactRevisionEvidenceBundleObjects(repository, subject, {
+    ref,
+    commitHash,
+    treeHash,
+    manifestSha256,
+  }, true, input.signal);
+  return { ...identity, subject: artifactRevisionEvidencePublicSubject(subject) };
 }
 
 async function verifyAttemptBase(
@@ -904,6 +1613,51 @@ function candidateForLifecycle(
   };
 }
 
+async function verifyArtifactRevisionEvidenceIdentityForLifecycle(
+  repository: ResolvedRepository,
+  attempt: ArtifactCandidateAttempt,
+  revisionId: string,
+  candidate: ArtifactCandidateIdentity,
+  receiptInput: ArtifactRevisionEvidenceBundleReceipt,
+  signal?: AbortSignal,
+): Promise<ArtifactRevisionEvidenceBundleReceipt> {
+  const ref = artifactRevisionEvidenceRef(attempt.workspaceId, revisionId);
+  const subject = normalizeArtifactRevisionEvidenceSubject(
+    receiptInput?.subject,
+    repository.objectIdLength,
+    false,
+  );
+  if (subject.workspaceId !== attempt.workspaceId
+    || subject.revisionId !== revisionId
+    || subject.candidate.commitHash !== candidate.commitHash
+    || subject.candidate.treeHash !== candidate.treeHash
+    || !isDeepStrictArtifactAttempt(subject.attempt, attempt)) {
+    throw new ArtifactCandidateValidationError(
+      "Artifact Revision evidence receipt does not match its lifecycle subject",
+    );
+  }
+  const identity = await verifyArtifactRevisionEvidenceBundleObjects(repository, subject, {
+    ref,
+    commitHash: receiptInput.commitHash,
+    treeHash: receiptInput.treeHash,
+    manifestSha256: receiptInput.manifestSha256,
+  }, false, signal);
+  return { ...identity, subject: artifactRevisionEvidencePublicSubject(subject) };
+}
+
+function isDeepStrictArtifactAttempt(
+  left: ArtifactCandidateAttempt,
+  right: ArtifactCandidateAttempt,
+): boolean {
+  return left.workspaceId === right.workspaceId
+    && left.taskId === right.taskId
+    && left.attempt === right.attempt
+    && left.inputHash === right.inputHash
+    && left.createdAt === right.createdAt
+    && left.sourceCommitHash === right.sourceCommitHash
+    && left.sourceTreeHash === right.sourceTreeHash;
+}
+
 async function assertAttemptHeadRetainsCandidate(
   repository: ResolvedRepository,
   attemptRef: string,
@@ -1055,11 +1809,36 @@ export async function promoteArtifactCandidateRef(
   );
   const revisionRef = artifactRevisionRef(input.revisionId);
   const historyRef = artifactRevisionHistoryRef(input.revisionId);
+  const evidence = input.evidence === undefined
+    ? null
+    : await verifyArtifactRevisionEvidenceIdentityForLifecycle(
+      repository,
+      attempt,
+      input.revisionId,
+      candidate,
+      input.evidence,
+      input.signal,
+    );
+  const verifyRetainedObjects = async (): Promise<void> => {
+    await verifyObjectInRepository(repository, candidate.commitHash, candidate.treeHash, input.signal);
+    await verifyObjectInRepository(repository, historyHead.commitHash, historyHead.treeHash, input.signal);
+    if (evidence !== null) {
+      await verifyArtifactRevisionEvidenceIdentityForLifecycle(
+        repository,
+        attempt,
+        input.revisionId,
+        candidate,
+        evidence,
+        input.signal,
+      );
+    }
+  };
   for (let retry = 0; retry < 4; retry += 1) {
-    const [attemptHead, existingRevision, existingHistory] = await Promise.all([
+    const [attemptHead, existingRevision, existingHistory, existingEvidence] = await Promise.all([
       readRef(repository, candidate.attemptRef, input.signal),
       readRef(repository, revisionRef, input.signal),
       readRef(repository, historyRef, input.signal),
+      evidence === null ? Promise.resolve(null) : readRef(repository, evidence.ref, input.signal),
     ]);
     if (existingRevision !== null && existingRevision !== candidate.commitHash) {
       throw new ArtifactCandidateRefConflictError(revisionRef);
@@ -1067,17 +1846,73 @@ export async function promoteArtifactCandidateRef(
     if (existingHistory !== null && existingHistory !== historyHead.commitHash) {
       throw new ArtifactCandidateRefConflictError(historyRef);
     }
-    if ((existingRevision === null) !== (existingHistory === null)) {
+    if (evidence !== null && existingEvidence !== null && existingEvidence !== evidence.commitHash) {
+      throw new ArtifactCandidateRefConflictError(evidence.ref);
+    }
+    const retentionStates = evidence === null
+      ? [existingRevision, existingHistory]
+      : [existingRevision, existingHistory, existingEvidence];
+    const presentRetentionCount = retentionStates.filter((value) => value !== null).length;
+    const repairsLegacyEvidencePair = evidence !== null
+      && existingRevision === candidate.commitHash
+      && existingHistory === historyHead.commitHash
+      && existingEvidence === null;
+    if (presentRetentionCount !== 0 && presentRetentionCount !== retentionStates.length
+      && !repairsLegacyEvidencePair) {
       throw new ArtifactCandidateRefConflictError(
-        existingRevision === null ? revisionRef : historyRef,
-        "durable Artifact Revision retention pair is partial",
+        existingRevision === null
+          ? revisionRef
+          : existingHistory === null
+            ? historyRef
+            : evidence!.ref,
+        evidence === null
+          ? "durable Artifact Revision retention pair is partial"
+          : "durable Artifact Revision retention triple is partial",
       );
     }
     // A fully completed promote + release is still an idempotent promote replay.
     if (attemptHead === null) {
-      if (existingRevision === candidate.commitHash && existingHistory === historyHead.commitHash) {
-        await verifyObjectInRepository(repository, candidate.commitHash, candidate.treeHash, input.signal);
-        await verifyObjectInRepository(repository, historyHead.commitHash, historyHead.treeHash, input.signal);
+      if (repairsLegacyEvidencePair) {
+        const repair = await captureGit(repository.root, ["update-ref", "--stdin"], {
+          signal: input.signal,
+          input: [
+            "start",
+            `verify ${revisionRef} ${candidate.commitHash}`,
+            `verify ${historyRef} ${historyHead.commitHash}`,
+            `create ${evidence.ref} ${evidence.commitHash}`,
+            "prepare",
+            "commit",
+            "",
+          ].join("\n"),
+        });
+        if (repair.code === 0) {
+          await verifyRetainedObjects();
+          return revisionRef;
+        }
+        checkAbort(input.signal);
+        const [currentRevision, currentHistory, currentEvidence] = await Promise.all([
+          readRef(repository, revisionRef, input.signal),
+          readRef(repository, historyRef, input.signal),
+          readRef(repository, evidence.ref, input.signal),
+        ]);
+        if (currentRevision === candidate.commitHash
+          && currentHistory === historyHead.commitHash
+          && currentEvidence === evidence.commitHash) {
+          await verifyRetainedObjects();
+          return revisionRef;
+        }
+        if (currentRevision !== candidate.commitHash) {
+          throw new ArtifactCandidateRefConflictError(revisionRef);
+        }
+        if (currentHistory !== historyHead.commitHash) {
+          throw new ArtifactCandidateRefConflictError(historyRef);
+        }
+        throw new ArtifactCandidateRefConflictError(evidence.ref);
+      }
+      if (existingRevision === candidate.commitHash
+        && existingHistory === historyHead.commitHash
+        && (evidence === null || existingEvidence === evidence.commitHash)) {
+        await verifyRetainedObjects();
         return revisionRef;
       }
       throw new ArtifactCandidateRefConflictError(
@@ -1098,49 +1933,51 @@ export async function promoteArtifactCandidateRef(
         "durable Artifact Attempt head does not exactly match the retained version history",
       );
     }
-    const transaction = existingRevision === null
-      ? [
-        "start",
-        `verify ${candidate.attemptRef} ${attemptHead}`,
-        `create ${revisionRef} ${candidate.commitHash}`,
-        `create ${historyRef} ${historyHead.commitHash}`,
-        "prepare",
-        "commit",
-        "",
-      ].join("\n")
-      : [
-        "start",
-        `verify ${candidate.attemptRef} ${attemptHead}`,
-        `verify ${revisionRef} ${candidate.commitHash}`,
-        `verify ${historyRef} ${historyHead.commitHash}`,
-        "prepare",
-        "commit",
-        "",
-      ].join("\n");
+    const transaction = [
+      "start",
+      `verify ${candidate.attemptRef} ${attemptHead}`,
+      existingRevision === null
+        ? `create ${revisionRef} ${candidate.commitHash}`
+        : `verify ${revisionRef} ${candidate.commitHash}`,
+      existingHistory === null
+        ? `create ${historyRef} ${historyHead.commitHash}`
+        : `verify ${historyRef} ${historyHead.commitHash}`,
+      ...(evidence === null
+        ? []
+        : [existingEvidence === null
+          ? `create ${evidence.ref} ${evidence.commitHash}`
+          : `verify ${evidence.ref} ${evidence.commitHash}`]),
+      "prepare",
+      "commit",
+      "",
+    ].join("\n");
     const promotion = await captureGit(repository.root, ["update-ref", "--stdin"], {
       signal: input.signal,
       input: transaction,
     });
     if (promotion.code === 0) {
-      await verifyObjectInRepository(repository, candidate.commitHash, candidate.treeHash, input.signal);
-      await verifyObjectInRepository(repository, historyHead.commitHash, historyHead.treeHash, input.signal);
+      await verifyRetainedObjects();
       return revisionRef;
     }
     checkAbort(input.signal);
-    const [promoted, retainedHistory, currentAttempt] = await Promise.all([
+    const [promoted, retainedHistory, retainedEvidence, currentAttempt] = await Promise.all([
       readRef(repository, revisionRef, input.signal),
       readRef(repository, historyRef, input.signal),
+      evidence === null ? Promise.resolve(null) : readRef(repository, evidence.ref, input.signal),
       readRef(repository, candidate.attemptRef, input.signal),
     ]);
     if (promoted === candidate.commitHash
       && retainedHistory === historyHead.commitHash
+      && (evidence === null || retainedEvidence === evidence.commitHash)
       && (currentAttempt === null || currentAttempt === historyHead.commitHash)) {
-      await verifyObjectInRepository(repository, candidate.commitHash, candidate.treeHash, input.signal);
-      await verifyObjectInRepository(repository, historyHead.commitHash, historyHead.treeHash, input.signal);
+      await verifyRetainedObjects();
       return revisionRef;
     }
     if (promoted !== null) throw new ArtifactCandidateRefConflictError(revisionRef);
     if (retainedHistory !== null) throw new ArtifactCandidateRefConflictError(historyRef);
+    if (evidence !== null && retainedEvidence !== null) {
+      throw new ArtifactCandidateRefConflictError(evidence.ref);
+    }
     if (currentAttempt !== null && currentAttempt !== historyHead.commitHash) {
       throw new ArtifactCandidateRefConflictError(candidate.attemptRef);
     }
@@ -1182,15 +2019,29 @@ export async function releaseArtifactCandidateAttemptRef(
     candidate.commitHash,
     input.signal,
   );
-  const [retainedRevision, retainedHistory] = await Promise.all([
+  const evidence = input.evidence === undefined
+    ? null
+    : await verifyArtifactRevisionEvidenceIdentityForLifecycle(
+      repository,
+      attempt,
+      input.revisionId,
+      candidate,
+      input.evidence,
+      input.signal,
+    );
+  const [retainedRevision, retainedHistory, retainedEvidence] = await Promise.all([
     readRef(repository, revisionRef, input.signal),
     readRef(repository, historyRef, input.signal),
+    evidence === null ? Promise.resolve(null) : readRef(repository, evidence.ref, input.signal),
   ]);
   if (retainedRevision !== candidate.commitHash) {
     throw new ArtifactCandidateRevisionRefNotRetainedError(revisionRef, retainedRevision);
   }
   if (retainedHistory !== historyHead.commitHash) {
     throw new ArtifactCandidateRevisionRefNotRetainedError(historyRef, retainedHistory);
+  }
+  if (evidence !== null && retainedEvidence !== evidence.commitHash) {
+    throw new ArtifactCandidateRevisionRefNotRetainedError(evidence.ref, retainedEvidence);
   }
   for (let retry = 0; retry < 4; retry += 1) {
     const attemptHead = await readRef(repository, candidate.attemptRef, input.signal);
@@ -1212,6 +2063,7 @@ export async function releaseArtifactCandidateAttemptRef(
       "start",
       `verify ${revisionRef} ${candidate.commitHash}`,
       `verify ${historyRef} ${historyHead.commitHash}`,
+      ...(evidence === null ? [] : [`verify ${evidence.ref} ${evidence.commitHash}`]),
       `delete ${candidate.attemptRef} ${attemptHead}`,
       "prepare",
       "commit",
@@ -1222,9 +2074,10 @@ export async function releaseArtifactCandidateAttemptRef(
       input: transaction,
     });
     if (result.code === 0) {
-      const [currentRevision, currentHistory] = await Promise.all([
+      const [currentRevision, currentHistory, currentEvidence] = await Promise.all([
         readRef(repository, revisionRef, input.signal),
         readRef(repository, historyRef, input.signal),
+        evidence === null ? Promise.resolve(null) : readRef(repository, evidence.ref, input.signal),
       ]);
       if (currentRevision !== candidate.commitHash) {
         throw new ArtifactCandidateRevisionRefNotRetainedError(revisionRef, currentRevision);
@@ -1232,20 +2085,37 @@ export async function releaseArtifactCandidateAttemptRef(
       if (currentHistory !== historyHead.commitHash) {
         throw new ArtifactCandidateRevisionRefNotRetainedError(historyRef, currentHistory);
       }
+      if (evidence !== null && currentEvidence !== evidence.commitHash) {
+        throw new ArtifactCandidateRevisionRefNotRetainedError(evidence.ref, currentEvidence);
+      }
       await verifyObjectInRepository(repository, candidate.commitHash, candidate.treeHash, input.signal);
       await verifyObjectInRepository(repository, historyHead.commitHash, historyHead.treeHash, input.signal);
+      if (evidence !== null) {
+        await verifyArtifactRevisionEvidenceIdentityForLifecycle(
+          repository,
+          attempt,
+          input.revisionId,
+          candidate,
+          evidence,
+          input.signal,
+        );
+      }
       return true;
     }
     checkAbort(input.signal);
-    const [currentRevision, currentHistory] = await Promise.all([
+    const [currentRevision, currentHistory, currentEvidence] = await Promise.all([
       readRef(repository, revisionRef, input.signal),
       readRef(repository, historyRef, input.signal),
+      evidence === null ? Promise.resolve(null) : readRef(repository, evidence.ref, input.signal),
     ]);
     if (currentRevision !== candidate.commitHash) {
       throw new ArtifactCandidateRevisionRefNotRetainedError(revisionRef, currentRevision);
     }
     if (currentHistory !== historyHead.commitHash) {
       throw new ArtifactCandidateRevisionRefNotRetainedError(historyRef, currentHistory);
+    }
+    if (evidence !== null && currentEvidence !== evidence.commitHash) {
+      throw new ArtifactCandidateRevisionRefNotRetainedError(evidence.ref, currentEvidence);
     }
     if (await readRef(repository, candidate.attemptRef, input.signal) === null) return false;
   }

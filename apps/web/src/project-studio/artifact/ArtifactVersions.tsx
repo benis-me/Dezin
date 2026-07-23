@@ -16,8 +16,13 @@ import type {
   ArtifactRevision,
   ArtifactTrack,
   ArtifactVersionActionResult,
+  WorkspaceRenderFrameSpec,
 } from "../../lib/api.ts";
 import { useArtifactPreview } from "./useArtifactPreview.ts";
+import {
+  readFrozenPrototypeRenderFrames,
+  selectFrozenPrototypeRenderFrame,
+} from "../../../../../packages/core/src/prototype-relation.ts";
 
 const HISTORY_PAGE_SIZE = 20;
 const VersionCompare = lazy(() => import("../../components/VersionCompare.tsx").then((module) => ({
@@ -33,6 +38,17 @@ type HistoryState =
 interface Comparison {
   first: ArtifactRevision;
   second: ArtifactRevision;
+}
+
+export function selectVersionComparisonFrame(
+  revision: Readonly<ArtifactRevision>,
+  preferredFrame: Readonly<WorkspaceRenderFrameSpec> | null,
+): Readonly<WorkspaceRenderFrameSpec> | null {
+  const frames = readFrozenPrototypeRenderFrames(revision.renderSpec);
+  return selectFrozenPrototypeRenderFrame(frames, {
+    currentFrame: preferredFrame,
+    targetState: null,
+  });
 }
 
 function versionError(error: unknown): string {
@@ -59,32 +75,50 @@ function ComparisonPreview({
   artifactId,
   comparison,
   tracks,
+  preferredFrame,
   onClose,
 }: {
   projectId: string;
   artifactId: string;
   comparison: Comparison;
   tracks: ArtifactTrack[];
+  preferredFrame: Readonly<WorkspaceRenderFrameSpec> | null;
   onClose: () => void;
 }) {
+  const comparisonFrames = useMemo(() => ({
+    first: selectVersionComparisonFrame(comparison.first, preferredFrame),
+    second: selectVersionComparisonFrame(comparison.second, preferredFrame),
+  }), [comparison.first, comparison.second, preferredFrame]);
   const first = useArtifactPreview({
     projectId,
     expectedArtifactId: artifactId,
+    expectedRevisionId: comparison.first.id,
+    expectedRenderSpec: comparison.first.renderSpec,
     target: { kind: "artifact-revision", projectId, revisionId: comparison.first.id },
   });
   const second = useArtifactPreview({
     projectId,
     expectedArtifactId: artifactId,
+    expectedRevisionId: comparison.second.id,
+    expectedRenderSpec: comparison.second.renderSpec,
     target: { kind: "artifact-revision", projectId, revisionId: comparison.second.id },
   });
-  const side = (preview: typeof first, revision: ArtifactRevision): VersionCompareSide => {
+  const side = (
+    preview: typeof first,
+    revision: ArtifactRevision,
+    frame: Readonly<WorkspaceRenderFrameSpec> | null,
+  ): VersionCompareSide => {
     const label = revisionLabel(revision, tracks);
+    if (frame === null) {
+      return { status: "error", label, error: "This Revision has no valid exact Render Frame." };
+    }
     if (preview.status === "ready") {
       return {
         status: "ready",
         label,
         url: preview.lease.url,
         bridgeNonce: preview.lease.bridgeNonce,
+        frame,
       };
     }
     if (preview.status === "error") {
@@ -98,8 +132,8 @@ function ComparisonPreview({
       <VersionCompare
         open
         onClose={onClose}
-        a={side(first, comparison.first)}
-        b={side(second, comparison.second)}
+        a={side(first, comparison.first, comparisonFrames.first)}
+        b={side(second, comparison.second, comparisonFrames.second)}
       />
     </Suspense>
   );
@@ -114,6 +148,7 @@ export function ArtifactVersions({
   headRevisionId,
   snapshotId,
   pinnedRevisionId,
+  preferredFrame = null,
   onClose,
   onViewRevision,
   onVersionPublished,
@@ -126,6 +161,7 @@ export function ArtifactVersions({
   headRevisionId: string | null;
   snapshotId: string | null;
   pinnedRevisionId: string | null;
+  preferredFrame?: Readonly<WorkspaceRenderFrameSpec> | null;
   onClose: () => void;
   onViewRevision: (revisionId: string) => void;
   onVersionPublished?: (result: ArtifactVersionActionResult) => void;
@@ -506,10 +542,11 @@ export function ArtifactVersions({
       {comparison ? (
         <ComparisonPreview
           projectId={projectId}
-          artifactId={artifactId}
-          comparison={comparison}
-          tracks={tracks}
-          onClose={() => setComparison(null)}
+        artifactId={artifactId}
+        comparison={comparison}
+        tracks={tracks}
+        preferredFrame={preferredFrame}
+        onClose={() => setComparison(null)}
         />
       ) : null}
     </>

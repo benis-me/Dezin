@@ -42,6 +42,10 @@ test("Generation Plan Artifact prompts retain the legacy design quality contract
     assert.match(result.systemPrompt, /real Vite \+ React project/);
     assert.match(result.systemPrompt, /Generated imagery/);
     assert.match(result.systemPrompt, /Design dials/i);
+    assert.match(result.systemPrompt, /dezin:frame-change/);
+    assert.match(result.systemPrompt, /dezin:frame-consumed/);
+    assert.match(result.systemPrompt, /source: "dezin-artifact"/);
+    assert.match(result.systemPrompt, /apply the requested initialState and fixture to the rendered DOM before acknowledging/i);
   } finally {
     store.close();
   }
@@ -74,6 +78,8 @@ test("Sharingan Artifact prompts exclude unrelated brand styling and keep recons
     assert.doesNotMatch(result.systemPrompt, /\.sharingan\/source-scaffold\/App\.jsx/);
     assert.match(result.systemPrompt, /\.sharingan\/probe\.mjs source-summary/);
     assert.match(result.systemPrompt, /fidelity/i);
+    assert.match(result.systemPrompt, /dezin:frame-change/);
+    assert.match(result.systemPrompt, /dezin:frame-consumed/);
   } finally {
     store.close();
   }

@@ -9382,6 +9382,45 @@ test("Context Packs seal immutable same-Workspace pins and usage evidence is app
     manifestPath: pack.manifestPath,
     hash: pack.hash,
   }), pack);
+  const exactPackItem = pack.items.map(({ ordinal: _ordinal, ...item }) => item)[0]!;
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "overlapping-context-pack-ref",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "a".repeat(64),
+    manifestPath: "context-packs/overlapping-context-pack-ref.json",
+    tokenEstimate: exactPackItem.tokenEstimate,
+    omissions: [{
+      ref: structuredClone(exactPackItem.ref),
+      reason: "the exact provided ref cannot also be omitted",
+      tokenEstimate: 1,
+    }],
+    hash: "8".repeat(64),
+    items: [exactPackItem],
+  }), /provided.*omitted|overlap/i);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "duplicate-context-pack-omission",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "b".repeat(64),
+    manifestPath: "context-packs/duplicate-context-pack-omission.json",
+    tokenEstimate: 0,
+    omissions: [{
+      ref: { kind: "inline", id: "same-missing-context" },
+      reason: "first omission",
+      tokenEstimate: 1,
+    }, {
+      ref: { kind: "inline", id: "same-missing-context" },
+      reason: "duplicate omission",
+      tokenEstimate: 1,
+    }],
+    hash: "9".repeat(64),
+    items: [],
+  }), /duplicate.*omission/i);
   assert.throws(() => store.workspace.persistContextPack({
     id: "duplicate-context-pack-hash",
     workspaceId: workspace.id,
@@ -9436,6 +9475,81 @@ test("Context Packs seal immutable same-Workspace pins and usage evidence is app
       provided: true,
     }],
   }), /Resource Revision ownership|kind/i);
+  const currentWorkspace = store.workspace.getWorkspace(project.id);
+  assert.ok(currentWorkspace);
+  const sharinganSource = store.workspace.createResourceForProject(project.id, {
+    kind: "sharingan-capture",
+    title: "Captured source",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: currentWorkspace.graphRevision,
+    expectedSnapshotId: currentWorkspace.activeSnapshotId,
+  });
+  const contextPackCountBeforeDisguisedOmission = rowCount(store.db, "context_packs");
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "disguised-sharingan-omission-pack",
+    workspaceId: workspace.id,
+    graphRevision: sharinganSource.graph.revision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "1".repeat(64),
+    manifestPath: "context-packs/disguised-sharingan-omission.json",
+    tokenEstimate: 0,
+    omissions: [{
+      ref: {
+        kind: "resource",
+        id: sharinganSource.resource.id,
+        resourceKind: "asset",
+      },
+      reason: "mislabelled source omission",
+      tokenEstimate: 1,
+    }],
+    hash: "2".repeat(64),
+    items: [],
+  }), /Context Pack omission.*Resource kind|ownership/i);
+  assert.equal(rowCount(store.db, "context_packs"), contextPackCountBeforeDisguisedOmission);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "cross-workspace-resource-omission-pack",
+    workspaceId: foreignWorkspace.id,
+    graphRevision: foreignWorkspace.graphRevision,
+    target: { type: "workspace", id: foreignWorkspace.id },
+    intent: "generate",
+    messageChecksum: "2".repeat(64),
+    manifestPath: "context-packs/cross-workspace-resource-omission.json",
+    tokenEstimate: 0,
+    omissions: [{
+      ref: {
+        kind: "resource",
+        id: created.resource.id,
+        resourceKind: created.resource.kind,
+      },
+      reason: "foreign Resource omission",
+      tokenEstimate: 1,
+    }],
+    hash: "e".repeat(64),
+    items: [],
+  }), /Context Pack omission.*another Workspace|ownership/i);
+  const missingResourceOmissionPack = store.workspace.persistContextPack({
+    id: "missing-resource-omission-pack",
+    workspaceId: workspace.id,
+    graphRevision: sharinganSource.graph.revision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "3".repeat(64),
+    manifestPath: "context-packs/missing-resource-omission.json",
+    tokenEstimate: 0,
+    omissions: [{
+      ref: {
+        kind: "resource",
+        id: "resource-not-yet-available",
+        resourceKind: "asset",
+      },
+      reason: "Resource was unavailable during resolution",
+      tokenEstimate: 1,
+    }],
+    hash: "d".repeat(64),
+    items: [],
+  });
+  assert.equal(missingResourceOmissionPack.omissions[0]?.ref.kind, "resource");
   assert.throws(
     () => store.db.prepare("UPDATE context_packs SET hash = hash WHERE id = ?").run(pack.id),
     /immutable/i,

@@ -1,5 +1,6 @@
 import type {
   GenerationRuntimeArtifactRefRecovery,
+  GenerationRuntimeEvidenceRecovery,
   GenerationRuntimeErrorEvent,
   GenerationRuntimeRecoveryEvent,
   GenerationRuntimeTimerPort,
@@ -18,6 +19,7 @@ export interface GenerationRecoveryBarrier {
 export interface GenerationRecoveryBarrierOptions {
   readonly artifactRefRecovery: GenerationRuntimeArtifactRefRecovery;
   readonly resourcePayloadRecovery: ResourceTaskPayloadRecoveryPort;
+  readonly evidenceRecovery?: GenerationRuntimeEvidenceRecovery;
   readonly timers?: GenerationRuntimeTimerPort;
   readonly intervalMs?: number;
   readonly resourcePayloadRecoveryLimit?: number;
@@ -117,6 +119,8 @@ class DefaultGenerationRecoveryBarrier implements GenerationRecoveryBarrier {
     if (this.#controller.signal.aborted) return;
     await this.#recoverResourcePayloads("startup-resource-payload-recovery");
     if (this.#controller.signal.aborted) return;
+    await this.#recoverEvidence("startup-generation-evidence-recovery");
+    if (this.#controller.signal.aborted) return;
     this.#state = "running";
     this.#schedule();
   }
@@ -148,6 +152,8 @@ class DefaultGenerationRecoveryBarrier implements GenerationRecoveryBarrier {
     await this.#recoverArtifactRefs("periodic-artifact-ref-recovery");
     if (this.#controller.signal.aborted) return;
     await this.#recoverResourcePayloads("periodic-resource-payload-recovery");
+    if (this.#controller.signal.aborted) return;
+    await this.#recoverEvidence("periodic-generation-evidence-recovery");
   }
 
   async #recoverArtifactRefs(
@@ -173,6 +179,18 @@ class DefaultGenerationRecoveryBarrier implements GenerationRecoveryBarrier {
       if (this.#controller.signal.aborted) return;
       this.#resourceCursor = exactCursor(summary.nextCursor);
       this.#observe({ phase, summary });
+    } catch (error) {
+      if (!this.#controller.signal.aborted) this.#report({ operation: phase, error });
+    }
+  }
+
+  async #recoverEvidence(
+    phase: "startup-generation-evidence-recovery" | "periodic-generation-evidence-recovery",
+  ): Promise<void> {
+    if (this.#options.evidenceRecovery === undefined) return;
+    try {
+      const summary = await this.#options.evidenceRecovery.recover(this.#controller.signal);
+      if (!this.#controller.signal.aborted) this.#observe({ phase, summary });
     } catch (error) {
       if (!this.#controller.signal.aborted) this.#report({ operation: phase, error });
     }

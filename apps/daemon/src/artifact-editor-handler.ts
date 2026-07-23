@@ -455,13 +455,10 @@ export function createArtifactThumbnailRenderer(
 ): ArtifactThumbnailRenderer {
   return async (target, { signal }) => {
     signal?.throwIfAborted();
-    if (target.stateKey !== null) {
+    if (target.stateKey !== null && target.frame.initialState !== target.stateKey) {
       throw new ArtifactThumbnailValidationError(
-        `required thumbnail state ${target.stateKey} cannot be applied by the production renderer`,
+        `required thumbnail state ${target.stateKey} does not match the immutable RenderSpec frame state`,
       );
-    }
-    if (target.frame.fixture && Object.keys(target.frame.fixture).length > 0) {
-      throw new ArtifactThumbnailValidationError("required thumbnail fixture cannot be applied by the production renderer");
     }
     const resolved = await resolvePreviewTarget(deps, {
       kind: "artifact-revision",
@@ -489,6 +486,13 @@ export function createArtifactThumbnailRenderer(
         width: target.frame.width,
         height: target.frame.height,
         frameId: target.frame.id,
+        frameAttemptId: `thumbnail-${target.revisionId.slice(0, 118)}`,
+        ...(target.stateKey === null && target.frame.initialState === undefined
+          ? {}
+          : { initialState: target.stateKey ?? target.frame.initialState }),
+        ...(target.frame.fixture === undefined
+          ? {}
+          : { fixture: structuredClone(target.frame.fixture) }),
         ...(target.frame.background === undefined ? {} : { background: target.frame.background }),
       };
       const captured = await capture(lease.url, outPath, frame, signal);

@@ -359,6 +359,8 @@ export {
   generationTaskArtifactCandidateRetentionRef,
   validateGenerationTaskArtifactQualityGate,
   type GenerationTaskArtifactQualityGateInput,
+  type GenerationTaskSourceVisualEvidenceAuthority,
+  type GenerationTaskSourceVisualEvidenceRequirement,
 } from "./generation-task-quality.ts";
 export {
   GENERATION_TASK_PROTOTYPE_VALIDATION_PROTOCOL,
@@ -369,6 +371,26 @@ export {
   type GenerationTaskPrototypeValidationResult,
   type GenerationTaskPrototypeValidationRevisionIds,
 } from "./generation-task-validation.ts";
+export {
+  DEFAULT_PROTOTYPE_TRANSITION_DURATION_MS,
+  MAX_PROTOTYPE_TRANSITION_DURATION_MS,
+  readFrozenPrototypeRenderFrames,
+  resolveFrozenPrototypeRelations,
+  resolvePrototypeTransition,
+  selectFrozenPrototypeRenderFrame,
+  type FrozenPrototypeEndpoint,
+  type FrozenPrototypeFrameSelectionInput,
+  type FrozenPrototypeRenderFrame,
+  type ResolvedFrozenPrototypeRelation,
+  type ResolvedPrototypeTransition,
+} from "./prototype-relation.ts";
+export {
+  RENDER_FRAME_CAPTURE_DIMENSION_LIMIT,
+  RENDER_FRAME_CAPTURE_PIXEL_LIMIT,
+  RENDER_FRAME_NAME_LIMIT,
+  generationTaskVisualEvidenceFrameStorageSegment,
+  isExactRenderFrameCaptureViewport,
+} from "./render-frame.ts";
 export {
   WorkspaceStoreCodecError,
   asGenerationPlan,

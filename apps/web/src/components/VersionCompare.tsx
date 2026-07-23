@@ -1,6 +1,8 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,12 +11,23 @@ import {
 } from "react";
 import { CircleAlert, Columns2, GripVertical, LoaderCircle, RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { Dialog, Segmented } from "./ui/index.ts";
-import { previewDocumentSrc, usePreviewChannel, type PreviewChannelMessage } from "../lib/preview-channel.ts";
+import {
+  generatePreviewBridgeNonce,
+  previewDocumentSrc,
+  usePreviewChannel,
+  type PreviewChannelMessage,
+} from "../lib/preview-channel.ts";
 import { usePreviewRuntimeErrors, type RuntimeError } from "../lib/preview-runtime-errors.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
+import type { WorkspaceRenderFrameSpec } from "../lib/api.ts";
+import {
+  buildPreviewFrameCommand,
+  PREVIEW_FRAME_ACK_TIMEOUT_MS,
+} from "../project-studio/artifact/usePreviewBridge.ts";
 
 type SideBase = {
   bridgeNonce?: string;
+  frame?: Readonly<WorkspaceRenderFrameSpec>;
   label: string;
   retry?: () => void;
 };
@@ -31,6 +44,159 @@ function sideStatus(side: VersionCompareSide): "loading" | "ready" | "error" {
   if (side.status !== undefined) return side.status;
   if (side.error || !side.url) return "error";
   return "ready";
+}
+
+type CompareFrameState =
+  | { status: "unframed" | "pending" | "applying" | "applied" }
+  | { status: "rejected"; message: string };
+
+function useCompareFrameChannel({
+  iframeRef,
+  side,
+  open,
+  onMessage,
+}: {
+  iframeRef: MutableRefObject<HTMLIFrameElement | null>;
+  side: VersionCompareSide;
+  open: boolean;
+  onMessage: (message: PreviewChannelMessage) => void;
+}) {
+  const status = sideStatus(side);
+  const previewSrc = status === "ready" && side.url ? previewDocumentSrc(side.url) : null;
+  const frame = side.frame ?? null;
+  const command = useMemo(() => frame === null ? null : buildPreviewFrameCommand(frame), [frame]);
+  const commandKey = command?.ok ? JSON.stringify(command.command) : command?.message ?? "unframed";
+  const [frameState, setFrameState] = useState<CompareFrameState>(
+    frame === null ? { status: "unframed" } : { status: "pending" },
+  );
+  const attemptRef = useRef<{ id: string; frameId: string; key: string; timer: number } | null>(null);
+  const appliedKeyRef = useRef<string | null>(null);
+
+  const onChannelMessage = useCallback((message: PreviewChannelMessage): void => {
+    const attempt = attemptRef.current;
+    if (attempt !== null
+      && message.frameId === attempt.frameId
+      && message.frameAttemptId === attempt.id
+      && (message.type === "frame-applied" || message.type === "frame-rejected")) {
+      window.clearTimeout(attempt.timer);
+      attemptRef.current = null;
+      if (message.type === "frame-applied") {
+        appliedKeyRef.current = attempt.key;
+        setFrameState({ status: "applied" });
+      } else {
+        appliedKeyRef.current = null;
+        setFrameState({
+          status: "rejected",
+          message: typeof message.reason === "string" && message.reason.trim()
+            ? message.reason
+            : typeof message.error === "string" && message.error.trim()
+              ? message.error
+              : `Frame ${attempt.frameId} was rejected by this Revision.`,
+        });
+      }
+    }
+    onMessage(message);
+  }, [onMessage]);
+  const channel = usePreviewChannel({
+    iframeRef,
+    previewSrc,
+    bridgeNonce: side.bridgeNonce ?? null,
+    enabled: open && status === "ready" && previewSrc !== null && side.bridgeNonce !== undefined,
+    onMessage: onChannelMessage,
+  });
+  const identity = `${previewSrc ?? ""}\u0000${side.bridgeNonce ?? ""}\u0000${commandKey}`;
+
+  useEffect(() => {
+    const attempt = attemptRef.current;
+    if (attempt !== null) window.clearTimeout(attempt.timer);
+    attemptRef.current = null;
+    appliedKeyRef.current = null;
+    setFrameState(frame === null ? { status: "unframed" } : { status: "pending" });
+  }, [frame, identity]);
+
+  useEffect(() => {
+    if (!open || status !== "ready" || frame === null) return;
+    if (!command?.ok) {
+      setFrameState({ status: "rejected", message: command?.message ?? "The exact Frame is invalid." });
+      return;
+    }
+    if (!side.bridgeNonce) {
+      setFrameState({ status: "rejected", message: "The exact Frame bridge capability is unavailable." });
+      return;
+    }
+    if (!channel.ready) {
+      setFrameState({ status: "pending" });
+      return;
+    }
+    const key = `${identity}\u0000${channel.generation}`;
+    if (appliedKeyRef.current === key) {
+      setFrameState({ status: "applied" });
+      return;
+    }
+    const previous = attemptRef.current;
+    if (previous !== null) window.clearTimeout(previous.timer);
+    const id = generatePreviewBridgeNonce();
+    const attempt = { id, frameId: frame.id, key, timer: 0 };
+    attempt.timer = window.setTimeout(() => {
+      if (attemptRef.current !== attempt) return;
+      attemptRef.current = null;
+      appliedKeyRef.current = null;
+      setFrameState({ status: "rejected", message: `Frame ${frame.name} was not acknowledged.` });
+    }, PREVIEW_FRAME_ACK_TIMEOUT_MS);
+    attemptRef.current = attempt;
+    setFrameState({ status: "applying" });
+    if (!channel.send({ ...command.command, frameAttemptId: id })) {
+      window.clearTimeout(attempt.timer);
+      attemptRef.current = null;
+      setFrameState({ status: "rejected", message: "The exact Frame bridge could not receive its state." });
+    }
+    return () => {
+      if (attemptRef.current !== attempt) return;
+      window.clearTimeout(attempt.timer);
+      attemptRef.current = null;
+    };
+  }, [channel.generation, channel.ready, channel.send, command, frame, identity, open, side.bridgeNonce, status]);
+
+  useEffect(() => () => {
+    const attempt = attemptRef.current;
+    if (attempt !== null) window.clearTimeout(attempt.timer);
+    attemptRef.current = null;
+  }, []);
+
+  const connect = useCallback(() => {
+    appliedKeyRef.current = null;
+    if (frame !== null) setFrameState({ status: "pending" });
+    channel.connect();
+  }, [channel.connect, frame]);
+
+  return { channel, connect, frameState };
+}
+
+function useCompareViewportScale(
+  slot: HTMLDivElement | null,
+  frame: Readonly<WorkspaceRenderFrameSpec> | null,
+): number {
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    if (slot === null || frame === null || typeof ResizeObserver === "undefined") {
+      setScale(1);
+      return;
+    }
+    const update = (width: number, height: number): void => {
+      if (width <= 0 || height <= 0) return;
+      const next = Math.min(1, width / frame.width, height / frame.height);
+      setScale(Math.round(next * 1_000_000) / 1_000_000);
+    };
+    const bounds = slot.getBoundingClientRect();
+    update(bounds.width, bounds.height);
+    const observer = new ResizeObserver((entries) => {
+      const content = entries[0]?.contentRect;
+      if (content) update(content.width, content.height);
+    });
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, [frame, slot]);
+  return scale;
 }
 
 function frameDocument(frame: HTMLIFrameElement | null): Document | null {
@@ -189,6 +355,10 @@ export function VersionCompare({
   const wrapRef = useRef<HTMLDivElement>(null);
   const aRef = useRef<HTMLIFrameElement>(null);
   const bRef = useRef<HTMLIFrameElement>(null);
+  const [aSlot, setASlot] = useState<HTMLDivElement | null>(null);
+  const [bSlot, setBSlot] = useState<HTMLDivElement | null>(null);
+  const aViewportRef = useRef<HTMLDivElement>(null);
+  const sliderFrameBoundsRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<HTMLDivElement>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const syncingScrollRef = useRef(false);
@@ -197,7 +367,17 @@ export function VersionCompare({
   const aStatus = sideStatus(a);
   const bStatus = sideStatus(b);
   const hasFailedPane = aStatus === "error" || bStatus === "error";
-  const canRenderSlider = aStatus === "ready" && bStatus === "ready" && Boolean(a.url && b.url);
+  const hasCompatibleFrames = (a.frame === undefined && b.frame === undefined)
+    || (a.frame !== undefined && b.frame !== undefined
+      && a.frame.width === b.frame.width && a.frame.height === b.frame.height);
+  const canRenderSlider = aStatus === "ready" && bStatus === "ready"
+    && Boolean(a.url && b.url) && hasCompatibleFrames;
+  const frameSizeMismatch = aStatus === "ready" && bStatus === "ready"
+    && Boolean(a.url && b.url) && !hasCompatibleFrames;
+  const forceSplit = hasFailedPane || frameSizeMismatch;
+  const effectiveMode: "slider" | "split" = forceSplit ? "split" : mode;
+  const aScale = useCompareViewportScale(aSlot, a.frame ?? null);
+  const bScale = useCompareViewportScale(bSlot, b.frame ?? null);
   const aErrors = usePreviewRuntimeErrors({
     iframeRef: aRef,
     previewSrc: a.url ?? null,
@@ -232,20 +412,10 @@ export function VersionCompare({
     });
     window.setTimeout(() => { syncingScrollRef.current = false; }, 0);
   }, [bErrors.ingestMessage]);
-  const aChannel = usePreviewChannel({
-    iframeRef: aRef,
-    previewSrc: a.url ?? null,
-    bridgeNonce: a.bridgeNonce ?? null,
-    enabled: open && Boolean(a.url && a.bridgeNonce),
-    onMessage: syncFromA,
-  });
-  const bChannel = usePreviewChannel({
-    iframeRef: bRef,
-    previewSrc: b.url ?? null,
-    bridgeNonce: b.bridgeNonce ?? null,
-    enabled: open && Boolean(b.url && b.bridgeNonce),
-    onMessage: syncFromB,
-  });
+  const aApplication = useCompareFrameChannel({ iframeRef: aRef, side: a, open, onMessage: syncFromA });
+  const bApplication = useCompareFrameChannel({ iframeRef: bRef, side: b, open, onMessage: syncFromB });
+  const aChannel = aApplication.channel;
+  const bChannel = bApplication.channel;
   aSendRef.current = aChannel.send;
   bSendRef.current = bChannel.send;
 
@@ -290,19 +460,80 @@ export function VersionCompare({
     };
   }, [a.url, aChannel.send, b.url, bChannel.send, mode, open]);
 
-  const frame = (side: VersionCompareSide, ref: MutableRefObject<HTMLIFrameElement | null>, onLoad: () => void) => {
+  const frame = (
+    side: VersionCompareSide,
+    ref: MutableRefObject<HTMLIFrameElement | null>,
+    setSlot: (element: HTMLDivElement | null) => void,
+    scale: number,
+    application: ReturnType<typeof useCompareFrameChannel>,
+    viewportRef?: MutableRefObject<HTMLDivElement | null>,
+    clipPath?: string,
+  ) => {
     const status = sideStatus(side);
     if (status === "ready" && side.url) {
+      const exactFrame = side.frame ?? null;
       return (
-        <iframe
-          key={side.url}
-          ref={ref}
-          src={previewDocumentSrc(side.url)}
-          title={side.label}
-          sandbox={previewSandboxForSrc(previewDocumentSrc(side.url))}
-          onLoad={onLoad}
-          className="h-full w-full bg-white"
-        />
+        <div ref={setSlot} className="absolute inset-0 grid overflow-hidden place-items-center">
+          {exactFrame === null ? (
+            <iframe
+              key={side.url}
+              ref={ref}
+              src={previewDocumentSrc(side.url)}
+              title={side.label}
+              sandbox={previewSandboxForSrc(previewDocumentSrc(side.url))}
+              onLoad={application.connect}
+              className="h-full w-full bg-white"
+              style={clipPath === undefined ? undefined : { clipPath }}
+            />
+          ) : (
+            <div
+              ref={viewportRef}
+              data-testid={`version-compare-frame-${side.label}`}
+              data-version-compare-frame-id={exactFrame.id}
+              data-frame-status={application.frameState.status}
+              className="relative overflow-hidden"
+              style={{
+                width: `${exactFrame.width}px`,
+                height: `${exactFrame.height}px`,
+                transform: `scale(${scale})`,
+                transformOrigin: "center",
+                clipPath,
+                visibility: application.frameState.status === "applied" ? "visible" : "hidden",
+              }}
+            >
+              <iframe
+                key={side.url}
+                ref={ref}
+                src={previewDocumentSrc(side.url)}
+                title={side.label}
+                sandbox={previewSandboxForSrc(previewDocumentSrc(side.url))}
+                onLoad={application.connect}
+                className="h-full w-full bg-white"
+              />
+            </div>
+          )}
+          {exactFrame !== null && application.frameState.status !== "applied" ? (
+            <div
+              className="absolute inset-0 z-10 grid place-items-center p-8"
+              role={application.frameState.status === "rejected" ? "alert" : "status"}
+              aria-label={`${side.label} exact Frame ${application.frameState.status}`}
+            >
+              <div className="max-w-sm rounded-lg border border-border bg-card/95 p-4 text-center shadow-sm">
+                {application.frameState.status === "rejected" ? (
+                  <>
+                    <div className="text-sm font-semibold text-foreground">Exact Frame unavailable</div>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{application.frameState.message}</p>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <LoaderCircle aria-hidden size={14} className="animate-spin" />
+                    Applying {exactFrame.name} · {exactFrame.width} × {exactFrame.height}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
       );
     }
     if (status === "loading") {
@@ -344,7 +575,8 @@ export function VersionCompare({
   };
 
   const renderDividerPosition = useCallback((value: number): void => {
-    if (aRef.current) aRef.current.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
+    const comparedSurface = aViewportRef.current ?? aRef.current;
+    if (comparedSurface) comparedSurface.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
     if (handleRef.current) handleRef.current.style.left = `${value}%`;
   }, []);
   const commitDividerPosition = useCallback((value: number): void => {
@@ -369,7 +601,7 @@ export function VersionCompare({
     if (currentFrame) currentFrame.style.pointerEvents = "none";
     const move = (ev: PointerEvent): void => {
       if (pointerId !== null && Number.isFinite(ev.pointerId) && ev.pointerId !== pointerId) return;
-      const el = wrapRef.current;
+      const el = sliderFrameBoundsRef.current ?? wrapRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || !Number.isFinite(ev.clientX)) return;
@@ -429,6 +661,31 @@ export function VersionCompare({
   };
 
   const tag = "pointer-events-none absolute top-2.5 z-10 rounded-md bg-foreground/85 px-2 py-0.5 text-[11px] font-medium text-background";
+  const divider = (
+    <div
+      ref={handleRef}
+      role="slider"
+      tabIndex={0}
+      aria-label="Drag to compare"
+      aria-orientation="horizontal"
+      aria-valuemin={1}
+      aria-valuemax={99}
+      aria-valuenow={Math.round(pos)}
+      aria-valuetext={`${Math.round(pos)}% compared version`}
+      onPointerDown={drag}
+      onKeyDown={moveDividerWithKeyboard}
+      className="pointer-events-auto absolute inset-y-0 z-20 flex w-9 touch-none -translate-x-1/2 cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+      style={{ left: `${pos}%` }}
+    >
+      <span data-testid="compare-divider-line" className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-primary" />
+      <span className="relative grid size-7 place-items-center rounded-full border border-border bg-card shadow-pop">
+        <GripVertical size={14} strokeWidth={2} className="text-foreground" />
+      </span>
+    </div>
+  );
+  const exactSliderFrame = hasCompatibleFrames && a.frame !== undefined && b.frame !== undefined
+    ? a.frame
+    : null;
 
   return (
     <Dialog open={open} onClose={onClose} label="Compare versions" className="sm:max-w-[92vw]" showClose>
@@ -438,11 +695,11 @@ export function VersionCompare({
           <Segmented
             ariaLabel="Compare mode"
             size="sm"
-            value={hasFailedPane ? "split" : mode}
+            value={effectiveMode}
             onChange={(v) => {
-              if (!hasFailedPane) setMode(v as typeof mode);
+              if (!forceSplit) setMode(v as typeof mode);
             }}
-            options={hasFailedPane
+            options={forceSplit
               ? [{ value: "split", title: "Side by side", icon: <Columns2 size={14} strokeWidth={1.75} /> }]
               : [
                   { value: "slider", title: "Before / after slider", icon: <SlidersHorizontal size={14} strokeWidth={1.75} /> },
@@ -452,63 +709,45 @@ export function VersionCompare({
           <span className="truncate text-sm font-medium">
             {a.label} <span className="text-muted-foreground">↔</span> {b.label}
           </span>
+          {frameSizeMismatch ? (
+            <span className="ml-auto truncate text-[11px] text-muted-foreground" role="status">
+              Frame sizes differ; shown side by side.
+            </span>
+          ) : null}
         </div>
         <div ref={wrapRef} className="relative flex-1 overflow-hidden bg-surface-2">
-          {mode === "split" || !canRenderSlider ? (
+          {effectiveMode === "split" || !canRenderSlider ? (
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                {frame(a, aRef, aChannel.connect)}
+                {frame(a, aRef, setASlot, aScale, aApplication, aViewportRef)}
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                {frame(b, bRef, bChannel.connect)}
+                {frame(b, bRef, setBSlot, bScale, bApplication)}
               </div>
             </div>
           ) : (
             <>
               {/* Current fills the pane; the compared version is clipped to the left side. */}
-              <iframe
-                key={b.url}
-                ref={bRef}
-                src={b.url ? previewDocumentSrc(b.url) : undefined}
-                title={b.label}
-                sandbox={previewSandboxForSrc(b.url ? previewDocumentSrc(b.url) : null)}
-                onLoad={bChannel.connect}
-                className="absolute inset-0 h-full w-full bg-white"
-              />
-              <iframe
-                key={a.url}
-                ref={aRef}
-                src={a.url ? previewDocumentSrc(a.url) : undefined}
-                title={a.label}
-                sandbox={previewSandboxForSrc(a.url ? previewDocumentSrc(a.url) : null)}
-                onLoad={aChannel.connect}
-                className="absolute inset-0 h-full w-full bg-white"
-                style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
-              />
+              {frame(b, bRef, setBSlot, bScale, bApplication)}
+              {frame(a, aRef, setASlot, aScale, aApplication, aViewportRef, `inset(0 ${100 - pos}% 0 0)`)}
               <span className={`${tag} left-2.5`}>{a.label}</span>
               <span className={`${tag} right-2.5`}>{b.label}</span>
-              <div
-                ref={handleRef}
-                role="slider"
-                tabIndex={0}
-                aria-label="Drag to compare"
-                aria-orientation="horizontal"
-                aria-valuemin={1}
-                aria-valuemax={99}
-                aria-valuenow={Math.round(pos)}
-                aria-valuetext={`${Math.round(pos)}% compared version`}
-                onPointerDown={drag}
-                onKeyDown={moveDividerWithKeyboard}
-                className="absolute inset-y-0 z-20 flex w-9 touch-none -translate-x-1/2 cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
-                style={{ left: `${pos}%` }}
-              >
-                <span data-testid="compare-divider-line" className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-primary" />
-                <span className="relative grid size-7 place-items-center rounded-full border border-border bg-card shadow-pop">
-                  <GripVertical size={14} strokeWidth={2} className="text-foreground" />
-                </span>
-              </div>
+              {exactSliderFrame === null ? divider : (
+                <div
+                  ref={sliderFrameBoundsRef}
+                  data-testid="compare-slider-frame-bounds"
+                  className="pointer-events-none absolute left-1/2 top-1/2 z-20"
+                  style={{
+                    width: `${exactSliderFrame.width * aScale}px`,
+                    height: `${exactSliderFrame.height * aScale}px`,
+                    transform: "translate(-50%, -50%)",
+                  }}
+                >
+                  {divider}
+                </div>
+              )}
             </>
           )}
           <CompareRuntimeNotice

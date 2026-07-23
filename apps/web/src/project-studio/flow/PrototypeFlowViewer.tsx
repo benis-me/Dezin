@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,6 +36,7 @@ const PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE = "The exact Page did not become rea
 interface FlowLocation {
   artifactId: string;
   stateKey: string | null;
+  frameId: string | null;
 }
 
 interface FlowSlot {
@@ -124,6 +126,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   slot: FlowSlot;
   active: boolean;
   desiredStateKey: string | null;
+  desiredFrameId: string | null;
   transition: NavigationRequest["transition"];
   onActivation: (result: PrototypeActivationResult) => void;
   onPrepared: (slotId: number) => void;
@@ -134,13 +137,19 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   slot,
   active,
   desiredStateKey,
+  desiredFrameId,
   transition,
   onActivation,
   onPrepared,
   onPreparationError,
 }, ref) {
   const page = session.pages.find((candidate) => candidate.artifactId === slot.location.artifactId) ?? session.pages[0]!;
+  const desiredFrame = desiredFrameId === null
+    ? null
+    : page.frames?.find((frame) => frame.id === desiredFrameId) ?? null;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const frameSlotRef = useRef<HTMLDivElement | null>(null);
+  const [viewportScale, setViewportScale] = useState(1);
   const mountedRef = useRef(true);
   const attemptRef = useRef<{
     id: string;
@@ -154,6 +163,29 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     preparationKey: string;
   } | null>(null);
   const preparedKeyRef = useRef<string | null>(null);
+  const [appliedPreparationKey, setAppliedPreparationKey] = useState<string | null>(null);
+  const [failedPreparation, setFailedPreparation] = useState<{ key: string; message: string } | null>(null);
+
+  useLayoutEffect(() => {
+    const slotElement = frameSlotRef.current;
+    if (slotElement === null || desiredFrame === null || typeof ResizeObserver === "undefined") {
+      setViewportScale(1);
+      return;
+    }
+    const update = (width: number, height: number): void => {
+      if (width <= 0 || height <= 0) return;
+      const next = Math.min(1, width / desiredFrame.width, height / desiredFrame.height);
+      setViewportScale(Math.round(next * 1_000_000) / 1_000_000);
+    };
+    const initial = slotElement.getBoundingClientRect();
+    update(initial.width, initial.height);
+    const observer = new ResizeObserver((entries) => {
+      const bounds = entries[0]?.contentRect;
+      if (bounds) update(bounds.width, bounds.height);
+    });
+    observer.observe(slotElement);
+    return () => observer.disconnect();
+  }, [desiredFrame]);
   const target = useMemo(
     () => exactFlowTarget(projectId, session, slot.location),
     [projectId, session, slot.location],
@@ -187,22 +219,27 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
       attemptRef.current = null;
       if (message.type === "frame-applied") {
         preparedKeyRef.current = attempt.preparationKey;
+        setAppliedPreparationKey(attempt.preparationKey);
+        setFailedPreparation(null);
         attempt.resolve();
-      }
-      else attempt.reject(new Error(
-        typeof message.reason === "string" && message.reason.trim()
+      } else {
+        const failure = typeof message.reason === "string" && message.reason.trim()
           ? message.reason
           : typeof message.error === "string" && message.error.trim()
             ? message.error
-          : `Prototype state ${attempt.frameId} was rejected by the exact Page.`,
-      ));
+            : `Prototype state ${attempt.frameId} was rejected by the exact Page.`;
+        preparedKeyRef.current = null;
+        setAppliedPreparationKey(null);
+        setFailedPreparation({ key: attempt.preparationKey, message: failure });
+        attempt.reject(new Error(failure));
+      }
       return;
     }
     if (!active || bridgeNonce === null || commandState.error !== null) return;
     const activation = parsePrototypeActivation(message, bridgeNonce);
     if (activation === null) return;
-    onActivation(resolvePrototypeActivation(session, page.artifactId, activation));
-  }, [active, bridgeNonce, commandState.error, onActivation, page.artifactId, session]);
+    onActivation(resolvePrototypeActivation(session, page.artifactId, activation, desiredFrameId));
+  }, [active, bridgeNonce, commandState.error, desiredFrameId, onActivation, page.artifactId, session]);
 
   const channel = usePreviewChannel({
     iframeRef,
@@ -211,6 +248,12 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     enabled: preview.status === "ready",
     onMessage: onBridgeMessage,
   });
+  const desiredPreparationKey = previewLeaseId === null || desiredFrame === null
+    ? null
+    : `${previewLeaseId}:${channel.generation}:${desiredFrame.id}:${desiredStateKey ?? "default"}`;
+  const exactFrameApplied = desiredFrame === null
+    || (desiredPreparationKey !== null && appliedPreparationKey === desiredPreparationKey);
+  const exactFrameFailure = failedPreparation?.message ?? null;
 
   const applyFrame = useCallback((
     frame: Readonly<WorkspaceRenderFrameSpec>,
@@ -227,7 +270,10 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
       : Math.min(PREVIEW_FRAME_ACK_TIMEOUT_MS, deadlineAt - Date.now());
     if (timeoutMs <= 0) return Promise.reject(new Error(PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE));
     const id = generatePreviewBridgeNonce();
-    const preparationKey = `${previewLeaseId}:${channel.generation}:${stateKey ?? "default"}`;
+    const preparationKey = `${previewLeaseId}:${channel.generation}:${frame.id}:${stateKey ?? "default"}`;
+    preparedKeyRef.current = null;
+    setAppliedPreparationKey(null);
+    setFailedPreparation(null);
     return new Promise<void>((resolve, reject) => {
       const attempt = {
         id,
@@ -243,14 +289,18 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
       const timer = window.setTimeout(() => {
         if (attemptRef.current !== attempt) return;
         attemptRef.current = null;
-        reject(new Error(`Prototype state ${frame.initialState ?? frame.id} was not acknowledged.`));
+        const failure = `Prototype state ${frame.initialState ?? frame.id} was not acknowledged.`;
+        setFailedPreparation({ key: preparationKey, message: failure });
+        reject(new Error(failure));
       }, timeoutMs);
       attempt.timer = timer;
       attemptRef.current = attempt;
       if (!channel.send({ ...command.command, frameAttemptId: id })) {
         window.clearTimeout(timer);
         attemptRef.current = null;
-        reject(new Error("The exact Page bridge could not receive prototype state."));
+        const failure = "The exact Page bridge could not receive prototype state.";
+        setFailedPreparation({ key: preparationKey, message: failure });
+        reject(new Error(failure));
       }
     });
   }, [channel.generation, channel.ready, channel.send, previewLeaseId]);
@@ -288,11 +338,15 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     const nextAttemptId = generatePreviewBridgeNonce();
     attempt.id = nextAttemptId;
     attempt.generation = channel.generation;
-    attempt.preparationKey = `${previewLeaseId}:${channel.generation}:${attempt.stateKey ?? "default"}`;
+    attempt.preparationKey = `${previewLeaseId}:${channel.generation}:${attempt.frameId}:${attempt.stateKey ?? "default"}`;
+    setAppliedPreparationKey(null);
+    setFailedPreparation(null);
     if (channel.send({ ...attempt.command, frameAttemptId: nextAttemptId })) return;
     window.clearTimeout(attempt.timer);
     attemptRef.current = null;
-    attempt.reject(new Error("The exact Page bridge could not replay prototype state."));
+    const failure = "The exact Page bridge could not replay prototype state.";
+    setFailedPreparation({ key: attempt.preparationKey, message: failure });
+    attempt.reject(new Error(failure));
   }, [channel.generation, channel.ready, channel.send, previewLeaseId]);
 
   const previewError = preview.status === "error" ? preview.error : null;
@@ -305,19 +359,28 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     if (slot.deadlineAt === null) return;
     const remaining = Math.max(0, slot.deadlineAt - Date.now());
     const timer = window.setTimeout(() => {
+      if (desiredPreparationKey !== null) {
+        setAppliedPreparationKey(null);
+        setFailedPreparation({ key: desiredPreparationKey, message: PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE });
+      }
       onPreparationError(slot.id, PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE);
     }, remaining);
     return () => window.clearTimeout(timer);
-  }, [onPreparationError, slot.deadlineAt, slot.id]);
+  }, [desiredPreparationKey, onPreparationError, slot.deadlineAt, slot.id]);
 
   useEffect(() => {
     if (preview.status !== "ready") return;
-    const preparationKey = `${preview.lease.leaseId}:${channel.generation}:${desiredStateKey ?? "default"}`;
+    const preparationKey = `${preview.lease.leaseId}:${channel.generation}:${desiredFrameId ?? "unframed"}:${desiredStateKey ?? "default"}`;
     if (preparedKeyRef.current === preparationKey) return;
     if (!channel.ready) return;
-    const matches = desiredStateKey === null
-      ? page.frames?.slice(0, 1) ?? []
-      : page.frames?.filter((frame) => frame.initialState === desiredStateKey) ?? [];
+    const matches = desiredFrameId === null
+      ? desiredStateKey === null
+        ? page.frames?.slice(0, 1) ?? []
+        : page.frames?.filter((frame) => frame.initialState === desiredStateKey) ?? []
+      : desiredFrame !== null
+        && (desiredStateKey === null || desiredFrame.initialState === desiredStateKey)
+        ? [desiredFrame]
+        : [];
     if (desiredStateKey === null && matches.length === 0) {
       preparedKeyRef.current = preparationKey;
       onPrepared(slot.id);
@@ -325,7 +388,10 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     }
     if (matches.length !== 1) {
       preparedKeyRef.current = preparationKey;
-      onPreparationError(slot.id, `Frozen RenderSpec state ${desiredStateKey} is unavailable.`);
+      const failure = `Frozen RenderSpec state ${desiredStateKey} is unavailable.`;
+      setAppliedPreparationKey(null);
+      setFailedPreparation({ key: preparationKey, message: failure });
+      onPreparationError(slot.id, failure);
       return;
     }
     // An imperative same-Page navigation owns the bridge until it settles. On
@@ -335,13 +401,20 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     if (attemptRef.current !== null) return;
     void applyFrame(matches[0]!, desiredStateKey, slot.deadlineAt).then(
       () => { if (mountedRef.current) onPrepared(slot.id); },
-      (error: unknown) => { if (mountedRef.current) onPreparationError(slot.id, errorMessage(error)); },
+      (error: unknown) => {
+        if (!mountedRef.current) return;
+        const failure = errorMessage(error);
+        setAppliedPreparationKey(null);
+        setFailedPreparation({ key: preparationKey, message: failure });
+        onPreparationError(slot.id, failure);
+      },
     );
-  }, [applyFrame, channel.generation, channel.ready, desiredStateKey, onPreparationError, onPrepared, page.frames, preview, slot.deadlineAt, slot.id]);
+  }, [applyFrame, channel.generation, channel.ready, desiredFrame, desiredFrameId, desiredStateKey, onPreparationError, onPrepared, page.frames, preview, slot.deadlineAt, slot.id]);
 
   const loading = preview.status === "idle" || preview.status === "loading";
   return (
     <div
+      ref={frameSlotRef}
       className="prototype-flow-viewer__frame-slot"
       data-active={active ? "true" : "false"}
       data-transition={active ? transition.type : "none"}
@@ -364,14 +437,46 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
           <p>{preview.error}</p>
         </div>
       ) : (
-        <iframe
-          ref={iframeRef}
-          title={`${page.name} flow preview`}
-          src={previewSrc!}
-          sandbox={previewSandboxForSrc(previewSrc)}
-          onLoad={channel.connect}
-        />
+        desiredFrame === null ? (
+          <iframe
+            ref={iframeRef}
+            className="prototype-flow-viewer__unframed"
+            title={`${page.name} flow preview`}
+            src={previewSrc!}
+            sandbox={previewSandboxForSrc(previewSrc)}
+            onLoad={channel.connect}
+          />
+        ) : (
+          <div
+            className="prototype-flow-viewer__frame-viewport"
+            data-prototype-frame-id={desiredFrame.id}
+            data-frame-status={exactFrameApplied ? "applied" : exactFrameFailure === null ? "pending" : "rejected"}
+            style={{
+              width: `${desiredFrame.width}px`,
+              height: `${desiredFrame.height}px`,
+              transform: `scale(${viewportScale})`,
+              visibility: exactFrameApplied ? "visible" : "hidden",
+            }}
+          >
+            <iframe
+              ref={iframeRef}
+              title={`${page.name} flow preview`}
+              src={previewSrc!}
+              sandbox={previewSandboxForSrc(previewSrc)}
+              onLoad={channel.connect}
+            />
+          </div>
+        )
       )}
+      {preview.status === "ready" && desiredFrame !== null && !exactFrameApplied ? (
+        <div className="prototype-flow-viewer__message prototype-flow-viewer__frame-gate">
+          {exactFrameFailure === null
+            ? <span className="prototype-flow-viewer__spinner" aria-hidden />
+            : <CircleAlert aria-hidden size={18} />}
+          <strong>{exactFrameFailure === null ? "Applying exact Frame" : "Exact Frame unavailable"}</strong>
+          <p>{exactFrameFailure ?? `Waiting for ${desiredFrame.name} state confirmation.`}</p>
+        </div>
+      ) : null}
     </div>
   );
 });
@@ -394,8 +499,8 @@ function PrototypeFlowViewerSession({
   const pendingRef = useRef<PendingNavigation | null>(null);
   const focusAfterCommitSlotRef = useRef<number | null>(null);
   const startLocation = useMemo<FlowLocation>(
-    () => ({ artifactId: session.startArtifactId, stateKey: null }),
-    [session.startArtifactId],
+    () => ({ artifactId: session.startArtifactId, stateKey: null, frameId: session.startFrameId }),
+    [session.startArtifactId, session.startFrameId],
   );
   const [history, setHistory] = useState<FlowLocation[]>([startLocation]);
   const [slots, setSlots] = useState<FlowSlot[]>(() => [{
@@ -419,6 +524,9 @@ function PrototypeFlowViewerSession({
   pendingRef.current = pending;
   const currentLocation = history.at(-1) ?? startLocation;
   const currentPage = session.pages.find((page) => page.artifactId === currentLocation.artifactId) ?? session.pages[0]!;
+  const currentFrame = currentLocation.frameId === null
+    ? null
+    : currentPage.frames?.find((frame) => frame.id === currentLocation.frameId) ?? null;
   const health = useMemo(
     () => prototypeFlowHealth(session, currentLocation.artifactId),
     [currentLocation.artifactId, session],
@@ -458,7 +566,8 @@ function PrototypeFlowViewerSession({
   }, []);
 
   const prepareSamePage = useCallback(async (request: NavigationRequest): Promise<void> => {
-    if (request.location.stateKey === currentLocation.stateKey) {
+    if (request.location.stateKey === currentLocation.stateKey
+      && request.location.frameId === currentLocation.frameId) {
       setHistory(request.history);
       setTransition(request.transition);
       setPending(null);
@@ -470,9 +579,12 @@ function PrototypeFlowViewerSession({
       failNavigation(request, "The current exact Page is not ready to apply prototype state.");
       return;
     }
-    const frame = request.location.stateKey === null
-      ? page.frames?.[0] ?? null
-      : page.frames?.find((candidate) => candidate.initialState === request.location.stateKey) ?? null;
+    const frame = request.location.frameId === null
+      ? request.location.stateKey === null
+        ? page.frames?.[0] ?? null
+        : page.frames?.find((candidate) => candidate.initialState === request.location.stateKey) ?? null
+      : page.frames?.find((candidate) => candidate.id === request.location.frameId
+        && (request.location.stateKey === null || candidate.initialState === request.location.stateKey)) ?? null;
     if (frame === null) {
       failNavigation(request, `Frozen RenderSpec state ${request.location.stateKey ?? "default"} is unavailable.`);
       return;
@@ -521,7 +633,7 @@ function PrototypeFlowViewerSession({
       window.clearTimeout(deadlineTimer);
       if (samePageAbortRef.current === controller) samePageAbortRef.current = null;
     }
-  }, [activeSlotId, api, currentLocation.stateKey, failNavigation, projectId, session]);
+  }, [activeSlotId, api, currentLocation.frameId, currentLocation.stateKey, failNavigation, projectId, session]);
 
   const beginNavigation = useCallback((request: NavigationRequest): void => {
     if (pending !== null) return;
@@ -552,7 +664,11 @@ function PrototypeFlowViewerSession({
       return;
     }
     const motionOff = reducedMotion();
-    const location = { artifactId: result.targetArtifactId, stateKey: result.targetState };
+    const location = {
+      artifactId: result.targetArtifactId,
+      stateKey: result.targetState,
+      frameId: result.targetFrame?.id ?? null,
+    };
     beginNavigation({
       location,
       history: [...history, location],
@@ -667,7 +783,11 @@ function PrototypeFlowViewerSession({
               value={currentPage.artifactId}
               disabled={pending !== null}
               onChange={(event) => {
-                const location = { artifactId: event.currentTarget.value, stateKey: null };
+                const targetPage = session.pages.find((page) => page.artifactId === event.currentTarget.value);
+                const targetFrame = targetPage?.frames?.find((frame) => frame.id === currentFrame?.id)
+                  ?? targetPage?.frames?.[0]
+                  ?? null;
+                const location = { artifactId: event.currentTarget.value, stateKey: null, frameId: targetFrame?.id ?? null };
                 beginNavigation({
                   location,
                   history: [location],
@@ -690,6 +810,9 @@ function PrototypeFlowViewerSession({
             <strong>{currentPage.name}</strong>
             <span title={currentPage.revisionId}>Revision {currentPage.revisionId}</span>
             {currentLocation.stateKey === null ? null : <span title={currentLocation.stateKey}>State {currentLocation.stateKey}</span>}
+            {currentFrame === null ? null : (
+              <span title={currentFrame.id}>Frame {currentFrame.name} · {currentFrame.width} × {currentFrame.height}</span>
+            )}
             <span title={session.snapshotId}>Snapshot {session.snapshotId}</span>
           </div>
 
@@ -705,6 +828,7 @@ function PrototypeFlowViewerSession({
               slot={slot}
               active={slot.id === activeSlotId}
               desiredStateKey={slot.id === activeSlotId ? currentLocation.stateKey : slot.location.stateKey}
+              desiredFrameId={slot.id === activeSlotId ? currentLocation.frameId : slot.location.frameId}
               transition={slot.id === activeSlotId ? transition : { type: "none", durationMs: 0, easing: "ease" }}
               onActivation={onActivation}
               onPrepared={onPrepared}

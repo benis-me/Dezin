@@ -7,6 +7,9 @@ import type {
   ResourceTaskPayloadRecoveryPort,
   ResourceTaskPayloadRecoveryResult,
 } from "./resource-task-payload-recovery.ts";
+import type {
+  GenerationTaskEvidenceRecoverySummary,
+} from "./generation-task-evidence-lifecycle.ts";
 import {
   recoverGenerationPlans,
   type GenerationPlanRecoveryDeps,
@@ -19,6 +22,10 @@ export interface GenerationRuntimeScheduler {
 
 export interface GenerationRuntimeArtifactRefRecovery {
   recover(signal: AbortSignal): Promise<ArtifactCandidateRefRecoverySummary>;
+}
+
+export interface GenerationRuntimeEvidenceRecovery {
+  recover(signal: AbortSignal): Promise<GenerationTaskEvidenceRecoverySummary>;
 }
 
 export interface GenerationRuntimeTimerPort {
@@ -37,6 +44,10 @@ export type GenerationRuntimeRecoveryEvent =
   | {
     readonly phase: "startup-resource-payload-recovery" | "periodic-resource-payload-recovery";
     readonly summary: ResourceTaskPayloadRecoveryResult;
+  }
+  | {
+    readonly phase: "startup-generation-evidence-recovery" | "periodic-generation-evidence-recovery";
+    readonly summary: GenerationTaskEvidenceRecoverySummary;
   };
 
 export interface GenerationRuntimeErrorEvent {
@@ -45,6 +56,8 @@ export interface GenerationRuntimeErrorEvent {
     | "periodic-artifact-ref-recovery"
     | "startup-resource-payload-recovery"
     | "periodic-resource-payload-recovery"
+    | "startup-generation-evidence-recovery"
+    | "periodic-generation-evidence-recovery"
     | "startup"
     | "scheduler-stop"
     | "store-close";
@@ -55,6 +68,7 @@ export interface GenerationRuntimeOptions {
   readonly planRecovery: GenerationPlanRecoveryDeps;
   readonly artifactRefRecovery: GenerationRuntimeArtifactRefRecovery;
   readonly resourcePayloadRecovery?: ResourceTaskPayloadRecoveryPort;
+  readonly evidenceRecovery?: GenerationRuntimeEvidenceRecovery;
   readonly scheduler: GenerationRuntimeScheduler;
   /**
    * Optional ownership hook for standalone runtimes. The daemon production
@@ -176,6 +190,12 @@ class DefaultGenerationRuntime implements GenerationRuntime {
     );
     if (this.controller.signal.aborted) return;
 
+    await this.runEvidenceRecovery(
+      "startup-generation-evidence-recovery",
+      "startup-generation-evidence-recovery",
+    );
+    if (this.controller.signal.aborted) return;
+
     this.options.scheduler.start();
     this.state = "running";
     this.schedulePeriodicRecovery();
@@ -234,6 +254,11 @@ class DefaultGenerationRuntime implements GenerationRuntime {
       "periodic-resource-payload-recovery",
       "periodic-resource-payload-recovery",
     );
+    if (this.controller.signal.aborted) return;
+    await this.runEvidenceRecovery(
+      "periodic-generation-evidence-recovery",
+      "periodic-generation-evidence-recovery",
+    );
   }
 
   private async runArtifactRefRecovery(
@@ -262,6 +287,19 @@ class DefaultGenerationRuntime implements GenerationRuntime {
       if (this.controller.signal.aborted) return;
       this.resourcePayloadCursor = nextResourceCursor(summary.nextCursor);
       this.observeRecovery({ phase, summary });
+    } catch (error) {
+      if (!this.controller.signal.aborted) this.reportError({ operation, error });
+    }
+  }
+
+  private async runEvidenceRecovery(
+    phase: "startup-generation-evidence-recovery" | "periodic-generation-evidence-recovery",
+    operation: GenerationRuntimeErrorEvent["operation"],
+  ): Promise<void> {
+    if (this.options.evidenceRecovery === undefined) return;
+    try {
+      const summary = await this.options.evidenceRecovery.recover(this.controller.signal);
+      if (!this.controller.signal.aborted) this.observeRecovery({ phase, summary });
     } catch (error) {
       if (!this.controller.signal.aborted) this.reportError({ operation, error });
     }

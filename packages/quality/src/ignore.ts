@@ -17,6 +17,13 @@ export interface QualityIgnore {
 export function applyIgnores(findings: Finding[], ignores: QualityIgnore[]): Finding[] {
   if (!ignores.length) return findings;
   return findings.filter(
-    (f) => !ignores.some((ig) => ig.ruleId === f.id && (ig.selector == null || ig.selector === "" || ig.selector === f.selector)),
+    (f) => !ignores.some((ig) => {
+      // A historic rule-wide ignore predates viewport/Frame-scoped ids and should continue to
+      // suppress that rule in every scope. An explicitly scoped ignore remains exact so ignoring
+      // one Frame never hides the same rule in another state.
+      const ruleMatches = ig.ruleId === f.id
+        || (!ig.ruleId.includes("@") && f.id.startsWith(`${ig.ruleId}@`));
+      return ruleMatches && (ig.selector == null || ig.selector === "" || ig.selector === f.selector);
+    }),
   );
 }

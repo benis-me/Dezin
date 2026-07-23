@@ -85,9 +85,10 @@
 .prototype-flow-viewer__metadata strong { overflow: hidden; max-width: 180px; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .prototype-flow-viewer__metadata span { overflow: hidden; max-width: 190px; text-overflow: ellipsis; white-space: nowrap; color: rgb(255 255 255 / .55); }
 
-.prototype-flow-viewer__frame-slot,
+.prototype-flow-viewer__frame-slot { position: absolute; inset: 0; display: grid; place-items: center; animation-duration: var(--prototype-transition-ms); animation-timing-function: var(--prototype-transition-easing); animation-fill-mode: both; }
 .prototype-flow-viewer__frame-slot iframe { width: 100%; height: 100%; border: 0; }
-.prototype-flow-viewer__frame-slot { position: absolute; inset: 0; animation-duration: var(--prototype-transition-ms); animation-timing-function: var(--prototype-transition-easing); animation-fill-mode: both; }
+.prototype-flow-viewer__frame-viewport { overflow: hidden; flex: none; transform-origin: center; background: white; box-shadow: 0 16px 60px rgb(0 0 0 / .34); }
+.prototype-flow-viewer__unframed { width: 100%; height: 100%; }
 .prototype-flow-viewer__frame-slot[data-active="false"] { visibility: hidden; pointer-events: none; }
 .prototype-flow-viewer__frame-slot[data-transition="fade"] { animation-name: prototype-flow-fade; }
 .prototype-flow-viewer__frame-slot[data-transition="slide"] { animation-name: prototype-flow-slide; }
@@ -112,6 +113,7 @@
 .prototype-flow-viewer__message strong { color: #f5f5f5; font-size: 12px; }
 .prototype-flow-viewer__message p { max-width: 420px; }
 .prototype-flow-viewer__message button { display: flex; align-items: center; gap: 5px; margin-top: 4px; border: 1px solid rgb(255 255 255 / .18); border-radius: 6px; padding: 5px 8px; color: white; }
+.prototype-flow-viewer__frame-gate { position: absolute; inset: 0; }
 .prototype-flow-viewer__spinner { width: 16px; height: 16px; border: 1.5px solid rgb(255 255 255 / .2); border-top-color: white; border-radius: 999px; animation: prototype-flow-spin .8s linear infinite; }
 @keyframes prototype-flow-spin { to { transform: rotate(360deg); } }
 

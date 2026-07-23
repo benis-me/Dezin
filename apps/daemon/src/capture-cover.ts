@@ -17,6 +17,7 @@ import puppeteer, {
   type Page,
   type Protocol,
 } from "puppeteer-core";
+import { isExactRenderFrameCaptureViewport } from "../../../packages/core/src/index.ts";
 
 const CHROME_PATHS = [
   process.env.DEZIN_CHROME ?? "",
@@ -42,6 +43,11 @@ const ARTIFACT_FRAME_REJECTION_REASONS = [
   "unsafe-background",
   "frame-too-large",
   "frame-event-unavailable",
+  "missing-frame-attempt",
+  "frame-consumption-unavailable",
+  "frame-consumption-timeout",
+  "frame-consumption-mismatch",
+  "frame-consumption-superseded",
 ] as const;
 
 export type CaptureNetworkPolicy = "http-preview" | "file-cover";
@@ -466,15 +472,7 @@ export function captureViaElectron(htmlPath: string, outPath: string, signal?: A
 
 // ── Puppeteer fallback ────────────────────────────────────────────────────────
 function checkedViewport(viewport: CaptureViewport): CaptureViewport {
-  if (
-    !Number.isSafeInteger(viewport.width)
-    || !Number.isSafeInteger(viewport.height)
-    || viewport.width < 1
-    || viewport.height < 1
-    || viewport.width > 16_384
-    || viewport.height > 16_384
-    || viewport.width * viewport.height > 64 * 1024 * 1024
-  ) {
+  if (!isExactRenderFrameCaptureViewport(viewport.width, viewport.height)) {
     throw new Error("capture viewport dimensions are invalid");
   }
   return { width: viewport.width, height: viewport.height };
@@ -608,6 +606,7 @@ export async function applyArtifactThumbnailFrame(
           });
           return;
         }
+        if (request.frameAttemptId !== undefined && message.frameAttemptId !== request.frameAttemptId) return;
         if (message.type === "frame-rejected" && message.frameId === request.frameId) {
           finish({
             ok: false,

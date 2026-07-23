@@ -305,15 +305,100 @@ function generationCompileFailureResult(error: unknown): ApprovedProposalResult 
   return candidate;
 }
 
-function canReplayGraphCommands(graph: WorkspaceGraph, commands: readonly WorkspaceGraphCommand[]): boolean {
-  const nodeIds = new Set(graph.nodes.map((node) => node.id));
-  const edgeIds = new Set(graph.edges.map((edge) => edge.id));
-  return commands.length > 0 && commands.every((command) => (
+type GraphCommandConflictResolution =
+  | { kind: "replay"; commands: readonly WorkspaceGraphCommand[] }
+  | { kind: "converged" }
+  | { kind: "conflict" };
+
+function sameSerializableValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameSerializableValue(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined).sort();
+  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]
+      && sameSerializableValue(leftRecord[key], rightRecord[key]));
+}
+
+function sameWorkspaceNodeIdentity(
+  left: WorkspaceGraph["nodes"][number],
+  right: WorkspaceGraph["nodes"][number],
+): boolean {
+  if (left.id !== right.id || left.workspaceId !== right.workspaceId || left.kind !== right.kind) return false;
+  return left.kind === "resource"
+    ? right.kind === "resource" && left.resourceId === right.resourceId
+    : right.kind !== "resource" && left.artifactId === right.artifactId;
+}
+
+function classifyGraphCommandConflict(
+  baselineGraph: WorkspaceGraph,
+  graph: WorkspaceGraph,
+  commands: readonly WorkspaceGraphCommand[],
+): GraphCommandConflictResolution {
+  if (commands.length === 0 || baselineGraph.workspaceId !== graph.workspaceId
+    || new Set(commands.map((command) => command.id)).size !== commands.length) {
+    return { kind: "conflict" };
+  }
+  const baselineNodesById = new Map(baselineGraph.nodes.map((node) => [node.id, node]));
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const baselineEdgesById = new Map(baselineGraph.edges.map((edge) => [edge.id, edge]));
+  const edgesById = new Map(graph.edges.map((edge) => [edge.id, edge]));
+  const addCommands = commands.filter((command): command is Extract<WorkspaceGraphCommand, { type: "add-edge" }> => (
     command.type === "add-edge"
-    && nodeIds.has(command.edge.sourceNodeId)
-    && nodeIds.has(command.edge.targetNodeId)
-    && !edgeIds.has(command.edge.id)
   ));
+  if (addCommands.length === commands.length) {
+    const batchEdgeIds = new Set<string>();
+    for (const command of addCommands) {
+      const baselineSource = baselineNodesById.get(command.edge.sourceNodeId);
+      const baselineTarget = baselineNodesById.get(command.edge.targetNodeId);
+      const source = nodesById.get(command.edge.sourceNodeId);
+      const target = nodesById.get(command.edge.targetNodeId);
+      if (batchEdgeIds.has(command.edge.id)
+        || command.edge.workspaceId !== graph.workspaceId
+        || !baselineSource || !baselineTarget || !source || !target
+        || !sameWorkspaceNodeIdentity(baselineSource, source)
+        || !sameWorkspaceNodeIdentity(baselineTarget, target)
+        || baselineEdgesById.has(command.edge.id)
+        || edgesById.has(command.edge.id)) return { kind: "conflict" };
+      batchEdgeIds.add(command.edge.id);
+    }
+    return { kind: "replay", commands: addCommands };
+  }
+  const removeCommands = commands.filter((command): command is Extract<WorkspaceGraphCommand, { type: "remove-edge" }> => (
+    command.type === "remove-edge"
+  ));
+  if (removeCommands.length !== commands.length) return { kind: "conflict" };
+  const replayCommands: WorkspaceGraphCommand[] = [];
+  const batchEdgeIds = new Set<string>();
+  for (const command of removeCommands) {
+    if (batchEdgeIds.has(command.edgeId)) return { kind: "conflict" };
+    batchEdgeIds.add(command.edgeId);
+    const baselineEdge = baselineEdgesById.get(command.edgeId);
+    if (!baselineEdge || baselineEdge.kind === "uses") return { kind: "conflict" };
+    const edge = edgesById.get(command.edgeId);
+    if (!edge) continue;
+    const baselineSource = baselineNodesById.get(baselineEdge.sourceNodeId);
+    const baselineTarget = baselineNodesById.get(baselineEdge.targetNodeId);
+    const source = nodesById.get(edge.sourceNodeId);
+    const target = nodesById.get(edge.targetNodeId);
+    if (edge.kind === "uses"
+      || !sameSerializableValue(baselineEdge, edge)
+      || !baselineSource || !baselineTarget || !source || !target
+      || !sameWorkspaceNodeIdentity(baselineSource, source)
+      || !sameWorkspaceNodeIdentity(baselineTarget, target)) return { kind: "conflict" };
+    replayCommands.push(command);
+  }
+  return replayCommands.length > 0
+    ? { kind: "replay", commands: replayCommands }
+    : { kind: "converged" };
 }
 
 type ReadyLoadState = Extract<ProjectStudioLoadState, { status: "ready" }>;
@@ -1021,10 +1106,14 @@ export function useProjectStudio(
       if (epoch !== projectEpochRef.current) return;
       if (commands.length === 0) return;
       let current = requireReady();
-      const apply = (ready: Extract<ProjectStudioLoadState, { status: "ready" }>) => api.applyWorkspaceGraphCommands(projectId, {
+      const baselineGraph = current.workspace.graph;
+      const apply = (
+        ready: Extract<ProjectStudioLoadState, { status: "ready" }>,
+        nextCommands: readonly WorkspaceGraphCommand[] = commands,
+      ) => api.applyWorkspaceGraphCommands(projectId, {
         baseGraphRevision: ready.workspace.graph.revision,
         expectedSnapshotId: ready.workspace.activeSnapshot.id,
-        commands,
+        commands: nextCommands,
       });
       let result;
       try {
@@ -1038,8 +1127,10 @@ export function useProjectStudio(
         if (refreshed.status !== "ready") throw new Error("The refreshed Standard workspace is unavailable.");
         updateReadyWorkspace(refreshed.workspace);
         current = refreshed;
-        if (!canReplayGraphCommands(current.workspace.graph, commands)) throw error;
-        result = await apply(current);
+        const resolution = classifyGraphCommandConflict(baselineGraph, current.workspace.graph, commands);
+        if (resolution.kind === "conflict") throw error;
+        if (resolution.kind === "converged") return;
+        result = await apply(current, resolution.commands);
       }
       if (epoch !== projectEpochRef.current) return;
       const snapshots = current.workspace.snapshots.some((snapshot) => snapshot.id === result.snapshot.id)

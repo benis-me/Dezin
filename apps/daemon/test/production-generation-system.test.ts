@@ -9,13 +9,20 @@ import { test } from "node:test";
 import {
   Store,
   type GenerationTaskAttemptClaim,
+  type Resource,
+  type ResourceRevision,
 } from "../../../packages/core/src/index.ts";
 import { BUNDLED_DESIGN_SYSTEMS, DesignRegistry } from "../../../packages/design/src/index.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 import { beginArtifactCandidateTransaction } from "../src/orchestration/artifact-candidate-transaction.ts";
 import type { ArtifactPreparedCandidate } from "../src/orchestration/generation-task-executor.ts";
-import { createProductionGenerationSystem } from "../src/orchestration/production-generation-system.ts";
+import { persistGenerationTaskVisualEvidence } from "../src/orchestration/generation-task-visual-evidence.ts";
+import {
+  createProductionGenerationSystem,
+  productionSharinganSourceAuthority,
+} from "../src/orchestration/production-generation-system.ts";
 import { createProductionResourceTaskExecutor } from "../src/orchestration/production-resource-task-adapter.ts";
+import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
 
@@ -131,6 +138,7 @@ function nonEmptyGeneration() {
 function deterministicArtifactLeaf(input: {
   projectId: string;
   repositoryDir: string;
+  dataDir: string;
   executions: string[];
 }) {
   return {
@@ -175,72 +183,96 @@ function deterministicArtifactLeaf(input: {
         const candidate = await transaction.commit(`generate ${claim.task.target.id}`, signal);
         const contextPackHash = contextPackId.slice("context-pack-".length);
         const round = 0;
-        const visualDescriptors = frames.map((frame) => {
-          const frameAttemptId = `quality-round-${round}-${frame.id}`;
-          const sha256 = createHash("sha256")
-            .update(`${claim.task.id}:${claim.attempt.attempt}:${frame.id}`)
-            .digest("hex");
-          const byteLength = 1_024;
-          const storageKey = [
-            "generation-task-evidence",
-            input.projectId,
-            claim.task.workspaceId,
-            claim.task.planId,
-            claim.task.id,
-            `attempt-${claim.attempt.attempt}`,
-            "visual",
-            `round-${round}-${frame.id}-${sha256}.png`,
-          ].join("/");
-          const summary = { frameId: frame.id, frameAttemptId, sha256, byteLength, storageKey };
+        const visualDescriptors = await Promise.all(frames.map(async (frame, index) => {
+          const frameAttemptId = `quality-round-${round}-frame-${index}`;
+          const bytes = sharinganFixturePng(frame.width, frame.height);
+          const sha256 = createHash("sha256").update(bytes).digest("hex");
+          const sourcePath = join(transaction.dir, `.quality-${round}-${index}.png`);
+          await writeFile(sourcePath, bytes);
+          const descriptor = await persistGenerationTaskVisualEvidence({
+            dataDir: input.dataDir,
+            owner: {
+              projectId: input.projectId,
+              workspaceId: claim.task.workspaceId,
+              planId: claim.task.planId,
+              taskId: claim.task.id,
+              attempt: claim.attempt.attempt,
+              candidateCommitHash: candidate.commitHash,
+              candidateTreeHash: candidate.treeHash,
+              contextPackId,
+              contextPackHash,
+            },
+            frame: { ...frame, frameAttemptId },
+            round,
+            sourcePath,
+            expectedIdentity: {
+              sha256,
+              byteLength: bytes.byteLength,
+              width: frame.width,
+              height: frame.height,
+            },
+          });
+          assert.ok(descriptor);
+          const summary = {
+            frameId: frame.id,
+            frameAttemptId,
+            sha256: descriptor.sha256,
+            byteLength: descriptor.byteLength,
+            storageKey: descriptor.storageKey,
+          };
           return {
             summary,
-            descriptor: {
-              protocol: "dezin.generation-task-visual-evidence.v1",
-              owner: {
-                projectId: input.projectId,
-                workspaceId: claim.task.workspaceId,
-                planId: claim.task.planId,
-                taskId: claim.task.id,
-                attempt: claim.attempt.attempt,
-                candidateCommitHash: candidate.commitHash,
-                candidateTreeHash: candidate.treeHash,
-                contextPackId,
-                contextPackHash,
-              },
-              frame: { ...frame, frameAttemptId },
-              round,
-              mediaType: "image/png",
-              sha256,
-              byteLength,
-              storageKey,
-            },
+            descriptor,
           };
-        });
-        const evaluatedFrames = claim.task.qaProfile.requireRuntimeChecks
-          || claim.task.qaProfile.requireVisualReview;
+        }));
+        const frameResults = frames.map((frame, index) => ({
+          frameId: frame.id,
+          frameAttemptId: visualDescriptors[index]!.descriptor.frame.frameAttemptId,
+          width: frame.width,
+          height: frame.height,
+          status: "passed" as const,
+          reviewed: claim.task.qaProfile.requireVisualReview,
+          captureIdentity: {
+            sha256: visualDescriptors[index]!.summary.sha256,
+            byteLength: visualDescriptors[index]!.summary.byteLength,
+            width: frame.width,
+            height: frame.height,
+          },
+        }));
+        const reviewSummary = {
+          status: "passed" as const,
+          fidelity: 0.99,
+          evidence: visualDescriptors.map((item) => item.summary),
+        };
         const qualityEvidence = {
           protocol: "dezin.standard-artifact-quality.v1",
           candidate: { commitHash: candidate.commitHash, treeHash: candidate.treeHash },
           contextPack: { id: contextPackId, hash: contextPackHash },
           frames,
-          frameResults: evaluatedFrames ? frames.map((frame) => ({
-            frameId: frame.id,
-            frameAttemptId: `quality-round-${round}-${frame.id}`,
-            width: frame.width,
-            height: frame.height,
-            status: "passed",
-            reviewed: claim.task.qaProfile.requireVisualReview,
-          })) : [],
+          frameResults,
           round,
           ...(claim.task.qaProfile.requireRuntimeChecks ? {
             runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
           } : {}),
           ...(claim.task.qaProfile.requireVisualReview ? {
-            visualReview: {
-              status: "passed",
-              fidelity: 0.99,
-              evidence: visualDescriptors.map((item) => item.summary),
-            },
+            visualReview: reviewSummary,
+            visualEvidence: visualDescriptors.map((item) => item.descriptor),
+          } : {}),
+        };
+        const evaluationManifest = {
+          protocol: "dezin.artifact-run-evaluation-manifest.v1",
+          candidate: { commitHash: candidate.commitHash, treeHash: candidate.treeHash },
+          round,
+          passed: true,
+          score: 100,
+          qualityState: "passed",
+          findingsDigest: createHash("sha256").update("[]").digest("hex"),
+          frameResults,
+          ...(claim.task.qaProfile.requireRuntimeChecks ? {
+            runtimeChecks: qualityEvidence.runtimeChecks,
+          } : {}),
+          ...(claim.task.qaProfile.requireVisualReview ? {
+            reviewSummary,
             visualEvidence: visualDescriptors.map((item) => item.descriptor),
           } : {}),
         };
@@ -277,6 +309,7 @@ function deterministicArtifactLeaf(input: {
               treeHash: candidate.treeHash,
               passed: true,
               score: 100,
+              evaluationManifest,
             }],
             ...(claim.task.qaProfile.requireRuntimeChecks ? {
               runtimeChecks: qualityEvidence.runtimeChecks,
@@ -293,6 +326,78 @@ function deterministicArtifactLeaf(input: {
     },
   };
 }
+
+test("production source authority accepts only the owning Sharingan Resource Revision", () => {
+  const resource: Resource = {
+    id: "resource-sharingan-1",
+    workspaceId: "workspace-1",
+    kind: "sharingan-capture" as const,
+    title: "Captured source",
+    headRevisionId: "revision-sharingan-1",
+    defaultPinPolicy: "pin-current" as const,
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const revision: ResourceRevision = {
+    id: "revision-sharingan-1",
+    workspaceId: "workspace-1",
+    resourceId: resource.id,
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/revision-sharingan-1/manifest.json",
+    summary: "Captured source",
+    metadata: {},
+    checksum: "9".repeat(64),
+    provenance: {},
+    createdByRunId: null,
+    createdAt: 1,
+  };
+  const resolve = (overrides: {
+    resource?: Resource;
+    revision?: ResourceRevision;
+  } = {}) => {
+    let resourceReads = 0;
+    let revisionReads = 0;
+    const authority = productionSharinganSourceAuthority({
+      store: {
+        getResourceForProject(projectId, resourceId) {
+          resourceReads += 1;
+          assert.equal(projectId, "project-1");
+          assert.equal(resourceId, resource.id);
+          return overrides.resource ?? resource;
+        },
+        getResourceRevisionForWorkspace(workspaceId, revisionId) {
+          revisionReads += 1;
+          assert.equal(workspaceId, "workspace-1");
+          assert.equal(revisionId, revision.id);
+          return overrides.revision ?? revision;
+        },
+      },
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+      resourceId: resource.id,
+      revisionId: revision.id,
+    });
+    return { authority, resourceReads, revisionReads };
+  };
+
+  assert.deepEqual(resolve(), {
+    authority: {
+      resourceId: resource.id,
+      revisionId: revision.id,
+      revisionChecksum: revision.checksum,
+    },
+    resourceReads: 1,
+    revisionReads: 1,
+  });
+  assert.deepEqual(resolve({
+    resource: { ...resource, kind: "research" },
+  }), { authority: null, resourceReads: 1, revisionReads: 0 });
+  assert.deepEqual(resolve({
+    revision: { ...revision, resourceId: "resource-sharingan-other" },
+  }), { authority: null, resourceReads: 1, revisionReads: 1 });
+});
 
 test("production Generation system recovers an approved shell and runs validation through checkpoint", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dezin-production-generation-system-"));
@@ -540,7 +645,12 @@ test("production Generation system publishes one real Resource to Component to P
       runtimeSupervisor,
       daemonOwnerId: "daemon-production-dag-first",
       repositoryDirForWorkspace: () => repositoryDir,
-      artifacts: deterministicArtifactLeaf({ projectId: project.id, repositoryDir, executions }),
+      artifacts: deterministicArtifactLeaf({
+        projectId: project.id,
+        repositoryDir,
+        dataDir: root,
+        executions,
+      }),
       resources,
       leaseMs: 5_000,
       heartbeatMs: 500,

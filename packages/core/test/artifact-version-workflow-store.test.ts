@@ -160,3 +160,44 @@ test("forking an Artifact version creates a current-Kernel Track that requires f
     store.close();
   }
 });
+
+test("version actions reject a sealed candidate Revision that was never published in a Snapshot", () => {
+  const { store, project, second, secondSnapshot } = createArtifactWorkspace();
+  try {
+    const candidate = store.workspace.createArtifactRevision({
+      artifactId: "page-artifact",
+      trackId: "page-main",
+      parentRevisionId: second.id,
+      sourceCommitHash: "commit-unpublished-candidate",
+      sourceTreeHash: "tree-unpublished-candidate",
+      kernelRevisionId: second.kernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }] },
+      quality: { state: "passed", score: 100, findings: [] },
+      contextPackHash: "context-unpublished-candidate",
+      dependencies: [],
+      resourcePins: [],
+    });
+    const beforeCount = store.workspace.listRevisions(project.id, "page-artifact").length;
+    assert.equal(store.workspace.isArtifactRevisionPublished(second.id), true);
+    assert.equal(store.workspace.isArtifactRevisionPublished(candidate.id), false);
+
+    assert.throws(() => store.workspace.restoreArtifactRevisionForProject(project.id, "page-artifact", {
+      sourceRevisionId: candidate.id,
+      expectedHeadRevisionId: second.id,
+      expectedSnapshotId: secondSnapshot.id,
+    }), /published|Snapshot|version source/i);
+    assert.throws(() => store.workspace.forkArtifactTrackForProject(project.id, "page-artifact", {
+      sourceRevisionId: candidate.id,
+      name: "Rejected candidate fork",
+      expectedHeadRevisionId: second.id,
+      expectedSnapshotId: secondSnapshot.id,
+    }), /published|Snapshot|version source/i);
+
+    assert.equal(store.workspace.listRevisions(project.id, "page-artifact").length, beforeCount);
+    assert.equal(store.workspace.getArtifact("page-artifact")?.activeTrackId, "page-main");
+    assert.equal(store.workspace.getTrack("page-main")?.headRevisionId, second.id);
+    assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, secondSnapshot.id);
+  } finally {
+    store.close();
+  }
+});

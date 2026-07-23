@@ -254,7 +254,7 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(card.target.type, "artifact");
   assert.equal(card.target.type === "artifact" ? card.target.trackId : null, "track-card");
   assert.deepEqual(card.dependencyIds, [images.id]);
-  assert.deepEqual(home.dependencyIds, [card.id, copy.id].sort());
+  assert.deepEqual(home.dependencyIds, [about.id, card.id, copy.id].sort());
   assert.deepEqual(about.dependencyIds, []);
 
   const validationTask = compiled.tasks.find((task) => task.kind === "prototype-validation");
@@ -293,6 +293,82 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(Object.isFrozen(compiled), true);
   assert.equal(Object.isFrozen(compiled.tasks), true);
   assert.equal(Object.isFrozen(compiled.dependencies), true);
+});
+
+test("serializes prototype-connected Page generation so later Context can observe an earlier Revision", () => {
+  const compiled = compileGenerationPlan(approvedPlanFixture());
+  const about = compiled.tasks.find((task) => task.target.id === "page-about");
+  const home = compiled.tasks.find((task) => task.target.id === "page-home");
+  assert.ok(about);
+  assert.ok(home);
+
+  // Navigation direction is intentionally irrelevant. Stable Artifact order
+  // chooses the spanning order when the existing Task DAG imposes no Page order.
+  assert.equal(about.dependencyIds.includes(home.id), false);
+  assert.equal(home.dependencyIds.includes(about.id), true);
+});
+
+test("uses an acyclic stable spanning order for bidirectional and cyclic prototype navigation", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  generation.artifactPlans.push({
+    operation: "create",
+    nodeId: "node-contact",
+    artifactId: "page-contact",
+    kind: "page",
+    name: "Contact",
+    trackId: "track-contact",
+    baseRevisionId: null,
+    dependsOnArtifactIds: [],
+    capabilityIds: ["cap-text"],
+    responsiveFrameIds: ["desktop"],
+  });
+  const aboutPlan = generation.artifactPlans.find((plan) => plan.artifactId === "page-about")!;
+  aboutPlan.dependsOnArtifactIds = ["page-home"];
+  generation.prototypeIntents.push(
+    {
+      edgeId: "edge-about-home",
+      sourceArtifactId: "page-about",
+      targetArtifactId: "page-home",
+      trigger: "click",
+    },
+    {
+      edgeId: "edge-about-contact",
+      sourceArtifactId: "page-about",
+      targetArtifactId: "page-contact",
+      trigger: "click",
+    },
+    {
+      edgeId: "edge-contact-home",
+      sourceArtifactId: "page-contact",
+      targetArtifactId: "page-home",
+      trigger: "click",
+    },
+  );
+
+  const compiled = compileGenerationPlan(fixture);
+  const repeated = compileGenerationPlan({
+    shell: { ...fixture.shell },
+    proposal: {
+      ...fixture.proposal,
+      generation: {
+        ...generation,
+        prototypeIntents: [...generation.prototypeIntents].reverse(),
+      },
+    },
+  });
+  assert.deepEqual(repeated, compiled);
+
+  const pages = new Map(compiled.tasks
+    .filter((task) => task.kind === "page")
+    .map((task) => [task.target.id, task]));
+  const about = pages.get("page-about")!;
+  const contact = pages.get("page-contact")!;
+  const home = pages.get("page-home")!;
+  assert.equal(contact.dependencyIds.includes(home.id), false);
+  assert.equal(home.dependencyIds.includes(contact.id), true);
+  assert.equal(about.dependencyIds.includes(home.id), true);
+  assert.equal(about.dependencyIds.includes(contact.id), false);
 });
 
 test("compiles an exact dispatch Context Pack identity into only its scoped Artifact and Resource leaves", () => {

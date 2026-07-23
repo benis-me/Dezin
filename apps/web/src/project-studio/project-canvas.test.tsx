@@ -34,6 +34,21 @@ const graph: WorkspaceGraph = {
   }],
 };
 
+function graphWithRelationship(
+  kind: WorkspaceGraph["edges"][number]["kind"],
+  edgeId = `${kind}-1`,
+): WorkspaceGraph {
+  const edge = {
+    id: edgeId,
+    workspaceId: graph.workspaceId,
+    kind,
+    sourceNodeId: "page-1",
+    targetNodeId: "page-2",
+    ...(kind === "prototype" ? { prototype: { status: "planned" as const } } : {}),
+  } as WorkspaceGraph["edges"][number];
+  return { ...graph, edges: [edge] };
+}
+
 const layout: WorkspaceLayout = {
   workspaceId: "workspace-1",
   layoutId: "default",
@@ -132,6 +147,7 @@ function CanvasHarness({
   canvasGraph = graph,
   artifactRevisionIds = { "artifact-page-1": "revision-1" },
   resourceRevisionStates,
+  initialSelectedNodeIds = [],
 }: {
   onSaveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
   onApplyGraphCommands?: (commands: readonly WorkspaceGraphCommand[]) => Promise<void>;
@@ -146,8 +162,9 @@ function CanvasHarness({
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
     qualityState: "grounded" | "needs-review" | null;
   }>>;
+  initialSelectedNodeIds?: readonly string[];
 }) {
-  const [selection, setSelection] = useState<string[]>([]);
+  const [selection, setSelection] = useState<string[]>([...initialSelectedNodeIds]);
   return (
     <ProjectCanvas
       projectId="project-1"
@@ -290,7 +307,7 @@ test("Research awaiting-selection treats sparse and explicit-null artifact revis
     .toHaveAttribute("data-awaiting-selection", "true");
 });
 
-test("canvas exposes truthful keyboard instructions without advertising semantic deletion", () => {
+test("canvas exposes truthful keyboard instructions for editable and derived relationships", () => {
   const { container } = render(<CanvasHarness onSaveLayout={async () => layout} />);
   const node = container.querySelector<HTMLElement>('.react-flow__node[data-id="page-1"]');
   expect(node).not.toBeNull();
@@ -299,10 +316,168 @@ test("canvas exposes truthful keyboard instructions without advertising semantic
   const nodeDescription = document.getElementById(nodeDescriptionId);
   const edgeDescription = document.getElementById(nodeDescriptionId.replace("node-desc", "edge-desc"));
   expect(nodeDescription).toHaveTextContent("Enter opens");
-  expect(nodeDescription).toHaveTextContent("not deleted with the keyboard");
-  expect(edgeDescription).toHaveTextContent("not deleted with the keyboard");
-  expect(nodeDescription).not.toHaveTextContent("Press delete");
-  expect(edgeDescription).not.toHaveTextContent("Press delete");
+  expect(nodeDescription).toHaveTextContent("Nodes are not deleted with the keyboard");
+  expect(edgeDescription).toHaveTextContent("Delete or Backspace removes selected editable relationships");
+  expect(edgeDescription).toHaveTextContent("Uses relationships are derived and read-only");
+});
+
+test.each(["prototype", "informs", "derives-from"] as const)(
+  "toolbar removes a selected editable %s relationship and clears selection after success",
+  async (kind) => {
+    const measureReactFlow = installReactFlowMeasurements();
+    const onApplyGraphCommands = vi.fn(async (_commands: readonly WorkspaceGraphCommand[]) => {});
+    const canvasGraph = graphWithRelationship(kind);
+    const { container } = render(
+      <CanvasHarness
+        canvasGraph={canvasGraph}
+        onSaveLayout={async () => layout}
+        onApplyGraphCommands={onApplyGraphCommands}
+        initialSelectedNodeIds={kind === "prototype" ? [] : ["page-1"]}
+      />,
+    );
+    await act(async () => measureReactFlow());
+    await act(async () => measureReactFlow());
+    const edge = await waitFor(() => {
+      const candidate = container.querySelector<HTMLElement>(`.react-flow__edge[data-id="${kind}-1"]`);
+      expect(candidate).not.toBeNull();
+      return candidate!;
+    });
+    fireEvent.click(edge);
+
+    const remove = screen.getByRole("button", { name: "Delete selected relationship" });
+    expect(remove).toBeEnabled();
+    fireEvent.click(remove);
+
+    await waitFor(() => expect(onApplyGraphCommands).toHaveBeenCalledWith([
+      expect.objectContaining({ type: "remove-edge", edgeId: `${kind}-1` }),
+    ]));
+    await waitFor(() => expect(remove).toBeDisabled());
+    expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Relationship removed");
+  },
+);
+
+test.each(["Delete", "Backspace"])("%s removes a selected editable relationship", async (key) => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const onApplyGraphCommands = vi.fn(async (_commands: readonly WorkspaceGraphCommand[]) => {});
+  const { container } = render(
+    <CanvasHarness onSaveLayout={async () => layout} onApplyGraphCommands={onApplyGraphCommands} />,
+  );
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+  const edge = await waitFor(() => {
+    const candidate = container.querySelector<HTMLElement>('.react-flow__edge[data-id="prototype-1"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  fireEvent.click(edge);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeEnabled());
+
+  fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key });
+
+  await waitFor(() => expect(onApplyGraphCommands).toHaveBeenCalledWith([
+    expect.objectContaining({ type: "remove-edge", edgeId: "prototype-1" }),
+  ]));
+});
+
+test("a failed relationship removal keeps the relationship selected and exposes the failure", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const onApplyGraphCommands = vi.fn(async () => { throw new Error("Relationship removal failed"); });
+  const { container } = render(
+    <CanvasHarness onSaveLayout={async () => layout} onApplyGraphCommands={onApplyGraphCommands} />,
+  );
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+  const edge = await waitFor(() => {
+    const candidate = container.querySelector<HTMLElement>('.react-flow__edge[data-id="prototype-1"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  fireEvent.click(edge);
+  const remove = screen.getByRole("button", { name: "Delete selected relationship" });
+
+  fireEvent.click(remove);
+
+  await waitFor(() => expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Relationship removal failed"));
+  expect(remove).toBeEnabled();
+});
+
+test("derived uses relationships are explicitly read-only and never submit a remove command", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const onApplyGraphCommands = vi.fn(async () => {});
+  const { container } = render(
+    <CanvasHarness
+      canvasGraph={graphWithRelationship("uses")}
+      onSaveLayout={async () => layout}
+      onApplyGraphCommands={onApplyGraphCommands}
+      initialSelectedNodeIds={["page-1"]}
+    />,
+  );
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+  const edge = await waitFor(() => {
+    const candidate = container.querySelector<HTMLElement>('.react-flow__edge[data-id="uses-1"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  fireEvent.click(edge);
+
+  expect(screen.getByRole("button", { name: "Uses relationships are derived and read-only" })).toBeDisabled();
+  fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Delete" });
+
+  expect(onApplyGraphCommands).not.toHaveBeenCalled();
+  expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Uses relationships are derived and read-only");
+});
+
+test("changing the relationship filter clears a selected relationship before hiding it", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const onApplyGraphCommands = vi.fn(async () => {});
+  const { container } = render(
+    <CanvasHarness onSaveLayout={async () => layout} onApplyGraphCommands={onApplyGraphCommands} />,
+  );
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+  const edge = await waitFor(() => {
+    const candidate = container.querySelector<HTMLElement>('.react-flow__edge[data-id="prototype-1"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  fireEvent.click(edge);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeEnabled());
+
+  fireEvent.click(screen.getByRole("button", { name: "Show semantic relations" }));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeDisabled());
+  expect(container.querySelector('.react-flow__edge[data-id="prototype-1"]')).toBeNull();
+  expect(onApplyGraphCommands).not.toHaveBeenCalled();
+});
+
+test("a graph revision change clears relationship selection even when an edge id is reused", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const onApplyGraphCommands = vi.fn(async () => {});
+  const rendered = render(
+    <CanvasHarness onSaveLayout={async () => layout} onApplyGraphCommands={onApplyGraphCommands} />,
+  );
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+  const edge = await waitFor(() => {
+    const candidate = rendered.container.querySelector<HTMLElement>('.react-flow__edge[data-id="prototype-1"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  fireEvent.click(edge);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeEnabled());
+
+  rendered.rerender(
+    <CanvasHarness
+      canvasGraph={{ ...graphWithRelationship("uses", "prototype-1"), revision: 2 }}
+      onSaveLayout={async () => layout}
+      onApplyGraphCommands={onApplyGraphCommands}
+    />,
+  );
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeDisabled());
+  expect(screen.queryByRole("button", { name: "Uses relationships are derived and read-only" })).toBeNull();
+  expect(onApplyGraphCommands).not.toHaveBeenCalled();
 });
 
 test("Resource nodes announce that Enter opens the exact revision viewer", () => {
@@ -464,8 +639,12 @@ function project(): Project {
   return { id: "project-1", name: "Storefront", skillId: null, designSystemId: null, mode: "standard", createdAt: 1, updatedAt: 1 };
 }
 
-function readyWorkspace(revision = 1, nextLayout = layout): ReadyProjectWorkspacePayload {
-  const currentGraph = { ...graph, revision };
+function readyWorkspace(
+  revision = 1,
+  nextLayout = layout,
+  nextGraph: WorkspaceGraph = graph,
+): ReadyProjectWorkspacePayload {
+  const currentGraph = { ...nextGraph, revision };
   const snapshotId = `snapshot-${revision}`;
   const snapshot = {
     id: snapshotId,
@@ -515,13 +694,21 @@ function readyWorkspace(revision = 1, nextLayout = layout): ReadyProjectWorkspac
 function StudioMutationProbe() {
   const studio = useProjectStudio("project-1");
   const [layoutError, setLayoutError] = useState("");
+  const [graphResult, setGraphResult] = useState("");
   if (studio.load.status !== "ready") return <div>{studio.load.status}</div>;
+  const applyAndReport = (commands: readonly WorkspaceGraphCommand[]) => {
+    setGraphResult("");
+    void studio.applyGraphCommands(commands)
+      .then(() => setGraphResult("ok"))
+      .catch((error: unknown) => setGraphResult(error instanceof Error ? error.message : String(error)));
+  };
   return (
     <div>
       <output data-testid="studio-pointers">
         {studio.load.workspace.graph.revision}:{studio.load.workspace.activeSnapshot.id}:{studio.load.workspace.layout.viewport.x}
       </output>
       <output data-testid="layout-error">{layoutError}</output>
+      <output data-testid="graph-result">{graphResult}</output>
       <button
         type="button"
         onClick={() => void studio.saveLayout([{
@@ -535,7 +722,7 @@ function StudioMutationProbe() {
       </button>
       <button
         type="button"
-        onClick={() => void studio.applyGraphCommands([{
+        onClick={() => applyAndReport([{
           id: "command-next",
           type: "rename-node",
           nodeId: "page-1",
@@ -546,7 +733,7 @@ function StudioMutationProbe() {
       </button>
       <button
         type="button"
-        onClick={() => void studio.applyGraphCommands([{
+        onClick={() => applyAndReport([{
           id: "command-edge",
           type: "add-edge",
           edge: {
@@ -559,6 +746,25 @@ function StudioMutationProbe() {
         }])}
       >
         Add graph edge
+      </button>
+      <button
+        type="button"
+        onClick={() => applyAndReport([{
+          id: "command-remove-edge",
+          type: "remove-edge",
+          edgeId: "prototype-1",
+        }])}
+      >
+        Remove graph edge
+      </button>
+      <button
+        type="button"
+        onClick={() => applyAndReport([
+          { id: "command-remove-edge-a", type: "remove-edge", edgeId: "prototype-1" },
+          { id: "command-remove-edge-b", type: "remove-edge", edgeId: "prototype-1" },
+        ])}
+      >
+        Remove graph edge twice
       </button>
     </div>
   );
@@ -688,5 +894,231 @@ describe("Project Studio authoritative persistence", () => {
     ]);
     expect(getWorkspace).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("studio-pointers")).toHaveTextContent("3:snapshot-3");
+  });
+
+  test("a graph conflict does not replay add-edge after an endpoint identity was replaced", async () => {
+    const replacementGraph: WorkspaceGraph = {
+      ...graph,
+      nodes: graph.nodes.map((node) => node.kind !== "resource" && node.id === "page-1"
+        ? { ...node, artifactId: "artifact-concurrent-replacement", name: "Concurrent replacement" }
+        : node),
+    };
+    const refreshed = readyWorkspace(2, layout, replacementGraph);
+    const published = readyWorkspace(3, layout, replacementGraph);
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }))
+      .mockResolvedValueOnce({ graph: published.graph, snapshot: published.activeSnapshot });
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add graph edge" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2");
+  });
+
+  test("a graph conflict still replays add-edge after a concurrent endpoint rename", async () => {
+    const renamedGraph: WorkspaceGraph = {
+      ...graph,
+      nodes: graph.nodes.map((node) => node.id === "page-1" ? { ...node, name: "Checkout renamed" } : node),
+    };
+    const refreshed = readyWorkspace(2, layout, renamedGraph);
+    const published = readyWorkspace(3, layout, renamedGraph);
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }))
+      .mockResolvedValueOnce({ graph: published.graph, snapshot: published.activeSnapshot });
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add graph edge" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("ok"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("3:snapshot-3");
+  });
+
+  test("a graph conflict safely replays a remove-edge command when the relationship still exists", async () => {
+    const refreshed = readyWorkspace(2);
+    const published = readyWorkspace(3, layout, { ...graph, edges: [] });
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }))
+      .mockResolvedValueOnce({ graph: published.graph, snapshot: published.activeSnapshot });
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("ok"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(2);
+    expect(applyWorkspaceGraphCommands.mock.calls.map((call) => call[1])).toMatchObject([
+      { baseGraphRevision: 1, expectedSnapshotId: "snapshot-1", commands: [{ type: "remove-edge", edgeId: "prototype-1" }] },
+      { baseGraphRevision: 2, expectedSnapshotId: "snapshot-2", commands: [{ type: "remove-edge", edgeId: "prototype-1" }] },
+    ]);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("3:snapshot-3");
+  });
+
+  test.each(["source", "target"] as const)(
+    "a graph conflict does not replay removal after the %s endpoint identity was replaced",
+    async (endpoint) => {
+      const endpointId = endpoint === "source" ? "page-1" : "page-2";
+      const replacementGraph: WorkspaceGraph = {
+        ...graph,
+        nodes: graph.nodes.map((node) => node.kind !== "resource" && node.id === endpointId
+          ? {
+              ...node,
+              artifactId: `artifact-concurrent-${endpoint}-replacement`,
+              name: `Concurrent ${endpoint} replacement`,
+            }
+          : node),
+      };
+      const refreshed = readyWorkspace(2, layout, replacementGraph);
+      const getWorkspace = vi.fn()
+        .mockResolvedValueOnce(readyWorkspace(1))
+        .mockResolvedValueOnce(refreshed);
+      const applyWorkspaceGraphCommands = vi.fn()
+        .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }));
+      render(
+        <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+          <StudioMutationProbe />
+        </ApiProvider>,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge" }));
+
+      await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+      expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2");
+    },
+  );
+
+  test("a graph conflict converges without replay when the relationship was already removed", async () => {
+    const refreshed = readyWorkspace(2, layout, { ...graph, edges: [] });
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }));
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("ok"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2");
+  });
+
+  test("a graph conflict does not replay removal when the refreshed relationship is a derived uses edge", async () => {
+    const refreshed = readyWorkspace(2, layout, graphWithRelationship("uses", "prototype-1"));
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }));
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2");
+  });
+
+  test.each(["endpoints", "prototype payload"] as const)(
+    "a graph conflict does not replay removal after same-id %s drift",
+    async (drift) => {
+      const baselineEdge = graph.edges[0]!;
+      const driftedEdge = (drift === "endpoints"
+        ? { ...baselineEdge, sourceNodeId: "page-2", targetNodeId: "page-1" }
+        : {
+            ...baselineEdge,
+            kind: "prototype",
+            prototype: { status: "broken", brokenReason: "Concurrent replacement" },
+          }) as WorkspaceGraph["edges"][number];
+      const refreshed = readyWorkspace(2, layout, { ...graph, edges: [driftedEdge] });
+      const published = readyWorkspace(3, layout, { ...graph, edges: [] });
+      const getWorkspace = vi.fn()
+        .mockResolvedValueOnce(readyWorkspace(1))
+        .mockResolvedValueOnce(refreshed);
+      const applyWorkspaceGraphCommands = vi.fn()
+        .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }))
+        .mockResolvedValueOnce({ graph: published.graph, snapshot: published.activeSnapshot });
+      render(
+        <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+          <StudioMutationProbe />
+        </ApiProvider>,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge" }));
+
+      await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+      expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2");
+    },
+  );
+
+  test("a graph conflict does not replay an unsafe non-edge command", async () => {
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(readyWorkspace(2));
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }));
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Apply graph" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
+  });
+
+  test("a graph conflict does not replay duplicate remove-edge targets", async () => {
+    const refreshed = readyWorkspace(2);
+    const published = readyWorkspace(3, layout, { ...graph, edges: [] });
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(refreshed);
+    const applyWorkspaceGraphCommands = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "stale", { code: "workspace_revision_conflict" }))
+      .mockResolvedValueOnce({ graph: published.graph, snapshot: published.activeSnapshot });
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, applyWorkspaceGraphCommands })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove graph edge twice" }));
+
+    await waitFor(() => expect(screen.getByTestId("graph-result")).toHaveTextContent("stale"));
+    expect(applyWorkspaceGraphCommands).toHaveBeenCalledTimes(1);
   });
 });

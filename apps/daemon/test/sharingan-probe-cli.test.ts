@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   immutableProbeCliScript,
   writeProbeCli,
@@ -19,6 +20,15 @@ test("probeCliScript bakes the base URL in but keeps the un-baked guard", () => 
   assert.match(s, /function renderMap/, "has the render-map command");
   assert.match(s, /function sourceSummary/, "has the source-summary command");
   assert.match(s, /function sourceScaffold/, "has the source-scaffold command");
+  const identityStart = s.indexOf("function sourceCaptureIdentity");
+  const identityEnd = s.indexOf("function regionSignalScore", identityStart);
+  const identitySource = s.slice(identityStart, identityEnd);
+  assert.ok(identityStart >= 0 && identityEnd > identityStart, "contains the capture identity implementation");
+  assert.doesNotMatch(
+    identitySource,
+    /readFileSync/,
+    "the plan identity must hash the same byte snapshots used to derive its regions, not re-read mutable files",
+  );
 });
 
 test("the immutable exported probe rejects mutable source-scaffold before changing either pinned root", () => {
@@ -52,6 +62,111 @@ test("the immutable exported probe rejects mutable source-scaffold before changi
   assert.deepEqual(readFileSync(asset), before.asset);
   assert.equal(existsSync(join(sharingan, "region-plan.json")), false);
   assert.equal(existsSync(join(sharingan, "source-scaffold")), false);
+});
+
+test("source-scaffold rejects controlled manifest, render-map, and screenshot replacement during one derivation", {
+  skip: process.platform === "win32" && "named-pipe replacement probe requires a POSIX host",
+}, async () => {
+  const runReplacementProbe = async (target: "manifest" | "render-map" | "screenshot"): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), `probe-snapshot-${target}-`));
+    writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/snapshot");
+    const sharingan = join(dir, ".sharingan");
+    const pageDir = join(sharingan, "home");
+    mkdirSync(pageDir, { recursive: true });
+    const pages = join(sharingan, "pages.json");
+    const renderMap = join(pageDir, "render-map.json");
+    const assets = join(pageDir, "assets.json");
+    const screenshot = join(pageDir, "shot.png");
+    const pipe = target === "manifest" ? pages : target === "render-map" ? renderMap : screenshot;
+    execFileSync("mkfifo", [pipe]);
+
+    const manifest = JSON.stringify({
+      entryUrl: "https://example.test/snapshot",
+      pages: [{
+        url: "https://example.test/snapshot",
+        renderMap,
+        assets,
+        screenshots: target === "screenshot" ? { desktop: screenshot } : {},
+      }],
+    });
+    const map = JSON.stringify({
+      viewport: { width: 1200, height: 800 },
+      document: { width: 1200, height: 800 },
+      elements: [{
+        selector: "main h1",
+        tag: "h1",
+        text: "First snapshot",
+        box: { x: 80, y: 80, w: 560, h: 48 },
+        style: { fontSize: "32px" },
+      }],
+    });
+    if (target !== "manifest") writeFileSync(pages, manifest);
+    if (target !== "render-map") writeFileSync(renderMap, map);
+    writeFileSync(assets, "[]");
+    if (target !== "screenshot") writeFileSync(screenshot, "unused");
+
+    const first = target === "manifest" ? manifest : target === "render-map" ? map : "first screenshot";
+    const second = target === "manifest"
+      ? manifest.replace("snapshot\"", "snapshot?changed\"")
+      : target === "render-map"
+        ? map.replace("First snapshot", "Second snapshot")
+        : "second screenshot";
+    const writer = spawn(process.execPath, [
+      "-e",
+      "const { writeFileSync } = require('node:fs'); const [path, first, second] = process.argv.slice(1); writeFileSync(path, first); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); writeFileSync(path, second);",
+      pipe,
+      first,
+      second,
+    ], { stdio: "ignore" });
+    const writerDone = new Promise<void>((resolve) => writer.once("exit", () => resolve()));
+    const result = spawnSync(process.execPath, [join(sharingan, "probe.mjs"), "source-scaffold"], {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (result.status !== 1) writer.kill();
+    await writerDone;
+
+    assert.equal(result.status, 1, `${target} replacement must fail closed: ${result.stderr}`);
+    assert.match(result.stderr, /captured source changed while source-scaffold was deriving its region plan/i);
+    assert.equal(existsSync(join(sharingan, "region-plan.json")), false, "an unstable snapshot cannot publish a derived plan");
+  };
+
+  await runReplacementProbe("manifest");
+  await runReplacementProbe("render-map");
+  await runReplacementProbe("screenshot");
+});
+
+test("source-scaffold rejects capture references that escape the pinned .sharingan root", () => {
+  const dir = mkdtempSync(join(tmpdir(), "probe-capture-boundary-"));
+  writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/boundary");
+  const sharingan = join(dir, ".sharingan");
+  const outsideRenderMap = join(dir, "outside-render-map.json");
+  const outsideAssets = join(dir, "outside-assets.json");
+  writeFileSync(outsideRenderMap, JSON.stringify({
+    viewport: { width: 1200, height: 800 },
+    document: { width: 1200, height: 800 },
+    elements: [],
+  }));
+  writeFileSync(outsideAssets, "[]");
+  writeFileSync(join(sharingan, "pages.json"), JSON.stringify({
+    entryUrl: "https://example.test/boundary",
+    pages: [{
+      url: "https://example.test/boundary",
+      renderMap: outsideRenderMap,
+      assets: outsideAssets,
+    }],
+  }));
+
+  const result = spawnSync(process.execPath, [join(sharingan, "probe.mjs"), "source-scaffold"], {
+    cwd: dir,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /outside the pinned \.sharingan capture root/i);
+  assert.equal(existsSync(join(sharingan, "region-plan.json")), false);
 });
 
 test("writeProbeCli writes a runnable .sharingan/probe.mjs — help + outline of a captured dom.json", () => {
@@ -219,7 +334,10 @@ test("probe source-scaffold writes a measured reference without replacing the St
   const app = readFileSync(join(dir, ".sharingan", "source-scaffold", "App.jsx"), "utf8");
   const css = readFileSync(join(dir, ".sharingan", "source-scaffold", "index.css"), "utf8");
   const regionPlan = JSON.parse(readFileSync(join(dir, ".sharingan", "region-plan.json"), "utf8"));
-  assert.equal(regionPlan.version, 1);
+  assert.equal(regionPlan.protocol, "dezin.sharingan-region-plan.v2");
+  assert.equal(regionPlan.version, 2);
+  assert.equal(regionPlan.regionBudget, 8);
+  assert.equal(regionPlan.candidateCount, regionPlan.regions.length);
   assert.equal(regionPlan.sourceUrl, "https://example.com");
   assert.ok(Array.isArray(regionPlan.regions));
   assert.ok(regionPlan.regions.length >= 2, "source-scaffold writes fine-grained regions for subagents");
@@ -254,4 +372,172 @@ test("probe source-scaffold writes a measured reference without replacing the St
   assert.match(css, /\.source-vector svg/);
   assert.match(css, /-webkit-line-clamp: var\(--source-lines, 1\)/);
   assert.match(css, /\.source-text\[data-lines="1"\]/);
+});
+
+test("probe source-scaffold plans a bounded, measured cross-section of a long page", () => {
+  const dir = mkdtempSync(join(tmpdir(), "probe-long-region-plan-"));
+  writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/x");
+  const probe = join(dir, ".sharingan", "probe.mjs");
+  const pageDir = join(dir, ".sharingan", "home");
+  const renderMap = join(pageDir, "render-map.json");
+  const assets = join(pageDir, "assets.json");
+  mkdirSync(pageDir, { recursive: true });
+
+  const elements: Array<{
+    selector: string;
+    tag: string;
+    text: string;
+    box: { x: number; y: number; w: number; h: number };
+    style: Record<string, string>;
+  }> = Array.from({ length: 18 }, (_, index) => ({
+    selector: index === 17 ? "footer.cta" : `section:nth-child(${index + 1}) h2`,
+    tag: index === 17 ? "footer" : "h2",
+    text: index === 17 ? "Footer CTA" : `Section ${index}`,
+    box: { x: 80, y: index * 240 + 20, w: 560, h: 48 },
+    style: { fontSize: "32px", fontWeight: "700", color: "rgb(20, 20, 20)" },
+  }));
+  elements.push(
+    ...Array.from({ length: 4 }, (_, index) => ({
+      selector: `.critical-card-${index}`,
+      tag: "img",
+      text: "",
+      box: { x: 680 + index * 80, y: 10 * 240 + 12, w: 64, h: 64 },
+      style: { objectFit: "cover" },
+    })),
+  );
+
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    entryUrl: "https://example.test/long",
+    pages: [{ url: "https://example.test/long", renderMap, assets }],
+  }));
+  writeFileSync(assets, "[]");
+  writeFileSync(renderMap, JSON.stringify({
+    viewport: { width: 1200, height: 800 },
+    document: { width: 1200, height: 4260 },
+    elements,
+  }));
+
+  execFileSync("node", [probe, "source-scaffold"], { cwd: dir, encoding: "utf8" });
+  const plan = JSON.parse(readFileSync(join(dir, ".sharingan", "region-plan.json"), "utf8")) as {
+    regions: Array<{ texts?: string[]; bbox?: { y?: number } }>;
+  };
+
+  assert.equal(plan.regions.length, 8, "the generated plan and agent budget must agree");
+  assert.ok(plan.regions[0]?.texts?.includes("Section 0"), "the opening region is preserved");
+  assert.ok(plan.regions.at(-1)?.texts?.includes("Footer CTA"), "the final measured region is preserved");
+  assert.ok(plan.regions.some((region) => region.texts?.includes("Section 10")), "a visually dense middle region is preserved");
+  assert.ok(
+    plan.regions.some((region) => Number(region.bbox?.y) >= 3_600),
+    "the plan samples the lower portion of the document instead of stopping near the top",
+  );
+});
+
+test("probe source-scaffold samples sparse middle and lower document bands instead of spending the budget near the top", () => {
+  const dir = mkdtempSync(join(tmpdir(), "probe-clustered-region-plan-"));
+  writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/x");
+  const probe = join(dir, ".sharingan", "probe.mjs");
+  const pageDir = join(dir, ".sharingan", "home");
+  const renderMap = join(pageDir, "render-map.json");
+  const assets = join(pageDir, "assets.json");
+  mkdirSync(pageDir, { recursive: true });
+
+  const elements: Array<{
+    selector: string;
+    tag: string;
+    text: string;
+    box: { x: number; y: number; w: number; h: number };
+    style: Record<string, string>;
+  }> = Array.from({ length: 12 }, (_, index) => ({
+    selector: `section.top-${index} h2`,
+    tag: "h2",
+    text: index === 0 ? "Opening" : `Top detail ${index}`,
+    box: { x: 80, y: index * 200 + 20, w: 560, h: 48 },
+    style: { fontSize: "32px", fontWeight: "700", color: "rgb(20, 20, 20)" },
+  }));
+  elements.push(
+    {
+      selector: "section.middle-story h2",
+      tag: "h2",
+      text: "Middle story",
+      box: { x: 80, y: 5_200, w: 560, h: 48 },
+      style: { fontSize: "32px", fontWeight: "700", color: "rgb(20, 20, 20)" },
+    },
+    {
+      selector: "section.lower-proof h2",
+      tag: "h2",
+      text: "Lower proof",
+      box: { x: 80, y: 9_100, w: 560, h: 48 },
+      style: { fontSize: "32px", fontWeight: "700", color: "rgb(20, 20, 20)" },
+    },
+    {
+      selector: "footer.cta",
+      tag: "footer",
+      text: "Footer CTA",
+      box: { x: 80, y: 11_800, w: 560, h: 48 },
+      style: { fontSize: "32px", fontWeight: "700", color: "rgb(20, 20, 20)" },
+    },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      selector: `.dense-top-${index}`,
+      tag: "img",
+      text: "",
+      box: { x: 680 + index * 70, y: 2_220, w: 60, h: 60 },
+      style: { objectFit: "cover" },
+    })),
+  );
+
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    entryUrl: "https://example.test/clustered",
+    pages: [{ url: "https://example.test/clustered", renderMap, assets }],
+  }));
+  writeFileSync(assets, "[]");
+  writeFileSync(renderMap, JSON.stringify({
+    viewport: { width: 1200, height: 800 },
+    document: { width: 1200, height: 12_000 },
+    elements,
+  }));
+
+  execFileSync("node", [probe, "source-scaffold"], { cwd: dir, encoding: "utf8" });
+  const plan = JSON.parse(readFileSync(join(dir, ".sharingan", "region-plan.json"), "utf8")) as {
+    protocol?: string;
+    version?: number;
+    captureIdentity?: {
+      protocol?: string;
+      pagesManifestSha256?: string;
+      pagesEntrySha256?: string;
+      renderMapSha256?: string;
+      assetsSha256?: string;
+      screenshotsSha256?: string;
+    };
+    regionBudget?: number;
+    candidateCount?: number;
+    regions: Array<{ texts?: string[] }>;
+  };
+
+  assert.equal(plan.protocol, "dezin.sharingan-region-plan.v2");
+  assert.equal(plan.version, 2);
+  assert.deepEqual(Object.keys(plan.captureIdentity ?? {}).sort(), [
+    "assetsSha256",
+    "pagesEntrySha256",
+    "pagesManifestSha256",
+    "protocol",
+    "renderMapSha256",
+    "screenshotsSha256",
+  ]);
+  assert.equal(plan.captureIdentity?.protocol, "dezin.sharingan-entry-capture-identity.v2");
+  assert.match(plan.captureIdentity?.pagesManifestSha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.match(plan.captureIdentity?.pagesEntrySha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.match(plan.captureIdentity?.renderMapSha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.match(plan.captureIdentity?.assetsSha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.match(plan.captureIdentity?.screenshotsSha256 ?? "", /^[a-f0-9]{64}$/);
+  const digest = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+  assert.equal(plan.captureIdentity?.pagesManifestSha256, digest(readFileSync(join(dir, ".sharingan", "pages.json"))));
+  assert.equal(plan.captureIdentity?.renderMapSha256, digest(readFileSync(renderMap)));
+  assert.equal(plan.captureIdentity?.assetsSha256, digest(readFileSync(assets)));
+  assert.equal(plan.captureIdentity?.screenshotsSha256, digest(Buffer.from("[]", "utf8")));
+  assert.equal(plan.regionBudget, 8);
+  assert.equal(plan.candidateCount, 15);
+  assert.equal(plan.regions.length, 8);
+  assert.ok(plan.regions.some((region) => region.texts?.includes("Middle story")));
+  assert.ok(plan.regions.some((region) => region.texts?.includes("Lower proof")));
+  assert.ok(plan.regions.at(-1)?.texts?.includes("Footer CTA"));
 });

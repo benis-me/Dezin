@@ -18,6 +18,11 @@ import type {
   WorkspaceSnapshot,
 } from "../../../../packages/core/src/index.ts";
 import {
+  MAX_PROTOTYPE_TRANSITION_DURATION_MS,
+  readFrozenPrototypeRenderFrames,
+  resolveFrozenPrototypeRelations,
+} from "../../../../packages/core/src/index.ts";
+import {
   DesignRegistry,
   type DesignSystem,
 } from "../../../../packages/design/src/index.ts";
@@ -54,6 +59,11 @@ import {
   verifyResourceRevisionPayload,
 } from "../resource-revision-payload.ts";
 import {
+  ResearchResourceRevisionError,
+  researchRevisionContextPackId,
+  selectResearchRevisionDirection,
+} from "../research-resource-revision.ts";
+import {
   parseProviderProfiles,
   providerRuntimeConfig,
   redactProviderProfiles,
@@ -76,7 +86,8 @@ const EXECUTION_PROFILE_PROTOCOL = "dezin.artifact-execution-profile.v4" as cons
 const IMAGE_GENERATION_PROFILE_PROTOCOL = "dezin.artifact-image-generation.v2" as const;
 const RESOURCE_EXECUTION_PROFILE_PROTOCOL = "dezin.resource-execution-profile.v3" as const;
 const RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL = "dezin.resource-image-generation.v1" as const;
-const TARGET_CONTEXT_PROTOCOL = "dezin.generation-target-context.v2" as const;
+const ARTIFACT_TARGET_CONTEXT_PROTOCOL = "dezin.generation-target-context.v3" as const;
+const RESOURCE_TARGET_CONTEXT_PROTOCOL = "dezin.generation-target-context.v2" as const;
 const RESOURCE_KINDS = Object.freeze([
   "research",
   "moodboard",
@@ -1418,6 +1429,133 @@ function exactSharinganCaptureContextSemantic(pack: ContextPack): boolean {
   return true;
 }
 
+function validateRelevantPrototypeRelations(value: unknown, targetArtifactId: string): void {
+  if (!Array.isArray(value) || value.length > 10_000) {
+    throw new ContextIntegrityError("Artifact execution prototype relations are invalid or unbounded");
+  }
+  let previousEdgeId: string | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const relation = plainRecord(value[index], `Artifact execution prototype relation ${index}`);
+    exactKeys(relation, [
+      "edgeId", "source", "target", "targetArtifactRole", "status",
+      "binding", "transition", "brokenReason",
+    ], `Artifact execution prototype relation ${index}`);
+    const edgeId = nonEmptyString(relation.edgeId, `Artifact execution prototype relation ${index} edge id`);
+    if (previousEdgeId !== null && compareBinary(previousEdgeId, edgeId) >= 0) {
+      throw new ContextIntegrityError("Artifact execution prototype relations are not in canonical edge-id order");
+    }
+    previousEdgeId = edgeId;
+
+    const source = plainRecord(relation.source, `Artifact execution prototype relation ${edgeId} source`);
+    const target = plainRecord(relation.target, `Artifact execution prototype relation ${edgeId} target`);
+    exactKeys(source, ["nodeId", "artifactId", "kind", "name", "revisionId"],
+      `Artifact execution prototype relation ${edgeId} source`);
+    exactKeys(target, ["nodeId", "artifactId", "kind", "name", "revisionId"],
+      `Artifact execution prototype relation ${edgeId} target`);
+    nonEmptyString(source.nodeId, `Artifact execution prototype relation ${edgeId} source node id`);
+    nonEmptyString(target.nodeId, `Artifact execution prototype relation ${edgeId} target node id`);
+    const sourceArtifactId = nonEmptyString(
+      source.artifactId,
+      `Artifact execution prototype relation ${edgeId} source Artifact id`,
+    );
+    const destinationArtifactId = nonEmptyString(
+      target.artifactId,
+      `Artifact execution prototype relation ${edgeId} target Artifact id`,
+    );
+    if ((source.kind !== "page" && source.kind !== "component")
+      || (target.kind !== "page" && target.kind !== "component")) {
+      throw new ContextIntegrityError(`Artifact execution prototype relation ${edgeId} endpoint kind is invalid`);
+    }
+    nonEmptyString(source.name, `Artifact execution prototype relation ${edgeId} source name`);
+    nonEmptyString(target.name, `Artifact execution prototype relation ${edgeId} target name`);
+    nullableString(source.revisionId, `Artifact execution prototype relation ${edgeId} source Revision id`);
+    nullableString(target.revisionId, `Artifact execution prototype relation ${edgeId} target Revision id`);
+    const sourceIsTaskTarget = sourceArtifactId === targetArtifactId;
+    const destinationIsTaskTarget = destinationArtifactId === targetArtifactId;
+    const expectedRole = sourceIsTaskTarget && destinationIsTaskTarget
+      ? "both"
+      : sourceIsTaskTarget
+        ? "source"
+        : destinationIsTaskTarget
+          ? "target"
+          : null;
+    if (expectedRole === null || relation.targetArtifactRole !== expectedRole) {
+      throw new ContextIntegrityError(
+        `Artifact execution prototype relation ${edgeId} does not identify the Task target role`,
+      );
+    }
+
+    if (relation.status !== "planned" && relation.status !== "interactive" && relation.status !== "broken") {
+      throw new ContextIntegrityError(`Artifact execution prototype relation ${edgeId} status is invalid`);
+    }
+    let binding: Record<string, unknown> | null = null;
+    if (relation.binding !== null) {
+      binding = plainRecord(relation.binding, `Artifact execution prototype relation ${edgeId} binding`);
+      exactKeys(binding, [
+        "sourceArtifactId", "sourceRevisionId", "sourceLocator", "trigger",
+        "targetArtifactId", "targetState",
+      ], `Artifact execution prototype relation ${edgeId} binding`);
+      if (binding.sourceArtifactId !== sourceArtifactId || binding.targetArtifactId !== destinationArtifactId) {
+        throw new ContextIntegrityError(
+          `Artifact execution prototype relation ${edgeId} binding endpoints are invalid`,
+        );
+      }
+      nonEmptyString(binding.sourceRevisionId, `Artifact execution prototype relation ${edgeId} source Revision id`);
+      if (binding.trigger !== "click" && binding.trigger !== "submit") {
+        throw new ContextIntegrityError(`Artifact execution prototype relation ${edgeId} trigger is invalid`);
+      }
+      nullableString(binding.targetState, `Artifact execution prototype relation ${edgeId} target state`);
+      const locator = plainRecord(
+        binding.sourceLocator,
+        `Artifact execution prototype relation ${edgeId} source locator`,
+      );
+      exactKeys(locator, ["designNodeId", "sourcePath", "selector"],
+        `Artifact execution prototype relation ${edgeId} source locator`);
+      nonEmptyString(locator.designNodeId, `Artifact execution prototype relation ${edgeId} design node id`);
+      nullableString(locator.sourcePath, `Artifact execution prototype relation ${edgeId} source path`);
+      nullableString(locator.selector, `Artifact execution prototype relation ${edgeId} selector`);
+    }
+
+    if (relation.transition !== null) {
+      if (binding === null) {
+        throw new ContextIntegrityError(
+          `Artifact execution prototype relation ${edgeId} transition has no binding`,
+        );
+      }
+      const transition = plainRecord(
+        relation.transition,
+        `Artifact execution prototype relation ${edgeId} transition`,
+      );
+      exactKeys(transition, ["type", "durationMs", "easing"],
+        `Artifact execution prototype relation ${edgeId} transition`);
+      if (transition.type !== "none" && transition.type !== "fade" && transition.type !== "slide") {
+        throw new ContextIntegrityError(`Artifact execution prototype relation ${edgeId} transition type is invalid`);
+      }
+      if (!Number.isSafeInteger(transition.durationMs)
+        || (transition.durationMs as number) < 0
+        || (transition.durationMs as number) > MAX_PROTOTYPE_TRANSITION_DURATION_MS) {
+        throw new ContextIntegrityError(`Artifact execution prototype relation ${edgeId} duration is invalid`);
+      }
+      nullableString(transition.easing, `Artifact execution prototype relation ${edgeId} easing`);
+    }
+
+    if (relation.status === "planned") {
+      if (binding !== null || relation.transition !== null || relation.brokenReason !== null) {
+        throw new ContextIntegrityError(`Artifact execution planned prototype relation ${edgeId} is invalid`);
+      }
+    } else if (relation.status === "interactive") {
+      if (binding === null || relation.brokenReason !== null) {
+        throw new ContextIntegrityError(`Artifact execution interactive prototype relation ${edgeId} is invalid`);
+      }
+    } else {
+      nonEmptyString(relation.brokenReason, `Artifact execution prototype relation ${edgeId} broken reason`);
+      if (binding === null && relation.transition !== null) {
+        throw new ContextIntegrityError(`Artifact execution broken prototype relation ${edgeId} is invalid`);
+      }
+    }
+  }
+}
+
 /** Extracts one exact, hash-valid execution profile from the required target item. */
 export function requireArtifactExecutionProfile(
   pack: ContextPack,
@@ -1460,9 +1598,9 @@ export function requireArtifactExecutionProfile(
   exactKeys(target, [
     "protocol", "projectId", "workspaceId", "planId", "taskId", "taskKind", "target",
     "payload", "capabilities", "qaProfile", "resourceLimits", "expectedSnapshotId",
-    "graphRevision", "kernelRevisionId", "artifactExecutionProfile",
+    "graphRevision", "kernelRevisionId", "relevantPrototypeRelations", "artifactExecutionProfile",
   ], "Artifact execution target Context");
-  if (target.protocol !== TARGET_CONTEXT_PROTOCOL
+  if (target.protocol !== ARTIFACT_TARGET_CONTEXT_PROTOCOL
     || target.projectId !== expected.projectId || target.workspaceId !== expected.workspaceId
     || target.planId !== expected.planId || target.taskId !== expected.taskId) {
     throw new ContextIntegrityError("Artifact execution target Context ownership is invalid");
@@ -1472,6 +1610,7 @@ export function requireArtifactExecutionProfile(
     || targetIdentity.id !== expected.targetArtifactId) {
     throw new ContextIntegrityError("Artifact execution target Artifact ownership is invalid");
   }
+  validateRelevantPrototypeRelations(target.relevantPrototypeRelations, expected.targetArtifactId);
   const result = validateArtifactExecutionProfile(target.artifactExecutionProfile, expected);
   if (result.hasExactSharinganCapture !== exactSharinganCaptureContextSemantic(pack)) {
     throw new ContextIntegrityError(
@@ -1567,7 +1706,7 @@ export function requireResourceExecutionProfile(
     "graphRevision", "kernelRevisionId", "resourceExecutionProfile",
   ], "Resource execution target Context");
   const projectId = nonEmptyString(target.projectId, "Resource execution target Project id");
-  if (target.protocol !== TARGET_CONTEXT_PROTOCOL
+  if (target.protocol !== RESOURCE_TARGET_CONTEXT_PROTOCOL
     || (expected.projectId !== undefined && projectId !== expected.projectId)
     || target.workspaceId !== expected.workspaceId || target.planId !== expected.planId
     || target.taskId !== expected.taskId || target.taskKind !== "resource") {
@@ -1618,6 +1757,7 @@ export interface GenerationContextWorkspacePort {
   getKernelRevision(revisionId: string): SharedDesignKernelRevision | null;
   getArtifact(artifactId: string): WorkspaceArtifactRecord | null;
   getArtifactRevision(revisionId: string): ArtifactRevisionRecord | null;
+  isArtifactRevisionPublished(revisionId: string): boolean;
   getArtifactRevisionContextChecksum(revisionId: string): string | null;
   listArtifactRevisionDependencies(revisionId: string): ArtifactRevisionDependency[];
   listArtifactRevisionResourcePins(revisionId: string): ArtifactRevisionResourcePin[];
@@ -1681,6 +1821,7 @@ export interface ProductionArtifactExecutionProfileLoaderOptions {
   readonly store: Store;
   readonly dataDir: string;
   readonly designRegistry: DesignRegistry;
+  readonly contextPacks?: Pick<ContextPackRepository, "get">;
   readonly repositoryDirForWorkspace: (
     workspaceId: string,
     signal: AbortSignal,
@@ -1806,7 +1947,19 @@ function contextItemKey(item: ContextPack["items"][number]): string {
   });
 }
 
-function mergeDispatchEvidence(
+function contextClassRefKey(input: {
+  contextClass: ContextPack["items"][number]["contextClass"];
+  ref: ContextPack["items"][number]["ref"];
+}): string {
+  return stableStringify({ contextClass: input.contextClass, ref: input.ref });
+}
+
+function contextItemValueKey(item: ContextPack["items"][number]): string {
+  const { ordinal: _ordinal, ...value } = item;
+  return stableStringify(value);
+}
+
+export function mergeDispatchEvidence(
   current: ContextPack,
   dispatch: ContextPack | null,
   packStore: ContextPackStore,
@@ -1814,14 +1967,37 @@ function mergeDispatchEvidence(
   if (dispatch === null) return current;
   const evidence = dispatch.items.filter((item) => item.contextClass === "selection"
     || item.contextClass === "explicit");
-  const byIdentity = new Map(current.items.map((item) => [contextItemKey(item), item] as const));
-  for (const item of evidence) byIdentity.set(contextItemKey(item), item);
+  const byIdentity = new Map<string, ContextPack["items"][number]>();
+  for (const item of current.items) {
+    const key = contextItemKey(item);
+    if (byIdentity.has(key)) {
+      throw new ContextIntegrityError("Current Generation Context contains duplicate provided identity");
+    }
+    byIdentity.set(key, item);
+  }
+  for (const item of evidence) {
+    const key = contextItemKey(item);
+    const existing = byIdentity.get(key);
+    if (existing !== undefined) {
+      if (contextItemValueKey(existing) !== contextItemValueKey(item)) {
+        throw new ContextIntegrityError(
+          `Generation dispatch evidence conflicts with current Context identity ${item.ref.id}`,
+        );
+      }
+      continue;
+    }
+    byIdentity.set(key, item);
+  }
   const priority = new Map(CONTEXT_PRIORITY.map((contextClass, ordinal) => [contextClass, ordinal]));
   const items = [...byIdentity.values()]
     .sort((left, right) => (priority.get(left.contextClass)! - priority.get(right.contextClass)!)
       || compareBinary(contextItemKey(left), contextItemKey(right)))
     .map((item, ordinal) => ({ ...structuredClone(item), ordinal }));
   const tokenEstimate = items.reduce((total, item) => total + item.tokenEstimate, 0);
+  const providedClassRefs = new Set(items.map(contextClassRefKey));
+  const omissions = current.omissions.filter(
+    (omission) => !providedClassRefs.has(contextClassRefKey(omission)),
+  );
   if (tokenEstimate > 64_000) {
     throw new BlockedContextError(
       evidence.map((item) => item.ref.id),
@@ -1835,7 +2011,7 @@ function mergeDispatchEvidence(
     intent: "generate",
     messageChecksum: current.messageChecksum,
     items,
-    omissions: current.omissions,
+    omissions,
     tokenEstimate,
   });
 }
@@ -1876,6 +2052,150 @@ function exactSnapshot(
     );
   }
   return { snapshot, graph, kernel };
+}
+
+export interface RelevantPrototypeRelation {
+  readonly edgeId: string;
+  readonly source: {
+    readonly nodeId: string;
+    readonly artifactId: string;
+    readonly kind: "page" | "component";
+    readonly name: string;
+    readonly revisionId: string | null;
+  };
+  readonly target: {
+    readonly nodeId: string;
+    readonly artifactId: string;
+    readonly kind: "page" | "component";
+    readonly name: string;
+    readonly revisionId: string | null;
+  };
+  readonly targetArtifactRole: "source" | "target" | "both";
+  readonly status: "planned" | "interactive" | "broken";
+  readonly binding: {
+    readonly sourceArtifactId: string;
+    readonly sourceRevisionId: string;
+    readonly sourceLocator: {
+      readonly designNodeId: string;
+      readonly sourcePath: string | null;
+      readonly selector: string | null;
+    };
+    readonly trigger: "click" | "submit";
+    readonly targetArtifactId: string;
+    readonly targetState: string | null;
+  } | null;
+  readonly transition: {
+    readonly type: "none" | "fade" | "slide";
+    readonly durationMs: number;
+    readonly easing: string | null;
+  } | null;
+  readonly brokenReason: string | null;
+}
+
+/**
+ * Projects exact frozen prototype semantics into Agent Context. Stored graph
+ * labels are intentionally not authoritative: the same Core resolver used by
+ * the Viewer derives stale revisions, missing states, and locator collisions.
+ */
+export function buildRelevantPrototypeRelations(input: {
+  readonly graph: WorkspaceGraph;
+  readonly snapshot: Pick<WorkspaceSnapshot, "artifactRevisions">;
+  readonly targetArtifactId: string;
+  readonly getArtifactRevision: (revisionId: string) => ArtifactRevisionRecord | null;
+}): readonly RelevantPrototypeRelation[] {
+  const targetNodes = input.graph.nodes.filter(
+    (node) => node.kind !== "resource" && node.artifactId === input.targetArtifactId,
+  );
+  if (targetNodes.length === 0) return [];
+  if (targetNodes.length !== 1) {
+    throw new ContextIntegrityError("Generation target Artifact has ambiguous Workspace graph nodes");
+  }
+  const targetNode = targetNodes[0]!;
+  const artifactNodes = input.graph.nodes.filter(
+    (node): node is Extract<typeof node, { kind: "page" | "component" }> => node.kind !== "resource",
+  );
+  const endpoints = artifactNodes.map((node) => {
+    const revisionId = input.snapshot.artifactRevisions[node.artifactId] ?? null;
+    const revision = revisionId === null ? null : input.getArtifactRevision(revisionId);
+    const frames = revision !== null
+      && revision.id === revisionId
+      && revision.workspaceId === input.graph.workspaceId
+      && revision.artifactId === node.artifactId
+      ? readFrozenPrototypeRenderFrames(revision.renderSpec)
+      : null;
+    return {
+      nodeId: node.id,
+      artifactId: node.artifactId,
+      revisionId,
+      targetStates: frames === null
+        ? null
+        : frames.flatMap((frame) => frame.initialState === undefined ? [] : [frame.initialState]),
+    };
+  });
+  const prototypeEdges = input.graph.edges.filter(
+    (edge): edge is Extract<typeof edge, { kind: "prototype" }> => edge.kind === "prototype",
+  );
+  const resolutions = resolveFrozenPrototypeRelations({ endpoints, edges: prototypeEdges });
+  const nodesById = new Map(artifactNodes.map((node) => [node.id, node]));
+  return prototypeEdges
+    .filter((edge) => edge.sourceNodeId === targetNode.id || edge.targetNodeId === targetNode.id)
+    .sort((left, right) => compareBinary(left.id, right.id))
+    .map((edge): RelevantPrototypeRelation => {
+      const sourceNode = nodesById.get(edge.sourceNodeId);
+      const destinationNode = nodesById.get(edge.targetNodeId);
+      const resolution = resolutions.get(edge.id);
+      if (sourceNode === undefined || destinationNode === undefined || resolution === undefined) {
+        throw new ContextIntegrityError(
+          `Generation target prototype relation ${edge.id} has a missing or non-Artifact endpoint`,
+        );
+      }
+      const sourceIsTarget = sourceNode.id === targetNode.id;
+      const destinationIsTarget = destinationNode.id === targetNode.id;
+      const resolvedBinding = resolution.binding;
+      const binding = resolvedBinding === null ? null : {
+        sourceArtifactId: resolvedBinding.sourceArtifactId,
+        sourceRevisionId: resolvedBinding.sourceRevisionId,
+        sourceLocator: {
+          designNodeId: resolvedBinding.sourceLocator.designNodeId,
+          sourcePath: resolvedBinding.sourceLocator.sourcePath ?? null,
+          selector: resolvedBinding.sourceLocator.selector ?? null,
+        },
+        trigger: resolvedBinding.trigger,
+        targetArtifactId: resolvedBinding.targetArtifactId,
+        targetState: resolvedBinding.targetState ?? null,
+      };
+      const transition = resolution.transition === null ? null : {
+        type: resolution.transition.type,
+        durationMs: resolution.transition.durationMs,
+        easing: resolution.transition.easing ?? null,
+      };
+      return {
+        edgeId: edge.id,
+        source: {
+          nodeId: sourceNode.id,
+          artifactId: sourceNode.artifactId,
+          kind: sourceNode.kind,
+          name: sourceNode.name,
+          revisionId: input.snapshot.artifactRevisions[sourceNode.artifactId] ?? null,
+        },
+        target: {
+          nodeId: destinationNode.id,
+          artifactId: destinationNode.artifactId,
+          kind: destinationNode.kind,
+          name: destinationNode.name,
+          revisionId: input.snapshot.artifactRevisions[destinationNode.artifactId] ?? null,
+        },
+        targetArtifactRole: sourceIsTarget && destinationIsTarget
+          ? "both"
+          : sourceIsTarget
+            ? "source"
+            : "target",
+        status: resolution.status,
+        binding,
+        transition,
+        brokenReason: resolution.status === "broken" ? resolution.detail : null,
+      };
+    });
 }
 
 class FrozenTaskContextSource implements ContextCandidateSource {
@@ -1996,9 +2316,11 @@ class FrozenTaskContextSource implements ContextCandidateSource {
   #targetCandidate(): ContextCandidate {
     const task = this.#input.task;
     const content = stableStringify({
-      protocol: this.#artifactExecutionProfile === null && this.#resourceExecutionProfile === null
-        ? "dezin.generation-target-context.v1"
-        : TARGET_CONTEXT_PROTOCOL,
+      protocol: this.#artifactExecutionProfile !== null
+        ? ARTIFACT_TARGET_CONTEXT_PROTOCOL
+        : this.#resourceExecutionProfile !== null
+          ? RESOURCE_TARGET_CONTEXT_PROTOCOL
+          : "dezin.generation-target-context.v1",
       projectId: this.#input.projectId,
       workspaceId: task.workspaceId,
       planId: task.planId,
@@ -2014,7 +2336,10 @@ class FrozenTaskContextSource implements ContextCandidateSource {
       kernelRevisionId: this.#kernel.id,
       ...(this.#artifactExecutionProfile === null
         ? {}
-        : { artifactExecutionProfile: this.#artifactExecutionProfile }),
+        : {
+            relevantPrototypeRelations: this.#relevantPrototypeRelations(),
+            artifactExecutionProfile: this.#artifactExecutionProfile,
+          }),
       ...(this.#resourceExecutionProfile === null
         ? {}
         : { resourceExecutionProfile: this.#resourceExecutionProfile }),
@@ -2057,6 +2382,16 @@ class FrozenTaskContextSource implements ContextCandidateSource {
     });
   }
 
+  #relevantPrototypeRelations(): readonly RelevantPrototypeRelation[] {
+    if (this.#input.task.target.type !== "artifact") return [];
+    return buildRelevantPrototypeRelations({
+      graph: this.#graph,
+      snapshot: this.#snapshot,
+      targetArtifactId: this.#input.task.target.id,
+      getArtifactRevision: (revisionId) => this.#workspace.getArtifactRevision(revisionId),
+    });
+  }
+
   #artifactCandidate(
     artifactId: string,
     revisionId: string,
@@ -2068,12 +2403,13 @@ class FrozenTaskContextSource implements ContextCandidateSource {
     const revision = this.#workspace.getArtifactRevision(revisionId);
     const checksum = this.#workspace.getArtifactRevisionContextChecksum(revisionId);
     if (!artifact || !revision || checksum === null || !SHA256.test(checksum)
+      || !this.#workspace.isArtifactRevisionPublished(revisionId)
       || artifact.id !== artifactId || artifact.workspaceId !== this.#input.task.workspaceId
       || artifact.archivedAt !== null || revision.id !== revisionId
       || revision.workspaceId !== artifact.workspaceId || revision.artifactId !== artifact.id) {
       throw new BlockedContextError(
         [revisionId],
-        `Artifact Revision ${revisionId} is unavailable or foreign`,
+        `Artifact Revision ${revisionId} is unavailable, unpublished, or foreign`,
       );
     }
     const dependencies = this.#workspace.listArtifactRevisionDependencies(revision.id);
@@ -2115,7 +2451,10 @@ class FrozenTaskContextSource implements ContextCandidateSource {
       (node) => node.kind !== "resource" && node.artifactId === this.#input.task.target.id,
     );
     if (!targetNode) return [];
-    const byRevision = new Map<string, ContextCandidate>();
+    const byRevision = new Map<string, {
+      artifactId: string;
+      edgeIds: Set<string>;
+    }>();
     for (const edge of this.#graph.edges) {
       if (edge.kind !== "prototype"
         || (edge.sourceNodeId !== targetNode.id && edge.targetNodeId !== targetNode.id)) continue;
@@ -2124,15 +2463,28 @@ class FrozenTaskContextSource implements ContextCandidateSource {
       if (!neighbor || neighbor.kind === "resource") continue;
       const revisionId = this.#snapshot.artifactRevisions[neighbor.artifactId];
       if (!revisionId) continue;
-      byRevision.set(revisionId, this.#artifactCandidate(
+      const existing = byRevision.get(revisionId);
+      if (existing !== undefined && existing.artifactId !== neighbor.artifactId) {
+        throw new ContextIntegrityError("Prototype-neighbor Revision resolves to multiple Artifacts");
+      }
+      if (existing === undefined) {
+        byRevision.set(revisionId, { artifactId: neighbor.artifactId, edgeIds: new Set([edge.id]) });
+      } else {
+        existing.edgeIds.add(edge.id);
+      }
+    }
+    return [...byRevision.entries()]
+      .map(([revisionId, neighbor]) => this.#artifactCandidate(
         neighbor.artifactId,
         revisionId,
         "prototype-neighbor",
         "exact prototype-neighbor Artifact Revision",
-        { prototypeEdgeId: edge.id, targetArtifactId: this.#input.task.target.id },
-      ));
-    }
-    return [...byRevision.values()].sort((left, right) => compareBinary(left.ref.id, right.ref.id));
+        {
+          prototypeEdgeIds: [...neighbor.edgeIds].sort(compareBinary),
+          targetArtifactId: this.#input.task.target.id,
+        },
+      ))
+      .sort((left, right) => compareBinary(left.ref.id, right.ref.id));
   }
 }
 
@@ -2307,112 +2659,6 @@ async function frozenSharinganCaptureTaskSemantic(input: {
   }
 }
 
-function researchDirectionStrings(
-  value: unknown,
-  label: string,
-  minimum: number,
-  maximum: number,
-): string[] {
-  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) {
-    throw new ContextIntegrityError(`${label} is invalid`);
-  }
-  return value.map((entry, index) => nonEmptyString(entry, `${label} ${index}`));
-}
-
-function directionFromImmutableResearchBundle(input: {
-  content: string;
-  directionId: string;
-  workspaceId: string;
-  resourceId: string;
-}): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.content) as unknown;
-  } catch {
-    throw new ContextIntegrityError("Artifact execution Research Revision is not valid JSON");
-  }
-  const bundle = plainRecord(parsed, "Artifact execution Research bundle");
-  if (bundle.format !== "dezin-research-resource-bundle"
-    || (bundle.version !== 1 && bundle.version !== 2 && bundle.version !== 3)
-    || !Array.isArray(bundle.directions) || bundle.directions.length < 1 || bundle.directions.length > 16) {
-    throw new ContextIntegrityError("Artifact execution Research bundle protocol is invalid");
-  }
-  const version = bundle.version;
-  const scope = plainRecord(bundle.scope, "Artifact execution Research bundle scope");
-  if (scope.workspaceId !== input.workspaceId || scope.resourceId !== input.resourceId) {
-    throw new ContextIntegrityError("Artifact execution Research bundle ownership is invalid");
-  }
-  const matches = bundle.directions.map((entry, index) => {
-    const direction = plainRecord(entry, `Artifact execution Research direction ${index}`);
-    const baseKeys = [
-      "id", "title", "thesis", "visualLanguage", "interactionPrinciples", "risks", "findingIds",
-    ];
-    exactKeys(direction, version === 1 ? baseKeys : [
-      ...baseKeys, "evidenceStatus", "evidenceFindingIds", "hypothesisFindingIds",
-    ], `Artifact execution Research direction ${index}`);
-    const findingIds = researchDirectionStrings(
-      direction.findingIds,
-      `Artifact execution Research direction ${index} finding ids`,
-      1,
-      32,
-    );
-    if (new Set(findingIds).size !== findingIds.length) {
-      throw new ContextIntegrityError(`Artifact execution Research direction ${index} finding ids are invalid`);
-    }
-    const normalized = {
-      id: nonEmptyString(direction.id, `Artifact execution Research direction ${index} id`),
-      title: nonEmptyString(direction.title, `Artifact execution Research direction ${index} title`),
-      thesis: nonEmptyString(direction.thesis, `Artifact execution Research direction ${index} thesis`),
-      visualLanguage: researchDirectionStrings(
-        direction.visualLanguage,
-        `Artifact execution Research direction ${index} visual language`,
-        2,
-        16,
-      ),
-      interactionPrinciples: researchDirectionStrings(
-        direction.interactionPrinciples,
-        `Artifact execution Research direction ${index} interaction principles`,
-        1,
-        16,
-      ),
-      risks: researchDirectionStrings(
-        direction.risks,
-        `Artifact execution Research direction ${index} risks`,
-        1,
-        16,
-      ),
-      findingIds,
-    };
-    if (version === 1) return normalized;
-    const evidenceFindingIds = researchDirectionStrings(
-      direction.evidenceFindingIds,
-      `Artifact execution Research direction ${index} evidence finding ids`,
-      0,
-      32,
-    );
-    const hypothesisFindingIds = researchDirectionStrings(
-      direction.hypothesisFindingIds,
-      `Artifact execution Research direction ${index} hypothesis finding ids`,
-      0,
-      32,
-    );
-    const partition = [...evidenceFindingIds, ...hypothesisFindingIds];
-    const evidenceStatus = direction.evidenceStatus;
-    if ((evidenceStatus !== "evidence" && evidenceStatus !== "hypothesis")
-      || new Set(partition).size !== partition.length
-      || partition.length !== findingIds.length
-      || partition.some((findingId) => !findingIds.includes(findingId))
-      || (evidenceStatus === "evidence") !== (hypothesisFindingIds.length === 0)) {
-      throw new ContextIntegrityError(`Artifact execution Research direction ${index} evidence is invalid`);
-    }
-    return { ...normalized, evidenceStatus, evidenceFindingIds, hypothesisFindingIds };
-  }).filter((direction) => direction.id === input.directionId);
-  if (matches.length !== 1) {
-    throw new ContextIntegrityError("Chosen Artifact Research direction is missing or ambiguous in its pinned Revision");
-  }
-  return stableStringify(matches[0]);
-}
-
 interface ImmutableResearchDirectionSelection {
   readonly protocol: "dezin.research-direction-selection.v1";
   readonly version: 1;
@@ -2460,6 +2706,7 @@ async function frozenResearchDirection(input: {
   request: GenerationTaskContextRequest;
   store: Store;
   dataDir: string;
+  contextPacks: Pick<ContextPackRepository, "get">;
   signal: AbortSignal;
 }): Promise<FreezeArtifactExecutionProfileInput["researchDirection"]> {
   checkAbort(input.signal);
@@ -2523,15 +2770,27 @@ async function frozenResearchDirection(input: {
       signal: input.signal,
     });
     checkAbort(input.signal);
-    content = directionFromImmutableResearchBundle({
-      content: await readFile(destination, "utf8"),
+    const contextPackId = researchRevisionContextPackId(exact.revision.provenance);
+    const contextPack = contextPackId === null
+      ? null
+      : input.contextPacks.get(input.request.task.workspaceId, contextPackId);
+    const direction = selectResearchRevisionDirection({
+      bytes: await readFile(destination),
       directionId: selection.directionId,
       workspaceId: input.request.task.workspaceId,
       resourceId: exact.resource.id,
+      parentRevisionId: exact.revision.parentRevisionId,
+      revisionMetadata: exact.revision.metadata,
+      revisionProvenance: exact.revision.provenance,
+      contextPack,
     });
+    content = stableStringify(direction);
   } catch (error) {
     if (input.signal.aborted) throw abortReason(input.signal);
     if (error instanceof ContextIntegrityError) throw error;
+    if (error instanceof ResearchResourceRevisionError) {
+      throw new ContextIntegrityError(`Artifact execution Research Revision is invalid: ${error.message}`);
+    }
     throw new ContextIntegrityError("Artifact execution Research Revision payload changed or is invalid");
   } finally {
     await rm(materializationRoot, { recursive: true, force: true }).catch(() => {});
@@ -2605,6 +2864,10 @@ export function createProductionResourceExecutionProfileLoader(
 export function createProductionArtifactExecutionProfileLoader(
   options: ProductionArtifactExecutionProfileLoaderOptions,
 ): ArtifactExecutionProfileLoader {
+  const contextPacks = options.contextPacks ?? createWorkspaceContextPackRepository(
+    options.store.workspace,
+    { manifestRoot: options.dataDir },
+  );
   return async (request, signal) => {
     checkAbort(signal);
     if (request.task.target.type !== "artifact"
@@ -2642,6 +2905,7 @@ export function createProductionArtifactExecutionProfileLoader(
       request,
       store: options.store,
       dataDir: options.dataDir,
+      contextPacks,
       signal,
     });
 
@@ -2886,6 +3150,7 @@ export function createProductionGenerationTaskContextResolver(
       store: options.store,
       dataDir: options.dataDir,
       designRegistry: options.designRegistry,
+      contextPacks: repository,
       repositoryDirForWorkspace: options.repositoryDirForWorkspace,
     }),
     loadResourceExecutionProfile: createProductionResourceExecutionProfileLoader({
