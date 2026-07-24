@@ -8,7 +8,13 @@ import {
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
-import { Button } from "../components/ui/index.ts";
+import {
+  Button,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/index.ts";
 import type { AgentInfo, DesignSystemCard, EffectCard, Moodboard } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import type { AgentTranscriptEntry } from "./scoped-agent-session.ts";
@@ -97,11 +103,23 @@ export function WorkspaceAgentPanel({
   designSystemId?: string;
   onDesignSystemChange?: (id: string) => void;
 }) {
-  const visibleMessage = submissionBlockedReason ?? error;
-  const messageIsError = !submissionBlockedPending && visibleMessage !== null;
-  const messageId = submissionBlockedPending ? "workspace-agent-status" : "workspace-agent-error";
+  const pendingMessage = submissionBlockedPending
+    ? submissionBlockedReason ?? "Checking Agent availability…"
+    : null;
+  const activityMessage = pendingMessage
+    ?? (attaching ? "Saving immutable context…" : submitting ? submittingLabel : null);
+  const activityLabel = pendingMessage ?? `${title} activity`;
+  const visibleMessage = submissionBlockedPending ? error : submissionBlockedReason ?? error;
+  const messageIsError = visibleMessage !== null;
+  const messageId = "workspace-agent-error";
+  const activityMessageId = "workspace-agent-activity";
+  const describedBy = [
+    visibleMessage ? messageId : null,
+    activityMessage ? activityMessageId : null,
+  ].filter(Boolean).join(" ") || undefined;
   const canSubmit = onSubmit !== undefined
     && draft.trim().length > 0
+    && !submissionBlockedPending
     && !submitting
     && !attaching
     && submissionBlockedReason === null;
@@ -111,7 +129,7 @@ export function WorkspaceAgentPanel({
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "nearest" });
-  }, [transcript.length]);
+  }, [status, transcript.length]);
 
   const attachFiles = (files: FileList | File[]): void => {
     if (!onAttachFiles || attaching) return;
@@ -182,6 +200,25 @@ export function WorkspaceAgentPanel({
             ))}
           </ol>
         )}
+        {status && activityMessage === null ? (
+          <div
+            role="status"
+            aria-label={`${title} task status`}
+            aria-live="polite"
+            className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-border/70 bg-card/90 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground shadow-[0_1px_2px_rgb(0_0_0/0.03)]"
+          >
+            <span className="min-w-0 truncate">{status}</span>
+            {onStatusClick ? (
+              <button
+                type="button"
+                className="shrink-0 font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
+                onClick={onStatusClick}
+              >
+                {statusActionLabel}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div ref={transcriptEndRef} />
       </div>
 
@@ -247,7 +284,7 @@ export function WorkspaceAgentPanel({
             <textarea
               id="workspace-agent-draft"
               aria-label={draftLabel}
-              aria-describedby={visibleMessage ? messageId : undefined}
+              aria-describedby={describedBy}
               aria-invalid={messageIsError ? true : undefined}
               value={draft}
               onChange={(event) => onDraftChange(event.target.value)}
@@ -294,47 +331,56 @@ export function WorkspaceAgentPanel({
                 <span className="hidden rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground min-[300px]:inline">{scopeLabel}</span>
               </div>
               {onSubmit ? (
-                <button
-                  type="submit"
-                  aria-label={submitLabel}
-                  disabled={!canSubmit}
-                  className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-background transition-[opacity,transform] enabled:hover:scale-[1.03] enabled:active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  {submitting
-                    ? <LoaderCircle aria-hidden className="size-3.5 animate-spin" />
-                    : <ArrowUp aria-hidden className="size-3.5" />}
-                </button>
+                <TooltipProvider delayDuration={180}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="inline-flex shrink-0"
+                        tabIndex={activityMessage ? 0 : undefined}
+                        aria-label={activityMessage ?? undefined}
+                      >
+                        <button
+                          type="submit"
+                          aria-label={submitLabel}
+                          aria-describedby={activityMessage ? activityMessageId : undefined}
+                          aria-busy={activityMessage ? true : undefined}
+                          disabled={!canSubmit}
+                          className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-background transition-[opacity,transform] enabled:hover:scale-[1.03] enabled:active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
+                        >
+                          {activityMessage
+                            ? <LoaderCircle aria-hidden className="size-3.5 animate-spin motion-reduce:animate-none" />
+                            : <ArrowUp aria-hidden className="size-3.5" />}
+                        </button>
+                      </span>
+                    </TooltipTrigger>
+                    {activityMessage ? (
+                      <TooltipContent side="top" sideOffset={6}>{activityMessage}</TooltipContent>
+                    ) : null}
+                  </Tooltip>
+                </TooltipProvider>
               ) : null}
             </div>
           </div>
+          {activityMessage ? (
+            <span
+              id={activityMessageId}
+              role="status"
+              aria-label={activityLabel}
+              aria-live="polite"
+              aria-atomic="true"
+              className="sr-only"
+            >
+              {activityMessage}
+            </span>
+          ) : null}
           {visibleMessage ? (
             <p
               id={messageId}
-              role={submissionBlockedPending ? "status" : "alert"}
-              className={cn(
-                "mt-1.5 px-1 text-[10px] leading-4",
-                submissionBlockedPending ? "text-muted-foreground" : "text-destructive",
-              )}
+              role="alert"
+              className="mt-1.5 px-1 text-[10px] leading-4 text-destructive"
             >
               {visibleMessage}
             </p>
-          ) : submitting || attaching ? (
-            <p role="status" aria-label={`${title} activity`} aria-live="polite" className="mt-1.5 px-1 text-[10px] leading-4 text-muted-foreground">
-              {attaching ? "Saving immutable context…" : submittingLabel}
-            </p>
-          ) : status ? (
-            <div role="status" aria-label={`${title} task status`} aria-live="polite" className="mt-1.5 flex items-center justify-between gap-2 px-1 text-[10px] leading-4 text-muted-foreground">
-              <span className="min-w-0 truncate">{status}</span>
-              {onStatusClick ? (
-                <button
-                  type="button"
-                  className="shrink-0 font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
-                  onClick={onStatusClick}
-                >
-                  {statusActionLabel}
-                </button>
-              ) : null}
-            </div>
           ) : null}
         </form>
       </div>

@@ -1031,7 +1031,14 @@ test("Workspace Agent stays blocked until Agent discovery and Settings initializ
   fireEvent.change(draft, { target: { value: "Wait for exact provider context" } });
   const submit = screen.getByRole("button", { name: "Create proposal" });
   expect(submit).toBeDisabled();
-  expect(screen.getByText("Checking Agent availability…")).toBeInTheDocument();
+  const pendingStatus = screen.getByRole("status", { name: "Checking Agent availability…" });
+  expect(pendingStatus).toHaveClass("sr-only");
+  expect(pendingStatus).toHaveAttribute("aria-live", "polite");
+  expect(pendingStatus).toHaveAttribute("aria-atomic", "true");
+  expect(submit).toHaveAttribute("aria-describedby", pendingStatus.id);
+  expect(submit).toHaveAttribute("aria-busy", "true");
+  expect(submit.querySelector(".animate-spin")).not.toBeNull();
+  expect(screen.queryByText("Checking Agent availability…", { selector: "p" })).not.toBeInTheDocument();
 
   await act(async () => {
     resolveAgents([
@@ -1047,6 +1054,9 @@ test("Workspace Agent stays blocked until Agent discovery and Settings initializ
     await settings;
   });
   await waitFor(() => expect(submit).toBeEnabled());
+  expect(submit).not.toHaveAttribute("aria-busy");
+  expect(submit).not.toHaveAttribute("aria-describedby");
+  expect(screen.queryByRole("status", { name: "Checking Agent availability…" })).not.toBeInTheDocument();
 });
 
 test("Workspace Agent waits for the latest serialized Design System write before submitting", async () => {
