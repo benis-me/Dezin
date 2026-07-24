@@ -16,6 +16,11 @@ import { navigate } from "../../router.tsx";
 
 export type GenerationPlanConnection = "connecting" | "live" | "offline" | "error" | "settled";
 
+export interface GenerationPlanTargetLabels {
+  readonly artifacts: ReadonlyMap<string, string>;
+  readonly resources: ReadonlyMap<string, string>;
+}
+
 const TERMINAL_PLAN_STATUSES = new Set<GenerationPlan["status"]>([
   "succeeded",
   "failed",
@@ -100,8 +105,15 @@ function taskDisplayState(projectId: string, task: GenerationTask): ReturnType<t
   return researchSelectionDestinations(projectId, task).length > 0 ? "active" : displayState(task.status);
 }
 
-function targetLabel(task: GenerationTask): string {
+function targetLabel(
+  task: GenerationTask,
+  targetLabels?: GenerationPlanTargetLabels,
+): string {
   if (task.target.type === "workspace") return "Workspace";
+  const ownedLabel = task.target.type === "artifact"
+    ? targetLabels?.artifacts.get(task.target.id)
+    : targetLabels?.resources.get(task.target.id);
+  if (typeof ownedLabel === "string" && ownedLabel.trim().length > 0) return ownedLabel.trim();
   const plain = task.target.id
     .replace(/^artifact-/, "")
     .replace(/^resource-/, "")
@@ -110,9 +122,21 @@ function targetLabel(task: GenerationTask): string {
   return plain.length > 0 ? plain.replace(/\b\w/g, (character) => character.toUpperCase()) : task.target.id;
 }
 
+const LOCAL_FAILURE_PATH =
+  /\/(?:Users|home|private|tmp|var|opt|usr|Applications|Volumes)(?:\/[^\s/]+)+/g;
+
+function publicFailureMessage(value: string): string {
+  return value.replace(LOCAL_FAILURE_PATH, (path) => {
+    const name = path.split("/").at(-1)?.replace(/[),.;:'"]+$/g, "") ?? "";
+    return /^[a-zA-Z0-9._-]{1,80}$/.test(name) ? name : "local path";
+  });
+}
+
 function taskMessage(task: GenerationTask): string | null {
   const message = task.error?.message;
-  if (typeof message === "string" && message.trim().length > 0) return message.trim();
+  if (typeof message === "string" && message.trim().length > 0) {
+    return publicFailureMessage(message.trim());
+  }
   return task.blockedReason;
 }
 
@@ -120,7 +144,7 @@ function planMessage(plan: GenerationPlan): string | null {
   if (plan.compileError === null) return null;
   const message = plan.compileError.message;
   return typeof message === "string" && message.trim().length > 0
-    ? message.trim()
+    ? publicFailureMessage(message.trim())
     : "The approved proposal could not be compiled.";
 }
 
@@ -210,6 +234,7 @@ export function GenerationPlanPanel({
   detail,
   connection,
   busyAction,
+  targetLabels,
   onSelectPlan,
   onRetry,
   onCancel,
@@ -220,6 +245,7 @@ export function GenerationPlanPanel({
   detail: GenerationPlanDetail;
   connection: GenerationPlanConnection;
   busyAction: string | null;
+  targetLabels?: GenerationPlanTargetLabels;
   onSelectPlan: (planId: string) => void;
   onRetry: (taskId: string, mode: GenerationTaskRetryMode) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
@@ -315,7 +341,7 @@ export function GenerationPlanPanel({
                 <div className="dezin-generation-plan__task-topline">
                   <div>
                     <span>{label}</span>
-                    <strong>{targetLabel(task)}</strong>
+                    <strong>{targetLabel(task, targetLabels)}</strong>
                   </div>
                   <span className="dezin-generation-plan__task-status">
                     {awaitingDirectionSelection ? "Awaiting direction selection" : statusLabel(task.status)}
@@ -424,11 +450,13 @@ function preferredPlan(plans: readonly GenerationPlan[], preferredPlanId: string
 export function GenerationPlanInspector({
   projectId,
   preferredPlanId,
+  targetLabels,
   onWorkspaceChanged,
   onClose,
 }: {
   projectId: string;
   preferredPlanId: string | null;
+  targetLabels?: GenerationPlanTargetLabels;
   onWorkspaceChanged?: () => void;
   onClose?: () => void;
 }) {
@@ -734,6 +762,7 @@ export function GenerationPlanInspector({
         detail={detail}
         connection={connection}
         busyAction={busyAction}
+        targetLabels={targetLabels}
         onSelectPlan={selectPlan}
         onRetry={retry}
         onCancel={cancel}

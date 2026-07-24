@@ -239,10 +239,12 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
 
     const responseBody = await response.text();
     assert.equal(response.status, 201, responseBody);
-    const proposal = JSON.parse(responseBody) as { workspaceId: string; status: string; review: { kind: string } };
+    const proposal = JSON.parse(responseBody) as WorkspaceProposalRecord;
     assert.equal(proposal.workspaceId, ready.workspace.id);
     assert.equal(proposal.status, "draft");
     assert.equal(proposal.review.kind, "none");
+    assert.equal(proposal.generation.kind, "workspace-generation");
+    assert.deepEqual(proposal.generation.agent, FROZEN_CODEBUDDY_AGENT);
     assert.deepEqual(turns[0], {
       scope: { type: "workspace", id: ready.workspace.id, workspaceId: ready.workspace.id },
       intent: "plan",
@@ -253,6 +255,37 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       graphRevision: ready.graph.revision,
       selection: [{ kind: "node", id: "selected-node" }],
     });
+
+    if (proposal.generation.kind !== "workspace-generation") {
+      assert.fail("Workspace Agent fixture must return a Workspace generation Proposal");
+    }
+    const substitutedAgent = {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-terra",
+    };
+    const substituted = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedProposalRevision: proposal.revision,
+          operations: proposal.operations,
+          layoutOperations: proposal.layoutOperations,
+          generation: { ...proposal.generation, agent: substitutedAgent },
+          rationale: proposal.rationale,
+          assumptions: proposal.assumptions,
+        }),
+      },
+    );
+    assert.equal(substituted.status, 422);
+    const substitutedBody = await substituted.json() as { error: string; code: string };
+    assert.equal(substitutedBody.code, "workspace_proposal_validation_error");
+    assert.match(substitutedBody.error, /frozen origin Agent selection/i);
+    const afterSubstitution = store.workspace.getProposalForProject(project.id, proposal.id);
+    assert.equal(afterSubstitution.revision, proposal.revision);
+    assert.deepEqual(afterSubstitution.generation, proposal.generation);
 
     const foreign = await fetch(endpoint, {
       method: "POST",

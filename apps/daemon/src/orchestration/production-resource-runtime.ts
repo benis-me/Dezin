@@ -61,7 +61,15 @@ import type {
   ProductionSharinganCaptureExportRequest,
   ProductionSharinganCaptureExportResult,
 } from "./production-resource-generators.ts";
-import { RESEARCH_EVIDENCE_FETCH_POLICY } from "./production-resource-generators.ts";
+import {
+  MAX_MOODBOARD_ASSETS,
+  MAX_RESEARCH_DIRECTIONS,
+  MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+  MIN_RESEARCH_DIRECTIONS,
+  MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+  MOODBOARD_ASPECT_RATIOS,
+  RESEARCH_EVIDENCE_FETCH_POLICY,
+} from "./production-resource-generators.ts";
 import {
   encodeSharinganCaptureResourceBundle,
   normalizeSharinganCaptureBundlePath,
@@ -73,6 +81,7 @@ import {
 import {
   SafeStructuredAgentError,
   runSafeStructuredAgent,
+  type SafeStructuredAgentFailureDetails,
   type SafeStructuredAgentRequest,
   type SafeStructuredAgentResult,
 } from "./safe-structured-agent.ts";
@@ -94,6 +103,7 @@ export type ProductionResourceRuntimeErrorCode =
   | "RESOURCE_AGENT_REQUEST_INVALID"
   | "RESOURCE_AGENT_PROVIDER_UNAVAILABLE"
   | "RESOURCE_AGENT_PROCESS_FAILED"
+  | "RESOURCE_AGENT_QUOTA_EXHAUSTED"
   | "RESOURCE_AGENT_TIMED_OUT"
   | "RESOURCE_AGENT_OUTPUT_BUDGET_EXCEEDED"
   | "RESOURCE_AGENT_OUTPUT_INVALID"
@@ -118,17 +128,20 @@ export type ProductionResourceRuntimeErrorCode =
 export class ProductionResourceRuntimeError extends Error {
   readonly code: ProductionResourceRuntimeErrorCode;
   readonly failureClass: GenerationTaskFailureClass;
+  readonly details?: Readonly<SafeStructuredAgentFailureDetails>;
 
   constructor(
     code: ProductionResourceRuntimeErrorCode,
     message: string,
     failureClass: GenerationTaskFailureClass,
     cause?: unknown,
+    details?: SafeStructuredAgentFailureDetails,
   ) {
     super(message);
     this.name = "ProductionResourceRuntimeError";
     this.code = code;
     this.failureClass = failureClass;
+    if (details !== undefined) this.details = Object.freeze({ ...details });
     if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
   }
 }
@@ -138,8 +151,45 @@ function fail(
   message: string,
   failureClass: GenerationTaskFailureClass,
   cause?: unknown,
+  details?: SafeStructuredAgentFailureDetails,
 ): never {
-  throw new ProductionResourceRuntimeError(code, message, failureClass, cause);
+  throw new ProductionResourceRuntimeError(code, message, failureClass, cause, details);
+}
+
+function safeStructuredFailureDetails(error: unknown): SafeStructuredAgentFailureDetails | undefined {
+  if (!(error instanceof SafeStructuredAgentError) || error.details === undefined) return undefined;
+  const { reasonCode, httpStatus, retryable } = error.details;
+  if ((reasonCode !== "quota-exhausted"
+      && reasonCode !== "rate-limited"
+      && reasonCode !== "upstream-unavailable")
+    || typeof retryable !== "boolean"
+    || (httpStatus !== undefined
+      && (!Number.isSafeInteger(httpStatus) || httpStatus < 100 || httpStatus > 599))) {
+    return undefined;
+  }
+  return Object.freeze({
+    reasonCode,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    retryable,
+  });
+}
+
+function failResourceAgentTransport(
+  error: unknown,
+  fallbackCode: ProductionResourceRuntimeErrorCode,
+  fallbackMessage: string,
+): never {
+  const details = safeStructuredFailureDetails(error);
+  if (error instanceof SafeStructuredAgentError && error.code === "quota-exhausted") {
+    return fail(
+      "RESOURCE_AGENT_QUOTA_EXHAUSTED",
+      "Resource Agent provider quota is exhausted",
+      "agent-transport",
+      error,
+      details ?? { reasonCode: "quota-exhausted", httpStatus: 429, retryable: false },
+    );
+  }
+  return fail(fallbackCode, fallbackMessage, "agent-transport", error, details);
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -205,6 +255,8 @@ function structuredContract(kind: ProductionResourceAgentRequest["kind"]): strin
       "Each support: sourceId, quote. quote must be an exact substring of that source excerpt and directly support the finding statement; source ids without claim-specific quotes are forbidden.",
       "Each design principle: id, title, rationale, findingIds.",
       "Each direction: id, title, thesis, visualLanguage, interactionPrinciples, risks, findingIds.",
+      `directions must be a JSON array with ${MIN_RESEARCH_DIRECTIONS}-${MAX_RESEARCH_DIRECTIONS} items.`,
+      `For every direction, visualLanguage must be a JSON array with ${MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS}-${MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS} non-empty strings; interactionPrinciples and risks must each be JSON arrays with 1-16 non-empty strings.`,
     ].join("\n");
   }
   return [
@@ -213,7 +265,9 @@ function structuredContract(kind: ProductionResourceAgentRequest["kind"]): strin
     "Each palette entry: name, value(canonical #RRGGBB), role.",
     "Each typography entry: role, family, treatment.",
     "Each reference: id, title, locator, notes.",
+    `assetSpecs must be a JSON array with 1-${MAX_MOODBOARD_ASSETS} items.`,
     "Each Asset spec: id, fileName, prompt, caption, aspectRatio, referenceIds.",
+    `For every Asset spec, aspectRatio must be exactly one of: ${MOODBOARD_ASPECT_RATIOS.join(", ")}.`,
     "Never return image bytes, base64, MIME, checksum, or pixel dimensions. The daemon generates and independently reviews every image from the Asset specs.",
   ].join("\n");
 }
@@ -298,17 +352,20 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
   readonly #timeoutMs: number;
   readonly #createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
   readonly #resolveClaudeExecutable: (() => string) | undefined;
+  readonly #resolveCodeBuddyExecutable: (() => string) | undefined;
 
   constructor(input: {
     store: Store;
     timeoutMs: number;
     createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
     resolveClaudeExecutable?: () => string;
+    resolveCodeBuddyExecutable?: () => string;
   }) {
     this.#store = input.store;
     this.#timeoutMs = input.timeoutMs;
     this.#createSpawner = input.createSpawner;
     this.#resolveClaudeExecutable = input.resolveClaudeExecutable;
+    this.#resolveCodeBuddyExecutable = input.resolveCodeBuddyExecutable;
   }
 
   async generateStructured(request: ProductionResourceAgentRequest): Promise<ProductionResourceAgentResult> {
@@ -359,6 +416,9 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
           ...(this.#resolveClaudeExecutable === undefined
             ? {}
             : { resolveClaudeExecutable: this.#resolveClaudeExecutable }),
+          ...(this.#resolveCodeBuddyExecutable === undefined
+            ? {}
+            : { resolveCodeBuddyExecutable: this.#resolveCodeBuddyExecutable }),
           stderrLimitBytes: STDERR_LIMIT_BYTES,
         });
       } catch (error) {
@@ -382,7 +442,11 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
         if (error instanceof SafeStructuredAgentError && error.code === "timed-out") {
           return fail("RESOURCE_AGENT_TIMED_OUT", "Resource Agent exceeded its wall-clock budget", "agent-transport", error);
         }
-        return fail("RESOURCE_AGENT_PROCESS_FAILED", "Resource Agent process failed", "agent-transport", error);
+        return failResourceAgentTransport(
+          error,
+          "RESOURCE_AGENT_PROCESS_FAILED",
+          "Resource Agent process failed",
+        );
       }
       checkAbort(request.signal);
       let output: unknown;
@@ -648,6 +712,7 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
   readonly #timeoutMs: number;
   readonly #createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
   readonly #resolveClaudeExecutable: (() => string) | undefined;
+  readonly #resolveCodeBuddyExecutable: (() => string) | undefined;
   readonly #review: ResourceReviewTransport;
 
   constructor(input: {
@@ -655,12 +720,14 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
     timeoutMs: number;
     createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
     resolveClaudeExecutable?: () => string;
+    resolveCodeBuddyExecutable?: () => string;
     review: ResourceReviewTransport;
   }) {
     this.#store = input.store;
     this.#timeoutMs = input.timeoutMs;
     this.#createSpawner = input.createSpawner;
     this.#resolveClaudeExecutable = input.resolveClaudeExecutable;
+    this.#resolveCodeBuddyExecutable = input.resolveCodeBuddyExecutable;
     this.#review = input.review;
   }
 
@@ -700,6 +767,9 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
         ...(this.#resolveClaudeExecutable === undefined
           ? {}
           : { resolveClaudeExecutable: this.#resolveClaudeExecutable }),
+        ...(this.#resolveCodeBuddyExecutable === undefined
+          ? {}
+          : { resolveCodeBuddyExecutable: this.#resolveCodeBuddyExecutable }),
         stderrLimitBytes: STDERR_LIMIT_BYTES,
       });
       if (result.providerId !== reviewer.providerId) {
@@ -734,7 +804,11 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
       });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
-      return fail("RESEARCH_GROUNDEDNESS_REVIEW_FAILED", "Research groundedness reviewer failed", "agent-transport", error);
+      return failResourceAgentTransport(
+        error,
+        "RESEARCH_GROUNDEDNESS_REVIEW_FAILED",
+        "Research groundedness reviewer failed",
+      );
     }
     const reviewCode = "RESEARCH_GROUNDEDNESS_REVIEW_FAILED" as const;
     const output = reviewObject(result.text, "Research groundedness reviewer", reviewCode);
@@ -826,7 +900,11 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
       });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
-      return fail("MOODBOARD_QUALITY_REVIEW_FAILED", "Moodboard visual reviewer failed", "agent-transport", error);
+      return failResourceAgentTransport(
+        error,
+        "MOODBOARD_QUALITY_REVIEW_FAILED",
+        "Moodboard visual reviewer failed",
+      );
     }
     const reviewCode = "MOODBOARD_QUALITY_REVIEW_FAILED" as const;
     const output = reviewObject(result.text, "Moodboard visual reviewer", reviewCode);
@@ -1525,6 +1603,8 @@ export interface ProductionResourceRuntimeOptions {
   readonly createSpawner?: (options: NodeSpawnerOptions) => ProcessSpawner;
   /** Test seam; production always resolves the official Claude CLI from fixed install roots. */
   readonly resolveClaudeExecutable?: () => string;
+  /** Test seam; production always resolves the official CodeBuddy CLI from fixed install roots. */
+  readonly resolveCodeBuddyExecutable?: () => string;
   /** Test seam; production reuses the canonical provider-aware fetch boundary. */
   readonly providerFetch?: typeof fetch;
   /** Test seam; production reuses the canonical AI SDK image request implementation. */
@@ -1568,6 +1648,7 @@ export function createProductionResourceRuntimePorts(
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_AGENT_TIMEOUT_MS
     || (options.createSpawner !== undefined && typeof options.createSpawner !== "function")
     || (options.resolveClaudeExecutable !== undefined && typeof options.resolveClaudeExecutable !== "function")
+    || (options.resolveCodeBuddyExecutable !== undefined && typeof options.resolveCodeBuddyExecutable !== "function")
     || (options.providerFetch !== undefined && typeof options.providerFetch !== "function")
     || (options.requestImage !== undefined && typeof options.requestImage !== "function")
     || (options.reviewTransport !== undefined && typeof options.reviewTransport !== "function")
@@ -1591,6 +1672,9 @@ export function createProductionResourceRuntimePorts(
     ...(options.resolveClaudeExecutable === undefined
       ? {}
       : { resolveClaudeExecutable: options.resolveClaudeExecutable }),
+    ...(options.resolveCodeBuddyExecutable === undefined
+      ? {}
+      : { resolveCodeBuddyExecutable: options.resolveCodeBuddyExecutable }),
     review: options.reviewTransport ?? runSafeStructuredAgent,
   });
   return Object.freeze({
@@ -1601,6 +1685,9 @@ export function createProductionResourceRuntimePorts(
       ...(options.resolveClaudeExecutable === undefined
         ? {}
         : { resolveClaudeExecutable: options.resolveClaudeExecutable }),
+      ...(options.resolveCodeBuddyExecutable === undefined
+        ? {}
+        : { resolveCodeBuddyExecutable: options.resolveCodeBuddyExecutable }),
     }),
     ...(researchEvidence === undefined ? {} : { researchEvidence }),
     researchGroundedness: quality,

@@ -67,6 +67,31 @@ describe("prototype edge", () => {
     expect(geometry.labelX).toBeLessThan(440);
   });
 
+  test("separates sibling self-loop lanes above and below the page", () => {
+    const upper = prototypeEdgeGeometry({
+      source: "page-home",
+      target: "page-home",
+      sourceX: 440,
+      sourceY: 111,
+      targetX: 280,
+      targetY: 111,
+      lane: -0.5,
+    });
+    const lower = prototypeEdgeGeometry({
+      source: "page-home",
+      target: "page-home",
+      sourceX: 440,
+      sourceY: 111,
+      targetX: 280,
+      targetY: 111,
+      lane: 0.5,
+    });
+
+    expect(upper.path).not.toBe(lower.path);
+    expect(upper.labelY).toBeLessThan(111);
+    expect(lower.labelY).toBeGreaterThan(111);
+  });
+
   test("keeps planned flows continuous at overview zoom", () => {
     render(<PrototypeEdge {...baseProps} />);
 

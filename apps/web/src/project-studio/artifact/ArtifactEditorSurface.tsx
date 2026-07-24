@@ -254,6 +254,7 @@ export function useArtifactEditorController({
   );
   const activeFrame = frames.find((frame) => frame.id === activeFrameId) ?? frames[0] ?? PAGE_FRAME;
   const bridge = usePreviewBridge({
+    api,
     iframeRef,
     previewSrc: preview.status === "ready" ? preview.lease.url : null,
     projectId,
@@ -262,6 +263,8 @@ export function useArtifactEditorController({
     frame: activeFrame,
     enabled: artifactId !== null && artifact !== null,
     pickerEnabled: !presentation,
+    presentationEnabled: presentation,
+    onPresentationExitRequested: () => setPresentation(false),
   });
   const retryPreview = useCallback(() => {
     bridge.clearSelection();

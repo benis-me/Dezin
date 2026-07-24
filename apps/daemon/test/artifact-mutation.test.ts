@@ -95,6 +95,68 @@ function createMutationFixture(options: {
   };
 }
 
+function createFlatContextPackedMutationFixture(options: {
+  contextPackHash?: string | null;
+  renderEntry?: string;
+  blockingCanonicalAncestor?: boolean;
+} = {}) {
+  const fixture = createMutationFixture();
+  const bundle = fixture.store.workspace.getBundleByProjectId(fixture.projectId)!;
+  const artifactId = "flat-context-packed-component";
+  const trackId = "flat-context-packed-component-track";
+  const graph = fixture.store.workspace.applyGraphCommands(fixture.projectId, {
+    baseGraphRevision: bundle.graph.revision,
+    expectedSnapshotId: fixture.snapshot.id,
+    commands: [{
+      id: "add-flat-context-packed-component",
+      type: "add-node",
+      node: {
+        id: "flat-context-packed-component-node",
+        kind: "component",
+        name: "Flat Context Packed Component",
+        artifactId,
+        createIdentity: { initialTrackId: trackId },
+      },
+    }],
+  });
+  const artifact = fixture.store.workspace.getArtifact(artifactId)!;
+  let sourceCommitHash = fixture.revision.sourceCommitHash;
+  let sourceTreeHash = fixture.revision.sourceTreeHash;
+  if (options.blockingCanonicalAncestor) {
+    writeFileSync(join(fixture.root, artifact.sourceRoot.split("/", 1)[0]!), "not a directory\n", "utf8");
+    git(fixture.root, ["add", "--all"]);
+    git(fixture.root, ["commit", "-q", "-m", "block canonical Artifact root"]);
+    sourceCommitHash = git(fixture.root, ["rev-parse", "HEAD"]);
+    sourceTreeHash = git(fixture.root, ["rev-parse", "HEAD^{tree}"]);
+  }
+  const revision = fixture.store.workspace.createArtifactRevision({
+    artifactId,
+    trackId,
+    parentRevisionId: null,
+    sourceCommitHash,
+    sourceTreeHash,
+    kernelRevisionId: bundle.workspace.activeKernelRevisionId,
+    renderSpec: {
+      entry: options.renderEntry ?? "index.html",
+      frames: [{ id: "desktop", width: 1440, height: 900 }],
+    },
+    quality: { state: "unassessed", score: null, findings: [] },
+    contextPackHash: options.contextPackHash === undefined ? "f".repeat(64) : options.contextPackHash,
+    dependencies: [],
+    resourcePins: [],
+  });
+  const snapshot = fixture.store.workspace.publishArtifactRevision(revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  return {
+    ...fixture,
+    artifactId,
+    revision,
+    snapshot,
+  };
+}
+
 function resourcePublicRoot(resourceRevisionId: string): string {
   const key = createHash("sha256")
     .update("dezin-resource-revision-v1")
@@ -282,6 +344,183 @@ test("mutation request parsing is exhaustive and rejects smuggled command fields
     /expectedCurrentValue/i,
     "set-text must carry an exact compare-and-swap value",
   );
+});
+
+test("direct mutation preserves strict compatibility for older flat Context-Pack revisions", async () => {
+  const fixture = createFlatContextPackedMutationFixture();
+  try {
+    let validatedArtifactRoot: string | null = null;
+    const result = await applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      expectedHeadRevisionId: fixture.revision.id,
+      expectedSnapshotId: fixture.snapshot.id,
+      validateCandidateSource(candidate) {
+        validatedArtifactRoot = candidate.artifactRoot;
+      },
+      command: {
+        type: "set-text",
+        locator: { designNodeId: "headline", sourcePath: "index.html" },
+        expectedCurrentValue: "Old title",
+        value: "Flat revision edited safely",
+      },
+    });
+
+    const artifact = fixture.store.workspace.getArtifact(fixture.artifactId)!;
+    assert.equal(validatedArtifactRoot, ".", "validation must use the physical flat source root");
+    assert.equal(result.revision.artifactRoot, artifact.sourceRoot, "sealed Revision ownership stays canonical");
+    assert.equal(result.revision.contextPackHash, fixture.revision.contextPackHash);
+    assert.match(
+      git(fixture.root, ["show", `${result.revision.sourceCommitHash}:index.html`]),
+      /Flat revision edited safely/,
+    );
+    assert.equal(
+      git(fixture.root, ["ls-tree", "-r", "--name-only", result.revision.sourceCommitHash]),
+      "index.html",
+      "direct mutation must not rewrite published flat history into a new layout",
+    );
+    assert.match(
+      git(fixture.root, ["show", `${fixture.revision.sourceCommitHash}:index.html`]),
+      /Old title/,
+      "the immutable parent Revision remains unchanged",
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
+test("direct mutation does not treat arbitrary missing Artifact roots as flat generation history", async () => {
+  const fixture = createFlatContextPackedMutationFixture({ contextPackHash: null });
+  try {
+    await assert.rejects(applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      expectedHeadRevisionId: fixture.revision.id,
+      expectedSnapshotId: fixture.snapshot.id,
+      validateCandidateSource: fixture.validateCandidateSource,
+      command: {
+        type: "set-text",
+        locator: { designNodeId: "headline", sourcePath: "index.html" },
+        expectedCurrentValue: "Old title",
+        value: "Must not be written",
+      },
+    }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Artifact source root is unavailable/i);
+      assert.doesNotMatch(error.message, new RegExp(fixture.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("direct mutation requires the declared flat render entry before enabling compatibility", async () => {
+  const fixture = createFlatContextPackedMutationFixture({ renderEntry: "missing-preview.html" });
+  try {
+    await assert.rejects(applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      expectedHeadRevisionId: fixture.revision.id,
+      expectedSnapshotId: fixture.snapshot.id,
+      validateCandidateSource: fixture.validateCandidateSource,
+      command: {
+        type: "set-text",
+        locator: { designNodeId: "headline", sourcePath: "index.html" },
+        expectedCurrentValue: "Old title",
+        value: "Must not be written",
+      },
+    }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /flat generation entry is unavailable/i);
+      assert.doesNotMatch(error.message, new RegExp(fixture.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("direct mutation rejects a blob that blocks the canonical Artifact root", async () => {
+  const fixture = createFlatContextPackedMutationFixture({ blockingCanonicalAncestor: true });
+  try {
+    await assert.rejects(applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      expectedHeadRevisionId: fixture.revision.id,
+      expectedSnapshotId: fixture.snapshot.id,
+      validateCandidateSource: fixture.validateCandidateSource,
+      command: {
+        type: "set-text",
+        locator: { designNodeId: "headline", sourcePath: "index.html" },
+        expectedCurrentValue: "Old title",
+        value: "Must not be written",
+      },
+    }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Artifact source root.*(?:directory|invalid)/i);
+      assert.doesNotMatch(error.message, new RegExp(fixture.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("flat Context-Pack asset replacement scans closure from the physical source root", async () => {
+  const fixture = createFlatContextPackedMutationFixture();
+  try {
+    const firstRevisionId = addResourceRevision(fixture, "flat-first-cover", "image/png");
+    const secondRevisionId = addResourceRevision(fixture, "flat-second-cover", "image/png");
+    const first = await applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      validateCandidateSource: fixture.validateCandidateSource,
+      expectedHeadRevisionId: fixture.revision.id,
+      expectedSnapshotId: fixture.snapshot.id,
+      command: {
+        type: "set-asset",
+        locator: { designNodeId: "cover", sourcePath: "index.html" },
+        resourceRevisionId: firstRevisionId,
+      },
+      resolveAssetSource: assetResolver(fixture),
+    });
+    const second = await applyArtifactMutation({
+      store: fixture.store,
+      projectRoot: fixture.root,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      validateCandidateSource: fixture.validateCandidateSource,
+      expectedHeadRevisionId: first.revision.id,
+      expectedSnapshotId: first.snapshot.id,
+      command: {
+        type: "set-asset",
+        locator: { designNodeId: "cover", sourcePath: "index.html" },
+        resourceRevisionId: secondRevisionId,
+      },
+      resolveAssetSource: assetResolver(fixture),
+    });
+
+    assert.deepEqual(
+      fixture.store.workspace.listArtifactRevisionResourcePins(second.revision.id).map((pin) => ({
+        resourceId: pin.resourceId,
+        resourceRevisionId: pin.resourceRevisionId,
+      })),
+      [{ resourceId: "flat-second-cover", resourceRevisionId: secondRevisionId }],
+    );
+  } finally {
+    fixture.close();
+  }
 });
 
 test("set-text publishes an immutable Artifact Revision without mutating the canonical checkout", async () => {

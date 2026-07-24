@@ -202,17 +202,28 @@ export function ProjectCanvas({
     const surface = surfaceRef.current;
     if (!surface) return;
     let active = true;
+    let measurementFrame: number | null = null;
+    let pendingMeasurement: { measured: boolean; width: number } | null = null;
     const observer = new ResizeObserver((entries) => {
       if (!active) return;
       const entry = entries.find((candidate) => candidate.target === surface);
       if (!entry) return;
       const measured = entry.contentRect.width > 0 && entry.contentRect.height > 0;
-      setSurfaceMeasured((current) => current === measured ? current : measured);
-      if (measured && entry.contentRect.width < OUTLINE_SAFE_SURFACE_WIDTH) setOutlineOpen(false);
+      pendingMeasurement = { measured, width: entry.contentRect.width };
+      if (measurementFrame !== null) return;
+      measurementFrame = window.requestAnimationFrame(() => {
+        measurementFrame = null;
+        const measurement = pendingMeasurement;
+        pendingMeasurement = null;
+        if (!active || !measurement) return;
+        setSurfaceMeasured((current) => current === measurement.measured ? current : measurement.measured);
+        if (measurement.measured && measurement.width < OUTLINE_SAFE_SURFACE_WIDTH) setOutlineOpen(false);
+      });
     });
     observer.observe(surface);
     return () => {
       active = false;
+      if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
       observer.disconnect();
     };
   }, []);
@@ -775,6 +786,11 @@ export function ProjectCanvas({
   const relationshipDeleteLabel = selectedRelationshipHasDerivedUse
     ? "Uses relationships are derived and read-only"
     : "Delete selected relationship";
+  const relationshipDeleteDisabledReason = selectedRelationshipHasDerivedUse
+    ? relationshipDeleteLabel
+    : relationshipMutationPending
+      ? "Relationship removal is in progress"
+      : "Select a relationship to delete";
 
   const deleteSelectedRelationships = useCallback(async (): Promise<void> => {
     if (relationshipMutationPendingRef.current) return;
@@ -982,6 +998,7 @@ export function ProjectCanvas({
           canDeleteGroup={canDeleteGroup}
           canDeleteRelationship={canDeleteRelationship}
           relationshipDeleteLabel={relationshipDeleteLabel}
+          relationshipDeleteDisabledReason={relationshipDeleteDisabledReason}
           onToolChange={setTool}
           onEdgeFilterChange={handleEdgeFilterChange}
           onToggleOutline={() => setOutlineOpen((open) => !open)}

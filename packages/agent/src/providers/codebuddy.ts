@@ -13,7 +13,11 @@ import type {
   AgentReadinessProbeOptions,
 } from "./types.ts";
 
-const CODEBUDDY_READINESS_TIMEOUT_MS = 8_000;
+// Current CodeBuddy releases can take 5–7s to finish the ACP handshake on a
+// warm machine, and longer while the desktop daemon is also recovering
+// generation work. Keep the probe bounded, but leave enough headroom that an
+// authenticated CLI is not incorrectly disabled as "verification-required".
+const CODEBUDDY_READINESS_TIMEOUT_MS = 15_000;
 const CODEBUDDY_READINESS_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const AUTHENTICATION_REQUIRED_REASON = "Sign in to CodeBuddy, then rescan agents.";
 const VERIFICATION_REQUIRED_REASON = "CodeBuddy sign-in couldn't be verified. Rescan agents to try again.";

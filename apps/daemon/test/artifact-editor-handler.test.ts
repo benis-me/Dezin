@@ -213,6 +213,15 @@ function thumbnailUrl(base: string, fixture: ArtifactEditorFixture, query = ""):
   return `${base}/api/projects/${fixture.projectId}/artifacts/${fixture.artifactId}/revisions/${fixture.revisionId}/thumbnail${query}`;
 }
 
+function elementProvenanceUrl(
+  base: string,
+  fixture: ArtifactEditorFixture,
+  revisionId = fixture.revisionId,
+  artifactId = fixture.artifactId,
+): string {
+  return `${base}/api/projects/${fixture.projectId}/artifacts/${artifactId}/revisions/${revisionId}/element-provenance`;
+}
+
 function resourceStorageKey(namespace: string, value: string): string {
   return createHash("sha256").update(namespace).update("\0").update(value).digest("hex");
 }
@@ -283,6 +292,82 @@ function installResourcePayload(
     payloadPath,
   };
 }
+
+test("POST artifact element provenance returns an assembly-bound immutable source manifest", async () => {
+  const fixture = createFixture();
+  try {
+    const assembly = buildRenderAssembly(fixture.store, {
+      projectId: fixture.projectId,
+      revisionId: fixture.revisionId,
+    }, { dataDir: fixture.dataDir });
+    await withServer(fixture, {}, async (base) => {
+      const response = await fetch(elementProvenanceUrl(base, fixture), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          designNodeId: "headline",
+          assemblyHash: assembly.assemblyHash,
+        }),
+      });
+      const responseText = await response.text();
+      assert.equal(response.status, 200, responseText);
+      const manifest = JSON.parse(responseText) as Record<string, unknown>;
+      assert.equal(manifest.artifactId, fixture.artifactId);
+      assert.equal(manifest.artifactRevisionId, fixture.revisionId);
+      assert.equal(manifest.assemblyHash, assembly.assemblyHash);
+      assert.equal(manifest.designNodeId, "headline");
+      assert.equal(manifest.sourceArtifactId, fixture.artifactId);
+      assert.equal(manifest.sourceArtifactRevisionId, fixture.revisionId);
+      assert.equal(manifest.sourcePath, fixture.sourcePath);
+      assert.match(String(manifest.selectionManifestHash), /^[0-9a-f]{64}$/);
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("POST artifact element provenance rejects stale assembly identity and unbounded request shapes", async () => {
+  const fixture = createFixture();
+  try {
+    await withServer(fixture, {}, async (base) => {
+      const stale = await fetch(elementProvenanceUrl(base, fixture), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          designNodeId: "headline",
+          assemblyHash: "0".repeat(64),
+        }),
+      });
+      assert.equal(stale.status, 409);
+      assert.equal((await stale.json() as { code: string }).code, "artifact_element_provenance_assembly_conflict");
+
+      const unbounded = await fetch(elementProvenanceUrl(base, fixture), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          designNodeId: "headline",
+          assemblyHash: "0".repeat(64),
+          sourcePath: fixture.sourcePath,
+        }),
+      });
+      assert.equal(unbounded.status, 422);
+      assert.equal((await unbounded.json() as { code: string }).code, "artifact_element_provenance_invalid_request");
+
+      const foreignRevision = await fetch(elementProvenanceUrl(base, fixture, "foreign-revision"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          designNodeId: "headline",
+          assemblyHash: "0".repeat(64),
+        }),
+      });
+      assert.equal(foreignRevision.status, 404);
+      assert.equal((await foreignRevision.json() as { code: string }).code, "artifact_element_provenance_not_found");
+    });
+  } finally {
+    fixture.close();
+  }
+});
 
 test("POST artifact mutation publishes by Head and Snapshot CAS without changing the canonical checkout", async () => {
   const fixture = createFixture();

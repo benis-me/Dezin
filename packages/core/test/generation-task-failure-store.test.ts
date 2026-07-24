@@ -455,6 +455,53 @@ test("retryable provider failures append exact successors with 1s, 4s, and 16s b
   }
 });
 
+test("terminal Resource Agent quota failure creates no automatic successor", () => {
+  const fixture = createClaimedPageFixture("quota-terminal");
+  const error = {
+    name: "ProductionResourceRuntimeError",
+    message: "Resource Agent provider quota is exhausted",
+    code: "RESOURCE_AGENT_QUOTA_EXHAUSTED",
+    details: {
+      reasonCode: "quota-exhausted",
+      httpStatus: 429,
+      retryable: false,
+    },
+  };
+  try {
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "agent-transport", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+    const attempt = attemptFor(fixture.store, fixture, fixture.attempt.attempt);
+    assert.equal(attempt.status, "failed");
+    assert.deepEqual(attempt.error, error);
+    assert.equal(
+      Number((fixture.store.db.prepare(
+        "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+      ).get(fixture.task.id) as { count: number }).count),
+      1,
+    );
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "failed");
+    assert.equal(taskRow(fixture.store, fixture.validation.id).status, "blocked");
+    assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
+    assert.equal(
+      fixture.store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id).status,
+      "failed",
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
 test("a terminal execution failure atomically releases claims, blocks every descendant, and fails the Plan", () => {
   const fixture = createClaimedPageFixture("terminal");
   const error = { code: "design-contract-failed", findingIds: ["contrast", "hierarchy"] };

@@ -139,6 +139,101 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   expect(onCancel).toHaveBeenCalledTimes(1);
 });
 
+test("GenerationPlanPanel never exposes absolute local paths from legacy Task failures", () => {
+  const failed = task("task-1", "component", "failed", {
+    error: {
+      message: "/Users/private-user/.local/lib/node_modules/provider/bin/codebuddy returned an error result",
+    },
+  });
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan("failed")]}
+      detail={{
+        plan: plan("failed"),
+        tasks: [failed],
+        dependencies: [],
+        currentAttempts: [],
+      }}
+      connection="settled"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("codebuddy returned an error result")).toBeInTheDocument();
+  expect(screen.queryByText(/private-user|\/Users\//)).not.toBeInTheDocument();
+});
+
+test("GenerationPlanPanel resolves owned Resource and Artifact names while preserving Workspace and stable fallbacks", () => {
+  const tasks = [
+    task("task-1", "resource", "failed", {
+      target: { type: "resource", workspaceId: "workspace-1", id: "resource-research" },
+    }),
+    task("task-2", "component", "failed", {
+      target: {
+        type: "artifact",
+        workspaceId: "workspace-1",
+        id: "artifact-location-card",
+        trackId: "track-location-card",
+      },
+    }),
+    task("task-3", "page", "failed", {
+      target: {
+        type: "artifact",
+        workspaceId: "workspace-1",
+        id: "artifact-destination",
+        trackId: "track-destination",
+      },
+    }),
+    task("task-4", "prototype-validation", "blocked", {
+      target: { type: "workspace", workspaceId: "workspace-1", id: "workspace-1" },
+    }),
+    task("task-5", "page", "blocked", {
+      target: {
+        type: "artifact",
+        workspaceId: "workspace-1",
+        id: "artifact-fallback-title",
+        trackId: "track-fallback-title",
+      },
+    }),
+  ];
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan("failed")]}
+      detail={{
+        plan: plan("failed"),
+        tasks,
+        dependencies: [],
+        currentAttempts: [],
+      }}
+      connection="settled"
+      busyAction={null}
+      targetLabels={{
+        artifacts: new Map([
+          ["artifact-location-card", "Location Metadata"],
+          ["artifact-destination", "Atlas Journal"],
+        ]),
+        resources: new Map([
+          ["resource-research", "Kyoto Cultural Guide"],
+        ]),
+      }}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("Kyoto Cultural Guide")).toBeInTheDocument();
+  expect(screen.getByText("Location Metadata")).toBeInTheDocument();
+  expect(screen.getByText("Atlas Journal")).toBeInTheDocument();
+  expect(screen.getByText("Workspace")).toBeInTheDocument();
+  expect(screen.getByText("Fallback Title")).toBeInTheDocument();
+});
+
 test("Research context gate opens the exact immutable Revision and never offers retry on the blocked Task", async () => {
   const user = userEvent.setup();
   const onRetry = vi.fn();

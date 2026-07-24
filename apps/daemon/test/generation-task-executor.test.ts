@@ -759,6 +759,46 @@ test("GenerationTaskExecutor records a typed leaf failure exactly once", async (
   });
 });
 
+test("GenerationTaskExecutor persists only bounded quota failure metadata", async () => {
+  const { calls, executor } = harness({
+    leafError: {
+      name: "ProductionResourceRuntimeError",
+      message: "Resource Agent provider quota is exhausted",
+      code: "RESOURCE_AGENT_QUOTA_EXHAUSTED",
+      failureClass: "agent-transport",
+      details: {
+        reasonCode: "quota-exhausted",
+        httpStatus: 429,
+        retryable: false,
+        stdout: "private provider output",
+        prompt: "private prompt transcript",
+        credential: "must-not-persist",
+      },
+    },
+  });
+
+  await executor.execute(claimFixture("resource"), new AbortController().signal);
+
+  assert.deepEqual(calls.map((call) => call.port), ["resource", "finish-failure"]);
+  assert.deepEqual(calls[1]?.values[1], {
+    failureClass: "agent-transport",
+    error: {
+      name: "ProductionResourceRuntimeError",
+      message: "Resource Agent provider quota is exhausted",
+      code: "RESOURCE_AGENT_QUOTA_EXHAUSTED",
+      details: {
+        reasonCode: "quota-exhausted",
+        httpStatus: 429,
+        retryable: false,
+      },
+    },
+  });
+  assert.doesNotMatch(
+    JSON.stringify(calls[1]?.values[1]),
+    /private provider output|private prompt transcript|must-not-persist/,
+  );
+});
+
 test("GenerationTaskExecutor unwraps a Context primary and records bounded cleanup diagnostics", async () => {
   const primaryError = {
     name: "ContextIntegrityError",

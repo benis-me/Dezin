@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -219,6 +220,11 @@ const researchLayout: WorkspaceLayout = {
 
 beforeEach(() => {
   window.history.pushState({}, "", "/projects/project-1/canvas");
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  });
+  vi.stubGlobal("cancelAnimationFrame", () => {});
 });
 
 afterEach(() => {
@@ -316,9 +322,19 @@ test("Outline opens the same exact Resource revision as the canvas keyboard path
   );
 });
 
-test("ReactFlow mounts only after a non-zero ResizeObserver measurement and disconnects under StrictMode", () => {
+test("ReactFlow mounts after the ResizeObserver delivery frame and disconnects under StrictMode", () => {
   const measureReactFlow = installReactFlowMeasurements();
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const animationFrames = new Map<number, FrameRequestCallback>();
+  let nextAnimationFrameId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    animationFrames.delete(id);
+  });
   const rendered = render(
     <StrictMode>
       <CanvasHarness onSaveLayout={async () => layout} />
@@ -330,6 +346,13 @@ test("ReactFlow mounts only after a non-zero ResizeObserver measurement and disc
   expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
 
   act(() => measureReactFlow(960, 640));
+  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+
+  act(() => {
+    const pending = [...animationFrames.values()];
+    animationFrames.clear();
+    for (const callback of pending) callback(0);
+  });
   expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
   expect(warn.mock.calls.flat().join(" ")).not.toContain("reactflow.dev/error#004");
 
@@ -465,6 +488,7 @@ test("a failed relationship removal keeps the relationship selected and exposes 
 test("derived uses relationships are explicitly read-only and never submit a remove command", async () => {
   const measureReactFlow = installReactFlowMeasurements();
   const onApplyGraphCommands = vi.fn(async () => {});
+  const user = userEvent.setup();
   const { container } = render(
     <CanvasHarness
       canvasGraph={graphWithRelationship("uses")}
@@ -482,7 +506,12 @@ test("derived uses relationships are explicitly read-only and never submit a rem
   });
   fireEvent.click(edge);
 
-  expect(screen.getByRole("button", { name: "Uses relationships are derived and read-only" })).toBeDisabled();
+  const remove = screen.getByRole("button", { name: "Uses relationships are derived and read-only" });
+  expect(remove).toBeDisabled();
+  expect(remove.parentElement).toHaveAccessibleName("Uses relationships are derived and read-only");
+  await user.hover(remove.parentElement!);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("Uses relationships are derived and read-only");
+  expect(screen.getByRole("tooltip")).not.toHaveTextContent("Select a relationship to delete");
   fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Delete" });
 
   expect(onApplyGraphCommands).not.toHaveBeenCalled();

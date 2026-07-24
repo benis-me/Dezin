@@ -1,3 +1,6 @@
+import { lstat, mkdir, realpath } from "node:fs/promises";
+import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+
 import type { AgentRunner } from "../../../../packages/agent/src/index.ts";
 import type {
   ArtifactGenerationTaskPayloadV2,
@@ -25,7 +28,10 @@ import {
   type SharinganCaptureBundleFence,
   type SharinganCaptureRevisionMaterializerPort,
 } from "./sharingan-capture-reference.ts";
-import type { StandardArtifactQualityEvaluatorPort } from "./standard-artifact-execution.ts";
+import type {
+  StandardArtifactCandidateIdentity,
+  StandardArtifactQualityEvaluatorPort,
+} from "./standard-artifact-execution.ts";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -47,6 +53,11 @@ export interface ArtifactRunPreparationOptions {
   ) => string | Promise<string>;
   readonly repositoryDirForWorkspace: (
     workspaceId: string,
+    signal: AbortSignal,
+  ) => string | Promise<string>;
+  readonly artifactSourceRootForTarget: (
+    workspaceId: string,
+    artifactId: string,
     signal: AbortSignal,
   ) => string | Promise<string>;
   readonly createRunner: (
@@ -73,10 +84,15 @@ export interface ArtifactRunPreparationOptions {
 export class ArtifactRunPreparationError extends Error {
   readonly failureClass: "build-infrastructure" | "qa";
 
-  constructor(message: string, failureClass: ArtifactRunPreparationError["failureClass"] = "build-infrastructure") {
+  constructor(
+    message: string,
+    failureClass: ArtifactRunPreparationError["failureClass"] = "build-infrastructure",
+    options?: ErrorOptions,
+  ) {
     super(message);
     this.name = "ArtifactRunPreparationError";
     this.failureClass = failureClass;
+    if (options?.cause !== undefined) (this as Error & { cause?: unknown }).cause = options.cause;
   }
 }
 
@@ -95,6 +111,98 @@ function preparationCleanupFailure(primaryError: unknown, cleanupErrors: readonl
     "Artifact run preparation failed and candidate cleanup failed",
     { cause: primaryError },
   );
+}
+
+function inside(root: string, candidate: string): boolean {
+  const local = relative(root, candidate);
+  return local === "" || (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local));
+}
+
+function canonicalArtifactSourceRoot(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096
+    || value.includes("\\") || isAbsolute(value) || /^[A-Za-z]:/.test(value)) {
+    throw new ArtifactRunPreparationError("Artifact source root is invalid");
+  }
+  if (value === ".") return value;
+  const normalized = posix.normalize(value);
+  const segments = normalized.split("/");
+  if (normalized !== value || normalized.startsWith("../")
+    || segments.some((segment) => !segment || segment === "." || segment === ".."
+      || segment.toLowerCase() === ".git")) {
+    throw new ArtifactRunPreparationError("Artifact source root is invalid");
+  }
+  return normalized;
+}
+
+async function artifactSourceDirectory(
+  worktreeDir: string,
+  sourceRoot: string,
+  create: boolean,
+): Promise<string> {
+  let root: string;
+  try {
+    root = await realpath(worktreeDir);
+  } catch (error) {
+    throw new ArtifactRunPreparationError("Artifact candidate worktree is unavailable", "build-infrastructure", {
+      cause: error,
+    });
+  }
+  if (sourceRoot === ".") return root;
+  let cursor = root;
+  try {
+    for (const segment of sourceRoot.split("/")) {
+      const next = join(cursor, segment);
+      if (create) {
+        await mkdir(next).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST") throw error;
+        });
+      }
+      const metadata = await lstat(next);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error("not a plain directory");
+      }
+      cursor = await realpath(next);
+      if (!inside(root, cursor)) throw new Error("directory escapes the candidate worktree");
+    }
+  } catch (error) {
+    throw new ArtifactRunPreparationError(
+      create
+        ? "Artifact source root could not be prepared inside its candidate worktree"
+        : "Artifact Agent removed or replaced its canonical source root",
+      "build-infrastructure",
+      { cause: error },
+    );
+  }
+  if (cursor !== resolve(root, ...sourceRoot.split("/"))) {
+    throw new ArtifactRunPreparationError("Artifact source root is not canonical inside its candidate worktree");
+  }
+  return cursor;
+}
+
+async function sourceScopedTransaction(
+  transaction: ArtifactRunPreparation["transaction"],
+  sourceRoot: string,
+): Promise<ArtifactRunPreparation["transaction"]> {
+  const dir = await artifactSourceDirectory(transaction.dir, sourceRoot, true);
+  if (dir === transaction.dir) return transaction;
+  return Object.freeze({
+    dir,
+    attemptRef: transaction.attemptRef,
+    fingerprint(signal: AbortSignal) {
+      return transaction.fingerprint(signal);
+    },
+    async commit(message: string, signal: AbortSignal) {
+      await artifactSourceDirectory(transaction.dir, sourceRoot, false);
+      return transaction.commit(message, signal);
+    },
+    async restore(candidate: StandardArtifactCandidateIdentity, signal: AbortSignal) {
+      await transaction.restore(candidate, signal);
+      await artifactSourceDirectory(transaction.dir, sourceRoot, false);
+    },
+    dispose() {
+      return transaction.dispose();
+    },
+  });
 }
 
 async function invokeWithAbort<T>(
@@ -371,6 +479,14 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
       signal,
       () => this.options.repositoryDirForWorkspace(claim.task.workspaceId, signal),
     );
+    const sourceRoot = canonicalArtifactSourceRoot(await invokeWithAbort(
+      signal,
+      () => this.options.artifactSourceRootForTarget(
+        claim.task.workspaceId,
+        claim.task.target.id,
+        signal,
+      ),
+    ));
     const attempt: ArtifactCandidateAttempt = {
       workspaceId: claim.task.workspaceId,
       taskId: claim.task.id,
@@ -383,19 +499,22 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
     const rawTransaction = await beginArtifactCandidateTransaction({ repositoryDir, attempt, signal });
     let captureFence: SharinganCaptureBundleFence | undefined;
     let transaction: ArtifactRunPreparation["transaction"] = rawTransaction;
+    let transactionOwnsCapture = false;
     try {
+      transaction = await sourceScopedTransaction(rawTransaction, sourceRoot);
       if (captureReference !== null) {
         captureFence = await invokeWithAbort(
           signal,
           () => this.options.sharinganCaptures!.materializeExactRevision({
             reference: captureReference,
-            worktreeDir: rawTransaction.dir,
+            worktreeDir: transaction.dir,
             signal,
           }),
         );
         validateSharinganFence(captureReference, captureFence);
         await captureFence.verify(signal);
-        transaction = fenceArtifactCandidateTransaction(rawTransaction, captureFence);
+        transaction = fenceArtifactCandidateTransaction(transaction, captureFence);
+        transactionOwnsCapture = true;
       }
       const infrastructure: ArtifactRunInfrastructureInput = Object.freeze({
         projectId,
@@ -451,25 +570,17 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
       };
     } catch (error) {
       const cleanupErrors: unknown[] = [];
-      if (transaction === rawTransaction) {
-        if (captureFence !== undefined) {
-          try {
-            await captureFence.dispose();
-          } catch (cleanupError) {
-            cleanupErrors.push(cleanupError);
-          }
-        }
+      if (!transactionOwnsCapture && captureFence !== undefined) {
         try {
-          await rawTransaction.dispose();
+          await captureFence.dispose();
         } catch (cleanupError) {
           cleanupErrors.push(cleanupError);
         }
-      } else {
-        try {
-          await transaction.dispose();
-        } catch (cleanupError) {
-          cleanupErrors.push(cleanupError);
-        }
+      }
+      try {
+        await transaction.dispose();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
       }
       throw preparationCleanupFailure(error, cleanupErrors);
     }

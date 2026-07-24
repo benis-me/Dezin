@@ -19,9 +19,12 @@ interface PrototypeEdgeGeometryInput {
 export function prototypeEdgeGeometry(input: PrototypeEdgeGeometryInput): { path: string; labelX: number; labelY: number } {
   const laneExpansion = workspaceEdgeLaneExpansion(input.lane);
   if (input.source === input.target) {
+    const loopDirection = (input.lane ?? 0) > 0 ? 1 : -1;
     const horizontalReach = Math.max(72, Math.abs(input.sourceX - input.targetX) * 0.28) + laneExpansion * 18;
     const lift = Math.max(104, Math.abs(input.sourceX - input.targetX) * 0.42) + laneExpansion * 24;
-    const apexY = Math.min(input.sourceY, input.targetY) - lift;
+    const apexY = loopDirection > 0
+      ? Math.max(input.sourceY, input.targetY) + lift
+      : Math.min(input.sourceY, input.targetY) - lift;
     return {
       path: `M ${input.sourceX} ${input.sourceY} C ${input.sourceX + horizontalReach} ${apexY} ${input.targetX - horizontalReach} ${apexY} ${input.targetX} ${input.targetY}`,
       labelX: (input.sourceX + input.targetX) / 2,

@@ -13,7 +13,7 @@ import {
 } from "../../../packages/core/src/index.ts";
 import type { ContextPack } from "../src/context/context-types.ts";
 import type { ArtifactRunInfrastructureInput } from "../src/orchestration/artifact-run-preparation.ts";
-import { visualQaFrameAttemptId } from "../src/visual-qa.ts";
+import { parseVisualReview, visualQaFrameAttemptId } from "../src/visual-qa.ts";
 import { generationTaskVisualEvidenceFrameStorageSegment } from "../src/orchestration/generation-task-visual-evidence.ts";
 import {
   ProductionStandardArtifactQualityEvaluator,
@@ -409,6 +409,54 @@ test("production evaluator audits the exact immutable frames and emits publishab
   assert.equal(deps.calls.acquire, 1);
   assert.equal(deps.calls.release, 1);
   assert.equal(deps.calls.persist, 1);
+});
+
+test("production evaluator accepts critic findings that omit optional selector and snippet anchors", async () => {
+  const infra = infrastructure();
+  const criticFindings = parseVisualReview(JSON.stringify({
+    findings: [
+      {
+        kind: "defect",
+        severity: "P1",
+        message: "The primary action is clipped at the desktop frame edge.",
+        fix: "Keep the primary action within the immutable desktop frame.",
+      },
+      {
+        kind: "contract",
+        severity: "P1",
+        message: "The generated hierarchy drifts from the requested editorial direction.",
+        fix: "Restore the requested editorial hierarchy without changing the task scope.",
+      },
+    ],
+  }));
+  const deps = dependencies({
+    async visualQa(input) {
+      return visualReport(input, criticFindings);
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 0,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, false);
+  const findings = result.quality.findings as QualityFinding[];
+  assert.deepEqual(
+    findings.map((finding) => finding.id),
+    ["visual-ai-review-1", "visual-contract-drift-1"],
+  );
+  assert.ok(findings.every((finding) => !Object.hasOwn(finding, "snippet")));
 });
 
 test("production evaluator preserves a Viewer-safe Unicode Frame id while validating its hashed evidence locator", async () => {

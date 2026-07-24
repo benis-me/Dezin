@@ -1268,6 +1268,125 @@ test("materialized assemblies expose and synchronously apply the exact Kernel re
   }
 });
 
+test("RenderAssembly mounts an older flat generation candidate at its immutable Artifact root", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    fixture.createRevision();
+    const beforeComponent = fixture.store.workspace.getBundleByProjectId(fixture.projectId)!;
+    const componentArtifactId = "flat-generation-component";
+    const componentTrackId = "flat-generation-component-track";
+    const graphResult = fixture.store.workspace.applyGraphCommands(fixture.projectId, {
+      baseGraphRevision: beforeComponent.graph.revision,
+      expectedSnapshotId: fixture.snapshotId,
+      commands: [{
+        id: "add-flat-generation-component",
+        type: "add-node",
+        node: {
+          id: "flat-generation-component-node",
+          kind: "component",
+          name: "Generated flat component",
+          artifactId: componentArtifactId,
+          createIdentity: { initialTrackId: componentTrackId },
+        },
+      }],
+    });
+    fixture.snapshotId = graphResult.snapshot.id;
+    const componentArtifact = fixture.store.workspace
+      .getBundleByProjectId(fixture.projectId)!
+      .artifacts.find((candidate) => candidate.id === componentArtifactId)!;
+    const source = "<!doctype html><main data-design-node-id=\"flat-card\">Generated flat component</main>";
+    const committed = fixture.commit(source);
+    const revision = fixture.store.workspace.createArtifactRevision({
+      artifactId: componentArtifactId,
+      trackId: componentTrackId,
+      parentRevisionId: null,
+      sourceCommitHash: committed.commitHash,
+      sourceTreeHash: committed.sourceTreeHash,
+      kernelRevisionId: beforeComponent.workspace.activeKernelRevisionId,
+      renderSpec: { entry: "index.html", frames: [{ id: "desktop", width: 1440, height: 900 }] },
+      quality: { state: "unassessed", score: null, findings: [] },
+      contextPackHash: "f".repeat(64),
+      dependencies: [],
+      resourcePins: [],
+    });
+    const snapshot = fixture.store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: fixture.snapshotId,
+    });
+    fixture.snapshotId = snapshot.id;
+
+    const assembly = buildRenderAssembly(fixture.store, {
+      projectId: fixture.projectId,
+      revisionId: revision.id,
+    });
+    const artifactDir = await materializeRenderAssembly(fixture, assembly);
+    assert.equal(artifactDir.endsWith(componentArtifact.sourceRoot), true);
+    assert.equal(readFileSync(join(artifactDir, "index.html"), "utf8"), source);
+    assert.equal(readFileSync(join(artifactDir, "package.json"), "utf8").includes("\"vite\""), true);
+    assert.equal(existsSync(join(artifactDir, ".dezin", "render-context.json")), true);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("RenderAssembly missing-root failures stay typed and never expose local storage paths", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    fixture.createRevision();
+    const beforeComponent = fixture.store.workspace.getBundleByProjectId(fixture.projectId)!;
+    const componentArtifactId = "missing-root-component";
+    const componentTrackId = "missing-root-component-track";
+    const graphResult = fixture.store.workspace.applyGraphCommands(fixture.projectId, {
+      baseGraphRevision: beforeComponent.graph.revision,
+      expectedSnapshotId: fixture.snapshotId,
+      commands: [{
+        id: "add-missing-root-component",
+        type: "add-node",
+        node: {
+          id: "missing-root-component-node",
+          kind: "component",
+          name: "Missing root component",
+          artifactId: componentArtifactId,
+          createIdentity: { initialTrackId: componentTrackId },
+        },
+      }],
+    });
+    fixture.snapshotId = graphResult.snapshot.id;
+    const committed = fixture.commit("<main>not rooted</main>");
+    const revision = fixture.store.workspace.createArtifactRevision({
+      artifactId: componentArtifactId,
+      trackId: componentTrackId,
+      parentRevisionId: null,
+      sourceCommitHash: committed.commitHash,
+      sourceTreeHash: committed.sourceTreeHash,
+      kernelRevisionId: beforeComponent.workspace.activeKernelRevisionId,
+      renderSpec: { entry: "index.html" },
+      quality: { state: "unassessed", score: null, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const snapshot = fixture.store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: fixture.snapshotId,
+    });
+    fixture.snapshotId = snapshot.id;
+    const assembly = buildRenderAssembly(fixture.store, {
+      projectId: fixture.projectId,
+      revisionId: revision.id,
+    });
+
+    await assert.rejects(materializeRenderAssembly(fixture, assembly), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "RenderAssemblyError");
+      assert.match(error.message, /Artifact root is unavailable/i);
+      assert.doesNotMatch(error.message, new RegExp(fixture.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
 test("RenderAssembly materializes and serves exact Artifact pins and Kernel shared Asset payloads", async () => {
   const fixture = createPreviewFixture();
   try {

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type {
+  ArtifactElementSelectionManifest,
   ArtifactMutationResult,
   ArtifactRevision,
   ArtifactVersionActionResult,
@@ -440,6 +441,20 @@ function editorApi(overrides = {}) {
       bridgeNonce: BRIDGE_NONCE,
       expiresAt: Date.now() + 60_000,
       resolved: target,
+    }),
+    resolveArtifactElementProvenance: async (_projectId, artifactId, revisionId, input) => ({
+      protocol: "dezin.artifact-element-selection-manifest.v1" as const,
+      workspaceId: artifact.workspaceId,
+      artifactId,
+      artifactRevisionId: revisionId,
+      assemblyHash: input.assemblyHash,
+      designNodeId: input.designNodeId,
+      sourceArtifactId: artifactId,
+      sourceArtifactRevisionId: revisionId,
+      sourceCommitHash: "b".repeat(40),
+      sourceTreeHash: "c".repeat(40),
+      sourcePath: input.designNodeId === "checkout-title" ? "src/Checkout.tsx" : "src/Hero.tsx",
+      selectionManifestHash: "d".repeat(64),
     }),
     ...overrides,
   });
@@ -1208,6 +1223,121 @@ test("renders a focused design-tool editor in the persistent Studio and bridges 
   expect(screen.getByRole("button", { name: "Select an element in the preview" })).toBeInTheDocument();
 });
 
+test("server-proven provenance upgrades a stable marker without delaying Agent Context", async () => {
+  let resolveProvenance!: (value: ArtifactElementSelectionManifest) => void;
+  const provenance = new Promise<ArtifactElementSelectionManifest>((resolve) => {
+    resolveProvenance = resolve;
+  });
+  const resolveArtifactElementProvenance = vi.fn(() => provenance);
+  render(
+    <ApiProvider client={editorApi({ resolveArtifactElementProvenance })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  await dispatchSelection();
+  expect(await screen.findByLabelText("Selected Agent Context")).toHaveTextContent("Objects for a considered home");
+  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+
+  act(() => resolveProvenance({
+    protocol: "dezin.artifact-element-selection-manifest.v1",
+    workspaceId: artifact.workspaceId,
+    artifactId: artifact.id,
+    artifactRevisionId: revision.id,
+    assemblyHash: "assembly-1",
+    designNodeId: "hero-title",
+    sourceArtifactId: artifact.id,
+    sourceArtifactRevisionId: revision.id,
+    sourceCommitHash: "b".repeat(40),
+    sourceTreeHash: "c".repeat(40),
+    sourcePath: "src/Hero.tsx",
+    selectionManifestHash: "d".repeat(64),
+  }));
+
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Text content" })).toBeEnabled());
+  expect(screen.getByText("src/Hero.tsx")).toBeInTheDocument();
+  expect(resolveArtifactElementProvenance).toHaveBeenCalledWith(
+    project.id,
+    artifact.id,
+    revision.id,
+    { designNodeId: "hero-title", assemblyHash: "assembly-1" },
+    expect.any(AbortSignal),
+  );
+});
+
+test("server provenance ignores stale and dependency-owned results and keeps failures as Agent Context", async () => {
+  const manifest = (
+    designNodeId: string,
+    sourceArtifactId = artifact.id,
+  ): ArtifactElementSelectionManifest => ({
+    protocol: "dezin.artifact-element-selection-manifest.v1",
+    workspaceId: artifact.workspaceId,
+    artifactId: artifact.id,
+    artifactRevisionId: revision.id,
+    assemblyHash: "assembly-1",
+    designNodeId,
+    sourceArtifactId,
+    sourceArtifactRevisionId: sourceArtifactId === artifact.id ? revision.id : "dependency-revision",
+    sourceCommitHash: "b".repeat(40),
+    sourceTreeHash: "c".repeat(40),
+    sourcePath: `src/${designNodeId}.tsx`,
+    selectionManifestHash: "d".repeat(64),
+  });
+  let resolveStale!: (value: ArtifactElementSelectionManifest) => void;
+  const stale = new Promise<ArtifactElementSelectionManifest>((resolve) => {
+    resolveStale = resolve;
+  });
+  const resolveArtifactElementProvenance = vi.fn()
+    .mockImplementationOnce(() => stale)
+    .mockResolvedValueOnce(manifest("secondary-title", "dependency-artifact"))
+    .mockRejectedValueOnce(new Error("provenance offline"));
+  render(
+    <ApiProvider client={editorApi({ resolveArtifactElementProvenance })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  await dispatchSelection(
+    {
+      designNodeId: "hero-title",
+      sourcePath: "src/UntrustedHero.tsx",
+      selector: "[data-design-node-id='hero-title']",
+    },
+    "Storefront home preview",
+    "First selection",
+  );
+  await dispatchSelection(
+    {
+      designNodeId: "secondary-title",
+      sourcePath: "src/UntrustedDependency.tsx",
+      selector: "[data-design-node-id='secondary-title']",
+    },
+    "Storefront home preview",
+    "Second selection",
+  );
+  await waitFor(() => expect(resolveArtifactElementProvenance).toHaveBeenCalledTimes(2));
+  expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Second selection");
+  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+
+  await act(async () => {
+    resolveStale(manifest("hero-title"));
+    await Promise.resolve();
+  });
+  expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Second selection");
+  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+
+  await dispatchSelection(
+    { designNodeId: "failed-title", selector: "[data-design-node-id='failed-title']" } as never,
+    "Storefront home preview",
+    "Failed provenance selection",
+  );
+  await waitFor(() => expect(resolveArtifactElementProvenance).toHaveBeenCalledTimes(3));
+  expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Failed provenance selection");
+  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+});
+
 test("Artifact Agent queues the active Head with exact element identity and opens the durable Plan", async () => {
   const work = queuedArtifactAgentWork();
   const artifactAgentTurn = vi.fn(async () => work.receipt);
@@ -1566,6 +1696,73 @@ test("presentation mode suspends editing overlays and the picker until its visib
   expect(screen.getByRole("status", { name: "Preview frame state" })).toBeInTheDocument();
   expect(screen.getByText("Picker active · choose an element in the preview")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Present" })).toHaveFocus();
+});
+
+test("an authenticated Escape request from the focused preview exits presentation mode", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  await dispatchSelection();
+  const bridge = latestPreviewBridgeHarness(frame);
+
+  fireEvent.click(screen.getByRole("button", { name: "Present" }));
+
+  await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
+    type: "set-prototype-bindings",
+    bindings: [],
+  })));
+  frame.focus();
+  expect(frame).toHaveFocus();
+  await sendPreviewBridgeMessage(bridge, { type: "prototype-exit-requested" });
+
+  expect(await screen.findByRole("button", { name: "Present" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Exit present" })).not.toBeInTheDocument();
+});
+
+test("presentation entered before the preview bridge is ready installs its Escape binding after connect", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  fireEvent.click(screen.getByRole("button", { name: "Present" }));
+  expect(screen.getByRole("button", { name: "Exit present" })).toBeInTheDocument();
+
+  const bridge = await connectPreviewBridge(frame);
+  await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
+    type: "set-prototype-bindings",
+    bindings: [],
+  })));
+});
+
+test("an iframe reload during presentation reinstalls the authenticated Escape binding", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  const initialBridge = await connectPreviewBridge(frame);
+  fireEvent.click(screen.getByRole("button", { name: "Present" }));
+  await waitFor(() => expect(initialBridge.commands).toContainEqual(expect.objectContaining({
+    type: "set-prototype-bindings",
+    bindings: [],
+  })));
+
+  fireEvent.load(frame);
+  const reloadedBridge = await acceptLatestPreviewBridge(frame);
+  expect(reloadedBridge).not.toBe(initialBridge);
+  await waitFor(() => expect(reloadedBridge.commands).toContainEqual(expect.objectContaining({
+    type: "set-prototype-bindings",
+    bindings: [],
+  })));
 });
 
 test("keeps preview failure isolated while the artifact, Inspector, and Agent remain usable", async () => {

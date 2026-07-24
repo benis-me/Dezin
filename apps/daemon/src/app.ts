@@ -147,6 +147,7 @@ import {
 } from "./preview-target-handler.ts";
 import type { GenerationPlanRuntimeControl } from "./orchestration/generation-plan-control.ts";
 import {
+  handleArtifactElementProvenance,
   handleArtifactMutation,
   handleArtifactThumbnail,
 } from "./artifact-editor-handler.ts";
@@ -162,6 +163,7 @@ import {
   handleCancelGenerationPlan,
   handleGenerationPlanEvents,
   handleGetGenerationPlan,
+  handleGetLatestActionableWorkspaceAgentGenerationPlan,
   handleGetLatestScopedArtifactGenerationPlan,
   handleListGenerationPlans,
   handleRetryGenerationTask,
@@ -552,6 +554,11 @@ const routes: Route[] = [
   },
   {
     method: "GET",
+    pattern: "/api/projects/:id/workspace/agent/latest-plan",
+    handler: handleGetLatestActionableWorkspaceAgentGenerationPlan,
+  },
+  {
+    method: "GET",
     pattern: "/api/projects/:id/workspace/plans/:planId",
     handler: handleGetGenerationPlan,
   },
@@ -721,6 +728,19 @@ const routes: Route[] = [
         res,
         scopeSignal,
         (signal) => handleArtifactMutation(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId/element-provenance",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleArtifactElementProvenance(req, res, params, deps, signal),
       ),
     ),
   },

@@ -333,8 +333,12 @@ test("parseVisualReview splits objective defects from advisory improvements and 
   // No 0-100 score — just objective defects, advisory improvements, and a "reviewed" marker.
   const ids = findings.map((f) => f.id);
   assert.deepEqual(ids, ["visual-ai-review-1", "visual-improve-1", "visual-improve-2", "visual-reviewed"]);
-  assert.equal(findings.find((f) => f.id === "visual-ai-review-1")!.severity, "P1");
+  const defect = findings.find((f) => f.id === "visual-ai-review-1")!;
+  assert.equal(defect.severity, "P1");
+  assert.equal(Object.hasOwn(defect, "selector"), false);
+  assert.equal(Object.hasOwn(defect, "snippet"), false);
   assert.equal(findings.filter((f) => f.id.startsWith("visual-improve")).length, 2);
+  assert.ok(findings.find((f) => f.id === "visual-reviewed")!.fix.length > 0);
   assert.ok(!findings.some((f) => /\/100/.test(f.message)), "no design score");
 });
 

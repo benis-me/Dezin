@@ -33,6 +33,7 @@ import {
   ProductionResourceRuntimeError,
   createProductionResourceRuntimePorts,
 } from "../src/orchestration/production-resource-runtime.ts";
+import { SafeStructuredAgentError } from "../src/orchestration/safe-structured-agent.ts";
 import {
   ProductionCaptureFdReadError,
   decodeProductionCaptureFileIdentity,
@@ -47,6 +48,7 @@ import {
 
 const HASH = "a".repeat(64);
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
+const TEST_CODEBUDDY_EXECUTABLE = "/trusted/codebuddy/install/bin/codebuddy";
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -325,6 +327,16 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
     assert.match(spawned.args.join(" "), /Each source: id, kind\(context\|web\|user\), title, locator, excerpt, binding, notes/);
     assert.match(spawned.args.join(" "), /Web binding must be null/);
     assert.match(spawned.args.join(" "), /contextPackId, contextPackHash, itemOrdinal, itemChecksum/);
+    assert.match(
+      spawned.args.join(" "),
+      /directions must be a JSON array with 2-16 items/i,
+      "the prompt must expose the validator's direction cardinality instead of leaving it implicit",
+    );
+    assert.match(
+      spawned.args.join(" "),
+      /visualLanguage must be a JSON array with 2-16 non-empty strings/i,
+      "the prompt must not invite a single prose visual-language value that the production contract rejects",
+    );
     assert.deepEqual(spawnerOptions, [{
       timeoutMs: 12_345,
       stdoutLimitBytes: request.maxOutputBytes,
@@ -545,6 +557,12 @@ test("production Moodboard Agent contract permits only Asset specs and explicitl
 
     const prompt = spawner.inputs[0]!.args.join(" ");
     assert.match(prompt, /Each Asset spec/);
+    assert.match(prompt, /assetSpecs must be a JSON array with 1-8 items/i);
+    assert.match(
+      prompt,
+      /aspectRatio must be exactly one of: 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16/i,
+      "the prompt must expose the daemon/image-provider ratio allowlist verbatim",
+    );
     assert.match(prompt, /Never return image bytes, base64, MIME, checksum, or pixel dimensions/);
     assert.match(prompt, /daemon generates and independently reviews every image/i);
     assert.doesNotMatch(prompt, /bytesBase64/);
@@ -752,6 +770,59 @@ test("production Resource quality ports use the independent no-tools review tran
   });
 });
 
+test("production Resource reviewer preserves terminal CodeBuddy quota semantics", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codebuddy",
+      model: "gpt-5.6-sol",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async () => {
+        throw new SafeStructuredAgentError(
+          "quota-exhausted",
+          "Structured Agent provider quota is exhausted",
+          undefined,
+          { reasonCode: "quota-exhausted", httpStatus: 429, retryable: false },
+        );
+      },
+    });
+
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims({
+        protocol: "dezin.research-groundedness-request.v1",
+        executionProfile: research.executionProfile,
+        scope: research.scope,
+        contextPack: research.contextPack,
+        claims: [{
+          findingId: "finding-1",
+          statement: "People verify status before acting.",
+          supports: [{
+            supportReceiptId,
+            sourceId: "source-1",
+            quote: "People verify status before acting.",
+          }],
+        }],
+        signal: research.signal,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProductionResourceRuntimeError);
+        assert.equal(error.code, "RESOURCE_AGENT_QUOTA_EXHAUSTED");
+        assert.deepEqual(error.details, {
+          reasonCode: "quota-exhausted",
+          httpStatus: 429,
+          retryable: false,
+        });
+        return true;
+      },
+    );
+  });
+});
+
 test("production Research evidence port delegates only to the injected SSRF-safe bounded fetcher", async () => {
   await withStore(async ({ root, store }) => {
     let observed: unknown;
@@ -868,6 +939,53 @@ test("production Resource Agent rejects decorated, oversized, and failed CLI out
         (error: unknown) => error instanceof ProductionResourceRuntimeError && error.code === code,
       );
     }
+  });
+});
+
+test("production Resource Agent exposes only terminal quota failure metadata", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings(defaultAgentSettings({
+      agentCommand: "codebuddy",
+      model: "gpt-5.6-sol",
+    }));
+    const secret = "credential=must-not-persist";
+    const spawner = new RecordingSpawner({
+      stdout: JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: [`API Error: 429 当前无可用Token额度，如需申请，请联系您所在团队的负责人或HRBP。 ${secret}`],
+        result: `private prompt transcript ${secret}`,
+      }),
+      stderr: `private stderr ${secret}`,
+      exitCode: 0,
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
+      createSpawner: () => spawner,
+    });
+
+    await assert.rejects(
+      () => ports.agent.generateStructured(agentRequest(
+        new AbortController().signal,
+        store.getSettings(),
+      )),
+      (error: unknown) => {
+        assert.ok(error instanceof ProductionResourceRuntimeError);
+        assert.equal(error.code, "RESOURCE_AGENT_QUOTA_EXHAUSTED");
+        assert.equal(error.failureClass, "agent-transport");
+        assert.deepEqual(error.details, {
+          reasonCode: "quota-exhausted",
+          httpStatus: 429,
+          retryable: false,
+        });
+        assert.doesNotMatch(JSON.stringify(error.details), /private|prompt|credential|must-not-persist|HRBP/);
+        return true;
+      },
+    );
+    assert.equal(spawner.inputs.length, 1);
   });
 });
 

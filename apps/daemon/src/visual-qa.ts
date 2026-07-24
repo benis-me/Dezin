@@ -956,13 +956,19 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
       if (finding.kind === "improvement" && finding.severity !== "P2") return [];
       severity = finding.severity;
     }
+    const selector = typeof finding.selector === "string" && finding.selector.trim()
+      ? finding.selector.trim().slice(0, 200)
+      : undefined;
+    const snippet = typeof finding.snippet === "string" && finding.snippet.trim()
+      ? finding.snippet.trim()
+      : undefined;
     parsedFindings.push({
       kind: finding.kind,
       severity,
       message: finding.message.trim(),
       fix: finding.fix.trim(),
-      selector: typeof finding.selector === "string" && finding.selector.trim() ? finding.selector.trim().slice(0, 200) : undefined,
-      snippet: typeof finding.snippet === "string" && finding.snippet.trim() ? finding.snippet.trim() : undefined,
+      ...(selector === undefined ? {} : { selector }),
+      ...(snippet === undefined ? {} : { snippet }),
     });
   }
 
@@ -982,8 +988,8 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
         id: `visual-improve-${improveN}`,
         message: finding.message,
         fix: finding.fix,
-        selector: finding.selector,
-        snippet: finding.snippet,
+        ...(finding.selector === undefined ? {} : { selector: finding.selector }),
+        ...(finding.snippet === undefined ? {} : { snippet: finding.snippet }),
       });
     } else if (!options.isSharingan && finding.kind === "contract") {
       if (contractN >= 6) continue;
@@ -993,8 +999,8 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
         id: `visual-contract-drift-${contractN}`,
         message: finding.message,
         fix: finding.fix,
-        selector: finding.selector,
-        snippet: finding.snippet,
+        ...(finding.selector === undefined ? {} : { selector: finding.selector }),
+        ...(finding.snippet === undefined ? {} : { snippet: finding.snippet }),
       });
     } else {
       if (defectN >= 6) continue;
@@ -1004,8 +1010,8 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
         id: `visual-ai-review-${defectN}`,
         message: finding.message,
         fix: finding.fix,
-        selector: finding.selector,
-        snippet: finding.snippet,
+        ...(finding.selector === undefined ? {} : { selector: finding.selector }),
+        ...(finding.snippet === undefined ? {} : { snippet: finding.snippet }),
       });
     }
   }
@@ -1013,7 +1019,12 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
   // nothing) — distinguishes "reviewed, clean" from "review failed / unparseable", without
   // quantifying design quality as a number. We do NOT rate design with a 0-100 score: it is
   // inflated, noisy, and imposes taste; objective defects gate the run, suggestions are advisory.
-  normalized.push({ severity: "P2", id: "visual-reviewed", message: "Automated design review completed.", fix: "" });
+  normalized.push({
+    severity: "P2",
+    id: "visual-reviewed",
+    message: "Automated design review completed.",
+    fix: "No action is required for this review marker.",
+  });
   return normalized;
 }
 

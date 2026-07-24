@@ -22,6 +22,7 @@ import {
   isTrustedClaudeExecutablePath,
   parseSafeStructuredClaudeStream,
   runSafeStructuredAgent,
+  SafeStructuredAgentError,
   safeStructuredClaudeArgs,
 } from "../src/orchestration/safe-structured-agent.ts";
 
@@ -133,7 +134,7 @@ test("CodeBuddy structured transport retries bounded transient remote 5xx failur
 
   const result = await runSafeStructuredAgent(request({
     command: "codebuddy",
-    timeoutMs: 100,
+    timeoutMs: 500,
   }), {
     createSpawner() {
       return spawner;
@@ -144,10 +145,411 @@ test("CodeBuddy structured transport retries bounded transient remote 5xx failur
   });
 
   assert.equal(attempts, 3);
-  assert.equal(seenTimeouts[0], 100);
-  assert.ok(seenTimeouts[1]! > 0 && seenTimeouts[1]! < 100);
+  assert.equal(seenTimeouts[0], 500);
+  assert.ok(seenTimeouts[1]! > 0 && seenTimeouts[1]! < 500);
   assert.ok(seenTimeouts[2]! > 0 && seenTimeouts[2]! < seenTimeouts[1]!);
   assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy structured transport terminalizes quota-exhausted 429 without leaking provider output", async () => {
+  let attempts = 0;
+  const secret = "api_key=must-not-persist";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [`API Error: 429 当前无可用Token额度，如需申请，请联系您所在团队的负责人或HRBP。 ${secret}`],
+          result: `private prompt transcript ${secret}`,
+        }),
+        stderr: `private diagnostic ${secret}`,
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codebuddy",
+      timeoutMs: 1_000,
+    }), {
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodeBuddyExecutable() {
+        return TEST_CODEBUDDY_EXECUTABLE;
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "quota-exhausted");
+      assert.equal(error.message, "Structured Agent provider quota is exhausted");
+      assert.deepEqual(error.details, {
+        reasonCode: "quota-exhausted",
+        httpStatus: 429,
+        retryable: false,
+      });
+      assert.doesNotMatch(JSON.stringify(error.details), /private|prompt|api_key|must-not-persist|HRBP/);
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("CodeBuddy structured transport gives terminal quota precedence across mixed remote status evidence", async () => {
+  const evidenceOrders = [
+    [
+      "HTTP 500 prior internal server error",
+      "API Error: 429 insufficient quota",
+    ],
+    [
+      "API Error: 429 quota exhausted",
+      "HTTP 503 later service unavailable",
+    ],
+  ];
+
+  for (const errors of evidenceOrders) {
+    let attempts = 0;
+    const spawner: ProcessSpawner = {
+      async run(): Promise<SpawnOutput> {
+        attempts += 1;
+        return {
+          stdout: JSON.stringify({
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            errors,
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    };
+
+    await assert.rejects(
+      () => runSafeStructuredAgent(request({
+        command: "codebuddy",
+        timeoutMs: 1_000,
+      }), {
+        createSpawner() {
+          return spawner;
+        },
+        resolveCodeBuddyExecutable() {
+          return TEST_CODEBUDDY_EXECUTABLE;
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SafeStructuredAgentError);
+        assert.equal(error.code, "quota-exhausted");
+        assert.deepEqual(error.details, {
+          reasonCode: "quota-exhausted",
+          httpStatus: 429,
+          retryable: false,
+        });
+        return true;
+      },
+    );
+    assert.equal(attempts, 1);
+  }
+});
+
+test("CodeBuddy structured transport gives terminal quota precedence in mixed stderr diagnostics", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: "",
+        stderr: [
+          "HTTP 503 prior service unavailable",
+          "API Error: 429 quota exhausted",
+        ].join("\n"),
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codebuddy",
+      timeoutMs: 1_000,
+    }), {
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodeBuddyExecutable() {
+        return TEST_CODEBUDDY_EXECUTABLE;
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "quota-exhausted");
+      assert.deepEqual(error.details, {
+        reasonCode: "quota-exhausted",
+        httpStatus: 429,
+        retryable: false,
+      });
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("CodeBuddy structured transport retries an ordinary rate-limit 429", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return attempts === 1
+        ? {
+            stdout: JSON.stringify({
+              type: "result",
+              subtype: "error_during_execution",
+              is_error: true,
+              errors: ["HTTP 429 too many requests; retry after a short delay"],
+            }),
+            stderr: "",
+            exitCode: 0,
+          }
+        : {
+            stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+            stderr: "",
+            exitCode: 0,
+          };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy structured transport retries a nonzero stderr-only transient 502", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return attempts === 1
+        ? {
+            stdout: "",
+            stderr: "HTTP 502 service unavailable",
+            exitCode: 1,
+          }
+        : {
+            stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+            stderr: "",
+            exitCode: 0,
+          };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy retry classification ignores status-like text in structured assistant content", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return attempts === 1
+        ? {
+            stdout: JSON.stringify({
+              type: "assistant",
+              message: {
+                content: [{ type: "text", text: "Designing a 404 page for the empty state." }],
+              },
+            }),
+            stderr: "HTTP 502 service unavailable",
+            exitCode: 1,
+          }
+        : {
+            stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+            stderr: "",
+            exitCode: 0,
+          };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy structured transport tolerates diagnostic noise around a retryable terminal 503", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return attempts === 1
+        ? {
+            stdout: [
+              "CodeBuddy diagnostic: upstream request failed",
+              JSON.stringify({
+                type: "result",
+                subtype: "error_during_execution",
+                is_error: true,
+                errors: ["503 temporarily unavailable"],
+              }),
+            ].join("\n"),
+            stderr: "",
+            exitCode: 0,
+          }
+        : {
+            stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+            stderr: "",
+            exitCode: 0,
+          };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy structured transport does not retry nontransient failures or successful terminal results", async () => {
+  let failedAttempts = 0;
+  const failedSpawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      failedAttempts += 1;
+      return {
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["HTTP 404 model not found"],
+        }),
+        stderr: "A previous request returned HTTP 502",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codebuddy",
+      timeoutMs: 1_000,
+    }), {
+      createSpawner() {
+        return failedSpawner;
+      },
+      resolveCodeBuddyExecutable() {
+        return TEST_CODEBUDDY_EXECUTABLE;
+      },
+    }),
+    (error: unknown) => (
+      error instanceof Error
+      && Reflect.get(error, "code") === "process-failed"
+    ),
+  );
+  assert.equal(failedAttempts, 1);
+
+  let successfulAttempts = 0;
+  const successfulSpawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      successfulAttempts += 1;
+      return {
+        stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+        stderr: "A previous request returned HTTP 502",
+        exitCode: 0,
+      };
+    },
+  };
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return successfulSpawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(successfulAttempts, 1);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
+test("CodeBuddy structured transport aborts during retry backoff without another spawn", async () => {
+  let attempts = 0;
+  const controller = new AbortController();
+  const reason = new Error("cancelled during retry backoff");
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: "",
+        stderr: "HTTP 502 service unavailable",
+        exitCode: 1,
+      };
+    },
+  };
+  const run = runSafeStructuredAgent(request({
+    command: "codebuddy",
+    signal: controller.signal,
+    timeoutMs: 1_000,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+  setTimeout(() => controller.abort(reason), 5);
+
+  await assert.rejects(run, (error: unknown) => error === reason);
+  assert.equal(attempts, 1);
 });
 
 test("trusted Claude executable policy rejects a fixed-search symlink to an external fake package", (t) => {

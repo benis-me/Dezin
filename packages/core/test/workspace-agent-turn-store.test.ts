@@ -9,6 +9,7 @@ import { Worker } from "node:worker_threads";
 import {
   Store,
   WorkspaceAgentTurnConflictError,
+  WorkspaceProposalValidationError,
   type StoreClock,
 } from "../src/index.ts";
 
@@ -165,6 +166,132 @@ test("reusing a Workspace Agent turn id for divergent immutable request facts fa
       && error.actualRequestHash !== committed.receipt.requestHash,
   );
   assert.equal(store.workspace.listProposals(fixture.project.id).length, 1);
+  store.close();
+});
+
+test("Workspace Agent turns reject a Proposal whose Agent differs from the immutable request", () => {
+  const store = new Store(":memory:", clock("agent-substitution"));
+  const fixture = seedWorkspaceTurn(store);
+
+  assert.throws(
+    () => store.workspace.commitWorkspaceAgentTurnForProject({
+      projectId: fixture.project.id,
+      turnId: TURN_ID,
+      request: fixture.request,
+      contextPackId: fixture.contextPack.id,
+      proposal: {
+        ...fixture.proposal,
+        generation: {
+          ...fixture.proposal.generation,
+          agent: {
+            providerId: "codebuddy",
+            command: "codebuddy",
+            model: "gpt-5.6-terra",
+          },
+        },
+      },
+    }),
+    (error: unknown) => error instanceof WorkspaceProposalValidationError
+      && /Agent selection.*immutable request/i.test(error.message),
+  );
+  assert.equal(store.workspace.listProposals(fixture.project.id).length, 0);
+  store.close();
+});
+
+test("Workspace Agent Proposal edits cannot replace the frozen origin Agent", () => {
+  const store = new Store(":memory:", clock("agent-edit"));
+  const fixture = seedWorkspaceTurn(store);
+  const committed = store.workspace.commitWorkspaceAgentTurnForProject({
+    projectId: fixture.project.id,
+    turnId: TURN_ID,
+    request: fixture.request,
+    contextPackId: fixture.contextPack.id,
+    proposal: fixture.proposal,
+  });
+  const original = committed.receipt.proposal;
+  assert.equal(original.revision, 1);
+  if (original.generation.kind !== "workspace-generation") {
+    assert.fail("Workspace Agent fixture must return a Workspace generation Proposal");
+  }
+  const originalGeneration = original.generation;
+
+  assert.throws(
+    () => store.workspace.updateProposalForProject(fixture.project.id, original.id, {
+      expectedProposalRevision: original.revision,
+      operations: original.operations,
+      layoutOperations: original.layoutOperations,
+      generation: {
+        ...originalGeneration,
+        agent: {
+          providerId: "codebuddy",
+          command: "codebuddy",
+          model: "gpt-5.6-terra",
+        },
+      },
+      rationale: original.rationale,
+      assumptions: original.assumptions,
+    }),
+    (error: unknown) => error instanceof WorkspaceProposalValidationError
+      && /frozen origin Agent selection/i.test(error.message),
+  );
+
+  const after = store.workspace.getProposalForProject(fixture.project.id, original.id);
+  assert.equal(after.revision, original.revision);
+  assert.deepEqual(after.generation, original.generation);
+  assert.equal(Number((store.db.prepare(
+    "SELECT COUNT(*) AS count FROM workspace_proposal_audit WHERE proposal_id = ?",
+  ).get(original.id) as { count: number }).count), 1);
+  store.close();
+});
+
+test("historical Workspace Agent Proposals without an Agent selection remain readable", () => {
+  const store = new Store(":memory:", clock("legacy-agent"));
+  const fixture = seedWorkspaceTurn(store);
+  const committed = store.workspace.commitWorkspaceAgentTurnForProject({
+    projectId: fixture.project.id,
+    turnId: TURN_ID,
+    request: fixture.request,
+    contextPackId: fixture.contextPack.id,
+    proposal: fixture.proposal,
+  });
+  const generationRow = store.db.prepare(
+    "SELECT generation_payload_json FROM workspace_proposals WHERE id = ?",
+  ).get(committed.receipt.proposal.id) as { generation_payload_json: string };
+  const generation = JSON.parse(generationRow.generation_payload_json) as Record<string, unknown>;
+  delete generation.agent;
+  const auditRow = store.db.prepare(
+    "SELECT payload_json FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = 1",
+  ).get(committed.receipt.proposal.id) as { payload_json: string };
+  const audit = JSON.parse(auditRow.payload_json) as {
+    generation: Record<string, unknown>;
+  };
+  delete audit.generation.agent;
+  store.db.exec("DROP TRIGGER workspace_proposal_audit_update_immutable");
+  store.db.prepare(
+    "UPDATE workspace_proposals SET generation_payload_json = ? WHERE id = ?",
+  ).run(JSON.stringify(generation), committed.receipt.proposal.id);
+  store.db.prepare(
+    "UPDATE workspace_proposal_audit SET payload_json = ? WHERE proposal_id = ? AND revision = 1",
+  ).run(JSON.stringify(audit), committed.receipt.proposal.id);
+
+  const proposal = store.workspace.getProposalForProject(
+    fixture.project.id,
+    committed.receipt.proposal.id,
+  );
+  assert.equal(proposal.generation.kind, "workspace-generation");
+  assert.equal(proposal.generation.agent, undefined);
+  const replay = store.workspace.getWorkspaceAgentTurnReceiptForProject(
+    fixture.project.id,
+    TURN_ID,
+    fixture.request,
+  );
+  assert.equal(replay?.proposal.generation.kind, "workspace-generation");
+  assert.equal(
+    replay?.proposal.generation.kind === "workspace-generation"
+      ? replay.proposal.generation.agent
+      : "unexpected-kind",
+    undefined,
+  );
   store.close();
 });
 
@@ -349,6 +476,109 @@ test("Workspace Agent receipt reads fail closed on a substituted Context Pack po
       fixture.request,
     ),
     /durable receipt.*inconsistent/i,
+  );
+  store.close();
+});
+
+test("latest actionable Workspace Agent Plan discovery restores unresolved work and excludes unrelated history", () => {
+  const store = new Store(":memory:", clock("latest-actionable-plan"));
+  const fixture = seedWorkspaceTurn(store);
+  const committed = store.workspace.commitWorkspaceAgentTurnForProject({
+    projectId: fixture.project.id,
+    turnId: TURN_ID,
+    request: fixture.request,
+    contextPackId: fixture.contextPack.id,
+    proposal: fixture.proposal,
+  });
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
+    null,
+  );
+
+  const approved = store.workspace.approveProposalForProject(
+    fixture.project.id,
+    committed.receipt.proposal.id,
+    "generate",
+  );
+  assert.ok(approved.plan);
+
+  const unrelated = store.workspace.createProposal({
+    ...fixture.proposal,
+    rationale: "A newer direct Proposal must not impersonate Workspace Agent history.",
+  });
+  const unrelatedApproval = store.workspace.approveProposalForProject(
+    fixture.project.id,
+    unrelated.id,
+    "generate",
+  );
+  assert.ok(unrelatedApproval.plan);
+
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
+    approved.plan.id,
+  );
+
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(
+    fixture.project.id,
+    approved.plan.id,
+  );
+  const rootTask = compiled.tasks.find((task) => task.dependencyIds.length === 0);
+  assert.ok(rootTask);
+  store.db.exec("DROP TRIGGER generation_plan_status_transition_guard");
+  store.db.prepare(
+    `UPDATE generation_plans
+     SET status = 'requires-new-impact'
+     WHERE id = ?`,
+  ).run(approved.plan.id);
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
+    approved.plan.id,
+  );
+
+  store.db.prepare(
+    `UPDATE generation_plans
+     SET status = 'queued'
+     WHERE id = ?`,
+  ).run(approved.plan.id);
+  store.workspace.recordGenerationTaskMaterializationFailureForProject(
+    fixture.project.id,
+    approved.plan.id,
+    {
+      taskId: rootTask.id,
+      expectedFailureCount: 0,
+      failureClass: "design",
+      error: { message: "Generated design payload was invalid." },
+      nextEligibleAt: null,
+    },
+  );
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
+    approved.plan.id,
+  );
+
+  store.db.exec("DROP TRIGGER generation_plan_terminal_state_guard");
+  store.db.prepare(
+    `UPDATE generation_plans
+     SET status = 'succeeded', finished_at = ?
+     WHERE id = ?`,
+  ).run(400_001, approved.plan.id);
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
+    null,
+  );
+
+  store.db.prepare(
+    `UPDATE generation_plans
+     SET status = 'cancelled', finished_at = ?
+     WHERE id = ?`,
+  ).run(400_002, approved.plan.id);
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
+    null,
+  );
+  assert.equal(
+    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject("missing-project"),
+    null,
   );
   store.close();
 });

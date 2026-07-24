@@ -2,6 +2,7 @@ import type {
   CreateWorkspaceProposalInput,
   GenerationTask,
   ProjectWorkspace,
+  WorkspaceGenerationAgentSelection,
   WorkspaceProposal,
 } from "../../../../packages/core/src/index.ts";
 import {
@@ -218,6 +219,16 @@ function exactScopedIntent(request: AgentTurnRequest): void {
   }
 }
 
+function sameAgentSelection(
+  expected: WorkspaceGenerationAgentSelection,
+  actual: WorkspaceGenerationAgentSelection | undefined,
+): boolean {
+  return actual !== undefined
+    && actual.providerId === expected.providerId
+    && actual.command === expected.command
+    && actual.model === expected.model;
+}
+
 function exactProposalInput(
   projectId: string,
   request: AgentTurnRequest,
@@ -228,6 +239,11 @@ function exactProposalInput(
     || value.baseGraphRevision !== request.graphRevision) {
     throw new ProductionAgentOrchestratorError(
       "Workspace Planner returned a foreign or source-writing Proposal contract",
+    );
+  }
+  if (!sameAgentSelection(request.agent, value.generation.agent)) {
+    throw new ProductionAgentOrchestratorError(
+      "Workspace Planner Proposal Agent selection does not match its immutable request",
     );
   }
   return value;
@@ -245,6 +261,10 @@ function exactWorkspaceTurnReceipt(
     || proposal.workspaceId !== request.scope.workspaceId
     || proposal.kind !== "workspace-generation"
     || proposal.generation?.kind !== "workspace-generation"
+    || (expectedContextPackId !== undefined
+      ? !sameAgentSelection(request.agent, proposal.generation.agent)
+      : proposal.generation.agent !== undefined
+        && !sameAgentSelection(request.agent, proposal.generation.agent))
     || proposal.baseGraphRevision !== request.graphRevision) {
     throw new ProductionAgentOrchestratorError(
       "Workspace Agent turn store returned a foreign Proposal or substituted Context Pack",

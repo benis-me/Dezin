@@ -380,6 +380,79 @@ test("Workspace canvas keeps Plan history closed until a Plan is explicitly open
   expect(getGenerationPlan).not.toHaveBeenCalled();
 });
 
+test("Workspace canvas restores its latest live Workspace Agent Plan after re-entry", async () => {
+  const settled = generationPlanDetail("plan-live-workspace-agent", "artifact-p-1", 2);
+  const active: GenerationPlanDetail = {
+    ...settled,
+    plan: { ...settled.plan, status: "running", finishedAt: null },
+  };
+  const getLatestWorkspaceAgentPlanId = vi.fn(async () => active.plan.id);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      getLatestWorkspaceAgentPlanId,
+      listGenerationPlans: async () => [active.plan],
+      getGenerationPlan: async () => active,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Workspace Agent task status")).toHaveTextContent(active.plan.id);
+  expect(getLatestWorkspaceAgentPlanId).toHaveBeenCalledWith("p-1", expect.any(AbortSignal));
+});
+
+test("Workspace canvas restores a failed Workspace Agent Plan with its retry action after re-entry", async () => {
+  const settled = generationPlanDetail("plan-failed-workspace-agent", "artifact-p-1", 2);
+  const failed: GenerationPlanDetail = {
+    ...settled,
+    plan: { ...settled.plan, status: "failed" },
+    tasks: settled.tasks.map((task) => ({
+      ...task,
+      status: "failed",
+      failureClass: "design",
+      error: { message: "The generated Resource payload was invalid." },
+      resultRevisionId: null,
+    })),
+  };
+  const queued: GenerationPlanDetail = {
+    ...failed,
+    plan: { ...failed.plan, status: "queued", finishedAt: null },
+    tasks: failed.tasks.map((task) => ({
+      ...task,
+      status: "materialization-pending",
+      failureClass: null,
+      error: null,
+      finishedAt: null,
+    })),
+  };
+  const retryGenerationTask = vi.fn(async () => queued);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      getLatestWorkspaceAgentPlanId: async () => failed.plan.id,
+      listGenerationPlans: async () => [failed.plan],
+      getGenerationPlan: async () => failed,
+      retryGenerationTask,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
+  fireEvent.click(screen.getByRole("button", { name: "Retry Page with the same context" }));
+  await waitFor(() => expect(retryGenerationTask).toHaveBeenCalledWith(
+    "p-1",
+    failed.plan.id,
+    failed.tasks[0]!.id,
+    "same-context",
+  ));
+});
+
 test("Artifact route restores the newest durable scoped Plan without displacing the Inspector", async () => {
   window.history.pushState({}, "", "/projects/p-1/artifacts/artifact-p-1");
   const exact = generationPlanDetail(

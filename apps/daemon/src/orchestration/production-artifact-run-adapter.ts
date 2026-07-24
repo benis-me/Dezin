@@ -20,6 +20,7 @@ const ARTIFACT_OPTION_FIELDS = Object.freeze([
   "contextPacks",
   "projectIdForWorkspace",
   "repositoryDirForWorkspace",
+  "artifactSourceRootForTarget",
   "agent",
   "quality",
   "baseSystemPrompt",
@@ -32,6 +33,7 @@ const REQUIRED_ARTIFACT_OPTION_FIELDS = Object.freeze([
   "contextPacks",
   "projectIdForWorkspace",
   "repositoryDirForWorkspace",
+  "artifactSourceRootForTarget",
   "agent",
   "quality",
   "baseSystemPrompt",
@@ -161,6 +163,7 @@ function requireConfiguration(
   contextPacks: ArtifactRunPreparationOptions["contextPacks"];
   projectIdForWorkspace: ArtifactRunPreparationOptions["projectIdForWorkspace"];
   repositoryDirForWorkspace: ArtifactRunPreparationOptions["repositoryDirForWorkspace"];
+  artifactSourceRootForTarget: ArtifactRunPreparationOptions["artifactSourceRootForTarget"];
   baseSystemPrompt: ArtifactRunPreparationOptions["baseSystemPrompt"];
   environment: ArtifactRunPreparationOptions["environment"];
   sharinganCaptures: ArtifactRunPreparationOptions["sharinganCaptures"];
@@ -177,6 +180,7 @@ function requireConfiguration(
   if (configuration === null || contextPackGet === null
     || typeof configuration.projectIdForWorkspace !== "function"
     || typeof configuration.repositoryDirForWorkspace !== "function"
+    || typeof configuration.artifactSourceRootForTarget !== "function"
     || typeof configuration.baseSystemPrompt !== "function"
     || (configuration.environment !== undefined && typeof configuration.environment !== "function")
     || (configuration.onEvent !== undefined && typeof configuration.onEvent !== "function")
@@ -223,6 +227,9 @@ function requireConfiguration(
     contextPacks: Object.freeze({ get: contextPackGet }),
     projectIdForWorkspace: (configuration.projectIdForWorkspace as ArtifactRunPreparationOptions["projectIdForWorkspace"]).bind(owner),
     repositoryDirForWorkspace: (configuration.repositoryDirForWorkspace as ArtifactRunPreparationOptions["repositoryDirForWorkspace"]).bind(owner),
+    artifactSourceRootForTarget: (
+      configuration.artifactSourceRootForTarget as ArtifactRunPreparationOptions["artifactSourceRootForTarget"]
+    ).bind(owner),
     baseSystemPrompt: (configuration.baseSystemPrompt as ArtifactRunPreparationOptions["baseSystemPrompt"]).bind(owner),
     environment: configuration.environment === undefined
       ? undefined
@@ -265,6 +272,7 @@ export function createProductionArtifactRunExecutor(
     contextPacks: configuration.contextPacks,
     projectIdForWorkspace: configuration.projectIdForWorkspace,
     repositoryDirForWorkspace: configuration.repositoryDirForWorkspace,
+    artifactSourceRootForTarget: configuration.artifactSourceRootForTarget,
     baseSystemPrompt: configuration.baseSystemPrompt,
     environment: configuration.environment,
     sharinganCaptures: configuration.sharinganCaptures,

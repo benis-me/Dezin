@@ -29,17 +29,36 @@ const SAFE_AMBIENT_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", 
 export type SafeStructuredAgentErrorCode =
   | "provider-unavailable"
   | "process-failed"
+  | "quota-exhausted"
   | "timed-out"
   | "output-limit"
   | "output-invalid";
 
+export type SafeStructuredAgentFailureReasonCode =
+  | "quota-exhausted"
+  | "rate-limited"
+  | "upstream-unavailable";
+
+export interface SafeStructuredAgentFailureDetails {
+  readonly reasonCode: SafeStructuredAgentFailureReasonCode;
+  readonly httpStatus?: number;
+  readonly retryable: boolean;
+}
+
 export class SafeStructuredAgentError extends Error {
   readonly code: SafeStructuredAgentErrorCode;
+  readonly details?: Readonly<SafeStructuredAgentFailureDetails>;
 
-  constructor(code: SafeStructuredAgentErrorCode, message: string, cause?: unknown) {
+  constructor(
+    code: SafeStructuredAgentErrorCode,
+    message: string,
+    cause?: unknown,
+    details?: SafeStructuredAgentFailureDetails,
+  ) {
     super(message);
     this.name = "SafeStructuredAgentError";
     this.code = code;
+    if (details !== undefined) this.details = Object.freeze({ ...details });
     if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
   }
 }
@@ -416,8 +435,59 @@ function safeStructuredAgentStdin(request: SafeStructuredAgentRequest): string {
   return `${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`;
 }
 
-function isTransientRemoteTerminalFailure(stdout: string): boolean {
-  let terminal: Record<string, unknown> | undefined;
+const UPSTREAM_UNAVAILABLE_PATTERN =
+  /\b(?:500|502|503|504)\b|internal server error|service unavailable|temporarily unavailable|overloaded/i;
+const NON_RETRYABLE_REMOTE_FAILURE_PATTERN =
+  /\b(?:400|401|402|403|404|405|406|407|408|409|410|411|412|413|414|415|416|417|418|421|422|423|424|425|426|428|431|451)\b|bad request|unauthorized|forbidden|not found|unprocessable/i;
+const QUOTA_EXHAUSTED_PATTERN =
+  /(?:当前)?无可用\s*token\s*额度|token\s*额度(?:已)?(?:耗尽|用尽|不足)|insufficient quota|quota (?:is )?(?:exhausted|depleted)|(?:token|account|usage).{0,32}quota.{0,32}(?:exhausted|depleted|unavailable)/i;
+const RATE_LIMITED_PATTERN =
+  /\b429\b|too many requests|rate[ -]?limit(?:ed|ing)?/i;
+
+function remoteHttpStatus(evidence: readonly string[]): number | undefined {
+  for (const value of evidence) {
+    const match = /\b(429|500|502|503|504)\b/.exec(value);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function classifyRemoteFailureEvidence(
+  evidence: readonly string[],
+): SafeStructuredAgentFailureDetails | null {
+  const httpStatus = remoteHttpStatus(evidence);
+  const hasRateLimitStatus = evidence.some((value) => /\b429\b/.test(value));
+  const joined = evidence.join("\n");
+  if (hasRateLimitStatus && QUOTA_EXHAUSTED_PATTERN.test(joined)) {
+    return Object.freeze({
+      reasonCode: "quota-exhausted",
+      httpStatus: 429,
+      retryable: false,
+    });
+  }
+  if (hasRateLimitStatus || RATE_LIMITED_PATTERN.test(joined)) {
+    return Object.freeze({
+      reasonCode: "rate-limited",
+      ...(hasRateLimitStatus ? { httpStatus: 429 } : httpStatus === undefined ? {} : { httpStatus }),
+      retryable: true,
+    });
+  }
+  if (UPSTREAM_UNAVAILABLE_PATTERN.test(joined)) {
+    return Object.freeze({
+      reasonCode: "upstream-unavailable",
+      ...(httpStatus === undefined ? {} : { httpStatus }),
+      retryable: true,
+    });
+  }
+  return null;
+}
+
+function classifyRemoteFailure(
+  stdout: string,
+  stderr: string | undefined,
+): SafeStructuredAgentFailureDetails | null {
+  const terminals: Record<string, unknown>[] = [];
+  const diagnosticLines: string[] = [];
   for (const rawLine of stdout.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -425,24 +495,82 @@ function isTransientRemoteTerminalFailure(stdout: string): boolean {
     try {
       decoded = JSON.parse(line);
     } catch {
-      return false;
+      diagnosticLines.push(line);
+      continue;
     }
     const event = plainRecord(decoded);
-    if (event?.type === "result") terminal = event;
+    if (event?.type === "result") terminals.push(event);
   }
-  if (terminal?.is_error !== true) return false;
-  const evidence = [
+  if (terminals.some((terminal) => (
+    terminal.is_error === false && terminal.subtype === "success"
+  ))) return null;
+  const failedTerminals = terminals.filter((terminal) => (
+    terminal.is_error === true
+    || (typeof terminal.subtype === "string" && terminal.subtype.startsWith("error"))
+  ));
+  if (terminals.length > 0 && failedTerminals.length === 0) return null;
+  const evidence = failedTerminals.flatMap((terminal) => [
     ...(Array.isArray(terminal.errors) ? terminal.errors : []),
     terminal.result,
-  ];
-  return evidence.some((value) => (
-    typeof value === "string"
-    && /\b(?:500|502|503|504)\b|internal server error|service unavailable|temporarily unavailable|overloaded/i.test(value)
-  ));
+  ]).filter((value): value is string => typeof value === "string");
+  const classified = classifyRemoteFailureEvidence(evidence);
+  if (classified?.reasonCode === "quota-exhausted") return classified;
+  if (evidence.some((value) => (
+    NON_RETRYABLE_REMOTE_FAILURE_PATTERN.test(value)
+  ))) return null;
+  if (failedTerminals.length > 0) return classified;
+  const diagnosticEvidence = [diagnosticLines.join("\n"), stderr ?? ""];
+  const diagnosticClassification = classifyRemoteFailureEvidence(diagnosticEvidence);
+  if (diagnosticClassification?.reasonCode === "quota-exhausted") return diagnosticClassification;
+  if (diagnosticEvidence.some((value) => NON_RETRYABLE_REMOTE_FAILURE_PATTERN.test(value))) return null;
+  return diagnosticClassification;
+}
+
+function remoteFailureError(details: SafeStructuredAgentFailureDetails): SafeStructuredAgentError {
+  return details.reasonCode === "quota-exhausted"
+    ? new SafeStructuredAgentError(
+        "quota-exhausted",
+        "Structured Agent provider quota is exhausted",
+        undefined,
+        details,
+      )
+    : new SafeStructuredAgentError(
+        "process-failed",
+        "Structured Agent remote request failed",
+        undefined,
+        details,
+      );
 }
 
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Structured Agent turn aborted", "AbortError");
+}
+
+async function waitForCodeBuddyRetry(
+  signal: AbortSignal,
+  deadlineMs: number,
+  attempt: number,
+): Promise<void> {
+  if (signal.aborted) throw abortReason(signal);
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    throw new SafeStructuredAgentError("timed-out", "Structured Agent exceeded its wall-clock limit");
+  }
+  const delayMs = Math.min(50 * (2 ** attempt), remainingMs);
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 export async function runSafeStructuredAgent(
@@ -520,7 +648,13 @@ export async function runSafeStructuredAgent(
       throw new SafeStructuredAgentError("process-failed", "Structured Agent process failed", error);
     }
     if (request.signal.aborted) throw abortReason(request.signal);
+    const remoteFailure = classifyRemoteFailure(result.stdout, result.stderr);
     if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
+      if (attempt + 1 < attempts && remoteFailure?.retryable === true) {
+        await waitForCodeBuddyRetry(request.signal, deadlineMs, attempt);
+        continue;
+      }
+      if (remoteFailure !== null) throw remoteFailureError(remoteFailure);
       throw new SafeStructuredAgentError("process-failed", "Structured Agent process did not exit successfully");
     }
     const bytes = Buffer.byteLength(result.stdout, "utf8");
@@ -537,7 +671,11 @@ export async function runSafeStructuredAgent(
       return Object.freeze({ providerId, text });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
-      if (attempt + 1 < attempts && isTransientRemoteTerminalFailure(result.stdout)) continue;
+      if (attempt + 1 < attempts && remoteFailure?.retryable === true) {
+        await waitForCodeBuddyRetry(request.signal, deadlineMs, attempt);
+        continue;
+      }
+      if (remoteFailure !== null) throw remoteFailureError(remoteFailure);
       throw error;
     }
   }

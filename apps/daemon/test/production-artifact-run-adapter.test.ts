@@ -30,6 +30,7 @@ interface ProductionArtifactRunAdapterModule {
     contextPacks: { get(workspaceId: string, contextPackId: string): ContextPack | null };
     projectIdForWorkspace(workspaceId: string): string | Promise<string>;
     repositoryDirForWorkspace(workspaceId: string): string | Promise<string>;
+    artifactSourceRootForTarget(workspaceId: string, artifactId: string): string | Promise<string>;
     agent: {
       createRunner(
         input: ArtifactRunInfrastructureInput,
@@ -292,6 +293,7 @@ test("production Artifact factory runs the exact isolated Standard leaf through 
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => "workspaces/raw-workspace-1/artifacts/raw-artifact-home",
     agent: {
       createRunner(input) {
         isolatedDir = input.worktreeDir;
@@ -349,6 +351,7 @@ test("production Artifact factory fails closed when the Agent adapter is unavail
       contextPacks: { get: () => null },
       projectIdForWorkspace: () => "project-1",
       repositoryDirForWorkspace: () => "/tmp/project",
+      artifactSourceRootForTarget: () => ".",
       agent: {} as never,
       quality: () => ({} as never),
       baseSystemPrompt: () => "base",
@@ -377,6 +380,7 @@ test("production Artifact setup aborts a stalled Agent factory and disposes the 
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     agent: {
       createRunner(input, signal) {
         isolatedDir = input.worktreeDir;
@@ -424,6 +428,7 @@ test("production Artifact factory rejects accessor-backed configuration without 
   const hostileOptions = Object.defineProperty({
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => "/projects/workspace-1",
+    artifactSourceRootForTarget: () => ".",
     agent: { createRunner() { throw new Error("not used"); } },
     quality: () => { throw new Error("not used"); },
     baseSystemPrompt: () => "base",
@@ -462,6 +467,7 @@ test("production Artifact factory rejects accessor-backed Agent runners without 
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     agent: {
       createRunner(input) {
         isolatedDir = input.worktreeDir;

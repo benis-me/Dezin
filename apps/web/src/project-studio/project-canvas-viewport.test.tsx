@@ -116,6 +116,13 @@ function renderCanvas({
   );
 }
 
+async function flushCanvasMeasurementFrame(): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersToNextFrame();
+    await Promise.resolve();
+  });
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   flowHarness.state.viewport = { ...layout.viewport };
@@ -146,7 +153,7 @@ test("a narrow initial surface keeps the workspace outline out of the canvas", a
     onViewportChange: () => {},
   });
 
-  await act(async () => { await Promise.resolve(); });
+  await flushCanvasMeasurementFrame();
 
   expect(screen.queryByRole("complementary", { name: "Workspace structure" })).toBeNull();
   expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "false");
@@ -159,7 +166,7 @@ test("a medium initial surface keeps the workspace outline available without cov
     onViewportChange: () => {},
   });
 
-  await act(async () => { await Promise.resolve(); });
+  await flushCanvasMeasurementFrame();
 
   expect(screen.queryByRole("complementary", { name: "Workspace structure" })).toBeNull();
   expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "false");
@@ -174,6 +181,7 @@ test("a failed viewport save never promotes the pending viewport and restores th
   const onViewportChange = vi.fn();
   const onSaveLayout = vi.fn(async () => { throw new Error("Viewport save failed"); });
   renderCanvas({ onSaveLayout, onViewportChange });
+  await flushCanvasMeasurementFrame();
 
   fireEvent.click(screen.getByRole("button", { name: "Simulate viewport move" }));
   await act(async () => {
@@ -197,6 +205,7 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
   const onSaveLayout = vi.fn(async () => { throw new Error("Fit save failed"); });
   const fittedViewport = flowHarness.state.fitViewport;
   renderCanvas({ onSaveLayout, onViewportChange });
+  await flushCanvasMeasurementFrame();
 
   fireEvent.click(screen.getByRole("button", { name: "Fit workspace" }));
   await act(async () => {
@@ -276,6 +285,7 @@ test.each([
   }
 
   render(<ControlledCanvas />);
+  await flushCanvasMeasurementFrame();
   flowHarness.state.nextViewport = firstViewport;
   fireEvent.click(screen.getByRole("button", { name: "Simulate viewport move" }));
   await act(async () => {

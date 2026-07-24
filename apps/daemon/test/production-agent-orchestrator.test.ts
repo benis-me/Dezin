@@ -59,6 +59,7 @@ function proposalInput(): CreateWorkspaceProposalInput {
     operations: [],
     generation: {
       kind: "workspace-generation",
+      agent: { providerId: "claude", command: "claude", model: null },
       resourceOperations: [],
       artifactPlans: [],
       dependencyPlans: [],
@@ -206,6 +207,57 @@ test("production AgentOrchestrator sends Workspace turns only through draft Prop
     `planner:context-pack-${CONTEXT_HASH}`,
     "persist:project-1",
   ]);
+});
+
+test("production AgentOrchestrator rejects a Planner Proposal with a substituted Agent selection", async () => {
+  let commitCalls = 0;
+  const module = await import("../src/orchestration/production-agent-orchestrator.ts");
+  const orchestrator = new module.ProductionAgentOrchestrator({
+    workspace: { getWorkspace: () => ({ id: "workspace-1", projectId: "project-1" }) },
+    contextResolver: { resolve: async () => pack("workspace") },
+    workspacePlanner: {
+      async propose() {
+        const proposal = proposalInput();
+        return {
+          ...proposal,
+          generation: {
+            ...proposal.generation,
+            agent: {
+              providerId: "codebuddy",
+              command: "codebuddy",
+              model: "gpt-5.6-terra",
+            },
+          },
+        };
+      },
+    },
+    workspaceTurns: {
+      replay: async () => null,
+      async commit() {
+        commitCalls += 1;
+        return { proposal: persistedProposal(), contextPackId: `context-pack-${CONTEXT_HASH}` };
+      },
+    },
+    scopedTasks: {
+      async enqueue() {
+        assert.fail("a rejected Workspace Proposal must not enqueue a scoped Task");
+      },
+    },
+  });
+  const turn = {
+    ...request("workspace", "plan"),
+    agent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+    },
+  };
+
+  await assert.rejects(
+    orchestrator.turn(turn, new AbortController().signal),
+    /Agent selection.*immutable request/i,
+  );
+  assert.equal(commitCalls, 0);
 });
 
 test("production AgentOrchestrator fails closed when the durable Workspace turn store is absent", async () => {

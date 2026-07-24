@@ -26,7 +26,10 @@ import type {
 import { navigate } from "../router.tsx";
 import { ArtifactEditorSurface, useArtifactEditorController } from "./artifact/ArtifactEditorSurface.tsx";
 import { ArtifactInspector } from "./artifact/ArtifactInspector.tsx";
-import { GenerationPlanInspector } from "./generation/GenerationPlanPanel.tsx";
+import {
+  GenerationPlanInspector,
+  type GenerationPlanTargetLabels,
+} from "./generation/GenerationPlanPanel.tsx";
 import {
   createPrototypeFlowSession,
   presentablePrototypeFlowPages,
@@ -516,6 +519,39 @@ export function ProjectStudioScreen({
   }, [projectId]);
 
   useEffect(() => {
+    setWorkspacePlanId(null);
+    setDismissedWorkspacePlanId(null);
+    if (artifactId !== null || resourceId !== null || workspaceId === null) return;
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const controller = new AbortController();
+    const discover = async (): Promise<void> => {
+      try {
+        const planId = await api.getLatestWorkspaceAgentPlanId(projectId, controller.signal);
+        failures = 0;
+        if (current && planId !== null) {
+          setWorkspacePlanId((known) => known ?? planId);
+        }
+      } catch {
+        failures += 1;
+        if (current) {
+          timer = setTimeout(
+            () => void discover(),
+            Math.min(100 * (4 ** Math.min(failures - 1, 3)), 4_000),
+          );
+        }
+      }
+    };
+    void discover();
+    return () => {
+      current = false;
+      controller.abort(new DOMException("Workspace view closed", "AbortError"));
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [api, artifactId, projectId, resourceId, workspaceId]);
+
+  useEffect(() => {
     if (approvedPlanFromReview === null) return;
     setWorkspacePlanId(approvedPlanFromReview);
     setDismissedWorkspacePlanId(null);
@@ -553,6 +589,10 @@ export function ProjectStudioScreen({
     () => new Map(availableResources.map((resource) => [resource.id, resource])),
     [availableResources],
   );
+  const generationPlanTargetLabels = useMemo<GenerationPlanTargetLabels>(() => ({
+    artifacts: new Map((readyWorkspace?.artifacts ?? []).map((artifact) => [artifact.id, artifact.name])),
+    resources: new Map(availableResources.map((resource) => [resource.id, resource.title])),
+  }), [availableResources, readyWorkspace?.artifacts]);
   const resourceRevisionStates = useMemo(() => readyWorkspace === null
     ? EMPTY_CANVAS_RESOURCE_REVISION_STATES
     : buildResourceRevisionStates(
@@ -859,6 +899,7 @@ export function ProjectStudioScreen({
     <GenerationPlanInspector
       projectId={projectId}
       preferredPlanId={preferredGenerationPlanId}
+      targetLabels={generationPlanTargetLabels}
       onWorkspaceChanged={studio.reconcileGenerationPublication}
       onClose={() => {
         if (workspaceScope) setDismissedWorkspacePlanId(preferredGenerationPlanId);

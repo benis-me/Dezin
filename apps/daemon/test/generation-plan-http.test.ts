@@ -196,6 +196,41 @@ test("Generation Plan HTTP exposes one narrow latest scoped Artifact Plan lookup
   });
 });
 
+test("Generation Plan HTTP exposes one narrow latest actionable Workspace Agent Plan lookup", async () => {
+  await withServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Workspace Agent Plan HTTP", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const reads: string[] = [];
+    Object.defineProperty(store.workspace, "getLatestActionableWorkspaceAgentGenerationPlanForProject", {
+      configurable: true,
+      value(projectId: string) {
+        reads.push(projectId);
+        return {
+          id: "plan-workspace-agent",
+          workspaceId: workspace.id,
+          proposalId: "proposal-workspace-agent",
+          proposalRevision: 1,
+          baseSnapshotId: workspace.activeSnapshotId,
+          status: "running",
+          constructionSealed: true,
+          executionEpoch: 0,
+          compileError: null,
+          createdAt: 1,
+          finishedAt: null,
+        };
+      },
+    });
+
+    const response = await fetch(
+      `${base}/api/projects/${project.id}/workspace/agent/latest-plan`,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.deepEqual(body, { planId: "plan-workspace-agent" });
+    assert.deepEqual(reads, [project.id]);
+  });
+});
+
 test("Generation Plan HTTP detail exposes only the exact current Attempt candidate identity and evidence", () => {
   const durable = {
     plan: { id: "plan-1", workspaceId: "workspace-1" },

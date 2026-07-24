@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import type { WorkspaceDesignNodeLocator, WorkspaceRenderFrameSpec } from "../../lib/api.ts";
+import type { ApiClient, WorkspaceDesignNodeLocator, WorkspaceRenderFrameSpec } from "../../lib/api.ts";
 import { usePreviewChannel, type PreviewChannelMessage } from "../../lib/preview-channel.ts";
 import {
   buildRuntimeErrorRepairPrompt,
@@ -40,6 +40,7 @@ type NormalizedPreviewMessage =
       rect: ArtifactElementContext["rect"];
       instanceId: string | null;
       mutationCapable: boolean;
+      provenanceEligible: boolean;
     };
 
 export interface ArtifactElementContext {
@@ -292,6 +293,7 @@ function selectorHasStableMarker(selector: string | undefined, designNodeId: str
 function normalizeLocator(message: PreviewSelectionMessage): {
   locator: WorkspaceDesignNodeLocator;
   mutationCapable: boolean;
+  provenanceEligible: boolean;
 } | null {
   const selector = trimmed(message.locator?.selector, 4_096) ?? trimmed(message.selector, 4_096);
   const sourcePath = trimmed(message.locator?.sourcePath, 1_024);
@@ -299,14 +301,16 @@ function normalizeLocator(message: PreviewSelectionMessage): {
   const hint = trimmed(message.attrs?.screenLabel, 256) ?? trimmed(message.attrs?.id, 256);
   const designNodeId = explicitId ?? (selector ? stableDomNodeId(selector, hint) : undefined);
   if (!designNodeId) return null;
+  const provenanceEligible = message.type === "element-selected"
+    && Boolean(explicitId && selectorHasStableMarker(selector, explicitId));
   return {
     locator: {
       designNodeId,
       ...(sourcePath ? { sourcePath } : {}),
       ...(selector ? { selector } : {}),
     },
-    mutationCapable: message.type === "element-selected"
-      && Boolean(sourcePath && explicitId && selectorHasStableMarker(selector, explicitId)),
+    mutationCapable: false,
+    provenanceEligible,
   };
 }
 
@@ -338,16 +342,20 @@ function messageData(value: unknown): NormalizedPreviewMessage | null {
     rect: normalizeRect(message.rect),
     instanceId: trimmed(message.instanceId) ?? null,
     mutationCapable: normalizedLocator.mutationCapable,
+    provenanceEligible: normalizedLocator.provenanceEligible,
     textMutationCapable,
     textMutationUnavailableReason: textMutationCapable
       ? null
       : normalizedLocator.mutationCapable
         ? "Text editing requires the picker's complete text value; truncated or invalid text remains Agent Context only."
-        : "Text editing requires a source-backed stable marker.",
+        : normalizedLocator.provenanceEligible
+          ? "Text editing is enabled only after immutable source provenance is verified."
+          : "Text editing requires a source-backed stable marker.",
   };
 }
 
 export function usePreviewBridge({
+  api,
   iframeRef,
   previewSrc,
   projectId,
@@ -356,7 +364,10 @@ export function usePreviewBridge({
   frame,
   enabled,
   pickerEnabled,
+  presentationEnabled,
+  onPresentationExitRequested,
 }: {
+  api: ApiClient;
   iframeRef: RefObject<HTMLIFrameElement | null>;
   previewSrc: string | null;
   projectId: string;
@@ -365,13 +376,22 @@ export function usePreviewBridge({
   frame: WorkspaceRenderFrameSpec | null;
   enabled: boolean;
   pickerEnabled: boolean;
+  presentationEnabled: boolean;
+  onPresentationExitRequested: () => void;
 }) {
   const [storedSelection, setStoredSelection] = useState<ArtifactElementContext | null>(null);
   const [pickerActive, setPickerActive] = useState(false);
   const pickerActiveRef = useRef(false);
   const pickerEnabledRef = useRef(pickerEnabled);
   pickerEnabledRef.current = pickerEnabled;
+  const presentationEnabledRef = useRef(presentationEnabled);
+  presentationEnabledRef.current = presentationEnabled;
+  const onPresentationExitRequestedRef = useRef(onPresentationExitRequested);
+  onPresentationExitRequestedRef.current = onPresentationExitRequested;
   const selectionMessageTimesRef = useRef<number[]>([]);
+  const provenanceSequenceRef = useRef(0);
+  const provenanceControllerRef = useRef<AbortController | null>(null);
+  const provenanceSelectionKeyRef = useRef<string | null>(null);
   const [frameState, setFrameState] = useState<PreviewFrameState>({ status: "idle", frameId: null });
   const [runtimeErrorState, setRuntimeErrorState] = useState<RuntimeErrorState>(resetRuntimeErrors);
   const appliedFrameIdRef = useRef<string | null>(null);
@@ -418,9 +438,19 @@ export function usePreviewBridge({
     if (!active) selectionMessageTimesRef.current = [];
     setPickerActive(active);
   }, []);
+  const cancelProvenanceRequest = useCallback((): void => {
+    provenanceSequenceRef.current += 1;
+    provenanceControllerRef.current?.abort();
+    provenanceControllerRef.current = null;
+    provenanceSelectionKeyRef.current = null;
+  }, []);
 
   const onBridgeMessage = useCallback((message: PreviewChannelMessage): void => {
     if (artifactId === null || previewIdentity === null) return;
+    if (message.type === "prototype-exit-requested") {
+      if (presentationEnabledRef.current) onPresentationExitRequestedRef.current();
+      return;
+    }
     if (isRuntimeErrorMessage(message)) {
       const messageFrameId = trimmed(message.frameId, 256);
       const messageAttemptId = trimmed(message.frameAttemptId, 128);
@@ -479,6 +509,7 @@ export function usePreviewBridge({
     if (data === null) return;
     if (!pickerEnabledRef.current || !pickerActiveRef.current) return;
     if (data.type === "cleared") {
+      cancelProvenanceRequest();
       setStoredSelection(null);
       updatePickerActive(false);
       return;
@@ -491,7 +522,14 @@ export function usePreviewBridge({
     }
     recentSelectionMessages.push(now);
     selectionMessageTimesRef.current = recentSelectionMessages;
-    setStoredSelection({
+    cancelProvenanceRequest();
+    const selectionKey = JSON.stringify([
+      identity,
+      data.locator.designNodeId,
+      data.locator.selector ?? null,
+    ]);
+    provenanceSelectionKeyRef.current = selectionKey;
+    const immediateSelection: ArtifactElementContext = {
       type: "design-element",
       id: `${projectId}:${artifactId}:${previewIdentity.targetKey}:${data.locator.designNodeId}`,
       projectId,
@@ -509,11 +547,74 @@ export function usePreviewBridge({
       mutationCapable: data.mutationCapable,
       mutationUnavailableReason: data.mutationCapable
         ? null
-        : "Direct edits require a source-backed stable marker. This selection remains available to Artifact Agent Context.",
+        : data.provenanceEligible
+          ? "Direct edits are enabled only after immutable source provenance is verified. This selection remains available to Artifact Agent Context."
+          : "Direct edits require a source-backed stable marker. This selection remains available to Artifact Agent Context.",
       textMutationCapable: data.textMutationCapable,
       textMutationUnavailableReason: data.textMutationUnavailableReason,
-    });
-  }, [artifactId, frame?.id, previewIdentity, projectId, updatePickerActive]);
+    };
+    setStoredSelection(immediateSelection);
+    if (!data.provenanceEligible) return;
+    const controller = new AbortController();
+    provenanceControllerRef.current = controller;
+    const requestSequence = provenanceSequenceRef.current;
+    void Promise.resolve()
+      .then(() => api.resolveArtifactElementProvenance(
+        projectId,
+        artifactId,
+        previewIdentity.revisionId,
+        {
+          designNodeId: data.locator.designNodeId,
+          assemblyHash: previewIdentity.assemblyHash,
+        },
+        controller.signal,
+      ))
+      .then((manifest) => {
+        if (controller.signal.aborted
+          || requestSequence !== provenanceSequenceRef.current
+          || provenanceSelectionKeyRef.current !== selectionKey
+          || manifest.artifactId !== artifactId
+          || manifest.artifactRevisionId !== previewIdentity.revisionId
+          || manifest.assemblyHash !== previewIdentity.assemblyHash
+          || manifest.designNodeId !== data.locator.designNodeId
+          || manifest.sourceArtifactId !== artifactId
+          || manifest.sourceArtifactRevisionId !== previewIdentity.revisionId) return;
+        setStoredSelection((current) => {
+          if (current === null
+            || requestSequence !== provenanceSequenceRef.current
+            || provenanceSelectionKeyRef.current !== selectionKey
+            || current.artifactId !== artifactId
+            || current.revisionId !== previewIdentity.revisionId
+            || current.targetKey !== previewIdentity.targetKey
+            || current.assemblyHash !== previewIdentity.assemblyHash
+            || current.frameId !== (frame?.id ?? "unknown")
+            || current.locator.designNodeId !== data.locator.designNodeId
+            || current.locator.selector !== data.locator.selector) return current;
+          return {
+            ...current,
+            locator: { ...current.locator, sourcePath: manifest.sourcePath },
+            mutationCapable: true,
+            mutationUnavailableReason: null,
+            textMutationCapable: current.text !== null,
+            textMutationUnavailableReason: current.text === null
+              ? "Text editing requires the picker's complete text value; truncated or invalid text remains Agent Context only."
+              : null,
+          };
+        });
+      })
+      .catch(() => {
+        // Keep the immediate Agent Context selection read-only on abort or provenance failure.
+      });
+  }, [
+    api,
+    artifactId,
+    cancelProvenanceRequest,
+    frame?.id,
+    identity,
+    previewIdentity,
+    projectId,
+    updatePickerActive,
+  ]);
   const channel = usePreviewChannel({
     iframeRef,
     previewSrc,
@@ -526,6 +627,18 @@ export function usePreviewBridge({
     if (typeof message.type !== "string") return;
     channel.send(message as { type: string } & Record<string, unknown>);
   }, [channel.send]);
+
+  useEffect(() => {
+    if (!enabled || identity === null || !presentationEnabled || !channel.ready) return;
+    postBridgeMessage({ type: "set-prototype-bindings", bindings: [] });
+  }, [
+    channel.generation,
+    channel.ready,
+    enabled,
+    identity,
+    postBridgeMessage,
+    presentationEnabled,
+  ]);
 
   const postFrameCommand = useCallback((attempt: NonNullable<typeof frameAttemptRef.current>): void => {
     frameAttemptSequenceRef.current += 1;
@@ -665,15 +778,17 @@ export function usePreviewBridge({
   }, [channel.connect, enabled, frame, identity]);
 
   const clearSelection = useCallback(() => {
+    cancelProvenanceRequest();
     setStoredSelection(null);
     updatePickerActive(false);
     postBridgeMessage({ type: "select-mode", on: false });
     postBridgeMessage({ type: "clear" });
-  }, [postBridgeMessage, updatePickerActive]);
+  }, [cancelProvenanceRequest, postBridgeMessage, updatePickerActive]);
 
   const beginSelection = useCallback(() => {
     if (!enabled || !pickerEnabled || identity === null || frame === null || frameState.status !== "applied"
       || frameState.frameId !== frame.id || appliedFrameIdRef.current !== frame.id) return;
+    cancelProvenanceRequest();
     setStoredSelection(null);
     updatePickerActive(true);
     postBridgeMessage({ type: "clear" });
@@ -683,10 +798,21 @@ export function usePreviewBridge({
     } catch {
       iframeRef.current?.focus();
     }
-  }, [enabled, frame, frameState, identity, iframeRef, pickerEnabled, postBridgeMessage, updatePickerActive]);
+  }, [
+    cancelProvenanceRequest,
+    enabled,
+    frame,
+    frameState,
+    identity,
+    iframeRef,
+    pickerEnabled,
+    postBridgeMessage,
+    updatePickerActive,
+  ]);
 
   const onPreviewLoad = useCallback(() => {
     if (!enabled || identity === null || previewIdentity === null) return;
+    cancelProvenanceRequest();
     appliedFrameIdRef.current = null;
     appliedFrameAttemptIdRef.current = null;
     pendingRuntimeErrorsRef.current = [];
@@ -697,11 +823,20 @@ export function usePreviewBridge({
     updatePickerActive(false);
     postBridgeMessage({ type: "select-mode", on: false });
     postBridgeMessage({ type: "clear" });
-  }, [channel.connect, enabled, identity, postBridgeMessage, previewIdentity, updatePickerActive]);
+  }, [
+    cancelProvenanceRequest,
+    channel.connect,
+    enabled,
+    identity,
+    postBridgeMessage,
+    previewIdentity,
+    updatePickerActive,
+  ]);
 
   useEffect(() => {
     if (!enabled || !pickerEnabled || identity === null || frame === null || frameState.status !== "applied"
       || frameState.frameId !== frame.id || appliedFrameIdRef.current !== frame.id) {
+      cancelProvenanceRequest();
       setStoredSelection(null);
       updatePickerActive(false);
       postBridgeMessage({ type: "select-mode", on: false });
@@ -711,10 +846,20 @@ export function usePreviewBridge({
     updatePickerActive(true);
     postBridgeMessage({ type: "clear" });
     postBridgeMessage({ type: "select-mode", on: true });
-  }, [enabled, frame, frameState, identity, pickerEnabled, postBridgeMessage, updatePickerActive]);
+  }, [
+    cancelProvenanceRequest,
+    enabled,
+    frame,
+    frameState,
+    identity,
+    pickerEnabled,
+    postBridgeMessage,
+    updatePickerActive,
+  ]);
 
   useEffect(() => {
     if (identity === null) {
+      cancelProvenanceRequest();
       lastIdentityRef.current = null;
       setStoredSelection(null);
       updatePickerActive(false);
@@ -725,11 +870,14 @@ export function usePreviewBridge({
       return;
     }
     if (lastIdentityRef.current !== null && lastIdentityRef.current !== identity) {
+      cancelProvenanceRequest();
       setStoredSelection(null);
       updatePickerActive(false);
     }
     lastIdentityRef.current = identity;
-  }, [identity, updatePickerActive]);
+  }, [cancelProvenanceRequest, identity, updatePickerActive]);
+
+  useEffect(() => () => cancelProvenanceRequest(), [cancelProvenanceRequest]);
 
   useEffect(() => {
     setRuntimeErrorState(resetRuntimeErrors());

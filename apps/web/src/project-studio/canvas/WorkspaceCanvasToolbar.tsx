@@ -58,7 +58,9 @@ function ToolButton({
         <span
           className={disabled ? "inline-flex cursor-help" : "inline-flex"}
           tabIndex={disabled ? 0 : undefined}
-          aria-label={disabled && disabledReason ? `${label}. ${disabledReason}` : undefined}
+          aria-label={disabled && disabledReason
+            ? label === disabledReason ? label : `${label}. ${disabledReason}`
+            : undefined}
         >
           {button}
         </span>
@@ -80,6 +82,7 @@ export function WorkspaceCanvasToolbar({
   canDeleteGroup,
   canDeleteRelationship,
   relationshipDeleteLabel,
+  relationshipDeleteDisabledReason = "Select a relationship to delete",
   onToolChange,
   onEdgeFilterChange,
   onToggleOutline,
@@ -97,6 +100,7 @@ export function WorkspaceCanvasToolbar({
   canDeleteGroup: boolean;
   canDeleteRelationship: boolean;
   relationshipDeleteLabel: string;
+  relationshipDeleteDisabledReason?: string;
   onToolChange: (tool: CanvasTool) => void;
   onEdgeFilterChange: (filter: WorkspaceEdgeFilter) => void;
   onToggleOutline: () => void;
@@ -141,7 +145,7 @@ export function WorkspaceCanvasToolbar({
         <ToolButton
           label={relationshipDeleteLabel}
           disabled={!canDeleteRelationship}
-          disabledReason="Select a relationship to delete"
+          disabledReason={relationshipDeleteDisabledReason}
           onClick={onDeleteRelationship}
         >
           <Trash2 size={14} />

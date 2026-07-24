@@ -37,9 +37,17 @@ const MAX_PROMPT_BYTES = 16 * 1024 * 1024;
 const MAX_RESEARCH_EXCERPT_BYTES = 8 * 1024;
 const MAX_RESEARCH_WEB_SOURCES = 16;
 const MAX_RESEARCH_SUPPORTS_PER_FINDING = 8;
-const MAX_MOODBOARD_ASSETS = 8;
 const MAX_MOODBOARD_IMAGE_BYTES = 8 * 1024 * 1024;
 const MIN_MOODBOARD_IMAGE_EDGE = 512;
+
+export const MIN_RESEARCH_DIRECTIONS = 2;
+export const MAX_RESEARCH_DIRECTIONS = 16;
+export const MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS = 2;
+export const MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS = 16;
+export const MAX_MOODBOARD_ASSETS = 8;
+export const MOODBOARD_ASPECT_RATIOS = Object.freeze([
+  "1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16",
+] as const);
 
 export const RESEARCH_EVIDENCE_FETCH_POLICY = Object.freeze({
   maxBytes: 512 * 1024,
@@ -158,7 +166,7 @@ export interface ProductionMoodboardAssetSpec {
   readonly fileName: string;
   readonly prompt: string;
   readonly caption: string;
-  readonly aspectRatio: "1:1" | "3:2" | "2:3" | "4:3" | "3:4" | "16:9" | "9:16";
+  readonly aspectRatio: (typeof MOODBOARD_ASPECT_RATIOS)[number];
   readonly referenceIds: readonly string[];
 }
 
@@ -1067,7 +1075,12 @@ async function normalizeResearch(
     };
   });
   const directionIds = new Set<string>();
-  const directions = denseArray(draft.directions, "Research design directions", 2, 16).map((raw, index) => {
+  const directions = denseArray(
+    draft.directions,
+    "Research design directions",
+    MIN_RESEARCH_DIRECTIONS,
+    MAX_RESEARCH_DIRECTIONS,
+  ).map((raw, index) => {
     const item = exactRecord(raw, [
       "id", "title", "thesis", "visualLanguage", "interactionPrinciples", "risks", "findingIds",
     ], `Research direction ${index}`);
@@ -1087,7 +1100,12 @@ async function normalizeResearch(
       id,
       title: text(item.title, `Research direction ${index} title`),
       thesis: text(item.thesis, `Research direction ${index} thesis`),
-      visualLanguage: stringArray(item.visualLanguage, `Research direction ${index} visual language`, 2, 16),
+      visualLanguage: stringArray(
+        item.visualLanguage,
+        `Research direction ${index} visual language`,
+        MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+        MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+      ),
       interactionPrinciples: stringArray(item.interactionPrinciples, `Research direction ${index} interaction principles`, 1, 16),
       risks: stringArray(item.risks, `Research direction ${index} risks`, 1, 16),
       findingIds: references,
@@ -1292,7 +1310,7 @@ function normalizeMoodboard(value: unknown) {
     return { id, title: text(item.title, `Moodboard reference ${index} title`, 4_096), locator: text(item.locator, `Moodboard reference ${index} locator`, 4_096), notes: text(item.notes, `Moodboard reference ${index} notes`, 8_192) };
   });
   const assetIds = new Set<string>();
-  const aspectRatios = new Set(["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"]);
+  const aspectRatios = new Set<string>(MOODBOARD_ASPECT_RATIOS);
   const assetSpecs = denseArray(draft.assetSpecs, "Moodboard Asset specs", 1, MAX_MOODBOARD_ASSETS)
     .map((raw, index): ProductionMoodboardAssetSpec => {
     const item = exactRecord(raw, [

@@ -561,9 +561,80 @@ function inside(root: string, candidate: string): boolean {
 }
 
 async function safeRealpath(root: string, candidate: string, label: string): Promise<string> {
-  const [realRoot, realCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
-  if (!inside(realRoot, realCandidate)) throw new RenderAssemblyError(`${label} escapes its RenderAssembly source root`);
-  return realCandidate;
+  try {
+    const [realRoot, realCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
+    if (!inside(realRoot, realCandidate)) {
+      throw new RenderAssemblyError(`${label} escapes its RenderAssembly source root`);
+    }
+    return realCandidate;
+  } catch (error) {
+    if (error instanceof RenderAssemblyError) throw error;
+    throw new RenderAssemblyError(`${label} is unavailable`);
+  }
+}
+
+interface RevisionArtifactSource {
+  directory: string;
+  layout: "workspace-rooted" | "flat-generation-compatibility";
+}
+
+async function existingRevisionArtifactDirectory(
+  checkout: string,
+  revision: ArtifactRevisionRecord,
+): Promise<string | null> {
+  const candidate = safeJoin(checkout, revision.artifactRoot);
+  if (!candidate) {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} root escapes its source tree`);
+  }
+  let metadata;
+  try {
+    metadata = await lstat(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} Artifact root is unavailable`);
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} Artifact root is not a plain directory`);
+  }
+  return safeRealpath(checkout, candidate, `Artifact Revision ${revision.id} Artifact root`);
+}
+
+async function revisionArtifactSource(
+  checkout: string,
+  revision: ArtifactRevisionRecord,
+): Promise<RevisionArtifactSource> {
+  const canonical = await existingRevisionArtifactDirectory(checkout, revision);
+  if (canonical !== null) return { directory: canonical, layout: "workspace-rooted" };
+
+  // Early production Artifact generation committed an isolated project at the
+  // candidate root while Core correctly sealed its canonical workspace source
+  // root. Context Pack ownership distinguishes those immutable generation
+  // candidates from arbitrary malformed/manual Revisions. Mount the old tree at
+  // its logical root during assembly without rewriting published Git history.
+  if (revision.artifactRoot === "." || revision.contextPackHash === null) {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} Artifact root is unavailable`);
+  }
+  const entry = typeof revision.renderSpec.entry === "string" && revision.renderSpec.entry.length > 0
+    ? revision.renderSpec.entry
+    : "index.html";
+  const flatEntry = safeJoin(checkout, entry);
+  if (!flatEntry) {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} flat generation entry is invalid`);
+  }
+  let entryMetadata;
+  try {
+    entryMetadata = await lstat(flatEntry);
+  } catch {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} Artifact root is unavailable`);
+  }
+  if (!entryMetadata.isFile() || entryMetadata.isSymbolicLink()) {
+    throw new RenderAssemblyError(`Artifact Revision ${revision.id} flat generation entry is unavailable`);
+  }
+  await safeRealpath(checkout, flatEntry, `Artifact Revision ${revision.id} flat generation entry`);
+  return {
+    directory: await safeRealpath(checkout, checkout, `Artifact Revision ${revision.id} source checkout`),
+    layout: "flat-generation-compatibility",
+  };
 }
 
 async function withRevisionCheckout<T>(
@@ -962,7 +1033,21 @@ async function materializeRenderAssemblyOnce(
   await mkdir(staging, { recursive: true });
   try {
     await withRevisionCheckout(repository, staging, assembly.rootRevision, signal, async (checkout) => {
-      await cp(checkout, source, {
+      const resolved = await revisionArtifactSource(checkout, assembly.rootRevision);
+      if (resolved.layout === "workspace-rooted") {
+        await cp(checkout, source, {
+          recursive: true,
+          verbatimSymlinks: true,
+          filter: (entry) => basename(entry) !== ".git",
+        });
+        return;
+      }
+      const destination = safeJoin(source, assembly.rootRevision.artifactRoot);
+      if (!destination) {
+        throw new RenderAssemblyError("RenderAssembly Artifact root escapes its source tree");
+      }
+      await mkdir(dirname(destination), { recursive: true });
+      await cp(resolved.directory, destination, {
         recursive: true,
         verbatimSymlinks: true,
         filter: (entry) => basename(entry) !== ".git",
@@ -971,12 +1056,11 @@ async function materializeRenderAssemblyOnce(
     for (const revision of assembly.revisions.slice(1)) {
       signal?.throwIfAborted();
       await withRevisionCheckout(repository, staging, revision, signal, async (checkout) => {
-        const componentSource = safeJoin(checkout, revision.artifactRoot);
+        const componentSource = (await revisionArtifactSource(checkout, revision)).directory;
         const componentDestination = safeJoin(source, revision.artifactRoot);
-        if (!componentSource || !componentDestination) {
+        if (!componentDestination) {
           throw new RenderAssemblyError(`Component Revision ${revision.id} root escapes its source tree`);
         }
-        await safeRealpath(checkout, componentSource, `Component Revision ${revision.id} root`);
         await rm(componentDestination, { recursive: true, force: true });
         await mkdir(dirname(componentDestination), { recursive: true });
         await cp(componentSource, componentDestination, { recursive: true, verbatimSymlinks: true });

@@ -522,6 +522,13 @@ export function createProductionArtifactGenerationExecutor(
     contextPacks,
     projectIdForWorkspace: (workspaceId) => exactProjectId(workspaceId),
     repositoryDirForWorkspace: options.repositoryDirForWorkspace,
+    artifactSourceRootForTarget(workspaceId, artifactId) {
+      const artifact = options.store.workspace.getArtifact(artifactId);
+      if (!artifact || artifact.workspaceId !== workspaceId || artifact.archivedAt !== null) {
+        throw new Error("Artifact execution target source root is unavailable");
+      }
+      return artifact.sourceRoot;
+    },
     agent: {
       async createRunner(infrastructure): Promise<AgentRunner> {
         const binding = bindArtifactExecutionProfile({

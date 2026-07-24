@@ -177,6 +177,7 @@ test("Default preparation binds the exact Context Pack and Git base into prompts
     contextPacks: { get: () => pack },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: (infrastructure) => {
       exactInfrastructure = infrastructure;
       return runner;
@@ -258,12 +259,63 @@ test("Default preparation binds the exact Context Pack and Git base into prompts
   }
 });
 
+test("Default preparation confines generated source to the Artifact's canonical source root", async () => {
+  const repo = repository();
+  const exactClaim = claim(repo);
+  const sourceRoot = "workspaces/raw-workspace-1/artifacts/raw-artifact-page";
+  let runnerWorktreeDir = "";
+  let evaluatorWorktreeDir = "";
+  const preparation = new DefaultArtifactRunPreparation({
+    contextPacks: { get: () => contextPack() },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: (workspaceId, artifactId) => {
+      assert.equal(workspaceId, "workspace-1");
+      assert.equal(artifactId, "artifact-page");
+      return sourceRoot;
+    },
+    createRunner: (infrastructure) => {
+      runnerWorktreeDir = infrastructure.worktreeDir;
+      return runner;
+    },
+    createQualityEvaluator: (infrastructure) => {
+      evaluatorWorktreeDir = infrastructure.worktreeDir;
+      return { async evaluate() { throw new Error("unused"); } };
+    },
+    baseSystemPrompt: () => "base",
+    sharinganCaptures: captureMaterializer(),
+  });
+  const result = await preparation.prepare(exactClaim, new AbortController().signal);
+  try {
+    assert.equal(result.transaction.dir.endsWith(sourceRoot), true);
+    assert.equal(runnerWorktreeDir, result.transaction.dir);
+    assert.equal(evaluatorWorktreeDir, result.transaction.dir);
+    assert.equal(existsSync(join(result.transaction.dir, "package.json")), false);
+    assert.equal(existsSync(join(result.transaction.dir, ".sharingan", "pages.json")), true);
+
+    writeFileSync(join(result.transaction.dir, "index.html"), "<main>scoped candidate</main>\n");
+    const candidate = await result.transaction.commit(
+      "candidate rooted at its canonical Artifact source path",
+      new AbortController().signal,
+    );
+    const candidateFiles = git(repo.root, "ls-tree", "-r", "--name-only", candidate.commitHash);
+    assert.match(candidateFiles, new RegExp(`^${sourceRoot}/index\\.html$`, "m"));
+    assert.doesNotMatch(candidateFiles, /^index\.html$/m);
+    assert.doesNotMatch(candidateFiles, /(?:^|\n)\.sharingan(?:\/|$)/);
+    assert.doesNotMatch(candidateFiles, new RegExp(`^${sourceRoot}/\\.sharingan(?:/|$)`, "m"));
+  } finally {
+    await result.transaction.dispose();
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
 test("Context Pack target substitution is rejected before a transaction is created", async () => {
   const repo = repository();
   const preparation = new DefaultArtifactRunPreparation({
     contextPacks: { get: () => contextPack({ target: { type: "artifact", id: "foreign" } }) },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: () => runner,
     createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
     baseSystemPrompt: () => "base",
@@ -285,6 +337,7 @@ test("failed infrastructure setup removes the isolated worktree", async () => {
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: (input) => {
       worktreeDir = input.worktreeDir;
       throw new Error("runner setup failed");
@@ -314,6 +367,7 @@ test("failed infrastructure setup exposes capture cleanup failure without losing
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: (input) => {
       worktreeDir = input.worktreeDir;
       throw primaryError;
@@ -346,6 +400,7 @@ test("malformed evaluator repair findings fail with a QA classification", async 
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: () => runner,
     createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
     baseSystemPrompt: () => "base",
@@ -386,6 +441,7 @@ test("a Sharingan Context Pack fails closed when exact Revision materialization 
     contextPacks: { get: () => contextPack() },
     projectIdForWorkspace: () => "project-1",
     repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
     createRunner: () => {
       runnerCreated = true;
       return runner;
@@ -429,6 +485,7 @@ test("mixed or unpinned Sharingan Capture revisions are rejected before material
       contextPacks: { get: () => mixed },
       projectIdForWorkspace: () => "project-1",
       repositoryDirForWorkspace: () => repo.root,
+      artifactSourceRootForTarget: () => ".",
       createRunner: () => runner,
       createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
       baseSystemPrompt: () => "base",
@@ -456,6 +513,7 @@ test("mixed or unpinned Sharingan Capture revisions are rejected before material
       contextPacks: { get: () => contextPack() },
       projectIdForWorkspace: () => "project-1",
       repositoryDirForWorkspace: () => repo.root,
+      artifactSourceRootForTarget: () => ".",
       createRunner: () => runner,
       createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
       baseSystemPrompt: () => "base",

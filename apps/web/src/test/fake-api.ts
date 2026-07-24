@@ -108,6 +108,7 @@ export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
     approveWorkspaceProposal: notImpl as ApiClient["approveWorkspaceProposal"],
     rejectWorkspaceProposal: notImpl as ApiClient["rejectWorkspaceProposal"],
     listGenerationPlans: async () => [],
+    getLatestWorkspaceAgentPlanId: async () => null,
     getLatestScopedArtifactPlanId: async () => null,
     getGenerationPlan: notImpl as ApiClient["getGenerationPlan"],
     streamGenerationPlanEvents: notImpl as ApiClient["streamGenerationPlanEvents"],
@@ -136,6 +137,7 @@ export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
     restoreArtifactRevision: notImpl as ApiClient["restoreArtifactRevision"],
     forkArtifactTrack: notImpl as ApiClient["forkArtifactTrack"],
     applyArtifactMutation: notImpl as ApiClient["applyArtifactMutation"],
+    resolveArtifactElementProvenance: notImpl as ApiClient["resolveArtifactElementProvenance"],
     getArtifactThumbnail: async () => new Blob(),
     artifactThumbnailUrl: (projectId, artifactId, revisionId) =>
       `/api/projects/${projectId}/artifacts/${artifactId}/revisions/${revisionId}/thumbnail`,

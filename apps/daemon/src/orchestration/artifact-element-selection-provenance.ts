@@ -20,10 +20,29 @@ const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SUPPORTED_SOURCE_EXTENSIONS = new Set([".html", ".htm", ".js", ".jsx", ".ts", ".tsx"]);
 const DESIGN_MARKER = /data-(?:dezin-id|design-node-id|dezin-node-id)/i;
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const GENERATED_SOURCE_ROOTS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  ".vite",
+  ".next",
+  ".turbo",
+]);
+const GENERATED_SOURCE_SEGMENTS = new Set(["node_modules", ".vite", ".next", ".turbo"]);
 
 interface GitTreeBlob {
   readonly objectId: string;
   readonly byteLength: number;
+  readonly sourcePath: string;
+}
+
+interface ExactGitTreeEntry {
+  readonly mode: string;
+  readonly type: "blob" | "tree" | "commit";
+  readonly objectId: string;
+  readonly byteLength: number | null;
   readonly sourcePath: string;
 }
 
@@ -53,7 +72,7 @@ export interface ArtifactElementSelectionManifestEntry {
 }
 
 export class ArtifactElementSelectionProvenanceError extends Error {
-  readonly code: "unavailable" | "invalid-source" | "not-found" | "ambiguous";
+  readonly code: "unavailable" | "invalid-source" | "not-found" | "ambiguous" | "assembly-conflict";
 
   constructor(code: ArtifactElementSelectionProvenanceError["code"], message: string, cause?: unknown) {
     super(message);
@@ -115,6 +134,86 @@ function gitBytes(
   });
 }
 
+function gitObjectTypes(
+  repositoryDir: string,
+  objectSpecs: readonly string[],
+  signal: AbortSignal,
+): Promise<Array<"blob" | "tree" | "commit" | null>> {
+  if (objectSpecs.length === 0) return Promise.resolve([]);
+  if (objectSpecs.some((spec) => /[\r\n\0]/.test(spec))) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      "Immutable Artifact source root contains an unsafe Git object path",
+    );
+  }
+  return new Promise((resolveTypes, reject) => {
+    const child = execFile(
+      "git",
+      [
+        "-c", "core.fsmonitor=false",
+        "-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+        "cat-file",
+        "--batch-check=%(objecttype)",
+      ],
+      {
+        cwd: repositoryDir,
+        encoding: "buffer",
+        env: gitEnvironment(),
+        maxBuffer: 64 * 1024,
+        signal,
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        let output: string;
+        try {
+          output = UTF8.decode(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
+        } catch (cause) {
+          reject(new ArtifactElementSelectionProvenanceError(
+            "invalid-source",
+            "Immutable Artifact source root type listing is not UTF-8",
+            cause,
+          ));
+          return;
+        }
+        const lines = output.endsWith("\n") ? output.slice(0, -1).split("\n") : output.split("\n");
+        if (lines.length !== objectSpecs.length) {
+          reject(new ArtifactElementSelectionProvenanceError(
+            "invalid-source",
+            "Immutable Artifact source root type listing is malformed",
+          ));
+          return;
+        }
+        const types: Array<"blob" | "tree" | "commit" | null> = [];
+        for (const line of lines) {
+          if (line === "blob" || line === "tree" || line === "commit") types.push(line);
+          else if (line.endsWith(" missing")) types.push(null);
+          else {
+            reject(new ArtifactElementSelectionProvenanceError(
+              "invalid-source",
+              "Immutable Artifact source root has an unsupported Git object type",
+            ));
+            return;
+          }
+        }
+        resolveTypes(types);
+      },
+    );
+    if (!child.stdin) {
+      child.kill();
+      reject(new ArtifactElementSelectionProvenanceError(
+        "unavailable",
+        "Immutable Artifact source root type reader is unavailable",
+      ));
+      return;
+    }
+    child.stdin.end(`${objectSpecs.join("\n")}\n`);
+  });
+}
+
 function canonicalTreePath(value: string, artifactRoot: string): string {
   if (value.length === 0 || value.length > 4_096 || value.includes("\\")
     || value.startsWith("/") || value.includes("\0") || posix.normalize(value) !== value
@@ -132,6 +231,27 @@ function canonicalTreePath(value: string, artifactRoot: string): string {
     );
   }
   return value;
+}
+
+function isGeneratedSourcePath(sourcePath: string, artifactRoot: string): boolean {
+  const relativePath = artifactRoot === "."
+    ? sourcePath
+    : sourcePath.slice(`${artifactRoot}/`.length);
+  const segments = relativePath.split("/");
+  return GENERATED_SOURCE_ROOTS.has(segments[0]!)
+    || segments.some((segment) => GENERATED_SOURCE_SEGMENTS.has(segment));
+}
+
+function artifactRelativeSourcePath(sourcePath: string, physicalArtifactRoot: string): string {
+  if (physicalArtifactRoot === ".") return sourcePath;
+  const prefix = `${physicalArtifactRoot}/`;
+  if (!sourcePath.startsWith(prefix) || sourcePath.length === prefix.length) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      "Immutable Artifact source path is outside its physical source root",
+    );
+  }
+  return sourcePath.slice(prefix.length);
 }
 
 function parseTreeBlobs(
@@ -163,6 +283,7 @@ function parseTreeBlobs(
     const [, mode, type, objectId, sizeText, rawPath] = match;
     const sourcePath = canonicalTreePath(rawPath!, artifactRoot);
     if (excludedRoots.some((root) => sourcePath === root || sourcePath.startsWith(`${root}/`))) return [];
+    if (isGeneratedSourcePath(sourcePath, artifactRoot)) return [];
     budget.treeFiles += 1;
     if (!Number.isSafeInteger(budget.treeFiles) || budget.treeFiles > MAX_SELECTION_SOURCE_FILES) {
       throw new ArtifactElementSelectionProvenanceError(
@@ -182,6 +303,124 @@ function parseTreeBlobs(
     }
     return [{ objectId: objectId!, byteLength, sourcePath }];
   });
+}
+
+function parseExactTreeEntry(
+  bytes: Buffer,
+  expectedPath: string,
+  label: string,
+): ExactGitTreeEntry | null {
+  let listing: string;
+  try {
+    listing = UTF8.decode(bytes);
+  } catch (error) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `${label} has a non-UTF-8 path`,
+      error,
+    );
+  }
+  if (listing.length === 0) return null;
+  const records = listing.split("\0");
+  if (records.at(-1) === "") records.pop();
+  if (records.length !== 1) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `${label} lookup is ambiguous`,
+    );
+  }
+  const match = /^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}(?:[0-9a-f]{24})?) +(-|\d+)\t([\s\S]+)$/.exec(records[0]!);
+  if (!match || match[5] !== expectedPath) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `${label} lookup is malformed`,
+    );
+  }
+  const byteLength = match[4] === "-" ? null : Number(match[4]);
+  if (byteLength !== null && (!Number.isSafeInteger(byteLength) || byteLength < 0)) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `${label} has an invalid byte length`,
+    );
+  }
+  return {
+    mode: match[1]!,
+    type: match[2]! as ExactGitTreeEntry["type"],
+    objectId: match[3]!,
+    byteLength,
+    sourcePath: match[5]!,
+  };
+}
+
+function revisionRenderEntry(revision: ArtifactRevisionRecord): string {
+  const value = typeof revision.renderSpec.entry === "string" && revision.renderSpec.entry.length > 0
+    ? revision.renderSpec.entry
+    : "index.html";
+  if (value.length > 4_096 || value.includes("\\") || value.startsWith("/")
+    || value.includes("\0") || posix.normalize(value) !== value
+    || value.split("/").some((part) => part.length === 0 || part === "." || part === "..")) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `Artifact Revision ${revision.id} flat generation entry is invalid`,
+    );
+  }
+  return value;
+}
+
+async function revisionPhysicalArtifactRoot(input: {
+  repositoryDir: string;
+  revision: ArtifactRevisionRecord;
+  signal: AbortSignal;
+}): Promise<string> {
+  if (input.revision.artifactRoot === ".") return ".";
+  const artifactRoot = canonicalTreePath(input.revision.artifactRoot, ".");
+  const segments = artifactRoot.split("/");
+  const prefixes = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
+  const types = await gitObjectTypes(
+    input.repositoryDir,
+    prefixes.map((prefix) => `${input.revision.sourceCommitHash}:${prefix}`),
+    input.signal,
+  );
+  const firstMissing = types.indexOf(null);
+  const presentTypes = firstMissing === -1 ? types : types.slice(0, firstMissing);
+  if (presentTypes.some((type) => type !== "tree")) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `Artifact Revision ${input.revision.id} source root ancestor is not a directory`,
+    );
+  }
+  if (firstMissing === -1) return artifactRoot;
+  if (types.slice(firstMissing).some((type) => type !== null)) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "invalid-source",
+      `Artifact Revision ${input.revision.id} source root ancestry is malformed`,
+    );
+  }
+  if (input.revision.contextPackHash === null) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "unavailable",
+      `Artifact Revision ${input.revision.id} Artifact source root is unavailable`,
+    );
+  }
+  const entry = revisionRenderEntry(input.revision);
+  const flatEntry = parseExactTreeEntry(
+    await gitBytes(
+      input.repositoryDir,
+      ["ls-tree", "-z", "--long", input.revision.sourceCommitHash, "--", entry],
+      input.signal,
+      MAX_TREE_LIST_BYTES,
+    ),
+    entry,
+    `Artifact Revision ${input.revision.id} flat generation entry`,
+  );
+  if (flatEntry === null || flatEntry.type !== "blob"
+    || (flatEntry.mode !== "100644" && flatEntry.mode !== "100755")) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "unavailable",
+      `Artifact Revision ${input.revision.id} flat generation entry is unavailable`,
+    );
+  }
+  return ".";
 }
 
 async function revisionDesignNodeMatches(input: {
@@ -215,14 +454,23 @@ async function revisionDesignNodeMatches(input: {
     );
   }
   let blobs: GitTreeBlob[];
+  let physicalArtifactRoot: string;
   try {
+    physicalArtifactRoot = await revisionPhysicalArtifactRoot({
+      repositoryDir: input.repositoryDir,
+      revision: input.revision,
+      signal: input.signal,
+    });
     const listing = await gitBytes(
       input.repositoryDir,
-      ["ls-tree", "-r", "-z", "--long", input.revision.sourceCommitHash, "--", input.revision.artifactRoot],
+      [
+        "ls-tree", "-r", "-z", "--long", input.revision.sourceCommitHash,
+        ...(physicalArtifactRoot === "." ? [] : ["--", physicalArtifactRoot]),
+      ],
       input.signal,
       MAX_TREE_LIST_BYTES,
     );
-    blobs = parseTreeBlobs(listing, input.revision.artifactRoot, input.excludedRoots, input.budget);
+    blobs = parseTreeBlobs(listing, physicalArtifactRoot, input.excludedRoots, input.budget);
   } catch (error) {
     if (input.signal.aborted) throw abortReason(input.signal);
     if (error instanceof ArtifactElementSelectionProvenanceError) throw error;
@@ -292,7 +540,10 @@ async function revisionDesignNodeMatches(input: {
     }
     for (const locator of locators) {
       if (locator.designNodeId === input.designNodeId) {
-        matches.push({ revision: input.revision, sourcePath: blob.sourcePath });
+        matches.push({
+          revision: input.revision,
+          sourcePath: artifactRelativeSourcePath(blob.sourcePath, physicalArtifactRoot),
+        });
       }
     }
   }
@@ -312,6 +563,7 @@ export async function resolveArtifactElementSelectionProvenance(input: {
   artifactId: string;
   revisionId: string;
   designNodeId: string;
+  expectedAssemblyHash?: string;
   signal: AbortSignal;
 }): Promise<ArtifactElementSelectionManifestEntry> {
   checkAbort(input.signal);
@@ -336,6 +588,12 @@ export async function resolveArtifactElementSelectionProvenance(input: {
     throw new ArtifactElementSelectionProvenanceError(
       "unavailable",
       `Artifact Revision ${input.revisionId} does not own the requested Artifact assembly`,
+    );
+  }
+  if (input.expectedAssemblyHash !== undefined && assembly.assemblyHash !== input.expectedAssemblyHash) {
+    throw new ArtifactElementSelectionProvenanceError(
+      "assembly-conflict",
+      "Artifact preview assembly changed before selection provenance could be resolved",
     );
   }
   const repositoryDir = projectDir(input.dataDir, input.projectId);

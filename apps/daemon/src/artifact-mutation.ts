@@ -1434,8 +1434,14 @@ function applyCommandToSource(
 }
 
 async function confinedSourceFile(checkoutRoot: string, artifactRoot: string, sourcePath: string): Promise<string> {
-  const checkout = await realpath(checkoutRoot);
-  const root = await realpath(resolve(checkout, artifactRoot));
+  let checkout: string;
+  try {
+    checkout = await realpath(checkoutRoot);
+  } catch {
+    throw new ArtifactMutationValidationError("Artifact source checkout is unavailable");
+  }
+  const root = await existingConfinedArtifactDirectory(checkout, artifactRoot);
+  if (root === null) throw new ArtifactMutationValidationError("Artifact source root is unavailable");
   if (!isWithin(checkout, root)) throw new ArtifactMutationValidationError("Artifact source root escapes the checkout");
   const candidate = resolve(root, sourcePath);
   if (!isWithin(root, candidate)) throw new ArtifactMutationValidationError("locator sourcePath escapes the Artifact source root");
@@ -1443,9 +1449,92 @@ async function confinedSourceFile(checkoutRoot: string, artifactRoot: string, so
   if (!stats?.isFile() || stats.isSymbolicLink()) {
     throw new ArtifactMutationValidationError("locator sourcePath must resolve to a regular source file");
   }
-  const exact = await realpath(candidate);
+  let exact: string;
+  try {
+    exact = await realpath(candidate);
+  } catch {
+    throw new ArtifactMutationValidationError("locator sourcePath is unavailable");
+  }
   if (!isWithin(root, exact)) throw new ArtifactMutationValidationError("locator sourcePath resolves outside the Artifact source root");
   return exact;
+}
+
+async function existingConfinedArtifactDirectory(checkout: string, artifactRoot: string): Promise<string | null> {
+  const candidate = resolve(checkout, artifactRoot);
+  if (!isWithin(checkout, candidate)) {
+    throw new ArtifactMutationValidationError("Artifact source root escapes the checkout");
+  }
+  let metadata;
+  try {
+    metadata = await lstat(candidate);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === "ENOENT") return null;
+    if (code === "ENOTDIR") {
+      throw new ArtifactMutationValidationError("Artifact source root ancestor is not a directory");
+    }
+    throw new ArtifactMutationValidationError("Artifact source root is unavailable");
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new ArtifactMutationValidationError("Artifact source root must resolve to a regular directory");
+  }
+  let exact: string;
+  try {
+    exact = await realpath(candidate);
+  } catch {
+    throw new ArtifactMutationValidationError("Artifact source root is unavailable");
+  }
+  if (!isWithin(checkout, exact)) {
+    throw new ArtifactMutationValidationError("Artifact source root resolves outside the checkout");
+  }
+  return exact;
+}
+
+async function resolveMutationArtifactSource(input: {
+  checkoutRoot: string;
+  artifactRoot: string;
+  revision: ArtifactRevisionRecord;
+  sourcePath: string;
+}): Promise<{ artifactRoot: string; absoluteSourcePath: string }> {
+  let checkout: string;
+  try {
+    checkout = await realpath(input.checkoutRoot);
+  } catch {
+    throw new ArtifactMutationValidationError("Artifact source checkout is unavailable");
+  }
+  const canonical = await existingConfinedArtifactDirectory(checkout, input.artifactRoot);
+  if (canonical !== null) {
+    return {
+      artifactRoot: input.artifactRoot,
+      absoluteSourcePath: await confinedSourceFile(checkout, input.artifactRoot, input.sourcePath),
+    };
+  }
+
+  // Early Context-Pack-backed generation committed an isolated project at the
+  // candidate root while Core sealed the canonical workspace source root.
+  // Compatibility is physical-only: published Revision ownership stays sealed.
+  if (input.artifactRoot === "." || input.revision.contextPackHash === null) {
+    throw new ArtifactMutationValidationError("Artifact source root is unavailable");
+  }
+  let entry: string;
+  try {
+    entry = canonicalSourcePath(
+      typeof input.revision.renderSpec.entry === "string" && input.revision.renderSpec.entry.length > 0
+        ? input.revision.renderSpec.entry
+        : "index.html",
+    );
+  } catch {
+    throw new ArtifactMutationValidationError("Artifact flat generation entry is invalid");
+  }
+  try {
+    await confinedSourceFile(checkout, ".", entry);
+  } catch {
+    throw new ArtifactMutationValidationError("Artifact flat generation entry is unavailable");
+  }
+  return {
+    artifactRoot: ".",
+    absoluteSourcePath: await confinedSourceFile(checkout, ".", input.sourcePath),
+  };
 }
 
 async function gitGrepTrackedPaths(
@@ -1831,7 +1920,13 @@ export async function applyArtifactMutation(input: ApplyArtifactMutationInput): 
       [...GIT_NO_HOOKS, "worktree", "add", "--detach", checkoutRoot, parent.sourceCommitHash],
       input.signal,
     );
-    const absoluteSourcePath = await confinedSourceFile(checkoutRoot, artifact.sourceRoot, sourcePath);
+    const mutationSource = await resolveMutationArtifactSource({
+      checkoutRoot,
+      artifactRoot: artifact.sourceRoot,
+      revision: parent,
+      sourcePath,
+    });
+    const absoluteSourcePath = mutationSource.absoluteSourcePath;
     const checkoutRealPath = await realpath(checkoutRoot);
     const repositorySourcePath = relative(checkoutRealPath, absoluteSourcePath);
     const sourceMetadata = await lstat(absoluteSourcePath);
@@ -1914,7 +2009,7 @@ export async function applyArtifactMutation(input: ApplyArtifactMutationInput): 
           if (oldUsages.length === 1) {
             const closure = await artifactSourceResourceReferenceClosure({
               checkoutRoot,
-              artifactRoot: artifact.sourceRoot,
+              artifactRoot: mutationSource.artifactRoot,
               absoluteSourcePath,
               repositorySourcePath,
               mutatedSource: mutated,
@@ -2005,7 +2100,7 @@ export async function applyArtifactMutation(input: ApplyArtifactMutationInput): 
     await git(checkoutRoot, ["diff", "--check", "--", repositorySourcePath], input.signal);
     await input.validateCandidateSource({
       checkoutRoot,
-      artifactRoot: artifact.sourceRoot,
+      artifactRoot: mutationSource.artifactRoot,
       sourcePath,
       absoluteSourcePath,
       source: mutated,

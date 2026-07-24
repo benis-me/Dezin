@@ -645,6 +645,30 @@ function safeContextFailureRefs(value: unknown): string[] | null {
   }
 }
 
+const SAFE_RESOURCE_AGENT_FAILURE_CODES = new Set([
+  "RESOURCE_AGENT_PROCESS_FAILED",
+  "RESOURCE_AGENT_QUOTA_EXHAUSTED",
+  "RESEARCH_GROUNDEDNESS_REVIEW_FAILED",
+  "MOODBOARD_QUALITY_REVIEW_FAILED",
+]);
+
+function safeResourceAgentFailureDetails(value: unknown): Record<string, unknown> | null {
+  const reasonCode = reflectedString(value, "reasonCode");
+  const httpStatus = reflectedValue(value, "httpStatus");
+  const retryable = reflectedValue(value, "retryable");
+  if (reasonCode === null || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(reasonCode)
+    || typeof retryable !== "boolean"
+    || (httpStatus !== undefined
+      && (!Number.isSafeInteger(httpStatus) || Number(httpStatus) < 100 || Number(httpStatus) > 599))) {
+    return null;
+  }
+  return {
+    reasonCode: reasonCode.slice(0, 128),
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    retryable,
+  };
+}
+
 function serializeExecutionFailure(error: unknown): GenerationTaskExecutionFailure {
   const inspection = inspectGenerationTaskError(error);
   const primary = inspection.primary;
@@ -670,10 +694,17 @@ function serializeExecutionFailure(error: unknown): GenerationTaskExecutionFailu
     payload.refs = contextRefs;
   }
   if (details !== undefined) {
-    try {
-      payload.details = canonicalJsonRecord(details, "Generation Task failure details", 48 * 1024);
-    } catch {
-      // A malformed optional detail object must not prevent the durable failure transition.
+    const safeResourceDetails = code !== null && SAFE_RESOURCE_AGENT_FAILURE_CODES.has(code)
+      ? safeResourceAgentFailureDetails(details)
+      : null;
+    if (safeResourceDetails !== null) {
+      payload.details = safeResourceDetails;
+    } else if (code === null || !SAFE_RESOURCE_AGENT_FAILURE_CODES.has(code)) {
+      try {
+        payload.details = canonicalJsonRecord(details, "Generation Task failure details", 48 * 1024);
+      } catch {
+        // A malformed optional detail object must not prevent the durable failure transition.
+      }
     }
   }
   try {

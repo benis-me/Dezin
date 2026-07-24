@@ -120,6 +120,66 @@ test("createProject posts JSON and returns the project", async () => {
   );
 });
 
+test("artifact element provenance uses an exact authenticated abortable wire contract", async () => {
+  const manifest = {
+    protocol: "dezin.artifact-element-selection-manifest.v1",
+    workspaceId: "workspace-1",
+    artifactId: "artifact-1",
+    artifactRevisionId: "revision-1",
+    assemblyHash: "a".repeat(64),
+    designNodeId: "headline",
+    sourceArtifactId: "artifact-1",
+    sourceArtifactRevisionId: "revision-1",
+    sourceCommitHash: "b".repeat(40),
+    sourceTreeHash: "c".repeat(40),
+    sourcePath: "src/App.jsx",
+    selectionManifestHash: "d".repeat(64),
+  } as const;
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(manifest));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "tok_provenance" });
+  const controller = new AbortController();
+
+  await expect(api.resolveArtifactElementProvenance(
+    "project /1",
+    "artifact /1",
+    "revision /1",
+    { designNodeId: "headline", assemblyHash: manifest.assemblyHash },
+    controller.signal,
+  )).resolves.toEqual(manifest);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project%20%2F1/artifacts/artifact%20%2F1/revisions/revision%20%2F1/element-provenance",
+    expect.objectContaining({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-dezin-daemon-token": "tok_provenance",
+      },
+      body: JSON.stringify({ designNodeId: "headline", assemblyHash: manifest.assemblyHash }),
+      signal: controller.signal,
+    }),
+  );
+
+  expect(() => api.resolveArtifactElementProvenance(
+    "project-1",
+    "artifact-1",
+    "revision-1",
+    {
+      designNodeId: "headline",
+      assemblyHash: manifest.assemblyHash,
+      sourcePath: "src/App.jsx",
+    } as never,
+  )).toThrow(/unsupported field sourcePath/i);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+  const malformedFetch = vi.fn<FetchLike>(async () => jsonResponse({ ...manifest, sourcePath: "" }));
+  await expect(createApiClient({ fetchImpl: malformedFetch }).resolveArtifactElementProvenance(
+    "project-1",
+    "artifact-1",
+    "revision-1",
+    { designNodeId: "headline", assemblyHash: manifest.assemblyHash },
+  )).rejects.toThrow(/sourcePath/i);
+});
+
 test("Research direction intent sends only the strict Agent wire selection", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ plan: { id: "plan-1" } }, 201));
   const api = createApiClient({ baseUrl: "http://d", fetchImpl });
@@ -432,6 +492,59 @@ test("workspace APIs encode project and artifact IDs and send typed mutation bod
   expect(fetchImpl).toHaveBeenNthCalledWith(7, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1/revisions/r%20%2F1", undefined);
   expect(fetchImpl).toHaveBeenNthCalledWith(8, "http://d/api/projects/p%20%2F1/workspace/snapshots", undefined);
   expect(fetchImpl).toHaveBeenNthCalledWith(9, "http://d/api/projects/p%20%2F1/workspace/snapshots/s%20%2F1", undefined);
+});
+
+test("Workspace Proposal updates surface immutable Agent validation without masking the daemon response", async () => {
+  const failure = {
+    error: "Workspace Proposal frozen origin Agent selection cannot change during an edit",
+    code: "workspace_proposal_validation_error",
+    details: {},
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(failure, 422));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const input = {
+    expectedProposalRevision: 1,
+    operations: [],
+    layoutOperations: [],
+    generation: {
+      kind: "workspace-generation" as const,
+      agent: {
+        providerId: "codebuddy" as const,
+        command: "codebuddy" as const,
+        model: "gpt-5.6-terra",
+      },
+      resourceOperations: [],
+      artifactPlans: [],
+      dependencyPlans: [],
+      prototypeIntents: [],
+      capabilities: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    },
+    rationale: "Attempt to replace the frozen Agent",
+    assumptions: [],
+  };
+
+  await expect(
+    api.updateWorkspaceProposal("project /1", "proposal /1", input),
+  ).rejects.toMatchObject({
+    name: "ApiError",
+    status: 422,
+    message: failure.error,
+    details: failure,
+  });
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project%20%2F1/workspace/proposals/proposal%20%2F1",
+    expect.objectContaining({
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  );
 });
 
 test("Artifact history APIs preserve paging and immutable version action fences", async () => {
@@ -1173,6 +1286,27 @@ test("latest scoped Artifact Plan API returns only the durable Plan id", async (
   expect(fetchImpl).toHaveBeenNthCalledWith(
     2,
     "http://d/api/projects/project-1/artifacts/artifact-2/agent/latest-plan",
+    undefined,
+  );
+});
+
+test("latest actionable Workspace Agent Plan API returns only the durable Plan id", async () => {
+  const responses = [{ planId: "plan-workspace-agent" }, { planId: null }];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.getLatestWorkspaceAgentPlanId("project-1"))
+    .resolves.toBe("plan-workspace-agent");
+  await expect(api.getLatestWorkspaceAgentPlanId("project-2"))
+    .resolves.toBeNull();
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project-1/workspace/agent/latest-plan",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project-2/workspace/agent/latest-plan",
     undefined,
   );
 });

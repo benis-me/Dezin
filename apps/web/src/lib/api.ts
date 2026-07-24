@@ -291,6 +291,26 @@ export interface ArtifactMutationResult {
   snapshot: WorkspaceSnapshot;
 }
 
+export interface ArtifactElementProvenanceInput {
+  designNodeId: string;
+  assemblyHash: string;
+}
+
+export interface ArtifactElementSelectionManifest {
+  protocol: "dezin.artifact-element-selection-manifest.v1";
+  workspaceId: string;
+  artifactId: string;
+  artifactRevisionId: string;
+  assemblyHash: string;
+  designNodeId: string;
+  sourceArtifactId: string;
+  sourceArtifactRevisionId: string;
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  sourcePath: string;
+  selectionManifestHash: string;
+}
+
 export interface WorkspaceRenderFrameSpec {
   id: string;
   name: string;
@@ -1837,6 +1857,92 @@ function codecExactRecord(value: unknown, allowedKeys: readonly string[], label:
   return record;
 }
 
+function codecHexHash(value: unknown, label: string, lengths: readonly number[]): string {
+  const hash = codecString(value, label);
+  if (!lengths.includes(hash.length) || !/^[0-9a-f]+$/.test(hash)) {
+    throw new TypeError(`${label} must be a lowercase hexadecimal hash`);
+  }
+  return hash;
+}
+
+function encodeArtifactElementProvenanceInput(input: ArtifactElementProvenanceInput): ArtifactElementProvenanceInput {
+  const value = codecExactRecord(
+    input,
+    ["designNodeId", "assemblyHash"],
+    "Artifact element provenance input",
+  );
+  const designNodeId = codecString(value.designNodeId, "Artifact element provenance designNodeId");
+  if (designNodeId.length > 256 || designNodeId.trim() !== designNodeId) {
+    throw new TypeError("Artifact element provenance designNodeId must be a bounded stable identifier");
+  }
+  return {
+    designNodeId,
+    assemblyHash: codecHexHash(value.assemblyHash, "Artifact element provenance assemblyHash", [64]),
+  };
+}
+
+export function decodeArtifactElementSelectionManifest(value: unknown): ArtifactElementSelectionManifest {
+  const input = codecExactRecord(value, [
+    "protocol",
+    "workspaceId",
+    "artifactId",
+    "artifactRevisionId",
+    "assemblyHash",
+    "designNodeId",
+    "sourceArtifactId",
+    "sourceArtifactRevisionId",
+    "sourceCommitHash",
+    "sourceTreeHash",
+    "sourcePath",
+    "selectionManifestHash",
+  ], "Artifact element selection manifest");
+  const sourcePath = codecString(input.sourcePath, "Artifact element selection manifest sourcePath");
+  if (sourcePath.length > 4_096 || sourcePath.startsWith("/") || sourcePath.includes("\\")
+    || sourcePath.includes("\0")
+    || sourcePath.split("/").some((part) => part.length === 0 || part === "." || part === "..")) {
+    throw new TypeError("Artifact element selection manifest sourcePath must be a safe relative path");
+  }
+  return {
+    protocol: codecEnum(
+      input.protocol,
+      ["dezin.artifact-element-selection-manifest.v1"],
+      "Artifact element selection manifest protocol",
+    ),
+    workspaceId: codecString(input.workspaceId, "Artifact element selection manifest workspaceId"),
+    artifactId: codecString(input.artifactId, "Artifact element selection manifest artifactId"),
+    artifactRevisionId: codecString(
+      input.artifactRevisionId,
+      "Artifact element selection manifest artifactRevisionId",
+    ),
+    assemblyHash: codecHexHash(input.assemblyHash, "Artifact element selection manifest assemblyHash", [64]),
+    designNodeId: codecString(input.designNodeId, "Artifact element selection manifest designNodeId"),
+    sourceArtifactId: codecString(
+      input.sourceArtifactId,
+      "Artifact element selection manifest sourceArtifactId",
+    ),
+    sourceArtifactRevisionId: codecString(
+      input.sourceArtifactRevisionId,
+      "Artifact element selection manifest sourceArtifactRevisionId",
+    ),
+    sourceCommitHash: codecHexHash(
+      input.sourceCommitHash,
+      "Artifact element selection manifest sourceCommitHash",
+      [40, 64],
+    ),
+    sourceTreeHash: codecHexHash(
+      input.sourceTreeHash,
+      "Artifact element selection manifest sourceTreeHash",
+      [40, 64],
+    ),
+    sourcePath,
+    selectionManifestHash: codecHexHash(
+      input.selectionManifestHash,
+      "Artifact element selection manifest selectionManifestHash",
+      [64],
+    ),
+  };
+}
+
 const RESOURCE_KINDS = [
   "research",
   "moodboard",
@@ -3247,6 +3353,10 @@ export interface ApiClient {
   ): Promise<ApprovedProposalResult>;
   rejectWorkspaceProposal(projectId: string, proposalId: string): Promise<WorkspaceProposal>;
   listGenerationPlans(projectId: string): Promise<GenerationPlan[]>;
+  getLatestWorkspaceAgentPlanId(
+    projectId: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
   getLatestScopedArtifactPlanId(
     projectId: string,
     artifactId: string,
@@ -3326,6 +3436,13 @@ export interface ApiClient {
     input: ForkArtifactTrackRequest,
   ): Promise<ArtifactVersionActionResult>;
   applyArtifactMutation(projectId: string, artifactId: string, input: ArtifactMutationInput): Promise<ArtifactMutationResult>;
+  resolveArtifactElementProvenance(
+    projectId: string,
+    artifactId: string,
+    revisionId: string,
+    input: ArtifactElementProvenanceInput,
+    signal?: AbortSignal,
+  ): Promise<ArtifactElementSelectionManifest>;
   getArtifactThumbnail(projectId: string, artifactId: string, revisionId: string, signal?: AbortSignal): Promise<Blob>;
   artifactThumbnailUrl(projectId: string, artifactId: string, revisionId: string): string;
   listWorkspaceSnapshots(projectId: string): Promise<WorkspaceSnapshot[]>;
@@ -3681,6 +3798,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<WorkspaceProposal>(`/api/projects/${enc(projectId)}/workspace/proposals/${enc(proposalId)}/reject`, jsonInit("POST", {})),
     listGenerationPlans: (projectId) =>
       json<GenerationPlan[]>(`/api/projects/${enc(projectId)}/workspace/plans`),
+    getLatestWorkspaceAgentPlanId: (projectId, signal) =>
+      json<{ planId: string | null }>(
+        `/api/projects/${enc(projectId)}/workspace/agent/latest-plan`,
+        signal === undefined ? undefined : { signal },
+      ).then(({ planId }) => planId),
     getLatestScopedArtifactPlanId: (projectId, artifactId, signal) =>
       json<{ planId: string | null }>(
         `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/agent/latest-plan`,
@@ -3803,6 +3925,15 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<ArtifactMutationResult>(
         `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/mutations`,
         jsonInit("POST", input),
+      ),
+    resolveArtifactElementProvenance: (projectId, artifactId, revisionId, input, signal) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}/element-provenance`,
+        decodeArtifactElementSelectionManifest,
+        {
+          ...jsonInit("POST", encodeArtifactElementProvenanceInput(input)),
+          ...(signal === undefined ? {} : { signal }),
+        },
       ),
     getArtifactThumbnail: (projectId, artifactId, revisionId, signal) =>
       blob(

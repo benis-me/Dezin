@@ -768,6 +768,18 @@ function normalizeWorkspaceAgentTurnIdentity(
   return { projectId, turnId, request, requestJson, requestHash: checksum(requestJson) };
 }
 
+function sameWorkspaceGenerationAgentSelection(
+  first: WorkspaceGenerationAgentSelection | undefined,
+  second: WorkspaceGenerationAgentSelection | undefined,
+): boolean {
+  return first === undefined
+    ? second === undefined
+    : second !== undefined
+      && first.providerId === second.providerId
+      && first.command === second.command
+      && first.model === second.model;
+}
+
 function generationClaimKeyId(value: string): string {
   return Buffer.from(value, "utf8").toString("hex");
 }
@@ -3765,8 +3777,14 @@ export class WorkspaceStore {
     if (proposalInput.projectId !== identity.projectId) {
       throw new WorkspaceProposalOwnershipError("workspace-agent-turn", identity.projectId, proposalInput.projectId);
     }
-    if (proposalInput.kind !== "workspace-generation") {
+    if (proposalInput.kind !== "workspace-generation"
+      || proposalInput.generation.kind !== "workspace-generation") {
       throw new WorkspaceProposalValidationError("Workspace Agent turns require Workspace generation Proposals");
+    }
+    if (!sameWorkspaceGenerationAgentSelection(proposalInput.generation.agent, identity.request.agent)) {
+      throw new WorkspaceProposalValidationError(
+        "Workspace Agent turn Proposal Agent selection does not match its immutable request",
+      );
     }
     return this.transactionImmediate(() => {
       const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
@@ -5151,6 +5169,36 @@ export class WorkspaceStore {
          ORDER BY plan.created_at DESC, plan.id COLLATE BINARY DESC
          LIMIT 1`,
       ).get(workspace.id, artifactId, artifactId) as { id: string } | undefined;
+      return row === undefined
+        ? null
+        : this.readGenerationPlanDetailForProject(projectId, row.id).plan;
+    });
+  }
+
+  getLatestActionableWorkspaceAgentGenerationPlanForProject(
+    projectId: string,
+  ): GenerationPlan | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const row = this.db.prepare(
+        `SELECT plan.id
+         FROM generation_plans plan
+         JOIN workspace_agent_turns turn
+           ON turn.proposal_id = plan.proposal_id
+          AND turn.workspace_id = plan.workspace_id
+         WHERE plan.workspace_id = ?
+           AND plan.status IN (
+             'approved',
+             'queued',
+             'running',
+             'failed',
+             'compile-failed',
+             'requires-new-impact'
+           )
+         ORDER BY plan.created_at DESC, plan.id COLLATE BINARY DESC
+         LIMIT 1`,
+      ).get(workspace.id) as { id: string } | undefined;
       return row === undefined
         ? null
         : this.readGenerationPlanDetailForProject(projectId, row.id).plan;
@@ -7266,7 +7314,8 @@ export class WorkspaceStore {
         || input.failure.failureClass === "provider"
         || input.failure.failureClass === "agent-transport"
         || input.failure.failureClass === "build-infrastructure";
-      const transient = transientFailure && !(source.target.type === "artifact"
+      const terminalFailure = input.failure.error.code === "RESOURCE_AGENT_QUOTA_EXHAUSTED";
+      const transient = transientFailure && !terminalFailure && !(source.target.type === "artifact"
         && (source.sourceCommitHash === null || source.sourceTreeHash === null));
       const retryDelay = transient
         ? ([1_000, 4_000, 16_000] as const)[source.automaticRetryIndex] ?? null
@@ -13495,6 +13544,9 @@ export class WorkspaceStore {
     const contextPackId = boundaryId(row.context_pack_id, "Workspace Agent turn Context Pack id");
     const proposal = this.requireProposalForProject(identity.projectId, proposalId);
     const baseSnapshot = this.requireSnapshot(workspace.id, proposal.baseSnapshotId);
+    const proposalAgent = proposal.generation.kind === "workspace-generation"
+      ? proposal.generation.agent
+      : undefined;
     const contextPack = this.db.prepare(
       `SELECT scope_type, scope_id, graph_revision, intent, message_checksum, sealed
        FROM context_packs WHERE id = ? AND workspace_id = ?`,
@@ -13514,6 +13566,8 @@ export class WorkspaceStore {
       || contextPack.message_checksum !== checksum(identity.request.message)
       || proposal.workspaceId !== workspace.id
       || proposal.kind !== "workspace-generation"
+      || (proposalAgent !== undefined
+        && !sameWorkspaceGenerationAgentSelection(proposalAgent, identity.request.agent))
       || proposal.baseGraphRevision !== identity.request.graphRevision
       || proposal.baseGraph.workspaceId !== workspace.id
       || proposal.baseGraph.revision !== identity.request.graphRevision
@@ -13842,6 +13896,17 @@ export class WorkspaceStore {
       }
       if (current.kind === "component-propagation") {
         throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+      }
+      const currentAgent = current.generation.kind === "workspace-generation"
+        ? current.generation.agent
+        : undefined;
+      const nextAgent = input.generation.kind === "workspace-generation"
+        ? input.generation.agent
+        : undefined;
+      if (!sameWorkspaceGenerationAgentSelection(currentAgent, nextAgent)) {
+        throw new WorkspaceProposalValidationError(
+          "Workspace Proposal frozen origin Agent selection cannot change during an edit",
+        );
       }
       if (current.revision === Number.MAX_SAFE_INTEGER) {
         throw new WorkspaceProposalValidationError("Workspace Proposal revision is exhausted");

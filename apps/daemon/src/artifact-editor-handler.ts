@@ -26,6 +26,10 @@ import {
   type ArtifactThumbnailCapture,
 } from "./capture-cover.ts";
 import { HttpError, readJsonBody, sendJson } from "./http-util.ts";
+import {
+  ArtifactElementSelectionProvenanceError,
+  resolveArtifactElementSelectionProvenance,
+} from "./orchestration/artifact-element-selection-provenance.ts";
 import type { PreviewLease } from "./preview-lease.ts";
 import {
   acquirePreviewTargetLease,
@@ -110,6 +114,143 @@ function ownsArtifact(deps: AppDeps, projectId: string, artifactId: string): boo
     && artifact.workspaceId === workspace.id
     && artifact.archivedAt === null,
   );
+}
+
+class ArtifactElementProvenanceRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArtifactElementProvenanceRequestError";
+  }
+}
+
+function isWellFormedText(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseArtifactElementProvenanceRequest(value: unknown): {
+  designNodeId: string;
+  assemblyHash: string;
+} {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ArtifactElementProvenanceRequestError("request must be an object");
+  }
+  const request = value as Record<string, unknown>;
+  const keys = Object.keys(request);
+  if (keys.length !== 2 || !keys.includes("designNodeId") || !keys.includes("assemblyHash")) {
+    throw new ArtifactElementProvenanceRequestError("request fields are invalid");
+  }
+  if (typeof request.designNodeId !== "string"
+    || request.designNodeId.length === 0
+    || request.designNodeId.length > 256
+    || request.designNodeId.trim() !== request.designNodeId
+    || request.designNodeId.includes("\0")
+    || !isWellFormedText(request.designNodeId)) {
+    throw new ArtifactElementProvenanceRequestError("designNodeId must be a bounded stable identifier");
+  }
+  if (typeof request.assemblyHash !== "string" || !/^[0-9a-f]{64}$/.test(request.assemblyHash)) {
+    throw new ArtifactElementProvenanceRequestError("assemblyHash must be an immutable preview hash");
+  }
+  return {
+    designNodeId: request.designNodeId,
+    assemblyHash: request.assemblyHash,
+  };
+}
+
+function sendArtifactElementProvenanceError(res: ServerResponse, error: unknown): boolean {
+  if (error instanceof ArtifactElementProvenanceRequestError) {
+    sendJson(res, 422, {
+      error: error.message,
+      code: "artifact_element_provenance_invalid_request",
+    });
+    return true;
+  }
+  if (!(error instanceof ArtifactElementSelectionProvenanceError)) return false;
+  switch (error.code) {
+    case "assembly-conflict":
+      sendJson(res, 409, {
+        error: "Preview assembly changed; refresh and select the element again",
+        code: "artifact_element_provenance_assembly_conflict",
+      });
+      return true;
+    case "not-found":
+      sendJson(res, 404, {
+        error: "Selected element was not found in the immutable preview assembly",
+        code: "artifact_element_provenance_element_not_found",
+      });
+      return true;
+    case "ambiguous":
+      sendJson(res, 422, {
+        error: "Selected element is ambiguous in the immutable preview assembly",
+        code: "artifact_element_provenance_ambiguous",
+      });
+      return true;
+    case "invalid-source":
+      sendJson(res, 422, {
+        error: "Selected element provenance cannot be resolved from immutable source",
+        code: "artifact_element_provenance_invalid_source",
+      });
+      return true;
+    case "unavailable":
+      sendJson(res, 409, {
+        error: "Selected element provenance is unavailable",
+        code: "artifact_element_provenance_unavailable",
+      });
+      return true;
+  }
+}
+
+export async function handleArtifactElementProvenance(
+  req: IncomingMessage,
+  res: ServerResponse,
+  { id, artifactId, revisionId }: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    if (!ownsArtifact(deps, id!, artifactId!)) {
+      sendJson(res, 404, {
+        error: "Artifact Revision was not found",
+        code: "artifact_element_provenance_not_found",
+      });
+      return;
+    }
+    const workspace = deps.store.workspace.getWorkspace(id!);
+    const revision = deps.store.workspace.getArtifactRevision(revisionId!);
+    if (!workspace || !revision || revision.workspaceId !== workspace.id || revision.artifactId !== artifactId) {
+      sendJson(res, 404, {
+        error: "Artifact Revision was not found",
+        code: "artifact_element_provenance_not_found",
+      });
+      return;
+    }
+    const request = parseArtifactElementProvenanceRequest(await readJsonBody(req, 4 * 1024, signal));
+    signal?.throwIfAborted();
+    const manifest = await resolveArtifactElementSelectionProvenance({
+      store: deps.store,
+      dataDir: deps.dataDir,
+      projectId: id!,
+      workspaceId: workspace.id,
+      artifactId: artifactId!,
+      revisionId: revisionId!,
+      designNodeId: request.designNodeId,
+      expectedAssemblyHash: request.assemblyHash,
+      signal: signal ?? new AbortController().signal,
+    });
+    signal?.throwIfAborted();
+    sendJson(res, 200, manifest);
+  } catch (error) {
+    if (error instanceof HttpError || !sendArtifactElementProvenanceError(res, error)) throw error;
+  }
 }
 
 interface ParsedHtmlNode {

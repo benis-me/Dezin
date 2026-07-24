@@ -122,6 +122,12 @@ function installReactFlowMeasurements(): () => void {
   };
 }
 
+function waitForAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 const emptyGeneration = {
   kind: "workspace-generation" as const,
   agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
@@ -887,7 +893,7 @@ test("canvas merges the proposal into one ReactFlow and keeps proposal focus out
   const { container } = rendered;
   await act(async () => {
     measureReactFlow();
-    await Promise.resolve();
+    await waitForAnimationFrame();
     measureReactFlow();
   });
 
@@ -1628,6 +1634,49 @@ test("Proposal validation errors retain the editable draft and focus its issue s
     expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Proposal needs attention" }));
   });
   expect(approveWorkspaceProposal).toHaveBeenCalledTimes(1);
+});
+
+test("a delayed Workspace Agent Plan discovery cannot reopen a newly approved Plan after the user closes it", async () => {
+  const approval = approvedResult("generate");
+  const plan = approval.plan!;
+  let resolveLatestPlan!: (planId: string | null) => void;
+  const latestPlan = new Promise<string | null>((resolve) => {
+    resolveLatestPlan = resolve;
+  });
+  const getLatestWorkspaceAgentPlanId = vi.fn(() => latestPlan);
+  const approveWorkspaceProposal = vi.fn(async () => approval);
+  const getGenerationPlan = vi.fn(async () => ({
+    plan,
+    tasks: [],
+    dependencies: [],
+    currentAttempts: [],
+  }));
+  renderStudio({
+    getLatestWorkspaceAgentPlanId,
+    approveWorkspaceProposal,
+    listGenerationPlans: async () => [plan],
+    getGenerationPlan,
+  });
+
+  await waitFor(() => expect(getLatestWorkspaceAgentPlanId).toHaveBeenCalledTimes(1));
+  fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
+  expect(await screen.findByRole("heading", { name: "Proposal approved" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "View build plan" }));
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+
+  await act(async () => {
+    resolveLatestPlan(plan.id);
+    await latestPlan;
+  });
+
+  await waitFor(() => {
+    expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+  });
 });
 
 test("a committed generation compile failure refreshes canonical workspace state and opens its Build plan", async () => {
