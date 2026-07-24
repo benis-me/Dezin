@@ -33,6 +33,12 @@ import {
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
 
+const FROZEN_CODEBUDDY_AGENT = {
+  providerId: "codebuddy",
+  command: "codebuddy",
+  model: "gpt-5.6-sol",
+} as const;
+
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
@@ -58,6 +64,7 @@ const PRODUCTION_GENERATION_HARD_TIMEOUT_MS = 60_000;
 function researchBackedPageGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: FROZEN_CODEBUDDY_AGENT,
     resourceOperations: [{
       operation: "create" as const,
       nodeId: "research-node",
@@ -104,6 +111,7 @@ function exactResearchBackedPageGeneration(input: {
 }) {
   return {
     kind: "workspace-generation" as const,
+    agent: FROZEN_CODEBUDDY_AGENT,
     resourceOperations: [{
       operation: "reuse" as const,
       nodeId: input.resourceNodeId,
@@ -750,8 +758,13 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
   assert.equal(artifactRunnerCalls, 1);
   assert.equal(Object.hasOwn(observedInputEnvironment ?? {}, "DEZIN_DAEMON_TOKEN"), true);
   assert.equal(observedInputEnvironment?.DEZIN_DAEMON_TOKEN, undefined);
+  assert.equal(Object.hasOwn(observedInputEnvironment ?? {}, "OPENAI_API_KEY"), true);
+  assert.equal(observedInputEnvironment?.OPENAI_API_KEY, undefined);
   assert.doesNotMatch(childEnvironment, /^DEZIN_DAEMON_TOKEN=/m);
-  assert.match(childEnvironment, /^OPENAI_API_KEY=artifact-provider-key$/m);
+  assert.doesNotMatch(
+    childEnvironment,
+    /^(?:ANTHROPIC_(?:API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_OAUTH_TOKEN|CODEBUDDY_(?:API_KEY|AUTH_TOKEN|BASE_URL)|OPENAI_(?:API_KEY|BASE_URL|ORG_ID)|GEMINI_API_KEY|GOOGLE_(?:API_KEY|APPLICATION_CREDENTIALS)|AZURE_OPENAI_(?:API_KEY|ENDPOINT))=/m,
+  );
   assert.deepEqual(JSON.parse(observedDirectionSpec ?? "null"), selectedDirection);
 
   const [artifactRevision] = store.workspace.listRevisions(project.id, "checkout-page");

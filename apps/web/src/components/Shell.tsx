@@ -49,6 +49,7 @@ export function Shell({
     || route.name === "project-canvas"
     || route.name === "project-artifact"
     || route.name === "project-artifact-revision"
+    || route.name === "project-artifact-candidate"
     || route.name === "project-resource"
     || route.name === "project-resource-revision"
     || route.name === "moodboard";

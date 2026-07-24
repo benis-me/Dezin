@@ -209,6 +209,14 @@ export type PreviewTarget =
   | { kind: "artifact-current"; projectId: string; artifactId: string; trackId?: string }
   | { kind: "artifact-revision"; projectId: string; revisionId: string }
   | { kind: "run-candidate"; projectId: string; runId: string }
+  | {
+    kind: "generation-candidate";
+    projectId: string;
+    artifactId: string;
+    planId: string;
+    taskId: string;
+    attempt: number;
+  }
   | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string; stateKey?: string }
   | { kind: "component-state"; projectId: string; revisionId: string; variantKey: string; stateKey: string };
 
@@ -233,6 +241,12 @@ export interface ResolvedPreviewTarget {
   variantKey: string | null;
   stateKey: string | null;
   runId: string | null;
+  generationCandidate?: {
+    planId: string;
+    taskId: string;
+    attempt: number;
+    evidenceHash: string;
+  } | null;
 }
 
 export type DirectTokenProperty =
@@ -695,6 +709,8 @@ export interface ResourceRevisionHistoryPage {
 export interface CreateResearchDirectionArtifactIntentInput {
   selectionRequestId: string;
   artifactId: string;
+  agentCommand: "claude" | "codebuddy";
+  model?: string | null;
   expectedResourceHeadRevisionId: string;
   expectedGraphRevision: number;
   expectedSnapshotId: string;
@@ -804,6 +820,7 @@ export interface WorkspaceGenerationArtifactPlan {
   artifactId: string;
   kind: WorkspaceArtifactKind;
   name: string;
+  instructions?: string;
   trackId: string;
   baseRevisionId: string | null;
   dependsOnArtifactIds: string[];
@@ -843,6 +860,10 @@ export interface WorkspaceGenerationCapability {
   required: boolean;
 }
 
+export type WorkspaceGenerationAgentSelection =
+  | { providerId: "claude"; command: "claude"; model: string | null }
+  | { providerId: "codebuddy"; command: "codebuddy"; model: string | null };
+
 export interface WorkspaceRenderFrameSpec {
   id: string;
   name: string;
@@ -862,6 +883,8 @@ export interface WorkspaceArtifactQualityProfile {
 
 export interface WorkspaceGenerationPayload {
   kind: "workspace-generation";
+  /** Optional only for historical persisted Proposals; new executable mutations require it. */
+  agent?: WorkspaceGenerationAgentSelection;
   resourceOperations: WorkspaceGenerationResourceOperation[];
   artifactPlans: WorkspaceGenerationArtifactPlan[];
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
@@ -1444,6 +1467,8 @@ export interface AgentTurnRequest {
   intent: AgentIntent;
   turnId: string;
   message: string;
+  agentCommand?: string;
+  model?: string;
   explicitContext: ContextItemRef[];
   graphRevision: number;
   baseRevisionId?: string;
@@ -1454,6 +1479,8 @@ export interface AgentTurnRequest {
 export interface WorkspaceAgentTurnInput {
   turnId: string;
   message: string;
+  agentCommand?: string;
+  model?: string;
   explicitContext: ContextItemRef[];
   graphRevision: number;
   selection?: SelectionRef[];
@@ -1466,6 +1493,8 @@ export interface ScopedAgentTurnInput {
   turnId: string;
   intent: ScopedAgentIntent;
   message: string;
+  agentCommand?: string;
+  model?: string;
   explicitContext: ContextItemRef[];
   graphRevision: number;
   baseRevisionId: string;
@@ -1683,13 +1712,15 @@ export interface AgentInfo {
   id: string;
   command: string;
   available: boolean;
+  availability?: "ready" | "not-installed" | "authentication-required" | "verification-required";
+  unavailableReason?: string;
   version?: string;
   models: string[];
 }
 
-/** Streamed progress from a rescan: per-agent "probe"/"models" steps, then a final "done". */
+/** Streamed progress from a rescan: presence/readiness/model steps, then a final "done". */
 export type ScanEvent =
-  | { type: "progress"; id: string; label: string; phase: "probe" | "models" }
+  | { type: "progress"; id: string; label: string; phase: "probe" | "readiness" | "models" }
   | { type: "done"; agents: AgentInfo[] };
 
 export interface Health {
@@ -2797,6 +2828,8 @@ function encodeCreateResearchDirectionArtifactIntentInput(
   const input = codecExactRecord(value, [
     "selectionRequestId",
     "artifactId",
+    "agentCommand",
+    "model",
     "expectedResourceHeadRevisionId",
     "expectedGraphRevision",
     "expectedSnapshotId",
@@ -2806,9 +2839,28 @@ function encodeCreateResearchDirectionArtifactIntentInput(
   if (typeof input.confirmHypothesis !== "boolean") {
     throw new TypeError("Research direction confirmHypothesis must be boolean");
   }
+  const agentCommand = codecEnum(
+    input.agentCommand,
+    ["claude", "codebuddy"] as const,
+    "Research direction Agent command",
+  );
+  const model = input.model === undefined
+    ? undefined
+    : input.model === null
+      ? null
+      : codecBoundedString(input.model, "Research direction Agent model", 256);
+  if (typeof model === "string" && (
+    model !== model.trim()
+    || model.includes("\0")
+    || new TextEncoder().encode(model).byteLength > 256
+  )) {
+    throw new TypeError("Research direction Agent model must be canonical");
+  }
   return {
     selectionRequestId: codecString(input.selectionRequestId, "Research direction selectionRequestId"),
     artifactId: codecString(input.artifactId, "Research direction artifactId"),
+    agentCommand,
+    ...(model === undefined ? {} : { model }),
     expectedResourceHeadRevisionId: codecString(
       input.expectedResourceHeadRevisionId,
       "Research direction expectedResourceHeadRevisionId",

@@ -86,7 +86,11 @@ export type SpawnResearchFn = (
   args: string[],
   cwd: string,
   opts: SpawnResearchOpts,
-) => Promise<{ code: number | null; stderr: string }>;
+) => Promise<{ code: number | null; stderr: string; stdout?: string }>;
+
+function isAuthenticationFailure(value: string): boolean {
+  return /authentication required|sign in to your account|use\s+\/login|not logged in|please log in/i.test(value);
+}
 
 export async function runResearchPhase(
   input: ResearchPhaseInput,
@@ -138,22 +142,32 @@ export async function runResearchPhase(
     let lastReason: string | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       if (input.signal?.aborted) break;
+      let nonRetryable = false;
       try {
-        const { code, stderr } = await spawner(input.agentCommand, argsFor(prompt), input.dir, {
+        const { code, stderr, stdout } = await spawner(input.agentCommand, argsFor(prompt), input.dir, {
           env: input.env ?? {},
           signal: input.signal,
           timeoutMs: input.timeoutMs,
           onActivity: input.onActivity ? (a) => input.onActivity!({ ...a, track }) : undefined,
         });
+        const output = [stderr, stdout]
+          .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          .join("\n")
+          .trim();
         if (code !== 0) {
-          lastReason = `${input.agentCommand} exited with code ${code}${stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ""}`;
+          lastReason = `${input.agentCommand} exited with code ${code}${output ? `: ${output.slice(0, 300)}` : ""}`;
+        } else if (isAuthenticationFailure(output)) {
+          lastReason = output.slice(0, 300);
         }
+        nonRetryable = isAuthenticationFailure(output);
       } catch (err) {
         lastReason = err instanceof Error ? err.message : String(err);
         if (await exists()) return { produced: true };
+        nonRetryable = isAuthenticationFailure(lastReason);
         if (err instanceof Error && /aborted/i.test(err.message)) break;
       }
       if (await exists()) return { produced: true };
+      if (nonRetryable) break;
       if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
         input.onActivity?.({ kind: "note", text: `${track} research produced nothing — retrying once.`, track });
       }
@@ -230,7 +244,7 @@ function spawnResearch(
   args: string[],
   cwd: string,
   opts: SpawnResearchOpts,
-): Promise<{ code: number | null; stderr: string }> {
+): Promise<{ code: number | null; stderr: string; stdout?: string }> {
   return new Promise((resolve, reject) => {
     if (opts.signal?.aborted) return reject(new Error("research phase aborted"));
     const env = agentSpawnEnv(opts.env);
@@ -242,6 +256,7 @@ function spawnResearch(
     }
     let stderr = "";
     let stdoutBuffer = "";
+    let stdoutSummary = "";
     const onAbort = (): void => {
       child.kill("SIGKILL");
     };
@@ -259,9 +274,10 @@ function spawnResearch(
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
     };
-    if (opts.onActivity) {
-      child.stdout?.setEncoding("utf8");
-      child.stdout?.on("data", (d: string) => {
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => {
+      stdoutSummary = `${stdoutSummary}${d}`.slice(-4096);
+      if (opts.onActivity) {
         stdoutBuffer += d;
         let nl: number;
         while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
@@ -269,8 +285,8 @@ function spawnResearch(
           stdoutBuffer = stdoutBuffer.slice(nl + 1);
           for (const a of parseResearchActivity(line)) opts.onActivity?.(a);
         }
-      });
-    }
+      }
+    });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (d: string) => (stderr += d));
     child.on("error", (e) => {
@@ -280,7 +296,7 @@ function spawnResearch(
     child.on("close", (code) => {
       cleanup();
       if (opts.signal?.aborted) return reject(new Error("research phase aborted"));
-      resolve({ code, stderr });
+      resolve({ code, stderr, stdout: stdoutSummary });
     });
   });
 }

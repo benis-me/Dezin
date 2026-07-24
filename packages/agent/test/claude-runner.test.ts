@@ -157,6 +157,20 @@ test("NodeSpawner exact-environment mode does not inherit ambient secrets", asyn
   assert.deepEqual(JSON.parse(out.stdout), { explicit: "visible" });
 });
 
+test("NodeSpawner never reports a signal-terminated provider as exit code zero", {
+  skip: process.platform === "win32",
+}, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-signal-"));
+  const out = await new NodeSpawner().run({
+    command: process.execPath,
+    args: ["-e", "process.kill(process.pid, 'SIGABRT')"],
+    cwd: dir,
+    stdin: "",
+  });
+
+  assert.notEqual(out.exitCode, 0);
+});
+
 test("NodeSpawner times out a stuck process and escalates termination", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-timeout-"));
   const spawner = new NodeSpawner({ timeoutMs: 40, killDelayMs: 10 });

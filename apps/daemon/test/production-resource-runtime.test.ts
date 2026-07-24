@@ -392,7 +392,7 @@ test("production Resource Agent replays frozen semantics with only the exact pro
   });
 });
 
-test("production Resource Agent rejects command, provider, model, endpoint, organization, and credential-semantic drift before spawn", async () => {
+test("production Resource Agent rejects provider, endpoint, organization, and credential-semantic drift before spawn", async () => {
   const frozenSettings = defaultAgentSettings({
     agentCommand: "claude",
     model: "frozen-model",
@@ -409,7 +409,6 @@ test("production Resource Agent rejects command, provider, model, endpoint, orga
   });
   for (const [label, drift] of [
     ["command/provider", { agentCommand: "codex", aiProviderId: "openai" }],
-    ["model", { model: "drifted-model" }],
     ["endpoint", { apiBaseUrl: "https://drifted.example/v1" }],
     ["organization", { aiProviderOrganization: "drifted-org" }],
     ["credential requirement and foreign profile key", {
@@ -444,6 +443,35 @@ test("production Resource Agent rejects command, provider, model, endpoint, orga
       assert.equal(spawner.inputs.length, 0, label);
     });
   }
+});
+
+test("production Resource Agent ignores live model drift and spawns with the frozen model", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings(defaultAgentSettings({
+      agentCommand: "claude",
+      model: "frozen-model",
+      apiBaseUrl: "https://frozen.example/v1",
+      apiKey: "frozen-key",
+      aiProviderId: "anthropic",
+      aiProviderOrganization: "frozen-org",
+    }));
+    const request = agentRequest(new AbortController().signal, store.getSettings());
+    store.updateSettings({ model: "drifted-model", apiKey: "rotated-exact-key" });
+    const spawner = new RecordingSpawner({ stdout: "{}", stderr: "", exitCode: 0 });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      createSpawner: () => spawner,
+    });
+
+    const result = await ports.agent.generateStructured(request);
+
+    assert.deepEqual(result.generator, { id: "claude", model: "frozen-model" });
+    assert.ok(spawner.inputs[0]!.args.includes("frozen-model"));
+    assert.equal(spawner.inputs[0]!.args.includes("drifted-model"), false);
+    assert.equal(spawner.inputs[0]!.env?.ANTHROPIC_API_KEY, "rotated-exact-key");
+  });
 });
 
 test("production Resource Agent fails closed when the frozen provider credential is no longer available", async () => {
@@ -1042,6 +1070,11 @@ function unboundExportRequest(workspaceId: string, signal = new AbortController(
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+    },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

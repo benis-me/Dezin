@@ -204,6 +204,14 @@ export function createProposalOverlayModel(
           ? proposalOverlayId(proposalId, "node", source.parentId)
           : source.parentId
         : undefined;
+      const expandedGroupSize = change.objectKind === "group"
+        && typeof source.data.expandedGroupWidth === "number"
+        && typeof source.data.expandedGroupHeight === "number"
+        ? {
+            width: source.data.expandedGroupWidth,
+            height: source.data.expandedGroupHeight,
+          }
+        : null;
       return [{
         ...source,
         id,
@@ -215,6 +223,9 @@ export function createProposalOverlayModel(
         ariaLabel: change.accessibleLabel,
         className: joinClassName(source.className, `dezin-proposal-flow-node dezin-proposal-flow-node--${change.changeKind}`),
         data: { ...source.data, ...changeData(change) },
+        style: expandedGroupSize === null
+          ? source.style
+          : { ...source.style, ...expandedGroupSize },
         draggable: false,
         connectable: false,
         selectable: false,

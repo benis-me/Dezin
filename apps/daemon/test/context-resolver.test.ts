@@ -128,6 +128,11 @@ async function makeHarness(input?: {
 const request = {
   scope: { type: "workspace" as const, workspaceId: "workspace-1", id: "workspace-1" },
   intent: "generate" as const,
+  agent: {
+    providerId: "codebuddy" as const,
+    command: "codebuddy" as const,
+    model: "gpt-5.6-sol",
+  },
   message: "Create a precise page",
   explicitContext: [{ kind: "resource" as const, id: "moodboard-1", resourceKind: "moodboard" as const }],
   graphRevision: 7,
@@ -291,6 +296,7 @@ test("element selection Revision is verified against trusted Artifact provenance
   const scopedRequest = {
     scope: { type: "artifact" as const, workspaceId: "workspace-1", id: "artifact-1" },
     intent: "edit" as const,
+    agent: request.agent,
     message: "Refine the selected call to action",
     explicitContext: [],
     graphRevision: 7,
@@ -1173,6 +1179,24 @@ test("runtime Agent request boundary rejects unresolved shapes and oversized inp
   const normalized = normalizeAgentTurnRequest(request);
   assert.equal(Object.isFrozen(normalized), true);
   assert.equal(normalized.scope.workspaceId, "workspace-1");
+  assert.deepEqual(normalized.agent, {
+    providerId: "codebuddy",
+    command: "codebuddy",
+    model: "gpt-5.6-sol",
+  });
+  assert.equal(Object.isFrozen(normalized.agent), true);
+  assert.throws(() => normalizeAgentTurnRequest({
+    ...request,
+    agent: { providerId: "claude", command: "codebuddy", model: "gpt-5.6-sol" },
+  }), /provider.*command|selection.*invalid/i);
+  assert.throws(() => normalizeAgentTurnRequest({
+    ...request,
+    agent: { providerId: "codebuddy", command: "/usr/local/bin/codebuddy", model: "gpt-5.6-sol" },
+  }), /canonical|unsupported/i);
+  assert.throws(() => normalizeAgentTurnRequest({
+    ...request,
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "m".repeat(257) },
+  }), /model.*limit|model.*bounded/i);
   assert.throws(() => normalizeAgentTurnRequest({
     ...request,
     scope: { ...request.scope, projectId: "legacy-project" },

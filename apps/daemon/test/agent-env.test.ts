@@ -38,15 +38,36 @@ const SETTINGS: Settings = {
   autoImproveMaxRounds: 8,
 };
 
-test("buildAgentEnv maps BYOK settings for Anthropic-compatible CLIs", () => {
+test("buildAgentEnv maps BYOK settings only for Claude", () => {
   assert.deepEqual(buildAgentEnv(SETTINGS, "claude"), {
     ANTHROPIC_API_KEY: "sk-test",
     ANTHROPIC_BASE_URL: "https://api.example.test",
   });
-  assert.deepEqual(buildAgentEnv(SETTINGS, "C:\\Tools\\codebuddy.cmd"), {
-    ANTHROPIC_API_KEY: "sk-test",
-    ANTHROPIC_BASE_URL: "https://api.example.test",
-  });
+});
+
+test("buildAgentEnv tombstones every provider credential for host-authenticated CodeBuddy", () => {
+  const env = buildAgentEnv(SETTINGS, "C:\\Tools\\codebuddy.cmd", "daemon-token");
+  for (const key of [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CODEBUDDY_API_KEY",
+    "CODEBUDDY_AUTH_TOKEN",
+    "CODEBUDDY_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+  ]) {
+    assert.equal(Object.hasOwn(env, key), true, key);
+    assert.equal(env[key], undefined, key);
+  }
+  assert.equal(env.DEZIN_DAEMON_TOKEN, "daemon-token");
 });
 
 test("buildAgentEnv maps BYOK settings for Codex and Gemini CLIs", () => {

@@ -56,6 +56,7 @@ import {
 import {
   BlockedContextError,
   ContextIntegrityError,
+  normalizeAgentExecutionSelection,
   normalizeAgentTurnId,
   normalizeAgentTurnRequest,
   normalizeScopedAgentTurnId,
@@ -208,7 +209,7 @@ async function parseWorkspaceAgentTurnBody(
   const body = requestRecord(await readJsonBody(req), "Workspace Agent turn body");
   rejectUnexpectedRequestFields(
     body,
-    ["turnId", "message", "explicitContext", "graphRevision", "selection"],
+    ["turnId", "agentCommand", "model", "message", "explicitContext", "graphRevision", "selection"],
     "Workspace Agent turn body",
   );
   if (typeof body.message !== "string" || body.message.trim().length === 0
@@ -223,6 +224,11 @@ async function parseWorkspaceAgentTurnBody(
         workspaceId: ready.workspace.id,
       },
       intent: "plan",
+      agent: normalizeAgentExecutionSelection({
+        providerId: body.agentCommand,
+        command: body.agentCommand,
+        model: body.model ?? null,
+      }),
       turnId: normalizeAgentTurnId(body.turnId),
       message: body.message.trim(),
       explicitContext: body.explicitContext,
@@ -282,7 +288,10 @@ async function parseScopedAgentTurnBody(
   const body = requestRecord(await readJsonBody(req), label);
   rejectUnexpectedRequestFields(
     body,
-    ["turnId", "intent", "message", "explicitContext", "graphRevision", "baseRevisionId", "selection"],
+    [
+      "turnId", "intent", "agentCommand", "model", "message", "explicitContext",
+      "graphRevision", "baseRevisionId", "selection",
+    ],
     label,
   );
   if (body.intent !== "generate" && body.intent !== "edit" && body.intent !== "repair") {
@@ -303,6 +312,11 @@ async function parseScopedAgentTurnBody(
         workspaceId: ready.workspace.id,
       },
       intent: body.intent,
+      agent: normalizeAgentExecutionSelection({
+        providerId: body.agentCommand,
+        command: body.agentCommand,
+        model: body.model ?? null,
+      }),
       turnId: normalizeScopedAgentTurnId(body.turnId),
       message: body.message.trim(),
       explicitContext: body.explicitContext,
@@ -415,6 +429,8 @@ async function parseResearchDirectionArtifactIntentBody(
   rejectUnexpectedRequestFields(body, [
     "selectionRequestId",
     "artifactId",
+    "agentCommand",
+    "model",
     "expectedResourceHeadRevisionId",
     "expectedGraphRevision",
     "expectedSnapshotId",
@@ -433,15 +449,26 @@ async function parseResearchDirectionArtifactIntentBody(
     || typeof body.confirmHypothesis !== "boolean") {
     throw new HttpError(400, "Research direction selection body is invalid");
   }
-  return {
-    selectionRequestId: body.selectionRequestId,
-    artifactId: body.artifactId,
-    expectedResourceHeadRevisionId: body.expectedResourceHeadRevisionId,
-    expectedGraphRevision: Number(body.expectedGraphRevision),
-    expectedSnapshotId: body.expectedSnapshotId,
-    expectedLayoutChecksum: body.expectedLayoutChecksum,
-    confirmHypothesis: body.confirmHypothesis,
-  };
+  try {
+    const agent = normalizeAgentExecutionSelection({
+      providerId: body.agentCommand,
+      command: body.agentCommand,
+      model: body.model ?? null,
+    });
+    return {
+      selectionRequestId: body.selectionRequestId,
+      artifactId: body.artifactId,
+      agent,
+      expectedResourceHeadRevisionId: body.expectedResourceHeadRevisionId,
+      expectedGraphRevision: Number(body.expectedGraphRevision),
+      expectedSnapshotId: body.expectedSnapshotId,
+      expectedLayoutChecksum: body.expectedLayoutChecksum,
+      confirmHypothesis: body.confirmHypothesis,
+    };
+  } catch (error) {
+    if (error instanceof ContextIntegrityError) throw new HttpError(400, error.message);
+    throw error;
+  }
 }
 
 function proposalNotFound(error: unknown): never {
@@ -1240,6 +1267,7 @@ export async function handleCreateResearchDirectionArtifactIntent(
     revisionId: params.revisionId!,
     directionId: params.directionId!,
     artifactId: input.artifactId,
+    agent: input.agent,
     resourceHeadRevisionId: input.expectedResourceHeadRevisionId,
     graphRevision: input.expectedGraphRevision,
     snapshotId: input.expectedSnapshotId,
@@ -1344,6 +1372,7 @@ export async function handleCreateResearchDirectionArtifactIntent(
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: input.agent,
       resourceOperations: [{
         operation: "reuse",
         nodeId: resourceNode.id,

@@ -21,7 +21,10 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       data-resource-quality={data.resourceQualityState ?? undefined}
       data-awaiting-selection={awaitingSelection || undefined}
     >
-      <Handle id="resource-target" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--relation" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-target-top" type="target" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-target-bottom" type="target" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <div className="dezin-flow-resource__glyph" aria-hidden><BookOpenText size={17} strokeWidth={1.45} /></div>
       <div className="dezin-flow-resource__copy">
         <span className="dezin-flow-card__kind"><Orbit size={10} /> Context resource</span>
@@ -42,7 +45,10 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
         )}
         {overview && <span className="dezin-flow-card__overview-status">{statusLabel}</span>}
       </div>
-      <Handle id="resource-source" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--relation" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-source-top" type="source" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="resource-source-bottom" type="source" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
     </div>
   );
 }

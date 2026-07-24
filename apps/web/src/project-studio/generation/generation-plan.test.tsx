@@ -339,11 +339,11 @@ test("GenerationPlanPanel links only exact candidate and published Revisions wit
 
   expect(screen.getByRole("link", { name: "Review Page candidate" })).toHaveAttribute(
     "href",
-    "/projects/project%20%2F%20one/artifacts/artifact%20%2F%20candidate/revisions/revision%20%2F%20candidate",
+    "/projects/project%20%2F%20one/artifacts/artifact%20%2F%20candidate/candidates/plan-1/task-1/1",
   );
   expect(screen.getByRole("link", { name: "Review Component candidate" })).toHaveAttribute(
     "href",
-    "/projects/project%20%2F%20one/artifacts/artifact-rebase/revisions/revision-rebase",
+    "/projects/project%20%2F%20one/artifacts/artifact-rebase/candidates/plan-1/task-2/1",
   );
   expect(screen.getByRole("link", { name: "Open published Page revision" })).toHaveAttribute(
     "href",

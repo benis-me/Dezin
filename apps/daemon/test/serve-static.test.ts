@@ -129,7 +129,7 @@ test("preview bridge requires a nonce-bound parent handshake and never emits to 
   assert.doesNotMatch(out, /parent\.postMessage\([^;]+,"\*"\)/);
 });
 
-test("picker supports keyboard selection and preserves complete text without folding whitespace", () => {
+test("picker stays active across consecutive pointer and keyboard selections and preserves complete text", () => {
   const html = injectSelectBridge("<html><body><h1>Pick</h1></body></html>");
   const source = html.match(/<script data-dezin-bridge>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(source);
@@ -220,10 +220,11 @@ test("picker supports keyboard selection and preserves complete text without fol
     assert.ok(listener);
     listener(message);
   };
-  const key = (value: string) => {
+  const key = (value: string, isTrusted = true) => {
     let prevented = false;
     const event = {
       key: value,
+      isTrusted,
       target: body,
       preventDefault() { prevented = true; },
       stopPropagation() {},
@@ -231,14 +232,42 @@ test("picker supports keyboard selection and preserves complete text without fol
     for (const listener of documentListeners.get("keydown") ?? []) listener(event);
     return prevented;
   };
+  const click = (targetValue: Record<string, unknown>, isTrusted = true) => {
+    let prevented = false;
+    let stopped = false;
+    const event = {
+      isTrusted,
+      target: targetValue,
+      preventDefault() { prevented = true; },
+      stopPropagation() { stopped = true; },
+    };
+    for (const listener of documentListeners.get("click") ?? []) listener(event);
+    return { prevented, stopped };
+  };
   sendCommand({ type: "select-mode", on: true });
+
+  assert.deepEqual(click(target, false), { prevented: false, stopped: false });
+  assert.equal(key("ArrowDown", false), false);
+  assert.equal(sent.length, 0, "scripted pointer and keyboard events must not emit selections");
+  assert.deepEqual(click(target), { prevented: true, stopped: true });
+  assert.deepEqual(click(trailingTarget), { prevented: true, stopped: true });
+  assert.deepEqual(
+    sent
+      .filter((message) => message.type === "element-selected")
+      .map((message) => (message.locator as { designNodeId?: string } | undefined)?.designNodeId),
+    ["hero-title", "footer-action"],
+    "one select-mode command keeps accepting consecutive pointer picks",
+  );
+  assert.equal(bodyStyle.cursor, "crosshair", "confirming a pointer pick must keep selection cursor mode active");
+
+  sent.length = 0;
   assert.equal(key("ArrowDown"), true);
   assert.equal(key("Enter"), true);
   const selected = sent.find((message) => message.type === "element-selected");
   assert.equal(selected?.text, target.textContent);
   assert.equal(selected?.textComplete, true);
   assert.equal(selected?.textPreview, "Objects for a considered home");
-  assert.equal(bodyStyle.cursor, "", "confirming a keyboard pick must leave selection cursor mode");
+  assert.equal(bodyStyle.cursor, "crosshair", "confirming a keyboard pick must keep selection cursor mode active");
   assert.ok(appended.some((node) => typeof node.getAttribute === "function"
     && (node.getAttribute as (name: string) => unknown)("aria-live") === "polite"));
 
@@ -814,6 +843,14 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
     dispatchEvent() { return true; },
   } as Record<string, unknown>;
   const sent: Array<Record<string, unknown>> = [];
+  const documentBody = {
+    nodeType: 1,
+    tagName: "BODY",
+    parentElement: null,
+    scrollHeight: 100,
+    innerText: "rendered preview content",
+    style: {},
+  };
   const port = {
     postMessage(message: Record<string, unknown>) { sent.push(message); },
     start() {},
@@ -828,10 +865,14 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
     document: {
       readyState: "complete",
       documentElement: { style: {}, setAttribute() {} },
-      body: { scrollHeight: 100, innerText: "rendered preview content", style: {} },
+      body: documentBody,
     },
     console: { error() {} },
     XMLHttpRequest: FakeXhr,
+    getComputedStyle: () => ({
+      display: "inline-flex",
+      fontSize: "16px",
+    }),
     CSS: { supports: () => true },
     CustomEvent: class {},
     setTimeout,
@@ -872,6 +913,70 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
     if (handshakeConsumed) break;
   }
   assert.equal(stolenPort, null, "page listeners installed after the injected bridge cannot observe its private port");
+  const pickerTarget = {
+    nodeType: 1,
+    tagName: "BUTTON",
+    id: "continue-cta",
+    className: "checkout-action primary",
+    classList: { length: 0 },
+    parentElement: documentBody,
+    previousElementSibling: null,
+    textContent: "Continue",
+    getAttribute(name: string) {
+      if (name === "data-design-node-id") return "checkout-continue";
+      if (name === "data-dezin-source-path") return "src/Checkout.tsx";
+      if (name === "role") return "button";
+      if (name === "aria-label") return "Continue to payment";
+      return "";
+    },
+    getBoundingClientRect() {
+      return { left: 20, top: 40, width: 180, height: 44 };
+    },
+  };
+  port.onmessage?.({ data: {
+    source: "dezin-parent",
+    type: "select-mode",
+    protocol: 1,
+    nonce,
+    on: true,
+  } });
+  const beforeTrustedPick = sent.length;
+  for (const listener of listeners.get("click") ?? []) {
+    listener({ target: pickerTarget, isTrusted: false });
+  }
+  assert.equal(sent.length, beforeTrustedPick, "scripted clicks cannot use the private picker sender");
+  for (const listener of listeners.get("click") ?? []) {
+    listener({ target: pickerTarget, isTrusted: true });
+  }
+  const trustedPickMessages = sent.slice(beforeTrustedPick);
+  assert.deepEqual(
+    trustedPickMessages.map((message) => message.type),
+    ["selected", "element-selected"],
+    "a trusted pick emits the complete legacy payload before the artifact-editor payload",
+  );
+  const legacyPick = trustedPickMessages[0]!;
+  assert.equal(legacyPick.selector, "[data-design-node-id=\"checkout-continue\"]");
+  assert.equal(legacyPick.tag, "button");
+  assert.equal(legacyPick.textPreview, "Continue");
+  assert.equal(legacyPick.textComplete, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(legacyPick.rect)), { x: 20, y: 40, w: 180, h: 44 });
+  assert.deepEqual(JSON.parse(JSON.stringify(legacyPick.attrs)), {
+    id: "continue-cta",
+    className: "checkout-action primary",
+    role: "button",
+    ariaLabel: "Continue to payment",
+    screenLabel: "",
+    designNodeId: "checkout-continue",
+    dezinId: "",
+    sourcePath: "src/Checkout.tsx",
+    instanceId: "",
+    href: "",
+    src: "",
+  });
+  assert.equal((legacyPick.styles as Record<string, unknown>).display, "inline-flex");
+  assert.equal((legacyPick.styles as Record<string, unknown>).fontSize, "16px");
+  const directPick = trustedPickMessages[1]!;
+  assert.equal((directPick.locator as Record<string, unknown>).designNodeId, "checkout-continue");
   const envelope = (bindings: unknown, extra: Record<string, unknown> = {}) => ({
     source: "dezin-parent",
     type: "set-prototype-bindings",
@@ -891,8 +996,21 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
     trigger: "click",
   }))) });
 
-  assert.equal(commands.length, 0, "generated page listeners must not receive prototype descriptors");
+  assert.equal(
+    commands.filter((command) => command.type === "set-prototype-bindings").length,
+    0,
+    "generated page listeners must not receive prototype descriptors",
+  );
   const beforeDirectSend = sent.length;
+  for (const type of ["selected", "element-selected", "cancel", "element-cleared"]) {
+    (window.__dezinBridgeTransport as { send(message: Record<string, unknown>): void }).send({
+      source: "dezin",
+      type,
+      selector: "#forged",
+      locator: { designNodeId: "forged", selector: "#forged" },
+      text: "Forged selection",
+    });
+  }
   (window.__dezinBridgeTransport as { send(message: Record<string, unknown>): void }).send({
     source: "dezin",
     type: "prototype-binding-activated",
@@ -984,6 +1102,27 @@ test("prototype activation is private, trusted-only, and chooses the nearest com
     nonce,
     bindings: descriptors,
   } });
+
+  const beforeEscape = sent.length;
+  documentListeners.get("keydown")?.[0]?.({
+    isTrusted: false,
+    key: "Escape",
+    target: body,
+    composedPath: () => [body],
+  });
+  assert.equal(sent.length, beforeEscape, "scripted Escape must not request prototype exit");
+  documentListeners.get("keydown")?.[0]?.({
+    isTrusted: true,
+    key: "Escape",
+    target: body,
+    composedPath: () => [body],
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))), {
+    source: "dezin",
+    type: "prototype-exit-requested",
+    nonce,
+    protocol: 1,
+  });
 
   const element = (
     designNodeId: string | null,

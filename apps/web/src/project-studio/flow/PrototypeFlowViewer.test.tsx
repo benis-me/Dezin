@@ -70,6 +70,15 @@ test("viewer keeps the exact Snapshot across navigation and releases the old and
 
   const firstFrame = await screen.findByTitle("Alpha flow preview") as HTMLIFrameElement;
   expect(firstFrame.getAttribute("src")).not.toContain("dezin-bridge");
+  const fallbackViewport = firstFrame.closest<HTMLElement>(".prototype-flow-viewer__frame-viewport");
+  expect(fallbackViewport).not.toBeNull();
+  expect(fallbackViewport).toHaveAttribute("data-prototype-fallback-frame", "true");
+  expect(fallbackViewport).toHaveStyle({ width: "1440px", height: "900px", visibility: "visible" });
+  expect(firstFrame).not.toHaveClass("prototype-flow-viewer__unframed");
+  const fittedViewport = fallbackViewport!.parentElement;
+  expect(fittedViewport).toHaveClass("prototype-flow-viewer__frame-scale");
+  expect(Number.parseFloat(fittedViewport!.style.width)).toBeLessThanOrEqual(1024);
+  expect(Number.parseFloat(fittedViewport!.style.height)).toBeLessThanOrEqual(768);
   const postMessage = vi.spyOn(firstFrame.contentWindow!, "postMessage");
   fireEvent.load(firstFrame);
   const bootstrap = (postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>).find(
@@ -162,6 +171,55 @@ test("viewer keeps the exact Snapshot across navigation and releases the old and
   betaPort.close();
   backPort.close();
   selectedBetaPort.close();
+});
+
+test("trusted Escape from the focused exact Page exits prototype flow through the preview channel", async () => {
+  const onClose = vi.fn();
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"]);
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: "lease-page-a-escape",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={onClose} />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle("Alpha flow preview") as HTMLIFrameElement;
+  const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+  fireEvent.load(frame);
+  const bootstrap = (postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>).find(
+    ([message]) => (message as { type?: string }).type === "bridge-init",
+  );
+  const port = bootstrap?.[2]?.[0] as MessagePort | undefined;
+  expect(port).toBeDefined();
+  port!.start();
+  port!.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
+  port!.postMessage({
+    source: "dezin",
+    type: "prototype-exit-requested",
+    nonce: "wrong-preview-bridge-nonce",
+    protocol: 1,
+  });
+  await act(async () => {});
+  expect(onClose).not.toHaveBeenCalled();
+
+  port!.postMessage({
+    source: "dezin",
+    type: "prototype-exit-requested",
+    nonce: NONCE,
+    protocol: 1,
+  });
+  await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  port!.close();
 });
 
 test("applies and acknowledges the frozen default RenderSpec frame before declaring a Page prepared", async () => {

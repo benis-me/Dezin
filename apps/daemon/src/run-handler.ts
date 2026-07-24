@@ -20,6 +20,7 @@ import {
   isAbortError,
   abortError,
   type GenerateEvent,
+  type AgentReadiness,
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
 import { defaultRegistry, type DesignRegistry } from "../../../packages/design/src/index.ts";
@@ -320,8 +321,21 @@ function questionMessage(text: string, runId: string): string {
   return JSON.stringify({ question: { text, runId } });
 }
 
-function directionGateMessage(directions: Array<{ slug: string; title: string; markdown: string }>, runId: string, brief: string): string {
-  return JSON.stringify({ directionGate: { directions, runId, brief } });
+interface DirectionGateContinuation {
+  agentCommand: string;
+  model?: string;
+  moodboardRefs?: Array<{ id: string; name?: string }>;
+  effectRefs?: Array<{ id: string; name?: string }>;
+  research?: boolean;
+}
+
+function directionGateMessage(
+  directions: Array<{ slug: string; title: string; markdown: string }>,
+  runId: string,
+  brief: string,
+  continuation: DirectionGateContinuation,
+): string {
+  return JSON.stringify({ directionGate: { directions, runId, brief, continuation } });
 }
 
 /** What the Research phase produced on disk — powers the workspace's Research card. */
@@ -621,6 +635,35 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       error: "Structured Context requires an immutable Context Pack before this Run can start",
       code: "context_pack_required",
     });
+  }
+  const readinessProbe = deps.agentReadiness
+    ?? (deps.runner
+      ? null
+      : async (command: string): Promise<AgentReadiness> => {
+          const provider = getProvider(command);
+          return provider?.probeReadiness
+            ? provider.probeReadiness(command)
+            : { status: "ready" };
+        });
+  if (readinessProbe) {
+    let readiness: AgentReadiness;
+    try {
+      readiness = await readinessProbe(runAgentCommand);
+    } catch {
+      readiness = {
+        status: "verification-required",
+        reason: "Agent sign-in couldn't be verified. Rescan agents to try again.",
+      };
+    }
+    if (readiness.status !== "ready") {
+      return sendJson(res, 409, {
+        error: readiness.reason,
+        code: readiness.status === "authentication-required"
+          ? "agent_authentication_required"
+          : "agent_readiness_required",
+        agentCommand: runAgentCommand,
+      });
+    }
   }
   // Persistent false-positive suppression — drop findings the user has dismissed on prior runs.
   const qualityIgnores = store.listQualityIgnores(project.id);
@@ -948,6 +991,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const directions = chosenDirection ? [] : await listDirections(dir);
       if (directions.length >= 2) {
         const options = directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown }));
+        const continuation: DirectionGateContinuation = {
+          agentCommand: runAgentCommand,
+          ...(runModel ? { model: runModel } : {}),
+          ...(moodboardContext.labels.length ? { moodboardRefs: moodboardContext.labels } : {}),
+          ...(effectContext.labels.length ? { effectRefs: effectContext.labels } : {}),
+          ...(typeof body.research === "boolean" ? { research: body.research } : {}),
+        };
         if (standardTransaction) {
           if (await workingTreeFingerprint(standardTransaction.dir)) {
             await standardTransaction.commit("Dezin: save research directions");
@@ -956,8 +1006,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           dir = standardSourceDir!;
           store.updateRun(run.id, { commitHash: publishedResearch });
         }
-        store.addMessage(conversation.id, "system", directionGateMessage(options, run.id, visibleBrief));
-        sse({ type: "direction-gate", runId: run.id, directions: options, brief: visibleBrief });
+        store.addMessage(conversation.id, "system", directionGateMessage(options, run.id, brief, continuation));
+        sse({ type: "direction-gate", runId: run.id, directions: options, brief, continuation });
         execution.settle("cancelled", {
           finishedAt: Date.now(),
           event: { type: "run-cancelled", runId: run.id, reason: "direction" },

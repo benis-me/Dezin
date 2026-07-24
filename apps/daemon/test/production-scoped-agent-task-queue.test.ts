@@ -194,6 +194,7 @@ function request(input: {
   id: string;
   intent?: "generate" | "edit" | "repair";
   baseRevisionId?: string;
+  agent?: AgentTurnRequest["agent"];
 }): AgentTurnRequest {
   const turnSuffix = createHash("sha256")
     .update(`${input.type}:${input.id}:${input.intent ?? "edit"}:${input.baseRevisionId ?? "none"}`)
@@ -202,6 +203,7 @@ function request(input: {
   return {
     scope: { type: input.type, id: input.id, workspaceId: input.workspaceId },
     intent: input.intent ?? "edit",
+    agent: input.agent ?? { providerId: "claude", command: "claude", model: null },
     message: `Improve ${input.id} while preserving the shared design system.`,
     explicitContext: [],
     graphRevision: input.graphRevision,
@@ -309,6 +311,7 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
     id: "scoped-page",
     intent: "edit",
     baseRevisionId: f.pageRevision.id,
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
   });
   const contextPack = persistPack(f, turn, {
     snapshotId: f.workspace.activeSnapshotId,
@@ -331,6 +334,7 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
     trackId: "scoped-page-track",
   });
   assert.equal(receipt.task.status, "materialization-pending");
+  assert.deepEqual(receipt.task.payload.agent, turn.agent);
   assert.equal(
     (receipt.task.payload.artifactPlan as Record<string, unknown>).dispatchContextPackId,
     contextPack.id,
@@ -346,6 +350,7 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
   assert.equal(proposal.rationale, turn.message);
   assert.equal(proposal.generation.kind, "workspace-generation");
   if (proposal.generation.kind !== "workspace-generation") assert.fail("expected Workspace generation");
+  assert.deepEqual(proposal.generation.agent, turn.agent);
   assert.deepEqual(proposal.generation.artifactPlans.map((plan) => plan.artifactId), ["scoped-page"]);
   assert.equal(proposal.generation.artifactPlans[0]?.dispatchContextPackId, contextPack.id);
 });
@@ -416,6 +421,7 @@ test("scoped Agent queue replays a lost response after Store reopen without a se
 
   for (const divergent of [
     { ...turn, message: `${turn.message} Divergent retry.` },
+    { ...turn, agent: { ...turn.agent, model: "gpt-5.6-terra" } },
     {
       ...turn,
       selection: [{ kind: "element" as const, id: "different-element", revisionId: f.pageRevision.id }],
@@ -454,6 +460,7 @@ test("scoped Resource Agent creates one generated Resource leaf and rejects impo
     id: "scoped-research",
     intent: "generate",
     baseRevisionId: f.researchRevision.id,
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
   });
   const anchor = {
     snapshotId: f.workspace.activeSnapshotId,
@@ -467,6 +474,7 @@ test("scoped Resource Agent creates one generated Resource leaf and rejects impo
   }, new AbortController().signal);
   assert.equal(receipt.task.kind, "resource");
   assert.equal(receipt.task.target.id, "scoped-research");
+  assert.deepEqual(receipt.task.payload.agent, researchTurn.agent);
   assert.equal(
     (receipt.task.payload.operation as Record<string, unknown>).dispatchContextPackId,
     receipt.contextPackId,
@@ -745,6 +753,7 @@ test("scoped element and explicit Resource evidence survives Plan compilation in
   const turn: AgentTurnRequest = {
     scope: { type: "artifact", id: "scoped-page", workspaceId: f.workspace.id },
     intent: "edit",
+    agent: { providerId: "claude", command: "claude", model: null },
     message: "Make the checkout CTA unmistakable and follow the exact attached research.",
     explicitContext: [{
       kind: "resource",

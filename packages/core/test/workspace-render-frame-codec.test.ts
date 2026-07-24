@@ -20,6 +20,7 @@ function frame(overrides: Partial<RenderFrameSpec> = {}): RenderFrameSpec {
 function generation(responsiveFrame: RenderFrameSpec) {
   return {
     kind: "workspace-generation" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -148,6 +149,53 @@ test("Kernel and Proposal persistence reject render frames the capture runtime c
       label,
     );
   }
+});
+
+test("new executable Workspace Proposal mutations require a frozen Agent selection", () => {
+  const executableGeneration = {
+    ...generation(frame()),
+    agent: undefined,
+    artifactPlans: [{
+      operation: "create" as const,
+      nodeId: "node-page",
+      artifactId: "artifact-page",
+      kind: "page" as const,
+      name: "Page",
+      trackId: "track-page",
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: [],
+      responsiveFrameIds: ["desktop"],
+    }],
+  };
+
+  assert.throws(
+    () => normalizeCreateWorkspaceProposalInput({
+      projectId: "project-1",
+      kind: "workspace-generation",
+      baseGraphRevision: 0,
+      baseSnapshotId: "snapshot-1",
+      layoutId: "default",
+      baseLayoutChecksum: "layout-checksum-1",
+      operations: [],
+      layoutOperations: [],
+      generation: executableGeneration,
+      rationale: "Generate the workspace",
+      assumptions: [],
+    }),
+    /freeze an Agent selection/i,
+  );
+  assert.throws(
+    () => normalizeUpdateWorkspaceProposalInput({
+      expectedProposalRevision: 1,
+      operations: [],
+      layoutOperations: [],
+      generation: executableGeneration,
+      rationale: "Revise the workspace",
+      assumptions: [],
+    }),
+    /freeze an Agent selection/i,
+  );
 });
 
 test("Kernel and Proposal persistence enforce the Viewer bridge fixture clone budget", () => {

@@ -221,7 +221,10 @@ export class NodeSpawner implements ProcessSpawner {
           if (timedOut) return reject(new Error(`${input.command} timed out after ${timeoutMs}ms`));
           if (input.signal?.aborted) return reject(abortError());
           const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8");
-          resolve({ stdout, stderr: stderr.toString(), exitCode: code ?? 0 });
+          // A signal-terminated provider has no numeric exit code. Treat that
+          // as failure; mapping null to zero would turn a sandbox crash into a
+          // false successful Agent turn.
+          resolve({ stdout, stderr: stderr.toString(), exitCode: code ?? 1 });
         })();
       });
       child.stdin.on("error", () => {}); // ignore EPIPE if the child exits early
@@ -242,6 +245,8 @@ export interface ClaudeCodeRunnerOptions {
   artifactPath?: string;
   /** Require the canonical artifact file to change during the turn. */
   enforceArtifactUpdate?: boolean;
+  /** Override provider argv while retaining the stream/event/output runner contract. */
+  buildArgs?: (systemPrompt: string) => string[];
 }
 
 export class ClaudeCodeRunner implements AgentRunner {
@@ -261,6 +266,7 @@ export class ClaudeCodeRunner implements AgentRunner {
   }
 
   buildArgs(systemPrompt: string): string[] {
+    if (this.opts.buildArgs) return this.opts.buildArgs(systemPrompt);
     const args = [
       "-p",
       "--input-format",

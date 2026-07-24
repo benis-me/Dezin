@@ -5,7 +5,11 @@ import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
-import { setPendingBrief } from "./lib/pending-brief.ts";
+import {
+  setPendingAgent,
+  setPendingBrief,
+  setPendingDesignWorkspaceTurn,
+} from "./lib/pending-brief.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
 const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
@@ -55,6 +59,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     case "project-canvas":
     case "project-artifact":
     case "project-artifact-revision":
+    case "project-artifact-candidate":
     case "project-resource":
     case "project-resource-revision":
       // key by projectId: switching projects must give a FRESH instance (full state reset), not reuse
@@ -64,9 +69,11 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
           key={route.id}
           projectId={route.id}
           artifactId={route.name === "project-artifact" || route.name === "project-artifact-revision"
-            ? route.artifactId
-            : null}
+            || route.name === "project-artifact-candidate" ? route.artifactId : null}
           artifactRevisionId={route.name === "project-artifact-revision" ? route.revisionId : null}
+          artifactCandidate={route.name === "project-artifact-candidate"
+            ? { planId: route.planId, taskId: route.taskId, attempt: route.attempt }
+            : null}
           resourceId={route.name === "project-resource" || route.name === "project-resource-revision"
             ? route.resourceId
             : null}
@@ -97,7 +104,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     default:
       return (
         <HomeScreen
-          onNewProject={async (brief, skillId, designSystemId, mode, sharingan) => {
+          onNewProject={async (brief, skillId, designSystemId, mode, sharingan, agentSelection) => {
             try {
               const project = await api.createProject({
                 name: briefToName(brief),
@@ -107,7 +114,19 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 sharingan: !!sharingan,
                 sourceUrl: sharingan?.sourceUrl,
               });
-              setPendingBrief(brief);
+              if (mode === "standard" && !sharingan) {
+                setPendingDesignWorkspaceTurn({
+                  projectId: project.id,
+                  brief,
+                  ...(agentSelection?.agentCommand ? { agentCommand: agentSelection.agentCommand } : {}),
+                  ...(agentSelection?.model ? { model: agentSelection.model } : {}),
+                });
+              } else {
+                setPendingBrief(brief);
+                if (agentSelection?.agentCommand) {
+                  setPendingAgent(agentSelection.agentCommand, agentSelection.model);
+                }
+              }
               void api
                 .generateProjectTitle(project.id, brief)
                 .then((updated) => window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated })))
@@ -125,7 +144,8 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
 
 function routeLifetimeKey(route: Route): string {
   if (route.name === "project" || route.name === "project-canvas" || route.name === "project-artifact"
-    || route.name === "project-artifact-revision" || route.name === "project-resource"
+    || route.name === "project-artifact-revision" || route.name === "project-artifact-candidate"
+    || route.name === "project-resource"
     || route.name === "project-resource-revision") {
     return `project:${route.id}`;
   }

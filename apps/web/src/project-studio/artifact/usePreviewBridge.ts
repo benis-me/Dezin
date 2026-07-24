@@ -355,6 +355,7 @@ export function usePreviewBridge({
   previewIdentity,
   frame,
   enabled,
+  pickerEnabled,
 }: {
   iframeRef: RefObject<HTMLIFrameElement | null>;
   previewSrc: string | null;
@@ -363,9 +364,14 @@ export function usePreviewBridge({
   previewIdentity: PreviewBridgeIdentity | null;
   frame: WorkspaceRenderFrameSpec | null;
   enabled: boolean;
+  pickerEnabled: boolean;
 }) {
   const [storedSelection, setStoredSelection] = useState<ArtifactElementContext | null>(null);
   const [pickerActive, setPickerActive] = useState(false);
+  const pickerActiveRef = useRef(false);
+  const pickerEnabledRef = useRef(pickerEnabled);
+  pickerEnabledRef.current = pickerEnabled;
+  const selectionMessageTimesRef = useRef<number[]>([]);
   const [frameState, setFrameState] = useState<PreviewFrameState>({ status: "idle", frameId: null });
   const [runtimeErrorState, setRuntimeErrorState] = useState<RuntimeErrorState>(resetRuntimeErrors);
   const appliedFrameIdRef = useRef<string | null>(null);
@@ -393,7 +399,8 @@ export function usePreviewBridge({
         frame?.id ?? null,
       ])
     : null;
-  const selection = storedSelection !== null
+  const selection = pickerEnabled
+    && storedSelection !== null
     && identity !== null
     && previewIdentity !== null
     && storedSelection.projectId === projectId
@@ -406,6 +413,11 @@ export function usePreviewBridge({
     && frameState.frameId === frame?.id
     ? storedSelection
     : null;
+  const updatePickerActive = useCallback((active: boolean): void => {
+    pickerActiveRef.current = active;
+    if (!active) selectionMessageTimesRef.current = [];
+    setPickerActive(active);
+  }, []);
 
   const onBridgeMessage = useCallback((message: PreviewChannelMessage): void => {
     if (artifactId === null || previewIdentity === null) return;
@@ -465,12 +477,20 @@ export function usePreviewBridge({
     if (frame === null || appliedFrameIdRef.current !== frame.id) return;
     const data = messageData(message);
     if (data === null) return;
+    if (!pickerEnabledRef.current || !pickerActiveRef.current) return;
     if (data.type === "cleared") {
       setStoredSelection(null);
-      setPickerActive(false);
+      updatePickerActive(false);
       return;
     }
-    setPickerActive(false);
+    const now = Date.now();
+    const recentSelectionMessages = selectionMessageTimesRef.current.filter((at) => now - at < 1_000);
+    if (recentSelectionMessages.length >= 24) {
+      selectionMessageTimesRef.current = recentSelectionMessages;
+      return;
+    }
+    recentSelectionMessages.push(now);
+    selectionMessageTimesRef.current = recentSelectionMessages;
     setStoredSelection({
       type: "design-element",
       id: `${projectId}:${artifactId}:${previewIdentity.targetKey}:${data.locator.designNodeId}`,
@@ -493,7 +513,7 @@ export function usePreviewBridge({
       textMutationCapable: data.textMutationCapable,
       textMutationUnavailableReason: data.textMutationUnavailableReason,
     });
-  }, [artifactId, frame?.id, previewIdentity, projectId]);
+  }, [artifactId, frame?.id, previewIdentity, projectId, updatePickerActive]);
   const channel = usePreviewChannel({
     iframeRef,
     previewSrc,
@@ -646,16 +666,16 @@ export function usePreviewBridge({
 
   const clearSelection = useCallback(() => {
     setStoredSelection(null);
-    setPickerActive(false);
+    updatePickerActive(false);
     postBridgeMessage({ type: "select-mode", on: false });
     postBridgeMessage({ type: "clear" });
-  }, [postBridgeMessage]);
+  }, [postBridgeMessage, updatePickerActive]);
 
   const beginSelection = useCallback(() => {
-    if (!enabled || identity === null || frame === null || frameState.status !== "applied"
+    if (!enabled || !pickerEnabled || identity === null || frame === null || frameState.status !== "applied"
       || frameState.frameId !== frame.id || appliedFrameIdRef.current !== frame.id) return;
     setStoredSelection(null);
-    setPickerActive(true);
+    updatePickerActive(true);
     postBridgeMessage({ type: "clear" });
     postBridgeMessage({ type: "select-mode", on: true });
     try {
@@ -663,7 +683,7 @@ export function usePreviewBridge({
     } catch {
       iframeRef.current?.focus();
     }
-  }, [enabled, frame, frameState, identity, iframeRef, postBridgeMessage]);
+  }, [enabled, frame, frameState, identity, iframeRef, pickerEnabled, postBridgeMessage, updatePickerActive]);
 
   const onPreviewLoad = useCallback(() => {
     if (!enabled || identity === null || previewIdentity === null) return;
@@ -674,30 +694,30 @@ export function usePreviewBridge({
     setStoredSelection(null);
     setRuntimeErrorState(resetRuntimeErrors());
     channel.connect();
-    setPickerActive(false);
+    updatePickerActive(false);
     postBridgeMessage({ type: "select-mode", on: false });
     postBridgeMessage({ type: "clear" });
-  }, [channel.connect, enabled, identity, postBridgeMessage, previewIdentity]);
+  }, [channel.connect, enabled, identity, postBridgeMessage, previewIdentity, updatePickerActive]);
 
   useEffect(() => {
-    if (!enabled || identity === null || frame === null || frameState.status !== "applied"
+    if (!enabled || !pickerEnabled || identity === null || frame === null || frameState.status !== "applied"
       || frameState.frameId !== frame.id || appliedFrameIdRef.current !== frame.id) {
       setStoredSelection(null);
-      setPickerActive(false);
+      updatePickerActive(false);
       postBridgeMessage({ type: "select-mode", on: false });
       postBridgeMessage({ type: "clear" });
       return;
     }
-    setPickerActive(true);
+    updatePickerActive(true);
     postBridgeMessage({ type: "clear" });
     postBridgeMessage({ type: "select-mode", on: true });
-  }, [enabled, frame, frameState, identity, postBridgeMessage]);
+  }, [enabled, frame, frameState, identity, pickerEnabled, postBridgeMessage, updatePickerActive]);
 
   useEffect(() => {
     if (identity === null) {
       lastIdentityRef.current = null;
       setStoredSelection(null);
-      setPickerActive(false);
+      updatePickerActive(false);
       appliedFrameIdRef.current = null;
       appliedFrameAttemptIdRef.current = null;
       pendingRuntimeErrorsRef.current = [];
@@ -706,10 +726,10 @@ export function usePreviewBridge({
     }
     if (lastIdentityRef.current !== null && lastIdentityRef.current !== identity) {
       setStoredSelection(null);
-      setPickerActive(false);
+      updatePickerActive(false);
     }
     lastIdentityRef.current = identity;
-  }, [identity]);
+  }, [identity, updatePickerActive]);
 
   useEffect(() => {
     setRuntimeErrorState(resetRuntimeErrors());
@@ -728,7 +748,8 @@ export function usePreviewBridge({
   return {
     selection,
     frameState,
-    pickerActive: identity !== null
+    pickerActive: pickerEnabled
+      && identity !== null
       && channel.ready
       && frame !== null
       && frameState.status === "applied"

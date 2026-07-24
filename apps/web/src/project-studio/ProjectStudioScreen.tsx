@@ -3,8 +3,21 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { type AgentComposerContextItem } from "../components/AgentComposerContext.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { Button } from "../components/ui/index.ts";
+import { persistAgentModelDefaultsStrict } from "../lib/agent-model-defaults.ts";
+import {
+  agentAvailabilityReason,
+  agentModeDisabledReason,
+  normalizeAgentModel,
+  selectableAgents,
+} from "../lib/agent-availability.ts";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import {
+  takePendingDesignWorkspaceTurn,
+  type PendingDesignWorkspaceTurn,
+} from "../lib/pending-brief.ts";
 import type {
+  DesignSystemCard,
   Resource,
   ResourceRevision,
   ResourceRevisionOwnedSource,
@@ -45,6 +58,12 @@ type CanvasResourceRevisionState = {
   resourceKind: WorkspaceResourceKind;
   qualityState: "grounded" | "needs-review" | null;
 };
+
+interface ArtifactCandidateRouteIdentity {
+  planId: string;
+  taskId: string;
+  attempt: number;
+}
 
 const EMPTY_CANVAS_RESOURCE_REVISION_STATES: Readonly<Record<string, CanvasResourceRevisionState>> = {};
 
@@ -126,6 +145,7 @@ export function ProjectStudioScreen({
   projectId,
   artifactId,
   artifactRevisionId = null,
+  artifactCandidate = null,
   resourceId = null,
   resourceRevisionId = null,
   legacyFallback,
@@ -134,6 +154,7 @@ export function ProjectStudioScreen({
   projectId: string;
   artifactId: string | null;
   artifactRevisionId?: string | null;
+  artifactCandidate?: ArtifactCandidateRouteIdentity | null;
   resourceId?: string | null;
   resourceRevisionId?: string | null;
   legacyFallback: LegacyWorkspaceComponent;
@@ -141,9 +162,32 @@ export function ProjectStudioScreen({
 }) {
   const api = useApi();
   const { toast } = useToast();
+  const {
+    provided: agentsProvided,
+    agents,
+    loading: agentsLoading,
+    rescan: rescanAgents,
+  } = useAgents();
   const studio = useProjectStudio(projectId, artifactId, resourceId);
   const { load } = studio;
   const readyWorkspace = load.status === "ready" ? load.workspace : null;
+  const [designSystems, setDesignSystems] = useState<DesignSystemCard[]>([]);
+  const [designSystemId, setDesignSystemId] = useState("");
+  const [settingsAgent, setSettingsAgent] = useState<string | null>(null);
+  const [settingsModel, setSettingsModel] = useState("");
+  const [studioAgent, setStudioAgent] = useState("");
+  const [studioModel, setStudioModel] = useState("");
+  const [agentSettingsReady, setAgentSettingsReady] = useState(false);
+  const [agentSettingsError, setAgentSettingsError] = useState<string | null>(null);
+  const [designSystemError, setDesignSystemError] = useState<string | null>(null);
+  const studioAgentRef = useRef("");
+  const agentSettingsWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const agentSettingsErrorRef = useRef<string | null>(null);
+  const designSystemWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const designSystemErrorRef = useRef<string | null>(null);
+  const agentSettingsRequestRef = useRef(0);
+  const designSystemRequestRef = useRef(0);
+  const initialTurnRef = useRef<PendingDesignWorkspaceTurn | null | undefined>(undefined);
   const workspaceId = readyWorkspace?.workspace.id ?? null;
   const resourceHeadRevisionId = resourceId === null
     ? null
@@ -162,9 +206,18 @@ export function ProjectStudioScreen({
       ? null
       : readyWorkspace?.activeSnapshot.artifactRevisions[artifactId] ?? null,
     activeSnapshotId: readyWorkspace?.activeSnapshot.id ?? null,
-    target: artifactRevisionId === null
-      ? undefined
-      : { kind: "artifact-revision", projectId, revisionId: artifactRevisionId },
+    target: artifactCandidate !== null && artifactId !== null
+      ? {
+          kind: "generation-candidate",
+          projectId,
+          artifactId,
+          planId: artifactCandidate.planId,
+          taskId: artifactCandidate.taskId,
+          attempt: artifactCandidate.attempt,
+        }
+      : artifactRevisionId === null
+        ? undefined
+        : { kind: "artifact-revision", projectId, revisionId: artifactRevisionId },
     onArtifactPublished: studio.reconcileArtifactPublication,
   });
   const resourceEditor = useResourceEditorController({
@@ -185,10 +238,25 @@ export function ProjectStudioScreen({
   const restorePresentFlowFocusRef = useRef(false);
   const [scopedInspectorMode, setScopedInspectorMode] = useState<"inspector" | "plan">("inspector");
   const scopedInspectorScopeKey = artifactId !== null
-    ? `artifact:${artifactId}`
+    ? `artifact:${artifactId}:${
+        artifactCandidate !== null
+          ? `candidate:${artifactCandidate.planId}:${artifactCandidate.taskId}:${artifactCandidate.attempt}`
+          : artifactRevisionId === null
+            ? "head"
+            : `revision:${artifactRevisionId}`
+      }`
     : resourceId !== null
-      ? `resource:${resourceId}`
+      ? `resource:${resourceId}:${resourceRevisionId === null ? "head" : `revision:${resourceRevisionId}`}`
       : "workspace";
+  const contextActionGuardRef = useRef({
+    mounted: true,
+    scopeKey: scopedInspectorScopeKey,
+    epoch: 0,
+  });
+  if (contextActionGuardRef.current.scopeKey !== scopedInspectorScopeKey) {
+    contextActionGuardRef.current.scopeKey = scopedInspectorScopeKey;
+    contextActionGuardRef.current.epoch += 1;
+  }
   const [attachmentErrorsByScope, setAttachmentErrorsByScope] = useState<Record<string, string>>({});
   const attachmentError = attachmentErrorsByScope[scopedInspectorScopeKey] ?? null;
   const clearAttachmentError = useCallback((scopeKey: string): void => {
@@ -202,11 +270,13 @@ export function ProjectStudioScreen({
   const recordAttachmentError = useCallback((scopeKey: string, message: string): void => {
     setAttachmentErrorsByScope((current) => ({ ...current, [scopeKey]: message }));
   }, []);
-  const scopedGenerationPlanId = artifactId !== null && artifactRevisionId === null
-    ? studio.artifactAgentPlanId
-    : resourceId !== null && resourceRevisionId === null
-      ? studio.resourceAgentPlanId
-      : null;
+  const scopedGenerationPlanId = artifactCandidate !== null
+    ? artifactCandidate.planId
+    : artifactId !== null && artifactRevisionId === null
+      ? studio.artifactAgentPlanId
+      : resourceId !== null && resourceRevisionId === null
+        ? studio.resourceAgentPlanId
+        : null;
   const scopedAgentSubmitting = artifactId !== null
     ? studio.artifactAgentSubmitting
     : resourceId !== null
@@ -226,6 +296,194 @@ export function ProjectStudioScreen({
   const approvedPlanFromReview = studio.proposalReview.status === "approved"
     ? studio.proposalReview.plan?.id ?? null
     : null;
+
+  useEffect(() => {
+    studioAgentRef.current = studioAgent;
+  }, [studioAgent]);
+
+  useEffect(() => {
+    contextActionGuardRef.current.mounted = true;
+    contextActionGuardRef.current.epoch += 1;
+    return () => {
+      contextActionGuardRef.current.mounted = false;
+      contextActionGuardRef.current.epoch += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    void api.listDesignSystems().then((systems) => {
+      if (alive) setDesignSystems(systems);
+    }).catch(() => {
+      if (alive) setDesignSystems([]);
+    });
+    void api.getSettings().then((settings) => {
+      if (!alive) return;
+      setSettingsAgent(settings.agentCommand ?? "");
+      setSettingsModel(settings.model ?? "");
+    }).catch(() => {
+      if (alive) setSettingsAgent("");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (load.status !== "ready") return;
+    setDesignSystemId(load.project.designSystemId ?? "");
+  }, [load.status, load.status === "ready" ? load.project.designSystemId : null, projectId]);
+
+  const saveAgentModelDefaults = useCallback((agentCommand: string, model: string): void => {
+    const request = ++agentSettingsRequestRef.current;
+    agentSettingsErrorRef.current = null;
+    setAgentSettingsError(null);
+    setAgentSettingsReady(false);
+    const write = agentSettingsWriteRef.current
+      .catch(() => {})
+      .then(() => persistAgentModelDefaultsStrict(
+        api,
+        { agentCommand, model },
+      ));
+    agentSettingsWriteRef.current = write.then(
+      () => {
+        if (request !== agentSettingsRequestRef.current) return;
+        agentSettingsErrorRef.current = null;
+        if (contextActionGuardRef.current.mounted) {
+          setSettingsAgent(agentCommand);
+          setSettingsModel(model);
+          setAgentSettingsError(null);
+          setAgentSettingsReady(true);
+        }
+      },
+      () => {
+        if (request !== agentSettingsRequestRef.current) return;
+        const message = "Couldn't save the selected Agent setting. Choose it again to retry.";
+        agentSettingsErrorRef.current = message;
+        if (contextActionGuardRef.current.mounted) {
+          setAgentSettingsError(message);
+          setAgentSettingsReady(false);
+          toast("Couldn't save Agent settings.", { variant: "error" });
+        }
+      },
+    );
+  }, [api, toast]);
+
+  useEffect(() => {
+    if (settingsAgent === null) return;
+    const selectable = selectableAgents(agents);
+    const saved = selectable.find((candidate) => candidate.command === settingsAgent);
+    const selected = saved ?? agents.find((candidate) => candidate.available) ?? selectable[0];
+    if (!selected) return;
+    studioAgentRef.current = selected.command;
+    setStudioAgent(selected.command);
+    setStudioModel(saved ? normalizeAgentModel(selected, settingsModel) : "");
+    setAgentSettingsReady(true);
+  }, [agents, settingsAgent, settingsModel]);
+
+  const changeStudioAgent = useCallback((command: string): void => {
+    studioAgentRef.current = command;
+    setStudioAgent(command);
+    setStudioModel("");
+    saveAgentModelDefaults(command, "");
+  }, [saveAgentModelDefaults]);
+
+  const changeStudioModel = useCallback((model: string): void => {
+    setStudioModel(model);
+    if (studioAgentRef.current) saveAgentModelDefaults(studioAgentRef.current, model);
+  }, [saveAgentModelDefaults]);
+
+  const changeDesignSystem = useCallback((nextId: string): void => {
+    const previousId = designSystemId;
+    const request = ++designSystemRequestRef.current;
+    designSystemErrorRef.current = null;
+    setDesignSystemError(null);
+    setDesignSystemId(nextId);
+    const write = designSystemWriteRef.current
+      .catch(() => {})
+      .then(() => api.patchProject(projectId, { designSystemId: nextId || null }))
+      .then((project) => {
+        if (request !== designSystemRequestRef.current) return;
+        designSystemErrorRef.current = null;
+        if (contextActionGuardRef.current.mounted) {
+          setDesignSystemError(null);
+          setDesignSystemId(project.designSystemId ?? "");
+        }
+      })
+      .catch((error) => {
+        if (request !== designSystemRequestRef.current) return;
+        const persistenceMessage = "Couldn't save the Design System. Choose it again to retry.";
+        designSystemErrorRef.current = persistenceMessage;
+        if (!contextActionGuardRef.current.mounted) return;
+        setDesignSystemError(persistenceMessage);
+        setDesignSystemId(previousId);
+        const message = error instanceof Error && error.message.trim()
+          ? error.message
+          : "Couldn't update the Design System.";
+        toast(message, { variant: "error" });
+      });
+    designSystemWriteRef.current = write;
+  }, [api, designSystemId, projectId, toast]);
+
+  const afterContextSettings = useCallback(async <T,>(action: () => T | Promise<T>): Promise<T | undefined> => {
+    const guard = contextActionGuardRef.current;
+    const epoch = guard.epoch;
+    const scopeKey = guard.scopeKey;
+    for (;;) {
+      const agentRequest = agentSettingsRequestRef.current;
+      const designSystemRequest = designSystemRequestRef.current;
+      await Promise.all([agentSettingsWriteRef.current, designSystemWriteRef.current]);
+      if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== scopeKey) return undefined;
+      if (agentRequest !== agentSettingsRequestRef.current
+        || designSystemRequest !== designSystemRequestRef.current) continue;
+      if (agentSettingsErrorRef.current !== null || designSystemErrorRef.current !== null) return undefined;
+      break;
+    }
+    return action();
+  }, []);
+
+  useEffect(() => {
+    if (load.status !== "ready" || settingsAgent === null || (agentsProvided && agentsLoading)) return;
+    if (initialTurnRef.current === undefined) {
+      initialTurnRef.current = takePendingDesignWorkspaceTurn(projectId);
+    }
+    const pendingTurn = initialTurnRef.current;
+    if (pendingTurn === null) return;
+    const agentCommand = pendingTurn.agentCommand ?? studioAgentRef.current;
+    const selectedAgent = agents.find((candidate) => candidate.command === agentCommand);
+    if (agentsProvided && (!selectedAgent || !selectedAgent.available)) return;
+    if (agentsProvided && agentModeDisabledReason(selectedAgent, "design-workspace") !== null) {
+      initialTurnRef.current = null;
+      studio.setWorkspaceAgentDraft(pendingTurn.brief);
+      return;
+    }
+
+    studioAgentRef.current = agentCommand;
+    setStudioAgent(agentCommand);
+    setStudioModel(pendingTurn.model ?? "");
+    setAgentSettingsReady(true);
+    const guard = contextActionGuardRef.current;
+    const epoch = guard.epoch;
+    const timer = window.setTimeout(() => {
+      if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace") return;
+      initialTurnRef.current = null;
+      void studio.submitWorkspaceAgentPrompt({
+        message: pendingTurn.brief,
+        ...(agentCommand ? { agentCommand } : {}),
+        ...(pendingTurn.model ? { model: pendingTurn.model } : {}),
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    agents,
+    agentsLoading,
+    agentsProvided,
+    load.status,
+    projectId,
+    settingsAgent,
+    studio.setWorkspaceAgentDraft,
+    studio.submitWorkspaceAgentPrompt,
+  ]);
 
   useEffect(() => {
     if (prototypeFlowSession !== null || !restorePresentFlowFocusRef.current) return;
@@ -275,9 +533,9 @@ export function ProjectStudioScreen({
       return;
     }
     if (!tracked.wasSubmitting && scopedAgentSubmitting) tracked.receiptAtStart = scopedAgentReceiptId;
-    if (tracked.wasSubmitting && !scopedAgentSubmitting
-      && scopedGenerationPlanId !== null && scopedAgentReceiptId !== null
+    if (scopedGenerationPlanId !== null && scopedAgentReceiptId !== null
       && scopedAgentReceiptId !== tracked.receiptAtStart) {
+      tracked.receiptAtStart = scopedAgentReceiptId;
       clearAttachmentError(scopedInspectorScopeKey);
       setScopedInspectorMode("plan");
     }
@@ -431,12 +689,28 @@ export function ProjectStudioScreen({
   const workspaceScope = artifactId === null && resourceId === null;
   const artifactScope = artifactId !== null;
   const resourceScope = resourceId !== null;
+  const selectedStudioAgent = agents.find((candidate) => candidate.command === studioAgent);
+  const agentCapabilityPending = agentsProvided && (
+    agentsLoading
+    || settingsAgent === null
+    || studioAgent.length === 0
+    || (!agentSettingsReady && agentSettingsError === null)
+  );
+  const agentSubmissionBlockedReason = agentCapabilityPending
+    ? "Checking Agent availability…"
+    : agentSettingsError ?? designSystemError ?? (
+        agentsProvided
+          ? agentAvailabilityReason(selectedStudioAgent)
+            ?? agentModeDisabledReason(selectedStudioAgent, "design-workspace")
+          : null
+      );
   const artifactHeadRevisionId = artifactId === null
     ? null
     : load.workspace.activeSnapshot.artifactRevisions[artifactId] ?? null;
+  const artifactReadOnlyRoute = artifactRevisionId !== null || artifactCandidate !== null;
   const activeResource = resourceEditor.load.status === "ready" ? resourceEditor.load.resource : null;
   const artifactAgentAvailable = artifactScope && activeArtifact !== null
-    && artifactHeadRevisionId !== null && artifactRevisionId === null;
+    && artifactHeadRevisionId !== null && !artifactReadOnlyRoute;
   const resourceAgentAvailable = resourceScope && activeResource !== null
     && resourceHeadRevisionId !== null && resourceRevisionId === null;
   const artifactKindLabel = activeArtifact?.kind === "component" ? "Component" : activeArtifact?.kind === "page" ? "Page" : "Artifact";
@@ -444,7 +718,11 @@ export function ProjectStudioScreen({
   const contextLabel = workspaceScope
     ? `${load.workspace.artifacts.length} ${load.workspace.artifacts.length === 1 ? "artifact" : "artifacts"}`
     : artifactScope
-      ? `${artifactKindLabel} · ${artifactEditor.selection ? "1 selected element" : "artifact context"}`
+      ? `${artifactKindLabel} · ${
+          artifactCandidate !== null
+            ? "Generation candidate"
+            : artifactEditor.selection ? "1 selected element" : "artifact context"
+        }`
       : `${resourceKindLabel} · ${resourceRevisionId === null ? "current context" : "pinned Revision"}`;
   const agentTitle = workspaceScope ? "Workspace Agent" : artifactScope ? "Artifact Agent" : "Resource Agent";
   const reviewableProposal = studio.proposalReview.status === "draft"
@@ -525,6 +803,10 @@ export function ProjectStudioScreen({
             resourceId={resourceId!}
             requestedRevisionId={resourceRevisionId}
             workspace={load.workspace}
+            agentCommand={studioAgent}
+            model={studioModel}
+            agentSettingsReady={agentSettingsReady && agentSubmissionBlockedReason === null}
+            afterContextSettings={afterContextSettings}
             onBack={() => navigate(`/projects/${encodeURIComponent(projectId)}/canvas`)}
             onOpenRevision={(revisionId) => openResourceRevision(resourceId!, revisionId)}
             onReturnToHead={() => navigate(`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId!)}`)}
@@ -589,15 +871,17 @@ export function ProjectStudioScreen({
     <ArtifactInspector editor={artifactEditor} />
   );
 
-  const artifactAgentStatus = artifactRevisionId !== null
-    ? "Artifact Agent is read-only while viewing a pinned Revision."
-    : studio.artifactAgentReceipt !== null
-      ? `Queued · Plan ${studio.artifactAgentReceipt.task.planId}`
-      : studio.artifactAgentPlanId !== null
-        ? `Recent · Plan ${studio.artifactAgentPlanId}`
-        : artifactId !== null && artifactHeadRevisionId === null
-          ? "Artifact Agent needs an active Revision before work can be queued."
-          : null;
+  const artifactAgentStatus = artifactCandidate !== null
+    ? "Artifact Agent is read-only while reviewing a Generation candidate."
+    : artifactRevisionId !== null
+      ? "Artifact Agent is read-only while viewing a pinned Revision."
+      : studio.artifactAgentReceipt !== null
+        ? `Queued · Plan ${studio.artifactAgentReceipt.task.planId}`
+        : studio.artifactAgentPlanId !== null
+          ? `Recent · Plan ${studio.artifactAgentPlanId}`
+          : artifactId !== null && artifactHeadRevisionId === null
+            ? "Artifact Agent needs an active Revision before work can be queued."
+            : null;
   const resourceAgentStatus = resourceRevisionId !== null
     ? "Resource Agent is read-only while viewing a pinned Revision."
     : studio.resourceAgentReceipt !== null
@@ -637,6 +921,8 @@ export function ProjectStudioScreen({
     <ProjectStudioShell
       agent={(
         <WorkspaceAgentPanel
+          projectName={load.project.name}
+          onBackHome={() => navigate("/")}
           draft={studio.workspaceAgentDraft}
           onDraftChange={studio.setWorkspaceAgentDraft}
           contextLabel={contextLabel}
@@ -649,12 +935,15 @@ export function ProjectStudioScreen({
               : "Describe how this Resource should inform or change the design…"}
           scopeLabel={workspaceScope ? "Workspace" : artifactScope ? artifactKindLabel : resourceKindLabel}
           onSubmit={workspaceScope
-            ? () => {
+            ? () => afterContextSettings(() => {
                 clearAttachmentError(scopedInspectorScopeKey);
-                return studio.submitWorkspaceAgentPrompt();
-              }
+                return studio.submitWorkspaceAgentPrompt({
+                  agentCommand: studioAgent,
+                  model: studioModel || undefined,
+                });
+              })
             : artifactAgentAvailable
-              ? () => {
+              ? () => afterContextSettings(() => {
                   clearAttachmentError(scopedInspectorScopeKey);
                   return studio.submitArtifactAgentPrompt({
                     artifactId,
@@ -664,16 +953,20 @@ export function ProjectStudioScreen({
                       id: artifactEditor.selection.locator.designNodeId,
                       revisionId: artifactEditor.selection.revisionId,
                     }],
+                    agentCommand: studioAgent,
+                    model: studioModel || undefined,
                   });
-                }
+                })
               : resourceAgentAvailable
-                ? () => {
+                ? () => afterContextSettings(() => {
                     clearAttachmentError(scopedInspectorScopeKey);
                     return studio.submitResourceAgentPrompt({
                       resourceId,
                       baseRevisionId: resourceHeadRevisionId,
+                      agentCommand: studioAgent,
+                      model: studioModel || undefined,
                     });
-                  }
+                  })
                 : undefined}
           submitting={studio.agentTurnSubmitting}
           error={attachmentError ?? (workspaceScope
@@ -758,6 +1051,18 @@ export function ProjectStudioScreen({
             const item = workspaceReferenceById.get(id);
             if (item) studio.addAgentContextItems([item]);
           }}
+          agents={agents}
+          agent={studioAgent}
+          model={studioModel}
+          onAgentChange={changeStudioAgent}
+          onModelChange={changeStudioModel}
+          onRescanAgents={rescanAgents}
+          agentDisabledReason={(agent) => agentModeDisabledReason(agent, "design-workspace")}
+          submissionBlockedReason={agentSubmissionBlockedReason}
+          submissionBlockedPending={agentCapabilityPending}
+          designSystems={designSystems}
+          designSystemId={designSystemId}
+          onDesignSystemChange={changeDesignSystem}
         />
       )}
       main={main}
@@ -772,7 +1077,8 @@ export function ProjectStudioScreen({
           : resourceScope
             ? "resource inspector"
             : "artifact inspector"}
-      presentation={artifactScope && artifactEditor.presentation}
+      presentation={(artifactScope && artifactEditor.presentation)
+        || (workspaceScope && prototypeFlowSession !== null)}
     />
   );
 }

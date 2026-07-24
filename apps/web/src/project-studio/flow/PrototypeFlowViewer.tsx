@@ -32,6 +32,12 @@ import "./prototype-flow-viewer.css";
 
 const PROTOTYPE_PREPARATION_DEADLINE_MS = 5_000;
 const PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE = "The exact Page did not become ready within 5 seconds.";
+const DEFAULT_PROTOTYPE_VIEWPORT: Readonly<WorkspaceRenderFrameSpec> = Object.freeze({
+  id: "fallback-desktop",
+  name: "Desktop",
+  width: 1440,
+  height: 900,
+});
 
 interface FlowLocation {
   artifactId: string;
@@ -129,6 +135,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   desiredFrameId: string | null;
   transition: NavigationRequest["transition"];
   onActivation: (result: PrototypeActivationResult) => void;
+  onExitRequest: () => void;
   onPrepared: (slotId: number) => void;
   onPreparationError: (slotId: number, error: string) => void;
 }>(function PrototypeFlowFrame({
@@ -140,6 +147,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   desiredFrameId,
   transition,
   onActivation,
+  onExitRequest,
   onPrepared,
   onPreparationError,
 }, ref) {
@@ -147,6 +155,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   const desiredFrame = desiredFrameId === null
     ? null
     : page.frames?.find((frame) => frame.id === desiredFrameId) ?? null;
+  const viewportFrame = desiredFrame ?? DEFAULT_PROTOTYPE_VIEWPORT;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const frameSlotRef = useRef<HTMLDivElement | null>(null);
   const [viewportScale, setViewportScale] = useState(1);
@@ -168,13 +177,13 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
 
   useLayoutEffect(() => {
     const slotElement = frameSlotRef.current;
-    if (slotElement === null || desiredFrame === null || typeof ResizeObserver === "undefined") {
+    if (slotElement === null || typeof ResizeObserver === "undefined") {
       setViewportScale(1);
       return;
     }
     const update = (width: number, height: number): void => {
       if (width <= 0 || height <= 0) return;
-      const next = Math.min(1, width / desiredFrame.width, height / desiredFrame.height);
+      const next = Math.min(1, width / viewportFrame.width, height / viewportFrame.height);
       setViewportScale(Math.round(next * 1_000_000) / 1_000_000);
     };
     const initial = slotElement.getBoundingClientRect();
@@ -185,7 +194,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     });
     observer.observe(slotElement);
     return () => observer.disconnect();
-  }, [desiredFrame]);
+  }, [viewportFrame]);
   const target = useMemo(
     () => exactFlowTarget(projectId, session, slot.location),
     [projectId, session, slot.location],
@@ -210,6 +219,10 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
   }, [page.artifactId, session]);
 
   const onBridgeMessage = useCallback((message: PreviewChannelMessage): void => {
+    if (message.type === "prototype-exit-requested") {
+      if (active) onExitRequest();
+      return;
+    }
     const attempt = attemptRef.current;
     if (attempt !== null
       && message.frameId === attempt.frameId
@@ -239,7 +252,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     const activation = parsePrototypeActivation(message, bridgeNonce);
     if (activation === null) return;
     onActivation(resolvePrototypeActivation(session, page.artifactId, activation, desiredFrameId));
-  }, [active, bridgeNonce, commandState.error, desiredFrameId, onActivation, page.artifactId, session]);
+  }, [active, bridgeNonce, commandState.error, desiredFrameId, onActivation, onExitRequest, page.artifactId, session]);
 
   const channel = usePreviewChannel({
     iframeRef,
@@ -437,23 +450,21 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
           <p>{preview.error}</p>
         </div>
       ) : (
-        desiredFrame === null ? (
-          <iframe
-            ref={iframeRef}
-            className="prototype-flow-viewer__unframed"
-            title={`${page.name} flow preview`}
-            src={previewSrc!}
-            sandbox={previewSandboxForSrc(previewSrc)}
-            onLoad={channel.connect}
-          />
-        ) : (
+        <div
+          className="prototype-flow-viewer__frame-scale"
+          style={{
+            width: `${viewportFrame.width * viewportScale}px`,
+            height: `${viewportFrame.height * viewportScale}px`,
+          }}
+        >
           <div
             className="prototype-flow-viewer__frame-viewport"
-            data-prototype-frame-id={desiredFrame.id}
+            data-prototype-frame-id={desiredFrame?.id}
+            data-prototype-fallback-frame={desiredFrame === null ? "true" : undefined}
             data-frame-status={exactFrameApplied ? "applied" : exactFrameFailure === null ? "pending" : "rejected"}
             style={{
-              width: `${desiredFrame.width}px`,
-              height: `${desiredFrame.height}px`,
+              width: `${viewportFrame.width}px`,
+              height: `${viewportFrame.height}px`,
               transform: `scale(${viewportScale})`,
               visibility: exactFrameApplied ? "visible" : "hidden",
             }}
@@ -466,7 +477,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
               onLoad={channel.connect}
             />
           </div>
-        )
+        </div>
       )}
       {preview.status === "ready" && desiredFrame !== null && !exactFrameApplied ? (
         <div className="prototype-flow-viewer__message prototype-flow-viewer__frame-gate">
@@ -831,6 +842,7 @@ function PrototypeFlowViewerSession({
               desiredFrameId={slot.id === activeSlotId ? currentLocation.frameId : slot.location.frameId}
               transition={slot.id === activeSlotId ? transition : { type: "none", durationMs: 0, easing: "ease" }}
               onActivation={onActivation}
+              onExitRequest={onClose}
               onPrepared={onPrepared}
               onPreparationError={onPreparationError}
             />

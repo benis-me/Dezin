@@ -1,6 +1,7 @@
 import type http from "node:http";
 import type { GenerationRuntime } from "./orchestration/generation-runtime.ts";
 import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
+import { abortAgentScans } from "./agents-handler.ts";
 
 export interface DaemonShutdownOptions {
   server: http.Server;
@@ -38,6 +39,7 @@ function settleBeforeDeadline(promise: Promise<boolean>, deadlineAt: number): Pr
 /** Stop admission immediately, then bound every remaining shutdown layer by one deadline. */
 export async function shutdownDaemon(options: DaemonShutdownOptions): Promise<boolean> {
   const deadlineAt = Date.now() + (options.timeoutMs ?? 5_000);
+  const agentScanSettlement = abortAgentScans().then(() => true, () => false);
   let serverClosed = !options.server.listening;
   const serverSettlement = serverClosed
     ? Promise.resolve(true)
@@ -62,13 +64,14 @@ export async function shutdownDaemon(options: DaemonShutdownOptions): Promise<bo
   const runtimeSettlement = options.runtimeSupervisor.shutdown(deadlineAt).catch(() => false);
 
   try {
-    const [generationSettled, runtimeSettled, connectionsSettled] = await Promise.all([
+    const [agentScansSettled, generationSettled, runtimeSettled, connectionsSettled] = await Promise.all([
+      settleBeforeDeadline(agentScanSettlement, deadlineAt),
       settleBeforeDeadline(generationSettlement, deadlineAt),
       settleBeforeDeadline(runtimeSettlement, deadlineAt),
       settleBeforeDeadline(serverSettlement, deadlineAt),
     ]);
     if (!connectionsSettled) options.server.closeAllConnections();
-    return generationSettled && runtimeSettled && connectionsSettled;
+    return agentScansSettled && generationSettled && runtimeSettled && connectionsSettled;
   } finally {
     if (!serverClosed) options.server.closeAllConnections();
     options.closeStore();

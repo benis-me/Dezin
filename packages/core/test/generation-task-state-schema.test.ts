@@ -25,6 +25,7 @@ function controlledClock(label: string): { clock: StoreClock; set(value: number)
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

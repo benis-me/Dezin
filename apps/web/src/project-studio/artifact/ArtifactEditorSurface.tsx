@@ -52,6 +52,7 @@ export interface ArtifactEditorController {
   setActiveFrameId: (frameId: string) => void;
   zoom: number;
   setZoom: (zoom: number) => void;
+  setFittedZoom: (zoom: number) => void;
   presentation: boolean;
   setPresentation: (value: boolean) => void;
   mutationState: MutationState;
@@ -76,7 +77,7 @@ export function fitArtifactPreviewZoom(
   const availableWidth = Math.max(0, stage.width - (stage.paddingLeft ?? 0) - (stage.paddingRight ?? 0));
   const availableHeight = Math.max(0, stage.height - (stage.paddingTop ?? 0) - (stage.paddingBottom ?? 0));
   const fitted = Math.min(availableWidth / frame.width, availableHeight / frame.height, 1);
-  return Math.min(1.5, Math.max(0.25, Number.isFinite(fitted) ? fitted : 0.25));
+  return Number.isFinite(fitted) ? Math.min(1, Math.max(0, fitted)) : 0;
 }
 
 export function parseFrames(renderSpec: Record<string, unknown> | null, kind: WorkspaceArtifact["kind"] | undefined): WorkspaceRenderFrameSpec[] {
@@ -260,6 +261,7 @@ export function useArtifactEditorController({
     previewIdentity,
     frame: activeFrame,
     enabled: artifactId !== null && artifact !== null,
+    pickerEnabled: !presentation,
   });
   const retryPreview = useCallback(() => {
     bridge.clearSelection();
@@ -331,6 +333,7 @@ export function useArtifactEditorController({
     snapshotId,
   ]);
   const setZoom = useCallback((value: number) => setZoomState(Math.min(1.5, Math.max(0.25, value))), []);
+  const setFittedZoom = useCallback((value: number) => setZoomState(Math.min(1, Math.max(0, value))), []);
 
   return {
     projectId,
@@ -361,6 +364,7 @@ export function useArtifactEditorController({
     setActiveFrameId,
     zoom,
     setZoom,
+    setFittedZoom,
     presentation,
     setPresentation,
     mutationState,
@@ -393,7 +397,7 @@ export function ArtifactEditorSurface({
       const parsed = Number.parseFloat(value);
       return Number.isFinite(parsed) ? parsed : 0;
     };
-    editor.setZoom(fitArtifactPreviewZoom(editor.activeFrame, {
+    editor.setFittedZoom(fitArtifactPreviewZoom(editor.activeFrame, {
       width: stage.clientWidth,
       height: stage.clientHeight,
       paddingLeft: padding(style.paddingLeft),
@@ -401,7 +405,7 @@ export function ArtifactEditorSurface({
       paddingTop: padding(style.paddingTop),
       paddingBottom: padding(style.paddingBottom),
     }));
-  }, [editor.activeFrame, editor.setZoom]);
+  }, [editor.activeFrame, editor.setFittedZoom]);
   const requestFitPreview = useCallback(() => {
     setKeepPreviewFitted(true);
     fitPreview();
@@ -466,6 +470,8 @@ export function ArtifactEditorSurface({
         stageRef={stageRef}
         iframeRef={editor.iframeRef}
         zoom={editor.zoom}
+        zoomMode={keepPreviewFitted ? "fitted" : "manual"}
+        presentation={editor.presentation}
         selection={editor.selection}
         pickerActive={editor.pickerActive}
         frameState={editor.frameState}

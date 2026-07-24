@@ -38,6 +38,7 @@ import type {
   WorkspaceGraph,
   WorkspaceGraphCommand,
   WorkspaceGraphMutationInput,
+  WorkspaceGenerationAgentSelection,
   WorkspaceGenerationArtifactPlan,
   WorkspaceGenerationCapability,
   WorkspaceGenerationDependencyPlan,
@@ -1413,7 +1414,7 @@ function normalizeGenerationArtifactPlan(value: unknown, index: number): Workspa
   allowFields(input, [
     "operation", "nodeId", "artifactId", "kind", "name", "trackId", "baseRevisionId",
     "dependsOnArtifactIds", "capabilityIds", "responsiveFrameIds", "dispatchContextPackId",
-    "researchDirectionSelection",
+    "researchDirectionSelection", "instructions",
   ], label);
   if (input.operation !== "create" && input.operation !== "revise") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
@@ -1427,6 +1428,9 @@ function normalizeGenerationArtifactPlan(value: unknown, index: number): Workspa
     artifactId: canonicalString(input.artifactId, `${label} Artifact id`),
     kind: input.kind,
     name: canonicalString(input.name, `${label} name`),
+    ...(input.instructions === undefined
+      ? {}
+      : { instructions: canonicalString(input.instructions, `${label} instructions`) }),
     trackId: canonicalString(input.trackId, `${label} Track id`),
     baseRevisionId: nullableCanonicalString(input.baseRevisionId, `${label} base Revision id`),
     dependsOnArtifactIds: uniqueCanonicalStrings(input.dependsOnArtifactIds, `${label} dependency Artifact ids`),
@@ -1616,11 +1620,39 @@ function uniqueBy<T>(values: readonly T[], key: (value: T) => string, label: str
   }
 }
 
+export function normalizeWorkspaceGenerationAgentSelection(
+  value: unknown,
+  label = "Workspace generation Agent selection",
+): WorkspaceGenerationAgentSelection {
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["providerId", "command", "model"], label);
+  if (input.command !== "claude" && input.command !== "codebuddy") {
+    throw new WorkspaceStoreCodecError(
+      `${label} command must be a canonical supported structured provider command`,
+    );
+  }
+  if (input.providerId !== input.command) {
+    throw new WorkspaceStoreCodecError(`${label} provider does not match its canonical command`);
+  }
+  let model: string | null = null;
+  if (input.model !== null) {
+    model = canonicalString(input.model, `${label} model`);
+    if (model !== input.model || model.includes("\0") || Buffer.byteLength(model, "utf8") > 256) {
+      throw new WorkspaceStoreCodecError(`${label} model must be canonical and bounded to 256 bytes`);
+    }
+  }
+  return {
+    providerId: input.command,
+    command: input.command,
+    model,
+  };
+}
+
 function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGenerationPayload {
   const label = "Workspace generation payload";
   const input = boundaryRecord(value, label);
   allowFields(input, [
-    "kind", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
+    "kind", "agent", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
     "capabilities", "responsiveFrames", "qualityProfile",
   ], label);
   if (input.kind !== "workspace-generation") {
@@ -1662,6 +1694,9 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
   });
   return {
     kind: input.kind,
+    ...(input.agent === undefined
+      ? {}
+      : { agent: normalizeWorkspaceGenerationAgentSelection(input.agent) }),
     resourceOperations,
     artifactPlans: quality.artifactPlans,
     dependencyPlans,
@@ -1717,6 +1752,20 @@ export function normalizeWorkspaceProposalGeneration(value: unknown): WorkspaceP
     : normalizeComponentPropagationPayload(input);
 }
 
+function assertExecutableWorkspaceGenerationAgent(
+  generation: WorkspaceProposalGeneration,
+  label: string,
+): void {
+  if (generation.kind !== "workspace-generation") return;
+  const hasExecutableAgentTask = generation.artifactPlans.length > 0
+    || generation.resourceOperations.some((operation) => operation.revisionPolicy.kind === "generate");
+  if (hasExecutableAgentTask && generation.agent === undefined) {
+    throw new WorkspaceStoreCodecError(
+      `${label} executable workspace generation must freeze an Agent selection`,
+    );
+  }
+}
+
 export function normalizeCreateWorkspaceProposalInput(value: unknown): CreateWorkspaceProposalInput & { layoutId: string; layoutOperations: WorkspaceLayoutCommand[]; createdByRunId: string | null } {
   const input = boundaryRecord(value, "create Workspace Proposal input");
   allowFields(input, [
@@ -1728,6 +1777,7 @@ export function normalizeCreateWorkspaceProposalInput(value: unknown): CreateWor
   }
   const generation = normalizeWorkspaceProposalGeneration(input.generation);
   if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");
+  assertExecutableWorkspaceGenerationAgent(generation, "create Workspace Proposal input");
   const baseGraphRevision = nonNegativeInteger(input.baseGraphRevision, "Workspace Proposal base graph revision");
   const createdByRunId = Object.hasOwn(input, "createdByRunId")
     ? nullableCanonicalString(input.createdByRunId, "Workspace Proposal creating Run id")
@@ -1755,11 +1805,13 @@ export function normalizeUpdateWorkspaceProposalInput(value: unknown): UpdateWor
   allowFields(input, [
     "expectedProposalRevision", "operations", "layoutOperations", "generation", "rationale", "assumptions",
   ], "update Workspace Proposal input");
+  const generation = normalizeWorkspaceProposalGeneration(input.generation);
+  assertExecutableWorkspaceGenerationAgent(generation, "update Workspace Proposal input");
   return {
     expectedProposalRevision: positiveInteger(input.expectedProposalRevision, "expected Workspace Proposal revision"),
     operations: normalizeProposalGraphCommands(input.operations),
     layoutOperations: normalizeWorkspaceLayoutCommands(input.layoutOperations, "Workspace Proposal layout operations"),
-    generation: normalizeWorkspaceProposalGeneration(input.generation),
+    generation,
     rationale: canonicalString(input.rationale, "Workspace Proposal rationale"),
     assumptions: canonicalStringArray(input.assumptions, "Workspace Proposal assumptions"),
   };

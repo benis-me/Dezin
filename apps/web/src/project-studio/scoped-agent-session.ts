@@ -187,6 +187,12 @@ function parseOutbox(value: unknown, scopeKey: AgentScopeKey): AgentTurnOutbox |
       request: {
         turnId,
         message: request.message.trim(),
+        ...(typeof request.agentCommand === "string" && request.agentCommand.trim()
+          ? { agentCommand: request.agentCommand.trim() }
+          : {}),
+        ...(typeof request.model === "string" && request.model.trim()
+          ? { model: request.model.trim() }
+          : {}),
         explicitContext,
         graphRevision: Number(request.graphRevision),
         ...(selection === undefined ? {} : { selection }),
@@ -205,11 +211,17 @@ function parseOutbox(value: unknown, scopeKey: AgentScopeKey): AgentTurnOutbox |
     turnId,
     fingerprint: input.fingerprint,
     createdAt: Number(input.createdAt),
-    request: {
-      turnId,
-      intent: request.intent,
-      message: request.message.trim(),
-      explicitContext,
+      request: {
+        turnId,
+        intent: request.intent,
+        message: request.message.trim(),
+        ...(typeof request.agentCommand === "string" && request.agentCommand.trim()
+          ? { agentCommand: request.agentCommand.trim() }
+          : {}),
+        ...(typeof request.model === "string" && request.model.trim()
+          ? { model: request.model.trim() }
+          : {}),
+        explicitContext,
       graphRevision: Number(request.graphRevision),
       baseRevisionId: request.baseRevisionId,
       ...(selection === undefined ? {} : { selection }),

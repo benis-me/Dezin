@@ -154,12 +154,12 @@ function extraEnvironment(value: Readonly<NodeJS.ProcessEnv> | undefined): NodeJ
   for (const [key, entry] of Object.entries(value ?? {}).sort(([left], [right]) => (
     left < right ? -1 : left > right ? 1 : 0
   ))) {
-    // This exact own-property tombstone is the only reserved environment entry
-    // accepted from the production profile. Agent spawners overlay this object
-    // on process.env, so dropping it here would re-introduce the daemon-wide
-    // bearer capability into the scoped Artifact child process.
-    if (key === "DEZIN_DAEMON_TOKEN" && entry === undefined) {
-      result.DEZIN_DAEMON_TOKEN = undefined;
+    // Server-authored undefined values are subtractive tombstones. Preserve
+    // them as own properties so the final Agent spawner overrides ambient
+    // credentials instead of silently inheriting daemon-wide authority.
+    if (entry === undefined && ENVIRONMENT_KEY.test(key)
+      && (!RESERVED_ENVIRONMENT_KEYS.has(key) || key === "DEZIN_DAEMON_TOKEN")) {
+      result[key] = undefined;
       continue;
     }
     if (!ENVIRONMENT_KEY.test(key) || RESERVED_ENVIRONMENT_KEYS.has(key)

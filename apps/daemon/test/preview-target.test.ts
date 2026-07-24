@@ -582,6 +582,14 @@ test("PreviewTarget parsing is exhaustive and rejects unknown transport fields",
     { kind: "artifact-current", projectId: "project", artifactId: "page", trackId: "track" },
     { kind: "artifact-revision", projectId: "project", revisionId: "revision" },
     { kind: "run-candidate", projectId: "project", runId: "run" },
+    {
+      kind: "generation-candidate",
+      projectId: "project",
+      artifactId: "page",
+      planId: "plan",
+      taskId: "task",
+      attempt: 2,
+    },
     { kind: "workspace-flow", projectId: "project", snapshotId: "snapshot", startArtifactId: "page" },
     { kind: "workspace-flow", projectId: "project", snapshotId: "snapshot", startArtifactId: "page", stateKey: "receipt" },
     {
@@ -605,6 +613,17 @@ test("PreviewTarget parsing is exhaustive and rejects unknown transport fields",
   assert.throws(
     () => parsePreviewTarget({ kind: "artifact-current", projectId: "", artifactId: "page" }),
     /projectId must be a non-empty string/i,
+  );
+  assert.throws(
+    () => parsePreviewTarget({
+      kind: "generation-candidate",
+      projectId: "project",
+      artifactId: "page",
+      planId: "plan",
+      taskId: "task",
+      attempt: 0,
+    }),
+    /attempt must be a positive safe integer/i,
   );
 });
 
@@ -754,6 +773,69 @@ test("formal Revision previews reject unpublished candidates while run-candidate
     });
     assert.equal(runCandidate.revisionId, candidate.id);
     assert.equal(runCandidate.snapshotId, null);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("Generation candidate previews bind an unpublished Revision to one exact Attempt identity", async () => {
+  const fixture = createPreviewFixture();
+  try {
+    const published = fixture.createRevision();
+    const committed = fixture.commit("unpublished Generation candidate preview");
+    const candidate = fixture.store.workspace.createArtifactRevision({
+      artifactId: fixture.artifactId,
+      trackId: fixture.trackId,
+      parentRevisionId: published.revisionId,
+      sourceCommitHash: committed.commitHash,
+      sourceTreeHash: committed.sourceTreeHash,
+      kernelRevisionId: fixture.store.workspace.getWorkspace(fixture.projectId)!.activeKernelRevisionId,
+      renderSpec: { entry: "index.html", frames: [{ id: "desktop", width: 1440, height: 900 }] },
+      quality: { state: "unassessed", score: null, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+    const attempt = {
+      planId: "plan-candidate",
+      taskId: "task-candidate",
+      workspaceId: fixture.store.workspace.getWorkspace(fixture.projectId)!.id,
+      attempt: 2,
+      status: "candidate-ready",
+      target: {
+        type: "artifact",
+        workspaceId: fixture.store.workspace.getWorkspace(fixture.projectId)!.id,
+        id: fixture.artifactId,
+        trackId: fixture.trackId,
+      },
+      candidateRevisionId: candidate.id,
+      candidateResourceRevisionId: null,
+      candidateEvidence: { protocol: "dezin.artifact-run.v1" },
+      candidateEvidenceHash: "e".repeat(64),
+    };
+    fixture.store.workspace.getGenerationTaskAttemptForProject = (() => attempt) as never;
+
+    const resolved = await resolvePreviewTarget(fixture, {
+      kind: "generation-candidate",
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      planId: attempt.planId,
+      taskId: attempt.taskId,
+      attempt: attempt.attempt,
+    });
+    assert.equal(resolved.revisionId, candidate.id);
+    assert.equal(resolved.snapshotId, null);
+    assert.deepEqual(resolved.generationCandidate, {
+      planId: attempt.planId,
+      taskId: attempt.taskId,
+      attempt: attempt.attempt,
+      evidenceHash: attempt.candidateEvidenceHash,
+    });
+
+    attempt.candidateEvidenceHash = "f".repeat(64);
+    assert.throws(
+      () => revalidateResolvedPreviewTarget(fixture, resolved),
+      /immutable assembly/i,
+    );
   } finally {
     fixture.close();
   }

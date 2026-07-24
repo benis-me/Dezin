@@ -413,6 +413,43 @@ test("rejects a current preview resolved from a different requested track before
   expect(acquirePreviewTargetLease).not.toHaveBeenCalled();
 });
 
+test("rejects a Generation candidate resolved from a different exact Attempt before acquire", async () => {
+  const target: PreviewTarget = {
+    kind: "generation-candidate",
+    projectId: "project-1",
+    artifactId: "artifact-1",
+    planId: "plan-1",
+    taskId: "task-1",
+    attempt: 2,
+  };
+  const wrongAttempt: ResolvedPreviewTarget = {
+    ...resolved("artifact-1", "revision-candidate"),
+    requestedKind: "generation-candidate",
+    snapshotId: null,
+    generationCandidate: {
+      planId: "plan-1",
+      taskId: "task-1",
+      attempt: 1,
+      evidenceHash: "e".repeat(64),
+    },
+  };
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, value: ResolvedPreviewTarget) => lease(value));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async () => wrongAttempt,
+      acquirePreviewTargetLease,
+    })}>
+      <PreviewProbe projectId="project-1" target={target} expectedArtifactId="artifact-1" />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText(
+    "Resolved preview Generation candidate does not match the requested Attempt.",
+  )).toBeInTheDocument();
+  expect(acquirePreviewTargetLease).not.toHaveBeenCalled();
+});
+
 test("releases an acquired lease whose immutable identity differs from the resolved target", async () => {
   const first = resolved("artifact-1", "revision-1");
   const changed = { ...first, assemblyHash: "assembly-tampered" };

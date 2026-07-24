@@ -1155,6 +1155,35 @@ test("reviewScreenshotWithAgent rejects unsupported reviewer executables before 
   assert.equal(existsSync(sentinel), false, "unsupported high-privilege provider never starts");
 });
 
+test("reviewScreenshotWithAgent routes a frozen CodeBuddy reviewer through the safe host-login transport", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-codebuddy-reviewer-"));
+  const screenshot = join(root, "screenshot.png");
+  writeFileSync(join(root, "index.html"), "<h1>Pricing</h1>", "utf8");
+  writeFileSync(screenshot, rgbaPng(1, 1, Buffer.from([255, 255, 255, 255])));
+  let safeRequest: Record<string, any> | undefined;
+
+  const findings = await reviewScreenshotWithAgent({
+    htmlPath: join(root, "index.html"),
+    projectRoot: root,
+    settings: {
+      visualQaEnabled: true,
+      agentCommand: "codebuddy",
+      model: "gpt-5.6-sol",
+    } as any,
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-sol",
+  }, screenshot, async (request) => {
+    safeRequest = request as unknown as Record<string, any>;
+    return { providerId: "codebuddy", text: '{"findings":[]}' };
+  });
+
+  assert.equal(safeRequest?.command, "codebuddy");
+  assert.equal(safeRequest?.model, "gpt-5.6-sol");
+  assert.equal(safeRequest?.timeoutMs, 300_000);
+  assert.deepEqual(safeRequest?.env, {});
+  assert.ok(findings.some((finding) => finding.id === "visual-reviewed"));
+});
+
 test("reviewScreenshotWithAgent refuses a Sharingan image path outside the canonical project root", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-visual-confined-reviewer-"));
   const outside = mkdtempSync(join(tmpdir(), "dezin-visual-outside-reviewer-"));

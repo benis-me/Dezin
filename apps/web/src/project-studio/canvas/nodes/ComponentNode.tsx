@@ -1,11 +1,9 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { Component, FileImage, Pin } from "lucide-react";
-import { useState } from "react";
+import { ArrowUpRight, Component } from "lucide-react";
 import type { WorkspaceFlowNode } from "../workspace-graph-adapter.ts";
+import { ArtifactNodePreview } from "./ArtifactNodePreview.tsx";
 
 export function ComponentNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
-  const [loadedThumbnailUrl, setLoadedThumbnailUrl] = useState<string | null>(null);
-  const thumbnailReady = Boolean(data.thumbnailUrl && loadedThumbnailUrl === data.thumbnailUrl);
   const overview = data.zoomLevel === "overview";
   const full = data.zoomLevel === "full";
   const overviewStatus = data.generationState !== "idle"
@@ -15,34 +13,25 @@ export function ComponentNode({ data, selected }: NodeProps<WorkspaceFlowNode>) 
       : data.revisionId ? "published" : "draft";
   return (
     <div className="dezin-flow-card dezin-flow-component" data-selected={selected || undefined} data-zoom={data.zoomLevel}>
-      <Handle id="component-target" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--relation" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <div className="dezin-flow-card__preview" aria-hidden>
-        {data.thumbnailUrl && (
-          <img
-            src={data.thumbnailUrl}
-            alt=""
-            draggable={false}
-            loading="lazy"
-            decoding="async"
-            width={280}
-            height={128}
-            data-ready={thumbnailReady || undefined}
-            onLoad={() => setLoadedThumbnailUrl(data.thumbnailUrl)}
-            onError={() => setLoadedThumbnailUrl(null)}
-          />
-        )}
-        {!thumbnailReady && (
-          <div className="dezin-flow-card__placeholder">
-            <FileImage size={18} strokeWidth={1.4} />
-            {!overview && <span>{data.revisionId ? "Preview pending" : "No published revision"}</span>}
-          </div>
-        )}
-        <span className="dezin-flow-card__kind"><Component size={11} /> Component</span>
-      </div>
+      <Handle id="component-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-target-top" type="target" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-target-bottom" type="target" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <ArtifactNodePreview
+        artifactKind="component"
+        projectId={data.projectId}
+        artifactId={data.artifactId}
+        name={data.name}
+        revisionId={data.revisionId}
+        zoomLevel={data.zoomLevel}
+      />
       <div className="dezin-flow-card__body">
         <div className="dezin-flow-card__title-row">
+          <span className="dezin-flow-card__title-mark" data-kind="component" aria-hidden>
+            <Component size={11} strokeWidth={1.6} />
+          </span>
           <h3 title={data.name}>{data.name}</h3>
-          {full && <Pin className="dezin-flow-card__open-mark" size={12} aria-hidden />}
+          {full && <ArrowUpRight className="dezin-flow-card__open-mark" size={13} aria-hidden />}
         </div>
         {!overview && (
           <div className="dezin-flow-card__meta">
@@ -50,9 +39,19 @@ export function ComponentNode({ data, selected }: NodeProps<WorkspaceFlowNode>) 
             {full && <span>{data.revisionId ? `rev ${data.revisionId.slice(0, 7)}` : "unpublished"}</span>}
           </div>
         )}
-        {overview && <span className="dezin-flow-card__overview-status">{overviewStatus}</span>}
+        {overview && (
+          <span
+            className="dezin-flow-card__overview-status"
+            aria-label={`${data.name} status: ${overviewStatus}`}
+          >
+            {overviewStatus}
+          </span>
+        )}
       </div>
-      <Handle id="component-source" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--relation" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-source-top" type="source" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
+      <Handle id="component-source-bottom" type="source" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
     </div>
   );
 }

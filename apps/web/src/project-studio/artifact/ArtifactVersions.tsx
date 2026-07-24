@@ -353,6 +353,8 @@ export function ArtifactVersions({
   };
 
   const canPublish = snapshotId !== null;
+  const historyDensity = history.items.length > 5 ? "scrolling" : "compact";
+  const historyLabel = `Saved revision history, ${history.items.length} ${history.items.length === 1 ? "revision" : "revisions"}`;
   return (
     <>
       <Dialog
@@ -363,7 +365,7 @@ export function ArtifactVersions({
         className="artifact-versions-dialog sm:max-w-3xl"
         showClose
       >
-        <div className="artifact-versions">
+        <div className="artifact-versions" data-history-density={historyDensity}>
           <header className="artifact-versions__header">
             <div>
               <span>Immutable history</span>
@@ -393,7 +395,12 @@ export function ArtifactVersions({
             ) : null}
           </header>
 
-          <div className="artifact-versions__body">
+          <div
+            className="artifact-versions__body"
+            role={historyDensity === "scrolling" ? "region" : undefined}
+            aria-label={historyDensity === "scrolling" ? "Scrollable revision history" : undefined}
+            tabIndex={historyDensity === "scrolling" ? 0 : undefined}
+          >
             {history.status === "loading" && history.items.length === 0 ? (
               <div className="artifact-versions__message" role="status">
                 <LoaderCircle aria-hidden className="artifact-spin" size={16} />
@@ -411,7 +418,7 @@ export function ArtifactVersions({
             ) : null}
 
             {history.items.length > 0 ? (
-              <ol className="artifact-version-list">
+              <ol className="artifact-version-list" aria-label={historyLabel}>
                 {history.items.map((revision) => {
                   const track = tracks.find((candidate) => candidate.id === revision.trackId);
                   const trackLabel = track?.name ?? "Unknown track";
@@ -450,7 +457,11 @@ export function ArtifactVersions({
                             <code title={revision.id}>{revision.id.slice(0, 12)}</code>
                           </div>
                         </div>
-                        <div className="artifact-version-row__actions">
+                        <div
+                          className="artifact-version-row__actions"
+                          role="group"
+                          aria-label={`Actions for Revision ${revision.sequence} on ${trackLabel}`}
+                        >
                           {!isPinned ? (
                             <button type="button" onClick={() => onViewRevision(revision.id)}>
                               <span className="sr-only">View Revision {revision.sequence} on {trackLabel}</span>

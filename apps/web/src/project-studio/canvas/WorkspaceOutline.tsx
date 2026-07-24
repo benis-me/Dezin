@@ -1,4 +1,13 @@
-import { Component, Frame, PanelTop, Paperclip, X } from "lucide-react";
+import { ChevronRight, Component, Frame, PanelTop, Paperclip, SquareArrowOutUpRight, X } from "lucide-react";
+import type { KeyboardEvent } from "react";
+import { Button } from "../../components/ui/Button.tsx";
+import { IconButton } from "../../components/ui/IconButton.tsx";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../../components/ui/tooltip.tsx";
 import { Link } from "../../router.tsx";
 import type { WorkspaceFlowNode } from "./workspace-graph-adapter.ts";
 
@@ -35,7 +44,9 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
   onToggleCollapsed: (groupId: string, collapsed: boolean) => void;
 }) {
   const children = childrenByParent.get(node.id) ?? [];
-  const stopCanvasShortcuts = (event: React.KeyboardEvent) => event.stopPropagation();
+  const stopCanvasShortcuts = (event: KeyboardEvent) => event.stopPropagation();
+  const openTooltip = `Open ${kindLabel(node)} ${node.data.name}`;
+  const groupActionLabel = `${node.data.collapsed ? "Expand" : "Collapse"} group ${node.data.name}`;
   return (
     <li>
       <div className="dezin-workspace-outline__row">
@@ -49,42 +60,69 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
           onKeyDown={stopCanvasShortcuts}
         >
           <span aria-hidden><KindIcon kind={node.data.kind} /></span>
-          <span className="dezin-workspace-outline__name">{node.data.name}</span>
-          {node.data.kind !== "group" && <span className="dezin-workspace-outline__count">{node.data.incomingCount + node.data.outgoingCount}</span>}
+          <span className="dezin-workspace-outline__name" title={node.data.name}>{node.data.name}</span>
+          {node.data.kind !== "group" && (
+            <span
+              className="dezin-workspace-outline__count"
+              aria-label={`${node.data.incomingCount + node.data.outgoingCount} connections`}
+            >
+              {node.data.incomingCount + node.data.outgoingCount}
+            </span>
+          )}
         </button>
         {node.data.artifactId ? (
-          <Link
-            to={`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(node.data.artifactId)}`}
-            className="dezin-workspace-outline__action"
-            aria-label={`Open ${node.data.name}`}
-            onKeyDown={stopCanvasShortcuts}
-          >
-            Open
-          </Link>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button asChild variant="ghost" size="icon-xs" className="dezin-workspace-outline__action">
+                <Link
+                  to={`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(node.data.artifactId)}`}
+                  aria-label={openTooltip}
+                  onKeyDown={stopCanvasShortcuts}
+                >
+                  <SquareArrowOutUpRight aria-hidden />
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={6}>{openTooltip}</TooltipContent>
+          </Tooltip>
         ) : node.data.resourceId ? (
-          <Link
-            to={`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(node.data.resourceId)}${
-              node.data.revisionId === null
-                ? ""
-                : `/revisions/${encodeURIComponent(node.data.revisionId)}`
-            }`}
-            className="dezin-workspace-outline__action"
-            aria-label={`Open ${node.data.name}`}
-            onKeyDown={stopCanvasShortcuts}
-          >
-            Open
-          </Link>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button asChild variant="ghost" size="icon-xs" className="dezin-workspace-outline__action">
+                <Link
+                  to={`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(node.data.resourceId)}${
+                    node.data.revisionId === null
+                      ? ""
+                      : `/revisions/${encodeURIComponent(node.data.revisionId)}`
+                  }`}
+                  aria-label={openTooltip}
+                  onKeyDown={stopCanvasShortcuts}
+                >
+                  <SquareArrowOutUpRight aria-hidden />
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={6}>{openTooltip}</TooltipContent>
+          </Tooltip>
         ) : node.data.kind === "group" ? (
-          <button
-            type="button"
-            className="dezin-workspace-outline__action"
-            aria-label={`${node.data.collapsed ? "Expand" : "Collapse"} group ${node.data.name}`}
-            aria-expanded={!node.data.collapsed}
-            onClick={() => onToggleCollapsed(node.id, !node.data.collapsed)}
-            onKeyDown={stopCanvasShortcuts}
-          >
-            {node.data.collapsed ? "Expand" : "Collapse"}
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <IconButton
+                className="dezin-workspace-outline__action"
+                aria-label={groupActionLabel}
+                aria-expanded={!node.data.collapsed}
+                onClick={() => onToggleCollapsed(node.id, !node.data.collapsed)}
+                onKeyDown={stopCanvasShortcuts}
+              >
+                <ChevronRight
+                  aria-hidden
+                  className="dezin-workspace-outline__disclosure"
+                  data-expanded={!node.data.collapsed || undefined}
+                />
+              </IconButton>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={6}>{groupActionLabel}</TooltipContent>
+          </Tooltip>
         ) : null}
       </div>
       {children.length > 0 && !(node.data.kind === "group" && node.data.collapsed) && (
@@ -121,23 +159,43 @@ export function WorkspaceOutline({ projectId, nodes, onSelect, onToggleCollapsed
   }
   const roots = childrenByParent.get(null) ?? [];
   return (
-    <aside className="dezin-workspace-outline" aria-label="Workspace structure">
-      <header>
-        <div><span className="label-mono">Outline</span><strong>{nodes.length} objects</strong></div>
-        <button type="button" aria-label="Close workspace outline" onClick={onClose}><X size={13} /></button>
-      </header>
-      <ul aria-label="Workspace outline">
-        {roots.map((node) => (
-          <OutlineBranch
-            key={node.id}
-            projectId={projectId}
-            node={node}
-            childrenByParent={childrenByParent}
-            onSelect={onSelect}
-            onToggleCollapsed={onToggleCollapsed}
-          />
-        ))}
-      </ul>
-    </aside>
+    <TooltipProvider delayDuration={300}>
+      <aside className="dezin-workspace-outline" aria-label="Workspace structure">
+        <header>
+          <div className="dezin-workspace-outline__heading">
+            <strong>Outline</strong>
+            <span>{nodes.length} {nodes.length === 1 ? "object" : "objects"}</span>
+          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <IconButton
+                className="dezin-workspace-outline__close"
+                aria-label="Close workspace outline"
+                onClick={onClose}
+              >
+                <X aria-hidden />
+              </IconButton>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={6}>Close outline</TooltipContent>
+          </Tooltip>
+        </header>
+        {roots.length > 0 ? (
+          <ul aria-label="Workspace outline">
+            {roots.map((node) => (
+              <OutlineBranch
+                key={node.id}
+                projectId={projectId}
+                node={node}
+                childrenByParent={childrenByParent}
+                onSelect={onSelect}
+                onToggleCollapsed={onToggleCollapsed}
+              />
+            ))}
+          </ul>
+        ) : (
+          <p className="dezin-workspace-outline__empty">Objects will appear here as the workspace takes shape.</p>
+        )}
+      </aside>
+    </TooltipProvider>
   );
 }

@@ -81,6 +81,7 @@ function seedScopedTurn(store: Store) {
     scopeType: "artifact" as const,
     scopeId: "scoped-turn-page",
     intent: "edit" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     message,
     graphRevision: workspace.graphRevision,
     baseRevisionId: revision.id,
@@ -97,6 +98,7 @@ function seedScopedTurn(store: Store) {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation" as const,
+      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: [{
         operation: "revise" as const,
@@ -153,6 +155,10 @@ test("a committed scoped Agent turn replays its exact durable receipt after Stor
 
   assert.deepEqual(replay, receipt);
   assert.equal(replay?.task.target.type, "artifact");
+  assert.deepEqual(
+    (replay?.task.payload as { agent?: unknown }).agent,
+    fixture.request.agent,
+  );
   assert.equal(replay?.contextPackId, fixture.contextPack.id);
   assert.equal(
     Number((reopened.db.prepare("SELECT COUNT(*) AS count FROM scoped_agent_turns").get() as { count: number }).count),
@@ -178,7 +184,7 @@ test("reusing one scoped Agent turn id for divergent immutable request facts fai
   }).receipt;
   const divergent = {
     ...fixture.request,
-    message: `${fixture.request.message} Add a promotion banner.`,
+    agent: { ...fixture.request.agent, model: "gpt-5.6-terra" },
   };
 
   assert.throws(

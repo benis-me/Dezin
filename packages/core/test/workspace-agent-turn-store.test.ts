@@ -45,6 +45,7 @@ function seedWorkspaceTurn(store: Store) {
   const request = {
     workspaceId: workspace.id,
     intent: "plan" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     message,
     graphRevision: workspace.graphRevision,
     requestContextHash: REQUEST_CONTEXT_HASH,
@@ -60,6 +61,7 @@ function seedWorkspaceTurn(store: Store) {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation" as const,
+      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: [],
       dependencyPlans: [],
@@ -148,7 +150,7 @@ test("reusing a Workspace Agent turn id for divergent immutable request facts fa
   });
   const divergent = {
     ...fixture.request,
-    requestContextHash: "8".repeat(64),
+    agent: { ...fixture.request.agent, model: "gpt-5.6-terra" },
   };
 
   assert.throws(

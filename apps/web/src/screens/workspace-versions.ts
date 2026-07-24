@@ -18,6 +18,9 @@ export function buildVersionGroups(runs: RunSummary[], variants: Variant[]): Ver
   const fallbackVariantId = activeVariantIdOf(variants) ?? UNASSIGNED_VARIANT_ID;
   const byVariant = new Map<string, RunSummary[]>();
   for (const run of sortRunsNewestFirst(runs)) {
+    // A cancelled run has no final published snapshot. In particular, Research direction gates
+    // deliberately settle as cancelled while waiting for the user's pick and must not consume v1.
+    if (run.status === "cancelled") continue;
     const variantId = run.variantId ?? fallbackVariantId;
     const groupRuns = byVariant.get(variantId);
     if (groupRuns) groupRuns.push(run);

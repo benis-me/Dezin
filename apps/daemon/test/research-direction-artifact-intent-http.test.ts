@@ -17,6 +17,11 @@ import {
 
 const SELECTION_ID = "selection-00000000-0000-4000-8000-000000000011";
 const HYPOTHESIS_SELECTION_ID = "selection-00000000-0000-4000-8000-000000000012";
+const FROZEN_CODEBUDDY_AGENT = Object.freeze({
+  providerId: "codebuddy" as const,
+  command: "codebuddy" as const,
+  model: "gpt-5.6-sol",
+});
 
 async function withServer(run: (input: {
   base: string;
@@ -167,6 +172,8 @@ function requestBody(
   return {
     selectionRequestId,
     artifactId: "checkout-target",
+    agentCommand: FROZEN_CODEBUDDY_AGENT.command,
+    model: FROZEN_CODEBUDDY_AGENT.model,
     expectedResourceHeadRevisionId: resource.headRevisionId,
     expectedGraphRevision: workspace.graphRevision,
     expectedSnapshotId: workspace.activeSnapshotId,
@@ -198,6 +205,19 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     assert.equal(view.openQuestions.length, 1);
 
     const body = requestBody(store, project.id, research.resource.id, SELECTION_ID);
+    for (const invalidBody of [
+      { ...body, providerId: "codebuddy" },
+      { ...body, agentCommand: undefined },
+      { ...body, agentCommand: "codex" },
+      { ...body, model: " gpt-5.6-sol" },
+    ]) {
+      const invalidAgent = await fetch(`${revisionUrl}/directions/quiet-confidence/artifact-intents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(invalidBody),
+      });
+      assert.equal(invalidAgent.status, 400, await invalidAgent.text());
+    }
     const staleHead = await fetch(`${revisionUrl}/directions/quiet-confidence/artifact-intents`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -215,9 +235,14 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     const responses = await Promise.all([post(), post()]);
     const results = await Promise.all(responses.map(async (response) => ({
       status: response.status,
-      body: await response.json() as { proposal: { id: string }; plan: { id: string }; task: { id: string } },
+      body: await response.json() as {
+        proposal: { id: string; generation: { agent: typeof FROZEN_CODEBUDDY_AGENT } };
+        plan: { id: string };
+        task: { id: string };
+      },
     })));
     assert.deepEqual(results.map(({ status }) => status).sort(), [200, 201]);
+    assert.deepEqual(results[0]!.body.proposal.generation.agent, FROZEN_CODEBUDDY_AGENT);
     assert.equal(new Set(results.map(({ body: result }) => result.proposal.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.plan.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.task.id)).size, 1);
@@ -227,6 +252,21 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     assert.equal(Number((store.db.prepare(
       "SELECT COUNT(*) AS count FROM generation_plans",
     ).get() as { count: number }).count), 1);
+    for (const agentOverride of [
+      { agentCommand: "claude", model: null },
+      { agentCommand: "codebuddy", model: "gpt-5.6-terra" },
+    ]) {
+      const divergentAgent = await fetch(`${revisionUrl}/directions/quiet-confidence/artifact-intents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...body, ...agentOverride }),
+      });
+      assert.equal(divergentAgent.status, 409);
+      assert.equal(
+        (await divergentAgent.json() as { code: string }).code,
+        "research_direction_intent_request_conflict",
+      );
+    }
     assert.equal(store.workspace.getGraph(project.id).edges.filter((edge) => edge.kind === "informs"
       && edge.sourceNodeId === research.node.id
       && edge.targetNodeId === "checkout-target-node").length, 1);
@@ -289,8 +329,13 @@ test("hypothesis direction requires explicit confirmation before creating a succ
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...unconfirmedBody, confirmHypothesis: true }),
     });
-    const confirmedBody = await confirmed.json() as { plan?: { id: string }; error?: string };
+    const confirmedBody = await confirmed.json() as {
+      proposal?: { generation: { agent: typeof FROZEN_CODEBUDDY_AGENT } };
+      plan?: { id: string };
+      error?: string;
+    };
     assert.equal(confirmed.status, 201, JSON.stringify(confirmedBody));
     assert.ok(confirmedBody.plan?.id);
+    assert.deepEqual(confirmedBody.proposal?.generation.agent, FROZEN_CODEBUDDY_AGENT);
   });
 });

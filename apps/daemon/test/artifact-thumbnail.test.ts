@@ -129,10 +129,52 @@ function runThumbnailChild(script: string): Promise<{ rendered: boolean; cacheHi
 
 function createThumbnailFixture(options: {
   frames?: Array<Record<string, unknown>>;
+  legacy?: boolean;
 } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-artifact-thumbnail-"));
   const store = new Store(join(dataDir, "store.db"));
   const project = store.createProject({ name: "Artifact thumbnail", mode: "standard" });
+  if (options.legacy) {
+    const conversation = store.createConversation(project.id, "Legacy thumbnail");
+    const variant = store.createVariant(project.id, "Desktop");
+    store.setActiveVariant(project.id, variant.id);
+    const run = store.createImportedRun(project.id, conversation.id, {
+      variantId: variant.id,
+      status: "succeeded",
+      commitHash: "1".repeat(40),
+      createdAt: 10,
+      finishedAt: 11,
+    });
+    const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+    const bundle = store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: facts.successfulRuns.map((fact) => ({
+        ...fact,
+        gitSnapshot: {
+          status: "verified" as const,
+          sourceCommitHash: run.commitHash!,
+          sourceTreeHash: "a".repeat(40),
+          artifactRoot: "." as const,
+        },
+      })),
+    });
+    const artifact = bundle.artifacts[0]!;
+    const revision = bundle.revisions[0]!;
+    return {
+      dataDir,
+      store,
+      projectId: project.id,
+      artifactId: artifact.id,
+      revision,
+      snapshot: bundle.activeSnapshot,
+      close() {
+        store.close();
+        rmSync(dataDir, { recursive: true, force: true });
+      },
+    };
+  }
   store.ensureMainVariant(project.id);
   const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
   const bundle = store.workspace.ensureLegacyStandardWorkspace({
@@ -222,6 +264,49 @@ test("thumbnail cache binds immutable Revision, canonical RenderSpec, required f
     assert.equal(first.renderSpecChecksum, second.renderSpecChecksum);
     assert.deepEqual(first.bytes, PNG);
     assert.deepEqual(second.bytes, PNG);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("legacy Revisions without declared frames receive a deterministic full-artboard thumbnail target", async () => {
+  const fixture = createThumbnailFixture({ legacy: true });
+  try {
+    const result = await getOrCreateArtifactThumbnail({
+      store: fixture.store,
+      dataDir: fixture.dataDir,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      revisionId: fixture.revision.id,
+    }, (target) => {
+      assert.deepEqual(target.frame, {
+        id: "legacy-artboard",
+        name: "Legacy artboard",
+        width: 1440,
+        height: 900,
+        background: "#ffffff",
+      });
+      assert.equal(target.stateKey, null);
+      return renderedPng(target);
+    });
+
+    assert.equal(result.cacheHit, false);
+    assert.equal(result.target.frame.id, "legacy-artboard");
+  } finally {
+    fixture.close();
+  }
+});
+
+test("native Revisions without declared frames remain invalid", async () => {
+  const fixture = createThumbnailFixture({ frames: [] });
+  try {
+    await assert.rejects(getOrCreateArtifactThumbnail({
+      store: fixture.store,
+      dataDir: fixture.dataDir,
+      projectId: fixture.projectId,
+      artifactId: fixture.artifactId,
+      revisionId: fixture.revision.id,
+    }, (target) => renderedPng(target)), /between 1 and 64 frames/i);
   } finally {
     fixture.close();
   }

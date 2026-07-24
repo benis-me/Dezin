@@ -6,6 +6,7 @@ import { ApiProvider } from "../../lib/api-context.tsx";
 import { decodeResearchResourceRevision } from "../../lib/api.ts";
 import type {
   ApprovedResearchDirectionArtifactIntentResult,
+  CreateResearchDirectionArtifactIntentInput,
   GraphCommandRequest,
   ReadyProjectWorkspacePayload,
   ResearchResourceRevisionView,
@@ -17,6 +18,15 @@ import { makeFakeApi } from "../../test/fake-api.ts";
 import { ResearchResourceViewer } from "./ResearchResourceViewer.tsx";
 
 afterEach(cleanup);
+
+const READY_AGENT_PROPS = {
+  agentCommand: "codebuddy",
+  model: "gpt-5.6-sol",
+  agentSettingsReady: true,
+  afterContextSettings: async (action: () => void | Promise<void>): Promise<void> => {
+    await action();
+  },
+} as const;
 
 const resource: Resource = {
   id: "resource-research",
@@ -353,6 +363,7 @@ test("Current Head Research retries once when the atomic view observes a newer H
         resourceId={resource.id}
         requestedRevisionId={null}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -384,6 +395,7 @@ test("a top-level Research load failure retries in place and preserves the exact
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -417,6 +429,7 @@ test("an archived Research Resource has no writable Current Head surface", async
         resourceId={resource.id}
         requestedRevisionId={null}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -447,6 +460,7 @@ test("an archived exact Research Revision remains readable without write control
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -475,6 +489,7 @@ test("Research directions use roving radio focus and arrow-key selection", async
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -513,6 +528,7 @@ test("Research viewer exposes evidence provenance and requires explicit confirma
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={onPlanCreated}
@@ -558,6 +574,83 @@ test("Research viewer exposes evidence provenance and requires explicit confirma
   expect(onPlanCreated).toHaveBeenCalledWith("plan-successor");
 });
 
+test("Research direction generation waits for persisted Agent settings and freezes their exact selection", async () => {
+  const user = userEvent.setup();
+  let releaseSettings!: () => void;
+  const settingsPersisted = new Promise<void>((resolve) => {
+    releaseSettings = resolve;
+  });
+  const afterContextSettings = vi.fn(async (action: () => void | Promise<void>) => {
+    await settingsPersisted;
+    await action();
+  });
+  const createIntent = vi.fn(async (
+    _projectId: string,
+    _resourceId: string,
+    _revisionId: string,
+    _directionId: string,
+    _input: CreateResearchDirectionArtifactIntentInput,
+  ) => ({
+    plan: { id: "plan-codebuddy" },
+  } as unknown as ApprovedResearchDirectionArtifactIntentResult));
+  const api = baseApi({ createResearchDirectionArtifactIntent: createIntent });
+  const rendered = render(
+    <ApiProvider client={api}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={revision.id}
+        workspace={workspace()}
+        agentCommand="codebuddy"
+        model="gpt-5.6-sol"
+        agentSettingsReady={false}
+        afterContextSettings={afterContextSettings}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const createButton = await screen.findByRole("button", { name: "Create Artifact plan" });
+  expect(createButton).toBeDisabled();
+  expect(afterContextSettings).not.toHaveBeenCalled();
+  expect(createIntent).not.toHaveBeenCalled();
+
+  rendered.rerender(
+    <ApiProvider client={api}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={revision.id}
+        workspace={workspace()}
+        agentCommand="codebuddy"
+        model="gpt-5.6-sol"
+        agentSettingsReady
+        afterContextSettings={afterContextSettings}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(createButton).toBeEnabled();
+  await user.click(createButton);
+  expect(afterContextSettings).toHaveBeenCalledOnce();
+  expect(createIntent).not.toHaveBeenCalled();
+
+  releaseSettings();
+  await waitFor(() => expect(createIntent).toHaveBeenCalledOnce());
+  expect(createIntent.mock.calls[0]![4]).toEqual(expect.objectContaining({
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-sol",
+  }));
+  expect(createIntent.mock.calls[0]![4]).not.toHaveProperty("providerId");
+});
+
 test("Research viewer can create a direction-named Page target when the canvas has no Artifact", async () => {
   const user = userEvent.setup();
   const applyCommands = vi.fn(async (
@@ -572,6 +665,7 @@ test("Research viewer can create a direction-named Page target when the canvas h
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace(false)}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -624,6 +718,7 @@ test("Research viewer refreshes its exact observation before creating a plan aft
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={initialWorkspace}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}
@@ -653,6 +748,7 @@ test("Research viewer refreshes its exact observation before creating a plan aft
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={advancedWorkspace}
+        {...READY_AGENT_PROPS}
         onBack={() => {}}
         onOpenRevision={() => {}}
         onPlanCreated={() => {}}

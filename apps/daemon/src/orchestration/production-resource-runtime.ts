@@ -77,7 +77,9 @@ import {
   type SafeStructuredAgentResult,
 } from "./safe-structured-agent.ts";
 
-const DEFAULT_AGENT_TIMEOUT_MS = 3 * 60 * 1_000;
+const DEFAULT_AGENT_TIMEOUT_MS = 5 * 60 * 1_000;
+const DEFAULT_REVIEW_TIMEOUT_MS = 2 * 60 * 1_000;
+const HOST_LOGIN_REVIEW_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_AGENT_TIMEOUT_MS = 20 * 60 * 1_000;
 const MAX_AGENT_OUTPUT_BYTES = 48 * 1024 * 1024;
 const MAX_CAPTURE_MANIFEST_BYTES = 2 * 1024 * 1024;
@@ -685,7 +687,12 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
         cwd,
         signal: input.signal,
         env,
-        timeoutMs: Math.min(this.#timeoutMs, 120_000),
+        timeoutMs: Math.min(
+          this.#timeoutMs,
+          reviewer.command === "codebuddy"
+            ? HOST_LOGIN_REVIEW_TIMEOUT_MS
+            : DEFAULT_REVIEW_TIMEOUT_MS,
+        ),
         maxOutputBytes: 256 * 1024,
         ...(input.image === undefined ? {} : { images: [input.image] }),
       }, {

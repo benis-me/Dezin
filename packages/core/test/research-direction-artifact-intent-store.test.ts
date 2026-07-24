@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -21,6 +22,11 @@ function fakeClock(): StoreClock {
 }
 
 const REQUEST_ID = "selection-00000000-0000-4000-8000-000000000001";
+const FROZEN_CODEBUDDY_AGENT = Object.freeze({
+  providerId: "codebuddy" as const,
+  command: "codebuddy" as const,
+  model: "gpt-5.6-sol",
+});
 
 function seed(existingInformsEdge = false) {
   const store = new Store(":memory:", fakeClock());
@@ -98,6 +104,7 @@ function seed(existingInformsEdge = false) {
     revisionId: revision.id,
     directionId: "quiet-confidence",
     artifactId: "checkout-page",
+    agent: FROZEN_CODEBUDDY_AGENT,
     resourceHeadRevisionId: revision.id,
     graphRevision: workspace.graphRevision,
     snapshotId: workspace.activeSnapshotId,
@@ -125,6 +132,7 @@ function seed(existingInformsEdge = false) {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: FROZEN_CODEBUDDY_AGENT,
       resourceOperations: [{
         operation: "reuse",
         nodeId: research.node.id,
@@ -326,7 +334,48 @@ test("Research selection request replay returns the original receipt after later
   fixture.store.close();
 });
 
-test("Research selection request id rejects reuse for different immutable input", () => {
+test("legacy Research selection identities replay only when the durable Proposal freezes the same Agent", () => {
+  const fixture = seed();
+  const created = fixture.store.workspace.createApprovedResearchDirectionArtifactIntentForProject(
+    fixture.project.id,
+    REQUEST_ID,
+    fixture.request,
+    fixture.proposal,
+  );
+  const row = fixture.store.db.prepare(
+    "SELECT request_json FROM research_direction_artifact_intents WHERE request_id = ?",
+  ).get(REQUEST_ID) as { request_json: string };
+  const legacyRequest = JSON.parse(row.request_json) as Record<string, unknown>;
+  delete legacyRequest.agent;
+  const legacyRequestJson = JSON.stringify(legacyRequest);
+  const legacyRequestHash = createHash("sha256").update(legacyRequestJson).digest("hex");
+  fixture.store.db.exec("DROP TRIGGER research_direction_artifact_intent_update_immutable");
+  fixture.store.db.prepare(
+    "UPDATE research_direction_artifact_intents SET request_hash = ?, request_json = ? WHERE request_id = ?",
+  ).run(legacyRequestHash, legacyRequestJson, REQUEST_ID);
+
+  const replay = fixture.store.workspace.getResearchDirectionArtifactIntentReceiptForProject(
+    fixture.project.id,
+    REQUEST_ID,
+    fixture.request,
+  );
+  assert.equal(replay?.proposal.id, created.proposal.id);
+  assert.equal(replay?.requestHash, legacyRequestHash);
+  assert.throws(
+    () => fixture.store.workspace.getResearchDirectionArtifactIntentReceiptForProject(
+      fixture.project.id,
+      REQUEST_ID,
+      {
+        ...fixture.request,
+        agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-terra" },
+      },
+    ),
+    ResearchDirectionArtifactIntentConflictError,
+  );
+  fixture.store.close();
+});
+
+test("Research selection request id rejects direction, provider, and model substitution", () => {
   const fixture = seed();
   fixture.store.workspace.createApprovedResearchDirectionArtifactIntentForProject(
     fixture.project.id,
@@ -334,14 +383,26 @@ test("Research selection request id rejects reuse for different immutable input"
     fixture.request,
     fixture.proposal,
   );
-  assert.throws(
-    () => fixture.store.workspace.getResearchDirectionArtifactIntentReceiptForProject(
-      fixture.project.id,
-      REQUEST_ID,
-      { ...fixture.request, directionId: "different-direction" },
-    ),
-    ResearchDirectionArtifactIntentConflictError,
-  );
+  for (const request of [
+    { ...fixture.request, directionId: "different-direction" },
+    {
+      ...fixture.request,
+      agent: { providerId: "claude" as const, command: "claude" as const, model: null },
+    },
+    {
+      ...fixture.request,
+      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-terra" },
+    },
+  ]) {
+    assert.throws(
+      () => fixture.store.workspace.getResearchDirectionArtifactIntentReceiptForProject(
+        fixture.project.id,
+        REQUEST_ID,
+        request,
+      ),
+      ResearchDirectionArtifactIntentConflictError,
+    );
+  }
   fixture.store.close();
 });
 

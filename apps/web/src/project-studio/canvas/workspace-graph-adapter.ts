@@ -14,8 +14,11 @@ import type {
 } from "../../lib/api.ts";
 import {
   WORKSPACE_NODE_SIZES,
+  isComponentLibraryGroupId,
   layoutObjectMap,
   materializeWorkspaceLayout,
+  resolveWorkspaceEdgeRoute,
+  workspaceEdgeLaneMap,
 } from "./workspace-layout.ts";
 
 export type SemanticZoomLevel = "overview" | "compact" | "full";
@@ -26,12 +29,12 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   objectId: string;
   kind: WorkspaceFlowNodeType;
   name: string;
+  projectId: string | null;
   artifactId: string | null;
   resourceId: string | null;
   resourceKind?: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference" | null;
   resourceQualityState?: "grounded" | "needs-review" | null;
   revisionId: string | null;
-  thumbnailUrl: string | null;
   zoomLevel: SemanticZoomLevel;
   incomingCount: number;
   outgoingCount: number;
@@ -40,6 +43,12 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   generationState: "idle" | "awaiting-selection" | "queued" | "running" | "complete" | "failed";
   collapsed: boolean;
   parentGroupId: string | null;
+  groupRole: "component-library" | "freeform" | null;
+  memberCount: number;
+  minimumGroupWidth: number;
+  minimumGroupHeight: number;
+  expandedGroupWidth?: number;
+  expandedGroupHeight?: number;
   onToggleCollapsed?: (groupId: string, collapsed: boolean) => void;
   onRenameGroup?: (groupId: string, label: string) => void;
   onResizeGroup?: (groupId: string, bounds: { x: number; y: number; width: number; height: number }) => void;
@@ -49,10 +58,16 @@ export interface WorkspaceEdgeData extends Record<string, unknown> {
   kind: WorkspaceEdge["kind"];
   status: "planned" | "interactive" | "broken" | null;
   label: string;
+  zoomLevel: SemanticZoomLevel;
+  lane: number;
 }
 
 export type WorkspaceFlowNode = Node<WorkspaceFlowNodeData, WorkspaceFlowNodeType>;
 export type WorkspaceFlowEdge = Edge<WorkspaceEdgeData>;
+
+const COLLAPSED_FREEFORM_GROUP_WIDTH = 264;
+const COLLAPSED_COMPONENT_LIBRARY_WIDTH = 312;
+const COLLAPSED_GROUP_HEIGHT = 48;
 
 export interface WorkspaceGraphView {
   zoom: number;
@@ -119,11 +134,6 @@ function hasCollapsedAncestor(object: WorkspaceLayoutObject, byId: Map<string, W
   return false;
 }
 
-function immutableThumbnailUrl(projectId: string | undefined, node: WorkspaceNode, revisionId: string | null): string | null {
-  if (!projectId || node.kind === "resource" || !revisionId) return null;
-  return `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(node.artifactId)}/revisions/${encodeURIComponent(revisionId)}/thumbnail`;
-}
-
 interface NodeRelationCount {
   incoming: number;
   outgoing: number;
@@ -147,8 +157,34 @@ function edgeCounts(graph: WorkspaceGraph): Map<string, NodeRelationCount> {
 function adaptGroup(
   group: Extract<WorkspaceLayoutObject, { kind: "group" }>,
   byId: Map<string, WorkspaceLayoutObject>,
+  graphNodes: ReadonlyMap<string, WorkspaceNode>,
   view: WorkspaceGraphView,
 ): WorkspaceFlowNode {
+  const componentLibrary = isComponentLibraryGroupId(group.id);
+  const directChildren = [...byId.values()].filter((object) => object.parentGroupId === group.id);
+  const rightPadding = componentLibrary ? 40 : 24;
+  const bottomPadding = componentLibrary ? 48 : 24;
+  const collapsedWidth = componentLibrary
+    ? COLLAPSED_COMPONENT_LIBRARY_WIDTH
+    : COLLAPSED_FREEFORM_GROUP_WIDTH;
+  const minimumGroupWidth = Math.max(
+    componentLibrary ? 360 : 240,
+    ...directChildren.map((child) => {
+      const size = child.kind === "group"
+        ? { width: child.width, height: child.height }
+        : WORKSPACE_NODE_SIZES[graphNodes.get(child.id)?.kind ?? "page"];
+      return child.x + size.width + rightPadding;
+    }),
+  );
+  const minimumGroupHeight = Math.max(
+    componentLibrary ? 300 : 144,
+    ...directChildren.map((child) => {
+      const size = child.kind === "group"
+        ? { width: child.width, height: child.height }
+        : WORKSPACE_NODE_SIZES[graphNodes.get(child.id)?.kind ?? "page"];
+      return child.y + size.height + bottomPadding;
+    }),
+  );
   return {
     id: group.id,
     type: "group",
@@ -158,17 +194,19 @@ function adaptGroup(
     extent: group.parentGroupId ? "parent" : undefined,
     hidden: hasCollapsedAncestor(group, byId),
     selected: view.selectedNodeIds?.has(group.id) ?? false,
-    style: { width: group.width, height: group.height },
+    style: group.collapsed
+      ? { width: Math.min(group.width, collapsedWidth), height: COLLAPSED_GROUP_HEIGHT }
+      : { width: group.width, height: group.height },
     data: {
       objectId: group.id,
       kind: "group",
       name: group.label,
+      projectId: view.projectId ?? null,
       artifactId: null,
       resourceId: null,
       resourceKind: null,
       resourceQualityState: null,
       revisionId: null,
-      thumbnailUrl: null,
       zoomLevel: semanticZoomLevel(view.zoom),
       incomingCount: 0,
       outgoingCount: 0,
@@ -177,8 +215,14 @@ function adaptGroup(
       generationState: "idle",
       collapsed: group.collapsed,
       parentGroupId: group.parentGroupId,
+      groupRole: componentLibrary ? "component-library" : "freeform",
+      memberCount: directChildren.filter((child) => graphNodes.get(child.id)?.kind === "component").length,
+      minimumGroupWidth,
+      minimumGroupHeight,
+      expandedGroupWidth: group.width,
+      expandedGroupHeight: group.height,
       onToggleCollapsed: view.onToggleCollapsed,
-      onRenameGroup: view.onRenameGroup,
+      onRenameGroup: componentLibrary ? undefined : view.onRenameGroup,
       onResizeGroup: view.onResizeGroup,
     },
   };
@@ -211,12 +255,12 @@ function adaptGraphNode(
       objectId: node.id,
       kind: node.kind,
       name: node.name,
+      projectId: view.projectId ?? null,
       artifactId: node.kind === "resource" ? null : node.artifactId,
       resourceId: node.kind === "resource" ? node.resourceId : null,
       resourceKind: node.kind === "resource" ? resourceState?.resourceKind ?? null : null,
       resourceQualityState: node.kind === "resource" ? resourceState?.qualityState ?? null : null,
       revisionId,
-      thumbnailUrl: immutableThumbnailUrl(view.projectId, node, revisionId),
       zoomLevel: semanticZoomLevel(view.zoom),
       incomingCount: counts.get(node.id)?.incoming ?? 0,
       outgoingCount: counts.get(node.id)?.outgoing ?? 0,
@@ -227,6 +271,10 @@ function adaptGraphNode(
         : "idle",
       collapsed: false,
       parentGroupId: layoutObject.parentGroupId,
+      groupRole: null,
+      memberCount: 0,
+      minimumGroupWidth: 0,
+      minimumGroupHeight: 0,
     },
   };
 }
@@ -240,29 +288,63 @@ function edgePassesFilter(edge: WorkspaceEdge, view: WorkspaceGraphView): boolea
   return Boolean(selection?.has(edge.sourceNodeId) || selection?.has(edge.targetNodeId));
 }
 
+function directionalEdgeHandles(
+  edge: WorkspaceEdge,
+  layout: WorkspaceLayout,
+  graphNodes: ReadonlyMap<string, WorkspaceNode>,
+  lane = 0,
+): Pick<WorkspaceFlowEdge, "sourceHandle" | "targetHandle"> {
+  const sourceNode = graphNodes.get(edge.sourceNodeId);
+  const targetNode = graphNodes.get(edge.targetNodeId);
+  const route = resolveWorkspaceEdgeRoute(edge, layout, graphNodes, lane);
+  if (!sourceNode || !targetNode || !route) return {};
+  return {
+    sourceHandle: `${sourceNode.kind}-source-${route.sourceSide}`,
+    targetHandle: `${targetNode.kind}-target-${route.targetSide}`,
+  };
+}
+
 function adaptEdge(
   edge: WorkspaceEdge,
   hiddenNodeIds: ReadonlySet<string>,
   nodeNames: ReadonlyMap<string, string>,
+  layout: WorkspaceLayout,
+  graphNodes: ReadonlyMap<string, WorkspaceNode>,
   view: WorkspaceGraphView,
+  lane: number,
 ): WorkspaceFlowEdge {
   const status = edge.kind === "prototype" ? edge.prototype.status : null;
-  const label = edge.kind === "prototype" ? edge.prototype.status : edge.kind.replace("-", " ");
+  const semanticLabel = edge.kind === "prototype" ? edge.prototype.status : edge.kind.replace("-", " ");
   const sourceName = nodeNames.get(edge.sourceNodeId) ?? edge.sourceNodeId;
   const targetName = nodeNames.get(edge.targetNodeId) ?? edge.targetNodeId;
+  const displayLabel = edge.kind === "prototype" ? `to ${targetName}` : semanticLabel;
+  const handles = directionalEdgeHandles(edge, layout, graphNodes, lane);
   return {
     id: edge.id,
     source: edge.sourceNodeId,
     target: edge.targetNodeId,
+    ...handles,
     type: edge.kind === "prototype" ? "prototype" : "relation",
-    ariaLabel: `${label} ${edge.kind === "prototype" ? "prototype" : "relation"} from ${sourceName} to ${targetName}`,
+    ariaLabel: `${semanticLabel} ${edge.kind === "prototype" ? "prototype" : "relation"} from ${sourceName} to ${targetName}`,
     hidden: hiddenNodeIds.has(edge.sourceNodeId) || hiddenNodeIds.has(edge.targetNodeId),
     selected: view.selectedEdgeIds?.has(edge.id) ?? false,
-    markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+    zIndex: 0,
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 12,
+      height: 12,
+      color: view.selectedEdgeIds?.has(edge.id)
+        ? "var(--foreground)"
+        : status === "broken"
+          ? "var(--destructive)"
+          : "var(--foreground-2)",
+    },
     data: {
       kind: edge.kind,
       status,
-      label,
+      label: displayLabel,
+      zoomLevel: semanticZoomLevel(view.zoom),
+      lane,
     },
   };
 }
@@ -275,18 +357,27 @@ export function workspaceGraphToFlow(
   const layout = materializeWorkspaceLayout(graph, sourceLayout);
   const byId = layoutObjectMap(layout);
   const counts = edgeCounts(graph);
+  const graphNodes = new Map(graph.nodes.map((node) => [node.id, node]));
   const nodeNames = new Map(graph.nodes.map((node) => [node.id, node.name]));
-  const groups = sortedGroups(layout).map((group) => adaptGroup(group, byId, view));
+  const groups = sortedGroups(layout).map((group) => adaptGroup(group, byId, graphNodes, view));
   const nodes = graph.nodes.flatMap((node) => {
     const object = byId.get(node.id);
     return object ? [adaptGraphNode(node, object, byId, counts, view)] : [];
   });
   const hiddenNodeIds = new Set([...groups, ...nodes].filter((node) => node.hidden).map((node) => node.id));
+  const visibleEdges = graph.edges.filter((edge) => edgePassesFilter(edge, view));
+  const edgeLanes = workspaceEdgeLaneMap(visibleEdges);
   return {
     nodes: [...groups, ...nodes],
-    edges: graph.edges
-      .filter((edge) => edgePassesFilter(edge, view))
-      .map((edge) => adaptEdge(edge, hiddenNodeIds, nodeNames, view)),
+    edges: visibleEdges.map((edge) => adaptEdge(
+      edge,
+      hiddenNodeIds,
+      nodeNames,
+      layout,
+      graphNodes,
+      view,
+      edgeLanes.get(edge.id) ?? 0,
+    )),
   };
 }
 

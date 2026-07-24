@@ -87,7 +87,8 @@
 
 .prototype-flow-viewer__frame-slot { position: absolute; inset: 0; display: grid; place-items: center; animation-duration: var(--prototype-transition-ms); animation-timing-function: var(--prototype-transition-easing); animation-fill-mode: both; }
 .prototype-flow-viewer__frame-slot iframe { width: 100%; height: 100%; border: 0; }
-.prototype-flow-viewer__frame-viewport { overflow: hidden; flex: none; transform-origin: center; background: white; box-shadow: 0 16px 60px rgb(0 0 0 / .34); }
+.prototype-flow-viewer__frame-scale { position: relative; overflow: hidden; flex: none; background: white; box-shadow: 0 16px 60px rgb(0 0 0 / .34); }
+.prototype-flow-viewer__frame-viewport { position: absolute; inset: 0; overflow: hidden; transform-origin: top left; background: white; }
 .prototype-flow-viewer__unframed { width: 100%; height: 100%; }
 .prototype-flow-viewer__frame-slot[data-active="false"] { visibility: hidden; pointer-events: none; }
 .prototype-flow-viewer__frame-slot[data-transition="fade"] { animation-name: prototype-flow-fade; }

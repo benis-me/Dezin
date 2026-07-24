@@ -14,13 +14,16 @@ import type {
   SharedDesignKernelRevision,
   Store,
   WorkspaceArtifactRecord,
+  WorkspaceGenerationAgentSelection,
   WorkspaceGraph,
   WorkspaceSnapshot,
 } from "../../../../packages/core/src/index.ts";
 import {
   MAX_PROTOTYPE_TRANSITION_DURATION_MS,
+  normalizeWorkspaceGenerationAgentSelection,
   readFrozenPrototypeRenderFrames,
   resolveFrozenPrototypeRelations,
+  WorkspaceStoreCodecError,
 } from "../../../../packages/core/src/index.ts";
 import {
   DesignRegistry,
@@ -289,8 +292,8 @@ export interface FrozenResourceExecutionProfile {
   };
   /** Independent no-tools quality reviewer identity, frozen separately from the generating Agent. */
   readonly reviewer: {
-    readonly command: "claude";
-    readonly providerId: "claude";
+    readonly command: "claude" | "codebuddy";
+    readonly providerId: "claude" | "codebuddy";
     readonly model: string | null;
     readonly baseUrl: string;
     readonly credentialSource: "anthropic-profile" | "agent" | "session";
@@ -346,6 +349,45 @@ function plainRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function taskAgentSelection(
+  payload: Record<string, unknown>,
+  label: string,
+): WorkspaceGenerationAgentSelection | null {
+  if (!Object.hasOwn(payload, "agent")) return null;
+  try {
+    return normalizeWorkspaceGenerationAgentSelection(payload.agent, label);
+  } catch (error) {
+    if (error instanceof WorkspaceStoreCodecError) {
+      throw new ContextIntegrityError(error.message);
+    }
+    throw error;
+  }
+}
+
+function settingsForFrozenTaskAgent(
+  settings: Settings,
+  agent: WorkspaceGenerationAgentSelection | null,
+): Settings {
+  if (agent === null) return settings;
+  const reviewerProviderId = agent.providerId === "claude" || agent.providerId === "codebuddy"
+    ? agent.providerId
+    : null;
+  return {
+    ...settings,
+    agentCommand: agent.command,
+    model: agent.model ?? "",
+    ...(reviewerProviderId === null
+      ? {}
+      : {
+          // A post-approval Task's immutable Agent selection owns the complete
+          // generation chain; stale global Visual QA settings cannot switch its
+          // critic to another provider or model.
+          visualQaAgentCommand: reviewerProviderId,
+          visualQaModel: agent.model ?? "",
+        }),
+  };
+}
+
 function nonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
     throw new ContextIntegrityError(`${label} is invalid`);
@@ -379,10 +421,13 @@ function credentialFreeAgentBaseUrl(
   }
   if ((url.protocol !== "http:" && url.protocol !== "https:")
     || url.username.length > 0 || url.password.length > 0
-    || url.search.length > 0 || url.hash.length > 0 || url.href !== raw) {
+    || url.search.length > 0 || url.hash.length > 0) {
     throw new ContextIntegrityError(`${label} must be canonical and credential-free`);
   }
-  return raw;
+  if (raw !== url.href && `${raw}/` !== url.href) {
+    throw new ContextIntegrityError(`${label} must be canonical and credential-free`);
+  }
+  return url.href;
 }
 
 function hashedBody<T extends Record<string, unknown>>(body: T): T & { checksum: string } {
@@ -484,7 +529,8 @@ function resourceImplementationProtocols(
 }
 
 function resourceCredentialProviderId(providerId: string): string {
-  if (providerId === "claude" || providerId === "codebuddy") return "anthropic";
+  if (providerId === "codebuddy") return "codebuddy";
+  if (providerId === "claude") return "anthropic";
   if (providerId === "codex" || providerId === "copilot") return "openai";
   return providerId;
 }
@@ -496,7 +542,15 @@ function artifactAgentCredentialSemantic(
   FrozenArtifactExecutionProfile["agent"],
   "credentialProviderId" | "baseUrl" | "organization" | "credentialRequired"
 > {
-  const usesAnthropicEndpoint = providerId === "claude" || providerId === "codebuddy";
+  if (providerId === "codebuddy") {
+    return {
+      credentialProviderId: "codebuddy",
+      baseUrl: "",
+      organization: "",
+      credentialRequired: false,
+    };
+  }
+  const usesAnthropicEndpoint = providerId === "claude";
   const usesOpenAiEndpoint = providerId === "codex";
   return {
     credentialProviderId: resourceCredentialProviderId(providerId),
@@ -511,12 +565,28 @@ function resourceCredentialConfigured(settings: Settings): boolean {
 }
 
 function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionProfile["reviewer"] {
+  const command = reviewerAgentCommand(settings, settings.agentCommand);
+  const model = reviewerModel(
+    settings,
+    settings.model.trim() || undefined,
+    settings.agentCommand,
+  ) ?? null;
+  if (command === "codebuddy") {
+    return Object.freeze({
+      command,
+      providerId: command,
+      model,
+      baseUrl: "",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    });
+  }
   const anthropic = providerRuntimeConfig(settings, "anthropic");
   if (anthropic.enabled) {
     return Object.freeze({
       command: "claude" as const,
       providerId: "claude" as const,
-      model: settings.visualQaModel.trim() || null,
+      model,
       baseUrl: credentialFreeAgentBaseUrl(anthropic.baseUrl),
       credentialSource: "anthropic-profile" as const,
       credentialRequired: Boolean(anthropic.apiKey.trim() || anthropic.apiKeyConfigured),
@@ -526,7 +596,7 @@ function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionPro
     return Object.freeze({
       command: "claude" as const,
       providerId: "claude" as const,
-      model: settings.visualQaModel.trim() || null,
+      model,
       baseUrl: credentialFreeAgentBaseUrl(settings.apiBaseUrl),
       credentialSource: "agent" as const,
       credentialRequired: resourceCredentialConfigured(settings),
@@ -535,7 +605,7 @@ function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionPro
   return Object.freeze({
     command: "claude" as const,
     providerId: "claude" as const,
-    model: settings.visualQaModel.trim() || null,
+    model,
     baseUrl: "",
     credentialSource: "session" as const,
     credentialRequired: false,
@@ -599,6 +669,7 @@ export function freezeResourceExecutionProfile(
   const command = input.settings.agentCommand.trim() || "claude";
   const providerId = providerIdentity(command);
   const credentialProviderId = resourceCredentialProviderId(providerId);
+  const hostAuthenticated = providerId === "codebuddy";
   const body = {
     protocol: RESOURCE_EXECUTION_PROFILE_PROTOCOL,
     ownership: structuredClone(input.ownership),
@@ -609,10 +680,10 @@ export function freezeResourceExecutionProfile(
       command,
       providerId,
       model: input.settings.model.trim() || null,
-      baseUrl: credentialFreeAgentBaseUrl(input.settings.apiBaseUrl),
-      organization: input.settings.aiProviderOrganization.trim(),
+      baseUrl: hostAuthenticated ? "" : credentialFreeAgentBaseUrl(input.settings.apiBaseUrl),
+      organization: hostAuthenticated ? "" : input.settings.aiProviderOrganization.trim(),
       credentialProviderId,
-      credentialRequired: resourceCredentialConfigured(input.settings),
+      credentialRequired: hostAuthenticated ? false : resourceCredentialConfigured(input.settings),
     },
     reviewer: resourceReviewerProfile(input.settings),
     imageGeneration: resourceImageGenerationProfile(input.resourceKind, input.settings),
@@ -713,22 +784,26 @@ export function validateResourceExecutionProfile(
   exactKeys(reviewerRecord, [
     "command", "providerId", "model", "baseUrl", "credentialSource", "credentialRequired",
   ], "Resource execution reviewer");
-  if (reviewerRecord.command !== "claude" || reviewerRecord.providerId !== "claude"
+  if ((reviewerRecord.command !== "claude" && reviewerRecord.command !== "codebuddy")
+    || reviewerRecord.providerId !== reviewerRecord.command
     || (reviewerRecord.credentialSource !== "anthropic-profile"
       && reviewerRecord.credentialSource !== "agent"
       && reviewerRecord.credentialSource !== "session")
     || typeof reviewerRecord.credentialRequired !== "boolean") {
     throw new ContextIntegrityError("Resource execution reviewer identity is invalid");
   }
+  const reviewerCommand = reviewerRecord.command;
+  const reviewerCredentialSource = reviewerRecord.credentialSource;
   const reviewer: FrozenResourceExecutionProfile["reviewer"] = {
-    command: "claude",
-    providerId: "claude",
+    command: reviewerCommand,
+    providerId: reviewerCommand,
     model: nullableString(reviewerRecord.model, "Resource execution reviewer model"),
     baseUrl: credentialFreeAgentBaseUrl(reviewerRecord.baseUrl),
-    credentialSource: reviewerRecord.credentialSource,
+    credentialSource: reviewerCredentialSource,
     credentialRequired: reviewerRecord.credentialRequired,
   };
-  if (reviewer.credentialSource === "session" && (reviewer.baseUrl || reviewer.credentialRequired)) {
+  if ((reviewer.credentialSource === "session" && (reviewer.baseUrl || reviewer.credentialRequired))
+    || (reviewer.command === "codebuddy" && reviewer.credentialSource !== "session")) {
     throw new ContextIntegrityError("Resource execution reviewer credential policy is invalid");
   }
   let imageGeneration: FrozenResourceExecutionProfile["imageGeneration"] = null;
@@ -1239,7 +1314,9 @@ export function hydrateArtifactExecutionSettings(
   const sameEndpoint = exact.agent.baseUrl === liveCredential.baseUrl;
   const sameOrganization = exact.agent.organization === liveCredential.organization;
   const credentialMatches = sameProvider && sameEndpoint && sameOrganization;
-  const apiKey = credentialMatches ? liveSettings.apiKey.trim() : "";
+  const apiKey = exact.agent.providerId === "codebuddy"
+    ? ""
+    : credentialMatches ? liveSettings.apiKey.trim() : "";
   if (exact.agent.credentialRequired && !apiKey) {
     throw new ContextIntegrityError(
       "Current credential for the frozen Artifact Agent provider, endpoint, and organization is unavailable",
@@ -1303,23 +1380,18 @@ export function hydrateResourceAgentExecution(
   if (!implementation || implementation.id !== exact.agent.providerId) {
     throw new ContextIntegrityError("Frozen Resource Agent implementation is unavailable or incompatible");
   }
+  if (exact.agent.providerId === "codebuddy") {
+    return Object.freeze({ ...exact.agent, apiKey: "" });
+  }
   const liveCommand = liveSettings.agentCommand.trim() || "claude";
   const liveProviderId = providerIdentity(liveCommand);
-  const liveModel = liveSettings.model.trim() || null;
   const currentBaseUrl = credentialFreeAgentBaseUrl(liveSettings.apiBaseUrl);
   const currentOrganization = liveSettings.aiProviderOrganization.trim();
-  const currentCredentialRequired = resourceCredentialConfigured(liveSettings);
-  if (liveCommand !== exact.agent.command || liveProviderId !== exact.agent.providerId
-    || liveModel !== exact.agent.model
-    || resourceCredentialProviderId(liveProviderId) !== exact.agent.credentialProviderId
-    || currentBaseUrl !== exact.agent.baseUrl
-    || currentOrganization !== exact.agent.organization
-    || currentCredentialRequired !== exact.agent.credentialRequired) {
-    throw new ContextIntegrityError(
-      "Current Resource Agent command, provider, model, endpoint, organization, or credential requirement does not match the frozen Attempt",
-    );
-  }
-  const apiKey = liveSettings.apiKey.trim();
+  const credentialMatches = liveProviderId === exact.agent.providerId
+    && resourceCredentialProviderId(liveProviderId) === exact.agent.credentialProviderId
+    && currentBaseUrl === exact.agent.baseUrl
+    && currentOrganization === exact.agent.organization;
+  const apiKey = credentialMatches ? liveSettings.apiKey.trim() : "";
   if (exact.agent.credentialRequired && !apiKey) {
     throw new ContextIntegrityError("Current credential for the frozen Resource Agent provider is unavailable");
   }
@@ -1336,6 +1408,9 @@ export function hydrateResourceReviewerExecution(
   liveSettings: Settings,
 ): BoundResourceReviewerExecution {
   const exact = validateResourceExecutionProfile(profile).reviewer;
+  if (exact.providerId === "codebuddy") {
+    return Object.freeze({ ...exact, apiKey: "" });
+  }
   const current = resourceReviewerProfile(liveSettings);
   if (!isDeepStrictEqual(current, exact)) {
     throw new ContextIntegrityError(
@@ -2831,6 +2906,7 @@ export function createProductionResourceExecutionProfileLoader(
       throw new ContextIntegrityError("Resource execution Project/Workspace/Resource ownership is invalid");
     }
     const payload = plainRecord(request.task.payload, "Resource execution Task payload");
+    const frozenTaskAgent = taskAgentSelection(payload, "Resource execution Task Agent selection");
     const operation = plainRecord(payload.operation, "Resource execution Task operation");
     const adapterRecord = plainRecord(payload.adapter, "Resource execution Task adapter");
     exactKeys(adapterRecord, ["id", "version", "kind"], "Resource execution Task adapter");
@@ -2840,6 +2916,7 @@ export function createProductionResourceExecutionProfileLoader(
       throw new ContextIntegrityError("Resource execution Task adapter or target identity is invalid");
     }
     const settingsSnapshot = options.store.getSettings();
+    const executionSettingsSnapshot = settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent);
     checkAbort(signal);
     return freezeResourceExecutionProfile({
       ownership: {
@@ -2855,7 +2932,7 @@ export function createProductionResourceExecutionProfileLoader(
         version: 1,
         kind: resource.kind,
       },
-      settings: settingsSnapshot,
+      settings: executionSettingsSnapshot,
     });
   };
 }
@@ -2881,7 +2958,13 @@ export function createProductionArtifactExecutionProfileLoader(
       throw new ContextIntegrityError("Artifact execution Project ownership is invalid");
     }
     const projectSnapshot = structuredClone(project);
+    const payload = plainRecord(request.task.payload, "Artifact execution Task payload");
+    const frozenTaskAgent = taskAgentSelection(payload, "Artifact execution Task Agent selection");
     const settingsSnapshot = options.store.getSettings();
+    const command = frozenTaskAgent?.command ?? (settingsSnapshot.agentCommand || "claude");
+    const model = frozenTaskAgent === null ? settingsSnapshot.model || null : frozenTaskAgent.model;
+    const providerId = frozenTaskAgent?.providerId ?? providerIdentity(command);
+    const executionSettingsSnapshot = settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent);
     const ignoresSnapshot = options.store.listQualityIgnores(project.id)
       .map((entry) => ({ ruleId: entry.ruleId, selector: entry.selector }))
       .sort((left, right) => compareBinary(
@@ -2934,17 +3017,19 @@ export function createProductionArtifactExecutionProfileLoader(
       throw new ContextIntegrityError("Artifact execution semantics changed during materialization");
     }
 
-    const payload = request.task.payload as { brief?: { proposalRationale?: unknown } };
-    const brief = typeof payload.brief?.proposalRationale === "string"
-      ? payload.brief.proposalRationale
+    const briefRecord = payload.brief && typeof payload.brief === "object" && !Array.isArray(payload.brief)
+      ? payload.brief as Record<string, unknown>
+      : undefined;
+    const brief = typeof briefRecord?.proposalRationale === "string"
+      ? briefRecord.proposalRationale
       : projectSnapshot.name;
-    const imageGenerationEnabled = artifactImageGenerationEnabled(settingsSnapshot);
+    const imageGenerationEnabled = artifactImageGenerationEnabled(executionSettingsSnapshot);
     const promptRegistry = designSnapshot === null
       ? options.designRegistry
       : new DesignRegistry([designSnapshot.content]);
     const promptResult = buildProjectAgentPrompt({
       project: projectSnapshot,
-      settings: sanitizedSettings(settingsSnapshot),
+      settings: sanitizedSettings(executionSettingsSnapshot),
       brief,
       designRegistry: promptRegistry,
       imageGenerationEnabled,
@@ -2973,10 +3058,8 @@ export function createProductionArtifactExecutionProfileLoader(
       "Use only offline probe reads. Consume the bounded measured JSON from `node .sharingan/probe.mjs source-scaffold --stdout`; it must perform no writes. Never use live navigate, capture, click, scroll, read-dom, styles, or links commands for this immutable Revision.",
       "If the final implementation reuses a captured source asset, copy its bytes into a candidate-owned path in the project and reference that owned copy. Never mutate, delete, rename, or generate files inside either pinned capture root.",
     ].join("\n\n") : "";
-    const command = settingsSnapshot.agentCommand || "claude";
-    const model = settingsSnapshot.model || null;
-    const reviewerCommand = reviewerAgentCommand(settingsSnapshot, command);
-    const reviewerModelId = reviewerModel(settingsSnapshot, model ?? undefined, command) ?? null;
+    const reviewerCommand = reviewerAgentCommand(executionSettingsSnapshot, command);
+    const reviewerModelId = reviewerModel(executionSettingsSnapshot, model ?? undefined, command) ?? null;
     return freezeArtifactExecutionProfile({
       ownership: {
         projectId: projectSnapshot.id,
@@ -2995,8 +3078,8 @@ export function createProductionArtifactExecutionProfileLoader(
         sharingan: projectSnapshot.sharingan,
         sourceUrl: projectSnapshot.sourceUrl ?? null,
       },
-      settings: settingsSnapshot,
-      agent: { command, providerId: providerIdentity(command), model },
+      settings: executionSettingsSnapshot,
+      agent: { command, providerId, model },
       designSystem: designSnapshot,
       skill: frozenSkill,
       researchDirection: direction,
@@ -3008,7 +3091,7 @@ export function createProductionArtifactExecutionProfileLoader(
           .join("\n\n"),
       },
       quality: {
-        visualQaEnabled: settingsSnapshot.visualQaEnabled
+        visualQaEnabled: executionSettingsSnapshot.visualQaEnabled
           || request.task.qaProfile.requireVisualReview
           || hasExactSharinganCapture,
         reviewer: {
@@ -3091,6 +3174,32 @@ export class ProductionGenerationTaskContextResolver implements GenerationTaskCo
       );
       checkAbort(signal);
     }
+    const taskAgent = taskAgentSelection(
+      input.task.payload as Record<string, unknown>,
+      "Generation Task payload Agent",
+    );
+    const profileAgent = artifactExecutionProfile?.agent ?? resourceExecutionProfile?.agent;
+    const contextAgent: WorkspaceGenerationAgentSelection = taskAgent
+      ?? (profileAgent?.command === "codebuddy" && profileAgent.providerId === "codebuddy"
+        ? {
+            providerId: "codebuddy",
+            command: "codebuddy",
+            model: profileAgent.model,
+          }
+        : profileAgent?.command === "claude" && profileAgent.providerId === "claude"
+          ? {
+              providerId: "claude",
+              command: "claude",
+              model: profileAgent.model,
+            }
+          : {
+              // Historical Tasks may predate the durable Agent field. Their exact
+              // payload remains in the message hash; this canonical selection is
+              // only the internal Context request boundary for those records.
+              providerId: "claude",
+              command: "claude",
+              model: null,
+            });
     const source = new FrozenTaskContextSource({
       workspace: this.#options.workspace,
       loadResourceSnapshot: this.#options.loadResourceSnapshot,
@@ -3113,6 +3222,7 @@ export class ProductionGenerationTaskContextResolver implements GenerationTaskCo
         id: input.task.target.id,
       },
       intent: "generate",
+      agent: contextAgent,
       message: stableStringify({
         protocol: "dezin.generation-context-request.v1",
         projectId: input.projectId,

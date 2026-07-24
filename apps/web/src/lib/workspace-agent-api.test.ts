@@ -31,6 +31,7 @@ function proposal(): WorkspaceProposal {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: [],
       dependencyPlans: [],

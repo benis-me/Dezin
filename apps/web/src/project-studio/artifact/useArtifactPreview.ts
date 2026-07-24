@@ -34,6 +34,8 @@ function targetIdentity(target: PreviewTarget | null): string {
       return `${target.kind}:${target.projectId}:${target.revisionId}`;
     case "run-candidate":
       return `${target.kind}:${target.projectId}:${target.runId}`;
+    case "generation-candidate":
+      return `${target.kind}:${target.projectId}:${target.artifactId}:${target.planId}:${target.taskId}:${target.attempt}`;
     case "workspace-flow":
       return `${target.kind}:${target.projectId}:${target.snapshotId}:${target.startArtifactId}:${target.stateKey ?? ""}`;
     case "component-state":
@@ -65,6 +67,8 @@ function resolutionError(
   }
   const targetArtifactId = target.kind === "artifact-current"
     ? target.artifactId
+    : target.kind === "generation-candidate"
+      ? target.artifactId
     : target.kind === "workspace-flow"
       ? target.startArtifactId
       : expectedArtifactId;
@@ -96,6 +100,16 @@ function resolutionError(
   }
   if (target.kind === "run-candidate" && resolved.runId !== target.runId) {
     return "Resolved preview run does not match the requested target.";
+  }
+  if (target.kind === "generation-candidate") {
+    const identity = resolved.generationCandidate;
+    if (identity === undefined
+      || identity === null
+      || identity.planId !== target.planId
+      || identity.taskId !== target.taskId
+      || identity.attempt !== target.attempt) {
+      return "Resolved preview Generation candidate does not match the requested Attempt.";
+    }
   }
   if (target.kind === "component-state"
     && (resolved.variantKey !== target.variantKey || resolved.stateKey !== target.stateKey)) {
@@ -133,7 +147,9 @@ function sameResolvedIdentity(first: ResolvedPreviewTarget, second: ResolvedPrev
     && canonicalJson(first.renderSpec) === canonicalJson(second.renderSpec)
     && first.variantKey === second.variantKey
     && first.stateKey === second.stateKey
-    && first.runId === second.runId;
+    && first.runId === second.runId
+    && canonicalJson(first.generationCandidate ?? null)
+      === canonicalJson(second.generationCandidate ?? null);
 }
 
 function leaseBridgeError(lease: Pick<PreviewTargetLease, "leaseId" | "url" | "bridgeNonce">): string | null {

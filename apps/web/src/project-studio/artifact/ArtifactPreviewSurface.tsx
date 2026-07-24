@@ -19,6 +19,8 @@ export function ArtifactPreviewSurface({
   stageRef,
   iframeRef,
   zoom,
+  zoomMode,
+  presentation,
   selection,
   pickerActive,
   frameState,
@@ -36,6 +38,8 @@ export function ArtifactPreviewSurface({
   stageRef: RefObject<HTMLDivElement | null>;
   iframeRef: RefObject<HTMLIFrameElement | null>;
   zoom: number;
+  zoomMode: "fitted" | "manual";
+  presentation: boolean;
   selection: ArtifactElementContext | null;
   pickerActive: boolean;
   frameState: PreviewFrameState;
@@ -50,7 +54,7 @@ export function ArtifactPreviewSurface({
   const [repairContextCopied, setRepairContextCopied] = useState(false);
   if (artifact === null) {
     return (
-      <div className="artifact-stage artifact-stage--message">
+      <div className="artifact-stage artifact-stage--message" data-preview-zoom-mode="fitted">
         <div role="alert" className="artifact-stage-message">
           <CircleAlert aria-hidden size={18} />
           <div>
@@ -64,7 +68,7 @@ export function ArtifactPreviewSurface({
 
   if (preview.status === "idle" || preview.status === "loading") {
     return (
-      <div className="artifact-stage artifact-stage--message">
+      <div className="artifact-stage artifact-stage--message" data-preview-zoom-mode="fitted">
         <div role="status" aria-live="polite" aria-label="Preparing artifact preview" className="artifact-stage-message">
           <LoaderCircle aria-hidden size={18} className="artifact-spin" />
           <div>
@@ -78,7 +82,7 @@ export function ArtifactPreviewSurface({
 
   if (preview.status === "error") {
     return (
-      <div className="artifact-stage artifact-stage--message">
+      <div className="artifact-stage artifact-stage--message" data-preview-zoom-mode="fitted">
         <div role="alert" aria-label="Artifact preview unavailable" className="artifact-stage-message artifact-stage-message--error">
           <CircleAlert aria-hidden size={18} />
           <div>
@@ -97,11 +101,18 @@ export function ArtifactPreviewSurface({
   const frameBackground = safePreviewFrameBackground(frame.background) ?? "white";
 
   return (
-    <div ref={stageRef} className="artifact-stage" data-preview-revision={preview.resolved.revisionId}>
-      <div className="artifact-stage__measure" aria-hidden>
-        <span>{frame.width} × {frame.height}</span>
-        <span>{frame.name}</span>
-      </div>
+    <div
+      ref={stageRef}
+      className="artifact-stage"
+      data-preview-revision={preview.resolved.revisionId}
+      data-preview-zoom-mode={zoomMode}
+    >
+      {!presentation ? (
+        <div className="artifact-stage__measure" aria-hidden>
+          <span>{frame.width} × {frame.height}</span>
+          <span>{frame.name}</span>
+        </div>
+      ) : null}
       {runtimeErrorIdentity !== null && runtimeRepairContext !== null
         && (runtimeErrors.fatal !== null || runtimeErrors.nonFatal.length > 0) ? (
           <aside className="artifact-runtime-errors" aria-label="Artifact runtime diagnostics">
@@ -176,41 +187,45 @@ export function ArtifactPreviewSurface({
           />
         </div>
       </div>
-      <div
-        className="artifact-stage__frame-status"
-        role="status"
-        aria-label="Preview frame state"
-        data-state={frameState.status}
-        title={frameState.status === "rejected" ? frameState.message : undefined}
-      >
-        <span aria-hidden />
-        {frameState.status === "applied"
-          ? "State applied"
-          : frameState.status === "rejected"
-            ? frameState.retryable
-              ? "State timed out"
-              : "State rejected"
-            : frameState.status === "applying"
-              ? frameState.attempt === 1
-                ? "Retrying state"
-                : "Applying state"
-              : frameState.status === "pending" && frameState.reconnecting
-                ? "Reconnecting state"
-                : "State pending"}
-        {frameState.status === "rejected" && frameState.retryable ? (
-          <button type="button" onClick={onRetryFrame} aria-label="Retry frame state">
-            Retry
-          </button>
-        ) : null}
-      </div>
-      <div className="artifact-stage__status" aria-live="polite">
-        <MousePointer2 aria-hidden size={13} />
-        {selection
-          ? `Selected · ${selection.label}`
-          : pickerActive
-            ? "Picker active · choose an element in the preview"
-            : "Selection paused · resume from the Inspector"}
-      </div>
+      {!presentation ? (
+        <>
+          <div
+            className="artifact-stage__frame-status"
+            role="status"
+            aria-label="Preview frame state"
+            data-state={frameState.status}
+            title={frameState.status === "rejected" ? frameState.message : undefined}
+          >
+            <span aria-hidden />
+            {frameState.status === "applied"
+              ? "State applied"
+              : frameState.status === "rejected"
+                ? frameState.retryable
+                  ? "State timed out"
+                  : "State rejected"
+                : frameState.status === "applying"
+                  ? frameState.attempt === 1
+                    ? "Retrying state"
+                    : "Applying state"
+                  : frameState.status === "pending" && frameState.reconnecting
+                    ? "Reconnecting state"
+                    : "State pending"}
+            {frameState.status === "rejected" && frameState.retryable ? (
+              <button type="button" onClick={onRetryFrame} aria-label="Retry frame state">
+                Retry
+              </button>
+            ) : null}
+          </div>
+          <div className="artifact-stage__status" aria-live="polite">
+            <MousePointer2 aria-hidden size={13} />
+            {selection
+              ? `Selected · ${selection.label}`
+              : pickerActive
+                ? "Picker active · choose an element in the preview"
+                : "Selection paused · resume from the Inspector"}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

@@ -13,6 +13,14 @@ export type Route =
   | { name: "project-canvas"; id: string }
   | { name: "project-artifact"; id: string; artifactId: string }
   | { name: "project-artifact-revision"; id: string; artifactId: string; revisionId: string }
+  | {
+    name: "project-artifact-candidate";
+    id: string;
+    artifactId: string;
+    planId: string;
+    taskId: string;
+    attempt: number;
+  }
   | { name: "project-resource"; id: string; resourceId: string }
   | { name: "project-resource-revision"; id: string; resourceId: string; revisionId: string }
   | { name: "effects" }
@@ -45,6 +53,20 @@ export function parsePath(pathname: string): Route {
     const revisionId = decodeSegment(segs[5]);
     if (id !== null && artifactId !== null && revisionId !== null) {
       return { name: "project-artifact-revision", id, artifactId, revisionId };
+    }
+    return { name: "home" };
+  }
+  if (segs[0] === "projects" && segs.length === 8 && segs[1]
+    && segs[2] === "artifacts" && segs[3] && segs[4] === "candidates"
+    && segs[5] && segs[6] && segs[7]) {
+    const id = decodeSegment(segs[1]);
+    const artifactId = decodeSegment(segs[3]);
+    const planId = decodeSegment(segs[5]);
+    const taskId = decodeSegment(segs[6]);
+    const attempt = Number(segs[7]);
+    if (id !== null && artifactId !== null && planId !== null && taskId !== null
+      && Number.isSafeInteger(attempt) && attempt > 0) {
+      return { name: "project-artifact-candidate", id, artifactId, planId, taskId, attempt };
     }
     return { name: "home" };
   }
@@ -100,6 +122,8 @@ export function routeToPath(route: Route): string {
       return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}`;
     case "project-artifact-revision":
       return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}/revisions/${encodeURIComponent(route.revisionId)}`;
+    case "project-artifact-candidate":
+      return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}/candidates/${encodeURIComponent(route.planId)}/${encodeURIComponent(route.taskId)}/${route.attempt}`;
     case "project-resource":
       return `/projects/${encodeURIComponent(route.id)}/resources/${encodeURIComponent(route.resourceId)}`;
     case "project-resource-revision":

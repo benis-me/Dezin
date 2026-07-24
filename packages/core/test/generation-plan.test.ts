@@ -63,6 +63,11 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
     assumptions: ["Use the approved product taxonomy.", "Keep the visual language editorial."],
     generation: {
       kind: "workspace-generation",
+      agent: {
+        providerId: "codebuddy",
+        command: "codebuddy",
+        model: "gpt-5.6-sol",
+      },
       resourceOperations: [
         {
           operation: "create",
@@ -295,6 +300,111 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(Object.isFrozen(compiled.dependencies), true);
 });
 
+test("copies the frozen proposal Agent into every executable Artifact and Resource leaf", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const agent = {
+    providerId: "codebuddy" as const,
+    command: "codebuddy" as const,
+    model: "gpt-5.6-sol",
+  };
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: {
+      ...fixture.proposal,
+      generation: { ...generation, agent },
+    },
+  });
+
+  const executable = compiled.tasks.filter(
+    (task) => task.kind === "resource" || task.kind === "page" || task.kind === "component",
+  );
+  assert.ok(executable.length > 0);
+  assert.ok(executable.every((task) => {
+    assert.deepEqual((task.payload as { agent?: unknown }).agent, agent);
+    return true;
+  }));
+  assert.ok(executable
+    .filter((task) => task.kind === "resource")
+    .every((task) => task.resourceLimits.timeoutMs === 12 * 60_000));
+  assert.ok(executable
+    .filter((task) => task.kind === "page" || task.kind === "component")
+    .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
+
+  for (const [extraFrameCount, expectedTimeoutMs] of [
+    [1, 35 * 60_000],
+    [4, 45 * 60_000],
+  ] as const) {
+    const extraFrames = Array.from({ length: extraFrameCount }, (_, index) => ({
+      id: `adaptive-${index}`,
+      name: `Adaptive ${index}`,
+      width: 1_024 - index * 80,
+      height: 768 + index * 40,
+    }));
+    const responsiveFrames = [...generation.responsiveFrames, ...extraFrames];
+    const requiredFrameIds = responsiveFrames.map((frame) => frame.id);
+    const adaptive = compileGenerationPlan({
+      shell: fixture.shell,
+      proposal: {
+        ...fixture.proposal,
+        generation: {
+          ...generation,
+          agent,
+          responsiveFrames,
+          qualityProfile: { ...generation.qualityProfile, requiredFrameIds },
+          artifactPlans: generation.artifactPlans.map((plan) => ({
+            ...plan,
+            responsiveFrameIds: requiredFrameIds,
+          })),
+        },
+      },
+    });
+    assert.ok(adaptive.tasks
+      .filter((task) => task.kind === "page" || task.kind === "component")
+      .every((task) => task.resourceLimits.timeoutMs === expectedTimeoutMs));
+  }
+});
+
+test("rejects executable generation that does not freeze its Agent selection", () => {
+  const fixture = approvedPlanFixture();
+  delete workspaceGeneration(fixture.proposal).agent;
+
+  assert.throws(
+    () => compileGenerationPlan(fixture),
+    (error: unknown) => error instanceof GenerationPlanCompileError
+      && error.code === "invalid-reference"
+      && /freeze an Agent selection/.test(error.message),
+  );
+});
+
+test("preserves unique per-Artifact design instructions in the sealed leaf brief", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const instructions = [
+    "Lead with the editorial story grid and one quiet itinerary call to action.",
+    "Use the shared Product card component for every story preview.",
+    "Include populated, empty, and saved states without changing the global visual direction.",
+  ].join(" ");
+  const normalized = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    artifactPlans: generation.artifactPlans.map((plan) => plan.artifactId === "page-home"
+      ? { ...plan, instructions }
+      : plan),
+  });
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: normalized },
+  });
+  const home = compiled.tasks.find((task) => task.target.id === "page-home");
+  assert.ok(home);
+
+  assert.equal((home.payload.artifactPlan as Record<string, unknown>).instructions, instructions);
+  assert.equal(
+    ((home.payload.brief as Record<string, unknown>).targetInstructions as Record<string, unknown>).instructions,
+    instructions,
+  );
+});
+
 test("serializes prototype-connected Page generation so later Context can observe an earlier Revision", () => {
   const compiled = compileGenerationPlan(approvedPlanFixture());
   const about = compiled.tasks.find((task) => task.target.id === "page-about");
@@ -304,6 +414,63 @@ test("serializes prototype-connected Page generation so later Context can observ
 
   // Navigation direction is intentionally irrelevant. Stable Artifact order
   // chooses the spanning order when the existing Task DAG imposes no Page order.
+  assert.equal(about.dependencyIds.includes(home.id), false);
+  assert.equal(home.dependencyIds.includes(about.id), true);
+});
+
+test("serializes Pages connected by the approved Proposal's planned graph edge", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const proposal: WorkspaceProposal = {
+    ...fixture.proposal,
+    operations: [
+      {
+        id: "add-home",
+        type: "add-node",
+        node: {
+          id: "node-home",
+          kind: "page",
+          name: "Home",
+          artifactId: "page-home",
+          createIdentity: { initialTrackId: "track-home" },
+        },
+      },
+      {
+        id: "add-about",
+        type: "add-node",
+        node: {
+          id: "node-about",
+          kind: "page",
+          name: "About",
+          artifactId: "page-about",
+          createIdentity: { initialTrackId: "track-about" },
+        },
+      },
+      {
+        id: "add-home-about-edge",
+        type: "add-edge",
+        edge: {
+          id: "edge-home-about",
+          workspaceId: "workspace-1",
+          sourceNodeId: "node-home",
+          targetNodeId: "node-about",
+          kind: "prototype",
+        },
+      },
+    ],
+    generation: {
+      ...generation,
+      // Production proposal-only planning encodes relationships as planned
+      // graph edges and deliberately forbids interactive prototype intents.
+      prototypeIntents: [],
+    },
+  };
+
+  const compiled = compileGenerationPlan({ shell: fixture.shell, proposal });
+  const about = compiled.tasks.find((task) => task.target.id === "page-about");
+  const home = compiled.tasks.find((task) => task.target.id === "page-home");
+  assert.ok(about);
+  assert.ok(home);
   assert.equal(about.dependencyIds.includes(home.id), false);
   assert.equal(home.dependencyIds.includes(about.id), true);
 });
@@ -483,12 +650,15 @@ test("freezes auditable v2 briefs, complete capabilities, and Resource adapter i
   const card = byTarget.get("component-card");
   const home = byTarget.get("page-home");
   const copy = byTarget.get("resource-copy");
+  const agent = workspaceGeneration(fixture.proposal).agent;
   assert.ok(card);
   assert.ok(home);
   assert.ok(copy);
+  assert.ok(agent);
 
   assert.deepEqual(card.payload, {
     version: 2,
+    agent,
     artifactPlan: {
       operation: "create",
       nodeId: "node-card",
@@ -525,6 +695,7 @@ test("freezes auditable v2 briefs, complete capabilities, and Resource adapter i
   });
   assert.deepEqual(copy.payload, {
     version: 2,
+    agent,
     operation: {
       operation: "create",
       nodeId: "node-copy",
@@ -656,7 +827,30 @@ test("rejects empty or per-Artifact-incomplete responsive Frame contracts before
       () => compileGenerationPlan(fixture),
       (error: unknown) => error instanceof GenerationPlanCompileError
         && error.code === "invalid-reference"
-        && /component-card.*missing required responsive Frame mobile/.test(error.message),
+      && /component-card.*missing required responsive Frame mobile/.test(error.message),
+    );
+  });
+
+  await t.test("visual QA exceeds the bounded per-Artifact Frame budget", () => {
+    const fixture = approvedPlanFixture();
+    const generation = workspaceGeneration(fixture.proposal);
+    const extraFrames = Array.from({ length: 5 }, (_, index) => ({
+      id: `adaptive-${index}`,
+      name: `Adaptive ${index}`,
+      width: 1_024 - index * 80,
+      height: 768 + index * 40,
+    }));
+    generation.responsiveFrames.push(...extraFrames);
+    generation.qualityProfile.requiredFrameIds.push(...extraFrames.map((frame) => frame.id));
+    for (const plan of generation.artifactPlans) {
+      plan.responsiveFrameIds.push(...extraFrames.map((frame) => frame.id));
+    }
+
+    assert.throws(
+      () => compileGenerationPlan(fixture),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === "invalid-reference"
+        && /at most 5 responsive Frames/.test(error.message),
     );
   });
 });
@@ -665,6 +859,7 @@ test("keeps the validation and checkpoint chain for an empty approved generation
   const fixture = approvedPlanFixture();
   fixture.proposal.generation = {
     kind: "workspace-generation",
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

@@ -63,6 +63,21 @@ test("visual review policy preserves an explicit Claude reviewer model and same-
   );
 });
 
+test("visual review policy inherits the frozen built-in CodeBuddy Agent and model", () => {
+  const settings = {
+    agentCommand: "codebuddy",
+    model: "mutable-global-model",
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+  } as Settings;
+
+  assert.equal(reviewerAgentCommand(settings, "codebuddy"), "codebuddy");
+  assert.equal(
+    reviewerModel(settings, "gpt-5.6-sol", "codebuddy"),
+    "gpt-5.6-sol",
+  );
+});
+
 test("standardRepairPrompt constrains visual-source findings to measured local patches", () => {
   const findings: QualityFinding[] = [
     {

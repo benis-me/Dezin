@@ -18,6 +18,7 @@ import type {
   SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
 import {
+  isTrustedCodeBuddyExecutablePath,
   isTrustedClaudeExecutablePath,
   parseSafeStructuredClaudeStream,
   runSafeStructuredAgent,
@@ -25,6 +26,7 @@ import {
 } from "../src/orchestration/safe-structured-agent.ts";
 
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
+const TEST_CODEBUDDY_EXECUTABLE = "/trusted/codebuddy/install/bin/codebuddy";
 const resolveTestClaudeExecutable = () => TEST_CLAUDE_EXECUTABLE;
 
 class RecordingSpawner implements ProcessSpawner {
@@ -70,6 +72,84 @@ test("production spawner injection still resolves the trusted Claude executable"
   assert.equal(spawner.inputs[0]?.command, TEST_CLAUDE_EXECUTABLE);
 });
 
+test("hard no-tools structured transport runs CodeBuddy with the requested model", async () => {
+  const spawner = new RecordingSpawner();
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    model: "gpt-5.6-terra",
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.deepEqual(result, { providerId: "codebuddy", text: "{}" });
+  assert.equal(spawner.inputs.length, 1);
+  const spawned = spawner.inputs[0]!;
+  assert.equal(spawned.command, TEST_CODEBUDDY_EXECUTABLE);
+  assert.equal(spawned.stdin, "Plan this exact workspace.");
+  assert.equal(spawned.args[spawned.args.indexOf("--model") + 1], "gpt-5.6-terra");
+  assert.equal(spawned.args[spawned.args.indexOf("--system-prompt") + 1], "Return one JSON object.");
+  assert.equal(spawned.args[spawned.args.indexOf("--output-format") + 1], "stream-json");
+  assert.equal(spawned.args[spawned.args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(spawned.args[spawned.args.indexOf("--tools") + 1], "");
+  assert.equal(spawned.args[spawned.args.indexOf("--mcp-config") + 1], '{"mcpServers":{}}');
+  assert.equal(spawned.args[spawned.args.indexOf("--setting-sources") + 1], "");
+  assert.ok(spawned.args.includes("--strict-mcp-config"));
+  assert.ok(spawned.args.includes("--no-session-persistence"));
+  assert.ok(!spawned.args.some((argument) => /bypass|danger|yolo/i.test(argument)));
+});
+
+test("CodeBuddy structured transport retries bounded transient remote 5xx failures within one deadline", async () => {
+  let attempts = 0;
+  const seenTimeouts: number[] = [];
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      attempts += 1;
+      seenTimeouts.push(input.timeoutMs ?? 0);
+      if (attempts < 3) await new Promise((resolve) => setTimeout(resolve, 20));
+      return attempts < 3
+        ? {
+            stdout: JSON.stringify({
+              type: "result",
+              subtype: "error_during_execution",
+              is_error: true,
+              errors: ["500 internal server error"],
+            }),
+            stderr: "",
+            exitCode: 0,
+          }
+        : {
+            stdout: '{"type":"result","subtype":"success","result":"{\\"ok\\":true}","is_error":false}',
+            stderr: "",
+            exitCode: 0,
+          };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codebuddy",
+    timeoutMs: 100,
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.equal(seenTimeouts[0], 100);
+  assert.ok(seenTimeouts[1]! > 0 && seenTimeouts[1]! < 100);
+  assert.ok(seenTimeouts[2]! > 0 && seenTimeouts[2]! < seenTimeouts[1]!);
+  assert.deepEqual(result, { providerId: "codebuddy", text: '{"ok":true}' });
+});
+
 test("trusted Claude executable policy rejects a fixed-search symlink to an external fake package", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-untrusted-structured-agent-package-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -86,6 +166,31 @@ test("trusted Claude executable policy rejects a fixed-search symlink to an exte
     isTrustedClaudeExecutablePath(realpathSync(configuredCommand), home),
     false,
   );
+});
+
+test("trusted CodeBuddy executable policy accepts only its fixed official package roots", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-trusted-codebuddy-package-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const officialCli = join(
+    home,
+    ".local",
+    "lib",
+    "node_modules",
+    "@tencent-ai",
+    "codebuddy-code",
+    "bin",
+    "codebuddy",
+  );
+  const externalCli = join(root, "outside", "codebuddy");
+  mkdirSync(join(officialCli, ".."), { recursive: true });
+  mkdirSync(join(externalCli, ".."), { recursive: true });
+  writeFileSync(officialCli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  writeFileSync(externalCli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+  const trustedHome = realpathSync(home);
+  assert.equal(isTrustedCodeBuddyExecutablePath(realpathSync(officialCli), trustedHome), true);
+  assert.equal(isTrustedCodeBuddyExecutablePath(realpathSync(externalCli), trustedHome), false);
 });
 
 test("hard no-tools structured transport passes only a minimal credential environment", async (t) => {

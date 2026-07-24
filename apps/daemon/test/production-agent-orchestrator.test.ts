@@ -17,6 +17,7 @@ function request(type: "workspace" | "artifact" | "resource", intent: AgentTurnR
   return {
     scope: { type, workspaceId: "workspace-1", id: type === "workspace" ? "workspace-1" : `${type}-1` },
     intent,
+    agent: { providerId: "claude", command: "claude", model: null },
     message: "Use the approved direction.",
     explicitContext: [],
     graphRevision: 7,

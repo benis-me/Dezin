@@ -9,6 +9,7 @@ import {
   type FetchLike,
   type Project,
   type ReadyProjectWorkspacePayload,
+  type WorkspaceGenerationPayload,
   type WorkspaceGraph,
   type WorkspaceLayout,
   type WorkspaceLayoutPatch,
@@ -123,6 +124,7 @@ function installReactFlowMeasurements(): () => void {
 
 const emptyGeneration = {
   kind: "workspace-generation" as const,
+  agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
   resourceOperations: [],
   artifactPlans: [],
   dependencyPlans: [],
@@ -134,6 +136,100 @@ const emptyGeneration = {
     blockingSeverities: [],
     requireRuntimeChecks: false,
     requireVisualReview: false,
+  },
+};
+
+const completeGeneration: WorkspaceGenerationPayload = {
+  kind: "workspace-generation",
+  agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+  resourceOperations: [{
+    operation: "reuse",
+    nodeId: "resource-research-node",
+    resourceId: "resource-research",
+    kind: "research",
+    title: "Checkout research",
+    revisionPolicy: { kind: "exact", resourceRevisionId: "research-revision-1" },
+  }],
+  artifactPlans: [
+    {
+      operation: "create",
+      nodeId: "component-card",
+      artifactId: "artifact-card",
+      kind: "component",
+      name: "Checkout card",
+      trackId: "track-card",
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: ["capability-browser"],
+      responsiveFrameIds: ["desktop"],
+    },
+    {
+      operation: "create",
+      nodeId: "page-checkout",
+      artifactId: "artifact-checkout",
+      kind: "page",
+      name: "Checkout",
+      trackId: "track-checkout",
+      baseRevisionId: null,
+      dependsOnArtifactIds: ["artifact-card"],
+      capabilityIds: ["capability-browser"],
+      responsiveFrameIds: ["desktop"],
+      researchDirectionSelection: {
+        protocol: "dezin.research-direction-selection.v1",
+        version: 1,
+        resourceId: "resource-research",
+        revisionId: "research-revision-1",
+        directionId: "direction-editorial",
+      },
+    },
+    {
+      operation: "create",
+      nodeId: "page-receipt",
+      artifactId: "artifact-receipt",
+      kind: "page",
+      name: "Receipt",
+      trackId: "track-receipt",
+      baseRevisionId: null,
+      dependsOnArtifactIds: ["artifact-checkout"],
+      capabilityIds: ["capability-browser"],
+      responsiveFrameIds: ["desktop"],
+    },
+  ],
+  dependencyPlans: [
+    {
+      kind: "component-instance",
+      ownerArtifactId: "artifact-checkout",
+      instanceId: "instance-checkout-card",
+      componentArtifactId: "artifact-card",
+      componentRevisionId: null,
+      sourceLocator: { designNodeId: "checkout.card-slot" },
+      overrides: {},
+      status: "linked",
+    },
+    {
+      kind: "resource",
+      ownerArtifactId: "artifact-checkout",
+      resourceId: "resource-research",
+    },
+    {
+      kind: "resource",
+      ownerArtifactId: "artifact-receipt",
+      resourceId: "resource-research",
+    },
+  ],
+  prototypeIntents: [{
+    edgeId: "edge-checkout-receipt",
+    sourceArtifactId: "artifact-checkout",
+    targetArtifactId: "artifact-receipt",
+    trigger: "click",
+  }],
+  capabilities: [{ id: "capability-browser", kind: "browser", required: true }],
+  responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }],
+  qualityProfile: {
+    requiredFrameIds: ["desktop"],
+    blockingSeverities: ["P0", "P1"],
+    requireRuntimeChecks: true,
+    requireVisualReview: true,
   },
 };
 
@@ -165,6 +261,57 @@ function draftProposal(overrides: Partial<WorkspaceProposal> = {}): WorkspacePro
     updatedAt: 1,
     ...overrides,
   };
+}
+
+function completeGenerationProposal(overrides: Partial<WorkspaceProposal> = {}): WorkspaceProposal {
+  return draftProposal({
+    operations: [
+      {
+        id: "command-add-research",
+        type: "add-node",
+        node: {
+          id: "resource-research-node",
+          kind: "resource",
+          name: "Checkout research",
+          resourceId: "resource-research",
+        },
+      },
+      {
+        id: "command-add-card",
+        type: "add-node",
+        node: {
+          id: "component-card",
+          kind: "component",
+          name: "Checkout card",
+          artifactId: "artifact-card",
+        },
+      },
+      ...draftProposal().operations,
+      {
+        id: "command-add-receipt",
+        type: "add-node",
+        node: {
+          id: "page-receipt",
+          kind: "page",
+          name: "Receipt",
+          artifactId: "artifact-receipt",
+        },
+      },
+      {
+        id: "command-add-checkout-receipt-edge",
+        type: "add-edge",
+        edge: {
+          id: "edge-checkout-receipt",
+          workspaceId: "workspace-1",
+          kind: "prototype",
+          sourceNodeId: "page-checkout",
+          targetNodeId: "page-receipt",
+        },
+      },
+    ],
+    generation: structuredClone(completeGeneration),
+    ...overrides,
+  });
 }
 
 test("proposal diff replays an addition from its immutable audited base", () => {
@@ -437,6 +584,7 @@ test("proposal API methods use the project-owned list get create edit approve an
     layoutOperations: [],
     generation: {
       kind: "workspace-generation" as const,
+      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: [],
       dependencyPlans: [],
@@ -828,7 +976,7 @@ test("real ReactFlow renderer resolves Proposal handles and paints the overlay r
   const overlay = createProposalOverlayModel(diff, canonicalAll, proposal.id, proposedAll);
   expect(overlay.edges[0]).toMatchObject({
     sourceHandle: "proposal-source",
-    targetHandle: undefined,
+    targetHandle: "page-target-right",
     zIndex: 28,
   });
   const model = mergeProposalOverlay(canonicalAll, overlay);
@@ -1168,6 +1316,19 @@ function DuplicateRevertProbe() {
       }}
     >
       Revert the same change twice
+    </button>
+  );
+}
+
+function RevertProposalObjectProbe({ objectId }: { objectId: string }) {
+  const studio = useProjectStudio("project-1");
+  const review = studio.proposalReview;
+  if (studio.load.status !== "ready" || review.status !== "draft") return <span>{studio.load.status}</span>;
+  const change = review.diff.reviewItems.find((candidate) => candidate.objectId === objectId);
+  if (!change) return <span>missing change</span>;
+  return (
+    <button type="button" onClick={() => void studio.revertProposalChange(change)}>
+      Revert generated object
     </button>
   );
 }
@@ -2293,14 +2454,15 @@ test("an in-flight rationale response preserves focused dirty assumptions that h
   await screen.findByRole("region", { name: "Project canvas" });
   const rationale = screen.getByRole("textbox", { name: "Proposal rationale" });
   const assumptions = screen.getByRole("textbox", { name: "Proposal assumptions" });
+  act(() => rationale.focus());
   await user.clear(rationale);
-  await user.type(rationale, "QA rationale preserved");
-  await user.click(assumptions);
+  await user.type(rationale, "QA rationale preserved", { skipClick: true });
+  act(() => assumptions.focus());
   await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
   expect(assumptions).not.toHaveAttribute("readonly");
   expect(document.activeElement).toBe(assumptions);
   await user.clear(assumptions);
-  await user.type(assumptions, "First assumption{enter}Second assumption");
+  await user.type(assumptions, "First assumption{enter}Second assumption", { skipClick: true });
 
   await act(async () => {
     resolveRationale(draftProposal({
@@ -2609,6 +2771,121 @@ test("a reject revision conflict preserves the rejected dirty field and keeps ap
   fireEvent.click(approve);
   expect(rejectWorkspaceProposal).toHaveBeenCalledTimes(1);
   expect(approveWorkspaceProposal).not.toHaveBeenCalled();
+});
+
+test("inline rename keeps the generated Artifact plan name aligned with its graph node", async () => {
+  const proposal = completeGenerationProposal();
+  const updateWorkspaceProposal = vi.fn(async (_projectId, _proposalId, input) => completeGenerationProposal({
+    ...proposal,
+    revision: input.expectedProposalRevision + 1,
+    operations: [...input.operations],
+    layoutOperations: [...input.layoutOperations],
+    generation: input.generation,
+    rationale: input.rationale,
+    assumptions: [...input.assumptions],
+    updatedAt: input.expectedProposalRevision + 1,
+  }));
+  renderStudio({
+    listWorkspaceProposals: async () => [proposal],
+    updateWorkspaceProposal,
+  });
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const name = screen.getByRole("textbox", { name: "Proposal name for Checkout" });
+  fireEvent.change(name, { target: { value: "Express checkout" } });
+  fireEvent.blur(name);
+
+  await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
+  const input = updateWorkspaceProposal.mock.calls[0]![2];
+  const operations = input.operations as WorkspaceProposal["operations"];
+  const generation = input.generation as WorkspaceGenerationPayload;
+  expect(operations.find((command) => command.id === "command-add-checkout"))
+    .toMatchObject({ node: { name: "Express checkout" } });
+  expect(generation.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout"))
+    .toMatchObject({ nodeId: "page-checkout", name: "Express checkout" });
+});
+
+test("reverting a generated Page addition removes its generation leaf and every dangling Artifact reference", async () => {
+  const proposal = completeGenerationProposal();
+  const updateWorkspaceProposal = vi.fn(async (_projectId, _proposalId, input) => completeGenerationProposal({
+    ...proposal,
+    revision: input.expectedProposalRevision + 1,
+    operations: [...input.operations],
+    layoutOperations: [...input.layoutOperations],
+    generation: input.generation,
+    rationale: input.rationale,
+    assumptions: [...input.assumptions],
+    updatedAt: input.expectedProposalRevision + 1,
+  }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [proposal],
+      updateWorkspaceProposal,
+    })}>
+      <RevertProposalObjectProbe objectId="page-checkout" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Revert generated object" }));
+
+  await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
+  const input = updateWorkspaceProposal.mock.calls[0]![2];
+  const operations = input.operations as WorkspaceProposal["operations"];
+  const operationIds = operations.map((command) => command.id);
+  const generation = input.generation as WorkspaceGenerationPayload;
+  expect(operationIds).not.toContain("command-add-checkout");
+  expect(operationIds).not.toContain("command-add-checkout-receipt-edge");
+  expect(generation.resourceOperations).toHaveLength(1);
+  expect(generation.artifactPlans.map((plan) => plan.artifactId))
+    .toEqual(["artifact-card", "artifact-receipt"]);
+  expect(generation.artifactPlans.find((plan) => plan.artifactId === "artifact-receipt"))
+    .toMatchObject({ dependsOnArtifactIds: [] });
+  expect(generation.dependencyPlans).toEqual([{
+    kind: "resource",
+    ownerArtifactId: "artifact-receipt",
+    resourceId: "resource-research",
+  }]);
+  expect(generation.prototypeIntents).toEqual([]);
+});
+
+test("reverting a generated Resource addition removes its operation and clears every dependent pin", async () => {
+  const proposal = completeGenerationProposal();
+  const updateWorkspaceProposal = vi.fn(async (_projectId, _proposalId, input) => completeGenerationProposal({
+    ...proposal,
+    revision: input.expectedProposalRevision + 1,
+    operations: [...input.operations],
+    layoutOperations: [...input.layoutOperations],
+    generation: input.generation,
+    rationale: input.rationale,
+    assumptions: [...input.assumptions],
+    updatedAt: input.expectedProposalRevision + 1,
+  }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [proposal],
+      updateWorkspaceProposal,
+    })}>
+      <RevertProposalObjectProbe objectId="resource-research-node" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Revert generated object" }));
+
+  await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
+  const input = updateWorkspaceProposal.mock.calls[0]![2];
+  const generation = input.generation as WorkspaceGenerationPayload;
+  expect(generation.resourceOperations).toEqual([]);
+  expect(generation.dependencyPlans).toEqual([expect.objectContaining({
+    kind: "component-instance",
+    ownerArtifactId: "artifact-checkout",
+    componentArtifactId: "artifact-card",
+  })]);
+  expect(generation.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout"))
+    .not.toHaveProperty("researchDirectionSelection");
 });
 
 test("a duplicate-name approval error can be repaired through the inline node name", async () => {

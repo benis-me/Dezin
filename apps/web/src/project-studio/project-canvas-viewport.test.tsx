@@ -128,6 +128,48 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+test("a narrow initial surface keeps the workspace outline out of the canvas", async () => {
+  const rect = {
+    x: 0,
+    y: 0,
+    top: 0,
+    right: 800,
+    bottom: 768,
+    left: 0,
+    width: 800,
+    height: 768,
+    toJSON: () => ({}),
+  } as DOMRect;
+  const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(rect);
+  renderCanvas({
+    onSaveLayout: async () => layout,
+    onViewportChange: () => {},
+  });
+
+  await act(async () => { await Promise.resolve(); });
+
+  expect(screen.queryByRole("complementary", { name: "Workspace structure" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "false");
+  rectSpy.mockRestore();
+});
+
+test("a medium initial surface keeps the workspace outline available without covering the canvas by default", async () => {
+  renderCanvas({
+    onSaveLayout: async () => layout,
+    onViewportChange: () => {},
+  });
+
+  await act(async () => { await Promise.resolve(); });
+
+  expect(screen.queryByRole("complementary", { name: "Workspace structure" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "false");
+
+  fireEvent.click(screen.getByRole("button", { name: "Toggle workspace outline" }));
+
+  expect(screen.getByRole("complementary", { name: "Workspace structure" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "true");
+});
+
 test("a failed viewport save never promotes the pending viewport and restores the authoritative one", async () => {
   const onViewportChange = vi.fn();
   const onSaveLayout = vi.fn(async () => { throw new Error("Viewport save failed"); });
@@ -153,6 +195,7 @@ test("a failed viewport save never promotes the pending viewport and restores th
 test("a failed Fit workspace save follows the same authoritative rollback semantics", async () => {
   const onViewportChange = vi.fn();
   const onSaveLayout = vi.fn(async () => { throw new Error("Fit save failed"); });
+  const fittedViewport = flowHarness.state.fitViewport;
   renderCanvas({ onSaveLayout, onViewportChange });
 
   fireEvent.click(screen.getByRole("button", { name: "Fit workspace" }));
@@ -164,9 +207,9 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
 
   expect(onSaveLayout).toHaveBeenCalledWith([{
     type: "set-viewport",
-    viewport: flowHarness.state.fitViewport,
+    viewport: fittedViewport,
   }]);
-  expect(onViewportChange).not.toHaveBeenCalledWith(flowHarness.state.fitViewport);
+  expect(onViewportChange).not.toHaveBeenCalledWith(fittedViewport);
   expect(onViewportChange).toHaveBeenLastCalledWith(layout.viewport);
   expect(flowHarness.instance.setViewport).toHaveBeenLastCalledWith(layout.viewport);
   expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Fit save failed");
