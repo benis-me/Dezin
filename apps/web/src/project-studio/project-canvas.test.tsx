@@ -148,6 +148,7 @@ function CanvasHarness({
   artifactRevisionIds = { "artifact-page-1": "revision-1" },
   resourceRevisionStates,
   initialSelectedNodeIds = [],
+  proposal = null,
 }: {
   onSaveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
   onApplyGraphCommands?: (commands: readonly WorkspaceGraphCommand[]) => Promise<void>;
@@ -163,6 +164,7 @@ function CanvasHarness({
     qualityState: "grounded" | "needs-review" | null;
   }>>;
   initialSelectedNodeIds?: readonly string[];
+  proposal?: { id: string } | null;
 }) {
   const [selection, setSelection] = useState<string[]>([...initialSelectedNodeIds]);
   return (
@@ -180,8 +182,13 @@ function CanvasHarness({
       onOpenArtifact={onOpenArtifact}
       onOpenResource={onOpenResource}
       onPresentFlow={onPresentFlow}
+      proposal={proposal}
     />
   );
+}
+
+function openWorkspaceOutline(): void {
+  fireEvent.click(screen.getByRole("button", { name: "Toggle workspace outline" }));
 }
 
 const researchGraph: WorkspaceGraph = {
@@ -225,12 +232,65 @@ test("canvas renders immutable-node Outline parity and never mounts iframe conte
   );
 
   expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
+  openWorkspaceOutline();
   expect(screen.getByRole("list", { name: "Workspace outline" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /Select Page Checkout.*outgoing 1/i })).toBeInTheDocument();
   expect(container.querySelector("iframe")).toBeNull();
 
-  const open = screen.getByRole("link", { name: "Open Checkout" });
+  const open = screen.getByRole("link", { name: "Open Page Checkout" });
   expect(open).toHaveAttribute("href", "/projects/project-1/artifacts/artifact-page-1");
+});
+
+test("component library migration does not invalidate a proposal's sealed layout checksum", async () => {
+  const onSaveLayout = vi.fn(async () => layout);
+  const graphWithComponent: WorkspaceGraph = {
+    ...graph,
+    nodes: [
+      ...graph.nodes,
+      {
+        id: "component-1",
+        workspaceId: graph.workspaceId,
+        kind: "component",
+        artifactId: "artifact-component-1",
+        name: "Order summary",
+      },
+    ],
+  };
+
+  render(
+    <CanvasHarness
+      canvasGraph={graphWithComponent}
+      onSaveLayout={onSaveLayout}
+      proposal={{ id: "proposal-1" }}
+    />,
+  );
+  await act(async () => {});
+
+  expect(onSaveLayout).not.toHaveBeenCalled();
+});
+
+test("component library migration retries after a transient background save failure", async () => {
+  const onSaveLayout = vi.fn()
+    .mockRejectedValueOnce(new Error("temporary write failure"))
+    .mockResolvedValue(layout);
+  const graphWithComponent: WorkspaceGraph = {
+    ...graph,
+    nodes: [
+      ...graph.nodes,
+      {
+        id: "component-1",
+        workspaceId: graph.workspaceId,
+        kind: "component",
+        artifactId: "artifact-component-1",
+        name: "Order summary",
+      },
+    ],
+  };
+  render(
+    <CanvasHarness canvasGraph={graphWithComponent} onSaveLayout={onSaveLayout} />,
+  );
+
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
 });
 
 test("Outline opens the same exact Resource revision as the canvas keyboard path", () => {
@@ -249,7 +309,8 @@ test("Outline opens the same exact Resource revision as the canvas keyboard path
     />,
   );
 
-  expect(screen.getByRole("link", { name: "Open Checkout research" })).toHaveAttribute(
+  openWorkspaceOutline();
+  expect(screen.getByRole("link", { name: "Open Resource Checkout research" })).toHaveAttribute(
     "href",
     "/projects/project-1/resources/research-1/revisions/research-revision-1",
   );
@@ -521,6 +582,7 @@ test("Group and Delete Group toolbar actions persist layout commands only", asyn
   const onApplyGraphCommands = vi.fn(async () => {});
   render(<CanvasHarness onSaveLayout={onSaveLayout} onApplyGraphCommands={onApplyGraphCommands} />);
 
+  openWorkspaceOutline();
   fireEvent.click(screen.getByRole("button", { name: /Select Page Checkout/i }));
   fireEvent.click(screen.getByRole("button", { name: "Group selection" }));
   await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
@@ -546,6 +608,7 @@ test("a quick move then Group computes structural commands from the saved move",
     ));
   render(<CanvasHarness onSaveLayout={onSaveLayout} />);
 
+  openWorkspaceOutline();
   fireEvent.click(screen.getByRole("button", { name: /Select Page Checkout/i }));
   fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "ArrowRight" });
   await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
@@ -562,6 +625,7 @@ test("a quick move then Group computes structural commands from the saved move",
 
 test("changing selection closes a pending group removal confirmation", () => {
   render(<CanvasHarness onSaveLayout={async () => layout} />);
+  openWorkspaceOutline();
   fireEvent.click(screen.getByRole("button", { name: /Select Group Purchase journey/i }));
   fireEvent.click(screen.getByRole("button", { name: "Delete group" }));
   expect(screen.getByRole("button", { name: "Remove frame" })).toBeInTheDocument();
@@ -574,6 +638,7 @@ test("canvas keyboard controls open, clear, switch tools, fit, and persist one o
   const onOpenArtifact = vi.fn();
   const onSaveLayout = vi.fn(async (_commands: readonly WorkspaceLayoutCommand[]) => layout);
   render(<CanvasHarness onSaveLayout={onSaveLayout} onOpenArtifact={onOpenArtifact} />);
+  openWorkspaceOutline();
   fireEvent.click(screen.getByRole("button", { name: /Select Page Checkout/i }));
   const canvas = screen.getByRole("application", { name: "Project canvas" });
 

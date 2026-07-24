@@ -15,13 +15,14 @@ export const geminiProvider: AgentProvider = {
   label: "Gemini CLI",
   seedModels: ["gemini-2.5-pro", "gemini-2.5-flash"],
   genericConfig: config,
-  async discoverModels() {
+  async discoverModels(_command, _deep, signal) {
     const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
     if (!key) return [];
     try {
+      const timeoutSignal = AbortSignal.timeout(8000);
       const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
         headers: { "x-goog-api-key": key },
-        signal: AbortSignal.timeout(8000),
+        signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
       });
       if (!res.ok) return [];
       const json = (await res.json()) as { models?: Array<{ name?: string }> };

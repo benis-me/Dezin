@@ -12,6 +12,12 @@ import {
   validateGenerationTaskPayload,
 } from "../src/orchestration/generation-task-contracts.ts";
 
+const FROZEN_CODEBUDDY_AGENT = {
+  providerId: "codebuddy",
+  command: "codebuddy",
+  model: "gpt-5.6-sol",
+} as const;
+
 function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProposal } {
   const shell: GenerationPlan = {
     id: "plan-contract",
@@ -52,6 +58,7 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: FROZEN_CODEBUDDY_AGENT,
       resourceOperations: [{
         operation: "create",
         nodeId: "node-research",
@@ -242,6 +249,60 @@ test("accepts every fully populated payload frozen by compileGenerationPlan", ()
     ["resource", "component", "page", "page", "prototype-validation", "checkpoint"],
   );
   for (const task of tasks) validateGenerationTaskPayload(task);
+});
+
+test("preserves legacy v2 leaves without Agent and strictly validates every present frozen Agent", () => {
+  const tasks = [taskOfKind("resource"), taskOfTarget("page-home")];
+
+  for (const task of tasks) {
+    const payload = clonePayload(task) as any;
+    assert.deepEqual(payload.agent, FROZEN_CODEBUDDY_AGENT);
+    validateGenerationTaskPayload(task);
+
+    const missing = clonePayload(task);
+    delete missing.agent;
+    validateGenerationTaskPayload(withPayload(task, missing));
+
+    const undefinedAgent = clonePayload(task);
+    undefinedAgent.agent = undefined;
+    expectContractError(withPayload(task, undefinedAgent), /Agent.*plain object/i);
+
+    const extra = clonePayload(task) as any;
+    extra.agent.extra = true;
+    expectContractError(withPayload(task, extra), /Agent fields/i);
+
+    const mismatch = clonePayload(task) as any;
+    mismatch.agent.providerId = "claude";
+    expectContractError(withPayload(task, mismatch), /Agent provider.*command/i);
+
+    const unsupported = clonePayload(task) as any;
+    unsupported.agent.command = "other";
+    unsupported.agent.providerId = "other";
+    expectContractError(withPayload(task, unsupported), /Agent command/i);
+
+    const nonCanonical = clonePayload(task) as any;
+    nonCanonical.agent.model = " gpt-5.6-sol ";
+    expectContractError(withPayload(task, nonCanonical), /Agent model.*canonical/i);
+
+    const nulModel = clonePayload(task) as any;
+    nulModel.agent.model = "gpt\0model";
+    expectContractError(withPayload(task, nulModel), /Agent model.*NUL/i);
+
+    const oversized = clonePayload(task) as any;
+    oversized.agent.model = "x".repeat(257);
+    expectContractError(withPayload(task, oversized), /Agent model.*256 bytes/i);
+
+    const accessor = clonePayload(task) as any;
+    Object.defineProperty(accessor.agent, "model", {
+      enumerable: true,
+      get: () => "gpt-5.6-sol",
+    });
+    expectContractError(withPayload(task, accessor), /Agent fields.*data properties/i);
+  }
+
+  const nullableModel = clonePayload(tasks[1]!) as any;
+  nullableModel.agent = { providerId: "claude", command: "claude", model: null };
+  validateGenerationTaskPayload(withPayload(tasks[1]!, nullableModel));
 });
 
 test("rejects readable legacy v1 leaf payloads with an explicit recompile disposition", () => {

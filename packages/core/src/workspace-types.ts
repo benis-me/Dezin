@@ -310,6 +310,7 @@ export type ResourceRevisionView =
 export interface CreateResearchDirectionArtifactIntentInput {
   selectionRequestId: string;
   artifactId: string;
+  agent: WorkspaceGenerationAgentSelection;
   expectedResourceHeadRevisionId: string;
   expectedGraphRevision: number;
   expectedSnapshotId: string;
@@ -1072,6 +1073,8 @@ export interface WorkspaceGenerationArtifactPlan {
   artifactId: string;
   kind: ArtifactKind;
   name: string;
+  /** Artifact-specific purpose, content, states, and composition requirements. */
+  instructions?: string;
   trackId: string;
   baseRevisionId: string | null;
   dependsOnArtifactIds: string[];
@@ -1118,8 +1121,20 @@ export interface WorkspaceGenerationCapability {
   required: boolean;
 }
 
+export interface WorkspaceGenerationAgentSelection {
+  providerId: "claude" | "codebuddy";
+  command: "claude" | "codebuddy";
+  model: string | null;
+}
+
 export interface WorkspaceGenerationPayload {
   kind: "workspace-generation";
+  /**
+   * Immutable generating Agent selected when the proposal-producing turn was
+   * submitted. Optional only so historical stored Proposals remain readable;
+   * new executable mutations and compilation require it.
+   */
+  agent?: WorkspaceGenerationAgentSelection;
   resourceOperations: WorkspaceGenerationResourceOperation[];
   artifactPlans: WorkspaceGenerationArtifactPlan[];
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
@@ -1139,6 +1154,8 @@ export interface GenerationTaskArtifactTargetInstructions {
   operation: "create" | "revise";
   kind: ArtifactKind;
   name: string;
+  /** Exact Artifact-specific brief frozen by the approved Workspace Proposal. */
+  instructions?: string;
 }
 
 export interface GenerationTaskResourceTargetInstructions {
@@ -1163,6 +1180,8 @@ export interface GenerationTaskResourceAdapterDescriptor {
 
 export interface ArtifactGenerationTaskPayloadV2 extends Record<string, unknown> {
   version: 2;
+  /** Absent only on legacy Tasks compiled before per-turn Agent selection was durable. */
+  agent?: WorkspaceGenerationAgentSelection;
   artifactPlan: WorkspaceGenerationArtifactPlan;
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
   responsiveFrames: RenderFrameSpec[];
@@ -1172,6 +1191,8 @@ export interface ArtifactGenerationTaskPayloadV2 extends Record<string, unknown>
 
 export interface ResourceGenerationTaskPayloadV2 extends Record<string, unknown> {
   version: 2;
+  /** Absent only on legacy Tasks compiled before per-turn Agent selection was durable. */
+  agent?: WorkspaceGenerationAgentSelection;
   operation: Extract<WorkspaceGenerationResourceOperation, { revisionPolicy: { kind: "generate" } }>;
   brief: GenerationTaskResourceBrief;
   capabilityDescriptors: WorkspaceGenerationCapability[];

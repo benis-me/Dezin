@@ -374,13 +374,19 @@
 }
 .dezin-resize-separator:hover::before,
 .dezin-resize-separator:active::before,
-.dezin-resize-separator[data-separator="hover"]::before {
+.dezin-resize-separator[data-separator="hover"]::before,
+.dezin-resize-separator:focus-visible::before {
   background-image: linear-gradient(
     to bottom,
     var(--border),
     color-mix(in oklch, var(--foreground) 18%, var(--border)) 50%,
     var(--border)
   );
+}
+.dezin-resize-separator:focus-visible::before {
+  box-shadow:
+    0 0 0 1px var(--background),
+    0 0 0 3px color-mix(in oklch, var(--foreground) 28%, transparent);
 }
 
 /* Custom scrollbars — thin, subtle, themed; replaces the chunky system bars everywhere. */

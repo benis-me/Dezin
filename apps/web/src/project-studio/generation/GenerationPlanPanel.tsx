@@ -195,7 +195,9 @@ function artifactRevisionDestination(
     action = "candidate";
   }
   if (revisionId === null || action === null) return null;
-  const href = `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(task.target.id)}/revisions/${encodeURIComponent(revisionId)}`;
+  const href = action === "candidate"
+    ? `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(task.target.id)}/candidates/${encodeURIComponent(detail.plan.id)}/${encodeURIComponent(task.id)}/${task.currentAttempt}`
+    : `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(task.target.id)}/revisions/${encodeURIComponent(revisionId)}`;
   const kind = taskLabel(task.kind);
   return action === "candidate"
     ? { href, ariaLabel: `Review ${kind} candidate`, label: "Review candidate", evidenceHash }

@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname } from "node:path";
 import { BoundedTextBuffer } from "../bounded-text-buffer.ts";
 import { terminateOwnedProcessGroup } from "../process-group.ts";
+import { abortError } from "../types.ts";
 
 export const PROVIDER_CAPTURE_LIMIT_BYTES = 1024 * 1024;
 
@@ -45,7 +46,13 @@ export function agentSpawnEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv 
 }
 
 /** Spawn `<command> <args>` on the augmented PATH and capture stdout+stderr (bounded). */
-export function runCapture(command: string, args: string[], timeoutMs: number): Promise<{ code: number; out: string } | null> {
+export function runCapture(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ code: number; out: string } | null> {
+  if (signal?.aborted) return Promise.reject(abortError());
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -63,6 +70,7 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
     let seenBytes = 0;
     let failed = false;
     let settled = false;
+    let aborted = false;
     let terminationPromise: Promise<void> | undefined;
     const kill = (signal: NodeJS.Signals): void => {
       try {
@@ -93,9 +101,42 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
       void terminationPromise.catch(() => {});
       return terminationPromise;
     };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (code?: number | null, spawnFailed = false): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      void (async () => {
+        let cleanupError: unknown;
+        try {
+          await terminationPromise;
+        } catch (error) {
+          cleanupError = error;
+        }
+        if (cleanupError) reject(cleanupError);
+        else if (aborted) reject(abortError());
+        else if (spawnFailed) resolve(null);
+        else resolve(failed ? null : { code: code ?? 0, out: out.toString() });
+      })();
+    };
+    const onAbort = (): void => {
+      if (settled || aborted) return;
+      aborted = true;
+      failed = true;
+      void terminate().then(
+        () => finish(),
+        () => finish(),
+      );
+    };
     const timer = setTimeout(() => {
       failed = true;
-      void terminate();
+      void terminate().then(
+        () => finish(),
+        () => finish(),
+      );
     }, timeoutMs);
     timer.unref?.();
     const append = (raw: Buffer | Uint8Array): void => {
@@ -104,43 +145,25 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
       seenBytes += chunk.length;
       if (seenBytes > PROVIDER_CAPTURE_LIMIT_BYTES) {
         failed = true;
-        void terminate();
+        void terminate().then(
+          () => finish(),
+          () => finish(),
+        );
         return;
       }
       out.append(chunk);
     };
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
-    child.on("error", () => {
-      if (settled) return;
-      settled = true;
-      void (async () => {
-        let cleanupError: unknown;
-        try {
-          await terminationPromise;
-        } catch (error) {
-          cleanupError = error;
-        }
-        clearTimeout(timer);
-        if (cleanupError) reject(cleanupError);
-        else resolve(null);
-      })();
-    });
+    child.on("error", () => finish(undefined, true));
     child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      void (async () => {
-        let cleanupError: unknown;
-        try {
-          await terminationPromise;
-        } catch (error) {
-          cleanupError = error;
-        }
-        clearTimeout(timer);
-        if (cleanupError) reject(cleanupError);
-        else resolve(failed ? null : { code: code ?? 0, out: out.toString() });
-      })();
+      // A wrapper (notably `expect`) can exit before its spawned CLI. Always verify and
+      // clean the owned process group before resolving so descendants cannot be orphaned.
+      void terminate();
+      finish(code);
     });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -150,8 +173,8 @@ export interface VersionProbe {
 }
 
 /** Default availability probe: `<command> --version` on the augmented PATH. */
-export async function probeVersion(command: string): Promise<VersionProbe> {
-  const r = await runCapture(command, ["--version"], 3000);
+export async function probeVersion(command: string, signal?: AbortSignal): Promise<VersionProbe> {
+  const r = await runCapture(command, ["--version"], 3000, signal);
   if (!r || r.code !== 0) return { available: false };
   return { available: true, version: r.out.trim().split("\n")[0] || undefined };
 }

@@ -5,6 +5,7 @@ import {
   RENDER_FRAME_CAPTURE_PIXEL_LIMIT,
   RENDER_FRAME_NAME_LIMIT,
   type GenerationTask,
+  type WorkspaceGenerationAgentSelection,
 } from "../../../../packages/core/src/index.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
@@ -224,6 +225,29 @@ function canonicalString(value: unknown, label: string): string {
 
 function nullableCanonicalString(value: unknown, label: string): string | null {
   return value === null ? null : canonicalString(value, label);
+}
+
+export function validateFrozenGenerationTaskAgent(
+  value: unknown,
+  label: string,
+): WorkspaceGenerationAgentSelection {
+  const agent = exactObject(value, ["providerId", "command", "model"], [], label);
+  if (agent.command !== "claude" && agent.command !== "codebuddy") {
+    fail(`${label} command is unsupported`);
+  }
+  if (agent.providerId !== agent.command) {
+    fail(`${label} provider must match its command`);
+  }
+  const model = agent.model === null ? null : canonicalString(agent.model, `${label} model`);
+  if (model !== null && model.includes("\0")) fail(`${label} model cannot contain NUL characters`);
+  if (model !== null && Buffer.byteLength(model, "utf8") > 256) {
+    fail(`${label} model cannot exceed 256 bytes`);
+  }
+  return Object.freeze({
+    providerId: agent.command,
+    command: agent.command,
+    model,
+  });
 }
 
 function positiveNumber(value: unknown, label: string): number {
@@ -570,10 +594,13 @@ function validateArtifactPayload(task: GenerationTask): void {
       "brief",
       "capabilityDescriptors",
     ],
-    [],
+    ["agent"],
     `${task.kind} Task payload`,
   );
   if (payload.version !== 2) fail(`${task.kind} Task payload version is unsupported`);
+  if (Object.hasOwn(payload, "agent")) {
+    validateFrozenGenerationTaskAgent(payload.agent, `${task.kind} Task Agent`);
+  }
   const plan = exactObject(payload.artifactPlan, [
     "operation",
     "nodeId",
@@ -585,7 +612,7 @@ function validateArtifactPayload(task: GenerationTask): void {
     "dependsOnArtifactIds",
     "capabilityIds",
     "responsiveFrameIds",
-  ], ["dispatchContextPackId", "researchDirectionSelection"], `${task.kind} Artifact plan`);
+  ], ["dispatchContextPackId", "researchDirectionSelection", "instructions"], `${task.kind} Artifact plan`);
   if (plan.operation !== "create" && plan.operation !== "revise") {
     fail(`${task.kind} Artifact plan operation is unsupported`);
   }
@@ -595,6 +622,9 @@ function validateArtifactPayload(task: GenerationTask): void {
   }
   if (plan.kind !== task.kind) fail(`${task.kind} Artifact plan kind does not match its Task`);
   canonicalString(plan.name, `${task.kind} Artifact plan name`);
+  const planInstructions = plan.instructions === undefined
+    ? undefined
+    : canonicalString(plan.instructions, `${task.kind} Artifact plan instructions`);
   if (canonicalString(plan.trackId, `${task.kind} Artifact plan Track id`) !== task.target.trackId) {
     fail(`${task.kind} Artifact plan Track does not match its Task`);
   }
@@ -671,7 +701,7 @@ function validateArtifactPayload(task: GenerationTask): void {
   const instructions = exactObject(
     brief.targetInstructions,
     ["operation", "kind", "name"],
-    [],
+    ["instructions"],
     `${task.kind} Task target instructions`,
   );
   if (instructions.operation !== plan.operation) {
@@ -682,6 +712,12 @@ function validateArtifactPayload(task: GenerationTask): void {
   }
   if (canonicalString(instructions.name, `${task.kind} Task target instructions name`) !== plan.name) {
     fail(`${task.kind} Task target instructions name does not match its Artifact plan`);
+  }
+  const briefInstructions = instructions.instructions === undefined
+    ? undefined
+    : canonicalString(instructions.instructions, `${task.kind} Task target instructions brief`);
+  if (briefInstructions !== planInstructions) {
+    fail(`${task.kind} Task target instructions brief does not match its Artifact plan`);
   }
   validateCapabilityDescriptors(
     payload.capabilityDescriptors,
@@ -698,10 +734,13 @@ function validateResourcePayload(task: GenerationTask): void {
   const payload = exactObject(
     task.payload,
     ["version", "operation", "brief", "capabilityDescriptors", "adapter"],
-    [],
+    ["agent"],
     "Resource Task payload",
   );
   if (payload.version !== 2) fail("Resource Task payload version is unsupported");
+  if (Object.hasOwn(payload, "agent")) {
+    validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent");
+  }
   const operation = exactObject(payload.operation, [
     "operation",
     "nodeId",

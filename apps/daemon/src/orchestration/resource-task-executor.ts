@@ -13,6 +13,10 @@ import type {
   ResourceGenerationTaskLeafExecutor,
   ResourcePreparedCandidate,
 } from "./generation-task-executor.ts";
+import {
+  GenerationTaskPayloadContractError,
+  validateFrozenGenerationTaskAgent,
+} from "./generation-task-contracts.ts";
 
 export interface ResourceGenerationAdapterIdentity {
   readonly id: string;
@@ -963,6 +967,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
     );
   }
   let version: unknown;
+  let hasAgent = false;
   try {
     if (task.payload === null || typeof task.payload !== "object") {
       return invalidPayload("Resource Task payload must be an object");
@@ -973,6 +978,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
       return invalidPayload("Resource Task payload version must be an own data field");
     }
     version = descriptor.value;
+    hasAgent = Object.getOwnPropertyDescriptor(task.payload, "agent") !== undefined;
   } catch (error) {
     return invalidPayload("Resource Task payload version could not be inspected", error);
   }
@@ -984,9 +990,20 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   }
   const payload = exactRecord(
     task.payload,
-    ["version", "operation", "brief", "capabilityDescriptors", "adapter"],
+    ["version", "operation", "brief", "capabilityDescriptors", "adapter", ...(hasAgent ? ["agent"] : [])],
     "Resource Task payload",
   );
+  let agent: ResourceGenerationTaskPayloadV2["agent"];
+  if (hasAgent) {
+    try {
+      agent = validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent");
+    } catch (error) {
+      if (error instanceof GenerationTaskPayloadContractError) {
+        invalidPayload(error.message, error);
+      }
+      throw error;
+    }
+  }
   const adapter = exactRecord(payload.adapter, ["id", "version", "kind"], "Resource Task adapter");
   const id = canonicalText(adapter.id, "Resource Task adapter id", 128);
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)
@@ -1087,6 +1104,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   }
   return Object.freeze({
     version: 2,
+    ...(agent === undefined ? {} : { agent }),
     adapter: Object.freeze({
       id,
       version: Number(adapter.version),

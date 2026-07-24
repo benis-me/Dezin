@@ -19,6 +19,11 @@ import type { ProductionAgentTurnPort } from "../src/orchestration/production-ag
 import { createProductionWorkspaceAgentOrchestrator } from "../src/orchestration/production-workspace-agent.ts";
 
 const CONTEXT_PACK_ID = `context-pack-${"c".repeat(64)}`;
+const FROZEN_CODEBUDDY_AGENT = Object.freeze({
+  providerId: "codebuddy" as const,
+  command: "codebuddy" as const,
+  model: "gpt-5.6-sol",
+});
 
 function seedArtifactSource(input: {
   dataDir: string;
@@ -171,6 +176,7 @@ async function withServer(run: (input: {
             layoutOperations: [],
             generation: {
               kind: "workspace-generation",
+              agent: FROZEN_CODEBUDDY_AGENT,
               resourceOperations: [],
               artifactPlans: [],
               dependencyPlans: [],
@@ -222,6 +228,8 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         turnId: "turn-00000000-0000-4000-8000-000000000031",
+        agentCommand: "codebuddy",
+        model: "gpt-5.6-sol",
         message: "Plan a pricing page",
         explicitContext: [],
         graphRevision: ready.graph.revision,
@@ -239,6 +247,7 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       scope: { type: "workspace", id: ready.workspace.id, workspaceId: ready.workspace.id },
       intent: "plan",
       turnId: "turn-00000000-0000-4000-8000-000000000031",
+      agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
       message: "Plan a pricing page",
       explicitContext: [],
       graphRevision: ready.graph.revision,
@@ -250,6 +259,7 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         turnId: "turn-00000000-0000-4000-8000-000000000032",
+        agentCommand: "claude",
         scope: { type: "workspace", id: "foreign" },
         message: "Plan a foreign workspace",
         explicitContext: [],
@@ -269,7 +279,23 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           ...(turnId === undefined ? {} : { turnId }),
+          agentCommand: "claude",
           message: "Invalid turn identity",
+          explicitContext: [],
+          graphRevision: ready.graph.revision,
+        }),
+      });
+      assert.equal(invalid.status, 400);
+    }
+    for (const agentCommand of [undefined, "/usr/local/bin/codebuddy", "codex"]) {
+      const invalid = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          turnId: "turn-00000000-0000-4000-8000-000000000033",
+          ...(agentCommand === undefined ? {} : { agentCommand }),
+          model: "gpt-5.6-sol",
+          message: "Invalid Agent selection",
           explicitContext: [],
           graphRevision: ready.graph.revision,
         }),
@@ -291,6 +317,7 @@ test("Workspace Agent HTTP classifies blocked immutable context without creating
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         turnId: "turn-00000000-0000-4000-8000-000000000034",
+        agentCommand: "claude",
         message: "missing context",
         explicitContext: [],
         graphRevision: ready.graph.revision,
@@ -336,6 +363,7 @@ test("Workspace Agent HTTP replays the current terminal Proposal before the curr
       layoutOperations: [],
       generation: {
         kind: "workspace-generation",
+        agent: FROZEN_CODEBUDDY_AGENT,
         resourceOperations: [],
         artifactPlans: [],
         dependencyPlans: [],
@@ -368,6 +396,7 @@ test("Workspace Agent HTTP replays the current terminal Proposal before the curr
     const endpoint = `${base}/api/projects/${project.id}/workspace/agent/turns`;
     const input = {
       turnId,
+      agentCommand: "claude",
       message: committedMessage,
       explicitContext: [],
       graphRevision: ready.graph.revision,
@@ -460,6 +489,7 @@ test("Artifact Agent HTTP proves an exact immutable element before returning the
     const endpoint = `${base}/api/projects/${project.id}/artifacts/${artifact.id}/agent/turns`;
     const input = {
       turnId: "turn-00000000-0000-4000-8000-000000000001",
+      agentCommand: "claude",
       intent: "edit",
       message: "Tighten the selected call to action",
       explicitContext: [],
@@ -488,9 +518,12 @@ test("Artifact Agent HTTP proves an exact immutable element before returning the
     });
     assert.equal(receipt.task.status, "materialization-pending");
     assert.match(receipt.contextPackId, /^context-pack-[0-9a-f]{64}$/);
+    const { agentCommand, ...turnInput } = input;
+    assert.equal(agentCommand, "claude");
     assert.deepEqual(turns.at(-1), {
       scope: { type: "artifact", id: artifact.id, workspaceId: ready.workspace.id },
-      ...input,
+      ...turnInput,
+      agent: { providerId: "claude", command: "claude", model: null },
     });
 
     const forged = await fetch(endpoint, {
@@ -621,6 +654,7 @@ test("Artifact Agent HTTP replays a committed receipt before stale graph and Hea
     const endpoint = `${base}/api/projects/${project.id}/artifacts/${artifact.id}/agent/turns`;
     const input = {
       turnId: "turn-00000000-0000-4000-8000-000000000011",
+      agentCommand: "claude",
       intent: "edit",
       message: committedMessage,
       explicitContext: [],
@@ -725,6 +759,7 @@ test("Resource Agent HTTP keeps Resource ownership in the path and classifies im
     const endpoint = `${base}/api/projects/${project.id}/resources/${created.resource.id}/agent/turns`;
     const input = {
       turnId: "turn-00000000-0000-4000-8000-000000000021",
+      agentCommand: "claude",
       intent: "repair",
       message: "Refresh the weak evidence",
       explicitContext: [],
@@ -747,9 +782,12 @@ test("Resource Agent HTTP keeps Resource ownership in the path and classifies im
     });
     assert.equal(receipt.task.planId, "plan-resource");
     assert.equal(receipt.contextPackId, CONTEXT_PACK_ID);
+    const { agentCommand, ...turnInput } = input;
+    assert.equal(agentCommand, "claude");
     assert.deepEqual(turns.at(-1), {
       scope: { type: "resource", id: created.resource.id, workspaceId: ready.workspace.id },
-      ...input,
+      ...turnInput,
+      agent: { providerId: "claude", command: "claude", model: null },
     });
 
     const blocked = await fetch(endpoint, {

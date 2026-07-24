@@ -7,6 +7,8 @@ import type { AgentInfo } from "./api.ts";
  * agent/model picker at once — instead of each screen holding its own stale copy.
  */
 interface AgentsValue {
+  /** Whether a real app-level provider owns this value. */
+  provided: boolean;
   agents: AgentInfo[];
   /** First load still in flight. */
   loading: boolean;
@@ -19,6 +21,7 @@ interface AgentsValue {
 }
 
 const AgentsContext = createContext<AgentsValue>({
+  provided: false,
   agents: [],
   loading: true,
   scanning: false,
@@ -53,7 +56,13 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       let done = false;
       for await (const ev of api.scanAgentsStream()) {
         if (ev.type === "progress") {
-          setStatus(ev.phase === "models" ? `Reading ${ev.label}'s models…` : `Scanning ${ev.label}…`);
+          setStatus(
+            ev.phase === "models"
+              ? `Reading ${ev.label}'s models…`
+              : ev.phase === "readiness"
+                ? `Checking ${ev.label} sign-in…`
+                : `Scanning ${ev.label}…`,
+          );
         } else {
           setAgents(ev.agents);
           done = true;
@@ -73,14 +82,13 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
     }
   }, [api]);
 
-  // Just load — the daemon persists each scan and reloads it at startup, so this returns the
-  // last (deep) result instantly. A fresh scan is explicit (first-run onboarding, or Rescan),
-  // so a launch never re-probes the slow CLIs or shows fast-path results.
+  // The daemon uses persisted model metadata but refreshes fast presence/sign-in state before
+  // answering, so upgraded or signed-out CLIs do not remain silently selectable.
   useEffect(() => {
     void reload();
   }, [reload]);
 
-  return <AgentsContext.Provider value={{ agents, loading, scanning, status, rescan, reload }}>{children}</AgentsContext.Provider>;
+  return <AgentsContext.Provider value={{ provided: true, agents, loading, scanning, status, rescan, reload }}>{children}</AgentsContext.Provider>;
 }
 
 export const useAgents = (): AgentsValue => useContext(AgentsContext);

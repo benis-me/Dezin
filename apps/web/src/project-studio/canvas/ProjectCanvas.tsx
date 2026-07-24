@@ -50,10 +50,12 @@ import {
   type WorkspaceFlowNode,
 } from "./workspace-graph-adapter.ts";
 import {
+  buildComponentLibraryCommands,
   buildDeleteGroupCommands,
   buildGroupCommands,
   buildMoveCommands,
   buildUngroupCommands,
+  isComponentLibraryGroupId,
   layoutObjectMap,
   materializeWorkspaceLayout,
 } from "./workspace-layout.ts";
@@ -61,6 +63,7 @@ import {
 const VIEWPORT_SAVE_DELAY_MS = 260;
 const MOVE_DEDUPE_WINDOW_MS = 80;
 const PROPOSAL_FOCUS_MOUNT_RETRIES = 4;
+const OUTLINE_SAFE_SURFACE_WIDTH = 900;
 const NOOP_VIEWPORT_CHANGE = () => {};
 const EMPTY_RESOURCE_REVISION_STATES = {} as const;
 const proposalNodeTypes = { ...workspaceNodeTypes, proposal: ProposalOverlay } satisfies NodeTypes;
@@ -175,6 +178,8 @@ export function ProjectCanvas({
   const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
   const viewportSaveJobsRef = useRef(0);
   const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
+  const componentLibraryNormalizationRef = useRef<string | null>(null);
+  const componentLibraryNormalizationFailureRef = useRef<{ key: string; count: number } | null>(null);
   const relationshipMutationPendingRef = useRef(false);
   const selectedEdgeGraphRevisionRef = useRef(graph.revision);
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
@@ -182,7 +187,7 @@ export function ProjectCanvas({
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
   const [tool, setTool] = useState<CanvasTool>("select");
   const [edgeFilter, setEdgeFilter] = useState<WorkspaceEdgeFilter>("flow");
-  const [outlineOpen, setOutlineOpen] = useState(true);
+  const [outlineOpen, setOutlineOpen] = useState(false);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [zoom, setZoom] = useState(viewport.zoom);
   const [adapterZoom, setAdapterZoom] = useState(viewport.zoom);
@@ -203,6 +208,7 @@ export function ProjectCanvas({
       if (!entry) return;
       const measured = entry.contentRect.width > 0 && entry.contentRect.height > 0;
       setSurfaceMeasured((current) => current === measured ? current : measured);
+      if (measured && entry.contentRect.width < OUTLINE_SAFE_SURFACE_WIDTH) setOutlineOpen(false);
     });
     observer.observe(surface);
     return () => {
@@ -305,6 +311,39 @@ export function ProjectCanvas({
     return result;
   }, [onSaveLayout]);
 
+  useEffect(() => {
+    if (proposal !== null) {
+      componentLibraryNormalizationRef.current = null;
+      componentLibraryNormalizationFailureRef.current = null;
+      return;
+    }
+    const commands = buildComponentLibraryCommands(graph, layout);
+    if (commands.length === 0) {
+      componentLibraryNormalizationRef.current = null;
+      componentLibraryNormalizationFailureRef.current = null;
+      return;
+    }
+    const key = `${graph.revision}\u0000${layout.checksum}\u0000${JSON.stringify(commands)}`;
+    if (componentLibraryNormalizationRef.current === key) return;
+    const previousFailure = componentLibraryNormalizationFailureRef.current;
+    if (previousFailure?.key === key && previousFailure.count >= 2) return;
+    componentLibraryNormalizationRef.current = key;
+    void persistLayout(commands, "Canvas ready").then((saved) => {
+      if (componentLibraryNormalizationRef.current === key) {
+        componentLibraryNormalizationRef.current = null;
+      }
+      if (saved) {
+        componentLibraryNormalizationFailureRef.current = null;
+        return;
+      }
+      const failure = componentLibraryNormalizationFailureRef.current;
+      componentLibraryNormalizationFailureRef.current = {
+        key,
+        count: failure?.key === key ? failure.count + 1 : 1,
+      };
+    });
+  }, [graph, layout, persistLayout, proposal, reconcileVersion]);
+
   const persistViewport = useCallback(async (
     next: WorkspaceViewport,
     successMessage: string,
@@ -341,6 +380,7 @@ export function ProjectCanvas({
   }, [canvasLayout, onSelectionChange, persistLayout, selectedNodeIds]);
 
   const renameGroup = useCallback((groupId: string, label: string) => {
+    if (isComponentLibraryGroupId(groupId)) return;
     void persistLayout([{ type: "rename-group", groupId, label }], "Group renamed");
   }, [persistLayout]);
 
@@ -590,13 +630,23 @@ export function ProjectCanvas({
       viewportTimerRef.current = null;
     }
     pendingViewportRef.current = null;
+    const surfaceWidth = surfaceRef.current?.clientWidth || 960;
+    const keepOutlineOpen = outlineOpen && surfaceWidth >= OUTLINE_SAFE_SURFACE_WIDTH;
+    if (outlineOpen && !keepOutlineOpen) setOutlineOpen(false);
     void instance.fitView({ padding: 0.18, duration: reducedMotion() ? 0 : 220 }).then(() => {
-      const next = instance.getViewport();
-      setZoom(next.zoom);
-      setAdapterZoom(next.zoom);
-      return persistViewport(next, "Fit workspace");
+      const fitted = instance.getViewport();
+      const outlineOffset = keepOutlineOpen ? Math.min(132, surfaceWidth * 0.14) : 0;
+      const next = outlineOffset > 0 ? { ...fitted, x: fitted.x + outlineOffset } : fitted;
+      const align = outlineOffset > 0
+        ? instance.setViewport(next, { duration: reducedMotion() ? 0 : 120 })
+        : Promise.resolve(true);
+      return align.then(() => {
+        setZoom(next.zoom);
+        setAdapterZoom(next.zoom);
+        return persistViewport(next, "Fit workspace");
+      });
     });
-  }, [persistViewport]);
+  }, [outlineOpen, persistViewport]);
 
   const handleConnect = useCallback((connection: Connection) => {
     if (!isValidWorkspaceConnection(connection, graph)) {
@@ -612,8 +662,16 @@ export function ProjectCanvas({
 
   const handleGroup = useCallback(() => {
     const livePositions = new Map((flowRef.current?.getNodes() ?? nodes).map((node) => [node.id, node.position]));
+    const byId = layoutObjectMap(canvasLayout);
+    const groupableIds = selectedNodeIds.filter((id) => {
+      const object = byId.get(id);
+      return object
+        && !isComponentLibraryGroupId(id)
+        && !isComponentLibraryGroupId(object.parentGroupId ?? "");
+    });
+    if (groupableIds.length === 0) return;
     const groupId = freshGroupId();
-    void persistLayout((currentLayout) => buildGroupCommands(currentLayout, selectedNodeIds, {
+    void persistLayout((currentLayout) => buildGroupCommands(currentLayout, groupableIds, {
       groupId,
       label: "New group",
       graph,
@@ -621,17 +679,23 @@ export function ProjectCanvas({
     }), "Selection grouped").then((saved) => {
       if (saved) onSelectionChange([groupId]);
     });
-  }, [graph, nodes, onSelectionChange, persistLayout, selectedNodeIds]);
+  }, [canvasLayout, graph, nodes, onSelectionChange, persistLayout, selectedNodeIds]);
 
   const handleUngroup = useCallback(() => {
     void persistLayout(
-      (currentLayout) => buildUngroupCommands(currentLayout, selectedNodeIds),
+      (currentLayout) => {
+        const byId = layoutObjectMap(currentLayout);
+        return buildUngroupCommands(
+          currentLayout,
+          selectedNodeIds.filter((id) => !isComponentLibraryGroupId(byId.get(id)?.parentGroupId ?? "")),
+        );
+      },
       "Selection moved out of its group",
     );
   }, [persistLayout, selectedNodeIds]);
 
   const confirmDeleteGroup = useCallback(() => {
-    if (!pendingDeleteGroupId) return;
+    if (!pendingDeleteGroupId || isComponentLibraryGroupId(pendingDeleteGroupId)) return;
     const groupId = pendingDeleteGroupId;
     setPendingDeleteGroupId(null);
     restoreDeleteButtonFocus();
@@ -644,7 +708,9 @@ export function ProjectCanvas({
   }, [onSelectionChange, pendingDeleteGroupId, persistLayout, selectedNodeIds]);
 
   const requestDeleteGroup = useCallback(() => {
-    const groupId = selectedNodeIds.find((id) => layoutObjectMap(canvasLayout).get(id)?.kind === "group") ?? null;
+    const groupId = selectedNodeIds.find((id) => (
+      !isComponentLibraryGroupId(id) && layoutObjectMap(canvasLayout).get(id)?.kind === "group"
+    )) ?? null;
     setPendingDeleteGroupId(groupId);
   }, [canvasLayout, selectedNodeIds]);
 
@@ -797,10 +863,18 @@ export function ProjectCanvas({
   }, [deleteSelectedRelationships, fitWorkspace, moveSelectionByKeyboard, nodes, onSelectionChange, openNode, selectedEdgeIds.length, selectedSet]);
 
   const groupObjects = useMemo(() => layoutObjectMap(canvasLayout), [canvasLayout]);
-  const canGroup = selectedNodeIds.some((id) => groupObjects.has(id));
-  const canUngroup = selectedNodeIds.some((id) => Boolean(groupObjects.get(id)?.parentGroupId));
+  const canGroup = selectedNodeIds.some((id) => {
+    const object = groupObjects.get(id);
+    return object
+      && !isComponentLibraryGroupId(id)
+      && !isComponentLibraryGroupId(object.parentGroupId ?? "");
+  });
+  const canUngroup = selectedNodeIds.some((id) => {
+    const parentGroupId = groupObjects.get(id)?.parentGroupId;
+    return Boolean(parentGroupId && !isComponentLibraryGroupId(parentGroupId));
+  });
   const selectedGroups = selectedNodeIds.filter((id) => groupObjects.get(id)?.kind === "group");
-  const canDeleteGroup = selectedGroups.length === 1;
+  const canDeleteGroup = selectedGroups.length === 1 && !isComponentLibraryGroupId(selectedGroups[0]!);
 
   useEffect(() => {
     if (pendingDeleteGroupId) deleteCancelRef.current?.focus();
@@ -959,7 +1033,13 @@ export function ProjectCanvas({
           </div>
         )}
 
-        <p className="dezin-project-canvas__status" role="status" aria-label="Canvas status" aria-live="polite">
+        <p
+          className="dezin-project-canvas__status"
+          role="status"
+          aria-label="Canvas status"
+          aria-live="polite"
+          data-idle={status === "Canvas ready" || undefined}
+        >
           {status}
         </p>
       </div>

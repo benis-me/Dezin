@@ -8,6 +8,7 @@ import type {
   AgentRunner,
   AgentTurnInput,
 } from "../../../packages/agent/src/index.ts";
+import { NodeSpawner } from "../../../packages/agent/src/index.ts";
 import type { GenerationTaskAttemptClaim } from "../../../packages/core/src/index.ts";
 import type { ContextPack } from "../src/context/context-types.ts";
 import type { ArtifactRunInfrastructureInput } from "../src/orchestration/artifact-run-preparation.ts";
@@ -187,9 +188,15 @@ test("production Artifact Agent ports bind one target, Context, Source Base, env
   assert.match(forwarded?.systemPrompt ?? "", /live HEAD/i);
 });
 
-test("production Artifact Agent ports preserve only the reserved daemon-token tombstone", async (t) => {
+test("production Artifact Agent ports preserve server tombstones through the final child-process overlay", async (t) => {
   const worktreeDir = mkdtempSync(join(tmpdir(), "dezin-confined-agent-token-tombstone-"));
   t.after(() => rmSync(worktreeDir, { recursive: true, force: true }));
+  const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "ambient-credential-must-not-cross";
+  t.after(() => {
+    if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
+  });
   const module = await import("../src/orchestration/target-confined-artifact-agent.ts");
   const ports = module.createProductionArtifactAgentExecutionPorts({
     createRunner: () => ({
@@ -199,15 +206,28 @@ test("production Artifact Agent ports preserve only the reserved daemon-token to
       },
     }),
     extraEnvironment: {
-      OPENAI_API_KEY: "provider-key",
+      ANTHROPIC_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
       DEZIN_DAEMON_TOKEN: undefined,
     },
   });
   const env = ports.environment(infrastructure(worktreeDir));
 
+  assert.equal(Object.hasOwn(env, "ANTHROPIC_API_KEY"), true);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(Object.hasOwn(env, "OPENAI_API_KEY"), true);
+  assert.equal(env.OPENAI_API_KEY, undefined);
   assert.equal(Object.hasOwn(env, "DEZIN_DAEMON_TOKEN"), true);
   assert.equal(env.DEZIN_DAEMON_TOKEN, undefined);
-  assert.equal(env.OPENAI_API_KEY, "provider-key");
+  const child = await new NodeSpawner({ timeoutMs: 5_000 }).run({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write(process.env.ANTHROPIC_API_KEY ?? 'missing')"],
+    cwd: worktreeDir,
+    stdin: "",
+    env,
+  });
+  assert.equal(child.exitCode, 0);
+  assert.equal(child.stdout, "missing");
   assert.throws(
     () => module.createProductionArtifactAgentExecutionPorts({
       createRunner: () => ({
@@ -228,9 +248,9 @@ test("production Artifact Agent ports preserve only the reserved daemon-token to
           return { text: "done", artifactHtml: "<main />" };
         },
       }),
-      extraEnvironment: { OPENAI_API_KEY: undefined },
+      extraEnvironment: { "invalid-name": undefined },
     }),
-    /OPENAI_API_KEY.*invalid/i,
+    /invalid-name.*invalid/i,
   );
 });
 

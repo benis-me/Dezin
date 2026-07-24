@@ -377,6 +377,52 @@ test("parses only the exact frozen v2 adapter and Resource operation contract", 
   });
 });
 
+test("preserves legacy v2 payloads without Agent and strictly parses every present frozen Agent", () => {
+  const base = taskFixture();
+  assert.equal(parseResourceGenerationTaskPayloadV2(base).agent, undefined);
+
+  const payload = structuredClone(base.payload) as Record<string, unknown>;
+  const agent = { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" };
+  assert.deepEqual(
+    parseResourceGenerationTaskPayloadV2({ ...base, payload: { ...payload, agent } }).agent,
+    agent,
+  );
+
+  const invalidAgents: unknown[] = [
+    { ...agent, extra: true },
+    { ...agent, providerId: "claude" },
+    { ...agent, command: "other", providerId: "other" },
+    { ...agent, model: " gpt-5.6-sol " },
+    { ...agent, model: "gpt\0model" },
+    { ...agent, model: "x".repeat(257) },
+    undefined,
+  ];
+  for (const invalidAgent of invalidAgents) {
+    assert.throws(
+      () => parseResourceGenerationTaskPayloadV2({
+        ...base,
+        payload: { ...payload, agent: invalidAgent },
+      }),
+      (error) => error instanceof ResourceTaskContractError
+        && error.code === "RESOURCE_TASK_PAYLOAD_INVALID",
+    );
+  }
+
+  const accessorAgent = { ...agent };
+  Object.defineProperty(accessorAgent, "model", {
+    enumerable: true,
+    get: () => "gpt-5.6-sol",
+  });
+  assert.throws(
+    () => parseResourceGenerationTaskPayloadV2({
+      ...base,
+      payload: { ...payload, agent: accessorAgent },
+    }),
+    (error) => error instanceof ResourceTaskContractError
+      && error.code === "RESOURCE_TASK_PAYLOAD_INVALID",
+  );
+});
+
 test("rejects extra fields at every v2 payload boundary", () => {
   const base = taskFixture();
   const payload = structuredClone(base.payload) as Record<string, unknown>;

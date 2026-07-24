@@ -35,9 +35,18 @@ export type ContextItemRef =
 
 export type AgentIntent = "plan" | "generate" | "edit" | "repair" | "analyze-impact";
 
+export type StructuredAgentProviderId = "claude" | "codebuddy";
+
+export interface AgentExecutionSelection {
+  providerId: StructuredAgentProviderId;
+  command: StructuredAgentProviderId;
+  model: string | null;
+}
+
 export interface AgentTurnRequest {
   scope: ResolvedAgentScope;
   intent: AgentIntent;
+  agent: AgentExecutionSelection;
   message: string;
   explicitContext: readonly ContextItemRef[];
   graphRevision: number;
@@ -457,6 +466,42 @@ function runtimeId(value: unknown, label: string): string {
   return value;
 }
 
+const STRUCTURED_AGENT_PROVIDER_BY_COMMAND = Object.freeze({
+  claude: "claude",
+  codebuddy: "codebuddy",
+} satisfies Record<StructuredAgentProviderId, StructuredAgentProviderId>);
+
+export function normalizeAgentExecutionSelection(value: unknown): AgentExecutionSelection {
+  const input = runtimeRecord(value, "Agent execution selection");
+  exactRuntimeFields(
+    input,
+    ["providerId", "command", "model"],
+    [],
+    "Agent execution selection",
+  );
+  if (typeof input.command !== "string"
+    || !Object.hasOwn(STRUCTURED_AGENT_PROVIDER_BY_COMMAND, input.command)) {
+    throw new ContextIntegrityError(
+      "Agent execution command must be a canonical supported structured provider command",
+    );
+  }
+  const command = input.command as StructuredAgentProviderId;
+  const providerId = STRUCTURED_AGENT_PROVIDER_BY_COMMAND[command];
+  if (input.providerId !== providerId) {
+    throw new ContextIntegrityError("Agent execution provider does not match its canonical command");
+  }
+  let model: string | null = null;
+  if (input.model !== null && input.model !== "") {
+    if (typeof input.model !== "string" || input.model.trim() !== input.model
+      || !isWellFormedContextText(input.model) || input.model.includes("\0")
+      || Buffer.byteLength(input.model, "utf8") > 256) {
+      throw new ContextIntegrityError("Agent execution model must be canonical and bounded to 256 bytes");
+    }
+    model = input.model;
+  }
+  return cloneAndFreeze({ providerId, command, model });
+}
+
 export function normalizeContextItemRef(value: unknown, label = "Context item ref"): ContextItemRef {
   const input = runtimeRecord(value, label);
   if (input.kind === "resource") {
@@ -492,7 +537,7 @@ export function normalizeAgentTurnRequest(value: unknown): AgentTurnRequest {
   const input = runtimeRecord(value, "Agent turn request");
   exactRuntimeFields(
     input,
-    ["scope", "intent", "message", "explicitContext", "graphRevision"],
+    ["scope", "intent", "agent", "message", "explicitContext", "graphRevision"],
     ["turnId", "baseRevisionId", "selection"],
     "Agent turn request",
   );
@@ -560,6 +605,7 @@ export function normalizeAgentTurnRequest(value: unknown): AgentTurnRequest {
       workspaceId: runtimeId(scope.workspaceId, "Agent turn Workspace id"),
     },
     intent: input.intent as AgentIntent,
+    agent: normalizeAgentExecutionSelection(input.agent),
     message: input.message,
     explicitContext,
     graphRevision: input.graphRevision as number,

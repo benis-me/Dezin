@@ -19,15 +19,16 @@ import {
 } from "node:path";
 
 import {
-  ClaudeCodeRunner,
   NodeSpawner,
   getProvider,
+  type AgentProvider,
   type AgentRunner,
   type ProcessSpawner,
   type SpawnInput,
 } from "../../../../packages/agent/src/index.ts";
 
 const MAX_ENVIRONMENT_VALUE_BYTES = 64 * 1024;
+const CODEBUDDY_ARTIFACT_TURN_TIMEOUT_MS = 8 * 60 * 1_000;
 const ARTIFACT_SCOPE_ENVIRONMENT_KEYS = new Set([
   "DEZIN_AGENT_SCOPE_PROTOCOL",
   "DEZIN_PROJECT_ID",
@@ -50,6 +51,9 @@ const PROVIDER_ENVIRONMENT_KEYS = Object.freeze({
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
   ]),
+  // CodeBuddy's Bash sandbox cannot mask credential environment variables.
+  // Scoped Artifact runs therefore use only the CLI's official host login state.
+  codebuddy: new Set<string>(),
 });
 const SAFE_AMBIENT_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "USER"] as const;
 const CLAUDE_DENIED_TOOLS = [
@@ -62,8 +66,51 @@ const CLAUDE_DENIED_TOOLS = [
   "Task",
   "Skill",
 ] as const;
+const CODEBUDDY_ARTIFACT_TOOLS = "Read,Write,Edit,Glob,Grep";
+const CODEBUDDY_DENIED_TOOLS = [
+  "Bash",
+  "PowerShell",
+  "Agent",
+  "Skill",
+  "WebFetch",
+  "WebSearch",
+  "NotebookEdit",
+  "EnterPlanMode",
+  "ExitPlanMode",
+  "TaskCreate",
+  "TaskGet",
+  "TaskUpdate",
+  "TaskList",
+  "TaskStop",
+  "TaskOutput",
+  "AskUserQuestion",
+  "StructuredOutput",
+  "ToolSearch",
+  "DeferExecuteTool",
+  "SendMessage",
+  "TeamCreate",
+  "TeamDelete",
+  "LSP",
+  "ImageGen",
+  "ImageEdit",
+  "ShareLink",
+  "VideoGen",
+  "EnterWorktree",
+  "LeaveWorktree",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "WeChatReply",
+  "WeComReply",
+  "ComputerUse",
+  "ListMcpResources",
+  "ReadMcpResource",
+  "WaitForMcpServers",
+  "Workflow",
+] as const;
 
-type SupportedArtifactProviderId = "claude";
+type SupportedArtifactProviderId = "claude" | "codebuddy";
+type SupportedArtifactProvider = AgentProvider & { readonly id: SupportedArtifactProviderId };
 
 export interface ProductionArtifactProviderRunnerInput {
   readonly providerId: string;
@@ -87,6 +134,10 @@ export interface ProductionArtifactProviderSandboxDependencies {
   readonly hostHome?: string;
   /** Test seam for an explicit Claude authentication root. */
   readonly claudeConfigDir?: string;
+  /** Test seam. Production CodeBuddy Artifact execution is macOS-only. */
+  readonly platform?: NodeJS.Platform;
+  /** Test seam. Production uses the fixed macOS Seatbelt launcher. */
+  readonly sandboxExecutable?: string;
 }
 
 export interface ProductionArtifactClaudeArgsInput {
@@ -94,6 +145,22 @@ export interface ProductionArtifactClaudeArgsInput {
   readonly runtimeRoot: string;
   readonly systemPrompt: string;
   readonly model?: string;
+}
+
+export interface ProductionArtifactCodeBuddyArgsInput {
+  readonly worktreeDir: string;
+  readonly runtimeRoot: string;
+  readonly hostHome: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+}
+
+export interface ProductionArtifactCodeBuddySeatbeltInput {
+  readonly worktreeDir: string;
+  readonly runtimeRoot: string;
+  readonly hostHome: string;
+  readonly executable: string;
+  readonly nodeRuntimeRoot: string;
 }
 
 export class ProductionArtifactProviderSandboxError extends Error {
@@ -195,9 +262,13 @@ function escapedRegExp(value: string): string {
 function trustedNodePackageExecutable(
   path: string,
   home: string,
+  providerId: SupportedArtifactProviderId,
 ): boolean {
-  const packageSuffix = join("@anthropic-ai", "claude-code", "cli.js");
+  const packageSuffix = providerId === "codebuddy"
+    ? join("@tencent-ai", "codebuddy-code", "bin", "codebuddy")
+    : join("@anthropic-ai", "claude-code", "cli.js");
   const fixedGlobalRoots = [
+    ...(providerId === "codebuddy" ? [join(home, ".local", "lib", "node_modules")] : []),
     join(home, ".npm-global", "lib", "node_modules"),
     join(resolve(dirname(process.execPath), ".."), "lib", "node_modules"),
     "/opt/homebrew/lib/node_modules",
@@ -211,11 +282,16 @@ function trustedNodePackageExecutable(
   ).test(path.replaceAll("\\", "/"));
 }
 
-function trustedExecutablePath(value: string, home: string): boolean {
+function trustedExecutablePath(
+  value: string,
+  home: string,
+  providerId: SupportedArtifactProviderId,
+): boolean {
   const path = value.replaceAll("\\", "/");
+  if (providerId === "codebuddy") return trustedNodePackageExecutable(path, home, providerId);
   const normalizedHome = home.replaceAll("\\", "/").replace(/\/$/, "");
   return new RegExp(`^${escapedRegExp(normalizedHome)}/\\.local/share/claude/versions/[^/]+$`).test(path)
-    || trustedNodePackageExecutable(path, home)
+    || trustedNodePackageExecutable(path, home, providerId)
     || /^\/(?:opt\/homebrew|usr\/local)\/Cellar\/(?:claude-code|claude)\/[^/]+\/.+\/claude$/.test(path);
 }
 
@@ -240,7 +316,7 @@ function resolveTrustedExecutable(
     try {
       accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
       const exact = realpathSync(candidate);
-      if (statSync(exact).isFile() && trustedExecutablePath(exact, home)) return exact;
+      if (statSync(exact).isFile() && trustedExecutablePath(exact, home, providerId)) return exact;
     } catch {
       // Continue through only the fixed, trusted install roots.
     }
@@ -260,6 +336,7 @@ function canonicalHostHome(value: string | undefined): string {
 }
 
 function providerProcessEnvironment(input: {
+  readonly providerId: SupportedArtifactProviderId;
   readonly request: NodeJS.ProcessEnv | undefined;
   readonly hostHome: string;
   readonly runtime: ArtifactProviderRuntime;
@@ -281,7 +358,7 @@ function providerProcessEnvironment(input: {
     const value = safeEnvironmentValue(process.env[key], `Artifact provider ambient ${key}`);
     if (value !== undefined) environment[key] = value;
   }
-  const providerKeys = PROVIDER_ENVIRONMENT_KEYS.claude;
+  const providerKeys = PROVIDER_ENVIRONMENT_KEYS[input.providerId];
   for (const [key, rawValue] of Object.entries(input.request ?? {})) {
     if (key === "DEZIN_DAEMON_TOKEN") {
       if (rawValue !== undefined) {
@@ -305,7 +382,7 @@ function providerProcessEnvironment(input: {
   return environment;
 }
 
-function claudeSandboxReadRoots(worktreeDir: string, runtimeRoot: string): string[] {
+function artifactSandboxReadRoots(worktreeDir: string, runtimeRoot: string): string[] {
   return [...new Set([
     worktreeDir,
     runtimeRoot,
@@ -319,6 +396,78 @@ function claudeSandboxReadRoots(worktreeDir: string, runtimeRoot: string): strin
     "/private/etc",
     resolve(dirname(process.execPath), ".."),
   ])];
+}
+
+function codeBuddyHostAuthRoots(hostHome: string): string[] {
+  return [
+    join(hostHome, ".codebuddy"),
+    join(
+      hostHome,
+      "Library",
+      "Application Support",
+      "CodeBuddyExtension",
+      "Data",
+      "Public",
+      "auth",
+    ),
+  ];
+}
+
+function codeBuddyAbsolutePermissionPath(value: string): string {
+  return `//${value.replace(/^\/+/, "")}`;
+}
+
+function seatbeltString(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
+}
+
+function seatbeltSubpaths(paths: readonly string[]): string {
+  return paths.map((path) => `(subpath ${seatbeltString(path)})`).join(" ");
+}
+
+/**
+ * CodeBuddy's own Bash sandbox has no allowRead setting and merges filesystem
+ * arrays with user defaults. The outer macOS Seatbelt profile therefore owns
+ * the exact provider-process read/write boundary; CodeBuddy's documented
+ * sandbox remains enabled inside it to isolate Bash networking and protect the
+ * CLI authentication directory from agent commands.
+ */
+export function buildProductionArtifactCodeBuddySeatbeltProfile(
+  input: ProductionArtifactCodeBuddySeatbeltInput,
+): string {
+  const packageRoot = resolve(dirname(input.executable), "..");
+  const authRoots = codeBuddyHostAuthRoots(input.hostHome);
+  const readRoots = [...new Set([
+    ...artifactSandboxReadRoots(input.worktreeDir, input.runtimeRoot),
+    input.nodeRuntimeRoot,
+    packageRoot,
+    ...authRoots,
+    "/dev",
+    "/private/var/db",
+    "/private/var/run",
+  ])];
+  const writeRoots = [...new Set([
+    input.worktreeDir,
+    input.runtimeRoot,
+    ...authRoots,
+    "/dev",
+  ])];
+  return [
+    "(version 1)",
+    "(allow default)",
+    // CodeBuddy and Node read undocumented system/runtime files while starting.
+    // Keep those available, but block user, temporary, and mounted-volume data;
+    // exact provider roots below are more-specific re-opens. Metadata stays
+    // visible so /usr/bin/env and Node can resolve ancestor directories.
+    '(deny file-read-data (subpath "/Users"))',
+    '(deny file-read-data (subpath "/private/tmp"))',
+    '(deny file-read-data (subpath "/tmp"))',
+    '(deny file-read-data (subpath "/Volumes"))',
+    `(allow file-read-data ${seatbeltSubpaths(readRoots)})`,
+    "(deny file-write*)",
+    `(allow file-write* ${seatbeltSubpaths(writeRoots)})`,
+    `(deny file-write* (subpath ${seatbeltString(join(input.worktreeDir, ".git"))}))`,
+  ].join("\n");
 }
 
 export function buildProductionArtifactClaudeArgs(
@@ -340,7 +489,7 @@ export function buildProductionArtifactClaudeArgs(
         // harmless cwd-marker EPERM to Bash results under a root read deny;
         // allowing that shared temp root would expose other Claude sessions.
         denyRead: ["/"],
-        allowRead: claudeSandboxReadRoots(input.worktreeDir, input.runtimeRoot),
+        allowRead: artifactSandboxReadRoots(input.worktreeDir, input.runtimeRoot),
         // Claude's sandbox already grants write only to cwd and its private
         // session temp. A root deny cannot be re-opened by allowWrite, so keep
         // the default cwd boundary and narrow Git metadata explicitly.
@@ -381,62 +530,102 @@ export function buildProductionArtifactClaudeArgs(
   return args;
 }
 
-class ProductionArtifactClaudeRunner extends ClaudeCodeRunner {
-  readonly #worktreeDir: string;
-  readonly #runtimeRoot: string;
-  readonly #model: string | undefined;
-
-  constructor(options: {
-    readonly command: string;
-    readonly model?: string;
-    readonly spawner: ProcessSpawner;
-    readonly worktreeDir: string;
-    readonly runtimeRoot: string;
-    readonly enforceArtifactUpdate: boolean;
-  }) {
-    super({
-      command: options.command,
-      model: options.model,
-      spawner: options.spawner,
-      enforceArtifactUpdate: options.enforceArtifactUpdate,
-    });
-    this.#worktreeDir = options.worktreeDir;
-    this.#runtimeRoot = options.runtimeRoot;
-    this.#model = options.model;
-  }
-
-  override buildArgs(systemPrompt: string): string[] {
-    return buildProductionArtifactClaudeArgs({
-      worktreeDir: this.#worktreeDir,
-      runtimeRoot: this.#runtimeRoot,
-      systemPrompt,
-      model: this.#model,
-    });
-  }
+export function buildProductionArtifactCodeBuddyArgs(
+  input: ProductionArtifactCodeBuddyArgsInput,
+): string[] {
+  const authRoots = codeBuddyHostAuthRoots(input.hostHome);
+  const authPermissionRules = authRoots.flatMap((path) => {
+    const absolute = `${codeBuddyAbsolutePermissionPath(path)}/**`;
+    return [`Read(${absolute})`, `Edit(${absolute})`];
+  });
+  const worktreePermission = `${codeBuddyAbsolutePermissionPath(input.worktreeDir)}/**`;
+  const gitPermission = `${codeBuddyAbsolutePermissionPath(join(input.worktreeDir, ".git"))}/**`;
+  const settings = {
+    permissions: {
+      allow: [
+        `Read(${worktreePermission})`,
+        `Edit(${worktreePermission})`,
+        "Glob",
+        "Grep",
+      ],
+      ask: [],
+      deny: [
+        ...CODEBUDDY_DENIED_TOOLS,
+        ...authPermissionRules,
+        `Edit(${gitPermission})`,
+      ],
+    },
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      excludedCommands: [],
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        denyRead: authRoots,
+        allowWrite: [input.worktreeDir, input.runtimeRoot],
+        denyWrite: [
+          join(input.worktreeDir, ".git"),
+          ...authRoots,
+        ],
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: ["*"],
+        allowUnixSockets: [],
+        allowLocalBinding: false,
+      },
+    },
+  };
+  const args = [
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--setting-sources", "",
+    "--settings", JSON.stringify(settings),
+    "--permission-mode", "dontAsk",
+    "--tools", CODEBUDDY_ARTIFACT_TOOLS,
+    "--disallowedTools", CODEBUDDY_DENIED_TOOLS.join(","),
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--no-session-persistence",
+    "--system-prompt", input.systemPrompt,
+  ];
+  if (input.model) args.push("--model", input.model);
+  return args;
 }
 
 class ExactArtifactProviderSpawner implements ProcessSpawner {
   readonly #delegate: ProcessSpawner;
+  readonly #providerId: SupportedArtifactProviderId;
   readonly #executable: string;
   readonly #worktreeDir: string;
   readonly #hostHome: string;
   readonly #runtime: ArtifactProviderRuntime;
   readonly #claudeConfigDir: string | undefined;
+  readonly #sandboxExecutable: string | undefined;
+  readonly #sandboxProfile: string | undefined;
 
   constructor(input: {
     readonly delegate: ProcessSpawner;
+    readonly providerId: SupportedArtifactProviderId;
     readonly executable: string;
     readonly worktreeDir: string;
     readonly hostHome: string;
     readonly runtime: ArtifactProviderRuntime;
     readonly claudeConfigDir?: string;
+    readonly sandboxExecutable?: string;
+    readonly sandboxProfile?: string;
   }) {
     this.#delegate = input.delegate;
+    this.#providerId = input.providerId;
     this.#executable = input.executable;
     this.#worktreeDir = input.worktreeDir;
     this.#hostHome = input.hostHome;
     this.#runtime = input.runtime;
     this.#claudeConfigDir = input.claudeConfigDir;
+    this.#sandboxExecutable = input.sandboxExecutable;
+    this.#sandboxProfile = input.sandboxProfile;
   }
 
   async run(input: SpawnInput) {
@@ -452,21 +641,38 @@ class ExactArtifactProviderSpawner implements ProcessSpawner {
       );
     }
     const environment = providerProcessEnvironment({
+      providerId: this.#providerId,
       request: input.env,
       hostHome: this.#hostHome,
       runtime: this.#runtime,
       claudeConfigDir: this.#claudeConfigDir,
     });
+    const sandboxed = this.#sandboxExecutable !== undefined;
+    if (sandboxed && !this.#sandboxProfile) {
+      throw new ProductionArtifactProviderSandboxError(
+        "Artifact provider sandbox profile is unavailable",
+      );
+    }
     return this.#delegate.run({
       ...input,
-      command: this.#executable,
+      ...(this.#providerId === "codebuddy"
+        ? {
+            timeoutMs: input.timeoutMs === undefined || input.timeoutMs <= 0
+              ? CODEBUDDY_ARTIFACT_TURN_TIMEOUT_MS
+              : Math.min(input.timeoutMs, CODEBUDDY_ARTIFACT_TURN_TIMEOUT_MS),
+          }
+        : {}),
+      command: this.#sandboxExecutable ?? this.#executable,
+      args: sandboxed
+        ? ["-p", this.#sandboxProfile!, this.#executable, ...input.args]
+        : input.args,
       cwd: this.#worktreeDir,
       env: environment,
     });
   }
 }
 
-function supportedProvider(providerId: string, command: string): SupportedArtifactProviderId {
+function supportedProvider(providerId: string, command: string): SupportedArtifactProvider {
   if (providerId === "codex") {
     throw new ProductionArtifactProviderSandboxError(
       "Codex Artifact generation is disabled: its /tmp-granting tool sandbox cannot be safely nested inside the required provider-level macOS sandbox",
@@ -477,18 +683,18 @@ function supportedProvider(providerId: string, command: string): SupportedArtifa
       "Gemini Artifact generation is unsupported because its installed sandbox cannot confine workspace reads",
     );
   }
-  if (providerId !== "claude") {
+  if (providerId !== "claude" && providerId !== "codebuddy") {
     throw new ProductionArtifactProviderSandboxError(
       `Artifact provider ${providerId || "(empty)"} is unsupported by the production workspace sandbox`,
     );
   }
-  const commandProvider = getProvider(command)?.id;
-  if (commandProvider !== providerId) {
+  const commandProvider = getProvider(command);
+  if (commandProvider?.id !== providerId) {
     throw new ProductionArtifactProviderSandboxError(
       `Artifact provider command mismatch: ${providerId} cannot execute ${command}`,
     );
   }
-  return providerId;
+  return commandProvider as SupportedArtifactProvider;
 }
 
 /**
@@ -500,34 +706,75 @@ export function createProductionArtifactProviderRunner(
   input: ProductionArtifactProviderRunnerInput,
   dependencies: ProductionArtifactProviderSandboxDependencies = {},
 ): AgentRunner {
-  const providerId = supportedProvider(input.providerId, input.command);
+  const provider = supportedProvider(input.providerId, input.command);
+  const providerId = provider.id;
   const worktreeDir = exactPlainDirectory(input.worktreeDir, "Artifact provider worktree");
   const hostHome = canonicalHostHome(dependencies.hostHome);
   const executable = dependencies.resolveExecutable?.(providerId, input.command)
     ?? resolveTrustedExecutable(providerId, input.command, hostHome);
   const exactExecutable = exactPlainFile(executable, "Artifact provider executable");
   const runtime = createArtifactProviderRuntime(worktreeDir, dependencies.runtimeRoot);
-  const claudeConfigDir = canonicalOptionalDirectory(
-    dependencies.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR,
-    "Claude authentication directory",
-  );
+  const claudeConfigDir = providerId === "claude"
+    ? canonicalOptionalDirectory(
+        dependencies.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR,
+        "Claude authentication directory",
+      )
+    : undefined;
+  const platform = dependencies.platform ?? process.platform;
+  if (providerId === "codebuddy" && platform !== "darwin") {
+    throw new ProductionArtifactProviderSandboxError(
+      "CodeBuddy Artifact generation requires the exact macOS Seatbelt provider boundary",
+    );
+  }
+  const sandboxExecutable = providerId === "codebuddy"
+    ? exactPlainFile(
+        dependencies.sandboxExecutable ?? "/usr/bin/sandbox-exec",
+        "CodeBuddy macOS sandbox executable",
+      )
+    : undefined;
+  const sandboxProfile = providerId === "codebuddy"
+    ? buildProductionArtifactCodeBuddySeatbeltProfile({
+        worktreeDir,
+        runtimeRoot: runtime.root,
+        hostHome,
+        executable: exactExecutable,
+        nodeRuntimeRoot: resolve(dirname(process.execPath), ".."),
+      })
+    : undefined;
   const delegate = dependencies.spawner ?? new NodeSpawner({ inheritEnvironment: false });
   const spawner = new ExactArtifactProviderSpawner({
     delegate,
+    providerId,
     executable: exactExecutable,
     worktreeDir,
     hostHome,
     runtime,
     claudeConfigDir,
+    sandboxExecutable,
+    sandboxProfile,
   });
   const enforceArtifactUpdate = input.enforceArtifactUpdate ?? false;
-  return new ProductionArtifactClaudeRunner({
+  return provider.createRunner({
     command: exactExecutable,
     model: input.model,
     spawner,
-    worktreeDir,
-    runtimeRoot: runtime.root,
     enforceArtifactUpdate,
+    buildArgs: (systemPrompt) => (
+      providerId === "codebuddy"
+        ? buildProductionArtifactCodeBuddyArgs({
+            worktreeDir,
+            runtimeRoot: runtime.root,
+            hostHome,
+            systemPrompt,
+            model: input.model,
+          })
+        : buildProductionArtifactClaudeArgs({
+            worktreeDir,
+            runtimeRoot: runtime.root,
+            systemPrompt,
+            model: input.model,
+          })
+    ),
   });
 }
 

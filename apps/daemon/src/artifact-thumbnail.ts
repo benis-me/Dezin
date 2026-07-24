@@ -21,6 +21,13 @@ const DEFAULT_CACHE_BUDGET_BYTES = 512 * 1024 * 1024;
 const LOCK_WAIT_TIMEOUT_MS = 120_000;
 const LOCK_STALE_AFTER_MS = 30_000;
 const MAX_LOCK_BYTES = 4 * 1024;
+const LEGACY_ARTBOARD_FRAME: RenderFrameSpec = Object.freeze({
+  id: "legacy-artboard",
+  name: "Legacy artboard",
+  width: 1440,
+  height: 900,
+  background: "#ffffff",
+});
 const flights = new Map<string, ThumbnailFlight>();
 const CONTEXT_DEPENDENT_BACKGROUND_TOKEN = /(?:^|[^a-z0-9_-])(?:currentcolor|inherit|initial|revert|revert-layer|unset|accentcolor|accentcolortext|activetext|buttonborder|buttonface|buttontext|canvas|canvastext|field|fieldtext|graytext|highlight|highlighttext|linktext|mark|marktext|selecteditem|selecteditemtext|visitedtext|activeborder|activecaption|appworkspace|background|buttonhighlight|buttonshadow|captiontext|inactiveborder|inactivecaption|inactivecaptiontext|infobackground|infotext|menu|menutext|scrollbar|threeddarkshadow|threedface|threedhighlight|threedlightshadow|threedshadow|window|windowframe|windowtext|-webkit-focus-ring-color)(?:$|[^a-z0-9_-])/i;
 const CONTEXT_DEPENDENT_BACKGROUND_FUNCTION = /(?:^|[^a-z0-9_-])light-dark\s*\(/i;
@@ -294,9 +301,26 @@ function requiredRenderTarget(
   renderSpec: Record<string, unknown>,
   requiredFrameId: string | undefined,
   requiredStateKey: string | null | undefined,
+  allowLegacyArtboard: boolean,
 ): { frame: RenderFrameSpec; stateKey: string | null } {
-  if (!Array.isArray(renderSpec.frames) || renderSpec.frames.length === 0 || renderSpec.frames.length > 64) {
+  if (!Array.isArray(renderSpec.frames) || renderSpec.frames.length > 64) {
     throw new ArtifactThumbnailValidationError("Artifact RenderSpec must declare between 1 and 64 frames");
+  }
+  if (renderSpec.frames.length === 0) {
+    if (!allowLegacyArtboard) {
+      throw new ArtifactThumbnailValidationError("Artifact RenderSpec must declare between 1 and 64 frames");
+    }
+    if (requiredFrameId !== undefined && requiredFrameId !== LEGACY_ARTBOARD_FRAME.id) {
+      throw new ArtifactThumbnailValidationError(
+        `required thumbnail frame ${requiredFrameId} is not available for the legacy Artifact Revision`,
+      );
+    }
+    if (requiredStateKey !== undefined && requiredStateKey !== null) {
+      throw new ArtifactThumbnailValidationError(
+        "legacy Artifact Revision thumbnails do not declare interactive states",
+      );
+    }
+    return { frame: { ...LEGACY_ARTBOARD_FRAME }, stateKey: null };
   }
   const frames = renderSpec.frames.map(frameFrom);
   const ids = new Set<string>();
@@ -1221,7 +1245,12 @@ function resolveTarget(input: GetArtifactThumbnailInput): {
     throw new ArtifactThumbnailNotFoundError("owned immutable Artifact Revision thumbnail target was not found");
   }
   const renderSpecChecksum = stablePreviewHash("dezin-render-spec-v1", revision.renderSpec);
-  const required = requiredRenderTarget(revision.renderSpec, input.requiredFrameId, input.requiredStateKey);
+  const required = requiredRenderTarget(
+    revision.renderSpec,
+    input.requiredFrameId,
+    input.requiredStateKey,
+    revision.legacyRunId !== null,
+  );
   const descriptor = {
     version: 1 as const,
     projectId,

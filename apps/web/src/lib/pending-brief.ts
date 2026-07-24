@@ -56,6 +56,61 @@ export function takePendingModel(): string | null {
   return m;
 }
 
+export interface PendingDesignWorkspaceTurn {
+  projectId: string;
+  brief: string;
+  agentCommand?: string;
+  model?: string;
+}
+
+const PENDING_DESIGN_WORKSPACE_TURN_KEY = "dezin.pending.design-workspace-turn";
+let pendingDesignWorkspaceTurn: PendingDesignWorkspaceTurn | null = null;
+
+function storedPendingDesignWorkspaceTurn(): PendingDesignWorkspaceTurn | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PENDING_DESIGN_WORKSPACE_TURN_KEY) ?? "null") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const value = parsed as Record<string, unknown>;
+    if (typeof value.projectId !== "string" || typeof value.brief !== "string") return null;
+    if (value.agentCommand !== undefined && typeof value.agentCommand !== "string") return null;
+    if (value.model !== undefined && typeof value.model !== "string") return null;
+    return {
+      projectId: value.projectId,
+      brief: value.brief,
+      ...(typeof value.agentCommand === "string" ? { agentCommand: value.agentCommand } : {}),
+      ...(typeof value.model === "string" ? { model: value.model } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Project-scoped one-shot handoff for a newly created Standard workspace.
+ * Binding the payload after project creation prevents failed creates or unrelated
+ * project navigation from inheriting another composer's Agent selection.
+ */
+export function setPendingDesignWorkspaceTurn(value: PendingDesignWorkspaceTurn): void {
+  pendingDesignWorkspaceTurn = value;
+  try {
+    localStorage.setItem(PENDING_DESIGN_WORKSPACE_TURN_KEY, JSON.stringify(value));
+  } catch {
+    /* localStorage may be unavailable */
+  }
+}
+
+export function takePendingDesignWorkspaceTurn(projectId: string): PendingDesignWorkspaceTurn | null {
+  const value = pendingDesignWorkspaceTurn ?? storedPendingDesignWorkspaceTurn();
+  if (value?.projectId !== projectId) return null;
+  pendingDesignWorkspaceTurn = null;
+  try {
+    localStorage.removeItem(PENDING_DESIGN_WORKSPACE_TURN_KEY);
+  } catch {
+    /* localStorage may be unavailable */
+  }
+  return value;
+}
+
 /** Other projects referenced on the home composer — their artifact is uploaded as a
  *  read-only reference on the new project's first run so the agent reads the real design. */
 export interface PendingRef {

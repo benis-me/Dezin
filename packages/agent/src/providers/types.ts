@@ -7,6 +7,18 @@
 
 import type { AgentRunner } from "../types.ts";
 import type { GenericAgentConfig } from "../generic-runner.ts";
+import type { ProcessSpawner } from "../claude-runner.ts";
+
+export type AgentReadiness =
+  | { readonly status: "ready" }
+  | { readonly status: "authentication-required"; readonly reason: string }
+  | { readonly status: "verification-required"; readonly reason: string };
+
+export interface AgentReadinessProbeOptions {
+  readonly cwd?: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
 
 export interface AgentProvider {
   /** Stable id (matches the UI's logo/label keys). */
@@ -23,9 +35,18 @@ export interface AgentProvider {
   genericConfig?: GenericAgentConfig;
   /** Probe the CLI/API for its real model list (returns [] when unavailable). `deep` permits
    *  slow methods (e.g. a PTY scrape) that should only run on an explicit rescan, not at boot. */
-  discoverModels?(command: string, deep?: boolean): Promise<string[]>;
+  discoverModels?(command: string, deep?: boolean, signal?: AbortSignal): Promise<string[]>;
+  /** Verify that an installed CLI can create a local, non-generating session. Implementations
+   *  must not issue a model prompt, expose credentials, or leave a probe session behind. */
+  probeReadiness?(command: string, options?: AgentReadinessProbeOptions): Promise<AgentReadiness>;
   /** Build the generation runner. */
-  createRunner(opts: { command: string; model?: string; enforceArtifactUpdate?: boolean }): AgentRunner;
+  createRunner(opts: {
+    command: string;
+    model?: string;
+    enforceArtifactUpdate?: boolean;
+    spawner?: ProcessSpawner;
+    buildArgs?: (systemPrompt: string) => string[];
+  }): AgentRunner;
   /** Argv for a one-shot prompt that reads files in cwd (used by the image analyzer). */
   oneShotArgs(model: string | undefined, prompt: string): string[];
 }

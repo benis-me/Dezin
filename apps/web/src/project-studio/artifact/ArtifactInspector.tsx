@@ -15,6 +15,9 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
 
   const mutationDisabled = editor.mutationDisabled;
   const textMutationDisabled = mutationDisabled || !selection?.textMutationCapable;
+  const pickerReady = editor.preview.status === "ready"
+    && editor.frameState.status === "applied"
+    && editor.frameState.frameId === editor.activeFrame.id;
   return (
     <section className="artifact-inspector" aria-labelledby="artifact-inspector-title">
       <header className="artifact-inspector__header app-drag">
@@ -53,7 +56,7 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
             <p>Choose an element in the live preview. Its stable locator becomes typed Agent Context and unlocks bounded direct edits.</p>
             <button
               type="button"
-              disabled={editor.preview.status !== "ready"}
+              disabled={!pickerReady}
               onClick={editor.beginSelection}
               aria-pressed={editor.pickerActive}
               aria-label="Select an element in the preview"
@@ -65,8 +68,9 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
           <div className="artifact-selection-card">
             <div className="artifact-selection-card__title">
               <span>{selection.tag ?? "element"}</span>
-              <strong>{selection.locator.designNodeId}</strong>
+              <strong title={selection.label}>{selection.label}</strong>
             </div>
+            <code title={selection.locator.designNodeId}>{selection.locator.designNodeId}</code>
             {selection.locator.sourcePath ? <code>{selection.locator.sourcePath}</code> : null}
             {selection.locator.selector ? <p>{selection.locator.selector}</p> : null}
             {selection.mutationUnavailableReason ? (

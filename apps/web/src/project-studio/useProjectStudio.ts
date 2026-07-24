@@ -16,6 +16,7 @@ import type {
   WorkspaceResourceKind,
   WorkspaceGraphCommand,
   WorkspaceGraph,
+  WorkspaceGenerationPayload,
   WorkspaceLayout,
   WorkspaceLayoutCommand,
   WorkspaceProposal,
@@ -85,7 +86,11 @@ export interface ProjectStudioState {
   agentTurnSubmitting: boolean;
   workspaceAgentSubmitting: boolean;
   workspaceAgentError: string | null;
-  submitWorkspaceAgentPrompt: () => Promise<void>;
+  submitWorkspaceAgentPrompt: (input?: {
+    message?: string;
+    agentCommand?: string;
+    model?: string;
+  }) => Promise<void>;
   artifactAgentSubmitting: boolean;
   artifactAgentError: string | null;
   artifactAgentReceipt: ScopedAgentTurnReceipt | null;
@@ -95,6 +100,8 @@ export interface ProjectStudioState {
     baseRevisionId: string;
     selection?: SelectionRef[];
     intent?: "generate" | "edit" | "repair";
+    agentCommand?: string;
+    model?: string;
   }) => Promise<void>;
   resourceAgentSubmitting: boolean;
   resourceAgentError: string | null;
@@ -104,6 +111,8 @@ export interface ProjectStudioState {
     resourceId: string;
     baseRevisionId: string;
     intent?: "generate" | "edit" | "repair";
+    agentCommand?: string;
+    model?: string;
   }) => Promise<void>;
   selectedGraphObjectIds: string[];
   setSelectedGraphObjectIds: Dispatch<SetStateAction<string[]>>;
@@ -612,6 +621,71 @@ function isProposalEditPatchNoop(proposal: WorkspaceProposal, patch: ProposalEdi
   return fields.length === 0 || fields.every((field) => (
     JSON.stringify(patch[field]) === JSON.stringify(proposal[field])
   ));
+}
+
+function renameGeneratedArtifactPlan(
+  generation: WorkspaceProposal["generation"],
+  nodeId: string,
+  name: string,
+): WorkspaceProposal["generation"] {
+  if (generation.kind !== "workspace-generation") return generation;
+  let changed = false;
+  const artifactPlans = generation.artifactPlans.map((plan) => {
+    if (plan.nodeId !== nodeId || plan.name === name) return plan;
+    changed = true;
+    return { ...plan, name };
+  });
+  return changed ? { ...generation, artifactPlans } : generation;
+}
+
+function cascadeRevertedGenerationAddition(input: {
+  generation: WorkspaceGenerationPayload;
+  nodeId: string | null;
+  edgeIds: ReadonlySet<string>;
+}): WorkspaceGenerationPayload {
+  const removedResourceIds = new Set(input.generation.resourceOperations.flatMap((operation) => (
+    input.nodeId !== null && operation.nodeId === input.nodeId ? [operation.resourceId] : []
+  )));
+  const removedArtifactIds = new Set(input.generation.artifactPlans.flatMap((plan) => (
+    input.nodeId !== null && plan.nodeId === input.nodeId ? [plan.artifactId] : []
+  )));
+  if (removedResourceIds.size === 0 && removedArtifactIds.size === 0 && input.edgeIds.size === 0) {
+    return input.generation;
+  }
+
+  const resourceOperations = input.generation.resourceOperations
+    .filter((operation) => !removedResourceIds.has(operation.resourceId));
+  const artifactPlans = input.generation.artifactPlans
+    .filter((plan) => !removedArtifactIds.has(plan.artifactId))
+    .map((plan) => {
+      const dependsOnArtifactIds = plan.dependsOnArtifactIds
+        .filter((artifactId) => !removedArtifactIds.has(artifactId));
+      const selection = plan.researchDirectionSelection;
+      const removeSelection = selection !== undefined && removedResourceIds.has(selection.resourceId);
+      if (dependsOnArtifactIds.length === plan.dependsOnArtifactIds.length && !removeSelection) return plan;
+      if (removeSelection) {
+        const { researchDirectionSelection: _removed, ...withoutSelection } = plan;
+        return { ...withoutSelection, dependsOnArtifactIds };
+      }
+      return { ...plan, dependsOnArtifactIds };
+    });
+  const dependencyPlans = input.generation.dependencyPlans.filter((dependency) => (
+    !removedArtifactIds.has(dependency.ownerArtifactId)
+    && (dependency.kind !== "component-instance" || !removedArtifactIds.has(dependency.componentArtifactId))
+    && (dependency.kind !== "resource" || !removedResourceIds.has(dependency.resourceId))
+  ));
+  const prototypeIntents = input.generation.prototypeIntents.filter((intent) => (
+    !input.edgeIds.has(intent.edgeId)
+    && !removedArtifactIds.has(intent.sourceArtifactId)
+    && !removedArtifactIds.has(intent.targetArtifactId)
+  ));
+  return {
+    ...input.generation,
+    resourceOperations,
+    artifactPlans,
+    dependencyPlans,
+    prototypeIntents,
+  };
 }
 
 export function useProjectStudio(
@@ -1153,12 +1227,14 @@ export function useProjectStudio(
 
   const submitWorkspaceAgentPromptInternal = useCallback(async (
     restoredOutbox: Extract<AgentTurnOutbox, { kind: "workspace" }> | null = null,
+    input: { message?: string; agentCommand?: string; model?: string } = {},
   ): Promise<void> => {
     if (activeAgentTurnRef.current !== null || artifactAgentTargetIdRef.current !== null
       || resourceAgentTargetIdRef.current !== null) return;
     const scopeKey = WORKSPACE_AGENT_SCOPE;
     const session = readCachedAgentSession(scopeKey);
-    const message = (restoredOutbox?.request.message ?? agentDrafts[scopeKey] ?? session.draft).trim();
+    const message = (restoredOutbox?.request.message ?? input.message
+      ?? agentDrafts[scopeKey] ?? session.draft).trim();
     if (!message) return;
     let ready: ReadyLoadState;
     let requestFacts: Extract<AgentTurnOutbox, { kind: "workspace" }>["request"];
@@ -1170,6 +1246,8 @@ export function useProjectStudio(
       requestFacts = restoredOutbox?.request ?? {
         turnId: "",
         message,
+        ...(input.agentCommand ? { agentCommand: input.agentCommand } : {}),
+        ...(input.model ? { model: input.model } : {}),
         explicitContext: mergeContextRefs(
           serializeDaemonOwnedComposerContext(readCachedAgentSession(scopeKey).contextItems),
           selectedContext,
@@ -1185,6 +1263,8 @@ export function useProjectStudio(
       || resourceAgentTargetIdRef.current !== null) return;
     const fingerprintFacts = {
       message: requestFacts.message,
+      agentCommand: requestFacts.agentCommand,
+      model: requestFacts.model,
       explicitContext: requestFacts.explicitContext,
       graphRevision: requestFacts.graphRevision,
       selection: requestFacts.selection ?? [],
@@ -1281,7 +1361,9 @@ export function useProjectStudio(
   }, [agentDrafts, api, commitProposalReview, projectId, replaceProposal, requireReady, selectedGraphObjectIds]);
 
   const submitWorkspaceAgentPrompt = useCallback(
-    (): Promise<void> => submitWorkspaceAgentPromptInternal(),
+    (input: { message?: string; agentCommand?: string; model?: string } = {}): Promise<void> => (
+      submitWorkspaceAgentPromptInternal(null, input)
+    ),
     [submitWorkspaceAgentPromptInternal],
   );
 
@@ -1291,6 +1373,8 @@ export function useProjectStudio(
     baseRevisionId,
     selection = [],
     intent = "edit",
+    agentCommand,
+    model,
     restoredOutbox = null,
   }: {
     scopeType: "artifact" | "resource";
@@ -1298,6 +1382,8 @@ export function useProjectStudio(
     baseRevisionId: string;
     selection?: SelectionRef[];
     intent?: "generate" | "edit" | "repair";
+    agentCommand?: string;
+    model?: string;
     restoredOutbox?: Extract<AgentTurnOutbox, { kind: "scoped" }> | null;
   }): Promise<void> => {
     const currentTargetId = scopeType === "artifact"
@@ -1323,6 +1409,8 @@ export function useProjectStudio(
         turnId: "",
         intent,
         message,
+        ...(agentCommand ? { agentCommand } : {}),
+        ...(model ? { model } : {}),
         explicitContext: serializeDaemonOwnedComposerContext(session.contextItems),
         graphRevision: ready.workspace.graph.revision,
         baseRevisionId,
@@ -1340,6 +1428,8 @@ export function useProjectStudio(
     const fingerprintFacts = {
       intent: requestFacts.intent,
       message: requestFacts.message,
+      agentCommand: requestFacts.agentCommand,
+      model: requestFacts.model,
       explicitContext: requestFacts.explicitContext,
       graphRevision: requestFacts.graphRevision,
       baseRevisionId: requestFacts.baseRevisionId,
@@ -1457,23 +1547,31 @@ export function useProjectStudio(
     baseRevisionId: string;
     selection?: SelectionRef[];
     intent?: "generate" | "edit" | "repair";
+    agentCommand?: string;
+    model?: string;
   }): Promise<void> => submitScopedAgentPrompt({
     scopeType: "artifact",
     targetId: input.artifactId,
     baseRevisionId: input.baseRevisionId,
     selection: input.selection,
     intent: input.intent,
+    agentCommand: input.agentCommand,
+    model: input.model,
   }), [submitScopedAgentPrompt]);
 
   const submitResourceAgentPrompt = useCallback((input: {
     resourceId: string;
     baseRevisionId: string;
     intent?: "generate" | "edit" | "repair";
+    agentCommand?: string;
+    model?: string;
   }): Promise<void> => submitScopedAgentPrompt({
     scopeType: "resource",
     targetId: input.resourceId,
     baseRevisionId: input.baseRevisionId,
     intent: input.intent,
+    agentCommand: input.agentCommand,
+    model: input.model,
   }), [submitScopedAgentPrompt]);
 
   useEffect(() => {
@@ -1688,7 +1786,12 @@ export function useProjectStudio(
         }
         return command;
       });
-      return changed ? { operations } : null;
+      if (!changed) return null;
+      const generation = renameGeneratedArtifactPlan(proposal.generation, latestChange.objectId, name);
+      return {
+        operations,
+        ...(generation === proposal.generation ? {} : { generation }),
+      };
     }, () => [changeValidationIdentity(change.key)])
   ), [enqueueProposalEdit, requireReady]);
 
@@ -1700,9 +1803,34 @@ export function useProjectStudio(
       const operationRefs = latestChange.operationRefs;
       const graphCommandIds = new Set(operationRefs.flatMap((ref) => ref.kind === "graph" ? [ref.commandId] : []));
       const layoutIndexes = new Set(operationRefs.flatMap((ref) => ref.kind === "layout" ? [ref.index] : []));
+      let revertedNodeId: string | null = null;
+      const revertedEdgeIds = new Set<string>();
+      if (latestChange.changeKind === "addition") {
+        if (latestChange.objectKind === "node") {
+          revertedNodeId = latestChange.objectId;
+          for (const command of proposal.operations) {
+            if (command.type !== "add-edge"
+              || (command.edge.sourceNodeId !== revertedNodeId && command.edge.targetNodeId !== revertedNodeId)) {
+              continue;
+            }
+            graphCommandIds.add(command.id);
+            revertedEdgeIds.add(command.edge.id);
+          }
+        } else if (latestChange.objectKind === "edge") {
+          revertedEdgeIds.add(latestChange.objectId);
+        }
+      }
+      const generation = proposal.generation.kind === "workspace-generation"
+        ? cascadeRevertedGenerationAddition({
+            generation: proposal.generation,
+            nodeId: revertedNodeId,
+            edgeIds: revertedEdgeIds,
+          })
+        : proposal.generation;
       return {
         operations: proposal.operations.filter((command) => !graphCommandIds.has(command.id)),
         layoutOperations: proposal.layoutOperations.filter((_command, index) => !layoutIndexes.has(index)),
+        ...(generation === proposal.generation ? {} : { generation }),
       };
     }, () => [changeValidationIdentity(change.key)]);
   }, [enqueueProposalEdit, requireReady]);

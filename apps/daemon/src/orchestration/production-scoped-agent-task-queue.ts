@@ -59,6 +59,7 @@ function scopedTurnRequestFacts(request: AgentTurnRequest): ScopedAgentTurnReque
     scopeType: request.scope.type,
     scopeId: request.scope.id,
     intent: request.intent as "generate" | "edit" | "repair",
+    agent: request.agent,
     message: request.message,
     graphRevision: request.graphRevision,
     baseRevisionId: request.baseRevisionId,
@@ -210,6 +211,7 @@ function artifactGeneration(
     : [];
   return {
     kind: "workspace-generation",
+    agent: request.agent,
     resourceOperations: resourceOperations.sort((left, right) => compareBinary(left.resourceId, right.resourceId)),
     artifactPlans: [{
       operation: "revise",
@@ -267,6 +269,7 @@ function resourceGeneration(
   }
   return {
     kind: "workspace-generation",
+    agent: request.agent,
     resourceOperations: [{
       operation: "revise",
       nodeId: node.id,

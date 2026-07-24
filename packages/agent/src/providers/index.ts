@@ -63,5 +63,9 @@ export const GENERIC_AGENTS: Record<string, GenericAgentConfig> = Object.fromEnt
   AGENT_PROVIDERS.filter((p) => p.genericConfig).map((p) => [p.id, p.genericConfig!]),
 );
 
-export type { AgentProvider } from "./types.ts";
+export type {
+  AgentProvider,
+  AgentReadiness,
+  AgentReadinessProbeOptions,
+} from "./types.ts";
 export { probeVersion, runCapture, augmentedPath, agentSpawnEnv, dedupModels, type VersionProbe } from "./cli.ts";

@@ -45,6 +45,8 @@ test("round-trips a scope-owned draft, immutable context, transcript, outbox, an
         turnId: TURN_ID,
         intent: "edit",
         message: "Refine the checkout hierarchy",
+        agentCommand: "codebuddy",
+        model: "hunyuan",
         explicitContext: [{ kind: "artifact", id: "artifact-checkout", revisionId: "revision-7" }],
         graphRevision: 4,
         baseRevisionId: "resource-revision-3",

@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import type { ConversationScope, CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
-import type { AgentRunner } from "../../../packages/agent/src/index.ts";
+import type { AgentReadiness, AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { HttpError, sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
 import { scoreTrend } from "../../../packages/quality/src/index.ts";
@@ -185,6 +185,8 @@ export interface AppDeps {
   designRegistry?: DesignRegistry;
   /** Agent availability prober for GET /api/agents (defaults to a real spawn probe). */
   agentProber?: AgentProber;
+  /** Non-generating provider readiness probe used to fail Runs before durable work starts. */
+  agentReadiness?: (command: string, signal?: AbortSignal) => Promise<AgentReadiness>;
   /** Serve the built web app from here (SPA). Defaults to apps/web/dist when it exists. */
   webDir?: string;
   /** Visual QA runner for final prototype artifacts (defaults to screenshot + geometry checks). */
@@ -481,6 +483,8 @@ async function withRequestAbortSignal(
     res.off("close", closeResponse);
   }
 }
+
+const REQUEST_LIFETIME_ONLY_SIGNAL = new AbortController().signal;
 
 const routes: Route[] = [
   {
@@ -1033,17 +1037,32 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/agents",
-    handler: (_req, res, _p, deps) => handleListAgents(res, deps),
+    handler: (req, res, _p, deps) => withRequestAbortSignal(
+      req,
+      res,
+      REQUEST_LIFETIME_ONLY_SIGNAL,
+      (signal) => handleListAgents(res, deps, signal),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/agents/rescan",
-    handler: (_req, res, _p, deps) => handleRescanAgents(res, deps),
+    handler: (req, res, _p, deps) => withRequestAbortSignal(
+      req,
+      res,
+      REQUEST_LIFETIME_ONLY_SIGNAL,
+      (signal) => handleRescanAgents(res, deps, signal),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/agents/rescan-stream",
-    handler: (_req, res, _p, deps) => handleScanAgentsStream(res, deps),
+    handler: (req, res, _p, deps) => withRequestAbortSignal(
+      req,
+      res,
+      REQUEST_LIFETIME_ONLY_SIGNAL,
+      (signal) => handleScanAgentsStream(res, deps, signal),
+    ),
   },
   {
     method: "POST",

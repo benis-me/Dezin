@@ -604,6 +604,51 @@ test("run passes BYOK settings to spawned agent turns", async () => {
   });
 });
 
+test("legacy CodeBuddy runs strip Settings and ambient provider credentials", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({
+      agentCommand: "codebuddy",
+      apiKey: "settings-key-must-not-bind",
+      apiBaseUrl: "https://settings-endpoint.example.test",
+    });
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        brief: "make a host-authenticated hero",
+        agentCommand: "codebuddy",
+      }),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    const env = runner.calls[0]?.env;
+    assert.ok(env);
+    for (const key of [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CODEBUDDY_API_KEY",
+      "CODEBUDDY_AUTH_TOKEN",
+      "CODEBUDDY_BASE_URL",
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+      "OPENAI_ORG_ID",
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "AZURE_OPENAI_API_KEY",
+      "AZURE_OPENAI_ENDPOINT",
+    ]) {
+      assert.equal(Object.hasOwn(env, key), true, key);
+      assert.equal(env[key], undefined, key);
+    }
+  });
+});
+
 test("visual QA run emits a start event before visual QA results", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   await withRunServer(
@@ -907,6 +952,49 @@ test("POST /api/runs closes the TOCTOU window: two racing runs → one starts, o
     releaseTurn();
     await winner.text();
   });
+});
+
+test("an unauthenticated selected Agent is rejected before a durable Run or Research task starts", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let readinessCalls = 0;
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: project.id,
+          brief: "three travel planner directions",
+          agentCommand: "codebuddy",
+          research: true,
+        }),
+      });
+
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), {
+        error: "Sign in to CodeBuddy, then rescan agents.",
+        code: "agent_authentication_required",
+        agentCommand: "codebuddy",
+      });
+      assert.equal(readinessCalls, 1);
+      assert.equal(runner.calls.length, 0);
+      assert.equal(store.listRuns(project.id).length, 0);
+    },
+    {
+      agentReadiness: async () => {
+        readinessCalls += 1;
+        return {
+          status: "authentication-required",
+          reason: "Sign in to CodeBuddy, then rescan agents.",
+        };
+      },
+      researchPhase: async () => {
+        throw new Error("Research must not start before Agent readiness succeeds");
+      },
+    },
+  );
 });
 
 test("exactly-once lifecycle releases the start key when registry lookup throws before createRun", async () => {
@@ -5736,6 +5824,60 @@ test("research with 2+ directions fires the direction gate and stops before buil
       });
       assert.equal(retry.status, 200, "direction-gate settlement releases the target for an immediate retry");
       assert.deepEqual(terminalEvents(await closedSse(retry, "direction retry")).map((event) => event.type), ["run-done"]);
+    },
+    { researchPhase: researchWithDirections },
+  );
+});
+
+test("direction gate persists the initial run continuation profile and reference context", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const moodboard = store.createMoodboard({ name: "Quiet atlas" });
+      const effect = store.createEffect({
+        name: "Soft reveal",
+        summary: "A restrained entrance treatment.",
+        code: "export default {}",
+      });
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: project.id,
+          brief: "make a hero",
+          research: true,
+          agentCommand: "codebuddy",
+          model: "gpt-5.5",
+          moodboardRefs: [{ id: moodboard.id, name: moodboard.name }],
+          effectRefs: [{ id: effect.id, name: effect.name }],
+        }),
+      });
+      const events = parseSse(await res.text());
+      const gate = events.find((event) => event.type === "direction-gate");
+      assert.ok(gate, "expected a direction-gate event");
+      assert.equal(gate.brief, "make a hero", "the continuation brief stays raw so references are not duplicated");
+      assert.deepEqual(gate.continuation, {
+        agentCommand: "codebuddy",
+        model: "gpt-5.5",
+        moodboardRefs: [{ id: moodboard.id, name: moodboard.name }],
+        effectRefs: [{ id: effect.id, name: effect.name }],
+        research: true,
+      });
+
+      const conversationId = events.find((event) => event.type === "run-start")!.conversationId as string;
+      const persistedGate = store
+        .listMessages(conversationId)
+        .map((message) => {
+          try {
+            return JSON.parse(message.content) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })
+        .find((message) => "directionGate" in message);
+      assert.deepEqual((persistedGate?.directionGate as { continuation?: unknown }).continuation, gate.continuation);
     },
     { researchPhase: researchWithDirections },
   );

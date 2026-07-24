@@ -50,8 +50,97 @@ test("AgentModelSelect uses the lighter bottom divider", async () => {
   );
 
   await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  expect(await screen.findByRole("dialog")).toHaveClass("overflow-y-auto");
   const rescan = await screen.findByRole("button", { name: "Rescan agents" });
   expect(rescan.parentElement?.className).toContain("border-border/60");
+});
+
+test("AgentModelSelect delegates an agent switch once without a stale model callback", async () => {
+  const user = userEvent.setup();
+  const onAgentChange = vi.fn();
+  const onModelChange = vi.fn();
+  render(
+    <AgentModelSelect
+      agents={[
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ]}
+      agent="codex"
+      model="gpt-5"
+      onAgentChange={onAgentChange}
+      onModelChange={onModelChange}
+      onRescan={vi.fn(async () => {})}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  await user.click(await screen.findByRole("button", { name: /Claude/ }));
+
+  expect(onAgentChange).toHaveBeenCalledOnce();
+  expect(onAgentChange).toHaveBeenCalledWith("claude");
+  expect(onModelChange).not.toHaveBeenCalled();
+});
+
+test("AgentModelSelect keeps unsupported agents visible but prevents selecting them", async () => {
+  const user = userEvent.setup();
+  const onAgentChange = vi.fn();
+  render(
+    <AgentModelSelect
+      agents={[
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ]}
+      agent="claude"
+      model=""
+      onAgentChange={onAgentChange}
+      onModelChange={vi.fn()}
+      onRescan={vi.fn(async () => {})}
+      agentDisabledReason={(candidate) => candidate.command === "claude"
+        ? null
+        : "Design Workspace generation requires Claude"}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  const codex = await screen.findByRole("button", { name: /Codex/ });
+  expect(codex).toBeDisabled();
+  expect(codex).toHaveAttribute("title", "Design Workspace generation requires Claude");
+  expect(codex).toHaveTextContent("Design Workspace generation requires Claude");
+  await user.click(codex);
+  expect(onAgentChange).not.toHaveBeenCalled();
+});
+
+test("AgentModelSelect keeps an installed but signed-out CodeBuddy visible with a recovery reason", async () => {
+  const user = userEvent.setup();
+  const onAgentChange = vi.fn();
+  render(
+    <AgentModelSelect
+      agents={[
+        { id: "claude", command: "claude", available: true, availability: "ready", version: "1", models: ["sonnet"] },
+        {
+          id: "codebuddy",
+          command: "codebuddy",
+          available: false,
+          availability: "authentication-required",
+          unavailableReason: "Sign in to CodeBuddy, then rescan agents.",
+          version: "2.126.0",
+          models: ["gpt-5.5"],
+        },
+      ]}
+      agent="claude"
+      model=""
+      onAgentChange={onAgentChange}
+      onModelChange={vi.fn()}
+      onRescan={vi.fn(async () => {})}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  const codebuddy = await screen.findByRole("button", { name: /CodeBuddy/ });
+  expect(codebuddy).toBeDisabled();
+  expect(codebuddy).toHaveTextContent("Sign in to CodeBuddy, then rescan agents.");
+  await user.click(codebuddy);
+  expect(onAgentChange).not.toHaveBeenCalled();
 });
 
 test("agent labels cover supported CLIs and no longer special-case Aider", () => {

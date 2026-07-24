@@ -11,7 +11,7 @@ import { computeMarkupPosition } from "./workspace-markup.ts";
 import { normalizeTranscriptMessages, runCardStackPosition } from "./workspace-transcript.tsx";
 import { sortRunsNewestFirst } from "./workspace-versions.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
-import type { PreviewLeaseInfo, RunEvent, RunSummary, VersionPreview } from "../lib/api.ts";
+import type { PreviewLeaseInfo, RunEvent, RunInput, RunSummary, VersionPreview } from "../lib/api.ts";
 import { previewBridgeNonceForSrc, previewDocumentSrc } from "../lib/preview-channel.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
@@ -729,6 +729,274 @@ test("reattaching to an in-flight run does not duplicate the research direction 
   await waitFor(() => expect(screen.getAllByTestId("research-card-direction").length).toBeGreaterThan(0));
   expect(screen.getAllByTestId("research-card-direction")).toHaveLength(1);
   expect(screen.getByTestId("research-submit-direction")).toBeTruthy();
+});
+
+test("choosing a direction resumes the newest matching gate with its frozen run context", async () => {
+  const requests: RunInput[] = [];
+  const gateDirections = [
+    { slug: "alpha", title: "Alpha", markdown: "# Alpha\n\nFocused alpha direction." },
+    { slug: "beta", title: "Beta", markdown: "# Beta\n\nFocused beta direction." },
+  ];
+  const contextRefs = [
+    {
+      kind: "inline" as const,
+      id: "brief-context",
+      title: "Launch constraints",
+      content: "Keep the launch message intact.",
+      trustLevel: "untrusted" as const,
+    },
+  ];
+  const selection = [{ kind: "element" as const, id: "hero", locator: { selector: "#hero" } }];
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m-research",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          research: {
+            produced: true,
+            complete: true,
+            report: true,
+            sources: 2,
+            assets: 2,
+            directions: gateDirections.map(({ slug, title }) => ({ slug, title, summary: `${title} summary.` })),
+          },
+        }),
+        createdAt: 1,
+      },
+      {
+        id: "m-old-gate",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          directionGate: {
+            runId: "run-old",
+            brief: "old brief",
+            directions: gateDirections,
+            continuation: { agentCommand: "claude", model: "sonnet" },
+          },
+        }),
+        createdAt: 2,
+      },
+      {
+        id: "m-new-gate",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          directionGate: {
+            runId: "run-new",
+            brief: "new brief",
+            directions: gateDirections,
+            continuation: {
+              agentCommand: "codebuddy",
+              model: "gpt-5.5",
+              moodboardRefs: [{ id: "mood-1", name: "Quiet atlas" }],
+              effectRefs: [{ id: "effect-1", name: "Soft reveal" }],
+              contextRefs,
+              selection,
+              research: false,
+            },
+          },
+        }),
+        createdAt: 3,
+      },
+    ],
+    streamRun: async function* (input): AsyncGenerator<RunEvent> {
+      requests.push(input);
+      yield { type: "run-start", runId: "run-resumed", conversationId: "c1" };
+      yield { type: "run-error", runId: "run-resumed", message: "test stop" };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const direction = (await screen.findAllByTestId("research-card-direction")).find((item) => item.textContent?.includes("Alpha"));
+  expect(direction).toBeTruthy();
+  fireEvent.click(direction!);
+  fireEvent.click(screen.getByTestId("research-submit-direction"));
+
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    projectId: "p1",
+    conversationId: "c1",
+    brief: "new brief",
+    agentCommand: "codebuddy",
+    model: "gpt-5.5",
+    moodboardRefs: [{ id: "mood-1", name: "Quiet atlas" }],
+    effectRefs: [{ id: "effect-1", name: "Soft reveal" }],
+    contextRefs,
+    selection,
+    directionSlug: "alpha",
+    research: false,
+  });
+});
+
+test("a legacy persisted direction gate without continuation metadata safely falls back to the current selector", async () => {
+  const requests: RunInput[] = [];
+  const gateDirections = [
+    { slug: "alpha", title: "Alpha", markdown: "# Alpha\n\nFocused alpha direction." },
+    { slug: "beta", title: "Beta", markdown: "# Beta\n\nFocused beta direction." },
+  ];
+  const fake = makeFakeApi({
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => ({ agentCommand: "codex", model: "gpt-5" }) as never,
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m-research",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          research: {
+            produced: true,
+            complete: true,
+            report: true,
+            sources: 2,
+            assets: 2,
+            directions: gateDirections.map(({ slug, title }) => ({ slug, title, summary: `${title} summary.` })),
+          },
+        }),
+        createdAt: 1,
+      },
+      {
+        id: "m-legacy-gate",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          directionGate: { runId: "run-legacy", brief: "legacy brief", directions: gateDirections },
+        }),
+        createdAt: 2,
+      },
+    ],
+    streamRun: async function* (input): AsyncGenerator<RunEvent> {
+      requests.push(input);
+      yield { type: "run-start", runId: "run-resumed", conversationId: "c1" };
+      yield { type: "run-error", runId: "run-resumed", message: "test stop" };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <AgentsProvider>
+        <WorkspaceScreen projectId="p1" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const direction = (await screen.findAllByTestId("research-card-direction")).find((item) => item.textContent?.includes("Alpha"));
+  expect(direction).toBeTruthy();
+  fireEvent.click(direction!);
+  fireEvent.click(screen.getByTestId("research-submit-direction"));
+
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    brief: "legacy brief",
+    agentCommand: "codex",
+    model: "gpt-5",
+    directionSlug: "alpha",
+  });
+  expect(requests[0]?.moodboardRefs).toBeUndefined();
+  expect(requests[0]?.effectRefs).toBeUndefined();
+  expect(requests[0]?.contextRefs).toBeUndefined();
+  expect(requests[0]?.selection).toBeUndefined();
+  expect(requests[0]?.research).toBeUndefined();
+});
+
+test("reattach keeps a later run's direction gate distinct from an older persisted gate", async () => {
+  const requests: RunInput[] = [];
+  let replayedLaterGate = false;
+  const gateDirections = [
+    { slug: "alpha", title: "Alpha", markdown: "# Alpha\n\nFocused alpha direction." },
+    { slug: "beta", title: "Beta", markdown: "# Beta\n\nFocused beta direction." },
+  ];
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m-research",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          research: {
+            produced: true,
+            complete: true,
+            report: true,
+            sources: 2,
+            assets: 2,
+            directions: gateDirections.map(({ slug, title }) => ({ slug, title, summary: `${title} summary.` })),
+          },
+        }),
+        createdAt: 1,
+      },
+      {
+        id: "m-old-gate",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          directionGate: {
+            runId: "run-old",
+            brief: "old brief",
+            directions: gateDirections,
+            continuation: { agentCommand: "claude", model: "sonnet" },
+          },
+        }),
+        createdAt: 2,
+      },
+    ],
+    listRuns: async () => [
+      {
+        id: "run-new",
+        conversationId: "c1",
+        status: "running",
+        score: null,
+        repairRounds: 0,
+        lintPassed: false,
+        createdAt: 3,
+        finishedAt: null,
+      },
+    ],
+    reattachRun: async function* (): AsyncGenerator<RunEvent> {
+      yield {
+        type: "direction-gate",
+        runId: "run-new",
+        brief: "new replayed brief",
+        directions: gateDirections,
+        continuation: { agentCommand: "codebuddy", model: "gpt-5.5", research: false },
+      };
+      replayedLaterGate = true;
+      yield { type: "run-cancelled", runId: "run-new", reason: "direction" };
+    },
+    streamRun: async function* (input): AsyncGenerator<RunEvent> {
+      requests.push(input);
+      yield { type: "run-start", runId: "run-resumed", conversationId: "c1" };
+      yield { type: "run-error", runId: "run-resumed", message: "test stop" };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(replayedLaterGate).toBe(true));
+  const direction = screen.getAllByTestId("research-card-direction").find((item) => item.textContent?.includes("Alpha"));
+  expect(direction).toBeTruthy();
+  fireEvent.click(direction!);
+  fireEvent.click(screen.getByTestId("research-submit-direction"));
+
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    brief: "new replayed brief",
+    agentCommand: "codebuddy",
+    model: "gpt-5.5",
+    directionSlug: "alpha",
+    research: false,
+  });
 });
 
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
@@ -1879,6 +2147,42 @@ test("/projects/new preserves the selected agent and model for the first run", a
   expect(takePendingAgent()).toBe("codex");
   expect(takePendingModel()).toBe("gpt-5");
   expect(updateSettings).toHaveBeenLastCalledWith({ agentCommand: "codex", model: "gpt-5" });
+});
+
+test("an existing workspace does not send a saved model that the restored agent no longer advertises", async () => {
+  const streamRun = vi.fn(() =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-stale-model", conversationId: "c1" };
+      yield { type: "run-done", runId: "r-stale-model", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+  const fake = makeFakeApi({
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => ({ agentCommand: "codex", model: "retired-codex-model" }) as never,
+    streamRun: streamRun as never,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <AgentsProvider>
+        <WorkspaceScreen projectId="p1" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const trigger = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(trigger).toHaveTextContent("Codex"));
+  expect(trigger).not.toHaveTextContent("retired-codex-model");
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  expect(streamRun).toHaveBeenCalledWith(
+    expect.objectContaining({ agentCommand: "codex", model: undefined }),
+    expect.anything(),
+  );
 });
 
 test("rehydrates the prior transcript and reuses the conversation on the next run", async () => {

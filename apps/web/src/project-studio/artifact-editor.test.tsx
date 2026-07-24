@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
+import type { ComponentProps } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -21,6 +23,7 @@ import type {
 import { navigate } from "../router.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { ArtifactInspector } from "./artifact/ArtifactInspector.tsx";
+import { ArtifactPreviewSurface } from "./artifact/ArtifactPreviewSurface.tsx";
 import {
   ArtifactEditorSurface,
   fitArtifactPreviewZoom,
@@ -28,6 +31,7 @@ import {
   useArtifactEditorController,
 } from "./artifact/ArtifactEditorSurface.tsx";
 import { selectVersionComparisonFrame } from "./artifact/ArtifactVersions.tsx";
+import type { ArtifactPreviewController } from "./artifact/useArtifactPreview.ts";
 import { buildPreviewFrameCommand, PREVIEW_FRAME_ACK_TIMEOUT_MS } from "./artifact/usePreviewBridge.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
@@ -539,6 +543,7 @@ function RoutedArtifactEditor({
   });
   return (
     <div className="grid h-[800px] grid-cols-[1fr_280px]">
+      <output hidden data-testid="picker-state">{editor.pickerActive ? "active" : "paused"}</output>
       <ArtifactEditorSurface
         editor={editor}
         onBack={() => {}}
@@ -567,7 +572,7 @@ async function dispatchSelection(
     .reverse()
     .find((message) => message.type === "set-frame")?.frameAttemptId;
   expect(frameAttemptId).toBeTruthy();
-  const frameId = (screen.getByLabelText("Preview frame") as HTMLSelectElement).value;
+  const frameId = screen.getByLabelText("Preview frame").getAttribute("data-frame-id") ?? "";
   await sendPreviewBridgeMessage(bridge, {
     type: "frame-applied",
     frameId,
@@ -598,7 +603,7 @@ async function dispatchLegacySelection(): Promise<void> {
     .reverse()
     .find((message) => message.type === "set-frame")?.frameAttemptId;
   expect(frameAttemptId).toBeTruthy();
-  const frameId = (screen.getByLabelText("Preview frame") as HTMLSelectElement).value;
+  const frameId = screen.getByLabelText("Preview frame").getAttribute("data-frame-id") ?? "";
   await sendPreviewBridgeMessage(bridge, {
     type: "frame-applied",
     frameId,
@@ -639,7 +644,132 @@ test("fits the active render frame to the measured stage instead of using a fixe
   expect(fitArtifactPreviewZoom(
     { id: "oversized", name: "Oversized", width: 6000, height: 4000 },
     { width: 100, height: 100 },
-  )).toBe(0.25);
+  )).toBeCloseTo(0.0167, 4);
+});
+
+test("automatic Fit can go below the manual zoom floor and keeps the stage in fitted overflow mode", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Storefront home preview");
+  const stage = document.querySelector<HTMLElement>(".artifact-stage");
+  expect(stage).not.toBeNull();
+  Object.defineProperties(stage!, {
+    clientWidth: { configurable: true, value: 100 },
+    clientHeight: { configurable: true, value: 100 },
+  });
+  const fit = screen.getByRole("button", { name: "Fit preview" });
+  const zoom = screen.getByLabelText("Preview zoom");
+  const zoomOut = screen.getByRole("button", { name: "Zoom out" });
+  const computedStyle = vi.spyOn(window, "getComputedStyle").mockReturnValue({
+    paddingLeft: "0px",
+    paddingRight: "0px",
+    paddingTop: "0px",
+    paddingBottom: "0px",
+  } as CSSStyleDeclaration);
+
+  try {
+    fireEvent.click(fit);
+    expect(zoom).toHaveTextContent("7%");
+    expect(stage).toHaveAttribute("data-preview-zoom-mode", "fitted");
+
+    fireEvent.click(zoomOut);
+    expect(zoom).toHaveTextContent("25%");
+    expect(stage).toHaveAttribute("data-preview-zoom-mode", "manual");
+  } finally {
+    computedStyle.mockRestore();
+  }
+});
+
+test("only manual previews activate stage scrolling; fitted and message stages cannot reserve a gutter", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  const stageStart = css.indexOf(".artifact-stage {");
+  const stageEnd = css.indexOf("}", stageStart);
+  const stageRule = css.slice(stageStart, stageEnd);
+  const stageOverflowRules = [...css.matchAll(/([^{}]*\.artifact-stage[^{}]*)\{([^}]*)\}/g)]
+    .filter(([, , body]) => /overflow:\s*auto/.test(body ?? ""))
+    .map(([, selector]) => selector?.trim());
+
+  expect(stageRule).toMatch(/overflow:\s*hidden/);
+  expect(stageRule).not.toMatch(/scrollbar-gutter/);
+  expect(stageOverflowRules).toEqual(['.artifact-stage[data-preview-zoom-mode="manual"]']);
+});
+
+test("keeps empty, loading, and error preview stages in fitted non-scrolling mode", () => {
+  const idlePreview = {
+    status: "idle",
+    resolved: null,
+    lease: null,
+    error: null,
+    readOnly: false,
+    retry: vi.fn(),
+  } satisfies ArtifactPreviewController;
+  const loadingPreview = {
+    ...idlePreview,
+    status: "loading",
+  } satisfies ArtifactPreviewController;
+  const errorPreview = {
+    ...idlePreview,
+    status: "error",
+    error: "Preview failed",
+  } satisfies ArtifactPreviewController;
+  const surfaceProps = {
+    frame: { id: "desktop", name: "Desktop", width: 1440, height: 900 },
+    stageRef: { current: null },
+    iframeRef: { current: null },
+    zoom: 0.65,
+    zoomMode: "manual",
+    presentation: false,
+    selection: null,
+    pickerActive: false,
+    frameState: { status: "idle", frameId: null },
+    runtimeErrors: { fatal: null, nonFatal: [] },
+    runtimeErrorIdentity: null,
+    runtimeRepairContext: null,
+    onDismissRuntimeFatal: vi.fn(),
+    onDismissRuntimeNonFatal: vi.fn(),
+    onRetryFrame: vi.fn(),
+    onPreviewLoad: vi.fn(),
+  } satisfies Omit<ComponentProps<typeof ArtifactPreviewSurface>, "artifact" | "preview">;
+  const expectFittedStage = (message: HTMLElement) => {
+    const stage = message.closest(".artifact-stage");
+    expect(stage).toHaveAttribute("data-preview-zoom-mode", "fitted");
+    expect(stage).not.toHaveAttribute("data-preview-zoom-mode", "manual");
+  };
+
+  const surface = render(
+    <ArtifactPreviewSurface artifact={null} preview={idlePreview} {...surfaceProps} />,
+  );
+  expectFittedStage(screen.getByRole("alert"));
+
+  surface.rerender(
+    <ArtifactPreviewSurface artifact={artifact} preview={loadingPreview} {...surfaceProps} />,
+  );
+  expectFittedStage(screen.getByRole("status", { name: "Preparing artifact preview" }));
+
+  surface.rerender(
+    <ArtifactPreviewSurface artifact={artifact} preview={errorPreview} {...surfaceProps} />,
+  );
+  expectFittedStage(screen.getByRole("alert", { name: "Artifact preview unavailable" }));
+});
+
+test("long selection labels stay bounded by the artifact stage instead of the outer viewport", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  const statusStart = css.indexOf(".artifact-stage__status {");
+  const statusEnd = css.indexOf("}", statusStart);
+  const statusRule = css.slice(statusStart, statusEnd);
+
+  expect(statusRule).toMatch(/max-width:\s*min\(420px,\s*calc\(100%\s*-\s*36px\)\)/);
+  expect(statusRule).toMatch(/min-width:\s*0/);
+  expect(statusRule).toMatch(/overflow-wrap:\s*anywhere/);
+  expect(statusRule).not.toContain("100vw");
 });
 
 test("keeps the preview frame selector available in the narrow editor toolbar", () => {
@@ -649,6 +779,45 @@ test("keeps the preview frame selector available in the narrow editor toolbar", 
   const narrowRules = css.slice(start, end);
   expect(narrowRules).not.toContain(".artifact-frame-select,");
   expect(narrowRules).toMatch(/\.artifact-frame-select\s*\{[^}]*max-width:/s);
+});
+
+test("sizes compact header actions from the editor surface instead of the outer viewport", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  expect(css).toMatch(/\.artifact-editor\s*\{[^}]*container:\s*artifact-editor\s*\/\s*inline-size;/s);
+
+  const start = css.indexOf("@container artifact-editor (max-width: 900px)");
+  const end = css.indexOf("@media (max-width: 640px)", start);
+  const compactDesktopRules = css.slice(start, end);
+
+  expect(compactDesktopRules).not.toMatch(/\.artifact-header__controls\s*\{[^}]*overflow-x:\s*auto/s);
+  expect(compactDesktopRules).toMatch(/\.artifact-header__controls\s*\{[^}]*overflow:\s*hidden/s);
+  expect(compactDesktopRules).toMatch(/\.artifact-action__label\s*\{[^}]*display:\s*none/s);
+});
+
+test("keeps priority artifact controls visible and moves secondary tools into More at 420px", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  const start = css.indexOf("@container artifact-editor (max-width: 420px)");
+  const end = css.indexOf("@media (max-width: 640px)", start);
+  const narrowRules = css.slice(start, end);
+
+  expect(start).toBeGreaterThan(-1);
+  expect(narrowRules).toMatch(/\.artifact-tool-group--desktop,\s*\.artifact-action--secondary\s*\{[^}]*display:\s*none/s);
+  expect(narrowRules).toMatch(/\.artifact-header\s+\.artifact-more\s*\{[^}]*display:\s*flex/s);
+  expect(narrowRules).toMatch(/\.artifact-header__metadata\s*\{[^}]*display:\s*none/s);
+  expect(narrowRules).not.toMatch(/\.artifact-header__title\s*\{[^}]*display:\s*none/s);
+  expect(narrowRules).not.toMatch(/\.artifact-frame-select\s*\{[^}]*display:\s*none/s);
+  expect(narrowRules).not.toMatch(/\.artifact-action--return\s*\{[^}]*display:\s*none/s);
+  expect(narrowRules).not.toMatch(/\.artifact-action--primary\s*\{[^}]*display:\s*none/s);
+});
+
+test("keeps the decorative frame stroke out of the declared iframe viewport dimensions", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  const start = css.indexOf(".artifact-preview-frame {");
+  const end = css.indexOf("}", start);
+  const frameRule = css.slice(start, end);
+
+  expect(frameRule).toMatch(/\bborder:\s*0;/);
+  expect(frameRule).toMatch(/\binset 0 0 0 1px\b/);
 });
 
 test("keeps the preview bridge capability in the parent channel and out of the artifact iframe URL", async () => {
@@ -776,6 +945,7 @@ test("the Fit preview control applies the measured zoom to the active frame", as
 });
 
 test("switching render frames applies fixture state and background through the authenticated preview bridge", async () => {
+  const user = userEvent.setup();
   const framedRevision: ArtifactRevision = {
     ...revision,
     renderSpec: {
@@ -831,7 +1001,8 @@ test("switching render frames applies fixture state and background through the a
     protocol: 1,
   })));
 
-  fireEvent.change(screen.getByLabelText("Preview frame"), { target: { value: "compact-menu" } });
+  await user.click(screen.getByLabelText("Preview frame"));
+  await user.click(await screen.findByRole("option", { name: "Compact · menu open" }));
 
   await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
     source: "dezin-parent",
@@ -905,10 +1076,9 @@ test("the first terminal frame result wins when an applied event arrives after r
 
   await terminal("frame-applied");
   expect(screen.getByRole("status", { name: "Preview frame state" })).toHaveTextContent("State rejected");
-  expect(screen.getByRole("button", { name: "Select an element in the preview" })).toHaveAttribute(
-    "aria-pressed",
-    "false",
-  );
+  const picker = screen.getByRole("button", { name: "Select an element in the preview" });
+  expect(picker).toHaveAttribute("aria-pressed", "false");
+  expect(picker).toBeDisabled();
 });
 
 test("a missing frame ACK retries, reconnects, and exposes an operable recovery state", async () => {
@@ -1151,6 +1321,19 @@ test("enables the preview picker on load and accepts both bridge protocols only 
   );
 
   const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  const sendCurrentSelection = () => sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
+    type: "element-selected",
+    locator: {
+      designNodeId: "hero-title",
+      sourcePath: "src/Hero.tsx",
+      selector: "[data-design-node-id='hero-title']",
+    },
+    tag: "h1",
+    text: "Objects for a considered home",
+    textPreview: "Objects for a considered home",
+    textComplete: true,
+    rect: { x: 96, y: 120, w: 640, h: 72 },
+  });
   const postMessage = framePostMessageMock(frame);
   fireEvent.load(frame);
   expect(postMessage).toHaveBeenCalledWith(
@@ -1217,7 +1400,10 @@ test("enables the preview picker on load and accepts both bridge protocols only 
   expect(previewBridgeCommands(frame)).toContainEqual(expect.objectContaining({ type: "clear" }));
   expect(previewBridgeCommands(frame)).toContainEqual(expect.objectContaining({ type: "select-mode", on: false }));
 
-  await dispatchSelection();
+  await sendCurrentSelection();
+  expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Select an element in the preview" }));
+  await sendCurrentSelection();
   expect(await screen.findByText("hero-title")).toBeInTheDocument();
 
   await sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
@@ -1225,12 +1411,17 @@ test("enables the preview picker on load and accepts both bridge protocols only 
   });
   expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
 
-  await dispatchSelection();
+  await sendCurrentSelection();
+  expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Select an element in the preview" }));
+  await sendCurrentSelection();
   expect(await screen.findByText("hero-title")).toBeInTheDocument();
 
   await sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
     type: "cancel",
   });
+  expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
+  await sendCurrentSelection();
   expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Select an element in the preview" }));
   expect(latestPreviewBridgeCommand(frame, (message) => message.type === "select-mode")).toEqual(
@@ -1238,27 +1429,142 @@ test("enables the preview picker on load and accepts both bridge protocols only 
   );
 });
 
-test("presentation mode makes background Studio panels inert and restores the trigger on Escape", async () => {
+test("keeps the preview picker active while consecutive selections replace the current element", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  const bridge = await connectPreviewBridge(frame);
+  await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
+    source: "dezin-parent",
+    type: "set-frame",
+    frameAttemptId: expect.any(String),
+  })));
+  const frameAttemptId = [...bridge.commands]
+    .reverse()
+    .find((message) => message.type === "set-frame")?.frameAttemptId;
+  expect(frameAttemptId).toBeTruthy();
+  const frameId = screen.getByLabelText("Preview frame").getAttribute("data-frame-id") ?? "";
+  await sendPreviewBridgeMessage(bridge, {
+    type: "frame-applied",
+    frameId,
+    frameAttemptId,
+    reason: "applied",
+  });
+
+  await waitFor(() => expect(screen.getByTestId("picker-state")).toHaveTextContent("active"));
+  expect(bridge.commands.filter((message) => message.type === "select-mode" && message.on === true)).toHaveLength(1);
+
+  await sendPreviewBridgeMessage(bridge, {
+    type: "element-selected",
+    locator: {
+      designNodeId: "hero-title",
+      sourcePath: "src/Hero.tsx",
+      selector: "[data-design-node-id='hero-title']",
+    },
+    tag: "h1",
+    text: "First selection",
+    textPreview: "First selection",
+    textComplete: true,
+    rect: { x: 96, y: 120, w: 640, h: 72 },
+  });
+  expect(await screen.findByText("hero-title")).toBeInTheDocument();
+  expect(screen.getByTestId("picker-state")).toHaveTextContent("active");
+
+  await sendPreviewBridgeMessage(bridge, {
+    type: "element-selected",
+    locator: {
+      designNodeId: "secondary-title",
+      sourcePath: "src/Secondary.tsx",
+      selector: "[data-design-node-id='secondary-title']",
+    },
+    tag: "h2",
+    text: "Second selection",
+    textPreview: "Second selection",
+    textComplete: true,
+    rect: { x: 96, y: 240, w: 480, h: 56 },
+  });
+  expect(await screen.findByText("secondary-title")).toBeInTheDocument();
+  expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
+  expect(screen.getByTestId("picker-state")).toHaveTextContent("active");
+  expect(bridge.commands.filter((message) => message.type === "select-mode" && message.on === true)).toHaveLength(1);
+
+  const fixedNow = Date.now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+  for (let index = 0; index < 30; index += 1) {
+    await sendPreviewBridgeMessage(bridge, {
+      type: "element-selected",
+      locator: {
+        designNodeId: `flood-${index}`,
+        sourcePath: "src/Flood.tsx",
+        selector: `[data-design-node-id='flood-${index}']`,
+      },
+      tag: "div",
+      text: `Flood ${index}`,
+      textPreview: `Flood ${index}`,
+      textComplete: true,
+      rect: { x: 0, y: index, w: 100, h: 20 },
+    });
+  }
+  clock.mockRestore();
+  expect(await screen.findByText("flood-21")).toBeInTheDocument();
+  expect(screen.queryByText("flood-29")).not.toBeInTheDocument();
+});
+
+test("presentation mode suspends editing overlays and the picker until its visible exit restores Studio", async () => {
   render(
     <ApiProvider client={editorApi()}>
       <App />
     </ApiProvider>,
   );
 
-  await screen.findByTitle("Storefront home preview");
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  await dispatchSelection();
+  const bridge = latestPreviewBridgeHarness(frame);
   const agent = screen.getByRole("complementary", { name: "Artifact Agent" });
   const inspector = screen.getByRole("complementary", { name: "Inspector" });
+  expect(screen.getByText("1440 × 900")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Preview frame state" })).toBeInTheDocument();
+  expect(screen.getByText("Selected · Objects for a considered home")).toBeInTheDocument();
+  expect(screen.getByText("hero-title")).toBeInTheDocument();
+
   const present = screen.getByRole("button", { name: "Present" });
   present.focus();
   fireEvent.click(present);
 
   expect(agent).toHaveAttribute("inert");
   expect(inspector).toHaveAttribute("inert");
-  expect(screen.getByRole("button", { name: "Exit present" })).toHaveFocus();
+  await waitFor(() => expect(latestPreviewBridgeCommand(
+    frame,
+    (message) => message.type === "select-mode",
+  )).toEqual(expect.objectContaining({ type: "select-mode", on: false })));
+  expect(screen.queryByText("1440 × 900")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "Preview frame state" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Selected · Objects for a considered home")).not.toBeInTheDocument();
+  expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
 
-  fireEvent.keyDown(window, { key: "Escape" });
+  const exitPresent = screen.getByRole("button", { name: "Exit present" });
+  expect(exitPresent).toHaveFocus();
+  fireEvent.click(exitPresent);
+
+  await waitFor(() => expect(latestPreviewBridgeCommand(
+    frame,
+    (message) => message.type === "select-mode",
+  )).toEqual(expect.objectContaining({ type: "select-mode", on: true })));
+  expect(bridge.commands).toContainEqual(expect.objectContaining({ type: "select-mode", on: false }));
   expect(agent).not.toHaveAttribute("inert");
   expect(inspector).not.toHaveAttribute("inert");
+  expect(screen.getByText("1440 × 900")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Preview frame state" })).toBeInTheDocument();
+  expect(screen.getByText("Picker active · choose an element in the preview")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Present" })).toHaveFocus();
 });
 
@@ -2059,6 +2365,18 @@ test("loads immutable Artifact history only when requested and pages older Revis
   expect(within(versionsDialog).getByText(/remain unassessed until validation runs again/i)).toBeInTheDocument();
   expect(within(versionsDialog).getByText("Revision 4")).toBeInTheDocument();
   expect(within(versionsDialog).getByText("Head")).toBeInTheDocument();
+  expect(versionsDialog.querySelector(".artifact-versions")).toHaveAttribute("data-history-density", "compact");
+  expect(within(versionsDialog).getByRole("list", {
+    name: "Saved revision history, 1 revision",
+  })).toBeInTheDocument();
+  expect(within(versionsDialog).queryByRole("region", {
+    name: "Scrollable revision history",
+  })).not.toBeInTheDocument();
+  expect(within(versionsDialog).getByRole("group", {
+    name: "Actions for Revision 4 on Main",
+  })).toContainElement(within(versionsDialog).getByRole("button", {
+    name: "Fork a track from Revision 4 on Main",
+  }));
 
   fireEvent.click(screen.getByRole("button", { name: "Load older revisions" }));
   await waitFor(() => expect(listArtifactRevisionHistory).toHaveBeenLastCalledWith(
@@ -2067,6 +2385,40 @@ test("loads immutable Artifact history only when requested and pages older Revis
     { limit: 20, cursor: "older-page" },
   ));
   expect(await screen.findByText("Revision 3")).toBeInTheDocument();
+});
+
+test("marks long Artifact history as a bounded keyboard-scrollable region", async () => {
+  const items = Array.from({ length: 8 }, (_, index) => ({
+    ...revision,
+    id: index === 0 ? revision.id : `revision-history-${index}`,
+    sequence: 8 - index,
+    parentRevisionId: index === 7 ? null : `revision-history-${index + 1}`,
+    createdAt: revision.createdAt - index,
+  }));
+  const listArtifactRevisionHistory = vi.fn(async () => ({ items, nextCursor: null }));
+  render(
+    <ApiProvider client={editorApi({ listArtifactRevisionHistory })}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+
+  const versionsDialog = await screen.findByRole("dialog", { name: "Artifact versions" });
+  await waitFor(() => expect(within(versionsDialog).getByText("Revision 8")).toBeInTheDocument());
+  expect(versionsDialog.querySelector(".artifact-versions")).toHaveAttribute("data-history-density", "scrolling");
+  expect(within(versionsDialog).getByRole("list", {
+    name: "Saved revision history, 8 revisions",
+  })).toBeInTheDocument();
+  expect(within(versionsDialog).getByRole("region", {
+    name: "Scrollable revision history",
+  })).toHaveAttribute("tabindex", "0");
 });
 
 test("hydrates a deeply paged pinned Revision by identity before comparing it with Head", async () => {

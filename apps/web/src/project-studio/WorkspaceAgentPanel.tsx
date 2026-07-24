@@ -1,12 +1,15 @@
-import { ArrowUp, LoaderCircle, MessageSquareText } from "lucide-react";
+import { ArrowUp, ChevronLeft, LoaderCircle, MessageSquareText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import {
   AgentComposerContextCards,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
+import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
-import type { EffectCard, Moodboard } from "../lib/api.ts";
+import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
+import { Button } from "../components/ui/index.ts";
+import type { AgentInfo, DesignSystemCard, EffectCard, Moodboard } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import type { AgentTranscriptEntry } from "./scoped-agent-session.ts";
 
@@ -14,6 +17,8 @@ const NOOP_CONTEXT_CHANGE = (_items: AgentComposerContextItem[]) => {};
 const NOOP_CONTEXT_REMOVE = (_id: string) => {};
 
 export function WorkspaceAgentPanel({
+  projectName,
+  onBackHome,
   draft,
   onDraftChange,
   contextLabel,
@@ -39,7 +44,21 @@ export function WorkspaceAgentPanel({
   onReferenceEffect,
   workspaceReferences = [],
   onReferenceWorkspaceItem,
+  agents = [],
+  agent = "",
+  model = "",
+  onAgentChange,
+  onModelChange,
+  onRescanAgents,
+  agentDisabledReason,
+  submissionBlockedReason = null,
+  submissionBlockedPending = false,
+  designSystems = [],
+  designSystemId = "",
+  onDesignSystemChange,
 }: {
+  projectName?: string;
+  onBackHome?: () => void;
   draft: string;
   onDraftChange: (value: string) => void;
   contextLabel: string;
@@ -65,8 +84,27 @@ export function WorkspaceAgentPanel({
   onReferenceEffect?: (effect: EffectCard) => void;
   workspaceReferences?: Array<{ id: string; label: string; detail?: string }>;
   onReferenceWorkspaceItem?: (id: string) => void;
+  agents?: AgentInfo[];
+  agent?: string;
+  model?: string;
+  onAgentChange?: (command: string) => void;
+  onModelChange?: (model: string) => void;
+  onRescanAgents?: () => Promise<void>;
+  agentDisabledReason?: (agent: AgentInfo) => string | null;
+  submissionBlockedReason?: string | null;
+  submissionBlockedPending?: boolean;
+  designSystems?: DesignSystemCard[];
+  designSystemId?: string;
+  onDesignSystemChange?: (id: string) => void;
 }) {
-  const canSubmit = onSubmit !== undefined && draft.trim().length > 0 && !submitting && !attaching;
+  const visibleMessage = submissionBlockedReason ?? error;
+  const messageIsError = !submissionBlockedPending && visibleMessage !== null;
+  const messageId = submissionBlockedPending ? "workspace-agent-status" : "workspace-agent-error";
+  const canSubmit = onSubmit !== undefined
+    && draft.trim().length > 0
+    && !submitting
+    && !attaching
+    && submissionBlockedReason === null;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
@@ -83,8 +121,21 @@ export function WorkspaceAgentPanel({
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-labelledby="workspace-agent-title">
-      <header className="app-drag titlebar-pad-left flex h-11 shrink-0 items-center border-b border-border px-3.5">
-        <div className="min-w-0">
+      <header className="app-drag titlebar-pad-left flex h-12 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+        {onBackHome ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="app-no-drag min-w-0 max-w-[58%] justify-start gap-1.5 px-1.5"
+            aria-label="Back to projects"
+            onClick={onBackHome}
+          >
+            <ChevronLeft aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{projectName ?? "Projects"}</span>
+          </Button>
+        ) : null}
+        <div className="min-w-0 flex-1 text-right">
           <h2 id="workspace-agent-title" className="truncate text-xs font-medium tracking-[-0.01em] text-foreground">
             {title}
           </h2>
@@ -183,11 +234,21 @@ export function WorkspaceAgentPanel({
               ariaLabel="Selected Agent Context"
               className="border-border/60 px-2.5 pt-2.5"
             />
+            {onDesignSystemChange ? (
+              <div className="flex min-h-9 items-center border-b border-border/60 px-2 py-1">
+                <DesignSystemSelect
+                  compact
+                  systems={designSystems}
+                  value={designSystemId}
+                  onChange={onDesignSystemChange}
+                />
+              </div>
+            ) : null}
             <textarea
               id="workspace-agent-draft"
               aria-label={draftLabel}
-              aria-describedby={error ? "workspace-agent-error" : undefined}
-              aria-invalid={error ? true : undefined}
+              aria-describedby={visibleMessage ? messageId : undefined}
+              aria-invalid={messageIsError ? true : undefined}
               value={draft}
               onChange={(event) => onDraftChange(event.target.value)}
               onKeyDown={(event) => {
@@ -216,8 +277,21 @@ export function WorkspaceAgentPanel({
                     allowFigImport={false}
                   />
                 ) : null}
-                <span className="truncate text-[10px] text-muted-foreground">Project context</span>
-                <span className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{scopeLabel}</span>
+                {onAgentChange && onModelChange && onRescanAgents ? (
+                  <AgentModelSelect
+                    agents={agents}
+                    agent={agent}
+                    model={model}
+                    onAgentChange={onAgentChange}
+                    onModelChange={onModelChange}
+                    onRescan={onRescanAgents}
+                    agentDisabledReason={agentDisabledReason}
+                    dropUp
+                  />
+                ) : (
+                  <span className="truncate text-[10px] text-muted-foreground">Project context</span>
+                )}
+                <span className="hidden rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground min-[300px]:inline">{scopeLabel}</span>
               </div>
               {onSubmit ? (
                 <button
@@ -233,9 +307,16 @@ export function WorkspaceAgentPanel({
               ) : null}
             </div>
           </div>
-          {error ? (
-            <p id="workspace-agent-error" role="alert" className="mt-1.5 px-1 text-[10px] leading-4 text-destructive">
-              {error}
+          {visibleMessage ? (
+            <p
+              id={messageId}
+              role={submissionBlockedPending ? "status" : "alert"}
+              className={cn(
+                "mt-1.5 px-1 text-[10px] leading-4",
+                submissionBlockedPending ? "text-muted-foreground" : "text-destructive",
+              )}
+            >
+              {visibleMessage}
             </p>
           ) : submitting || attaching ? (
             <p role="status" aria-label={`${title} activity`} aria-live="polite" className="mt-1.5 px-1 text-[10px] leading-4 text-muted-foreground">

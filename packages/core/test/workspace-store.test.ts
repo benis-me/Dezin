@@ -305,6 +305,7 @@ function workspaceGraphChecksum(nodesJson: string, edgesJson: string): string {
 function emptyWorkspaceGenerationPayload() {
   return {
     kind: "workspace-generation" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -6698,6 +6699,24 @@ test("legacy Standard migration preserves Variant and Run aliases with per-Track
   assert.equal(revisionA2.parentRevisionId, revisionA1.id);
   assert.deepEqual(revisionA1.quality, { state: "unassessed", score: null, findings: [] });
   assert.equal(revisionA1.producedByRunId, null);
+  const artifactId = first.artifacts[0]!.id;
+  assert.deepEqual(
+    store.workspace.listPublishedRevisions(project.id, artifactId)
+      .map((revision) => revision.legacyRunId)
+      .sort(),
+    runs.map((run) => run.id).sort(),
+    "verified legacy Runs remain visible as immutable saved Revisions",
+  );
+  assert.deepEqual(
+    store.workspace.listArtifactRevisionHistoryPage(project.id, artifactId, { limit: 20 }).items
+      .map((revision) => revision.legacyRunId)
+      .sort(),
+    runs.map((run) => run.id).sort(),
+    "legacy Revision history must not collapse to the active Snapshot Head",
+  );
+  for (const revision of first.revisions) {
+    assert.equal(store.workspace.isArtifactRevisionPublished(revision.id), true);
+  }
   assert.deepEqual({
     project: store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id),
     variants: store.db.prepare("SELECT * FROM variants WHERE project_id = ? ORDER BY id").all(project.id),

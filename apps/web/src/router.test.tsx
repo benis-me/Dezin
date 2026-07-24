@@ -25,6 +25,14 @@ test("parsePath maps URLs to typed routes", () => {
     artifactId: "a/1",
     revisionId: "r/1",
   });
+  expect(parsePath("/projects/p%201/artifacts/a%2F1/candidates/plan%2F1/task%2F1/2")).toEqual({
+    name: "project-artifact-candidate",
+    id: "p 1",
+    artifactId: "a/1",
+    planId: "plan/1",
+    taskId: "task/1",
+    attempt: 2,
+  });
   expect(parsePath("/projects/p%201/resources/research%2F1")).toEqual({
     name: "project-resource",
     id: "p 1",
@@ -41,6 +49,9 @@ test("parsePath maps URLs to typed routes", () => {
   expect(parsePath("/projects/p-1/artifacts/a-1/extra")).toEqual({ name: "home" });
   expect(parsePath("/projects/p-1/artifacts/a-1/revisions/%ZZ")).toEqual({ name: "home" });
   expect(parsePath("/projects/p-1/artifacts/a-1/revisions/r-1/extra")).toEqual({ name: "home" });
+  expect(parsePath("/projects/p-1/artifacts/a-1/candidates/plan-1/task-1/0")).toEqual({ name: "home" });
+  expect(parsePath("/projects/p-1/artifacts/a-1/candidates/plan-1/task-1/1.5")).toEqual({ name: "home" });
+  expect(parsePath("/projects/p-1/artifacts/a-1/candidates/plan-1/%ZZ/1")).toEqual({ name: "home" });
   expect(parsePath("/projects/p-1/resources/r-1/revisions/%ZZ")).toEqual({ name: "home" });
   expect(parsePath("/projects/p-1/resources/r-1/revisions/v-1/extra")).toEqual({ name: "home" });
   expect(parsePath("/effects")).toEqual({ name: "effects" });
@@ -58,6 +69,14 @@ test("routeToPath round-trips through parsePath", () => {
     { name: "project-canvas", id: "p 1" },
     { name: "project-artifact", id: "p 1", artifactId: "a/1" },
     { name: "project-artifact-revision", id: "p 1", artifactId: "a/1", revisionId: "r/1" },
+    {
+      name: "project-artifact-candidate",
+      id: "p 1",
+      artifactId: "a/1",
+      planId: "plan/1",
+      taskId: "task/1",
+      attempt: 2,
+    },
     { name: "project-resource", id: "p 1", resourceId: "research/1" },
     { name: "project-resource-revision", id: "p 1", resourceId: "research/1", revisionId: "revision/1" },
     { name: "effects" },

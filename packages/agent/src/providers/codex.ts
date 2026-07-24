@@ -14,8 +14,8 @@ export const codexProvider: AgentProvider = {
   label: "Codex",
   seedModels: ["gpt-5-codex", "gpt-5", "o3"],
   genericConfig: config,
-  async discoverModels(command) {
-    const r = await runCapture(command, ["debug", "models"], 10_000);
+  async discoverModels(command, _deep, signal) {
+    const r = await runCapture(command, ["debug", "models"], 10_000, signal);
     if (!r) return [];
     const start = r.out.indexOf("{");
     if (start === -1) return [];

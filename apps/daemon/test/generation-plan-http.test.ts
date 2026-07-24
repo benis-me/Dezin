@@ -13,9 +13,16 @@ import {
 } from "../src/generation-plan-handler.ts";
 import { GenerationPlanEventBroker } from "../src/orchestration/generation-plan-events.ts";
 
+const FROZEN_CODEBUDDY_AGENT = Object.freeze({
+  providerId: "codebuddy" as const,
+  command: "codebuddy" as const,
+  model: "gpt-5.6-sol",
+});
+
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: FROZEN_CODEBUDDY_AGENT,
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

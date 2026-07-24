@@ -10,6 +10,7 @@ import {
   decodeResourceRevisionView,
   decodeScopedAgentTurnReceipt,
   parseSseBlock,
+  type CreateResearchDirectionArtifactIntentInput,
   type FetchLike,
 } from "./api.ts";
 
@@ -117,6 +118,46 @@ test("createProject posts JSON and returns the project", async () => {
     "http://d/api/projects",
     expect.objectContaining({ method: "POST" }),
   );
+});
+
+test("Research direction intent sends only the strict Agent wire selection", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ plan: { id: "plan-1" } }, 201));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const input = {
+    selectionRequestId: "selection-00000000-0000-4000-8000-000000000041",
+    artifactId: "artifact-1",
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-sol",
+    expectedResourceHeadRevisionId: "research-revision-1",
+    expectedGraphRevision: 3,
+    expectedSnapshotId: "snapshot-3",
+    expectedLayoutChecksum: "a".repeat(64),
+    confirmHypothesis: false,
+  } satisfies CreateResearchDirectionArtifactIntentInput;
+
+  await api.createResearchDirectionArtifactIntent(
+    "project /1",
+    "resource /1",
+    "revision /1",
+    "direction /1",
+    input,
+  );
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/revisions/revision%20%2F1/directions/direction%20%2F1/artifact-intents",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  );
+
+  expect(() => api.createResearchDirectionArtifactIntent(
+    "project /1",
+    "resource /1",
+    "revision /1",
+    "direction /1",
+    { ...input, providerId: "codebuddy" } as unknown as CreateResearchDirectionArtifactIntentInput,
+  )).toThrow(/unsupported field providerId/i);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
 });
 
 test("Conversation APIs preserve strict scopes in responses, list queries, and create bodies", async () => {

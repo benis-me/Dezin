@@ -155,6 +155,25 @@ test("runResearchPhase reports a per-track reason (with prefixes) when BOTH trac
   assert.match(result.error!, /no api key configured/);
 });
 
+test("runResearchPhase does not retry CodeBuddy authentication failures", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-rp-auth-"));
+  let calls = 0;
+  const spawn = async () => {
+    calls += 1;
+    return {
+      code: 0,
+      stderr: "",
+      stdout: "Authentication required. Please use /login command to sign in to your account",
+    };
+  };
+
+  const result = await runResearchPhase({ dir, brief: "a hero", agentCommand: "codebuddy" }, spawn);
+
+  assert.equal(calls, 2, "product and visual should each fail once without a duplicate retry");
+  assert.equal(result.complete, false);
+  assert.match(result.error ?? "", /authentication required/i);
+});
+
 test("runResearchPhase runs a synthesis step after both tracks and produces directions", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-rp-synth-"));
   const calls: string[] = [];

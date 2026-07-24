@@ -65,7 +65,7 @@ export interface SafeStructuredAgentImage {
 }
 
 export interface SafeStructuredAgentResult {
-  readonly providerId: "claude";
+  readonly providerId: "claude" | "codebuddy";
   readonly text: string;
 }
 
@@ -73,6 +73,7 @@ export interface SafeStructuredAgentOptions {
   readonly createSpawner?: (options: NodeSpawnerOptions) => ProcessSpawner;
   /** Test seam; production always resolves the official CLI from fixed install roots. */
   readonly resolveClaudeExecutable?: () => string;
+  readonly resolveCodeBuddyExecutable?: () => string;
   readonly stderrLimitBytes?: number;
 }
 
@@ -148,6 +149,41 @@ function resolveTrustedClaudeExecutable(): string {
   );
 }
 
+export function isTrustedCodeBuddyExecutablePath(value: string, trustedHome = homedir()): boolean {
+  const path = value.replaceAll("\\", "/");
+  const packageSuffix = join("@tencent-ai", "codebuddy-code", "bin", "codebuddy").replaceAll("\\", "/");
+  const fixedGlobalRoots = [
+    join(trustedHome, ".local", "lib", "node_modules"),
+    join(trustedHome, ".npm-global", "lib", "node_modules"),
+    join(resolve(dirname(process.execPath), ".."), "lib", "node_modules"),
+    "/opt/homebrew/lib/node_modules",
+    "/usr/local/lib/node_modules",
+  ];
+  return fixedGlobalRoots.some((root) => path === join(root, packageSuffix).replaceAll("\\", "/"));
+}
+
+function resolveTrustedCodeBuddyExecutable(): string {
+  const executableNames = process.platform === "win32"
+    ? ["codebuddy.exe", "codebuddy.cmd"]
+    : ["codebuddy"];
+  for (const directory of safeClaudeSearchDirectories()) {
+    for (const name of executableNames) {
+      const candidate = join(directory, name);
+      try {
+        accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+        const exact = realpathSync(candidate);
+        if (statSync(exact).isFile() && isTrustedCodeBuddyExecutablePath(exact)) return exact;
+      } catch {
+        // Keep searching the fixed install roots.
+      }
+    }
+  }
+  throw new SafeStructuredAgentError(
+    "provider-unavailable",
+    "The official CodeBuddy CLI executable could not be verified in a trusted install location",
+  );
+}
+
 function safeStructuredAgentEnvironment(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     HOME: homedir(),
@@ -214,6 +250,28 @@ export function safeStructuredClaudeArgs(
     "--disable-slash-commands",
     "--no-session-persistence",
     "--no-chrome",
+    "--system-prompt", systemPrompt,
+  ];
+  if (model) args.push("--model", model);
+  return args;
+}
+
+function safeStructuredCodeBuddyArgs(
+  systemPrompt: string,
+  model?: string,
+  inputFormat: "text" | "stream-json" = "text",
+): string[] {
+  const args = [
+    "--print",
+    "--input-format", inputFormat,
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "dontAsk",
+    "--tools", "",
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}',
+    "--setting-sources", "",
+    "--no-session-persistence",
     "--system-prompt", systemPrompt,
   ];
   if (model) args.push("--model", model);
@@ -358,6 +416,31 @@ function safeStructuredAgentStdin(request: SafeStructuredAgentRequest): string {
   return `${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`;
 }
 
+function isTransientRemoteTerminalFailure(stdout: string): boolean {
+  let terminal: Record<string, unknown> | undefined;
+  for (const rawLine of stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const event = plainRecord(decoded);
+    if (event?.type === "result") terminal = event;
+  }
+  if (terminal?.is_error !== true) return false;
+  const evidence = [
+    ...(Array.isArray(terminal.errors) ? terminal.errors : []),
+    terminal.result,
+  ];
+  return evidence.some((value) => (
+    typeof value === "string"
+    && /\b(?:500|502|503|504)\b|internal server error|service unavailable|temporarily unavailable|overloaded/i.test(value)
+  ));
+}
+
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Structured Agent turn aborted", "AbortError");
 }
@@ -367,10 +450,15 @@ export async function runSafeStructuredAgent(
   options: SafeStructuredAgentOptions = {},
 ): Promise<SafeStructuredAgentResult> {
   if (request.signal.aborted) throw abortReason(request.signal);
-  if (request.command !== "claude") {
+  const providerId = request.command === "claude"
+    ? "claude"
+    : request.command === "codebuddy"
+      ? "codebuddy"
+      : undefined;
+  if (!providerId) {
     throw new SafeStructuredAgentError(
       "provider-unavailable",
-      "The hard no-tools structured-output transport accepts only the built-in Claude CLI entry, not executable paths or wrappers",
+      "The hard no-tools structured-output transport accepts only built-in provider CLI entries, not executable paths or wrappers",
     );
   }
   if (!request.systemPrompt || !request.message || !Number.isSafeInteger(request.maxOutputBytes)
@@ -384,7 +472,9 @@ export async function runSafeStructuredAgent(
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent message exceeds the 512 KiB byte limit");
   }
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const command = (options.resolveClaudeExecutable ?? resolveTrustedClaudeExecutable)();
+  const command = providerId === "claude"
+    ? (options.resolveClaudeExecutable ?? resolveTrustedClaudeExecutable)()
+    : (options.resolveCodeBuddyExecutable ?? resolveTrustedCodeBuddyExecutable)();
   const environment = safeStructuredAgentEnvironment(request.env);
   const stdin = safeStructuredAgentStdin(request);
   if (Buffer.byteLength(stdin, "utf8") > MAX_STDIN_BYTES) {
@@ -397,41 +487,59 @@ export async function runSafeStructuredAgent(
     killDelayMs: 500,
     inheritEnvironment: false,
   });
-  let result: Awaited<ReturnType<ProcessSpawner["run"]>>;
-  try {
-    result = await spawner.run({
-      command,
-      args: safeStructuredClaudeArgs(request.systemPrompt, request.model, request.images?.length ? "stream-json" : "text"),
-      cwd: request.cwd,
-      stdin,
-      timeoutMs,
-      signal: request.signal,
-      env: environment,
-    });
-  } catch (error) {
+  const inputFormat = request.images?.length ? "stream-json" : "text";
+  const attempts = providerId === "codebuddy" ? 3 : 1;
+  const deadlineMs = Date.now() + timeoutMs;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const attemptTimeoutMs = attempt === 0 ? timeoutMs : deadlineMs - Date.now();
+    if (attemptTimeoutMs <= 0) {
+      throw new SafeStructuredAgentError("timed-out", "Structured Agent exceeded its wall-clock limit");
+    }
+    let result: Awaited<ReturnType<ProcessSpawner["run"]>>;
+    try {
+      result = await spawner.run({
+        command,
+        args: providerId === "claude"
+          ? safeStructuredClaudeArgs(request.systemPrompt, request.model, inputFormat)
+          : safeStructuredCodeBuddyArgs(request.systemPrompt, request.model, inputFormat),
+        cwd: request.cwd,
+        stdin,
+        timeoutMs: attemptTimeoutMs,
+        signal: request.signal,
+        env: environment,
+      });
+    } catch (error) {
+      if (request.signal.aborted) throw abortReason(request.signal);
+      if (error instanceof AgentOutputLimitError
+        || (error && typeof error === "object" && Reflect.get(error, "code") === "AGENT_OUTPUT_LIMIT")) {
+        throw new SafeStructuredAgentError("output-limit", "Structured Agent stdout exceeded its byte limit", error);
+      }
+      if (error instanceof Error && /timed out/i.test(error.message)) {
+        throw new SafeStructuredAgentError("timed-out", "Structured Agent exceeded its wall-clock limit", error);
+      }
+      throw new SafeStructuredAgentError("process-failed", "Structured Agent process failed", error);
+    }
     if (request.signal.aborted) throw abortReason(request.signal);
-    if (error instanceof AgentOutputLimitError
-      || (error && typeof error === "object" && Reflect.get(error, "code") === "AGENT_OUTPUT_LIMIT")) {
-      throw new SafeStructuredAgentError("output-limit", "Structured Agent stdout exceeded its byte limit", error);
+    if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
+      throw new SafeStructuredAgentError("process-failed", "Structured Agent process did not exit successfully");
     }
-    if (error instanceof Error && /timed out/i.test(error.message)) {
-      throw new SafeStructuredAgentError("timed-out", "Structured Agent exceeded its wall-clock limit", error);
+    const bytes = Buffer.byteLength(result.stdout, "utf8");
+    if (bytes === 0) {
+      throw new SafeStructuredAgentError("output-invalid", "Structured Agent returned an empty response");
     }
-    throw new SafeStructuredAgentError("process-failed", "Structured Agent process failed", error);
+    if (bytes > request.maxOutputBytes) {
+      throw new SafeStructuredAgentError("output-limit", "Structured Agent stdout exceeded its byte limit");
+    }
+    try {
+      const text = providerId === "codebuddy" || request.images?.length
+        ? parseSafeStructuredClaudeStream(result.stdout)
+        : result.stdout;
+      return Object.freeze({ providerId, text });
+    } catch (error) {
+      if (request.signal.aborted) throw abortReason(request.signal);
+      if (attempt + 1 < attempts && isTransientRemoteTerminalFailure(result.stdout)) continue;
+      throw error;
+    }
   }
-  if (request.signal.aborted) throw abortReason(request.signal);
-  if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
-    throw new SafeStructuredAgentError("process-failed", "Structured Agent process did not exit successfully");
-  }
-  const bytes = Buffer.byteLength(result.stdout, "utf8");
-  if (bytes === 0) {
-    throw new SafeStructuredAgentError("output-invalid", "Structured Agent returned an empty response");
-  }
-  if (bytes > request.maxOutputBytes) {
-    throw new SafeStructuredAgentError("output-limit", "Structured Agent stdout exceeded its byte limit");
-  }
-  const text = request.images?.length
-    ? parseSafeStructuredClaudeStream(result.stdout)
-    : result.stdout;
-  return Object.freeze({ providerId: "claude", text });
+  throw new SafeStructuredAgentError("process-failed", "Structured Agent retry budget was exhausted");
 }

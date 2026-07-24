@@ -28,6 +28,14 @@ export type PreviewTarget =
   | { kind: "artifact-current"; projectId: string; artifactId: string; trackId?: string }
   | { kind: "artifact-revision"; projectId: string; revisionId: string }
   | { kind: "run-candidate"; projectId: string; runId: string }
+  | {
+    kind: "generation-candidate";
+    projectId: string;
+    artifactId: string;
+    planId: string;
+    taskId: string;
+    attempt: number;
+  }
   | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string; stateKey?: string }
   | {
     kind: "component-state";
@@ -78,6 +86,12 @@ export interface ResolvedPreviewTarget {
   variantKey: string | null;
   stateKey: string | null;
   runId: string | null;
+  generationCandidate?: {
+    planId: string;
+    taskId: string;
+    attempt: number;
+    evidenceHash: string;
+  } | null;
 }
 
 export interface PreviewTargetResolverDeps {
@@ -119,6 +133,13 @@ function stringField(value: unknown, field: string): string {
 
 function nullableStringField(value: unknown, field: string): string | null {
   return value === null ? null : stringField(value, field);
+}
+
+function positiveSafeIntegerField(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new PreviewTargetValidationError(`${field} must be a positive safe integer`);
+  }
+  return value;
 }
 
 function stateKeyField(value: unknown): string {
@@ -177,6 +198,16 @@ export function parsePreviewTarget(value: unknown): PreviewTarget {
     case "run-candidate":
       rejectUnexpectedFields(input, ["kind", "projectId", "runId"]);
       return { kind, projectId, runId: stringField(input.runId, "runId") };
+    case "generation-candidate":
+      rejectUnexpectedFields(input, ["kind", "projectId", "artifactId", "planId", "taskId", "attempt"]);
+      return {
+        kind,
+        projectId,
+        artifactId: stringField(input.artifactId, "artifactId"),
+        planId: stringField(input.planId, "planId"),
+        taskId: stringField(input.taskId, "taskId"),
+        attempt: positiveSafeIntegerField(input.attempt, "attempt"),
+      };
     case "workspace-flow": {
       rejectUnexpectedFields(input, ["kind", "projectId", "snapshotId", "startArtifactId", "stateKey"]);
       const stateKey = input.stateKey === undefined ? undefined : stateKeyField(input.stateKey);
@@ -222,7 +253,26 @@ const RESOLVED_PREVIEW_TARGET_FIELDS = [
   "variantKey",
   "stateKey",
   "runId",
+  "generationCandidate",
 ] as const;
+
+function generationCandidateField(
+  value: unknown,
+): NonNullable<ResolvedPreviewTarget["generationCandidate"]> | null {
+  if (value === undefined || value === null) return null;
+  const candidate = record(value);
+  rejectUnexpectedFields(candidate, ["planId", "taskId", "attempt", "evidenceHash"]);
+  const evidenceHash = stringField(candidate.evidenceHash, "generationCandidate.evidenceHash");
+  if (!/^[a-f0-9]{64}$/.test(evidenceHash)) {
+    throw new PreviewTargetValidationError("generationCandidate.evidenceHash must be a SHA-256 hex digest");
+  }
+  return {
+    planId: stringField(candidate.planId, "generationCandidate.planId"),
+    taskId: stringField(candidate.taskId, "generationCandidate.taskId"),
+    attempt: positiveSafeIntegerField(candidate.attempt, "generationCandidate.attempt"),
+    evidenceHash,
+  };
+}
 
 /** Strictly parse the immutable transport form accepted by lease acquisition. */
 export function parseResolvedPreviewTarget(value: unknown): ResolvedPreviewTarget {
@@ -236,6 +286,7 @@ export function parseResolvedPreviewTarget(value: unknown): ResolvedPreviewTarge
     "artifact-current",
     "artifact-revision",
     "run-candidate",
+    "generation-candidate",
     "workspace-flow",
     "component-state",
   ].includes(requestedKind)) {
@@ -261,6 +312,7 @@ export function parseResolvedPreviewTarget(value: unknown): ResolvedPreviewTarge
     variantKey: nullableStringField(input.variantKey, "variantKey"),
     stateKey: nullableStringField(input.stateKey, "stateKey"),
     runId: nullableStringField(input.runId, "runId"),
+    generationCandidate: generationCandidateField(input.generationCandidate),
   };
 }
 
@@ -317,6 +369,7 @@ interface RevisionResolution {
   variantKey: string | null;
   stateKey: string | null;
   runId: string | null;
+  generationCandidate?: NonNullable<ResolvedPreviewTarget["generationCandidate"]> | null;
 }
 
 function validateWorkspaceFlowState(renderSpec: Record<string, unknown>, stateKey: string | null): void {
@@ -491,6 +544,50 @@ function resolveRevision(
         runId: target.runId,
       };
     }
+    case "generation-candidate": {
+      let attempt;
+      try {
+        attempt = deps.store.workspace.getGenerationTaskAttemptForProject(
+          target.projectId,
+          target.planId,
+          target.taskId,
+          target.attempt,
+        );
+      } catch {
+        throw new PreviewTargetNotFoundError("Preview Target Generation candidate Attempt was not found");
+      }
+      if (!attempt
+        || attempt.planId !== target.planId
+        || attempt.taskId !== target.taskId
+        || attempt.workspaceId !== workspaceId
+        || attempt.attempt !== target.attempt
+        || attempt.target.type !== "artifact"
+        || attempt.target.id !== target.artifactId
+        || attempt.candidateRevisionId === null
+        || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence === null
+        || attempt.candidateEvidenceHash === null) {
+        throw new PreviewTargetNotFoundError("Preview Target Generation candidate is unavailable");
+      }
+      const revision = ownedRevision(deps, workspaceId, attempt.candidateRevisionId);
+      if (revision.artifactId !== target.artifactId || revision.trackId !== attempt.target.trackId) {
+        throw new PreviewTargetNotFoundError("Preview Target Generation candidate Revision was not found");
+      }
+      return {
+        revision,
+        snapshot: null,
+        boundedCurrent: false,
+        variantKey: null,
+        stateKey: null,
+        runId: null,
+        generationCandidate: {
+          planId: attempt.planId,
+          taskId: attempt.taskId,
+          attempt: attempt.attempt,
+          evidenceHash: attempt.candidateEvidenceHash,
+        },
+      };
+    }
     case "workspace-flow": {
       const snapshot = deps.store.workspace.getSnapshotForProject(target.projectId, target.snapshotId);
       if (!snapshot || snapshot.workspaceId !== workspaceId) {
@@ -574,6 +671,7 @@ export async function resolvePreviewTarget(
     variantKey: resolution.variantKey,
     stateKey: resolution.stateKey,
     runId: resolution.runId,
+    generationCandidate: resolution.generationCandidate ?? null,
     assemblyHash: assembly.assemblyHash,
   })}`;
   return {
@@ -596,6 +694,7 @@ export async function resolvePreviewTarget(
     variantKey: resolution.variantKey,
     stateKey: resolution.stateKey,
     runId: resolution.runId,
+    generationCandidate: resolution.generationCandidate ?? null,
   };
 }
 
@@ -610,6 +709,7 @@ function targetKeyFor(resolved: Omit<ResolvedPreviewTarget, "targetKey">): strin
     variantKey: resolved.variantKey,
     stateKey: resolved.stateKey,
     runId: resolved.runId,
+    generationCandidate: resolved.generationCandidate ?? null,
     assemblyHash: resolved.assemblyHash,
   })}`;
 }
@@ -688,6 +788,7 @@ export function revalidateResolvedPreviewTarget(
         || resolved.variantKey === null
         || resolved.stateKey === null
         || resolved.runId !== null
+        || resolved.generationCandidate !== null
       ) immutableIdentityChanged();
       break;
     case "workspace-flow":
@@ -696,6 +797,7 @@ export function revalidateResolvedPreviewTarget(
         || resolved.snapshotId === null
         || resolved.variantKey !== null
         || resolved.runId !== null
+        || resolved.generationCandidate !== null
       ) immutableIdentityChanged();
       validateWorkspaceFlowState(revision.renderSpec, resolved.stateKey);
       break;
@@ -707,7 +809,44 @@ export function revalidateResolvedPreviewTarget(
         || revision.producedByRunId !== resolved.runId
         || resolved.variantKey !== null
         || resolved.stateKey !== null
+        || resolved.generationCandidate !== null
       ) immutableIdentityChanged();
+      break;
+    }
+    case "generation-candidate": {
+      const identity = resolved.generationCandidate;
+      if (identity == null
+        || resolved.snapshotId !== null
+        || resolved.runId !== null
+        || resolved.variantKey !== null
+        || resolved.stateKey !== null) {
+        immutableIdentityChanged();
+      }
+      let attempt;
+      try {
+        attempt = deps.store.workspace.getGenerationTaskAttemptForProject(
+          resolved.projectId,
+          identity.planId,
+          identity.taskId,
+          identity.attempt,
+        );
+      } catch {
+        immutableIdentityChanged();
+      }
+      if (!attempt
+        || attempt.planId !== identity.planId
+        || attempt.taskId !== identity.taskId
+        || attempt.workspaceId !== resolved.workspaceId
+        || attempt.attempt !== identity.attempt
+        || attempt.target.type !== "artifact"
+        || attempt.target.id !== resolved.artifactId
+        || attempt.target.trackId !== resolved.trackId
+        || attempt.candidateRevisionId !== resolved.revisionId
+        || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence === null
+        || attempt.candidateEvidenceHash !== identity.evidenceHash) {
+        immutableIdentityChanged();
+      }
       break;
     }
     case "artifact-current":
@@ -716,6 +855,7 @@ export function revalidateResolvedPreviewTarget(
         || resolved.variantKey !== null
         || resolved.stateKey !== null
         || resolved.runId !== null
+        || resolved.generationCandidate !== null
       ) immutableIdentityChanged();
       break;
     case "artifact-revision":
@@ -723,6 +863,7 @@ export function revalidateResolvedPreviewTarget(
         resolved.variantKey !== null
         || resolved.stateKey !== null
         || resolved.runId !== null
+        || resolved.generationCandidate !== null
       ) immutableIdentityChanged();
       break;
   }

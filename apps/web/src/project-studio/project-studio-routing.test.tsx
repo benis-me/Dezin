@@ -223,6 +223,11 @@ test("Canvas Present flow opens an exact Snapshot viewer without resolving mutab
   const viewer = await screen.findByRole("region", { name: "Prototype flow viewer" });
   expect(viewer).toBeInTheDocument();
   expect(viewer).toHaveFocus();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-presentation", "true");
+  expect(screen.queryByRole("complementary", { name: "Workspace Agent" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("separator", { name: "Resize Workspace Agent" })).not.toBeInTheDocument();
+  expect(document.getElementById("dezin-project-studio-layout")).toBeInTheDocument();
+  expect(document.getElementById("workspace-agent")).toHaveAttribute("hidden");
   expect(await screen.findByTitle("Landing page flow preview")).toBeInTheDocument();
   expect(resolvePreviewTarget).toHaveBeenCalledWith("p-1", {
     kind: "workspace-flow",
@@ -234,6 +239,11 @@ test("Canvas Present flow opens an exact Snapshot viewer without resolving mutab
 
   fireEvent.keyDown(window, { key: "Escape" });
   expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).not.toHaveAttribute("data-presentation");
+  expect(screen.getByRole("complementary", { name: "Workspace Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("separator", { name: "Resize Workspace Agent" })).toBeInTheDocument();
+  expect(document.getElementById("dezin-project-studio-layout")).toBeInTheDocument();
+  expect(document.getElementById("workspace-agent")).not.toHaveAttribute("hidden");
   expect(screen.getByRole("button", { name: "Present prototype flow" })).toHaveFocus();
 });
 
@@ -625,6 +635,65 @@ test("revision routes stay pinned to the URL identity and ignore an older same-p
   expect(resolvePreviewTarget.mock.calls.every(([, target]) => target.kind === "artifact-revision")).toBe(true);
 });
 
+test("candidate Review routes resolve the exact Generation Attempt instead of a formal Revision", async () => {
+  const resolvePreviewTarget = vi.fn(async (_projectId: string, target: PreviewTarget) => {
+    if (target.kind !== "generation-candidate") {
+      throw new Error("candidate Review must use the Generation Attempt identity");
+    }
+    return {
+      ...resolvedRevision(target, "revision-unpublished"),
+      requestedKind: "generation-candidate" as const,
+      generationCandidate: {
+        planId: target.planId,
+        taskId: target.taskId,
+        attempt: target.attempt,
+        evidenceHash: "e".repeat(64),
+      },
+    };
+  });
+  const getArtifactRevision = vi.fn(async () => {
+    throw new Error("unpublished candidates are not formal Revisions");
+  });
+  window.history.pushState(
+    {},
+    "",
+    "/projects/p-1/artifacts/artifact-p-1/candidates/plan%2F1/task%2F1/2",
+  );
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async (id) => project(id),
+      getWorkspace: async (id) => revisionWorkspace(id),
+      getArtifactRevision,
+      resolvePreviewTarget,
+      acquirePreviewTargetLease: async (_projectId, resolved) => ({
+        leaseId: "lease-generation-candidate",
+        url: `http://preview.local/revision-unpublished#dezin-bridge=${PREVIEW_BRIDGE_NONCE}`,
+        bridgeNonce: PREVIEW_BRIDGE_NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved,
+      }),
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByTitle("Landing page preview")).toBeInTheDocument();
+  expect(resolvePreviewTarget).toHaveBeenCalledWith("p-1", {
+    kind: "generation-candidate",
+    projectId: "p-1",
+    artifactId: "artifact-p-1",
+    planId: "plan/1",
+    taskId: "task/1",
+    attempt: 2,
+  }, expect.any(AbortSignal));
+  expect(getArtifactRevision).not.toHaveBeenCalled();
+  expect(screen.getByText("Read-only preview")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Artifact Agent task status" })).toHaveTextContent(
+    "read-only while reviewing a Generation candidate",
+  );
+  expect(document.querySelector('[data-preview-revision="revision-unpublished"]')).toBeInTheDocument();
+});
+
 test("a Revision URL remains Agent-read-only even when it names the current Head", async () => {
   const artifactAgentTurn = vi.fn();
   window.history.pushState(
@@ -698,7 +767,7 @@ test("same-project navigation while loading neither refetches nor accepts a stal
   expect(getWorkspace).toHaveBeenCalledTimes(1);
 
   act(() => navigate("/projects/p-2/canvas"));
-  expect(await screen.findByText("Project p-2")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { level: 1, name: "Project p-2" })).toBeInTheDocument();
 
   await act(async () => {
     resolveFirstProject(project("p-1"));
@@ -706,8 +775,8 @@ test("same-project navigation while loading neither refetches nor accepts a stal
     await firstProject;
     await firstWorkspace;
   });
-  expect(screen.getByText("Project p-2")).toBeInTheDocument();
-  expect(screen.queryByText("Project p-1")).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1, name: "Project p-2" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { level: 1, name: "Project p-1" })).not.toBeInTheDocument();
 });
 
 test("workspace loading failures and Standard/unsupported mismatches render accessible errors", async () => {

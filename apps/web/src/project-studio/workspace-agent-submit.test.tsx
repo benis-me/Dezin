@@ -1,9 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import App from "../App.tsx";
+import { AgentsProvider } from "../lib/agents-context.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type {
+  AgentInfo,
   Project,
   ProjectWorkspacePayload,
   Resource,
@@ -200,6 +204,7 @@ function draftProposal(ready: Extract<ProjectWorkspacePayload, { status: "ready"
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: [],
       dependencyPlans: [],
@@ -280,12 +285,16 @@ function ArtifactAgentProbe({
   baseRevisionId = "revision-1",
   selection = [{ kind: "element" as const, id: "hero-cta", revisionId: baseRevisionId }],
   intent = "edit",
+  agentCommand,
+  model,
   refreshable = false,
 }: {
   targetId: string;
   baseRevisionId?: string;
   selection?: ScopedAgentTurnInput["selection"];
   intent?: ScopedAgentTurnInput["intent"];
+  agentCommand?: string;
+  model?: string;
   refreshable?: boolean;
 }) {
   const studio = useProjectStudio("p-1", targetId);
@@ -306,6 +315,8 @@ function ArtifactAgentProbe({
           baseRevisionId,
           selection,
           intent,
+          agentCommand,
+          model,
         })}
       >
         Queue artifact edit
@@ -322,7 +333,15 @@ function ArtifactAgentProbe({
   );
 }
 
-function ResourceAgentProbe({ targetId = "resource-1" }: { targetId?: string }) {
+function ResourceAgentProbe({
+  targetId = "resource-1",
+  agentCommand,
+  model,
+}: {
+  targetId?: string;
+  agentCommand?: string;
+  model?: string;
+}) {
   const studio = useProjectStudio("p-1", null, targetId);
   if (studio.load.status !== "ready") return <output aria-label="Resource Agent load">{studio.load.status}</output>;
   return (
@@ -361,6 +380,8 @@ function ResourceAgentProbe({ targetId = "resource-1" }: { targetId?: string }) 
         onClick={() => void studio.submitResourceAgentPrompt({
           resourceId: targetId,
           baseRevisionId: "resource-revision-1",
+          agentCommand,
+          model,
         })}
       >
         Queue resource task
@@ -657,6 +678,536 @@ test("Workspace Agent submission creates a scoped draft and focuses Proposal rev
   expect(getWorkspace).toHaveBeenCalledTimes(1);
 });
 
+test("Design Workspace preserves the saved ready CodeBuddy Agent and model without rewriting Settings", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const updateSettings = vi.fn(async () => ({
+    ...currentSettings,
+    agentCommand: "codebuddy",
+    model: "hunyuan",
+  }));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ],
+      updateSettings,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const picker = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(picker).toHaveTextContent("CodeBuddy"));
+  expect(picker).toHaveTextContent("hunyuan");
+
+  await user.click(picker);
+  expect(await screen.findByRole("button", { name: /CodeBuddy/ })).toBeEnabled();
+  expect(updateSettings).not.toHaveBeenCalled();
+});
+
+test("Workspace Agent freezes the selected CodeBuddy Agent and model into its turn request", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("hunyuan"));
+  fireEvent.change(draft, { target: { value: "Build with the selected provider" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    agentCommand: "codebuddy",
+    model: "hunyuan",
+  }));
+});
+
+test("Design Workspace disables ready Codex while CodeBuddy remains usable", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const updateSettings = vi.fn(async () => ({
+    ...currentSettings,
+    agentCommand: "codebuddy",
+    model: "",
+  }));
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({ ...currentSettings, agentCommand: "codex", model: "gpt-5" }),
+      listAgents: async () => [
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+      ],
+      updateSettings,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  fireEvent.change(draft, { target: { value: "Build a complete workspace" } });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Design Workspace generation requires Claude Code or CodeBuddy.",
+  );
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit).toBeDisabled();
+
+  const picker = screen.getByRole("button", { name: "Agent and model" });
+  await user.click(picker);
+  const codex = await screen.findByRole("button", { name: /^Codex/ });
+  expect(codex).toBeDisabled();
+  expect(codex).toHaveTextContent("Design Workspace generation requires Claude Code or CodeBuddy.");
+  const codebuddy = screen.getByRole("button", { name: /^CodeBuddy/ });
+  expect(codebuddy).toBeEnabled();
+  await user.click(codebuddy);
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "codebuddy", model: "" }));
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(submit).toBeEnabled());
+  await user.click(submit);
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    message: "Build a complete workspace",
+    agentCommand: "codebuddy",
+  }));
+});
+
+test("a new Standard Design Workspace consumes the Home brief and CodeBuddy selection exactly once", async () => {
+  const user = userEvent.setup();
+  const createdProject = { ...project("p-new"), name: "Fresh workspace" };
+  const ready = readyWorkspace("p-new");
+  const currentSettings = await makeFakeApi().getSettings();
+  const createProject = vi.fn(async () => createdProject);
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+  window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.home.composer", JSON.stringify({ mode: "standard" }));
+
+  render(
+    <StrictMode>
+      <ApiProvider client={makeFakeApi({
+        createProject,
+        getProject: async () => createdProject,
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "hunyuan",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </StrictMode>,
+  );
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("hunyuan"));
+  expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard");
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Create a complete music discovery workspace" },
+  });
+  await user.click(screen.getByLabelText("Design"));
+
+  await waitFor(() => expect(createProject).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    message: "Create a complete music discovery workspace",
+    agentCommand: "codebuddy",
+    model: "hunyuan",
+  }));
+
+  act(() => navigate("/"));
+  await screen.findByLabelText("Describe your design");
+  act(() => navigate("/projects/p-new/canvas"));
+  await screen.findByRole("region", { name: "Project canvas" });
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+});
+
+test("Workspace Agent persists changed Agent and Design System context before creating a proposal", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentProject = project("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveSettings!: (settings: typeof currentSettings) => void;
+  let resolveProject!: (project: Project) => void;
+  let settingsWrite!: Promise<typeof currentSettings>;
+  let projectWrite!: Promise<Project>;
+  const updateSettings = vi.fn(() => (settingsWrite = new Promise<typeof currentSettings>((resolve) => {
+    resolveSettings = resolve;
+  })));
+  const patchProject = vi.fn(() => (projectWrite = new Promise<Project>((resolve) => {
+    resolveProject = resolve;
+  })));
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => currentProject,
+      getWorkspace: async () => ready,
+      getSettings: async () => ({ ...currentSettings, agentCommand: "codex", model: "gpt-5" }),
+      listAgents: async () => [
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "spotify", name: "Spotify", category: "Brand", summary: "", origin: "built-in" },
+      ],
+      updateSettings,
+      patchProject,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("button", { name: "Back to projects" })).toHaveTextContent("Project p-1");
+  const agentPicker = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(agentPicker).toHaveTextContent("Codex"));
+  expect(agentPicker).toHaveTextContent("gpt-5");
+  expect(updateSettings).not.toHaveBeenCalled();
+  await user.click(agentPicker);
+  const claude = await screen.findByRole("button", { name: /^Claude Code/ });
+  expect(claude).toBeEnabled();
+  await user.click(claude);
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "claude", model: "" }));
+  await user.keyboard("{Escape}");
+
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: /Spotify/ }));
+  await waitFor(() => expect(patchProject).toHaveBeenCalledWith("p-1", { designSystemId: "spotify" }));
+
+  const draft = screen.getByRole("textbox", { name: "Workspace Agent draft" });
+  fireEvent.change(draft, { target: { value: "Build a complete music workspace" } });
+  expect(draft).toHaveValue("Build a complete music workspace");
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit).toBeDisabled();
+
+  await act(async () => {
+    resolveSettings({ ...currentSettings, agentCommand: "claude", model: "" });
+    await settingsWrite;
+  });
+  await waitFor(() => expect(submit).toBeEnabled());
+  await user.click(submit);
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveProject({ ...currentProject, designSystemId: "spotify" });
+    await projectWrite;
+  });
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1].message).toBe("Build a complete music workspace");
+});
+
+test("Workspace Agent blocks generation when a changed Agent selection cannot be persisted", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn(async () => draftProposal(ready));
+  const updateSettings = vi.fn(async () => {
+    throw new Error("Settings storage unavailable");
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({ ...currentSettings, agentCommand: "codex", model: "gpt-5" }),
+      listAgents: async () => [
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ],
+      updateSettings,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const agentPicker = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(agentPicker).toHaveTextContent("Codex"));
+  await user.click(agentPicker);
+  await user.click(await screen.findByRole("button", { name: /^Claude Code/ }));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "claude", model: "" }));
+  await user.keyboard("{Escape}");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Couldn't save the selected Agent setting. Choose it again to retry.",
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Build a safe workspace" },
+  });
+  expect(screen.getByRole("button", { name: "Create proposal" })).toBeDisabled();
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+});
+
+test("Workspace Agent stays blocked until Agent discovery and Settings initialization finish", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveAgents!: (value: AgentInfo[]) => void;
+  let resolveSettings!: (value: typeof currentSettings) => void;
+  const agents = new Promise<AgentInfo[]>((resolve) => {
+    resolveAgents = resolve;
+  });
+  const settings = new Promise<typeof currentSettings>((resolve) => {
+    resolveSettings = resolve;
+  });
+  const workspaceAgentTurn = vi.fn(async () => draftProposal(ready));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => settings,
+      listAgents: async () => agents,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  fireEvent.change(draft, { target: { value: "Wait for exact provider context" } });
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit).toBeDisabled();
+  expect(screen.getByText("Checking Agent availability…")).toBeInTheDocument();
+
+  await act(async () => {
+    resolveAgents([
+      { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+    ]);
+    await agents;
+  });
+  expect(submit).toBeDisabled();
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveSettings({ ...currentSettings, agentCommand: "claude", model: "" });
+    await settings;
+  });
+  await waitFor(() => expect(submit).toBeEnabled());
+});
+
+test("Workspace Agent waits for the latest serialized Design System write before submitting", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentProject = project("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const pendingProjectWrites: Array<(value: Project) => void> = [];
+  const patchProject = vi.fn(() => new Promise<Project>((resolve) => {
+    pendingProjectWrites.push(resolve);
+  }));
+  const workspaceAgentTurn = vi.fn(async () => draftProposal(ready));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => currentProject,
+      getWorkspace: async () => ready,
+      getSettings: async () => ({ ...currentSettings, agentCommand: "claude", model: "" }),
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "spotify", name: "Spotify", category: "Brand", summary: "", origin: "built-in" },
+      ],
+      patchProject,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: /Spotify/ }));
+  await waitFor(() => expect(patchProject).toHaveBeenCalledTimes(1));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Build the latest selected direction" },
+  });
+  await user.click(screen.getByRole("button", { name: "Create proposal" }));
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: /Modern Minimal/ }));
+  expect(patchProject).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    pendingProjectWrites[0]!({ ...currentProject, designSystemId: "spotify" });
+  });
+  await waitFor(() => expect(patchProject).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  await act(async () => {
+    pendingProjectWrites[1]!({ ...currentProject, designSystemId: "modern-minimal" });
+  });
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+});
+
+test("StrictMode navigation cancels a submission waiting for Design System persistence", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentProject = project("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveProject!: (value: Project) => void;
+  const patchProject = vi.fn(() => new Promise<Project>((resolve) => {
+    resolveProject = resolve;
+  }));
+  const workspaceAgentTurn = vi.fn(async () => draftProposal(ready));
+  render(
+    <StrictMode>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => currentProject,
+        getWorkspace: async () => ready,
+        getSettings: async () => ({ ...currentSettings, agentCommand: "claude", model: "" }),
+        listAgents: async () => [
+          { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        ],
+        listDesignSystems: async () => [
+          { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+          { id: "spotify", name: "Spotify", category: "Brand", summary: "", origin: "built-in" },
+        ],
+        patchProject,
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </StrictMode>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: /Spotify/ }));
+  await waitFor(() => expect(patchProject).toHaveBeenCalledTimes(1));
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Do not submit after leaving" },
+  });
+  await user.click(screen.getByRole("button", { name: "Create proposal" }));
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "Back to projects" }));
+  await act(async () => {
+    resolveProject({ ...currentProject, designSystemId: "spotify" });
+  });
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Project canvas" })).not.toBeInTheDocument());
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+});
+
+test("opening a pinned Resource Revision cancels a Head submission waiting for context persistence", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspaceWithResources("p-1");
+  const currentProject = project("p-1");
+  let resolveProject!: (value: Project) => void;
+  const patchProject = vi.fn(() => new Promise<Project>((resolve) => {
+    resolveProject = resolve;
+  }));
+  const resourceAgentTurn = vi.fn(async () => resourceReceipt("resource-1"));
+  window.history.pushState({}, "", "/projects/p-1/resources/resource-1");
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => currentProject,
+      getWorkspace: async () => ready,
+      listResources: async () => ready.resources!,
+      getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
+      getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "spotify", name: "Spotify", category: "Brand", summary: "", origin: "built-in" },
+      ],
+      patchProject,
+      resourceAgentTurn,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("textbox", { name: "Resource Agent draft" });
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: /Spotify/ }));
+  await waitFor(() => expect(patchProject).toHaveBeenCalledTimes(1));
+  fireEvent.change(screen.getByRole("textbox", { name: "Resource Agent draft" }), {
+    target: { value: "Only submit against Resource Head" },
+  });
+  await user.click(screen.getByRole("button", { name: "Queue resource task" }));
+  expect(resourceAgentTurn).not.toHaveBeenCalled();
+
+  act(() => navigate("/projects/p-1/resources/resource-1/revisions/resource-1-revision-1"));
+  expect(await screen.findByText("Resource Agent is read-only while viewing a pinned Revision.")).toBeInTheDocument();
+  await act(async () => {
+    resolveProject({ ...currentProject, designSystemId: "spotify" });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(screen.queryByRole("button", { name: "Queue resource task" })).not.toBeInTheDocument();
+  expect(resourceAgentTurn).not.toHaveBeenCalled();
+});
+
 test("Workspace Agent reuses its turnId only for an unchanged failed request", async () => {
   let attempt = 0;
   const ready = readyWorkspace("p-1");
@@ -903,12 +1454,16 @@ test("Workspace Agent aborts an in-flight turn when the Project changes", async 
   act(() => navigate("/projects/p-2/canvas"));
 
   await waitFor(() => expect(observedSignal?.aborted).toBe(true));
-  expect(await screen.findByText("Project p-2")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Project p-2" })).toBeInTheDocument();
   expect(screen.queryByRole("alert", { name: /Workspace Agent/i })).not.toBeInTheDocument();
 });
 
 test("Artifact Agent queues the exact active Revision and exposes a durable Plan receipt", async () => {
-  const artifactAgentTurn = vi.fn(async () => artifactReceipt());
+  const artifactAgentTurn = vi.fn(async (
+    _projectId: string,
+    _artifactId: string,
+    _input: ScopedAgentTurnInput,
+  ) => artifactReceipt());
   render(
     <ApiProvider client={makeFakeApi({
       getProject: async () => project("p-1"),
@@ -939,6 +1494,38 @@ test("Artifact Agent queues the exact active Revision and exposes a durable Plan
   expect(screen.getByRole("status", { name: "Artifact Agent busy" })).toHaveTextContent("idle");
   expect(screen.getByRole("status", { name: "Artifact Agent error" })).toHaveTextContent("none");
   expect(prompt).toHaveValue("");
+});
+
+test("Artifact Agent freezes the selected CodeBuddy Agent and model into its turn request", async () => {
+  const artifactAgentTurn = vi.fn(async (
+    _projectId: string,
+    _artifactId: string,
+    _input: ScopedAgentTurnInput,
+  ) => artifactReceipt());
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      artifactAgentTurn,
+    })}>
+      <ArtifactAgentProbe
+        targetId="artifact-1"
+        agentCommand="codebuddy"
+        model="hunyuan"
+      />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Artifact Agent prompt" }), {
+    target: { value: "Refine with the selected provider" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Queue artifact edit" }));
+
+  await waitFor(() => expect(artifactAgentTurn).toHaveBeenCalledTimes(1));
+  expect(artifactAgentTurn.mock.calls[0]![2]).toEqual(expect.objectContaining({
+    agentCommand: "codebuddy",
+    model: "hunyuan",
+  }));
 });
 
 test("Artifact Agent reuses its canonical turnId when the unchanged draft is retried", async () => {
@@ -1241,6 +1828,34 @@ test("Resource Agent submits its exact target Revision and daemon-owned Context 
   expect(screen.getByRole("status", { name: "Resource Agent transcript" })).toHaveTextContent(
     "Queued Task task-resource-agent in Plan plan-resource-agent",
   );
+});
+
+test("Resource Agent freezes the selected CodeBuddy Agent and model into its turn request", async () => {
+  const resourceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _resourceId: string,
+    _input: ScopedAgentTurnInput,
+  ) => resourceReceipt());
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      resourceAgentTurn,
+    })}>
+      <ResourceAgentProbe agentCommand="codebuddy" model="hunyuan" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Resource Agent prompt" }), {
+    target: { value: "Ground this resource task with the selected provider" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Queue resource task" }));
+
+  await waitFor(() => expect(resourceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(resourceAgentTurn.mock.calls[0]![2]).toEqual(expect.objectContaining({
+    agentCommand: "codebuddy",
+    model: "hunyuan",
+  }));
 });
 
 test("Resource Agent reports moving Context identities before any request leaves the browser", async () => {

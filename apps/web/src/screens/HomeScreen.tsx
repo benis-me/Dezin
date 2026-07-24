@@ -50,12 +50,18 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import {
+  agentAvailabilityReason,
+  agentModeDisabledReason,
+  normalizeAgentModel,
+  selectableAgents,
+} from "../lib/agent-availability.ts";
 import { isCloneUrl } from "../lib/clone-url.ts";
 import sharinganEyeUrl from "../assets/sharingan-eye.png";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 import { native } from "../lib/native.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
-import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
+import { setPendingImages, setPendingRefs } from "../lib/pending-brief.ts";
 import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
@@ -229,7 +235,14 @@ export function HomeScreen({
   onOpenProject,
 }: {
   projects?: Project[];
-  onNewProject?: (brief: string, skillId: string, designSystemId: string | null, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void | Promise<void>;
+  onNewProject?: (
+    brief: string,
+    skillId: string,
+    designSystemId: string | null,
+    mode: ProjectMode,
+    sharingan?: { sourceUrl: string },
+    agentSelection?: { agentCommand: string; model?: string },
+  ) => void | Promise<void>;
   onOpenProject?: (id: string) => void;
 }) {
   const api = useApi();
@@ -241,7 +254,9 @@ export function HomeScreen({
   const [skills, setSkills] = useState<SkillCard[]>([]);
   const [skillId, setSkillIdState] = useState(initialComposerPrefs.skillId ?? DEFAULT_SKILL);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
-  const { agents, rescan: rescanAgents } = useAgents();
+  const [systemsStatus, setSystemsStatus] = useState<"loading" | "ready" | "error">("loading");
+  const designSystemRequestRef = useRef(0);
+  const { agents, loading: agentsLoading, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
   // The two feature toggles surfaced on the home header — they ARE the global Settings values
@@ -252,6 +267,10 @@ export function HomeScreen({
   const [homeModel, setHomeModel] = useState("");
   const [designSystemId, setDesignSystemIdState] = useState(initialComposerPrefs.designSystemId ?? DEFAULT_DS);
   const [mode, setModeState] = useState<ProjectMode>(initialComposerPrefs.mode ?? "prototype");
+  const selectedHomeAgent = agents.find((candidate) => candidate.command === homeAgent);
+  const homeAgentBlockedReason = homeAgent
+    ? agentAvailabilityReason(selectedHomeAgent) ?? agentModeDisabledReason(selectedHomeAgent, mode)
+    : null;
   // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading; forces mode to
   // "standard" and swaps the composer's textarea for a URL input (desktop-only entry).
   const [sharingan, setSharingan] = useState(false);
@@ -318,6 +337,22 @@ export function HomeScreen({
     setModeState(value);
     writeHomeComposerPrefs({ mode: value });
   }, []);
+
+  const refreshDesignSystems = useCallback(() => {
+    const request = ++designSystemRequestRef.current;
+    setSystemsStatus("loading");
+    void api
+      .listDesignSystems()
+      .then((next) => {
+        if (request !== designSystemRequestRef.current) return;
+        setSystems(next);
+        setSystemsStatus("ready");
+        if (next.length && !next.some((system) => system.id === DEFAULT_DS)) setDesignSystemId(next[0]!.id);
+      })
+      .catch(() => {
+        if (request === designSystemRequestRef.current) setSystemsStatus("error");
+      });
+  }, [api, setDesignSystemId]);
 
   // Sharingan is desktop-only (it drives a real browser session in the Electron main process).
   // Entering it forces mode to "standard"; exiting just clears the flag and leaves mode as-is.
@@ -438,14 +473,6 @@ export function HomeScreen({
         if (s.length && !s.some((x) => x.id === DEFAULT_SKILL)) setSkillId(s[0]!.id);
       })
       .catch(() => {});
-    api
-      .listDesignSystems()
-      .then((d) => {
-        if (!alive) return;
-        setSystems(d);
-        if (d.length && !d.some((x) => x.id === DEFAULT_DS)) setDesignSystemId(d[0]!.id);
-      })
-      .catch(() => {});
     void api
       .getSettings()
       .then((s) => {
@@ -462,17 +489,31 @@ export function HomeScreen({
     };
   }, [api]);
 
+  useEffect(() => {
+    refreshDesignSystems();
+    return () => {
+      designSystemRequestRef.current += 1;
+    };
+  }, [refreshDesignSystems]);
+
   // Default the composer to the saved agent + model — but only once settings have loaded, so
   // the scan resolving first doesn't lock it onto the first available agent. A manual pick
   // (homeAgent already set) is preserved.
   useEffect(() => {
     if (settingsAgent === null) return;
-    const avail = agents.filter((a) => a.available);
-    if (!avail.length) return;
-    const useSaved = settingsAgent !== "" && avail.some((a) => a.command === settingsAgent);
-    setHomeAgent((cur) => cur || (useSaved ? settingsAgent : avail[0]!.command));
+    const selectable = selectableAgents(agents);
+    const ready = agents.filter((candidate) => candidate.available);
+    if (!selectable.length && !ready.length) return;
+    const useSaved = settingsAgent !== "" && selectable.some((candidate) => candidate.command === settingsAgent);
+    setHomeAgent((cur) => cur || (useSaved ? settingsAgent : ready[0]?.command ?? selectable[0]!.command));
     if (useSaved && settingsModel) setHomeModel((cur) => cur || settingsModel);
   }, [agents, settingsAgent, settingsModel]);
+
+  useEffect(() => {
+    if (agentsLoading || !homeAgent) return;
+    const selected = agents.find((candidate) => candidate.command === homeAgent);
+    setHomeModel((current) => normalizeAgentModel(selected, current));
+  }, [agents, agentsLoading, homeAgent]);
 
   const saveAgentModelDefaults = useCallback(
     (patch: Pick<Settings, "agentCommand" | "model">) => {
@@ -595,10 +636,21 @@ export function HomeScreen({
     creatingRef.current = true;
     setCreating(true);
     try {
-      // Keep the standard call at 4 args (don't append an undefined 5th) — the sharingan arg is only
-      // passed when cloning, preserving onNewProject's existing call shape.
+      // Keep the legacy four-argument call when no Agent is selected. A normal Agent-backed
+      // creation carries its immutable command/model separately from the Sharingan option.
       if (sharinganArg) await onNewProject?.(text, skillId, null, projectMode, sharinganArg);
-      else await onNewProject?.(text, skillId, designSystemId, projectMode);
+      else if (homeAgent) {
+        await onNewProject?.(
+          text,
+          skillId,
+          designSystemId,
+          projectMode,
+          undefined,
+          { agentCommand: homeAgent, ...(homeModel ? { model: homeModel } : {}) },
+        );
+      } else {
+        await onNewProject?.(text, skillId, designSystemId, projectMode);
+      }
     } finally {
       creatingRef.current = false;
       setCreating(false);
@@ -606,6 +658,10 @@ export function HomeScreen({
   };
 
   const submit = () => {
+    if (homeAgentBlockedReason) {
+      toast(homeAgentBlockedReason, { variant: "error" });
+      return;
+    }
     const pathItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "local-path" }> => item.type === "local-path");
     const textItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "text-context" }> => item.type === "text-context");
     const contextSuffix = [
@@ -637,7 +693,6 @@ export function HomeScreen({
     if (!text) return;
     if (images.length) setPendingImages(images.map((i) => ({ name: i.name, base64: i.base64 })));
     if (refs.length) setPendingRefs(refs.map((r) => ({ name: r.name, base64: r.base64 })));
-    if (homeAgent) setPendingAgent(homeAgent, homeModel || undefined);
     void startCreate(text, mode);
   };
 
@@ -663,6 +718,10 @@ export function HomeScreen({
   const optimizeCurrentPrompt = async (): Promise<void> => {
     const original = brief.trim();
     if (!original || optimizingPrompt) return;
+    if (homeAgentBlockedReason) {
+      toast(homeAgentBlockedReason, { variant: "error" });
+      return;
+    }
     setOptimizingPrompt(true);
     try {
       const result = await api.optimizePrompt({
@@ -939,10 +998,11 @@ export function HomeScreen({
                       ) : (
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <IconButton
-                              aria-label={optimizingPrompt ? "Optimizing prompt" : "Optimize prompt"}
-                              aria-busy={optimizingPrompt}
-                              disabled={optimizingPrompt}
+                              <IconButton
+                                aria-label={optimizingPrompt ? "Optimizing prompt" : "Optimize prompt"}
+                                aria-busy={optimizingPrompt}
+                                disabled={optimizingPrompt || homeAgentBlockedReason !== null}
+                                title={homeAgentBlockedReason ?? undefined}
                               className={cn(
                                 "h-7 w-7 rounded-md bg-background/80 shadow-sm backdrop-blur",
                                 optimizingPrompt && "bg-transparent text-foreground shadow-none disabled:opacity-100",
@@ -968,7 +1028,16 @@ export function HomeScreen({
                     onReference={(p) => void referenceProject(p)}
                   />
                   <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
-                  {!sharingan ? <DesignSystemSelect systems={systems} value={designSystemId} onChange={setDesignSystemId} defaultId={DEFAULT_DS} /> : null}
+                  {!sharingan ? (
+                    <DesignSystemSelect
+                      systems={systems}
+                      value={designSystemId}
+                      onChange={setDesignSystemId}
+                      defaultId={DEFAULT_DS}
+                      catalogStatus={systemsStatus}
+                      onRetry={refreshDesignSystems}
+                    />
+                  ) : null}
                   {!sharingan && (
                     <FieldSelect
                       label="Mode"
@@ -999,11 +1068,12 @@ export function HomeScreen({
                     onAgentChange={changeHomeAgent}
                     onModelChange={changeHomeModel}
                     onRescan={rescanAgents}
+                    agentDisabledReason={(agent) => agentModeDisabledReason(agent, mode)}
                   />
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
+                    disabled={creating || optimizingPrompt || homeAgentBlockedReason !== null || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >

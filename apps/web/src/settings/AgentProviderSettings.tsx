@@ -3,6 +3,7 @@ import type { AgentInfo, Settings } from "../lib/api.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { Button, Input, Picker, Spinner } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
+import { agentAvailabilityReason } from "../lib/agent-availability.ts";
 import { SettingRow, SettingsPanel } from "./settings-ui.tsx";
 
 export function AgentProviderSettings({
@@ -24,8 +25,12 @@ export function AgentProviderSettings({
   onSave: (key: keyof Settings, value: string | boolean) => void;
   onRescan: () => void;
 }) {
+  const panelDescription = activeAgent?.id === "codebuddy" || settings.agentCommand === "codebuddy"
+    ? "Dezin uses your locally authenticated CodeBuddy CLI session."
+    : "Dezin uses the authenticated session from your selected local coding-agent CLI.";
+
   return (
-    <SettingsPanel title="Agents" desc="Bring your own key. Dezin drives your local coding-agent CLI.">
+    <SettingsPanel title="Agents" desc={panelDescription}>
       <div className="space-y-6">
         <div>
           <div className="flex items-center justify-between">
@@ -48,15 +53,30 @@ export function AgentProviderSettings({
           <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
             {agentsLoading
               ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[78px] animate-pulse rounded-xl border border-border bg-surface-2/50" />)
-              : (agents.length ? agents : [{ id: settings.agentCommand, command: settings.agentCommand, available: false, version: undefined, models: [] }]).map((agent) => {
+              : (agents.length ? agents : [{
+                  id: settings.agentCommand,
+                  command: settings.agentCommand,
+                  available: false,
+                  availability: "not-installed" as const,
+                  version: undefined,
+                  models: [],
+                }]).map((agent) => {
                   const selected = agent.command === settings.agentCommand;
+                  const unavailableReason = agentAvailabilityReason(agent);
+                  const status = agent.available
+                    ? (agent.version?.slice(0, 16) ?? "Detected")
+                    : agent.availability === "authentication-required"
+                      ? "Sign in required"
+                      : agent.availability === "verification-required"
+                        ? "Rescan required"
+                        : "Not found";
                   return (
                     <button
                       key={agent.id}
                       type="button"
                       aria-pressed={selected}
                       disabled={!agent.available}
-                      title={agent.available ? undefined : `${agentLabel(agent.id)} isn't installed`}
+                      title={unavailableReason ?? undefined}
                       onClick={() => onSave("agentCommand", agent.command)}
                       className={cn(
                         "relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all",
@@ -76,7 +96,7 @@ export function AgentProviderSettings({
                         <span className="block truncate text-sm font-medium">{agentLabel(agent.id)}</span>
                         <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                           <span className={cn("size-1.5 shrink-0 rounded-full", agent.available ? "bg-[var(--success)]" : "bg-border-strong")} />
-                          <span className="truncate">{agent.available ? (agent.version?.slice(0, 16) ?? "Detected") : "Not found"}</span>
+                          <span className="truncate">{status}</span>
                         </span>
                       </span>
                     </button>
@@ -85,7 +105,7 @@ export function AgentProviderSettings({
           </div>
         </div>
         <SettingRow label="Model" desc="Optional. Blank uses the agent default.">
-          {activeAgent && activeAgent.models.length > 0 ? (
+          {activeAgent?.available && activeAgent.models.length > 0 ? (
             <Picker
               ariaLabel="Model"
               className="w-44"

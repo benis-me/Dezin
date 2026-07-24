@@ -62,5 +62,7 @@ export {
   agentSpawnEnv,
   dedupModels,
   type AgentProvider,
+  type AgentReadiness,
+  type AgentReadinessProbeOptions,
   type VersionProbe,
 } from "./providers/index.ts";

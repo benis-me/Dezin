@@ -75,6 +75,7 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

@@ -104,8 +104,15 @@ export function standardRepairPolicy(settings: Settings, isSharingan: boolean | 
   return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
 }
 
-export function reviewerAgentCommand(_settings: Settings, _fallback: string): string {
-  return "claude";
+function builtInStructuredReviewer(command: string): "claude" | "codebuddy" | null {
+  const providerId = getProvider(command)?.id;
+  return providerId === "claude" || providerId === "codebuddy" ? providerId : null;
+}
+
+export function reviewerAgentCommand(settings: Settings, fallback: string): string {
+  return builtInStructuredReviewer(settings.visualQaAgentCommand.trim())
+    ?? builtInStructuredReviewer(fallback)
+    ?? "claude";
 }
 
 export function reviewerModel(
@@ -113,11 +120,11 @@ export function reviewerModel(
   fallback?: string,
   fallbackCommand: string = settings.agentCommand,
 ): string | undefined {
-  const configuredCommand = settings.visualQaAgentCommand.trim();
-  if (configuredCommand && getProvider(configuredCommand)?.id !== "claude") return undefined;
+  const command = reviewerAgentCommand(settings, fallbackCommand);
+  const configuredCommand = builtInStructuredReviewer(settings.visualQaAgentCommand.trim());
   const configuredModel = settings.visualQaModel.trim();
-  if (configuredModel) return configuredModel;
-  if (getProvider(fallbackCommand)?.id !== "claude") return undefined;
+  if (configuredCommand === command && configuredModel) return configuredModel;
+  if (builtInStructuredReviewer(fallbackCommand) !== command) return undefined;
   return fallback || settings.model || undefined;
 }
 

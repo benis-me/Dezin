@@ -115,6 +115,7 @@ function compilePlan(
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
+      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
       resourceOperations: [],
       artifactPlans: plans,
       dependencyPlans: [],

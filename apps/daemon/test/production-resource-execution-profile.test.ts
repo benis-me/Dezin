@@ -5,6 +5,7 @@ import type { GenerationTaskContextRequest } from "../src/orchestration/generati
 import {
   createProductionResourceExecutionProfileLoader,
   freezeResourceExecutionProfile,
+  hydrateResourceAgentExecution,
   hydrateResourceImageGeneration,
   hydrateResourceReviewerExecution,
   requireResourceExecutionProfile,
@@ -177,7 +178,10 @@ function pack(executionProfile: FrozenResourceExecutionProfile): ContextPack {
   };
 }
 
-function resourceRequest(kind: "research" | "moodboard" | "sharingan-capture" = "research"): GenerationTaskContextRequest {
+function resourceRequest(
+  kind: "research" | "moodboard" | "sharingan-capture" = "research",
+  agent?: { providerId: "claude" | "codebuddy"; command: "claude" | "codebuddy"; model: string | null },
+): GenerationTaskContextRequest {
   const task = {
     id: OWNERSHIP.taskId,
     planId: OWNERSHIP.planId,
@@ -186,6 +190,7 @@ function resourceRequest(kind: "research" | "moodboard" | "sharingan-capture" = 
     target: { type: "resource", workspaceId: OWNERSHIP.workspaceId, id: OWNERSHIP.targetResourceId },
     payload: {
       version: 2,
+      ...(agent === undefined ? {} : { agent }),
       operation: {
         operation: "create",
         nodeId: "resource-node-1",
@@ -232,7 +237,10 @@ function resourceRequest(kind: "research" | "moodboard" | "sharingan-capture" = 
 }
 
 test("Resource execution profile freezes one settings observation without persisting credentials", async () => {
-  let current = settings();
+  let current = settings({
+    visualQaAgentCommand: "claude",
+    visualQaModel: "legacy-reviewer-must-not-override-the-frozen-task",
+  });
   let reads = 0;
   const fakeStore = {
     getProject: () => ({ id: OWNERSHIP.projectId, archivedAt: null }),
@@ -249,7 +257,12 @@ test("Resource execution profile freezes one settings observation without persis
   } as unknown as Store;
   const load = createProductionResourceExecutionProfileLoader({ store: fakeStore });
 
-  const first = await load(resourceRequest(), new AbortController().signal);
+  const frozenAgent = {
+    providerId: "codebuddy" as const,
+    command: "codebuddy" as const,
+    model: "gpt-5.6-sol",
+  };
+  const first = await load(resourceRequest("research", frozenAgent), new AbortController().signal);
   current = settings({
     agentCommand: "codex",
     model: "gpt-5.4",
@@ -258,32 +271,44 @@ test("Resource execution profile freezes one settings observation without persis
     aiProviderId: "openai",
     aiProviderProfiles: JSON.stringify({ openai: { apiKey: "new-profile-secret", baseUrl: "", models: "", organization: "" } }),
   });
-  const second = await load(resourceRequest(), new AbortController().signal);
+  const second = await load(resourceRequest("research", frozenAgent), new AbortController().signal);
 
   assert.equal(reads, 2, "each Context materialization observes Settings exactly once");
   assert.deepEqual(first.agent, {
-    command: "claude",
-    providerId: "claude",
-    model: "claude-sonnet-4-6",
-    baseUrl: "https://api.anthropic.example/v1",
-    organization: "org-frozen",
-    credentialProviderId: "anthropic",
-    credentialRequired: true,
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "codebuddy",
+    credentialRequired: false,
   });
   assert.deepEqual(first.reviewer, {
-    command: "claude",
-    providerId: "claude",
-    model: null,
-    baseUrl: "https://api.anthropic.example/v1",
-    credentialSource: "anthropic-profile",
-    credentialRequired: true,
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+    baseUrl: "",
+    credentialSource: "session",
+    credentialRequired: false,
   });
   assert.equal(first.implementation.requestProtocol, "dezin.resource-agent-request.v1");
   assert.equal(first.implementation.promptProtocol, "dezin.research-generation-prompt.v3");
   assert.equal(first.implementation.contractProtocol, "dezin.research-generation.v3");
   assert.doesNotMatch(stableStringify(first), /must-never-enter-context|profile-secret|image-secret|video-secret/);
-  assert.notEqual(first.checksum, second.checksum);
-  assert.notEqual(pack(first).hash, pack(second).hash, "rematerialized execution semantics change Context Pack/input identity");
+  assert.deepEqual(hydrateResourceAgentExecution(second, current), {
+    ...second.agent,
+    apiKey: "",
+  });
+  assert.deepEqual(hydrateResourceReviewerExecution(second, current), {
+    ...second.reviewer,
+    apiKey: "",
+  });
+  assert.equal(first.checksum, second.checksum);
+  assert.equal(
+    pack(first).hash,
+    pack(second).hash,
+    "mutable unrelated provider settings cannot change a frozen CodeBuddy Resource Attempt",
+  );
   assert.throws(
     () => profile("research", settings({ apiBaseUrl: "https://user:secret@example.test/v1" })),
     /credential-free/i,
@@ -291,7 +316,10 @@ test("Resource execution profile freezes one settings observation without persis
 });
 
 test("Resource quality reviewer restores only the exact frozen Claude reviewer credential", () => {
-  const frozenSettings = settings({ visualQaModel: "claude-sonnet-4-6" });
+  const frozenSettings = settings({
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-sonnet-4-6",
+  });
   const exact = profile("research", frozenSettings);
   const rotatedProfiles = JSON.stringify({
     anthropic: {

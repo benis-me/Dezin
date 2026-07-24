@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 
 import { useApi } from "../../lib/api-context.tsx";
 import type {
+  CreateResearchDirectionArtifactIntentInput,
   ReadyProjectWorkspacePayload,
   ResearchResourceRevisionView,
 } from "../../lib/api.ts";
@@ -42,6 +43,10 @@ export function ResearchResourceViewer({
   resourceId,
   requestedRevisionId,
   workspace,
+  agentCommand,
+  model,
+  agentSettingsReady,
+  afterContextSettings,
   onBack,
   onOpenRevision,
   onReturnToHead,
@@ -52,6 +57,12 @@ export function ResearchResourceViewer({
   resourceId: string;
   requestedRevisionId: string | null;
   workspace: ReadyProjectWorkspacePayload;
+  agentCommand: string;
+  model: string;
+  agentSettingsReady: boolean;
+  afterContextSettings: (
+    action: () => void | Promise<void>,
+  ) => Promise<void | undefined>;
   onBack: () => void;
   onOpenRevision: (revisionId: string) => void;
   onReturnToHead?: () => void;
@@ -179,7 +190,10 @@ export function ResearchResourceViewer({
   const archived = view.resource.archivedAt !== null;
   const selectedDirection = view.directions.find((direction) => direction.id === selectedDirectionId) ?? null;
   const requiresConfirmation = selectedDirection?.evidenceStatus === "hypothesis";
+  const canonicalAgentCommand: CreateResearchDirectionArtifactIntentInput["agentCommand"] | null =
+    agentCommand === "claude" || agentCommand === "codebuddy" ? agentCommand : null;
   const canCreateIntent = !archived && selectedDirection !== null && targetArtifactId.length > 0
+    && agentSettingsReady && canonicalAgentCommand !== null
     && activeResourceRevisionId !== null
     && view.observed.headRevisionId === activeResourceRevisionId
     && view.observed.snapshotId === workspace.activeSnapshot.id
@@ -211,26 +225,30 @@ export function ResearchResourceViewer({
   };
 
   const createIntent = async (): Promise<void> => {
-    if (!canCreateIntent || selectedDirection === null) return;
+    if (!canCreateIntent || selectedDirection === null || canonicalAgentCommand === null) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const result = await api.createResearchDirectionArtifactIntent(
-        projectId,
-        view.resource.id,
-        view.revision.id,
-        selectedDirection.id,
-        {
-          selectionRequestId: `selection-${globalThis.crypto.randomUUID().toLowerCase()}`,
-          artifactId: targetArtifactId,
-          expectedResourceHeadRevisionId: activeResourceRevisionId!,
-          expectedGraphRevision: workspace.graph.revision,
-          expectedSnapshotId: workspace.activeSnapshot.id,
-          expectedLayoutChecksum: workspace.layout.checksum,
-          confirmHypothesis: requiresConfirmation && hypothesisConfirmed,
-        },
-      );
-      onPlanCreated(result.plan.id);
+      await afterContextSettings(async () => {
+        const result = await api.createResearchDirectionArtifactIntent(
+          projectId,
+          view.resource.id,
+          view.revision.id,
+          selectedDirection.id,
+          {
+            selectionRequestId: `selection-${globalThis.crypto.randomUUID().toLowerCase()}`,
+            artifactId: targetArtifactId,
+            agentCommand: canonicalAgentCommand,
+            ...(model ? { model } : {}),
+            expectedResourceHeadRevisionId: activeResourceRevisionId!,
+            expectedGraphRevision: workspace.graph.revision,
+            expectedSnapshotId: workspace.activeSnapshot.id,
+            expectedLayoutChecksum: workspace.layout.checksum,
+            confirmHypothesis: requiresConfirmation && hypothesisConfirmed,
+          },
+        );
+        onPlanCreated(result.plan.id);
+      });
     } catch (error) {
       setSubmitError(errorMessage(error));
     } finally {

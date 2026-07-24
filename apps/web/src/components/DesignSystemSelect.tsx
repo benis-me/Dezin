@@ -47,12 +47,16 @@ export function DesignSystemSelect({
   onChange,
   defaultId,
   compact = false,
+  catalogStatus = "ready",
+  onRetry,
 }: {
   systems: DesignSystemCard[];
   value: string;
   onChange: (id: string) => void;
   defaultId?: string;
   compact?: boolean;
+  catalogStatus?: "loading" | "ready" | "error";
+  onRetry?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -189,7 +193,26 @@ export function DesignSystemSelect({
           />
           <ScrollArea viewportClassName="max-h-[min(18rem,calc(var(--radix-popover-content-available-height,40rem)-8.5rem))]">
           <ul aria-label="Design systems" className="px-1 py-1" onMouseLeave={() => setPreview(null)}>
-            {filtered.length === 0 ? (
+            {catalogStatus === "loading" && systems.length === 0 ? (
+              <li role="status" className="px-2 py-6 text-center text-sm text-muted-foreground">
+                Loading design systems…
+              </li>
+            ) : catalogStatus === "error" && systems.length === 0 ? (
+              <li role="alert" className="px-2 py-5 text-center text-sm text-muted-foreground">
+                <div>Couldn&apos;t load design systems.</div>
+                {onRetry ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mt-1.5"
+                    aria-label="Retry loading design systems"
+                    onClick={onRetry}
+                  >
+                    Retry
+                  </Button>
+                ) : null}
+              </li>
+            ) : filtered.length === 0 ? (
               <li className="px-2 py-6 text-center text-sm text-muted-foreground">
                 No {tab === "custom" ? "custom systems yet" : "matches"}
               </li>

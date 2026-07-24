@@ -1,4 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
+import { useMediaQuery } from "../hooks/useMediaQuery.ts";
+import {
+  readPanelPercent,
+  RESIZE_SEPARATOR_CLASS,
+  savePanelFraction,
+  twoPanelLayout,
+} from "../lib/panel-layout.ts";
+
+const PROJECT_STUDIO_AGENT_WIDTH_KEY = "dezin.project-studio.agent.width";
+const PROJECT_STUDIO_AGENT_PANEL = "workspace-agent";
+const PROJECT_STUDIO_CONTENT_PANEL = "studio-content";
 
 export function ProjectStudioShell({
   agent,
@@ -20,9 +32,11 @@ export function ProjectStudioShell({
   presentation?: boolean;
 }) {
   const [narrowInspectorOpen, setNarrowInspectorOpen] = useState(inspectorOpen);
+  const mobile = useMediaQuery("(max-width: 639px)");
   const showInspectorRef = useRef<HTMLButtonElement>(null);
   const hideInspectorRef = useRef<HTMLButtonElement>(null);
   const wasNarrowReachableRef = useRef(false);
+  const agentPercent = readPanelPercent(PROJECT_STUDIO_AGENT_WIDTH_KEY, 20, 12, 34);
 
   useEffect(() => {
     setNarrowInspectorOpen(inspectorOpen);
@@ -39,23 +53,26 @@ export function ProjectStudioShell({
     wasNarrowReachableRef.current = narrowReachable;
   }, [inspectorOpen, narrowReachable]);
 
-  return (
-    <div
-      data-testid="project-studio-shell"
-      data-inspector-layout={inspectorOpen ? "open" : "closed"}
-      className={`relative grid h-full min-h-0 w-full min-w-0 grid-cols-1 grid-rows-[minmax(156px,36%)_minmax(0,1fr)] overflow-hidden bg-background text-foreground sm:grid-cols-[240px_minmax(0,1fr)] sm:grid-rows-1 ${inspectorOpen
-        ? "xl:grid-cols-[272px_minmax(640px,1fr)_minmax(224px,18vw)]"
-        : "xl:grid-cols-[272px_minmax(0,1fr)]"}`}
+  const agentPanel = (
+    <aside
+      aria-label={agentLabel}
+      inert={presentation ? true : undefined}
+      hidden={presentation}
+      className={`h-full min-h-0 min-w-0 overflow-hidden bg-sidebar/50 ${mobile ? "border-b border-border" : ""}`}
     >
-      <aside
-        aria-label={agentLabel}
-        inert={presentation ? true : undefined}
-        className="min-h-0 min-w-0 overflow-hidden border-b border-border bg-sidebar/50 sm:border-b-0 sm:border-r"
-      >
-        {agent}
-      </aside>
+      {agent}
+    </aside>
+  );
+
+  const studioContent = (
+    <div
+      data-testid="project-studio-content"
+      className={`relative grid h-full min-h-0 min-w-0 grid-cols-1 overflow-hidden ${inspectorOpen && !presentation
+        ? "xl:grid-cols-[minmax(640px,1fr)_minmax(224px,18vw)]"
+        : ""}`}
+    >
       <section aria-label="Studio surface" className="min-h-0 min-w-0 overflow-hidden bg-background">{main}</section>
-      {inspectorOpen && !narrowReachable ? (
+      {inspectorOpen && !presentation && !narrowReachable ? (
         <button
           ref={showInspectorRef}
           type="button"
@@ -74,9 +91,10 @@ export function ProjectStudioShell({
           id="project-studio-inspector"
           aria-label={inspectorLabel}
           inert={presentation ? true : undefined}
+          hidden={presentation}
           data-narrow-reachable={narrowReachable || undefined}
           className={narrowReachable
-            ? "absolute inset-x-2 bottom-2 z-30 max-h-[min(70%,640px)] min-h-0 min-w-0 overflow-auto border border-border bg-sidebar shadow-lg sm:left-auto sm:right-2 sm:w-[320px] xl:static xl:block xl:max-h-none xl:w-auto xl:overflow-hidden xl:border-y-0 xl:border-r-0 xl:shadow-none"
+            ? "absolute inset-x-2 bottom-2 z-30 max-h-[min(70%,640px)] min-h-0 min-w-0 overflow-hidden border border-border bg-sidebar shadow-lg sm:left-auto sm:right-2 sm:w-[320px] xl:static xl:block xl:max-h-none xl:w-auto xl:border-y-0 xl:border-r-0 xl:shadow-none"
             : "hidden min-h-0 min-w-0 overflow-hidden border-l border-border bg-sidebar/35 xl:block"}
         >
           {narrowReachable ? (
@@ -95,6 +113,59 @@ export function ProjectStudioShell({
           {inspector}
         </aside>
       ) : null}
+    </div>
+  );
+
+  return (
+    <div
+      data-testid="project-studio-shell"
+      data-inspector-layout={inspectorOpen ? "open" : "closed"}
+      data-studio-layout={mobile ? "mobile" : "desktop"}
+      data-presentation={presentation || undefined}
+      className="relative h-full min-h-0 w-full min-w-0 overflow-hidden bg-background text-foreground"
+    >
+      {mobile ? (
+        <div className={`grid h-full min-h-0 grid-cols-1 ${presentation
+          ? "grid-rows-1"
+          : "grid-rows-[minmax(156px,36%)_minmax(0,1fr)]"}`}>
+          {agentPanel}
+          {studioContent}
+        </div>
+      ) : (
+        <Group
+          id="dezin-project-studio-layout"
+          className="h-full min-w-0"
+          defaultLayout={twoPanelLayout(
+            PROJECT_STUDIO_AGENT_PANEL,
+            agentPercent,
+            PROJECT_STUDIO_CONTENT_PANEL,
+          )}
+          onLayoutChanged={(layout) => {
+            savePanelFraction(PROJECT_STUDIO_AGENT_WIDTH_KEY, layout, PROJECT_STUDIO_AGENT_PANEL);
+          }}
+          resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+        >
+          <Panel
+            id={PROJECT_STUDIO_AGENT_PANEL}
+            minSize="220px"
+            maxSize="420px"
+            groupResizeBehavior="preserve-pixel-size"
+            hidden={presentation}
+            style={{ overflow: "hidden" }}
+          >
+            {agentPanel}
+          </Panel>
+          {presentation ? null : (
+            <Separator
+              aria-label="Resize Workspace Agent"
+              className={RESIZE_SEPARATOR_CLASS}
+            />
+          )}
+          <Panel id={PROJECT_STUDIO_CONTENT_PANEL} minSize="420px" style={{ overflow: "hidden" }}>
+            {studioContent}
+          </Panel>
+        </Group>
+      )}
     </div>
   );
 }

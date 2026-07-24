@@ -15,13 +15,15 @@ import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import type { Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
-import { takePendingImages, takePendingRefs } from "../lib/pending-brief.ts";
+import { takePendingAgent, takePendingImages, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
   localStorage.removeItem("dezin.home.composer");
+  takePendingAgent();
   takePendingImages();
+  takePendingModel();
   takePendingRefs();
   cleanup();
 });
@@ -99,6 +101,43 @@ function deferred<T>() {
 test("HomeScreen shows an empty state with no projects", () => {
   renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
+});
+
+test("HomeScreen distinguishes a pending design-system catalog from an empty search result", async () => {
+  const user = userEvent.setup();
+  const catalog = deferred<typeof DSYS>();
+  renderWithApi(<HomeScreen projects={[]} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems: () => catalog.promise,
+  });
+
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("Loading design systems");
+  expect(screen.queryByText(/^No matches$/)).toBeNull();
+
+  catalog.resolve(DSYS);
+  expect(await screen.findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
+});
+
+test("HomeScreen lets the user retry a failed design-system catalog load", async () => {
+  const user = userEvent.setup();
+  const listDesignSystems = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("catalog offline"))
+    .mockResolvedValueOnce(DSYS);
+  renderWithApi(<HomeScreen projects={[]} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems,
+  });
+
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load design systems");
+
+  await user.click(screen.getByRole("button", { name: "Retry loading design systems" }));
+
+  expect(await screen.findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
+  expect(listDesignSystems).toHaveBeenCalledTimes(2);
 });
 
 test("HomeScreen exposes a retryable alert after the first project load fails", async () => {
@@ -447,7 +486,14 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
 
   expect(textarea).toHaveValue("Create a finished shader microsite with sourced assets.");
   fireEvent.click(screen.getByLabelText("Design"));
-  expect(onNewProject).toHaveBeenCalledWith("Create a finished shader microsite with sourced assets.", "frontend-design", "modern-minimal", "prototype");
+  expect(onNewProject).toHaveBeenCalledWith(
+    "Create a finished shader microsite with sourced assets.",
+    "frontend-design",
+    "modern-minimal",
+    "prototype",
+    undefined,
+    { agentCommand: "codebuddy", model: "hunyuan" },
+  );
 
   await user.click(screen.getByRole("button", { name: "Reject optimized prompt" }));
   expect(textarea).toHaveValue("make a shader site");
@@ -1140,6 +1186,121 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
   expect(trigger).toHaveTextContent("gpt-5");
 });
 
+test("HomeScreen drops a saved model that the restored agent no longer advertises", async () => {
+  const user = userEvent.setup();
+  const onNewProject = vi.fn(async () => {});
+  renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => settingsFixture({ agentCommand: "codex", model: "retired-codex-model" }),
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+
+  const trigger = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(trigger).toHaveTextContent("Codex"));
+  expect(trigger).not.toHaveTextContent("retired-codex-model");
+
+  await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
+  await user.click(screen.getByRole("button", { name: "Design" }));
+  await waitFor(() => expect(onNewProject).toHaveBeenCalled());
+
+  expect(onNewProject).toHaveBeenCalledWith(
+    "Design a travel planner",
+    "frontend-design",
+    "modern-minimal",
+    "prototype",
+    undefined,
+    { agentCommand: "codex" },
+  );
+});
+
+test("HomeScreen keeps Codex usable in Prototype but disables it for Standard while CodeBuddy stays selectable", async () => {
+  const user = userEvent.setup();
+  const onNewProject = vi.fn(async () => {});
+  const agents = [
+    AGENTS[0]!,
+    AGENTS[1]!,
+    { id: "codebuddy", command: "codebuddy", available: true, version: "codebuddy 2.126.0", models: ["hunyuan"] },
+  ];
+  renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listAgents: async () => agents,
+    rescanAgents: async () => agents,
+    getSettings: async () => settingsFixture({ agentCommand: "codex", model: "gpt-5" }),
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+
+  const picker = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(picker).toHaveTextContent("Codex"));
+  await user.click(picker);
+  expect(await screen.findByRole("button", { name: /^Codex/ })).toBeEnabled();
+  expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
+  await user.keyboard("{Escape}");
+
+  await user.click(screen.getByRole("button", { name: "Mode" }));
+  await user.click(await screen.findByRole("menuitem", { name: /^Standard/ }));
+  await user.click(picker);
+  const codex = await screen.findByRole("button", { name: /^Codex/ });
+  expect(codex).toBeDisabled();
+  expect(codex).toHaveTextContent("Standard projects require Claude Code or CodeBuddy.");
+  expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
+  await user.keyboard("{Escape}");
+
+  await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
+  const design = screen.getByRole("button", { name: "Design" });
+  expect(design).toBeDisabled();
+
+  await user.click(picker);
+  await user.click(await screen.findByRole("button", { name: /^CodeBuddy/ }));
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(design).toBeEnabled());
+  await user.click(design);
+  await waitFor(() => expect(onNewProject).toHaveBeenCalledWith(
+    "Design a travel planner",
+    "frontend-design",
+    "modern-minimal",
+    "standard",
+    undefined,
+    { agentCommand: "codebuddy" },
+  ));
+});
+
+test("HomeScreen keeps a signed-out saved CodeBuddy visible and blocks Design until it is ready", async () => {
+  const user = userEvent.setup();
+  const onNewProject = vi.fn();
+  const agents = [
+    AGENTS[0]!,
+    {
+      id: "codebuddy",
+      command: "codebuddy",
+      available: false,
+      availability: "authentication-required" as const,
+      unavailableReason: "Sign in to CodeBuddy, then rescan agents.",
+      version: "2.126.0",
+      models: ["gpt-5.5"],
+    },
+  ];
+  renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listAgents: async () => agents,
+    rescanAgents: async () => agents,
+    getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "gpt-5.5" }),
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+
+  const trigger = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(trigger).toHaveTextContent("CodeBuddy"));
+  await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
+
+  expect(screen.getByRole("button", { name: "Design" })).toBeDisabled();
+  await user.click(trigger);
+  expect(await screen.findByRole("button", { name: /CodeBuddy/ })).toHaveTextContent(
+    "Sign in to CodeBuddy, then rescan agents.",
+  );
+  expect(onNewProject).not.toHaveBeenCalled();
+});
+
 function renderSettings(over = {}) {
   const onToggleDark = vi.fn();
   const updateSettings = vi.fn(async (p: Partial<Settings>) => settingsFixture(p));
@@ -1166,6 +1327,31 @@ test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data"
   expect(screen.getByRole("button", { name: /Gemini/ })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
   expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
+});
+
+test("SettingsScreen distinguishes a signed-out CodeBuddy from a missing CLI", async () => {
+  const codebuddy = {
+    id: "codebuddy",
+    command: "codebuddy",
+    available: false,
+    availability: "authentication-required" as const,
+    unavailableReason: "Sign in to CodeBuddy, then rescan agents.",
+    version: "2.126.0",
+    models: ["gpt-5.5"],
+  };
+  renderSettings({
+    listAgents: async () => [AGENTS[0]!, codebuddy],
+    rescanAgents: async () => [AGENTS[0]!, codebuddy],
+    getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "gpt-5.5" }),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+  expect(await screen.findByText("Dezin uses your locally authenticated CodeBuddy CLI session.")).toBeInTheDocument();
+  expect(screen.queryByText(/Bring your own key/i)).toBeNull();
+  const card = await screen.findByRole("button", { name: /CodeBuddy/ });
+  expect(card).toBeDisabled();
+  expect(card).toHaveTextContent("Sign in required");
+  expect(card).toHaveAttribute("title", "Sign in to CodeBuddy, then rescan agents.");
 });
 
 test("SettingsScreen generates a pairing code and displays its expiration", async () => {

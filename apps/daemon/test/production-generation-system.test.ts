@@ -28,6 +28,11 @@ import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
 const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 900 } as const;
 const PRODUCTION_GENERATION_IDLE_TIMEOUT_MS = 30_000;
 const PRODUCTION_GENERATION_HARD_TIMEOUT_MS = 60_000;
+const FROZEN_CODEBUDDY_AGENT = {
+  providerId: "codebuddy",
+  command: "codebuddy",
+  model: "gpt-5.6-sol",
+} as const;
 
 function emptyGeneration() {
   return {
@@ -75,6 +80,7 @@ async function initializeRepository(repositoryDir: string): Promise<void> {
 function nonEmptyGeneration() {
   return {
     kind: "workspace-generation" as const,
+    agent: FROZEN_CODEBUDDY_AGENT,
     resourceOperations: [{
       operation: "create" as const,
       nodeId: "direction-board-node",

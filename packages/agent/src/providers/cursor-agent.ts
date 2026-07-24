@@ -34,8 +34,8 @@ export const cursorAgentProvider: AgentProvider = {
   label: "Cursor Agent",
   seedModels: ["auto", "sonnet-4", "gpt-5", "opus-4"],
   genericConfig: config,
-  async discoverModels(command) {
-    const r = await runCapture(command, ["models"], 5000);
+  async discoverModels(command, _deep, signal) {
+    const r = await runCapture(command, ["models"], 5000, signal);
     return r ? parseCursorModels(r.out) : [];
   },
   createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "cursor-agent", command, model, config, enforceArtifactUpdate }),

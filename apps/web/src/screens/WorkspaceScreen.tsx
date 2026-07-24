@@ -56,6 +56,7 @@ import {
   runCardRadiusClass,
   runCardStackPosition,
   type LiveItem,
+  type DirectionGateContinuation,
   type Msg,
   type ResultMeta,
   type RunCardStackPosition,
@@ -84,6 +85,7 @@ import {
 import { highlightToReact } from "../lib/highlight-lite.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
+import { normalizeAgentModel } from "../lib/agent-availability.ts";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
@@ -201,6 +203,27 @@ function parseQueuedSelection(value: unknown): RunSelectionRef[] | null {
   } catch {
     return null;
   }
+}
+
+function parseDirectionGateContinuation(value: unknown): DirectionGateContinuation | undefined {
+  if (!isRecord(value)) return undefined;
+  const agentCommand = typeof value.agentCommand === "string" ? value.agentCommand.trim() : "";
+  if (!agentCommand) return undefined;
+  const contextRefs = parseQueuedContextRefs(value.contextRefs);
+  const selection = parseQueuedSelection(value.selection);
+  if (contextRefs === null || selection === null) return undefined;
+  const model = typeof value.model === "string" && value.model.trim() ? value.model.trim() : undefined;
+  const moodboardRefs = parseRunRefs(value.moodboardRefs);
+  const effectRefs = parseRunRefs(value.effectRefs);
+  return {
+    agentCommand,
+    ...(model ? { model } : {}),
+    ...(moodboardRefs.length ? { moodboardRefs } : {}),
+    ...(effectRefs.length ? { effectRefs } : {}),
+    ...(contextRefs.length ? { contextRefs } : {}),
+    ...(selection.length ? { selection } : {}),
+    ...(typeof value.research === "boolean" ? { research: value.research } : {}),
+  };
 }
 
 function readQueue(projectId: string): QueuedPrompt[] {
@@ -674,6 +697,7 @@ function toMsg(m: Message, id: number): Msg {
             text: typeof parsed.directionGate.brief === "string" ? parsed.directionGate.brief : "",
             directions,
             runId: typeof parsed.directionGate.runId === "string" ? parsed.directionGate.runId : undefined,
+            directionContinuation: parseDirectionGateContinuation(parsed.directionGate.continuation),
             at: m.createdAt,
           };
         }
@@ -2149,7 +2173,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     a: { url?: string; bridgeNonce?: string; label: string; error?: string };
     b: { url?: string; bridgeNonce?: string; label: string; error?: string };
   } | null>(null);
-  const { agents, rescan: rescanAgents } = useAgents();
+  const { agents, loading: agentsLoading, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
   const [autoFixLive, setAutoFixLive] = useState(false);
@@ -3300,13 +3324,26 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (directions.length) {
           materializeLive({ emitSummary: false });
           // Reattach replays direction-gate too; reuse the card already loaded from history rather
-          // than appending a duplicate gate.
+          // than appending a duplicate gate for the same run. A later Research pass is a distinct
+          // gate and must remain available as the newest pending continuation.
           const gid = msgId.current++;
-          setMessages((m) =>
-            m.some((msg) => msg.kind === "direction-gate")
+          const runId = typeof ev.runId === "string" ? ev.runId : undefined;
+          const directionContinuation = parseDirectionGateContinuation(ev.continuation);
+          setMessages((m) => {
+            const alreadyLoaded = runId
+              ? m.some((msg) => msg.kind === "direction-gate" && msg.runId === runId)
+              : false;
+            return alreadyLoaded
               ? m
-              : [...m, { id: gid, kind: "direction-gate", text: typeof ev.brief === "string" ? ev.brief : "", directions, runId: typeof ev.runId === "string" ? ev.runId : undefined }],
-          );
+              : [...m, {
+                  id: gid,
+                  kind: "direction-gate",
+                  text: typeof ev.brief === "string" ? ev.brief : "",
+                  directions,
+                  runId,
+                  directionContinuation,
+                }];
+          });
         }
         setLiveStatus(null);
         break;
@@ -3704,6 +3741,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setRunAgent((cur) => cur || (useSaved ? settingsAgent : avail[0]!.command));
     if (useSaved && settingsModel) setRunModel((cur) => cur || settingsModel);
   }, [agents, settingsAgent, settingsModel]);
+
+  useEffect(() => {
+    if (agentsLoading || !runAgent) return;
+    const selected = agents.find((candidate) => candidate.command === runAgent);
+    setRunModel((current) => normalizeAgentModel(selected, current));
+  }, [agents, agentsLoading, runAgent]);
 
   const saveAgentModelDefaults = useCallback(
     (patch: Pick<AppSettings, "agentCommand" | "model">) => {
@@ -4513,13 +4556,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // the gate's brief and continues the run with the chosen direction.
   const hasPendingDirectionGate = !research?.chosenSlug && messages.some((m) => m.kind === "direction-gate");
   const submitDirection = (slug: string): void => {
-    const gate = messages.find((m) => m.kind === "direction-gate");
+    const gate = [...messages]
+      .reverse()
+      .find((message) => message.kind === "direction-gate" && message.directions?.some((direction) => direction.slug === slug));
     const brief = gate?.text || lastRunBriefRef.current;
     if (brief.trim()) {
       // Optimistic: reflect the pick in the Research tab (panel selection) immediately, before the
       // run round-trips and the server persists .research/chosen.
       setResearch((prev) => (prev ? { ...prev, chosenSlug: slug } : prev));
-      void runBrief(brief, undefined, undefined, [], [], slug);
+      const continuation = gate?.directionContinuation;
+      void runBrief(
+        brief,
+        continuation?.agentCommand,
+        continuation?.model,
+        continuation?.moodboardRefs ?? [],
+        continuation?.effectRefs ?? [],
+        slug,
+        {
+          research: continuation?.research,
+          contextRefs: continuation?.contextRefs,
+          selection: continuation?.selection,
+        },
+      );
     }
   };
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>

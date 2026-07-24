@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Check, ChevronDown, RotateCw } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, RotateCw } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Spinner } from "./ui/index.ts";
 import { AgentLogo, agentLabel } from "./agent-logos.tsx";
 import { cn } from "../lib/utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
+import { agentAvailabilityReason, selectableAgents } from "../lib/agent-availability.ts";
 
 /**
  * Combined agent + model picker. The panel mirrors Settings → Provider: a grid of the
@@ -16,6 +17,7 @@ export function AgentModelSelect({
   onAgentChange,
   onModelChange,
   onRescan,
+  agentDisabledReason,
   dropUp = false,
 }: {
   agents: AgentInfo[];
@@ -24,14 +26,18 @@ export function AgentModelSelect({
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
   onRescan: () => Promise<void>;
+  agentDisabledReason?: (agent: AgentInfo) => string | null;
   dropUp?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
 
-  const available = agents.filter((a) => a.available);
+  const selectable = selectableAgents(agents);
   const current = agents.find((a) => a.command === agent);
-  const models = current?.models ?? [];
+  const currentUnavailableReason = current
+    ? agentAvailabilityReason(current) ?? agentDisabledReason?.(current) ?? null
+    : null;
+  const models = current?.available && currentUnavailableReason === null ? current.models : [];
 
   const rescan = async (): Promise<void> => {
     setScanning(true);
@@ -46,32 +52,41 @@ export function AgentModelSelect({
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
         aria-label="Agent and model"
+        title={currentUnavailableReason ?? undefined}
         className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         {current ? <AgentLogo id={current.id} className="size-3.5" /> : null}
         <span className="max-w-[9rem] truncate font-medium text-foreground">{current ? agentLabel(current.id) : "Agent"}</span>
         {model ? <span className="max-w-[7rem] truncate text-muted-foreground">· {model}</span> : null}
+        {currentUnavailableReason ? <CircleAlert aria-hidden size={13} className="text-destructive" /> : null}
         <ChevronDown size={13} strokeWidth={2} />
       </PopoverTrigger>
-      <PopoverContent side={dropUp ? "top" : "bottom"} align="start" className="w-72 p-2">
+      <PopoverContent
+        side={dropUp ? "top" : "bottom"}
+        align="start"
+        className="w-80 max-w-[calc(100vw-16px)] overflow-y-auto p-2"
+      >
         <p className="label-mono px-0.5 pb-1.5">Agent</p>
-        {available.length === 0 ? (
+        {selectable.length === 0 ? (
           <p className="px-1 py-4 text-center text-xs text-muted-foreground">No agents detected.</p>
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
-            {available.map((a) => {
+            {selectable.map((a) => {
               const selected = a.command === agent;
+              const disabledReason = agentAvailabilityReason(a) ?? agentDisabledReason?.(a) ?? null;
               return (
                 <button
                   key={a.id}
                   type="button"
+                  disabled={disabledReason !== null}
+                  title={disabledReason ?? undefined}
                   onClick={() => {
                     onAgentChange(a.command);
-                    onModelChange("");
                   }}
                   className={cn(
                     "relative flex flex-col gap-1.5 rounded-lg border p-2 text-left transition-colors",
                     selected ? "border-ring bg-surface ring-1 ring-ring/30" : "border-border hover:bg-surface-2/60",
+                    disabledReason && "cursor-not-allowed opacity-55 hover:bg-transparent",
                   )}
                 >
                   {selected ? <Check size={12} strokeWidth={2.5} className="absolute right-1.5 top-1.5 text-foreground" /> : null}
@@ -81,6 +96,11 @@ export function AgentModelSelect({
                   <span className="min-w-0">
                     <span className="block truncate text-xs font-medium leading-tight">{agentLabel(a.id)}</span>
                     {a.version ? <span className="block truncate text-[10px] text-muted-foreground">{a.version.slice(0, 18)}</span> : null}
+                    {disabledReason ? (
+                      <span className="mt-0.5 block text-[9px] leading-3 text-muted-foreground">
+                        {disabledReason}
+                      </span>
+                    ) : null}
                   </span>
                 </button>
               );

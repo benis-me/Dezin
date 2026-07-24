@@ -350,7 +350,7 @@ function profile(overrides: {
     settings: currentSettings,
     agent: {
       command,
-      providerId: command === "claude" ? "claude" : "codex",
+      providerId: command === "claude" ? "claude" : command === "codebuddy" ? "codebuddy" : "codex",
       model: currentSettings.model,
     },
     designSystem: {
@@ -397,8 +397,12 @@ function profile(overrides: {
       visualQaEnabled: overrides.effectiveVisualQa ?? true,
       reviewer: {
         command: frozenReviewerCommand,
-        providerId: "claude",
-        model: reviewerModel(currentSettings, currentSettings.model) ?? null,
+        providerId: frozenReviewerCommand,
+        model: reviewerModel(
+          currentSettings,
+          currentSettings.model,
+          currentSettings.agentCommand,
+        ) ?? null,
       },
       expectedSharinganRequestedUrl: null,
       ignores: [{ ruleId: "intentional-density", selector: ".checkout-summary" }],
@@ -635,6 +639,60 @@ test("legacy Codex and Gemini reviewer settings freeze and bind as Claude withou
   }
 });
 
+test("CodeBuddy Artifact binding keeps the frozen model and never injects API credentials", () => {
+  const frozen = profile({
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-sol",
+    agentApiKey: "snapshot-secret-must-not-bind",
+    agentApiBaseUrl: "",
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+  });
+
+  const bound = bindArtifactExecutionProfile({
+    contextPack: packWithProfile(frozen),
+    ownership: {
+      projectId: PROJECT_ID,
+      workspaceId: WORKSPACE_ID,
+      planId: PLAN_ID,
+      taskId: TASK_ID,
+      targetArtifactId: ARTIFACT_ID,
+    },
+    liveSettings: {
+      ...settings(),
+      agentCommand: "codebuddy",
+      model: "global-model-must-not-win",
+      apiBaseUrl: "",
+      apiKey: "live-secret-must-not-bind",
+    },
+  });
+
+  assert.deepEqual(frozen.agent, {
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+    credentialProviderId: "codebuddy",
+    baseUrl: "",
+    organization: "",
+    credentialRequired: false,
+  });
+  assert.equal(bound.agentCommand, "codebuddy");
+  assert.equal(bound.providerId, "codebuddy");
+  assert.equal(bound.model, "gpt-5.6-sol");
+  assert.deepEqual(frozen.quality.reviewer, {
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+  });
+  assert.equal(bound.qualitySettings.visualQaAgentCommand, "codebuddy");
+  assert.equal(bound.qualitySettings.visualQaModel, "gpt-5.6-sol");
+  assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings, "codebuddy"), {});
+  assert.equal(bound.settings.apiKey, "");
+  assert.equal(bound.environment.ANTHROPIC_API_KEY, undefined);
+  assert.equal(bound.environment.CODEBUDDY_API_KEY, undefined);
+  assert.equal(bound.environment.CODEBUDDY_AUTH_TOKEN, undefined);
+});
+
 test("Artifact execution settings retain frozen semantics and hydrate only current credentials", () => {
   const frozen = profile({ visualQaSetting: false, effectiveVisualQa: true });
   const live = {
@@ -709,6 +767,28 @@ test("Artifact execution settings allow credential-free local auth without borro
   assert.equal(hydrated.apiKey, "");
   assert.equal(hydrated.agentCommand, "codex");
   assert.equal(hydrated.apiBaseUrl, "https://api.example.test/v1");
+});
+
+test("Artifact execution canonicalizes a credential-free image provider URL from Settings", () => {
+  const frozen = profile({ imageProviderBaseUrl: "https://images.example.test" });
+
+  assert.equal(frozen.imageGeneration.baseUrl, "https://images.example.test/");
+});
+
+test("Artifact execution rejects image provider URLs with broader non-canonical rewrites", () => {
+  for (const imageProviderBaseUrl of [
+    "HTTP://images.example.test",
+    "http://0x7f000001",
+    "https://images.example.test:443",
+    "https://images.example.test/a/../",
+    "https://images.example.test\t/",
+  ]) {
+    assert.throws(
+      () => profile({ imageProviderBaseUrl }),
+      /must be canonical and credential-free/i,
+      imageProviderBaseUrl,
+    );
+  }
 });
 
 test("Artifact image postprocessing hydrates only the exact frozen provider credential", () => {
@@ -1266,6 +1346,11 @@ test("production materialization freezes Project, settings, design, skill, Resea
       kind: "page",
       target: { type: "artifact", workspaceId: workspace.id, id: ARTIFACT_ID, trackId: "track-profile" },
       payload: {
+        agent: {
+          providerId: "codebuddy",
+          command: "codebuddy",
+          model: "gpt-5.6-sol",
+        },
         artifactPlan: {
           researchDirectionSelection: {
             protocol: "dezin.research-direction-selection.v1",
@@ -1297,8 +1382,15 @@ test("production materialization freezes Project, settings, design, skill, Resea
   const frozen = await loader(request, new AbortController().signal);
   const serialized = stableStringify(frozen);
   assert.equal(frozen.project.name, "Frozen checkout");
-  assert.equal(frozen.agent.command, "codex");
-  assert.equal(frozen.agent.model, "gpt-5.4");
+  assert.deepEqual(frozen.agent, {
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+    credentialProviderId: "codebuddy",
+    baseUrl: "",
+    organization: "",
+    credentialRequired: false,
+  });
   assert.equal(frozen.designSystem?.content.designMd, designSystem.designMd);
   assert.equal(frozen.skill?.id, "frontend-design");
   assert.match(frozen.skill?.content.body ?? "", /frontend/i);
@@ -1308,7 +1400,11 @@ test("production materialization freezes Project, settings, design, skill, Resea
   assert.equal(frozen.researchDirection?.content, stableStringify(immutableDirection));
   assert.doesNotMatch(frozen.researchDirection?.content ?? "", /Mutable legacy shadow/);
   assert.deepEqual(frozen.quality.ignores, [{ ruleId: "intentional-density", selector: ".summary" }]);
-  assert.equal(frozen.quality.reviewer.model, "reviewer-frozen");
+  assert.deepEqual(frozen.quality.reviewer, {
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-sol",
+  });
   assert.deepEqual(frozen.imageGeneration, {
     protocol: "dezin.artifact-image-generation.v2",
     enabled: true,
@@ -1342,13 +1438,14 @@ test("production materialization freezes Project, settings, design, skill, Resea
   );
 
   assert.equal(frozen.project.name, "Frozen checkout", "already-materialized semantics remain immutable");
-  assert.equal(frozen.agent.command, "codex");
+  assert.equal(frozen.agent.command, "codebuddy");
   assert.match(frozen.researchDirection?.content ?? "", /persistent order rail/);
   assert.equal(frozen.imageGeneration.model, "image-frozen");
   const rematerialized = await loader(request, new AbortController().signal);
   assert.notEqual(rematerialized.checksum, frozen.checksum);
   assert.equal(rematerialized.project.name, "Mutated checkout");
-  assert.equal(rematerialized.agent.command, "gemini");
+  assert.equal(rematerialized.agent.command, "codebuddy");
+  assert.equal(rematerialized.agent.model, "gpt-5.6-sol");
   assert.equal(rematerialized.imageGeneration.model, "image-mutated");
   assert.equal(
     rematerialized.imageGeneration.baseUrl,

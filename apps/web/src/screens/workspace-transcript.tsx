@@ -1,4 +1,4 @@
-import type { QualityFinding } from "../lib/api.ts";
+import type { QualityFinding, RunContextRef, RunSelectionRef } from "../lib/api.ts";
 import type { ResearchCardData } from "./ResearchViews.tsx";
 
 export interface ResultMeta {
@@ -12,6 +12,16 @@ export interface ResultMeta {
   designReviewed?: boolean;
   /** Count of defects the auto-fixer repeatedly failed to resolve (gave up on). */
   unresolved?: number;
+}
+
+export interface DirectionGateContinuation {
+  agentCommand: string;
+  model?: string;
+  moodboardRefs?: Array<{ id: string; name?: string }>;
+  effectRefs?: Array<{ id: string; name?: string }>;
+  contextRefs?: RunContextRef[];
+  selection?: RunSelectionRef[];
+  research?: boolean;
 }
 
 export interface Msg {
@@ -28,6 +38,7 @@ export interface Msg {
   visualReview?: VisualReviewState;
   elapsedMs?: number;
   runId?: string;
+  directionContinuation?: DirectionGateContinuation;
   /** DB createdAt — used to link a Versions run back to its triggering message. */
   at?: number;
 }

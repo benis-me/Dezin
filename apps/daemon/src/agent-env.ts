@@ -11,11 +11,34 @@ function setIfPresent(env: NodeJS.ProcessEnv, key: string, value: string | undef
   if (trimmed) env[key] = trimmed;
 }
 
+const CODEBUDDY_PROVIDER_ENVIRONMENT_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CODEBUDDY_API_KEY",
+  "CODEBUDDY_AUTH_TOKEN",
+  "CODEBUDDY_BASE_URL",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_ORG_ID",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_OPENAI_API_KEY",
+  "AZURE_OPENAI_ENDPOINT",
+] as const;
+
 export function buildAgentEnv(settings: Settings, command: string, daemonToken?: string): NodeJS.ProcessEnv {
   const providerId = getProvider(command)?.id;
   const env: NodeJS.ProcessEnv = {};
 
-  if (providerId === "claude" || providerId === "codebuddy") {
+  if (providerId === "codebuddy") {
+    // CodeBuddy uses only its official host login. Explicit tombstones override
+    // Settings-derived and ambient daemon provider credentials when the child
+    // environment is composed.
+    for (const key of CODEBUDDY_PROVIDER_ENVIRONMENT_KEYS) env[key] = undefined;
+  } else if (providerId === "claude") {
     setIfPresent(env, "ANTHROPIC_API_KEY", settings.apiKey);
     setIfPresent(env, "ANTHROPIC_BASE_URL", settings.apiBaseUrl);
   } else if (providerId === "codex") {
@@ -35,11 +58,16 @@ export function buildAgentEnv(settings: Settings, command: string, daemonToken?:
 }
 
 /**
- * The Visual QA process is always Claude. Prefer an enabled Anthropic profile;
- * otherwise forward the generic project credential only when that project
- * Agent is itself Claude. A different provider's key must never be relabeled.
+ * Builds credentials only for a frozen Claude Visual QA reviewer. CodeBuddy
+ * reviewers authenticate through their official host login and therefore
+ * receive no provider credentials here. A different provider's key must never
+ * be relabeled.
  */
-export function buildVisualReviewerEnv(settings: Settings): NodeJS.ProcessEnv {
+export function buildVisualReviewerEnv(
+  settings: Settings,
+  reviewerCommand: string = "claude",
+): NodeJS.ProcessEnv {
+  if (getProvider(reviewerCommand)?.id !== "claude") return {};
   const profile = providerRuntimeConfig(settings, "anthropic");
   if (profile.enabled) {
     if (profile.apiKeyConfigured && !profile.apiKey.trim()) {
@@ -62,17 +90,18 @@ function sameEndpoint(left: string | undefined, right: string | undefined): bool
 }
 
 /**
- * Restores only the live credential that belongs to the immutable Claude
- * reviewer semantics. The returned Settings object is quality-process-only:
- * it must never be reused for the Page/Component builder process.
+ * Restores only the live credential that belongs to an immutable Claude or
+ * CodeBuddy reviewer selection. The returned Settings object is
+ * quality-process-only; it must never be reused for the Page/Component builder.
  */
 export function hydrateVisualReviewerSettings(
   frozenSettings: Settings,
   liveSettings: Settings,
   reviewer: { readonly command: string; readonly model?: string | null },
 ): Settings {
-  if (reviewer.command !== "claude") {
-    throw new Error("Frozen visual reviewer must use the canonical Claude command");
+  const reviewerProviderId = getProvider(reviewer.command)?.id;
+  if (reviewerProviderId !== "claude" && reviewerProviderId !== "codebuddy") {
+    throw new Error("Frozen visual reviewer must use a built-in structured-output command");
   }
 
   const frozenProfiles = parseProviderProfiles(frozenSettings.aiProviderProfiles);
@@ -85,9 +114,10 @@ export function hydrateVisualReviewerSettings(
     imageApiKey: "",
     videoApiKey: "",
     aiProviderProfiles: serializeProviderProfiles(frozenProfiles),
-    visualQaAgentCommand: "claude",
+    visualQaAgentCommand: reviewerProviderId,
     visualQaModel: reviewer.model ?? "",
   };
+  if (reviewerProviderId === "codebuddy") return quality;
 
   // A frozen explicit profile is authoritative. Live endpoint/model/org
   // changes cannot enter the Attempt; only its exact provider credential can.

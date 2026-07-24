@@ -88,6 +88,7 @@ import type {
   WorkspaceGraphCommand,
   WorkspaceGraphMutationInput,
   WorkspaceGraphMutationResult,
+  WorkspaceGenerationAgentSelection,
   WorkspaceLayout,
   WorkspaceLayoutCommand,
   WorkspaceLayoutPatch,
@@ -156,6 +157,7 @@ import {
   normalizeLegacyWorkspaceSeed,
   normalizeRestoreArtifactRevisionInput,
   normalizeWorkspaceGraphMutationInput,
+  normalizeWorkspaceGenerationAgentSelection,
   normalizeWorkspaceLayoutId,
   normalizeWorkspaceLayoutPatch,
   normalizeWorkspaceProposalApprovalMode,
@@ -279,6 +281,7 @@ export interface ScopedAgentTurnRequestFacts {
   scopeType: "artifact" | "resource";
   scopeId: string;
   intent: "generate" | "edit" | "repair";
+  agent: WorkspaceGenerationAgentSelection;
   message: string;
   graphRevision: number;
   baseRevisionId: string;
@@ -326,6 +329,7 @@ export interface ResearchDirectionArtifactIntentRequestFacts {
   revisionId: string;
   directionId: string;
   artifactId: string;
+  agent: WorkspaceGenerationAgentSelection;
   resourceHeadRevisionId: string;
   graphRevision: number;
   snapshotId: string;
@@ -336,6 +340,7 @@ export interface ResearchDirectionArtifactIntentRequestFacts {
 export interface WorkspaceAgentTurnRequestFacts {
   workspaceId: string;
   intent: "plan";
+  agent: WorkspaceGenerationAgentSelection;
   message: string;
   graphRevision: number;
   /** Hash of the normalized explicit Context and selection supplied by the client. */
@@ -541,6 +546,8 @@ interface NormalizedResearchDirectionArtifactIntentIdentity {
   request: ResearchDirectionArtifactIntentRequestFacts;
   requestJson: string;
   requestHash: string;
+  legacyRequestJson: string;
+  legacyRequestHash: string;
 }
 
 function normalizeResearchDirectionArtifactIntentIdentity(
@@ -565,6 +572,7 @@ function normalizeResearchDirectionArtifactIntentIdentity(
     "revisionId",
     "directionId",
     "artifactId",
+    "agent",
     "resourceHeadRevisionId",
     "graphRevision",
     "snapshotId",
@@ -577,6 +585,10 @@ function normalizeResearchDirectionArtifactIntentIdentity(
     revisionId: boundaryId(input.revisionId, "Research direction intent Revision id"),
     directionId: boundaryId(input.directionId, "Research direction intent direction id"),
     artifactId: boundaryId(input.artifactId, "Research direction intent Artifact id"),
+    agent: normalizeWorkspaceGenerationAgentSelection(
+      input.agent,
+      "Research direction intent Agent selection",
+    ),
     resourceHeadRevisionId: boundaryId(
       input.resourceHeadRevisionId,
       "Research direction intent expected Resource Head Revision id",
@@ -593,12 +605,18 @@ function normalizeResearchDirectionArtifactIntentIdentity(
           })(),
   };
   const requestJson = canonicalJsonText({ projectId, ...request }, "Research direction intent request identity");
+  const legacyRequestJson = canonicalJsonText({
+    projectId,
+    ...Object.fromEntries(Object.entries(request).filter(([key]) => key !== "agent")),
+  }, "legacy Research direction intent request identity");
   return {
     projectId,
     selectionRequestId,
     request,
     requestJson,
     requestHash: checksum(requestJson),
+    legacyRequestJson,
+    legacyRequestHash: checksum(legacyRequestJson),
   };
 }
 
@@ -625,6 +643,7 @@ function normalizeScopedAgentTurnIdentity(
     "scopeType",
     "scopeId",
     "intent",
+    "agent",
     "message",
     "graphRevision",
     "baseRevisionId",
@@ -638,6 +657,10 @@ function normalizeScopedAgentTurnIdentity(
   if (input.intent !== "generate" && input.intent !== "edit" && input.intent !== "repair") {
     throw new WorkspaceStoreCodecError("Scoped Agent turn intent is unsupported");
   }
+  const agent = normalizeWorkspaceGenerationAgentSelection(
+    input.agent,
+    "Scoped Agent turn execution selection",
+  );
   const message = boundaryString(input.message, "Scoped Agent turn message", 64 * 1024);
   if (message.trim() !== message || Buffer.byteLength(message, "utf8") > 64 * 1024) {
     throw new WorkspaceStoreCodecError("Scoped Agent turn message must be canonical and at most 64 KiB");
@@ -657,6 +680,7 @@ function normalizeScopedAgentTurnIdentity(
     scopeType: input.scopeType,
     scopeId,
     intent: input.intent,
+    agent,
     message,
     graphRevision,
     baseRevisionId,
@@ -668,6 +692,7 @@ function normalizeScopedAgentTurnIdentity(
     scopeType: request.scopeType,
     scopeId,
     intent: request.intent,
+    agent,
     message,
     graphRevision,
     baseRevisionId,
@@ -697,6 +722,7 @@ function normalizeWorkspaceAgentTurnIdentity(
   const input = boundaryObject(requestValue, "Workspace Agent turn request facts", [
     "workspaceId",
     "intent",
+    "agent",
     "message",
     "graphRevision",
     "requestContextHash",
@@ -705,6 +731,10 @@ function normalizeWorkspaceAgentTurnIdentity(
   if (input.intent !== "plan") {
     throw new WorkspaceStoreCodecError("Workspace Agent turn intent must be plan");
   }
+  const agent = normalizeWorkspaceGenerationAgentSelection(
+    input.agent,
+    "Workspace Agent turn execution selection",
+  );
   const message = boundaryString(input.message, "Workspace Agent turn message", 64 * 1024);
   if (message.trim() !== message || Buffer.byteLength(message, "utf8") > 64 * 1024) {
     throw new WorkspaceStoreCodecError("Workspace Agent turn message must be canonical and at most 64 KiB");
@@ -721,6 +751,7 @@ function normalizeWorkspaceAgentTurnIdentity(
   const request: WorkspaceAgentTurnRequestFacts = {
     workspaceId,
     intent: "plan",
+    agent,
     message,
     graphRevision,
     requestContextHash,
@@ -729,6 +760,7 @@ function normalizeWorkspaceAgentTurnIdentity(
     projectId,
     workspaceId,
     intent: request.intent,
+    agent,
     message,
     graphRevision,
     requestContextHash,
@@ -9009,16 +9041,20 @@ export class WorkspaceStore {
          JOIN workspace_artifacts artifact
            ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
          WHERE revision.workspace_id = ? AND revision.artifact_id = ?
-           AND EXISTS (
-             SELECT 1
-             FROM workspace_snapshot_artifacts mapping
-             JOIN workspace_snapshots snapshot
-               ON snapshot.id = mapping.snapshot_id
-              AND snapshot.workspace_id = mapping.workspace_id
-             WHERE mapping.workspace_id = revision.workspace_id
-               AND mapping.artifact_id = revision.artifact_id
-               AND mapping.revision_id = revision.id
-               AND snapshot.sealed = 1
+           AND revision.sealed = 1
+           AND (
+             revision.legacy_run_id IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+               FROM workspace_snapshot_artifacts mapping
+               JOIN workspace_snapshots snapshot
+                 ON snapshot.id = mapping.snapshot_id
+                AND snapshot.workspace_id = mapping.workspace_id
+               WHERE mapping.workspace_id = revision.workspace_id
+                 AND mapping.artifact_id = revision.artifact_id
+                 AND mapping.revision_id = revision.id
+                 AND snapshot.sealed = 1
+             )
            )
          ORDER BY revision.created_at ASC, revision.id ASC`,
       ).all(workspace.id, artifactId) as Row[];
@@ -9066,16 +9102,20 @@ export class WorkspaceStore {
          JOIN workspace_artifacts artifact
            ON artifact.id = revision.artifact_id AND artifact.workspace_id = revision.workspace_id
          WHERE revision.workspace_id = ? AND revision.artifact_id = ?
-           AND EXISTS (
-             SELECT 1
-             FROM workspace_snapshot_artifacts mapping
-             JOIN workspace_snapshots snapshot
-               ON snapshot.id = mapping.snapshot_id
-              AND snapshot.workspace_id = mapping.workspace_id
-             WHERE mapping.workspace_id = revision.workspace_id
-               AND mapping.artifact_id = revision.artifact_id
-               AND mapping.revision_id = revision.id
-               AND snapshot.sealed = 1
+           AND revision.sealed = 1
+           AND (
+             revision.legacy_run_id IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+               FROM workspace_snapshot_artifacts mapping
+               JOIN workspace_snapshots snapshot
+                 ON snapshot.id = mapping.snapshot_id
+                AND snapshot.workspace_id = mapping.workspace_id
+               WHERE mapping.workspace_id = revision.workspace_id
+                 AND mapping.artifact_id = revision.artifact_id
+                 AND mapping.revision_id = revision.id
+                 AND snapshot.sealed = 1
+             )
            )
            ${cursorSql}
          ORDER BY revision.created_at DESC, revision.id DESC
@@ -13590,7 +13630,11 @@ export class WorkspaceStore {
       row.request_hash,
       "Research direction intent stored request hash",
     );
-    if (storedRequestHash !== identity.requestHash || row.request_json !== identity.requestJson) {
+    const exactRequestMatch = storedRequestHash === identity.requestHash
+      && row.request_json === identity.requestJson;
+    const legacyRequestMatch = storedRequestHash === identity.legacyRequestHash
+      && row.request_json === identity.legacyRequestJson;
+    if (!exactRequestMatch && !legacyRequestMatch) {
       throw new ResearchDirectionArtifactIntentConflictError(
         identity.selectionRequestId,
         storedRequestHash,
@@ -13610,6 +13654,16 @@ export class WorkspaceStore {
     const task = detail.tasks.find((candidate) => candidate.id === taskId);
     const snapshot = this.requireSnapshot(workspace.id, snapshotId);
     const graph = this.requireGraphRevision(workspace.id, graphRevision);
+    const frozenProposalAgent = proposal.generation.kind === "workspace-generation"
+      ? proposal.generation.agent
+      : undefined;
+    if (legacyRequestMatch && !isDeepStrictEqual(frozenProposalAgent, identity.request.agent)) {
+      throw new ResearchDirectionArtifactIntentConflictError(
+        identity.selectionRequestId,
+        storedRequestHash,
+        identity.requestHash,
+      );
+    }
     let layout: WorkspaceLayout;
     try {
       layout = asWorkspaceLayoutValue(JSON.parse(row.layout_json));
@@ -13633,6 +13687,7 @@ export class WorkspaceStore {
       || proposal.baseGraphRevision !== identity.request.graphRevision
       || proposal.baseSnapshotId !== identity.request.snapshotId
       || proposal.baseLayoutChecksum !== identity.request.layoutChecksum
+      || !isDeepStrictEqual(frozenProposalAgent, identity.request.agent)
       || task.planId !== planId
       || task.workspaceId !== workspace.id
       || task.target.type !== "artifact"
@@ -14789,12 +14844,21 @@ export class WorkspaceStore {
   private artifactRevisionWasPublished(revisionId: string): boolean {
     const published = this.db.prepare(
       `SELECT 1
-       FROM workspace_snapshot_artifacts mapping
-       JOIN workspace_snapshots snapshot
-         ON snapshot.id = mapping.snapshot_id
-        AND snapshot.workspace_id = mapping.workspace_id
-       WHERE mapping.revision_id = ?
-         AND snapshot.sealed = 1
+       FROM artifact_revisions revision
+       WHERE revision.id = ?
+         AND revision.sealed = 1
+         AND (
+           revision.legacy_run_id IS NOT NULL
+           OR EXISTS (
+             SELECT 1
+             FROM workspace_snapshot_artifacts mapping
+             JOIN workspace_snapshots snapshot
+               ON snapshot.id = mapping.snapshot_id
+              AND snapshot.workspace_id = mapping.workspace_id
+             WHERE mapping.revision_id = revision.id
+               AND snapshot.sealed = 1
+           )
+         )
        LIMIT 1`,
     ).get(revisionId);
     return Boolean(published);

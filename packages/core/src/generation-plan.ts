@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   normalizeGenerationTaskIntent,
 } from "./store-codecs.ts";
+import { applyWorkspaceGraphCommands } from "./workspace-graph.ts";
 import { compareBinary } from "./workspace-codecs.ts";
 import type {
   ArtifactGenerationTaskPayloadV2,
@@ -75,6 +76,11 @@ const ARTIFACT_LIMITS: GenerationTaskResourceLimits = {
   maxOutputBytes: 24 * 1024 * 1024,
   capacityClasses: ["agent", "render-qa"],
 };
+const CODEBUDDY_RESOURCE_TIMEOUT_MS = 12 * 60_000;
+const CODEBUDDY_ARTIFACT_BASE_TIMEOUT_MS = 30 * 60_000;
+const CODEBUDDY_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS = 5 * 60_000;
+const CODEBUDDY_ARTIFACT_MAX_TIMEOUT_MS = 45 * 60_000;
+const MAX_ARTIFACT_VISUAL_QA_FRAMES = 5;
 
 const VALIDATION_LIMITS: GenerationTaskResourceLimits = {
   timeoutMs: 180_000,
@@ -211,6 +217,15 @@ function validateGenerationPayload(
   generation: WorkspaceGenerationPayload,
   proposal: WorkspaceProposal,
 ): void {
+  const hasExecutableAgentTask = generation.artifactPlans.length > 0
+    || generation.resourceOperations.some((operation) => operation.revisionPolicy.kind === "generate");
+  if (hasExecutableAgentTask && generation.agent === undefined) {
+    compileError(
+      "invalid-reference",
+      "executable workspace generation must freeze an Agent selection before compilation",
+      { proposalId: proposal.id },
+    );
+  }
   assertUnique(generation.resourceOperations, (operation) => operation.resourceId, "Resource operation id");
   assertUnique(generation.artifactPlans, (plan) => plan.artifactId, "Artifact plan id");
   assertUnique(generation.artifactPlans, (plan) => plan.trackId, "Artifact Track id");
@@ -258,6 +273,19 @@ function validateGenerationPayload(
         "invalid-reference",
         `generation Artifact ${plan.artifactId} must include at least one responsive Frame`,
         { artifactId: plan.artifactId },
+      );
+    }
+    if (generation.qualityProfile.requireVisualReview
+      && plan.responsiveFrameIds.length > MAX_ARTIFACT_VISUAL_QA_FRAMES) {
+      compileError(
+        "invalid-reference",
+        `generation Artifact ${plan.artifactId} may require visual QA for at most `
+          + `${MAX_ARTIFACT_VISUAL_QA_FRAMES} responsive Frames`,
+        {
+          artifactId: plan.artifactId,
+          frameCount: plan.responsiveFrameIds.length,
+          maxFrameCount: MAX_ARTIFACT_VISUAL_QA_FRAMES,
+        },
       );
     }
     const artifactFrameIds = new Set(plan.responsiveFrameIds);
@@ -387,6 +415,32 @@ function taskLimits(
   };
 }
 
+function resourceTaskLimits(generation: WorkspaceGenerationPayload): GenerationTaskResourceLimits {
+  if (generation.agent?.providerId !== "codebuddy") return RESOURCE_LIMITS;
+  // One host-login structured generation stage, one independent groundedness/
+  // moodboard review stage, and bounded evidence/publication settlement.
+  return { ...RESOURCE_LIMITS, timeoutMs: CODEBUDDY_RESOURCE_TIMEOUT_MS };
+}
+
+function artifactTaskLimits(
+  generation: WorkspaceGenerationPayload,
+  plan: WorkspaceGenerationArtifactPlan,
+): GenerationTaskResourceLimits {
+  if (generation.agent?.providerId !== "codebuddy") return ARTIFACT_LIMITS;
+  // CodeBuddy has an explicit per-turn cap in the provider sandbox and an
+  // explicit per-Frame critic cap. Scale the frozen outer deadline only with
+  // immutable Frame count and retain one finite hard ceiling.
+  const extraFrames = Math.max(0, plan.responsiveFrameIds.length - 1);
+  return {
+    ...ARTIFACT_LIMITS,
+    timeoutMs: Math.min(
+      CODEBUDDY_ARTIFACT_MAX_TIMEOUT_MS,
+      CODEBUDDY_ARTIFACT_BASE_TIMEOUT_MS
+        + extraFrames * CODEBUDDY_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS,
+    ),
+  };
+}
+
 function buildTask(
   shell: GenerationPlan,
   input: Omit<GenerationTaskIntentInput, "id" | "workspaceId" | "planId">,
@@ -463,6 +517,7 @@ function taskPayloadForArtifact(
   };
   return {
     version: 2,
+    ...(generation.agent === undefined ? {} : { agent: { ...generation.agent } }),
     artifactPlan,
     dependencyPlans: relevantDependencies(generation, plan.artifactId),
     responsiveFrames: sorted(
@@ -475,6 +530,7 @@ function taskPayloadForArtifact(
         operation: plan.operation,
         kind: plan.kind,
         name: plan.name,
+        ...(plan.instructions === undefined ? {} : { instructions: plan.instructions }),
       },
     },
     capabilityDescriptors: capabilityDescriptorsFor(plan.capabilityIds, capabilitiesById),
@@ -549,6 +605,7 @@ function stableTopologicalTaskOrder(
 }
 
 function prototypeConnectedPlannedPageComponents(
+  proposal: WorkspaceProposal,
   generation: WorkspaceGenerationPayload,
 ): string[][] {
   const plannedPages = new Set(generation.artifactPlans
@@ -562,6 +619,23 @@ function prototypeConnectedPlannedPageComponents(
     adjacency.set(artifactId, created);
     return created;
   };
+  const approvedGraph = proposal.operations.length === 0
+    ? proposal.baseGraph
+    : applyWorkspaceGraphCommands(proposal.baseGraph, proposal.operations);
+  const pageArtifactByNodeId = new Map(approvedGraph.nodes.flatMap((node) => (
+    node.kind === "page" ? [[node.id, node.artifactId] as const] : []
+  )));
+  for (const edge of approvedGraph.edges) {
+    if (edge.kind !== "prototype") continue;
+    const sourceArtifactId = pageArtifactByNodeId.get(edge.sourceNodeId);
+    const targetArtifactId = pageArtifactByNodeId.get(edge.targetNodeId);
+    if (sourceArtifactId === undefined || targetArtifactId === undefined) continue;
+    neighbors(sourceArtifactId).add(targetArtifactId);
+    neighbors(targetArtifactId).add(sourceArtifactId);
+  }
+  // Keep accepting the older direct Artifact relation contract for already
+  // approved Proposals while production proposal-only planning migrates to
+  // server-applied planned graph edges.
   for (const intent of generation.prototypeIntents) {
     neighbors(intent.sourceArtifactId).add(intent.targetArtifactId);
     neighbors(intent.targetArtifactId).add(intent.sourceArtifactId);
@@ -590,6 +664,7 @@ function prototypeConnectedPlannedPageComponents(
 
 function orderPrototypeConnectedPageTasks(
   tasks: readonly GenerationTaskIntent[],
+  proposal: WorkspaceProposal,
   generation: WorkspaceGenerationPayload,
 ): GenerationTaskIntent[] {
   const topological = stableTopologicalTaskOrder(tasks);
@@ -600,7 +675,7 @@ function orderPrototypeConnectedPageTasks(
       : []
   )));
   const addedDependencies = new Map<string, Set<string>>();
-  for (const component of prototypeConnectedPlannedPageComponents(generation)) {
+  for (const component of prototypeConnectedPlannedPageComponents(proposal, generation)) {
     const ordered = component
       .map((artifactId) => pageTaskByArtifactId.get(artifactId))
       .filter((task): task is GenerationTaskIntent => task !== undefined)
@@ -676,6 +751,7 @@ export function compileGenerationPlan(input: {
     };
     const payload: ResourceGenerationTaskPayloadV2 = {
       version: 2,
+      ...(generation.agent === undefined ? {} : { agent: { ...generation.agent } }),
       operation,
       brief: {
         ...proposalBrief(input.proposal),
@@ -700,7 +776,11 @@ export function compileGenerationPlan(input: {
       payload,
       capabilities: requiredCapabilityIds,
       qaProfile: NO_QA,
-      resourceLimits: taskLimits(RESOURCE_LIMITS, requiredCapabilityIds, capabilitiesById),
+      resourceLimits: taskLimits(
+        resourceTaskLimits(generation),
+        requiredCapabilityIds,
+        capabilitiesById,
+      ),
     });
   });
   const resourceTaskById = new Map(resourceTasks.map((task) => [task.target.id, task]));
@@ -759,12 +839,17 @@ export function compileGenerationPlan(input: {
       payload: taskPayloadForArtifact(input.proposal, generation, plan, capabilitiesById),
       capabilities: plan.capabilityIds,
       qaProfile: generation.qualityProfile,
-      resourceLimits: taskLimits(ARTIFACT_LIMITS, plan.capabilityIds, capabilitiesById),
+      resourceLimits: taskLimits(
+        artifactTaskLimits(generation, plan),
+        plan.capabilityIds,
+        capabilitiesById,
+      ),
     });
   });
 
   const generatedTasks = orderPrototypeConnectedPageTasks(
     [...resourceTasks, ...artifactTasks],
+    input.proposal,
     generation,
   );
   const workspaceTarget: GenerationTaskTarget = {
