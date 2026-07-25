@@ -1,7 +1,30 @@
 import "./generation-plan.css";
 
-import { X } from "lucide-react";
+import {
+  Check,
+  ExternalLink,
+  ListChecks,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+  Square,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Button,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioInspectorSection,
+  StudioPanelHeader,
+  StudioStatusBadge,
+} from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
 import {
   GenerationPlanStreamError,
@@ -73,6 +96,15 @@ function displayState(
   if (status === "running" || status === "candidate-ready" || status === "needs-rebase"
     || status === "awaiting-context-refresh" || status === "cancel-requested") return "active";
   return "idle";
+}
+
+function statusTone(
+  state: ReturnType<typeof displayState>,
+): "neutral" | "active" | "success" | "danger" {
+  if (state === "success") return "success";
+  if (state === "failure") return "danger";
+  if (state === "active") return "active";
+  return "neutral";
 }
 
 interface ResearchSelectionDestination {
@@ -179,10 +211,49 @@ function shortPlanLabel(plan: GenerationPlan, index: number): string {
 
 function PlanCloseButton({ onClose }: { onClose?: () => void }) {
   return onClose ? (
-    <button type="button" className="dezin-generation-plan__close" aria-label="Close build plan" onClick={onClose}>
-      <X size={12} aria-hidden />
-    </button>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      className="dezin-generation-plan__close"
+      aria-label="Close build plan"
+      title="Close build plan"
+      onClick={onClose}
+    >
+      <X aria-hidden />
+    </Button>
   ) : null;
+}
+
+function PlanHistorySelect({
+  plans,
+  value,
+  onChange,
+}: {
+  plans: readonly GenerationPlan[];
+  value: string;
+  onChange: (planId: string) => void;
+}) {
+  return (
+    <div className="dezin-generation-plan__selector">
+      <span>History</span>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger
+          size="sm"
+          value={value}
+          aria-label="Selected generation plan"
+          className="dezin-generation-plan__selector-trigger"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent align="end" className="z-[100]">
+          {plans.map((plan, index) => (
+            <SelectItem key={plan.id} value={plan.id}>{shortPlanLabel(plan, index)}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
 }
 
 interface ArtifactRevisionDestination {
@@ -254,6 +325,7 @@ export function GenerationPlanPanel({
 }) {
   const complete = detail.tasks.filter((task) => task.status === "succeeded").length;
   const planStatus = statusLabel(detail.plan.status, true);
+  const planState = displayState(detail.plan.status);
   const failureMessage = planMessage(detail.plan);
   const connectionLabel = connection === "live"
     ? "Live updates"
@@ -267,25 +339,33 @@ export function GenerationPlanPanel({
 
   return (
     <section className="dezin-generation-plan" aria-labelledby="generation-plan-title">
-      <header className="dezin-generation-plan__header">
-        <div className="dezin-generation-plan__heading">
-          <span>Generation</span>
-          <h2 id="generation-plan-title">Build plan</h2>
-        </div>
-        <div className="dezin-generation-plan__header-actions">
-          <div
+      <StudioPanelHeader className="dezin-generation-plan__header">
+        <StudioHeaderCopy
+          title="Build plan"
+          subtitle="Generation progress"
+          titleId="generation-plan-title"
+          headingLevel={2}
+          className="dezin-generation-plan__heading"
+        />
+        <StudioHeaderActions className="dezin-generation-plan__header-actions">
+          <StudioStatusBadge
             className="dezin-generation-plan__plan-state"
-            data-state={displayState(detail.plan.status)}
+            data-state={planState}
+            tone={statusTone(planState)}
             aria-label={`Plan status: ${planStatus}`}
           >
             <i aria-hidden />
             <span>{planStatus}</span>
-          </div>
+          </StudioStatusBadge>
           <PlanCloseButton onClose={onClose} />
-        </div>
-      </header>
+        </StudioHeaderActions>
+      </StudioPanelHeader>
 
-      <div className="dezin-generation-plan__overview">
+      <StudioInspectorSection
+        className="dezin-generation-plan__overview"
+        heading="Progress"
+        contentClassName="dezin-generation-plan__overview-content"
+      >
         <div
           className="dezin-generation-plan__overview-copy"
           role="status"
@@ -312,123 +392,133 @@ export function GenerationPlanPanel({
           <p className="dezin-generation-plan__plan-message" role="alert">{failureMessage}</p>
         ) : null}
         {plans.length > 1 ? (
-          <label className="dezin-generation-plan__selector">
-            <span>History</span>
-            <select
-              aria-label="Selected generation plan"
-              value={detail.plan.id}
-              onChange={(event) => onSelectPlan(event.target.value)}
-            >
-              {plans.map((plan, index) => (
-                <option key={plan.id} value={plan.id}>{shortPlanLabel(plan, index)}</option>
-              ))}
-            </select>
-          </label>
+          <PlanHistorySelect plans={plans} value={detail.plan.id} onChange={onSelectPlan} />
         ) : null}
-      </div>
+      </StudioInspectorSection>
 
-      <ol className="dezin-generation-plan__tasks" aria-label="Generation tasks">
-        {detail.tasks.map((task) => {
-          const label = taskLabel(task.kind);
-          const selectionDestinations = researchSelectionDestinations(projectId, task);
-          const awaitingDirectionSelection = selectionDestinations.length > 0;
-          const state = awaitingDirectionSelection ? "active" : displayState(task.status);
-          const message = taskMessage(task);
-          const artifactDestination = artifactRevisionDestination(projectId, task, detail);
-          return (
-            <li key={task.id} className="dezin-generation-plan__task" data-state={state}>
-              <span className="dezin-generation-plan__task-marker" data-state={state} aria-hidden />
-              <div className="dezin-generation-plan__task-body">
-                <div className="dezin-generation-plan__task-topline">
-                  <div>
-                    <span>{label}</span>
-                    <strong>{targetLabel(task, targetLabels)}</strong>
-                  </div>
-                  <span className="dezin-generation-plan__task-status">
-                    {awaitingDirectionSelection ? "Awaiting direction selection" : statusLabel(task.status)}
-                  </span>
-                </div>
-                <p className="dezin-generation-plan__task-meta">{dependencyLabel(task)}</p>
-                {message ? <p className="dezin-generation-plan__task-message">{message}</p> : null}
-                {artifactDestination ? (
-                  <a
-                    className="dezin-generation-plan__artifact-link"
-                    href={artifactDestination.href}
-                    aria-label={artifactDestination.ariaLabel}
-                    title={artifactDestination.evidenceHash === null
-                      ? undefined
-                      : `Candidate evidence ${artifactDestination.evidenceHash}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      navigate(artifactDestination.href);
-                    }}
-                  >
-                    <span>{artifactDestination.label}</span>
-                    <span aria-hidden>↗</span>
-                  </a>
-                ) : null}
-                {selectionDestinations.map((destination) => (
-                  <a
-                    key={`${destination.resourceId}:${destination.revisionId}`}
-                    className="dezin-generation-plan__artifact-link"
-                    href={destination.href}
-                    aria-label={`Review Research directions from Revision ${destination.revisionId}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      navigate(destination.href);
-                    }}
-                  >
-                    <span>Review Research directions</span>
-                    <span aria-hidden>↗</span>
-                  </a>
-                ))}
-                {retryablePlan(detail.plan) && canRetry(task) && !awaitingDirectionSelection ? (
-                  <div className="dezin-generation-plan__retry-actions" aria-label={`${label} retry options`}>
-                    {task.currentAttempt > 0 ? (
-                      <button
-                        type="button"
-                        disabled={busyAction !== null}
-                        aria-label={`Retry ${label} with the same context`}
-                        onClick={() => void onRetry(task.id, "same-context")}
-                      >
-                        <span aria-hidden>↻</span>
-                        Same input
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      disabled={busyAction !== null}
-                      aria-label={`Retry ${label} with refreshed context`}
-                      onClick={() => void onRetry(task.id, "latest-context")}
+      <StudioInspectorSection
+        className="dezin-generation-plan__tasks-section"
+        heading="Tasks"
+        actions={<StudioStatusBadge>{detail.tasks.length}</StudioStatusBadge>}
+        contentClassName="dezin-generation-plan__tasks-content"
+      >
+        <ol className="dezin-generation-plan__tasks" aria-label="Generation tasks">
+          {detail.tasks.map((task) => {
+            const label = taskLabel(task.kind);
+            const selectionDestinations = researchSelectionDestinations(projectId, task);
+            const awaitingDirectionSelection = selectionDestinations.length > 0;
+            const state = awaitingDirectionSelection ? "active" : displayState(task.status);
+            const message = taskMessage(task);
+            const artifactDestination = artifactRevisionDestination(projectId, task, detail);
+            return (
+              <li key={task.id} className="dezin-generation-plan__task" data-state={state}>
+                <span className="dezin-generation-plan__task-marker" data-state={state} aria-hidden />
+                <div className="dezin-generation-plan__task-body">
+                  <div className="dezin-generation-plan__task-topline">
+                    <div>
+                      <span>{label}</span>
+                      <strong>{targetLabel(task, targetLabels)}</strong>
+                    </div>
+                    <StudioStatusBadge
+                      className="dezin-generation-plan__task-status"
+                      tone={statusTone(state)}
                     >
-                      Refresh context
-                    </button>
+                      {awaitingDirectionSelection ? "Awaiting direction selection" : statusLabel(task.status)}
+                    </StudioStatusBadge>
                   </div>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ol>
+                  <p className="dezin-generation-plan__task-meta">{dependencyLabel(task)}</p>
+                  {message ? <p className="dezin-generation-plan__task-message">{message}</p> : null}
+                  {artifactDestination ? (
+                    <a
+                      className="dezin-generation-plan__artifact-link"
+                      href={artifactDestination.href}
+                      aria-label={artifactDestination.ariaLabel}
+                      title={artifactDestination.evidenceHash === null
+                        ? undefined
+                        : `Candidate evidence ${artifactDestination.evidenceHash}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        navigate(artifactDestination.href);
+                      }}
+                    >
+                      <span>{artifactDestination.label}</span>
+                      <ExternalLink aria-hidden />
+                    </a>
+                  ) : null}
+                  {selectionDestinations.map((destination) => (
+                    <a
+                      key={`${destination.resourceId}:${destination.revisionId}`}
+                      className="dezin-generation-plan__artifact-link"
+                      href={destination.href}
+                      aria-label={`Review Research directions from Revision ${destination.revisionId}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        navigate(destination.href);
+                      }}
+                    >
+                      <span>Review Research directions</span>
+                      <ExternalLink aria-hidden />
+                    </a>
+                  ))}
+                  {retryablePlan(detail.plan) && canRetry(task) && !awaitingDirectionSelection ? (
+                    <div
+                      className="dezin-generation-plan__retry-actions"
+                      role="group"
+                      aria-label={`${label} retry options`}
+                    >
+                      {task.currentAttempt > 0 ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          disabled={busyAction !== null}
+                          aria-label={`Retry ${label} with the same context`}
+                          onClick={() => void onRetry(task.id, "same-context")}
+                        >
+                          <RotateCcw aria-hidden />
+                          Same input
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        disabled={busyAction !== null}
+                        aria-label={`Retry ${label} with refreshed context`}
+                        onClick={() => void onRetry(task.id, "latest-context")}
+                      >
+                        <RefreshCw aria-hidden />
+                        Refresh context
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      </StudioInspectorSection>
 
       <footer className="dezin-generation-plan__footer">
         <span className="dezin-generation-plan__identity" title={detail.plan.id}>
           {detail.plan.id.slice(-12)}
         </span>
         {canCancel(detail.plan) ? (
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="xs"
             className="dezin-generation-plan__cancel"
             disabled={busyAction !== null}
             aria-label="Cancel generation plan"
             onClick={() => void onCancel()}
           >
-            <span aria-hidden>×</span>
+            <Square aria-hidden />
             Stop
-          </button>
+          </Button>
         ) : (
           <span className="dezin-generation-plan__settled">
-            <span aria-hidden>■</span>
+            <Check aria-hidden />
             Settled
           </span>
         )}
@@ -709,7 +799,7 @@ export function GenerationPlanInspector({
     return (
       <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-label="Generation Plan">
         <PlanCloseButton onClose={onClose} />
-        <div className="dezin-generation-plan__placeholder-lines" aria-hidden><i /><i /><i /></div>
+        <LoaderCircle className="dezin-generation-plan__placeholder-icon motion-safe:animate-spin" aria-hidden />
         <p role="status">Loading build plan…</p>
       </section>
     );
@@ -718,7 +808,7 @@ export function GenerationPlanInspector({
     return (
       <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-labelledby="empty-generation-plan-title">
         <PlanCloseButton onClose={onClose} />
-        <div className="dezin-generation-plan__empty-mark" aria-hidden><i /><i /><i /></div>
+        <ListChecks className="dezin-generation-plan__placeholder-icon" aria-hidden />
         <h2 id="empty-generation-plan-title">No build plan yet</h2>
         <p>Approved generation work will appear here as a durable task sequence.</p>
       </section>
@@ -728,26 +818,23 @@ export function GenerationPlanInspector({
     return (
       <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-labelledby="unavailable-generation-plan-title">
         <PlanCloseButton onClose={onClose} />
+        <TriangleAlert className="dezin-generation-plan__placeholder-icon" aria-hidden />
         <h2 id="unavailable-generation-plan-title">Build plan unavailable</h2>
         <p role="alert">{message ?? "The Generation Plan could not be loaded."}</p>
         {plans.length > 1 ? (
-          <label className="dezin-generation-plan__selector">
-            <span>History</span>
-            <select
-              aria-label="Selected generation plan"
-              value={selectedPlanId ?? ""}
-              onChange={(event) => selectPlan(event.target.value)}
-            >
-              {plans.map((plan, index) => (
-                <option key={plan.id} value={plan.id}>{shortPlanLabel(plan, index)}</option>
-              ))}
-            </select>
-          </label>
+          <PlanHistorySelect plans={plans} value={selectedPlanId ?? ""} onChange={selectPlan} />
         ) : null}
         {selectedPlanId !== null ? (
-          <button type="button" onClick={() => selectPlan(selectedPlanId)} aria-label="Retry loading build plan">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => selectPlan(selectedPlanId)}
+            aria-label="Retry loading build plan"
+          >
+            <RefreshCw aria-hidden />
             Try again
-          </button>
+          </Button>
         ) : null}
       </section>
     );

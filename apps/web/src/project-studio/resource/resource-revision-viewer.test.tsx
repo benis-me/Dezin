@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
@@ -135,6 +136,146 @@ test("the exact Resource body is ready before lazy history, and history failure 
   expect(await screen.findByRole("alert")).toHaveTextContent("History index is offline");
   expect(screen.getByText("Make every decision legible.")).toBeInTheDocument();
   expect(listHistory).toHaveBeenCalledWith("project-1", resource.id, { limit: 20 });
+});
+
+test("Resource document navigation uses the shared ghost header action", async () => {
+  render(
+    <ApiProvider client={makeFakeApi({
+      getResource: async () => resource,
+      getResourceRevisionView: async () => fileView,
+    })}>
+      <Harness requestedRevisionId={null} />
+    </ApiProvider>,
+  );
+
+  const back = await screen.findByRole("button", { name: "Back to project canvas" });
+  expect(back).toHaveClass("h-8", "w-8", "rounded-lg", "hover:bg-surface-2");
+  expect(back).not.toHaveClass("dezin-resource-viewer__back");
+});
+
+test("Resource states and Revision history preserve shared control sizing and skinning", () => {
+  const css = readFileSync(
+    `${process.cwd()}/src/project-studio/resource/resource-revision-viewer.css`,
+    "utf8",
+  );
+
+  expect(css).not.toMatch(
+    /\.dezin-resource-viewer--state button\s*\{[^}]*(?:border|border-radius|padding|background|font-size)\s*:/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-resource-history__trigger\s*\{[^}]*(?:height|gap|padding|font-size|font-weight)\s*:/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-resource-history__heading button\s*\{[^}]*font-size\s*:/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-resource-history__older\s*\{[^}]*(?:border|border-radius|padding|font-size)\s*:/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-revision-(?:payload__download-error|media__state|image-state) button\s*\{[^}]*(?:border|border-radius|padding|background|font-size|font-weight)\s*:/s,
+  );
+});
+
+test("Resource history opens and closes from the keyboard while returning focus to its trigger", async () => {
+  const user = userEvent.setup();
+  render(
+    <ApiProvider client={makeFakeApi({
+      listResourceRevisionHistory: async () => ({ items: [], nextCursor: null }),
+    })}>
+      <ResourceRevisionHistory
+        projectId="project-1"
+        resourceId={resource.id}
+        current={identity}
+        headRevisionId={identity.id}
+        pinned={false}
+        onOpenRevision={() => {}}
+        onReturnToHead={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const trigger = screen.getByRole("button", { name: "Open Resource Revision history" });
+  expect(trigger).toHaveAttribute("data-size", "sm");
+  expect(trigger).toHaveAccessibleDescription("Current Resource checkout: Current Head · Revision 2");
+  trigger.focus();
+  await user.keyboard("{Enter}");
+  expect(await screen.findByRole("dialog", { name: "Resource Revision history" })).toBeInTheDocument();
+  expect(await screen.findByText("No immutable Revisions yet.")).toBeInTheDocument();
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "Resource Revision history" })).not.toBeInTheDocument();
+  });
+  expect(trigger).toHaveFocus();
+});
+
+test("Resource history announces its initial loading state without hiding the current checkout", async () => {
+  const user = userEvent.setup();
+  const history = new Promise<never>(() => {});
+  render(
+    <ApiProvider client={makeFakeApi({
+      listResourceRevisionHistory: async () => history,
+    })}>
+      <ResourceRevisionHistory
+        projectId="project-1"
+        resourceId={resource.id}
+        current={identity}
+        headRevisionId={identity.id}
+        pinned={false}
+        onOpenRevision={() => {}}
+        onReturnToHead={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Open Resource Revision history" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Loading 20 newest Revisions");
+  expect(screen.getByRole("button", { name: "Open Resource Revision history" }))
+    .toHaveAccessibleDescription("Current Resource checkout: Current Head · Revision 2");
+});
+
+test("choosing a Resource Revision dismisses history before routing to the checkout", async () => {
+  const user = userEvent.setup();
+  const onOpenRevision = vi.fn();
+  render(
+    <ApiProvider client={makeFakeApi({
+      listResourceRevisionHistory: async () => ({
+        items: [{
+          id: "revision-history-choice",
+          workspaceId: resource.workspaceId,
+          resourceId: resource.id,
+          sequence: 4,
+          parentRevisionId: identity.id,
+          manifestPath: "resource-revisions/revision-history-choice/manifest.json",
+          summary: "A selected immutable checkout",
+          metadata: {},
+          checksum: "4".repeat(64),
+          provenance: {},
+          createdByRunId: null,
+          createdAt: 4,
+        }],
+        nextCursor: null,
+      }),
+    })}>
+      <ResourceRevisionHistory
+        projectId="project-1"
+        resourceId={resource.id}
+        current={identity}
+        headRevisionId={identity.id}
+        pinned={false}
+        onOpenRevision={onOpenRevision}
+        onReturnToHead={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Open Resource Revision history" }));
+  await user.click(await screen.findByRole("button", { name: /Revision 4/ }));
+
+  expect(onOpenRevision).toHaveBeenCalledWith("revision-history-choice");
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "Resource Revision history" })).not.toBeInTheDocument();
+  });
 });
 
 test("native media uses an authenticated Blob URL and revokes it on unmount", async () => {
@@ -686,10 +827,26 @@ test("all non-Research Resource kinds render from bounded frozen projections", (
           parameters: [
             { id: "strength", label: "Strength", type: "number", defaultValue: 0.5, options: [], description: "Opacity" },
             { id: "enabled", label: "Enabled", type: "boolean", defaultValue: true, options: [], description: "Frozen switch" },
+            {
+              id: "easing",
+              label: "Easing",
+              type: "select",
+              defaultValue: "ease-out",
+              options: [
+                { value: "ease-out", label: "Ease out" },
+                { value: "linear", label: "Linear" },
+              ],
+              description: "Frozen curve",
+            },
           ],
           presets: [], code: "return opacity;",
         },
-        fixture: { width: 640, height: 360, timesMs: [0, 500, 1_000], values: { strength: 0.5, enabled: true } },
+        fixture: {
+          width: 640,
+          height: 360,
+          timesMs: [0, 500, 1_000],
+          values: { strength: 0.5, enabled: true, easing: "ease-out" },
+        },
       },
     },
     {
@@ -719,6 +876,8 @@ test("all non-Research Resource kinds render from bounded frozen projections", (
   expect(screen.getByRole("heading", { name: "Reference checkout" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Soft reveal" })).toBeInTheDocument();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Easing" })).not.toBeInTheDocument();
   expect(screen.getByText("On")).toBeInTheDocument();
+  expect(screen.getByText("Ease out")).toBeInTheDocument();
   expect(screen.getByText("Frozen external evidence.")).toBeInTheDocument();
 });

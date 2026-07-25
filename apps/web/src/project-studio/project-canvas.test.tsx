@@ -14,7 +14,17 @@ import {
   type WorkspaceLayoutCommand,
 } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
-import { ProjectCanvas, isCanvasShortcutTarget } from "./canvas/ProjectCanvas.tsx";
+import {
+  ProjectCanvas,
+  isCanvasShortcutTarget,
+  reconcileCanvasEdges,
+  reconcileCanvasNodes,
+} from "./canvas/ProjectCanvas.tsx";
+import {
+  workspaceGraphToFlow,
+  type WorkspaceFlowEdge,
+  type WorkspaceFlowNode,
+} from "./canvas/workspace-graph-adapter.ts";
 import { applyWorkspaceLayoutCommands } from "./canvas/workspace-layout.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
@@ -62,14 +72,21 @@ const layout: WorkspaceLayout = {
   checksum: "layout-1",
 };
 
+const fullZoomLayout: WorkspaceLayout = {
+  ...layout,
+  viewport: { ...layout.viewport, zoom: 1 },
+};
+
 interface ReactFlowMeasurementController {
-  (width?: number, height?: number): void;
+  (width?: number, height?: number, left?: number, top?: number): void;
   observedCanvasSurfaces: () => number;
 }
 
-function installReactFlowMeasurements(): ReactFlowMeasurementController {
+function installReactFlowMeasurements(initialLeft = 0, initialTop = 0): ReactFlowMeasurementController {
   let measuredWidth = 960;
   let measuredHeight = 640;
+  let measuredLeft = initialLeft;
+  let measuredTop = initialTop;
   vi.stubGlobal("DOMMatrixReadOnly", class MockDOMMatrixReadOnly {
     readonly m22 = 1;
   });
@@ -83,12 +100,12 @@ function installReactFlowMeasurements(): ReactFlowMeasurementController {
     const width = this.offsetWidth;
     const height = this.offsetHeight;
     return {
-      x: 0,
-      y: 0,
-      top: 0,
-      right: width,
-      bottom: height,
-      left: 0,
+      x: measuredLeft,
+      y: measuredTop,
+      top: measuredTop,
+      right: measuredLeft + width,
+      bottom: measuredTop + height,
+      left: measuredLeft,
       width,
       height,
       toJSON: () => ({}),
@@ -114,9 +131,11 @@ function installReactFlowMeasurements(): ReactFlowMeasurementController {
       this.targets.clear();
     }
   });
-  const measure = ((width = 960, height = 640) => {
+  const measure = ((width = 960, height = 640, left = measuredLeft, top = measuredTop) => {
     measuredWidth = width;
     measuredHeight = height;
+    measuredLeft = left;
+    measuredTop = top;
     for (const observer of observers) {
       const entries = [...observer.targets].map((target) => {
         const contentRect = target.getBoundingClientRect();
@@ -353,7 +372,7 @@ test("Outline opens the same exact Resource revision as the canvas keyboard path
   );
 });
 
-test("ReactFlow mounts after the ResizeObserver delivery frame and disconnects under StrictMode", () => {
+test("ReactFlow mounts before the first ResizeObserver delivery and disconnects under StrictMode", () => {
   const measureReactFlow = installReactFlowMeasurements();
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   const animationFrames = new Map<number, FrameRequestCallback>();
@@ -372,12 +391,12 @@ test("ReactFlow mounts after the ResizeObserver delivery frame and disconnects u
     </StrictMode>,
   );
 
-  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+  expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
   act(() => measureReactFlow(0, 640));
-  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+  expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
 
   act(() => measureReactFlow(960, 640));
-  expect(screen.queryByRole("application", { name: "Project canvas" })).not.toBeInTheDocument();
+  expect(screen.getByRole("application", { name: "Project canvas" })).toBeInTheDocument();
 
   act(() => {
     const pending = [...animationFrames.values()];
@@ -389,6 +408,236 @@ test("ReactFlow mounts after the ResizeObserver delivery frame and disconnects u
 
   rendered.unmount();
   expect(measureReactFlow.observedCanvasSurfaces()).toBe(0);
+});
+
+test("panel resizing keeps canvas objects fixed in screen space instead of recentering the camera", async () => {
+  const measureReactFlow = installReactFlowMeasurements(240);
+  const onSaveLayout = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => (
+    applyWorkspaceLayoutCommands(layout, commands)
+  ));
+  const animationFrames = new Map<number, FrameRequestCallback>();
+  let nextAnimationFrameId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    animationFrames.delete(id);
+  });
+  const flushAnimationFrames = () => {
+    const pending = [...animationFrames.values()];
+    animationFrames.clear();
+    for (const callback of pending) callback(0);
+  };
+  const { container } = render(
+    <CanvasHarness onSaveLayout={onSaveLayout} />,
+  );
+  await act(async () => {
+    measureReactFlow(960, 640, 240);
+    flushAnimationFrames();
+  });
+  const viewport = container.querySelector<HTMLElement>(".react-flow__viewport");
+  expect(viewport).not.toBeNull();
+  expect(viewport).toHaveStyle({ transform: "translate(0px,0px) scale(0.8)" });
+
+  await act(async () => {
+    measureReactFlow(1120, 640, 240);
+    flushAnimationFrames();
+  });
+  expect(viewport).toHaveStyle({ transform: "translate(0px,0px) scale(0.8)" });
+  expect(onSaveLayout).not.toHaveBeenCalled();
+
+  await act(async () => {
+    measureReactFlow(1040, 640, 320);
+    flushAnimationFrames();
+  });
+
+  await waitFor(() => expect(viewport).toHaveStyle({
+    transform: "translate(-80px,0px) scale(0.8)",
+  }));
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
+    { type: "set-viewport", viewport: { x: -80, y: 0, zoom: 0.8 } },
+  ]));
+  expect(onSaveLayout).toHaveBeenCalledTimes(1);
+});
+
+test("a surface shift during pan debounce is folded into that viewport save without a delayed jump", async () => {
+  const measureReactFlow = installReactFlowMeasurements(240);
+  const onSaveLayout = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => (
+    applyWorkspaceLayoutCommands(layout, commands)
+  ));
+  const animationFrames = new Map<number, FrameRequestCallback>();
+  let nextAnimationFrameId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    animationFrames.delete(id);
+  });
+  const flushAnimationFrames = () => {
+    const pending = [...animationFrames.values()];
+    animationFrames.clear();
+    for (const callback of pending) callback(0);
+  };
+  const { container } = render(<CanvasHarness onSaveLayout={onSaveLayout} />);
+  await act(async () => {
+    measureReactFlow(960, 640, 240);
+    flushAnimationFrames();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Hand tool" }));
+  const pane = container.querySelector<HTMLElement>(".react-flow__pane")!;
+  const viewport = container.querySelector<HTMLElement>(".react-flow__viewport")!;
+  const eventWindow = pane.ownerDocument.defaultView!;
+  const mouseEvent = (type: string, init: MouseEventInit): MouseEvent => {
+    const event = new eventWindow.MouseEvent(type, { bubbles: true, ...init });
+    Object.defineProperty(event, "view", { configurable: true, value: eventWindow });
+    return event;
+  };
+
+  pane.dispatchEvent(mouseEvent("mousedown", {
+    button: 0,
+    buttons: 1,
+    clientX: 400,
+    clientY: 300,
+  }));
+  eventWindow.dispatchEvent(mouseEvent("mousemove", {
+    button: 0,
+    buttons: 1,
+    clientX: 440,
+    clientY: 300,
+  }));
+  eventWindow.dispatchEvent(mouseEvent("mouseup", {
+    button: 0,
+    buttons: 0,
+    clientX: 440,
+    clientY: 300,
+  }));
+  await waitFor(() => expect(viewport).toHaveStyle({
+    transform: "translate(40px,0px) scale(0.8)",
+  }));
+
+  await act(async () => {
+    measureReactFlow(880, 640, 320);
+    flushAnimationFrames();
+  });
+
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
+    { type: "set-viewport", viewport: { x: -40, y: 0, zoom: 0.8 } },
+  ]));
+  expect(viewport).toHaveStyle({ transform: "translate(-40px,0px) scale(0.8)" });
+
+  await act(async () => {
+    measureReactFlow(800, 640, 400);
+    flushAnimationFrames();
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
+    { type: "set-viewport", viewport: { x: -120, y: 0, zoom: 0.8 } },
+  ]));
+});
+
+test("an older viewport save cannot snap back a newer surface resize", async () => {
+  const measureReactFlow = installReactFlowMeasurements(240);
+  const animationFrames = new Map<number, FrameRequestCallback>();
+  let nextAnimationFrameId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    animationFrames.delete(id);
+  });
+  const flushAnimationFrames = () => {
+    const pending = [...animationFrames.values()];
+    animationFrames.clear();
+    for (const callback of pending) callback(0);
+  };
+  let resolveFirstSave!: (saved: WorkspaceLayout) => void;
+  const firstSave = new Promise<WorkspaceLayout>((resolve) => {
+    resolveFirstSave = resolve;
+  });
+  let authoritative = layout;
+  const onSaveLayout = vi.fn()
+    .mockImplementationOnce(() => firstSave)
+    .mockImplementation(async (commands: readonly WorkspaceLayoutCommand[]) => {
+      authoritative = applyWorkspaceLayoutCommands(authoritative, commands);
+      return authoritative;
+    });
+  const { container } = render(<CanvasHarness onSaveLayout={onSaveLayout} />);
+  await act(async () => {
+    measureReactFlow(960, 640, 240);
+    flushAnimationFrames();
+  });
+  await act(async () => {
+    measureReactFlow(880, 640, 320);
+    flushAnimationFrames();
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
+  const firstSavedLayout = applyWorkspaceLayoutCommands(layout, onSaveLayout.mock.calls[0]![0]);
+  const viewport = container.querySelector<HTMLElement>(".react-flow__viewport")!;
+  expect(viewport).toHaveStyle({ transform: "translate(-80px,0px) scale(0.8)" });
+
+  await act(async () => {
+    measureReactFlow(800, 640, 400);
+    flushAnimationFrames();
+  });
+  await waitFor(() => expect(viewport).toHaveStyle({
+    transform: "translate(-160px,0px) scale(0.8)",
+  }));
+
+  await act(async () => {
+    authoritative = firstSavedLayout;
+    resolveFirstSave(firstSavedLayout);
+    await firstSave;
+  });
+
+  expect(viewport).toHaveStyle({ transform: "translate(-160px,0px) scale(0.8)" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+});
+
+test("unmount flushes a pending resize viewport instead of restoring the old camera on return", async () => {
+  const measureReactFlow = installReactFlowMeasurements(240);
+  const animationFrames = new Map<number, FrameRequestCallback>();
+  let nextAnimationFrameId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    animationFrames.delete(id);
+  });
+  const flushAnimationFrames = () => {
+    const pending = [...animationFrames.values()];
+    animationFrames.clear();
+    for (const callback of pending) callback(0);
+  };
+  const onSaveLayout = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => (
+    applyWorkspaceLayoutCommands(layout, commands)
+  ));
+  const rendered = render(<CanvasHarness onSaveLayout={onSaveLayout} />);
+  await act(async () => {
+    measureReactFlow(960, 640, 240);
+    flushAnimationFrames();
+  });
+  await act(async () => {
+    measureReactFlow(880, 640, 320);
+    flushAnimationFrames();
+  });
+  const viewport = rendered.container.querySelector<HTMLElement>(".react-flow__viewport");
+  await waitFor(() => expect(viewport).toHaveStyle({
+    transform: "translate(-80px,0px) scale(0.8)",
+  }));
+
+  await act(async () => rendered.unmount());
+
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
+    { type: "set-viewport", viewport: { x: -80, y: 0, zoom: 0.8 } },
+  ]));
+  expect(onSaveLayout).toHaveBeenCalledTimes(1);
 });
 
 test("offscreen workspace nodes stay mounted after measurement so selection drags only use initialized nodes", async () => {
@@ -558,9 +807,9 @@ test("derived uses relationships are explicitly read-only and never submit a rem
   fireEvent.click(edge);
 
   const remove = screen.getByRole("button", { name: "Uses relationships are derived and read-only" });
-  expect(remove).toBeDisabled();
-  expect(remove.parentElement).toHaveAccessibleName("Uses relationships are derived and read-only");
-  await user.hover(remove.parentElement!);
+  expect(remove).toHaveAttribute("aria-disabled", "true");
+  expect(remove).toHaveAttribute("tabindex", "0");
+  await user.hover(remove);
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Uses relationships are derived and read-only");
   expect(screen.getByRole("tooltip")).not.toHaveTextContent("Select a relationship to delete");
   fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Delete" });
@@ -570,6 +819,7 @@ test("derived uses relationships are explicitly read-only and never submit a rem
 });
 
 test("changing the relationship filter clears a selected relationship before hiding it", async () => {
+  const user = userEvent.setup();
   const measureReactFlow = installReactFlowMeasurements();
   const onApplyGraphCommands = vi.fn(async () => {});
   const { container } = render(
@@ -585,9 +835,10 @@ test("changing the relationship filter clears a selected relationship before hid
   fireEvent.click(edge);
   await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeEnabled());
 
-  fireEvent.click(screen.getByRole("button", { name: "Show semantic relations" }));
+  await user.click(screen.getByRole("button", { name: "Relationship filter: Prototype flow" }));
+  await user.click(screen.getByRole("menuitemradio", { name: "Semantic relations" }));
 
-  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeDisabled());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Delete selected relationship" })).toBeNull());
   expect(container.querySelector('.react-flow__edge[data-id="prototype-1"]')).toBeNull();
   expect(onApplyGraphCommands).not.toHaveBeenCalled();
 });
@@ -616,7 +867,7 @@ test("a graph revision change clears relationship selection even when an edge id
     />,
   );
 
-  await waitFor(() => expect(screen.getByRole("button", { name: "Delete selected relationship" })).toBeDisabled());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Delete selected relationship" })).toBeNull());
   expect(screen.queryByRole("button", { name: "Uses relationships are derived and read-only" })).toBeNull();
   expect(onApplyGraphCommands).not.toHaveBeenCalled();
 });
@@ -648,7 +899,8 @@ test("double-clicking a connection Handle never opens the artifact", () => {
   const onOpenArtifact = vi.fn();
   render(
     <CanvasHarness
-      onSaveLayout={async () => layout}
+      canvasLayout={fullZoomLayout}
+      onSaveLayout={async () => fullZoomLayout}
       onOpenArtifact={onOpenArtifact}
     />,
   );
@@ -735,7 +987,7 @@ test("canvas keyboard controls open, clear, switch tools, fit, and persist one o
     { type: "move", objectId: "page-1", x: 41, y: 70 },
   ]));
   fireEvent.keyDown(canvas, { key: "Escape" });
-  expect(screen.getByRole("button", { name: "Group selection" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Group selection" })).toBeNull();
 });
 
 test("an older move response cannot overwrite a newer optimistic node position", async () => {
@@ -845,10 +1097,161 @@ test("a workspace model refresh preserves the optimistic node position while its
   ]);
 });
 
+test("a late save from the previous project cannot contaminate the next project's layout queue", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const firstProjectLayout: WorkspaceLayout = {
+    workspaceId: "workspace-1",
+    layoutId: "default",
+    objects: [
+      { id: "page-1", kind: "node", x: 40, y: 70, parentGroupId: null },
+      { id: "page-2", kind: "node", x: 370, y: 70, parentGroupId: null },
+    ],
+    viewport: { x: 0, y: 0, zoom: 0.8 },
+    checksum: "project-1-layout",
+  };
+  const secondProjectGraph: WorkspaceGraph = {
+    ...graph,
+    workspaceId: "workspace-2",
+    nodes: graph.nodes.map((node) => ({ ...node, workspaceId: "workspace-2" })),
+    edges: graph.edges.map((edge) => ({ ...edge, workspaceId: "workspace-2" })),
+  };
+  const secondProjectLayout: WorkspaceLayout = {
+    ...layout,
+    workspaceId: "workspace-2",
+    checksum: "project-2-layout",
+  };
+  let resolveFirstProjectSave!: (saved: WorkspaceLayout) => void;
+  const firstProjectSave = new Promise<WorkspaceLayout>((resolve) => {
+    resolveFirstProjectSave = resolve;
+  });
+  const onSaveFirstProject = vi.fn((_commands: readonly WorkspaceLayoutCommand[]) => firstProjectSave);
+  const onSaveSecondProject = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => (
+    applyWorkspaceLayoutCommands(secondProjectLayout, commands)
+  ));
+  const common = {
+    projectName: "Storefront system",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+    selectedNodeIds: ["page-1"] as const,
+    onSelectionChange: vi.fn(),
+    onApplyGraphCommands: vi.fn(async () => {}),
+    onOpenArtifact: vi.fn(),
+  };
+  const rendered = render(
+    <ProjectCanvas
+      {...common}
+      projectId="project-1"
+      graph={graph}
+      layout={firstProjectLayout}
+      onSaveLayout={onSaveFirstProject}
+    />,
+  );
+  await act(async () => measureReactFlow());
+  const canvas = await screen.findByRole("application", { name: "Project canvas" });
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveFirstProject).toHaveBeenCalledTimes(1));
+
+  rendered.rerender(
+    <ProjectCanvas
+      {...common}
+      projectId="project-2"
+      graph={secondProjectGraph}
+      layout={secondProjectLayout}
+      onSaveLayout={onSaveSecondProject}
+    />,
+  );
+  await act(async () => measureReactFlow());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Ungroup selection" })).toBeEnabled());
+
+  fireEvent.click(screen.getByRole("button", { name: "Ungroup selection" }));
+
+  await waitFor(() => expect(onSaveSecondProject).toHaveBeenCalledWith([
+    { type: "move", objectId: "page-1", x: 80, y: 110 },
+    { type: "set-parent", objectId: "page-1", parentGroupId: null },
+  ]));
+
+  await act(async () => {
+    resolveFirstProjectSave(applyWorkspaceLayoutCommands(
+      firstProjectLayout,
+      onSaveFirstProject.mock.calls[0]![0],
+    ));
+    await firstProjectSave;
+  });
+});
+
+test("a stale collapse save cannot restore the previous project's selection", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const secondProjectGraph: WorkspaceGraph = {
+    ...graph,
+    workspaceId: "workspace-2",
+    nodes: graph.nodes.map((node) => ({ ...node, workspaceId: "workspace-2" })),
+    edges: graph.edges.map((edge) => ({ ...edge, workspaceId: "workspace-2" })),
+  };
+  const secondProjectLayout: WorkspaceLayout = {
+    ...layout,
+    workspaceId: "workspace-2",
+    checksum: "project-2-layout",
+  };
+  let resolveFirstProjectSave!: (saved: WorkspaceLayout) => void;
+  const firstProjectSave = new Promise<WorkspaceLayout>((resolve) => {
+    resolveFirstProjectSave = resolve;
+  });
+  const onSaveFirstProject = vi.fn((_commands: readonly WorkspaceLayoutCommand[]) => firstProjectSave);
+  const onSelectionChange = vi.fn();
+  const common = {
+    projectName: "Storefront system",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+    onSelectionChange,
+    onApplyGraphCommands: vi.fn(async () => {}),
+    onOpenArtifact: vi.fn(),
+  };
+  const rendered = render(
+    <ProjectCanvas
+      {...common}
+      projectId="project-1"
+      graph={graph}
+      layout={layout}
+      selectedNodeIds={["journey", "page-1"]}
+      onSaveLayout={onSaveFirstProject}
+    />,
+  );
+  await act(async () => measureReactFlow());
+
+  fireEvent.click(await screen.findByRole("button", { name: "Collapse group Purchase journey" }));
+  await waitFor(() => expect(onSaveFirstProject).toHaveBeenCalledTimes(1));
+  expect(onSelectionChange).toHaveBeenCalledTimes(1);
+
+  rendered.rerender(
+    <ProjectCanvas
+      {...common}
+      projectId="project-2"
+      graph={secondProjectGraph}
+      layout={secondProjectLayout}
+      selectedNodeIds={[]}
+      onSaveLayout={vi.fn(async () => secondProjectLayout)}
+    />,
+  );
+  await act(async () => measureReactFlow());
+
+  await act(async () => {
+    resolveFirstProjectSave(applyWorkspaceLayoutCommands(
+      layout,
+      onSaveFirstProject.mock.calls[0]![0],
+    ));
+    await firstProjectSave;
+  });
+
+  expect(onSelectionChange).toHaveBeenCalledTimes(1);
+});
+
 test("full semantic zoom exposes keyboard Page handles and compact zoom removes them from the accessibility tree", async () => {
   const onApplyGraphCommands = vi.fn(async (_commands: readonly WorkspaceGraphCommand[]) => {});
   const { unmount } = render(
-    <CanvasHarness onSaveLayout={async () => layout} onApplyGraphCommands={onApplyGraphCommands} />,
+    <CanvasHarness
+      canvasLayout={fullZoomLayout}
+      onSaveLayout={async () => fullZoomLayout}
+      onApplyGraphCommands={onApplyGraphCommands}
+    />,
   );
 
   const source = screen.getByRole("button", { name: "Connect from Checkout" });
@@ -873,6 +1276,347 @@ test("full semantic zoom exposes keyboard Page handles and compact zoom removes 
     />,
   );
   expect(screen.queryByRole("button", { name: "Connect from Checkout" })).not.toBeInTheDocument();
+});
+
+test("canvas reconciliation reuses unchanged nodes and edges across workspace polling", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  });
+  const incoming = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  });
+  const measuredNode = {
+    ...original.nodes[1]!,
+    measured: { width: 312, height: 220 },
+  } satisfies WorkspaceFlowNode;
+  const currentEdges = [{ ...original.edges[0]! }] satisfies WorkspaceFlowEdge[];
+
+  const nextNodes = reconcileCanvasNodes(
+    [original.nodes[0]!, measuredNode, original.nodes[2]!],
+    incoming.nodes,
+    new Map(),
+  );
+  const nextEdges = reconcileCanvasEdges(currentEdges, incoming.edges);
+
+  expect(nextNodes[1]).toBe(measuredNode);
+  expect(nextNodes[1]?.measured).toEqual({ width: 312, height: 220 });
+  expect(nextEdges[0]).toBe(currentEdges[0]);
+});
+
+test("canvas reconciliation keeps measured geometry when semantic node data changes", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  });
+  const current = {
+    ...original.nodes[1]!,
+    measured: { width: 312, height: 220 },
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original.nodes[1]!,
+    data: {
+      ...original.nodes[1]!.data,
+      generationState: "running" as const,
+      generationMessage: "Refining the page",
+    },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes([current], [incoming], new Map());
+
+  expect(next).not.toBe(current);
+  expect(next?.data.generationState).toBe("running");
+  expect(next?.measured).toEqual({ width: 312, height: 220 });
+});
+
+test("canvas reconciliation keeps measured geometry during an optimistic move", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[1]!;
+  const current = {
+    ...original,
+    measured: { width: 312, height: 220 },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes(
+    [current],
+    [{ ...original, position: { x: 52, y: 70 } }],
+    new Map([["page-1", { generation: 1, position: { x: 64, y: 70 } }]]),
+  );
+
+  expect(next?.position).toEqual({ x: 64, y: 70 });
+  expect(next?.measured).toEqual({ width: 312, height: 220 });
+});
+
+test("canvas reconciliation invalidates measured geometry when declared node geometry changes", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[1]!;
+  const current = {
+    ...original,
+    measured: { width: 312, height: 220 },
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original,
+    style: { ...original.style, width: 420 },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes([current], [incoming], new Map());
+
+  expect(next?.style).toMatchObject({ width: 420 });
+  expect(next?.measured).toBeUndefined();
+});
+
+test("canvas reconciliation preserves active resizer geometry across semantic model refreshes", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[0]!;
+  const current = {
+    ...original,
+    width: 760,
+    height: 420,
+    measured: { width: 760, height: 420 },
+    resizing: true,
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original,
+    data: { ...original.data, name: "Purchase journey refreshed" },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes([current], [incoming], new Map());
+
+  expect(next).toMatchObject({
+    width: 760,
+    height: 420,
+    measured: { width: 760, height: 420 },
+    resizing: true,
+  });
+});
+
+test("canvas reconciliation keeps a new live drag ahead of an older pending move acknowledgement", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[1]!;
+  const current = {
+    ...original,
+    position: { x: 112, y: 96 },
+    dragging: true,
+    measured: { width: 312, height: 220 },
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original,
+    data: { ...original.data, generationState: "running" as const },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes(
+    [current],
+    [incoming],
+    new Map([["page-1", { generation: 1, position: { x: 72, y: 80 } }]]),
+  );
+
+  expect(next).toMatchObject({
+    position: { x: 112, y: 96 },
+    dragging: true,
+  });
+});
+
+test("canvas reconciliation keeps a new live resize ahead of an older pending resize acknowledgement", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[0]!;
+  const current = {
+    ...original,
+    position: { x: 4, y: 12 },
+    width: 820,
+    height: 460,
+    measured: { width: 820, height: 460 },
+    resizing: true,
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original,
+    data: { ...original.data, name: "Purchase journey refreshed" },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes(
+    [current],
+    [incoming],
+    new Map(),
+    new Map([[
+      "journey",
+      {
+        generation: 1,
+        position: { x: 20, y: 24 },
+        width: 760,
+        height: 420,
+      },
+    ]]),
+  );
+
+  expect(next).toMatchObject({
+    position: { x: 4, y: 12 },
+    width: 820,
+    height: 460,
+    measured: { width: 820, height: 460 },
+    resizing: true,
+  });
+});
+
+test("canvas reconciliation uses the newest completed position across move and resize saves", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[0]!;
+
+  const [resizeAfterMove] = reconcileCanvasNodes(
+    [original],
+    [original],
+    new Map([["journey", { generation: 1, position: { x: 72, y: 80 } }]]),
+    new Map([[
+      "journey",
+      {
+        generation: 2,
+        position: { x: 18, y: 22 },
+        width: 760,
+        height: 420,
+      },
+    ]]),
+  );
+  const [moveAfterResize] = reconcileCanvasNodes(
+    [original],
+    [original],
+    new Map([["journey", { generation: 4, position: { x: 96, y: 104 } }]]),
+    new Map([[
+      "journey",
+      {
+        generation: 3,
+        position: { x: 18, y: 22 },
+        width: 760,
+        height: 420,
+      },
+    ]]),
+  );
+
+  expect(resizeAfterMove?.position).toEqual({ x: 18, y: 22 });
+  expect(moveAfterResize?.position).toEqual({ x: 96, y: 104 });
+});
+
+test("canvas reconciliation preserves completed group resize geometry while its save is pending", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[0]!;
+  const current = {
+    ...original,
+    position: { x: 10, y: 20 },
+    width: 760,
+    height: 420,
+    measured: { width: 760, height: 420 },
+    resizing: false,
+  } satisfies WorkspaceFlowNode;
+  const incoming = {
+    ...original,
+    data: { ...original.data, name: "Purchase journey refreshed" },
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes(
+    [current],
+    [incoming],
+    new Map(),
+    new Map([[
+      "journey",
+      {
+        generation: 1,
+        position: { x: 10, y: 20 },
+        width: 760,
+        height: 420,
+      },
+    ]]),
+  );
+
+  expect(next).toMatchObject({
+    position: { x: 10, y: 20 },
+    style: { width: 760, height: 420 },
+    width: 760,
+    height: 420,
+    measured: { width: 760, height: 420 },
+    resizing: false,
+  });
+  expect(next?.data.name).toBe("Purchase journey refreshed");
+});
+
+test("canvas reconciliation rolls an unsaved completed resize back to authoritative geometry", () => {
+  const original = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  }).nodes[0]!;
+  const current = {
+    ...original,
+    width: 760,
+    height: 420,
+    measured: { width: 760, height: 420 },
+    resizing: false,
+  } satisfies WorkspaceFlowNode;
+
+  const [next] = reconcileCanvasNodes([current], [original], new Map());
+
+  expect(next).not.toBe(current);
+  expect(next?.style).toEqual(original.style);
+  expect(next?.width).toBeUndefined();
+  expect(next?.height).toBeUndefined();
+  expect(next?.measured).toBeUndefined();
+});
+
+test("canvas reconciliation follows authoritative node and edge ordering", () => {
+  const model = workspaceGraphToFlow(graph, layout, {
+    zoom: layout.viewport.zoom,
+    edgeFilter: "all",
+    projectId: "project-1",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+  });
+  const currentNodes = [...model.nodes];
+  const incomingNodes = [...model.nodes].reverse().map((node) => ({ ...node }));
+  const secondEdge = {
+    ...model.edges[0]!,
+    id: "prototype-2",
+  } satisfies WorkspaceFlowEdge;
+  const currentEdges = [model.edges[0]!, secondEdge];
+  const incomingEdges = [{ ...secondEdge }, { ...model.edges[0]! }];
+
+  const nextNodes = reconcileCanvasNodes(currentNodes, incomingNodes, new Map());
+  const nextEdges = reconcileCanvasEdges(currentEdges, incomingEdges);
+
+  expect(nextNodes).not.toBe(currentNodes);
+  expect(nextNodes.map((node) => node.id)).toEqual(incomingNodes.map((node) => node.id));
+  expect(nextEdges).not.toBe(currentEdges);
+  expect(nextEdges.map((edge) => edge.id)).toEqual(["prototype-2", "prototype-1"]);
 });
 
 test("shortcut target guard uses closest and ignores nested interactive/contenteditable targets", () => {

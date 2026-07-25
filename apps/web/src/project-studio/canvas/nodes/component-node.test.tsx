@@ -63,6 +63,7 @@ describe("component node", () => {
     expect(screen.getByRole("heading", { name: "Order summary" })).toBeInTheDocument();
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-artifact-kind", "component");
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-zoom", "overview");
+    expect(screen.getByLabelText("Order summary status: passed")).toHaveClass("dezin-flow-card__overview-meta");
     expect(screen.getByLabelText("Order summary status: passed")).toHaveTextContent("passed");
     expect(screen.queryByText(/consumers?/i)).toBeNull();
     expect(screen.queryByText(/rev revision/i)).toBeNull();

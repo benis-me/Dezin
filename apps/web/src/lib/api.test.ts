@@ -186,8 +186,8 @@ test("Research direction intent sends only the strict Agent wire selection", asy
   const input = {
     selectionRequestId: "selection-00000000-0000-4000-8000-000000000041",
     artifactId: "artifact-1",
-    agentCommand: "codebuddy",
-    model: "gpt-5.6-sol",
+    agentCommand: "trae-cli",
+    model: "doubao-seed-1.6",
     expectedResourceHeadRevisionId: "research-revision-1",
     expectedGraphRevision: 3,
     expectedSnapshotId: "snapshot-3",

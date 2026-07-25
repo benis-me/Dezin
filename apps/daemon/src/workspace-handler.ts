@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { getProvider } from "../../../packages/agent/src/index.ts";
 import {
   GenerationPlanCompileError,
   LegacyWorkspaceSeedDriftError,
@@ -60,6 +61,7 @@ import {
   normalizeAgentTurnId,
   normalizeAgentTurnRequest,
   normalizeScopedAgentTurnId,
+  type AgentExecutionSelection,
   type AgentTurnRequest,
 } from "./context/context-types.ts";
 import { removeSealedResourceRevisionPayload } from "./context/adapters/file.ts";
@@ -202,6 +204,24 @@ function rejectUnexpectedRequestFields(
   if (unexpected) throw new HttpError(400, `${label} contains unexpected field: ${unexpected}`);
 }
 
+function registeredAgentExecutionSelection(
+  command: unknown,
+  model: unknown,
+): AgentExecutionSelection {
+  if (typeof command !== "string") {
+    throw new HttpError(400, "Agent command must identify a registered Agent");
+  }
+  const provider = getProvider(command);
+  if (!provider) {
+    throw new HttpError(400, "Agent command is not registered");
+  }
+  return normalizeAgentExecutionSelection({
+    providerId: provider.id,
+    command,
+    model,
+  });
+}
+
 async function parseWorkspaceAgentTurnBody(
   req: IncomingMessage,
   ready: ReadyWorkspace,
@@ -224,11 +244,7 @@ async function parseWorkspaceAgentTurnBody(
         workspaceId: ready.workspace.id,
       },
       intent: "plan",
-      agent: normalizeAgentExecutionSelection({
-        providerId: body.agentCommand,
-        command: body.agentCommand,
-        model: body.model ?? null,
-      }),
+      agent: registeredAgentExecutionSelection(body.agentCommand, body.model ?? null),
       turnId: normalizeAgentTurnId(body.turnId),
       message: body.message.trim(),
       explicitContext: body.explicitContext,
@@ -312,11 +328,7 @@ async function parseScopedAgentTurnBody(
         workspaceId: ready.workspace.id,
       },
       intent: body.intent,
-      agent: normalizeAgentExecutionSelection({
-        providerId: body.agentCommand,
-        command: body.agentCommand,
-        model: body.model ?? null,
-      }),
+      agent: registeredAgentExecutionSelection(body.agentCommand, body.model ?? null),
       turnId: normalizeScopedAgentTurnId(body.turnId),
       message: body.message.trim(),
       explicitContext: body.explicitContext,
@@ -450,11 +462,7 @@ async function parseResearchDirectionArtifactIntentBody(
     throw new HttpError(400, "Research direction selection body is invalid");
   }
   try {
-    const agent = normalizeAgentExecutionSelection({
-      providerId: body.agentCommand,
-      command: body.agentCommand,
-      model: body.model ?? null,
-    });
+    const agent = registeredAgentExecutionSelection(body.agentCommand, body.model ?? null);
     return {
       selectionRequestId: body.selectionRequestId,
       artifactId: body.artifactId,

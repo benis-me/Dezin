@@ -14,9 +14,22 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
+import {
+  Badge,
+  Button,
+  Card,
+  IconButton,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StudioDocumentHeader,
+  StudioHeaderCopy,
+} from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
-  CreateResearchDirectionArtifactIntentInput,
   ReadyProjectWorkspacePayload,
   ResearchResourceRevisionView,
 } from "../../lib/api.ts";
@@ -194,8 +207,14 @@ export function ResearchResourceViewer({
         <CircleAlert aria-hidden />
         <strong>Research unavailable</strong>
         <span role="alert">{currentLoad.message}</span>
-        <button type="button" onClick={() => setLoadRetryEpoch((value) => value + 1)}>Try again</button>
-        <button type="button" onClick={onBack}>Back to canvas</button>
+        <div className="dezin-research-viewer__state-actions">
+          <Button type="button" size="sm" onClick={() => setLoadRetryEpoch((value) => value + 1)}>
+            Try again
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={onBack}>
+            Back to canvas
+          </Button>
+        </div>
       </section>
     );
   }
@@ -225,9 +244,9 @@ export function ResearchResourceViewer({
         <span>{stateMessage}</span>
         <div className="dezin-research-viewer__state-actions">
           {onOpenPlan && generationState ? (
-            <button type="button" onClick={onOpenPlan}>Open build plan</button>
+            <Button type="button" size="sm" onClick={onOpenPlan}>Open build plan</Button>
           ) : null}
-          <button type="button" onClick={onBack}>Back to canvas</button>
+          <Button type="button" size="sm" variant="outline" onClick={onBack}>Back to canvas</Button>
         </div>
       </section>
     );
@@ -237,10 +256,8 @@ export function ResearchResourceViewer({
   const archived = view.resource.archivedAt !== null;
   const selectedDirection = view.directions.find((direction) => direction.id === selectedDirectionId) ?? null;
   const requiresConfirmation = selectedDirection?.evidenceStatus === "hypothesis";
-  const canonicalAgentCommand: CreateResearchDirectionArtifactIntentInput["agentCommand"] | null =
-    agentCommand === "claude" || agentCommand === "codebuddy" ? agentCommand : null;
   const canCreateIntent = !archived && selectedDirection !== null && targetArtifactId.length > 0
-    && agentSettingsReady && canonicalAgentCommand !== null
+    && agentSettingsReady && agentCommand.trim().length > 0
     && activeResourceRevisionId !== null
     && view.observed.headRevisionId === activeResourceRevisionId
     && view.observed.snapshotId === workspace.activeSnapshot.id
@@ -272,7 +289,7 @@ export function ResearchResourceViewer({
   };
 
   const createIntent = async (): Promise<void> => {
-    if (!canCreateIntent || selectedDirection === null || canonicalAgentCommand === null) return;
+    if (!canCreateIntent || selectedDirection === null) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -285,7 +302,7 @@ export function ResearchResourceViewer({
           {
             selectionRequestId: `selection-${globalThis.crypto.randomUUID().toLowerCase()}`,
             artifactId: targetArtifactId,
-            agentCommand: canonicalAgentCommand,
+            agentCommand,
             ...(model ? { model } : {}),
             expectedResourceHeadRevisionId: activeResourceRevisionId!,
             expectedGraphRevision: workspace.graph.revision,
@@ -335,14 +352,15 @@ export function ResearchResourceViewer({
 
   return (
     <section className="dezin-research-viewer" aria-labelledby="research-viewer-title">
-      <header className="dezin-research-viewer__header">
-        <button type="button" className="dezin-research-viewer__back" onClick={onBack} aria-label="Back to project canvas">
+      <StudioDocumentHeader className="dezin-research-viewer__header">
+        <IconButton className="dezin-research-viewer__back" onClick={onBack} aria-label="Back to project canvas">
           <ArrowLeft size={15} aria-hidden />
-        </button>
-        <div className="dezin-research-viewer__identity">
-          <span><BookOpenText size={13} aria-hidden /> Research</span>
-          <h1 id="research-viewer-title">{view.resource.title}</h1>
-        </div>
+        </IconButton>
+        <StudioHeaderCopy
+          title={view.resource.title}
+          subtitle={<span className="flex items-center gap-1.5"><BookOpenText size={13} aria-hidden /> Research</span>}
+          titleId="research-viewer-title"
+        />
         <ResourceRevisionHistory
           className="dezin-research-viewer__history"
           projectId={projectId}
@@ -353,7 +371,7 @@ export function ResearchResourceViewer({
           onOpenRevision={onOpenRevision}
           onReturnToHead={onReturnToHead ?? onBack}
         />
-      </header>
+      </StudioDocumentHeader>
 
       <div className="dezin-research-viewer__scroll">
         <div className="dezin-research-viewer__document">
@@ -363,8 +381,10 @@ export function ResearchResourceViewer({
               <h2 id="research-summary-title">{view.executiveSummary}</h2>
             </div>
             <div className="dezin-research-viewer__quality" data-quality={view.qualityState}>
-              {view.qualityState === "grounded" ? <ShieldCheck aria-hidden /> : <CircleAlert aria-hidden />}
-              <span>{view.qualityState === "grounded" ? "Grounded" : "Needs review"}</span>
+              <Badge variant={view.qualityState === "grounded" ? "secondary" : "outline"}>
+                {view.qualityState === "grounded" ? <ShieldCheck aria-hidden /> : <CircleAlert aria-hidden />}
+                {view.qualityState === "grounded" ? "Grounded" : "Needs review"}
+              </Badge>
               <small>{view.evidenceDirectionCount} evidence · {view.hypothesisDirectionCount} hypothesis</small>
             </div>
           </section>
@@ -387,55 +407,72 @@ export function ResearchResourceViewer({
                 const linkedSourceIds = new Set(linkedFindings.flatMap((finding) => finding.sourceIds));
                 const linkedSources = view.sources.filter((source) => linkedSourceIds.has(source.id));
                 return (
-                  <article className="dezin-research-direction-card" key={direction.id} data-active={active || undefined}>
-                    <button
+                  <Card className="dezin-research-direction-card" key={direction.id} data-active={active || undefined}>
+                    <Button
                       type="button"
                       role="radio"
                       aria-checked={active}
                       tabIndex={active ? 0 : -1}
                       className="dezin-research-direction"
+                      variant="ghost"
                       data-active={active || undefined}
                       data-evidence={direction.evidenceStatus}
                       onClick={() => selectDirection(direction.id)}
                       onKeyDown={(event) => handleDirectionKeyDown(event, index)}
                     >
                       <span className="dezin-research-direction__index">0{index + 1}</span>
-                      <span className="dezin-research-direction__status">
+                      <Badge
+                        className="dezin-research-direction__status"
+                        variant={direction.evidenceStatus === "evidence" ? "secondary" : "outline"}
+                      >
                         {direction.evidenceStatus === "evidence" ? <CircleCheck aria-hidden /> : <Lightbulb aria-hidden />}
                         {direction.evidenceStatus}
-                      </span>
+                      </Badge>
                       <strong>{direction.title}</strong>
                       <span className="dezin-research-direction__thesis">{direction.thesis}</span>
                       <span className="dezin-research-direction__label">Visual language</span>
                       <span className="dezin-research-direction__tokens">
-                        {direction.visualLanguage.map((item) => <i key={item}>{item}</i>)}
+                        {direction.visualLanguage.map((item) => (
+                          <Badge key={item} variant="outline">{item}</Badge>
+                        ))}
                       </span>
                       <span className="dezin-research-direction__risk">Risk · {direction.risks[0]}</span>
                       <span className="dezin-research-direction__select">
                         {active ? <><Check size={13} aria-hidden /> Selected</> : <>Select direction <ArrowUpRight size={13} aria-hidden /></>}
                       </span>
-                    </button>
+                    </Button>
                     <details className="dezin-research-direction__evidence">
                       <summary>
                         Evidence chain · {linkedFindings.length} {linkedFindings.length === 1 ? "finding" : "findings"} · {linkedSources.length} {linkedSources.length === 1 ? "source" : "sources"}
                       </summary>
                       <div>
                         {linkedFindings.map((finding) => (
-                          <article key={finding.id} data-evidence={finding.evidenceStatus}>
-                            <span>{finding.evidenceStatus}</span>
+                          <Card
+                            className="dezin-research-direction__evidence-item"
+                            key={finding.id}
+                            data-evidence={finding.evidenceStatus}
+                          >
+                            <Badge variant={finding.evidenceStatus === "evidence" ? "secondary" : "outline"}>
+                              {finding.evidenceStatus}
+                            </Badge>
                             <p>{finding.statement}</p>
-                          </article>
+                          </Card>
                         ))}
                         <p className="dezin-research-direction__source-chips">
                           {linkedSources.map((source) => (
-                            <span key={source.id} data-verification={source.verification} title={`Receipt ${source.receiptId}`}>
+                            <Badge
+                              key={source.id}
+                              data-verification={source.verification}
+                              title={`Receipt ${source.receiptId}`}
+                              variant="outline"
+                            >
                               {source.title} · {source.verification}
-                            </span>
+                            </Badge>
                           ))}
                         </p>
                       </div>
                     </details>
-                  </article>
+                  </Card>
                 );
               })}
             </div>
@@ -451,12 +488,14 @@ export function ResearchResourceViewer({
             </div>
             <div className="dezin-research-viewer__findings">
               {view.findings.map((finding) => (
-                <article key={finding.id} data-evidence={finding.evidenceStatus}>
-                  <span>{finding.evidenceStatus} · {finding.confidence} confidence</span>
+                <Card key={finding.id} data-evidence={finding.evidenceStatus}>
+                  <Badge variant={finding.evidenceStatus === "evidence" ? "secondary" : "outline"}>
+                    {finding.evidenceStatus} · {finding.confidence} confidence
+                  </Badge>
                   <h3>{finding.statement}</h3>
                   <p>{finding.implication}</p>
                   <small>{finding.groundedness.rationale}</small>
-                </article>
+                </Card>
               ))}
             </div>
           </section>
@@ -471,15 +510,18 @@ export function ResearchResourceViewer({
               </div>
               <div className="dezin-research-viewer__sources">
                 {view.sources.map((source) => (
-                  <article key={source.id} data-verification={source.verification}>
+                  <Card key={source.id} data-verification={source.verification}>
                     <div>
                       <span>{source.kind}</span>
                       <strong>{source.title}</strong>
                     </div>
-                    <span className="dezin-research-viewer__source-state">
+                    <Badge
+                      className="dezin-research-viewer__source-state"
+                      variant={source.verification === "verified" ? "secondary" : "outline"}
+                    >
                       {source.verification === "verified" ? <CircleCheck aria-hidden /> : <CircleAlert aria-hidden />}
                       {source.verification}
-                    </span>
+                    </Badge>
                     <blockquote>{source.excerpt}</blockquote>
                     {source.kind === "web" ? (
                       <a href={source.locator} target="_blank" rel="noreferrer">
@@ -487,7 +529,7 @@ export function ResearchResourceViewer({
                       </a>
                     ) : <small>{source.locator}</small>}
                     <code className="dezin-research-viewer__receipt">Receipt · {source.receiptId}</code>
-                  </article>
+                  </Card>
                 ))}
               </div>
             </section>
@@ -511,64 +553,101 @@ export function ResearchResourceViewer({
 
       {archived ? (
         <footer
-          className="dezin-research-viewer__handoff dezin-research-viewer__handoff--readonly"
+          className="dezin-research-viewer__handoff"
           aria-label="Archived Research Revision"
         >
-          <div>
-            <span>Archived Revision</span>
-            <strong>Read-only research record</strong>
-            <small>Immutable evidence remains available; generation actions are disabled.</small>
-          </div>
+          <Card className="dezin-research-viewer__handoff-card dezin-research-viewer__handoff-card--readonly">
+            <div>
+              <Badge variant="outline">Archived Revision</Badge>
+              <strong>Read-only research record</strong>
+              <small>Immutable evidence remains available; generation actions are disabled.</small>
+            </div>
+          </Card>
         </footer>
       ) : (
-      <footer className="dezin-research-viewer__handoff" aria-label="Create Artifact generation intent">
-        <div>
-          <span>Selected direction</span>
-          <strong>{selectedDirection?.title ?? "Choose a direction"}</strong>
-          {selectedDirection ? <small>{view.resource.id} · Revision {view.revision.sequence} · {selectedDirection.id}</small> : null}
-        </div>
-        {targetArtifacts.length > 0 ? (
-          <label className="dezin-research-viewer__target">
-            <span>Apply to artifact</span>
-            <select
-              aria-label="Artifact target"
-              value={targetArtifactId}
-              onChange={(event) => setTargetArtifactId(event.target.value)}
+        <footer className="dezin-research-viewer__handoff" aria-label="Create Artifact generation intent">
+          <Card className="dezin-research-viewer__handoff-card">
+            <div className="dezin-research-viewer__handoff-selection">
+              <span>Selected direction</span>
+              <strong>{selectedDirection?.title ?? "Choose a direction"}</strong>
+              {selectedDirection ? <small>{view.resource.id} · Revision {view.revision.sequence} · {selectedDirection.id}</small> : null}
+            </div>
+            {targetArtifacts.length > 0 ? (
+              <div className="dezin-research-viewer__target">
+                <span>Apply to artifact</span>
+                <Select
+                  value={targetArtifactId}
+                  onValueChange={setTargetArtifactId}
+                >
+                  <SelectTrigger
+                    className="dezin-research-viewer__target-trigger"
+                    size="sm"
+                    aria-label="Artifact target"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent
+                    position="popper"
+                    align="end"
+                  >
+                    {targetArtifacts.map((artifact) => (
+                      <SelectItem
+                        key={artifact.id}
+                        value={artifact.id}
+                      >
+                        {artifact.name} · {workspace.activeSnapshot.artifactRevisions[artifact.id] === null ? "new" : "revise"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <div className="dezin-research-viewer__create-target" role="group" aria-label="Create an Artifact target">
+                <span>No Artifact target yet</span>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={creatingTarget !== null}
+                  onClick={() => void createArtifactTarget("page")}
+                >
+                  {creatingTarget === "page" ? "Creating…" : "Create Page"}
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={creatingTarget !== null}
+                  onClick={() => void createArtifactTarget("component")}
+                >
+                  {creatingTarget === "component" ? "Creating…" : "Create Component"}
+                </Button>
+              </div>
+            )}
+            {requiresConfirmation ? (
+              <label className="dezin-research-viewer__confirm">
+                <Input
+                  className="dezin-research-viewer__confirm-control"
+                  type="checkbox"
+                  checked={hypothesisConfirmed}
+                  onChange={(event) => setHypothesisConfirmed(event.target.checked)}
+                />
+                <span>I understand this direction depends on {selectedDirection.hypothesisFindingIds.length} unverified {selectedDirection.hypothesisFindingIds.length === 1 ? "hypothesis" : "hypotheses"}.</span>
+              </label>
+            ) : null}
+            <Button
+              type="button"
+              className="dezin-research-viewer__generate"
+              size="default"
+              disabled={!canCreateIntent}
+              onClick={() => void createIntent()}
             >
-              {targetArtifacts.map((artifact) => (
-                <option key={artifact.id} value={artifact.id}>
-                  {artifact.name} · {workspace.activeSnapshot.artifactRevisions[artifact.id] === null ? "new" : "revise"}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <div className="dezin-research-viewer__create-target" role="group" aria-label="Create an Artifact target">
-            <span>No Artifact target yet</span>
-            <button type="button" disabled={creatingTarget !== null} onClick={() => void createArtifactTarget("page")}>
-              {creatingTarget === "page" ? "Creating…" : "Create Page"}
-            </button>
-            <button type="button" disabled={creatingTarget !== null} onClick={() => void createArtifactTarget("component")}>
-              {creatingTarget === "component" ? "Creating…" : "Create Component"}
-            </button>
-          </div>
-        )}
-        {requiresConfirmation ? (
-          <label className="dezin-research-viewer__confirm">
-            <input
-              type="checkbox"
-              checked={hypothesisConfirmed}
-              onChange={(event) => setHypothesisConfirmed(event.target.checked)}
-            />
-            <span>I understand this direction depends on {selectedDirection.hypothesisFindingIds.length} unverified {selectedDirection.hypothesisFindingIds.length === 1 ? "hypothesis" : "hypotheses"}.</span>
-          </label>
-        ) : null}
-        <button type="button" className="dezin-research-viewer__generate" disabled={!canCreateIntent} onClick={() => void createIntent()}>
-          {submitting ? <LoaderCircle className="dezin-research-viewer__spinner" aria-hidden /> : <ArrowUpRight aria-hidden />}
-          {submitting ? "Creating successor plan…" : "Create Artifact plan"}
-        </button>
-        {submitError ? <p role="alert">{submitError}</p> : null}
-      </footer>
+              {submitting ? <LoaderCircle className="dezin-research-viewer__spinner" aria-hidden /> : <ArrowUpRight aria-hidden />}
+              {submitting ? "Creating successor plan…" : "Create Artifact plan"}
+            </Button>
+            {submitError ? <p role="alert">{submitError}</p> : null}
+          </Card>
+        </footer>
       )}
     </section>
   );

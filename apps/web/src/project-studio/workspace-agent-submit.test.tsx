@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -759,7 +759,7 @@ test("Workspace Agent freezes the selected CodeBuddy Agent and model into its tu
   }));
 });
 
-test("Design Workspace disables ready Codex while CodeBuddy remains usable", async () => {
+test("Design Workspace submits with a ready Codex selection without a brand restriction", async () => {
   const user = userEvent.setup();
   const ready = readyWorkspace("p-1");
   const currentSettings = await makeFakeApi().getSettings();
@@ -793,29 +793,69 @@ test("Design Workspace disables ready Codex while CodeBuddy remains usable", asy
 
   const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
   fireEvent.change(draft, { target: { value: "Build a complete workspace" } });
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Design Workspace generation requires Claude Code or CodeBuddy.",
-  );
   const submit = screen.getByRole("button", { name: "Create proposal" });
-  expect(submit).toBeDisabled();
+  await waitFor(() => expect(submit).toBeEnabled());
 
   const picker = screen.getByRole("button", { name: "Agent and model" });
   await user.click(picker);
   const codex = await screen.findByRole("button", { name: /^Codex/ });
-  expect(codex).toBeDisabled();
-  expect(codex).toHaveTextContent("Design Workspace generation requires Claude Code or CodeBuddy.");
-  const codebuddy = screen.getByRole("button", { name: /^CodeBuddy/ });
-  expect(codebuddy).toBeEnabled();
-  await user.click(codebuddy);
-  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "codebuddy", model: "" }));
+  expect(codex).toBeEnabled();
+  expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
   await user.keyboard("{Escape}");
 
-  await waitFor(() => expect(submit).toBeEnabled());
   await user.click(submit);
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
   expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
     message: "Build a complete workspace",
-    agentCommand: "codebuddy",
+    agentCommand: "codex",
+    model: "gpt-5",
+  }));
+  expect(updateSettings).not.toHaveBeenCalled();
+});
+
+test("Design Workspace preserves a registered Agent whose provider id differs from its CLI command", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "trae-cli",
+        model: "doubao-seed-1.6",
+      }),
+      listAgents: async () => [{
+        id: "trae",
+        command: "trae-cli",
+        available: true,
+        version: "1",
+        models: ["doubao-seed-1.6"],
+      }],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  fireEvent.change(draft, { target: { value: "Build a component library" } });
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  await waitFor(() => expect(submit).toBeEnabled());
+  fireEvent.click(submit);
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    message: "Build a component library",
+    agentCommand: "trae-cli",
+    model: "doubao-seed-1.6",
   }));
 });
 
@@ -920,7 +960,8 @@ test("Workspace Agent persists changed Agent and Design System context before cr
     </ApiProvider>,
   );
 
-  expect(await screen.findByRole("button", { name: "Back to projects" })).toHaveTextContent("Project p-1");
+  expect(await screen.findByRole("button", { name: "Back to projects" }))
+    .toHaveAttribute("title", "Back to projects · Project p-1");
   const agentPicker = await screen.findByRole("button", { name: "Agent and model" });
   await waitFor(() => expect(agentPicker).toHaveTextContent("Codex"));
   expect(agentPicker).toHaveTextContent("gpt-5");
@@ -957,6 +998,44 @@ test("Workspace Agent persists changed Agent and Design System context before cr
 
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
   expect(workspaceAgentTurn.mock.calls[0]![1].message).toBe("Build a complete music workspace");
+});
+
+test("Workspace Agent distinguishes Design System loading, failure, and retry from an empty catalog", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  let rejectInitialCatalog!: (error: Error) => void;
+  const listDesignSystems = vi.fn()
+    .mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectInitialCatalog = reject;
+    }))
+    .mockResolvedValueOnce([
+      { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+    ]);
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      listDesignSystems,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  const dialog = await screen.findByRole("dialog", { name: "Choose Design system" });
+  expect(within(dialog).getByRole("status")).toHaveTextContent("Loading design systems…");
+
+  await act(async () => {
+    rejectInitialCatalog(new Error("catalog unavailable"));
+  });
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("Couldn't load design systems.");
+  expect(within(dialog).queryByText("No matches")).not.toBeInTheDocument();
+
+  await user.click(within(dialog).getByRole("button", { name: "Retry loading design systems" }));
+  expect(await within(dialog).findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
+  expect(listDesignSystems).toHaveBeenCalledTimes(2);
 });
 
 test("Workspace Agent blocks generation when a changed Agent selection cannot be persisted", async () => {

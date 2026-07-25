@@ -12,6 +12,16 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import {
+  Button,
+  IconButton,
+  StudioDocumentHeader,
+  StudioFactRow,
+  StudioHeaderCopy,
+  StudioInspectorSection,
+  StudioPanelHeader,
+  StudioStatusBadge,
+} from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
   ApiClient,
@@ -172,7 +182,9 @@ function PayloadMedia({
     return (
       <p className="dezin-revision-media__state" role="alert">
         <span>Exact media unavailable · {blob.message}</span>
-        <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry exact media</button>
+        <Button type="button" variant="outline" size="xs" onClick={() => setAttempt((value) => value + 1)}>
+          Retry exact media
+        </Button>
       </p>
     );
   }
@@ -354,7 +366,9 @@ function AuthenticatedImage({
     return (
       <span className="dezin-revision-image-state" role="alert">
         <span>Image unavailable · {blob.message}</span>
-        <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry exact image</button>
+        <Button type="button" variant="outline" size="xs" onClick={() => setAttempt((value) => value + 1)}>
+          Retry exact image
+        </Button>
       </span>
     );
   }
@@ -396,9 +410,9 @@ function AuthenticatedDownload({ path, fileName }: { path: string; fileName: str
     return (
       <>
         <a ref={anchorRef} href={blob.url} download={fileName} hidden aria-hidden tabIndex={-1} />
-        <button type="button" onClick={() => anchorRef.current?.click()}>
+        <Button type="button" variant="ghost" size="xs" onClick={() => anchorRef.current?.click()}>
           <Download aria-hidden size={12} /> Download again
-        </button>
+        </Button>
       </>
     );
   }
@@ -406,15 +420,23 @@ function AuthenticatedDownload({ path, fileName }: { path: string; fileName: str
     return (
       <span className="dezin-revision-payload__download-error" role="alert">
         Download unavailable · {blob.message}
-        <button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button>
+        <Button type="button" variant="outline" size="xs" onClick={() => setAttempt((value) => value + 1)}>
+          Retry
+        </Button>
       </span>
     );
   }
   return (
-    <button type="button" disabled={blob.status === "loading"} onClick={() => setRequested(true)}>
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      disabled={blob.status === "loading"}
+      onClick={() => setRequested(true)}
+    >
       {blob.status === "loading" ? <LoaderCircle aria-hidden size={12} /> : <Download aria-hidden size={12} />}
       {blob.status === "loading" ? "Preparing exact payload…" : "Download exact payload"}
-    </button>
+    </Button>
   );
 }
 
@@ -582,22 +604,26 @@ function EffectView({ view }: { view: Extract<ResourceRevisionView, { kind: "eff
         <h2>{view.content.definition.name}</h2>
         <p>{view.content.definition.summary}</p>
         <div className="dezin-effect__parameters">
-          {view.content.definition.parameters.map((parameter) => (
-            <label key={parameter.id}>
-              <span>{parameter.label}</span>
-              {parameter.type === "boolean" ? (
-                <output aria-label={`${parameter.label} frozen value`}>
-                  {Boolean(view.content.fixture.values[parameter.id] ?? parameter.defaultValue) ? "On" : "Off"}
-                </output>
-              ) : parameter.type === "select" ? (
-                <select value={String(view.content.fixture.values[parameter.id] ?? parameter.defaultValue)} disabled>
-                  {parameter.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
-              ) : (
-                <output>{String(view.content.fixture.values[parameter.id] ?? parameter.defaultValue)}</output>
-              )}
-            </label>
-          ))}
+          {view.content.definition.parameters.map((parameter) => {
+            const value = view.content.fixture.values[parameter.id] ?? parameter.defaultValue;
+            const selectedLabel = parameter.type === "select"
+              ? parameter.options.find((option) => option.value === String(value))?.label ?? String(value)
+              : null;
+            return (
+              <label key={parameter.id}>
+                <span>{parameter.label}</span>
+                {parameter.type === "boolean" ? (
+                  <output aria-label={`${parameter.label} frozen value`}>
+                    {Boolean(value) ? "On" : "Off"}
+                  </output>
+                ) : parameter.type === "select" ? (
+                  <output aria-label={`${parameter.label} frozen value`}>{selectedLabel}</output>
+                ) : (
+                  <output>{String(value)}</output>
+                )}
+              </label>
+            );
+          })}
         </div>
         <details className="dezin-effect__code">
           <summary><Code2 aria-hidden size={12} /> Frozen source (never executed)</summary>
@@ -704,8 +730,8 @@ export function ResourceEditorSurface({
         <FileArchive aria-hidden />
         <strong>Resource unavailable</strong>
         <span>{editor.load.message}</span>
-        <button type="button" onClick={editor.retry}>Try again</button>
-        <button type="button" onClick={onBack}>Back to canvas</button>
+        <Button type="button" size="sm" onClick={editor.retry}>Try again</Button>
+        <Button type="button" variant="outline" size="sm" onClick={onBack}>Back to canvas</Button>
       </section>
     );
   }
@@ -713,14 +739,14 @@ export function ResourceEditorSurface({
   const { resource, view } = editor.load;
   return (
     <section role="region" aria-label="Resource editor" className="dezin-resource-viewer">
-      <header className="dezin-resource-viewer__header">
-        <button type="button" aria-label="Back to project canvas" className="dezin-resource-viewer__back" onClick={onBack}>
+      <StudioDocumentHeader className="dezin-resource-viewer__header">
+        <IconButton aria-label="Back to project canvas" className="shrink-0" onClick={onBack}>
           <ArrowLeft aria-hidden size={15} />
-        </button>
-        <div className="dezin-resource-viewer__identity">
-          <span>{resource.kind.replaceAll("-", " ")} / immutable resource</span>
-          <h1>{resource.title}</h1>
-        </div>
+        </IconButton>
+        <StudioHeaderCopy
+          title={resource.title}
+          subtitle={`${resource.kind.replaceAll("-", " ")} / immutable resource`}
+        />
         <ResourceRevisionHistory
           projectId={projectId}
           resourceId={resource.id}
@@ -730,7 +756,7 @@ export function ResourceEditorSurface({
           onOpenRevision={onOpenRevision}
           onReturnToHead={onReturnToHead}
         />
-      </header>
+      </StudioDocumentHeader>
       {view === null ? (
         <div className="dezin-resource-viewer__empty">
           <ImageIcon aria-hidden size={26} />
@@ -757,18 +783,60 @@ export function ResourceInspector({ editor }: { editor: ResourceEditorController
   const ready = editor.load.status === "ready" ? editor.load : null;
   const view = ready?.view ?? null;
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-labelledby="resource-inspector-title">
-      <header className="app-drag titlebar-pad-right flex h-11 shrink-0 items-center border-b border-border px-3.5">
-        <div><h2 id="resource-inspector-title" className="text-xs font-medium text-foreground">Resource</h2><p className="mt-0.5 text-[10px] text-muted-foreground">Exact Revision facts</p></div>
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {ready === null ? <p className="text-[10px] text-muted-foreground">Resource identity is loading…</p> : (
-          <dl className="space-y-3 text-[10px]">
-            <div><dt className="text-muted-foreground">Resource</dt><dd className="mt-1 break-all font-mono text-foreground">{ready.resource.id}</dd></div>
-            <div><dt className="text-muted-foreground">Revision</dt><dd className="mt-1 break-all font-mono text-foreground">{view?.revision.id ?? "None"}</dd></div>
-            <div><dt className="text-muted-foreground">Viewing</dt><dd className="mt-1 text-foreground">{editor.pinned ? "Pinned immutable Revision" : "Current Head"}</dd></div>
-            {view ? <><div><dt className="text-muted-foreground">MIME</dt><dd className="mt-1 text-foreground">{view.payload.mimeType}</dd></div><div><dt className="text-muted-foreground">Checksum</dt><dd className="mt-1 break-all font-mono text-foreground">{view.payload.checksum}</dd></div></> : null}
-          </dl>
+    <section className="flex h-full min-h-0 flex-col bg-background" aria-labelledby="resource-inspector-title">
+      <StudioPanelHeader draggable className="titlebar-pad-right px-3">
+        <StudioHeaderCopy
+          title="Resource"
+          subtitle="Exact Revision facts"
+          titleId="resource-inspector-title"
+          headingLevel={2}
+        />
+      </StudioPanelHeader>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {ready === null ? (
+          <p className="p-3.5 text-xs leading-5 text-muted-foreground">Resource identity is loading…</p>
+        ) : (
+          <StudioInspectorSection
+            heading="Revision identity"
+            description="Durable facts for the exact Resource checkout."
+          >
+            <dl className="divide-y divide-border">
+              <StudioFactRow
+                label="Resource"
+                value={ready.resource.id}
+                metadata
+                mono
+                valueClassName="break-all"
+              />
+              <StudioFactRow
+                label="Revision"
+                value={view?.revision.id ?? "None"}
+                metadata={view !== null}
+                mono={view !== null}
+                valueClassName="break-all"
+              />
+              <StudioFactRow
+                label="Viewing"
+                value={(
+                  <StudioStatusBadge tone={editor.pinned ? "active" : "neutral"}>
+                    {editor.pinned ? "Pinned immutable Revision" : "Current Head"}
+                  </StudioStatusBadge>
+                )}
+              />
+              {view ? (
+                <>
+                  <StudioFactRow label="MIME" value={view.payload.mimeType} />
+                  <StudioFactRow
+                    label="Checksum"
+                    value={view.payload.checksum}
+                    metadata
+                    mono
+                    valueClassName="break-all"
+                  />
+                </>
+              ) : null}
+            </dl>
+          </StudioInspectorSection>
         )}
       </div>
     </section>

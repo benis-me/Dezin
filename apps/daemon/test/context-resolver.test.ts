@@ -1185,14 +1185,28 @@ test("runtime Agent request boundary rejects unresolved shapes and oversized inp
     model: "gpt-5.6-sol",
   });
   assert.equal(Object.isFrozen(normalized.agent), true);
-  assert.throws(() => normalizeAgentTurnRequest({
+  const trae = normalizeAgentTurnRequest({
     ...request,
-    agent: { providerId: "claude", command: "codebuddy", model: "gpt-5.6-sol" },
-  }), /provider.*command|selection.*invalid/i);
-  assert.throws(() => normalizeAgentTurnRequest({
-    ...request,
-    agent: { providerId: "codebuddy", command: "/usr/local/bin/codebuddy", model: "gpt-5.6-sol" },
-  }), /canonical|unsupported/i);
+    agent: { providerId: "trae", command: "trae-cli", model: "doubao-seed-1.6" },
+  });
+  assert.deepEqual(trae.agent, {
+    providerId: "trae",
+    command: "trae-cli",
+    model: "doubao-seed-1.6",
+  });
+  for (const agent of [
+    { providerId: "", command: "trae-cli", model: null },
+    { providerId: " trae", command: "trae-cli", model: null },
+    { providerId: "trae", command: "", model: null },
+    { providerId: "trae", command: "trae-cli ", model: null },
+    { providerId: "p".repeat(257), command: "trae-cli", model: null },
+    { providerId: "trae", command: "c".repeat(257), model: null },
+  ]) {
+    assert.throws(
+      () => normalizeAgentTurnRequest({ ...request, agent }),
+      /provider.*canonical|provider.*bounded|command.*canonical|command.*bounded/i,
+    );
+  }
   assert.throws(() => normalizeAgentTurnRequest({
     ...request,
     agent: { providerId: "codebuddy", command: "codebuddy", model: "m".repeat(257) },

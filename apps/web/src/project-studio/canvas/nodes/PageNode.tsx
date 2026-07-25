@@ -23,6 +23,7 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
       className="dezin-flow-card dezin-flow-page"
       data-selected={selected || undefined}
       data-zoom={data.zoomLevel}
+      data-selection-emphasis={overview && selected ? "overview" : undefined}
     >
       <Handle
         id="page-target"
@@ -75,7 +76,7 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
         )}
         {overview && (
           <span
-            className="dezin-flow-card__overview-status"
+            className="dezin-flow-card__overview-meta"
             aria-label={`${data.name} status: ${overviewStatus}`}
           >
             {overviewStatus}

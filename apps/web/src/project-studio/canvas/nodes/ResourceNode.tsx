@@ -31,6 +31,7 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       className="dezin-flow-card dezin-flow-resource"
       data-selected={selected || undefined}
       data-zoom={data.zoomLevel}
+      data-selection-emphasis={overview && selected ? "overview" : undefined}
       data-resource-quality={data.resourceQualityState ?? undefined}
       data-awaiting-selection={awaitingSelection || undefined}
       data-generation-state={data.generationState}
@@ -56,7 +57,7 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
             <span className="dezin-flow-resource__id"><Link2 size={10} /> {data.resourceId}</span>
           </div>
         )}
-        {overview && <span className="dezin-flow-card__overview-status">{statusLabel}</span>}
+        {overview && <span className="dezin-flow-card__overview-meta">{statusLabel}</span>}
       </div>
       <Handle id="resource-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="resource-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />

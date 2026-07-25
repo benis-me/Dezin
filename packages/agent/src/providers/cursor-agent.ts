@@ -4,7 +4,11 @@ import type { AgentProvider } from "./types.ts";
 
 // Cursor agent CLI — `-p`/--print headless mode.
 const config: GenericAgentConfig = {
-  buildArgs: (m, p) => [...(m ? ["--model", m] : []), "-p", p],
+  buildArgs: (m, p) => [
+    "--output-format", "text",
+    ...(m ? ["--model", m] : []),
+    "-p", p,
+  ],
 };
 
 /** Parse `cursor-agent models` output (one account-bound id per line). When the user isn't
@@ -38,6 +42,13 @@ export const cursorAgentProvider: AgentProvider = {
     const r = await runCapture(command, ["models"], 5000, signal);
     return r ? parseCursorModels(r.out) : [];
   },
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "cursor-agent", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "cursor-agent",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

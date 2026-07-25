@@ -377,12 +377,12 @@ test("parses only the exact frozen v2 adapter and Resource operation contract", 
   });
 });
 
-test("preserves legacy v2 payloads without Agent and strictly parses every present frozen Agent", () => {
+test("preserves legacy v2 payloads without Agent and bounds every present frozen Agent identity", () => {
   const base = taskFixture();
   assert.equal(parseResourceGenerationTaskPayloadV2(base).agent, undefined);
 
   const payload = structuredClone(base.payload) as Record<string, unknown>;
-  const agent = { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" };
+  const agent = { providerId: "trae", command: "trae-cli", model: "doubao-seed-1.6" };
   assert.deepEqual(
     parseResourceGenerationTaskPayloadV2({ ...base, payload: { ...payload, agent } }).agent,
     agent,
@@ -390,9 +390,15 @@ test("preserves legacy v2 payloads without Agent and strictly parses every prese
 
   const invalidAgents: unknown[] = [
     { ...agent, extra: true },
-    { ...agent, providerId: "claude" },
-    { ...agent, command: "other", providerId: "other" },
-    { ...agent, model: " gpt-5.6-sol " },
+    { ...agent, providerId: "" },
+    { ...agent, providerId: " trae" },
+    { ...agent, providerId: `trae\0forged` },
+    { ...agent, providerId: "x".repeat(257) },
+    { ...agent, command: "" },
+    { ...agent, command: "trae-cli " },
+    { ...agent, command: `trae-cli\0forged` },
+    { ...agent, command: "x".repeat(257) },
+    { ...agent, model: " doubao-seed-1.6 " },
     { ...agent, model: "gpt\0model" },
     { ...agent, model: "x".repeat(257) },
     undefined,

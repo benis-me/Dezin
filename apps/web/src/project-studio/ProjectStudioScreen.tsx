@@ -6,7 +6,6 @@ import { Button } from "../components/ui/index.ts";
 import { persistAgentModelDefaultsStrict } from "../lib/agent-model-defaults.ts";
 import {
   agentAvailabilityReason,
-  agentModeDisabledReason,
   normalizeAgentModel,
   selectableAgents,
 } from "../lib/agent-availability.ts";
@@ -180,6 +179,7 @@ export function ProjectStudioScreen({
   const { load } = studio;
   const readyWorkspace = load.status === "ready" ? load.workspace : null;
   const [designSystems, setDesignSystems] = useState<DesignSystemCard[]>([]);
+  const [designSystemCatalogStatus, setDesignSystemCatalogStatus] = useState<"loading" | "ready" | "error">("loading");
   const [designSystemId, setDesignSystemId] = useState("");
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null);
   const [settingsModel, setSettingsModel] = useState("");
@@ -195,6 +195,7 @@ export function ProjectStudioScreen({
   const designSystemErrorRef = useRef<string | null>(null);
   const agentSettingsRequestRef = useRef(0);
   const designSystemRequestRef = useRef(0);
+  const designSystemCatalogRequestRef = useRef(0);
   const initialTurnRef = useRef<PendingDesignWorkspaceTurn | null | undefined>(undefined);
   const workspaceId = readyWorkspace?.workspace.id ?? null;
   const resourceHeadRevisionId = resourceId === null
@@ -323,13 +324,27 @@ export function ProjectStudioScreen({
     };
   }, []);
 
+  const refreshDesignSystems = useCallback((): void => {
+    const request = ++designSystemCatalogRequestRef.current;
+    setDesignSystemCatalogStatus("loading");
+    void api.listDesignSystems().then((systems) => {
+      if (request !== designSystemCatalogRequestRef.current) return;
+      setDesignSystems(systems);
+      setDesignSystemCatalogStatus("ready");
+    }).catch(() => {
+      if (request === designSystemCatalogRequestRef.current) setDesignSystemCatalogStatus("error");
+    });
+  }, [api]);
+
+  useEffect(() => {
+    refreshDesignSystems();
+    return () => {
+      designSystemCatalogRequestRef.current += 1;
+    };
+  }, [refreshDesignSystems]);
+
   useEffect(() => {
     let alive = true;
-    void api.listDesignSystems().then((systems) => {
-      if (alive) setDesignSystems(systems);
-    }).catch(() => {
-      if (alive) setDesignSystems([]);
-    });
     void api.getSettings().then((settings) => {
       if (!alive) return;
       setSettingsAgent(settings.agentCommand ?? "");
@@ -465,11 +480,6 @@ export function ProjectStudioScreen({
     const agentCommand = pendingTurn.agentCommand ?? studioAgentRef.current;
     const selectedAgent = agents.find((candidate) => candidate.command === agentCommand);
     if (agentsProvided && (!selectedAgent || !selectedAgent.available)) return;
-    if (agentsProvided && agentModeDisabledReason(selectedAgent, "design-workspace") !== null) {
-      initialTurnRef.current = null;
-      studio.setWorkspaceAgentDraft(pendingTurn.brief);
-      return;
-    }
 
     studioAgentRef.current = agentCommand;
     setStudioAgent(agentCommand);
@@ -800,7 +810,6 @@ export function ProjectStudioScreen({
     : agentSettingsError ?? designSystemError ?? (
         agentsProvided
           ? agentAvailabilityReason(selectedStudioAgent)
-            ?? agentModeDisabledReason(selectedStudioAgent, "design-workspace")
           : null
       );
   const artifactHeadRevisionId = artifactId === null
@@ -1161,12 +1170,13 @@ export function ProjectStudioScreen({
           onAgentChange={changeStudioAgent}
           onModelChange={changeStudioModel}
           onRescanAgents={rescanAgents}
-          agentDisabledReason={(agent) => agentModeDisabledReason(agent, "design-workspace")}
           submissionBlockedReason={agentSubmissionBlockedReason}
           submissionBlockedPending={agentCapabilityPending}
           designSystems={designSystems}
           designSystemId={designSystemId}
           onDesignSystemChange={changeDesignSystem}
+          designSystemCatalogStatus={designSystemCatalogStatus}
+          onRetryDesignSystems={refreshDesignSystems}
         />
       )}
       main={main}
@@ -1181,6 +1191,7 @@ export function ProjectStudioScreen({
           : resourceScope
             ? "resource inspector"
             : "artifact inspector"}
+      narrowInspectorContentOwnsClose={generationPlanOpen}
       presentation={(artifactScope && artifactEditor.presentation)
         || (workspaceScope && prototypeFlowSession !== null)}
     />

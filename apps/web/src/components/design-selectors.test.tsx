@@ -36,6 +36,70 @@ test("DesignSystemSelect uses the standard tab strip and compact list spacing", 
   expect(divider?.className).not.toContain("mt-1");
 });
 
+test("DesignSystemSelect keeps bright accent previews readable", async () => {
+  const user = userEvent.setup();
+  render(
+    <DesignSystemSelect
+      systems={[{
+        id: "bright-brand",
+        name: "Bright Brand",
+        category: "Custom",
+        summary: "",
+        origin: "built-in",
+        swatch: {
+          bg: "#ffffff",
+          surface: "#f7f7f7",
+          fg: "#111111",
+          accent: "#ffe600",
+        },
+      }]}
+      value=""
+      onChange={() => {}}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.hover(await screen.findByRole("button", { name: /Bright Brand/ }));
+
+  expect(await screen.findByText("Button")).toHaveStyle({ color: "#111111" });
+});
+
+test("Design and Agent pickers expose their current selection", async () => {
+  const user = userEvent.setup();
+  const design = render(
+    <DesignSystemSelect
+      systems={SYSTEMS}
+      value="modern-minimal"
+      onChange={() => {}}
+    />,
+  );
+
+  const designTrigger = screen.getByRole("button", { name: "Design system" });
+  expect(designTrigger).toHaveAccessibleDescription("Current Design system: Modern Minimal");
+  await user.click(designTrigger);
+  expect(await screen.findByRole("dialog", { name: "Choose Design system" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Modern Minimal/ })).toHaveAttribute("aria-pressed", "true");
+  design.unmount();
+
+  render(
+    <AgentModelSelect
+      agents={[{ id: "codebuddy", command: "codebuddy", available: true, version: "2", models: ["gpt-5.6-sol"] }]}
+      agent="codebuddy"
+      model="gpt-5.6-sol"
+      onAgentChange={() => {}}
+      onModelChange={() => {}}
+      onRescan={vi.fn(async () => {})}
+    />,
+  );
+
+  const agentTrigger = screen.getByRole("button", { name: "Agent and model" });
+  expect(agentTrigger).toHaveAccessibleDescription("Current Agent and model: CodeBuddy, gpt-5.6-sol");
+  await user.click(agentTrigger);
+  expect(await screen.findByRole("dialog", { name: "Choose Agent and model" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: /CodeBuddy/ })).toHaveAttribute("aria-pressed", "true");
+  expect(await screen.findByRole("button", { name: "gpt-5.6-sol" })).toHaveAttribute("aria-pressed", "true");
+});
+
 test("AgentModelSelect uses the lighter bottom divider", async () => {
   const user = userEvent.setup();
   render(
@@ -81,7 +145,7 @@ test("AgentModelSelect delegates an agent switch once without a stale model call
   expect(onModelChange).not.toHaveBeenCalled();
 });
 
-test("AgentModelSelect keeps unsupported agents visible but prevents selecting them", async () => {
+test("AgentModelSelect keeps caller-disabled agents visible with the supplied capability reason", async () => {
   const user = userEvent.setup();
   const onAgentChange = vi.fn();
   render(
@@ -97,15 +161,15 @@ test("AgentModelSelect keeps unsupported agents visible but prevents selecting t
       onRescan={vi.fn(async () => {})}
       agentDisabledReason={(candidate) => candidate.command === "claude"
         ? null
-        : "Design Workspace generation requires Claude"}
+        : "This local Agent session cannot access the selected capability."}
     />,
   );
 
   await user.click(screen.getByRole("button", { name: "Agent and model" }));
   const codex = await screen.findByRole("button", { name: /Codex/ });
   expect(codex).toBeDisabled();
-  expect(codex).toHaveAttribute("title", "Design Workspace generation requires Claude");
-  expect(codex).toHaveTextContent("Design Workspace generation requires Claude");
+  expect(codex).toHaveAttribute("title", "This local Agent session cannot access the selected capability.");
+  expect(codex).toHaveTextContent("This local Agent session cannot access the selected capability.");
   await user.click(codex);
   expect(onAgentChange).not.toHaveBeenCalled();
 });

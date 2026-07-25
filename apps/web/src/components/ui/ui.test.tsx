@@ -2,7 +2,17 @@ import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { test, expect, afterEach, vi } from "vitest";
-import { Button, Badge, Tabs, Dialog, Card, Picker } from "./index.ts";
+import {
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  Picker,
+  StudioFactRow,
+  StudioInspectorSection,
+  StudioStatusBadge,
+  Tabs,
+} from "./index.ts";
 
 afterEach(cleanup);
 
@@ -73,6 +83,29 @@ test("Tabs uses roving focus for ArrowLeft/Right/Home/End", () => {
 test("Badge renders its content", () => {
   render(<Badge variant="default">New</Badge>);
   expect(screen.getByText("New")).toBeInTheDocument();
+});
+
+test("studio inspector primitives preserve a labelled hierarchy and fact semantics", () => {
+  render(
+    <StudioInspectorSection
+      heading="Revision identity"
+      description="Immutable facts"
+      actions={<StudioStatusBadge tone="success">Current</StudioStatusBadge>}
+    >
+      <dl>
+        <StudioFactRow label="Resource" value="resource-1" metadata mono />
+        <StudioFactRow label="Viewing" value="Current Head" />
+      </dl>
+    </StudioInspectorSection>,
+  );
+
+  const heading = screen.getByRole("heading", { name: "Revision identity", level: 3 });
+  expect(heading.closest("section")).toHaveAttribute("aria-labelledby", heading.id);
+  expect(screen.getByText("Immutable facts")).toHaveClass("text-xs");
+  expect(screen.getByText("Resource").tagName).toBe("DT");
+  expect(screen.getByText("resource-1").tagName).toBe("DD");
+  expect(screen.getByText("resource-1")).toHaveClass("text-[11px]", "font-mono");
+  expect(screen.getByText("Current")).toHaveAttribute("data-tone", "success");
 });
 
 test("Picker (shadcn Select) opens and reports the chosen value", async () => {

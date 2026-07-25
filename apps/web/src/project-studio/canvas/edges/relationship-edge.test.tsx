@@ -5,9 +5,20 @@ import type { WorkspaceFlowEdge } from "../workspace-graph-adapter.ts";
 import { RelationshipEdge, relationshipEdgeGeometry } from "./RelationshipEdge.tsx";
 
 vi.mock("@xyflow/react", () => ({
-  BaseEdge: ({ className, interactionWidth }: { className?: string; interactionWidth?: number }) => (
+  BaseEdge: ({
+    className,
+    interactionWidth,
+    style,
+  }: {
+    className?: string;
+    interactionWidth?: number;
+    style?: React.CSSProperties;
+  }) => (
     <>
-      <path data-testid={className === "dezin-flow-edge__path" ? "relation-path" : "relation-halo"} />
+      <path
+        data-testid={className === "dezin-flow-edge__path" ? "relation-path" : "relation-halo"}
+        style={style}
+      />
       {interactionWidth ? <path data-testid="relation-interaction" className="react-flow__edge-interaction" /> : null}
     </>
   ),
@@ -38,8 +49,8 @@ describe("relationship edge", () => {
       targetY: 100,
     } as const;
 
-    expect(relationshipEdgeGeometry({ ...base, lane: 0.5 }).path).toBe("M 0 0 L 30 30");
-    expect(relationshipEdgeGeometry({ ...base, lane: 1.5 }).path).toBe("M 0 0 L 48 48");
+    expect(relationshipEdgeGeometry({ ...base, lane: 0.5 }).path).toBe("M 0 0 L 28 28");
+    expect(relationshipEdgeGeometry({ ...base, lane: 1.5 }).path).toBe("M 0 0 L 46 46");
   });
 
   test("shows its semantic label on selection and hover", () => {
@@ -66,5 +77,15 @@ describe("relationship edge", () => {
     const label = container.querySelector("[data-edge-kind='uses']");
     expect(label?.querySelector("svg")).not.toBeNull();
     expect(label?.querySelector("i")).toBeNull();
+  });
+
+  test("keeps the halo and foreground stroke widths stable while the canvas zooms", () => {
+    render(<RelationshipEdge {...baseProps as unknown as EdgeProps<WorkspaceFlowEdge>} />);
+
+    expect(screen.getByTestId("relation-halo").style.stroke).toBe("var(--dezin-canvas-plane, var(--background))");
+    expect(screen.getByTestId("relation-halo").style.vectorEffect).toBe("non-scaling-stroke");
+    expect(screen.getByTestId("relation-path").style.vectorEffect).toBe("non-scaling-stroke");
+    expect(screen.getByTestId("relation-path").style.strokeWidth).toBe("1.1");
+    expect(screen.getByTestId("relation-path").style.opacity).toBe("0.5");
   });
 });

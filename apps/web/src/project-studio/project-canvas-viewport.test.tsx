@@ -2,17 +2,22 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useCallback, useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
+  Project,
+  ProjectWorkspacePayload,
   WorkspaceGraph,
   WorkspaceLayout,
   WorkspaceLayoutCommand,
   WorkspaceViewport,
 } from "../lib/api.ts";
+import { ApiProvider } from "../lib/api-context.tsx";
+import { makeFakeApi } from "../test/fake-api.ts";
 
 const flowHarness = vi.hoisted(() => {
   const state = {
     viewport: { x: 0, y: 0, zoom: 0.8 } as WorkspaceViewport,
     nextViewport: { x: 32, y: 48, zoom: 1.1 } as WorkspaceViewport,
     fitViewport: { x: 84, y: 36, zoom: 1.2 } as WorkspaceViewport,
+    nodes: [] as unknown[],
   };
   const instance = {
     getViewport: vi.fn(() => state.viewport),
@@ -24,7 +29,7 @@ const flowHarness = vi.hoisted(() => {
       state.viewport = state.fitViewport;
       return true;
     }),
-    getNodes: vi.fn(() => []),
+    getNodes: vi.fn(() => state.nodes),
   };
   return { state, instance };
 });
@@ -37,14 +42,17 @@ vi.mock("@xyflow/react", async () => {
     onMove,
     onMoveEnd,
     children,
+    nodes,
     ...props
   }: {
     onInit?: (instance: typeof flowHarness.instance) => void;
     onMove?: (event: MouseEvent, viewport: WorkspaceViewport) => void;
     onMoveEnd?: (event: MouseEvent, viewport: WorkspaceViewport) => void;
     children?: React.ReactNode;
+    nodes?: unknown[];
     "aria-label"?: string;
   }) {
+    flowHarness.state.nodes = nodes ?? [];
     React.useEffect(() => {
       onInit?.(flowHarness.instance);
     }, []);
@@ -75,6 +83,8 @@ vi.mock("@xyflow/react", async () => {
 });
 
 import { ProjectCanvas } from "./canvas/ProjectCanvas.tsx";
+import { applyWorkspaceLayoutCommands } from "./canvas/workspace-layout.ts";
+import { useProjectStudio } from "./useProjectStudio.ts";
 
 const graph: WorkspaceGraph = {
   workspaceId: "workspace-1",
@@ -90,6 +100,80 @@ const layout: WorkspaceLayout = {
   viewport: { x: 0, y: 0, zoom: 0.8 },
   checksum: "layout-1",
 };
+
+function project(): Project {
+  return {
+    id: "project-1",
+    name: "Storefront",
+    skillId: null,
+    designSystemId: null,
+    mode: "standard",
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+function readyWorkspace(
+  currentLayout: WorkspaceLayout = layout,
+): Extract<ProjectWorkspacePayload, { status: "ready" }> {
+  const activeSnapshot = {
+    id: "snapshot-1",
+    workspaceId: graph.workspaceId,
+    sequence: 1,
+    parentSnapshotId: null,
+    graphRevision: graph.revision,
+    kernelRevisionId: "kernel-1",
+    reason: "workspace-created",
+    provenance: { kind: "workspace-created" as const },
+    createdByRunId: null,
+    createdAt: 1,
+    graph,
+    artifactTracks: {},
+    artifactRevisions: { "artifact-1": "revision-1" },
+    resourceRevisions: {},
+  };
+  return {
+    status: "ready",
+    workspace: {
+      id: graph.workspaceId,
+      projectId: "project-1",
+      mode: "standard",
+      graphRevision: graph.revision,
+      activeSnapshotId: activeSnapshot.id,
+      activeKernelRevisionId: "kernel-1",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    graph,
+    activeSnapshot,
+    activeKernelRevision: {
+      id: "kernel-1",
+      workspaceId: graph.workspaceId,
+      sequence: 1,
+      parentRevisionId: null,
+      tokens: {},
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+      checksum: "kernel-1",
+      createdAt: 1,
+    },
+    artifacts: [],
+    tracks: [],
+    revisions: [],
+    snapshots: [activeSnapshot],
+    layout: currentLayout,
+  };
+}
 
 function renderCanvas({
   onSaveLayout,
@@ -113,6 +197,32 @@ function renderCanvas({
       onApplyGraphCommands={async () => {}}
       onOpenArtifact={() => {}}
     />,
+  );
+}
+
+function StudioCanvasIntegrationProbe() {
+  const studio = useProjectStudio("project-1");
+  if (studio.load.status !== "ready") return <span>{studio.load.status}</span>;
+  return (
+    <>
+      <button type="button" onClick={studio.reconcileGenerationPublication}>
+        Reconcile same head
+      </button>
+      <ProjectCanvas
+        projectId="project-1"
+        projectName="Storefront"
+        graph={studio.load.workspace.graph}
+        layout={studio.load.workspace.layout}
+        viewport={studio.viewport}
+        artifactRevisionIds={{ "artifact-1": "revision-1" }}
+        selectedNodeIds={["page-1"]}
+        onSelectionChange={() => {}}
+        onViewportChange={studio.setViewport}
+        onSaveLayout={studio.saveLayout}
+        onApplyGraphCommands={studio.applyGraphCommands}
+        onOpenArtifact={() => {}}
+      />
+    </>
   );
 }
 
@@ -175,6 +285,69 @@ test("a medium initial surface keeps the workspace outline available without cov
 
   expect(screen.getByRole("complementary", { name: "Workspace structure" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Toggle workspace outline" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("pending local camera survives a node save and same-head generation reconcile", async () => {
+  let server = readyWorkspace();
+  let checksumSequence = 1;
+  const getWorkspace = vi.fn(async () => structuredClone(server));
+  const saveWorkspaceLayout = vi.fn(async (
+    _projectId: string,
+    input: {
+      commands: readonly WorkspaceLayoutCommand[];
+    },
+  ) => {
+    const saved = applyWorkspaceLayoutCommands(server.layout, input.commands);
+    server = {
+      ...server,
+      layout: {
+        ...saved,
+        checksum: `layout-${++checksumSequence}`,
+      },
+    };
+    return server.layout;
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project(),
+      getWorkspace,
+      listWorkspaceProposals: async () => [],
+      saveWorkspaceLayout,
+    })}>
+      <StudioCanvasIntegrationProbe />
+    </ApiProvider>,
+  );
+  await act(async () => {
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+  });
+  await flushCanvasMeasurementFrame();
+  screen.getByRole("application", { name: "Project canvas" });
+  flowHarness.instance.setViewport.mockClear();
+
+  flowHarness.state.nextViewport = { x: 72, y: 36, zoom: 1.15 };
+  fireEvent.click(screen.getByRole("button", { name: "Simulate viewport move" }));
+  fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), {
+    key: "ArrowRight",
+  });
+  await act(async () => {
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+  });
+
+  expect(saveWorkspaceLayout).toHaveBeenCalledTimes(1);
+  expect(saveWorkspaceLayout).toHaveBeenCalledWith("project-1", expect.objectContaining({
+    commands: [{ type: "move", objectId: "page-1", x: 21, y: 20 }],
+  }));
+  expect(flowHarness.state.viewport).toEqual({ x: 72, y: 36, zoom: 1.15 });
+  expect(flowHarness.instance.setViewport).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile same head" }));
+  await act(async () => {
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+  });
+
+  expect(getWorkspace).toHaveBeenCalledTimes(2);
+  expect(flowHarness.state.viewport).toEqual({ x: 72, y: 36, zoom: 1.15 });
+  expect(flowHarness.instance.setViewport).not.toHaveBeenCalled();
 });
 
 test("a failed viewport save never promotes the pending viewport and restores the authoritative one", async () => {

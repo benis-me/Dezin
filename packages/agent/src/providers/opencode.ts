@@ -13,6 +13,13 @@ export const opencodeProvider: AgentProvider = {
   label: "opencode",
   seedModels: [],
   genericConfig: config,
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "opencode", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "opencode",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

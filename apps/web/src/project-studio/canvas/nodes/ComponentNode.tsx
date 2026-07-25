@@ -12,7 +12,12 @@ export function ComponentNode({ data, selected }: NodeProps<WorkspaceFlowNode>) 
       ? data.qualityState.replace("-", " ")
       : data.revisionId ? "published" : "draft";
   return (
-    <div className="dezin-flow-card dezin-flow-component" data-selected={selected || undefined} data-zoom={data.zoomLevel}>
+    <div
+      className="dezin-flow-card dezin-flow-component"
+      data-selected={selected || undefined}
+      data-zoom={data.zoomLevel}
+      data-selection-emphasis={overview && selected ? "overview" : undefined}
+    >
       <Handle id="component-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="component-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <ArtifactNodePreview
@@ -49,7 +54,7 @@ export function ComponentNode({ data, selected }: NodeProps<WorkspaceFlowNode>) 
         )}
         {overview && (
           <span
-            className="dezin-flow-card__overview-status"
+            className="dezin-flow-card__overview-meta"
             aria-label={`${data.name} status: ${overviewStatus}`}
           >
             {overviewStatus}

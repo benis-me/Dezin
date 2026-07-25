@@ -22,6 +22,7 @@ import {
   buildProductionArtifactCodeBuddyArgs,
   buildProductionArtifactCodeBuddySeatbeltProfile,
   buildProductionArtifactClaudeArgs,
+  buildProductionArtifactGenericSeatbeltProfile,
   createProductionArtifactProviderRunner,
 } from "../src/orchestration/production-artifact-provider-sandbox.ts";
 
@@ -264,23 +265,28 @@ test("production CodeBuddy outer Seatbelt profile gives the CLI only exact runti
   assert.doesNotMatch(profile, /\(deny network/);
 });
 
-test("production Artifact provider sandbox fail-closes Codex, Gemini, unknown providers, and mismatches", () => {
-  assert.throws(
-    () => createProductionArtifactProviderRunner({
-      providerId: "codex",
-      command: "codex",
-      worktreeDir: "/private/tmp/dezin-artifact/worktree",
-    }),
-    /Codex.*disabled|tmp-granting|cannot be safely nested/i,
-  );
-  assert.throws(
-    () => createProductionArtifactProviderRunner({
-      providerId: "gemini",
-      command: "gemini",
-      worktreeDir: "/private/tmp/dezin-artifact/worktree",
-    }),
-    /Gemini|unsupported|workspace sandbox/i,
-  );
+test("generic outer Seatbelt confines the process tree while preserving provider runtimes and project tools", () => {
+  const profile = buildProductionArtifactGenericSeatbeltProfile({
+    providerId: "hermes",
+    worktreeDir: "/Users/designer/project/transaction/worktree",
+    runtimeRoot: "/Users/designer/project/transaction/provider-runtime",
+    hostHome: "/Users/designer",
+    executable: "/Users/designer/.local/bin/hermes",
+    nodeRuntimeRoot: "/Users/designer/.hermes/node",
+  });
+
+  assert.match(profile, /^\(version 1\)/);
+  assert.match(profile, /\(deny file-read-data .*subpath "\/Users"/);
+  assert.match(profile, /subpath "\/Users\/designer\/project\/transaction\/worktree"/);
+  assert.match(profile, /subpath "\/Users\/designer\/project\/transaction\/provider-runtime"/);
+  assert.match(profile, /subpath "\/Users\/designer\/\.hermes"/);
+  assert.match(profile, /subpath "\/Users\/designer\/\.local\/share\/uv"/);
+  assert.match(profile, /\(deny file-write\*\)/);
+  assert.match(profile, /deny file-write\* .*\/worktree\/\.git/);
+  assert.doesNotMatch(profile, /\((?:allow|deny) process-exec/);
+});
+
+test("production Artifact provider sandbox rejects unknown providers and registry mismatches", () => {
   assert.throws(
     () => createProductionArtifactProviderRunner({
       providerId: "custom-cli",
@@ -299,48 +305,222 @@ test("production Artifact provider sandbox fail-closes Codex, Gemini, unknown pr
   );
 });
 
-test("Codex and Gemini fail closed before resolution, runtime creation, or spawn even with credentials", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "dezin-disabled-provider-credentials-"));
+test("production Artifact runner confines Codex, Gemini, and generic providers to canonical execution boundaries", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-generic-artifact-providers-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const worktreeDir = join(root, "worktree");
-  const runtimeRoot = join(root, "provider-runtime");
-  mkdirSync(worktreeDir);
-  let resolveCount = 0;
-  let spawnCount = 0;
-  const previousOpenAi = process.env.OPENAI_API_KEY;
-  const previousGemini = process.env.GEMINI_API_KEY;
-  process.env.OPENAI_API_KEY = "configured-openai-credential";
-  process.env.GEMINI_API_KEY = "configured-gemini-credential";
+  const hostHome = join(root, "host-home");
+  mkdirSync(hostHome);
+  const previousAmbient = process.env.DEZIN_AMBIENT_SECRET_SENTINEL;
+  process.env.DEZIN_AMBIENT_SECRET_SENTINEL = "must-not-cross";
   t.after(() => {
-    if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = previousOpenAi;
-    if (previousGemini === undefined) delete process.env.GEMINI_API_KEY;
-    else process.env.GEMINI_API_KEY = previousGemini;
+    if (previousAmbient === undefined) delete process.env.DEZIN_AMBIENT_SECRET_SENTINEL;
+    else process.env.DEZIN_AMBIENT_SECRET_SENTINEL = previousAmbient;
   });
-  const dependencies = {
-    runtimeRoot,
-    resolveExecutable: () => { resolveCount += 1; return "/usr/bin/true"; },
-    spawner: {
-      async run() {
-        spawnCount += 1;
-        return { stdout: "", stderr: "", exitCode: 0 };
+
+  const fixtures = [
+    {
+      providerId: "codex",
+      command: "codex",
+      canonicalCommand: "codex",
+      model: "gpt-5",
+      providerEnv: {
+        OPENAI_API_KEY: "codex-key",
+        OPENAI_BASE_URL: "https://openai.example.test/v1",
+        OPENAI_ORG_ID: "org-1",
       },
     },
-  };
+    {
+      providerId: "gemini",
+      command: "gemini",
+      canonicalCommand: "gemini",
+      model: "gemini-2.5-pro",
+      providerEnv: {
+        GEMINI_API_KEY: "gemini-key",
+        GOOGLE_API_KEY: "google-key",
+      },
+    },
+    {
+      providerId: "trae",
+      command: "trae",
+      canonicalCommand: "trae-cli",
+      model: "trae-model",
+      providerEnv: {},
+    },
+  ] as const;
+
+  for (const fixture of fixtures) {
+    const transactionRoot = join(root, fixture.providerId);
+    const worktreeDir = join(transactionRoot, "worktree");
+    const runtimeRoot = join(transactionRoot, "provider-runtime");
+    mkdirSync(worktreeDir, { recursive: true });
+    writeFileSync(join(worktreeDir, "index.html"), `<main>${fixture.providerId}</main>`);
+    const calls: SpawnInput[] = [];
+    const resolutions: Array<[string, string]> = [];
+    const runner = createProductionArtifactProviderRunner({
+      providerId: fixture.providerId,
+      command: fixture.command,
+      model: fixture.model,
+      worktreeDir,
+    }, {
+      resolveExecutable(providerId, command) {
+        resolutions.push([providerId, command]);
+        return "/usr/bin/true";
+      },
+      runtimeRoot,
+      hostHome,
+      platform: "darwin",
+      sandboxExecutable: "/usr/bin/false",
+      spawner: {
+        async run(input) {
+          calls.push(input);
+          return { stdout: `${fixture.providerId} complete`, stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    const result = await runner.runTurn({
+      systemPrompt: "Build the exact Artifact.",
+      message: `Build with ${fixture.providerId}.`,
+      projectDir: worktreeDir,
+      env: {
+        ...fixture.providerEnv,
+        DEZIN_AGENT_SCOPE_PROTOCOL: "dezin.artifact-agent-scope.v1",
+        DEZIN_DAEMON_TOKEN: undefined,
+      },
+    });
+
+    assert.equal(result.artifactHtml, `<main>${fixture.providerId}</main>`);
+    assert.deepEqual(resolutions, [[fixture.providerId, fixture.canonicalCommand]]);
+    assert.equal(calls.length, 1);
+    const call = calls[0]!;
+    assert.equal(call.command, "/usr/bin/false");
+    assert.equal(call.args[0], "-p");
+    assert.equal(call.args[2], "/usr/bin/true");
+    assert.match(call.args[1]!, /\(deny file-write\*\)/);
+    assert.match(call.args[1]!, new RegExp(`subpath "${realpathSync(worktreeDir)}"`));
+    assert.match(call.args[1]!, new RegExp(`subpath "${realpathSync(runtimeRoot)}"`));
+    assert.match(call.args[1]!, new RegExp(`subpath "${realpathSync(hostHome)}/\\.${fixture.providerId}"`));
+    assert.match(call.args[1]!, /deny file-read-data .*subpath "\/Users"/);
+    assert.match(call.args[1]!, /deny file-read-data .*subpath "\/private\/var\/folders"/);
+    assert.match(call.args[1]!, /deny file-write\* .*\/worktree\/\.git/);
+    assert.equal(call.cwd, realpathSync(worktreeDir));
+    assert.equal(call.env?.HOME, realpathSync(hostHome));
+    assert.equal(call.env?.TMPDIR, realpathSync(join(runtimeRoot, "tmp")));
+    assert.equal(call.env?.DEZIN_AGENT_SCOPE_PROTOCOL, "dezin.artifact-agent-scope.v1");
+    assert.equal(call.env?.DEZIN_DAEMON_TOKEN, undefined);
+    assert.equal(Object.hasOwn(call.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+    assert.equal(call.env?.DEZIN_AMBIENT_SECRET_SENTINEL, undefined);
+    for (const [key, value] of Object.entries(fixture.providerEnv)) {
+      assert.equal(call.env?.[key], value);
+    }
+  }
+});
+
+test("generic Artifact providers fail closed without the outer macOS process sandbox", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-generic-provider-platform-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktreeDir = join(root, "worktree");
+  mkdirSync(worktreeDir);
 
   assert.throws(() => createProductionArtifactProviderRunner({
     providerId: "codex",
     command: "codex",
     worktreeDir,
-  }, dependencies), /Codex.*disabled|tmp-granting/i);
+  }, {
+    platform: "linux",
+    resolveExecutable: () => "/usr/bin/true",
+  }), /macOS|Seatbelt|outer.*sandbox/i);
+});
+
+test("generic Artifact providers ignore configured wrappers and resolve the registry executable from fixed roots", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-generic-provider-resolution-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hostHome = join(root, "host-home");
+  const worktreeDir = join(root, "transaction", "worktree");
+  const canonicalExecutable = join(hostHome, ".local", "bin", "trae-cli");
+  const configuredWrapper = join(root, "trae");
+  mkdirSync(join(canonicalExecutable, ".."), { recursive: true });
+  mkdirSync(worktreeDir, { recursive: true });
+  writeFileSync(canonicalExecutable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  writeFileSync(configuredWrapper, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+  writeFileSync(join(worktreeDir, "index.html"), "<main>safe</main>");
+  const calls: SpawnInput[] = [];
+
+  const runner = createProductionArtifactProviderRunner({
+    providerId: "trae",
+    command: configuredWrapper,
+    worktreeDir,
+    enforceArtifactUpdate: false,
+  }, {
+    hostHome,
+    platform: "darwin",
+    sandboxExecutable: "/usr/bin/false",
+    spawner: {
+      async run(input) {
+        calls.push(input);
+        return { stdout: "done", stderr: "", exitCode: 0 };
+      },
+    },
+  });
+  await runner.runTurn({
+    systemPrompt: "boundary",
+    message: "build",
+    projectDir: worktreeDir,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "/usr/bin/false");
+  assert.equal(calls[0]!.args[2], realpathSync(canonicalExecutable));
+  assert.notEqual(calls[0]!.args[2], realpathSync(configuredWrapper));
+
+  rmSync(canonicalExecutable);
   assert.throws(() => createProductionArtifactProviderRunner({
+    providerId: "trae",
+    command: configuredWrapper,
+    worktreeDir,
+  }, {
+    hostHome,
+    platform: "darwin",
+    sandboxExecutable: "/usr/bin/false",
+  }), /canonical|registry|executable|fixed.*root/i);
+});
+
+test("generic Artifact providers reject foreign credentials and daemon capabilities before spawn", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-generic-provider-env-reject-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktreeDir = join(root, "worktree");
+  mkdirSync(worktreeDir);
+  writeFileSync(join(worktreeDir, "index.html"), "<main>safe</main>");
+  let spawnCount = 0;
+  const runner = createProductionArtifactProviderRunner({
     providerId: "gemini",
     command: "gemini",
     worktreeDir,
-  }, dependencies), /Gemini.*unsupported|workspace sandbox/i);
-  assert.equal(resolveCount, 0);
+  }, {
+    resolveExecutable: () => "/usr/bin/true",
+    platform: "darwin",
+    sandboxExecutable: "/usr/bin/false",
+    spawner: {
+      async run() {
+        spawnCount += 1;
+        return { stdout: "done", stderr: "", exitCode: 0 };
+      },
+    },
+  });
+
+  await assert.rejects(() => runner.runTurn({
+    systemPrompt: "boundary",
+    message: "build",
+    projectDir: worktreeDir,
+    env: { OPENAI_API_KEY: "foreign-provider-secret" },
+  }), /OPENAI_API_KEY|not permitted/i);
+  await assert.rejects(() => runner.runTurn({
+    systemPrompt: "boundary",
+    message: "build",
+    projectDir: worktreeDir,
+    env: { DEZIN_DAEMON_TOKEN: "mutation-capability" },
+  }), /daemon mutation token|cannot receive/i);
   assert.equal(spawnCount, 0);
-  assert.equal(existsSync(runtimeRoot), false);
 });
 
 test("production Artifact provider sandbox rejects an untrusted same-name CLI wrapper", (t) => {

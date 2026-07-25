@@ -17,10 +17,10 @@ import {
 
 const SELECTION_ID = "selection-00000000-0000-4000-8000-000000000011";
 const HYPOTHESIS_SELECTION_ID = "selection-00000000-0000-4000-8000-000000000012";
-const FROZEN_CODEBUDDY_AGENT = Object.freeze({
-  providerId: "codebuddy" as const,
-  command: "codebuddy" as const,
-  model: "gpt-5.6-sol",
+const FROZEN_TRAE_AGENT = Object.freeze({
+  providerId: "trae",
+  command: "trae-cli",
+  model: "doubao-seed-1.6",
 });
 
 async function withServer(run: (input: {
@@ -172,8 +172,8 @@ function requestBody(
   return {
     selectionRequestId,
     artifactId: "checkout-target",
-    agentCommand: FROZEN_CODEBUDDY_AGENT.command,
-    model: FROZEN_CODEBUDDY_AGENT.model,
+    agentCommand: FROZEN_TRAE_AGENT.command,
+    model: FROZEN_TRAE_AGENT.model,
     expectedResourceHeadRevisionId: resource.headRevisionId,
     expectedGraphRevision: workspace.graphRevision,
     expectedSnapshotId: workspace.activeSnapshotId,
@@ -208,8 +208,8 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     for (const invalidBody of [
       { ...body, providerId: "codebuddy" },
       { ...body, agentCommand: undefined },
-      { ...body, agentCommand: "codex" },
-      { ...body, model: " gpt-5.6-sol" },
+      { ...body, agentCommand: "unknown-agent" },
+      { ...body, model: " doubao-seed-1.6" },
     ]) {
       const invalidAgent = await fetch(`${revisionUrl}/directions/quiet-confidence/artifact-intents`, {
         method: "POST",
@@ -236,13 +236,13 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     const results = await Promise.all(responses.map(async (response) => ({
       status: response.status,
       body: await response.json() as {
-        proposal: { id: string; generation: { agent: typeof FROZEN_CODEBUDDY_AGENT } };
+        proposal: { id: string; generation: { agent: typeof FROZEN_TRAE_AGENT } };
         plan: { id: string };
         task: { id: string };
       },
     })));
     assert.deepEqual(results.map(({ status }) => status).sort(), [200, 201]);
-    assert.deepEqual(results[0]!.body.proposal.generation.agent, FROZEN_CODEBUDDY_AGENT);
+    assert.deepEqual(results[0]!.body.proposal.generation.agent, FROZEN_TRAE_AGENT);
     assert.equal(new Set(results.map(({ body: result }) => result.proposal.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.plan.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.task.id)).size, 1);
@@ -330,12 +330,12 @@ test("hypothesis direction requires explicit confirmation before creating a succ
       body: JSON.stringify({ ...unconfirmedBody, confirmHypothesis: true }),
     });
     const confirmedBody = await confirmed.json() as {
-      proposal?: { generation: { agent: typeof FROZEN_CODEBUDDY_AGENT } };
+      proposal?: { generation: { agent: typeof FROZEN_TRAE_AGENT } };
       plan?: { id: string };
       error?: string;
     };
     assert.equal(confirmed.status, 201, JSON.stringify(confirmedBody));
     assert.ok(confirmedBody.plan?.id);
-    assert.deepEqual(confirmedBody.proposal?.generation.agent, FROZEN_CODEBUDDY_AGENT);
+    assert.deepEqual(confirmedBody.proposal?.generation.agent, FROZEN_TRAE_AGENT);
   });
 });

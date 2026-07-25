@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiProvider } from "../../lib/api-context.tsx";
 import type { ArtifactRevision, PreviewTarget, ResolvedPreviewTarget } from "../../lib/api.ts";
@@ -45,6 +46,7 @@ function resolved(
 }
 
 test("viewer keeps the exact Snapshot across navigation and releases the old and final leases", async () => {
+  const user = userEvent.setup();
   const resolvePreviewTarget = vi.fn(async (_projectId: string, target: PreviewTarget) => {
     if (target.kind !== "workspace-flow") throw new Error("mutable preview target is forbidden");
     return resolved(target);
@@ -141,9 +143,8 @@ test("viewer keeps the exact Snapshot across navigation and releases the old and
   await waitFor(() => expect(screen.queryByTitle("Beta flow preview")).not.toBeInTheDocument());
   await waitFor(() => expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-page-b"));
 
-  fireEvent.change(screen.getByRole("combobox", { name: "Prototype flow start Page" }), {
-    target: { value: "page-b" },
-  });
+  await user.click(screen.getByRole("combobox", { name: "Prototype flow start Page" }));
+  await user.click(await screen.findByRole("option", { name: "Beta" }));
   const selectedBetaFrame = await screen.findByTitle("Beta flow preview") as HTMLIFrameElement;
   expect(screen.getByTitle("Alpha flow preview")).toBe(backFrame);
   const selectedBetaPostMessage = vi.spyOn(selectedBetaFrame.contentWindow!, "postMessage");

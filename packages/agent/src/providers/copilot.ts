@@ -14,7 +14,14 @@ export const copilotProvider: AgentProvider = {
   label: "GitHub Copilot",
   seedModels: ["claude-sonnet-4.6", "gpt-5.2", "gpt-5"],
   genericConfig: config,
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "copilot", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "copilot",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   // Generation pipes the prompt via stdin (config); the one-shot analyzer passes it inline.
   oneShotArgs: (model, prompt) => ["--allow-all-tools", "--output-format", "json", ...(model ? ["--model", model] : []), "-p", prompt],
 };

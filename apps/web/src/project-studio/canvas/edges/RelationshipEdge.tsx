@@ -2,7 +2,8 @@ import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from "
 import { Link2 } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceFlowEdge } from "../workspace-graph-adapter.ts";
-import { workspaceEdgeLaneExpansion } from "./edge-lane-geometry.ts";
+import { canvasEdgeTheme } from "./edge-theme.ts";
+import { workspaceEdgeRouteGeometry } from "./edge-lane-geometry.ts";
 
 interface RelationshipEdgeGeometryInput {
   sourceX: number;
@@ -18,10 +19,11 @@ export function relationshipEdgeGeometry(
   input: RelationshipEdgeGeometryInput,
 ): { path: string; labelX: number; labelY: number } {
   const { lane, ...pathInput } = input;
+  const routeGeometry = workspaceEdgeRouteGeometry(lane);
   const [path, labelX, labelY] = getSmoothStepPath({
     ...pathInput,
-    borderRadius: 18,
-    offset: 30 + workspaceEdgeLaneExpansion(lane) * 18,
+    borderRadius: routeGeometry.cornerRadius,
+    offset: routeGeometry.routeOffset,
   });
   return { path, labelX, labelY };
 }
@@ -49,8 +51,13 @@ export function RelationshipEdge({
     lane: data?.lane,
   });
   const supportingRelation = data?.kind === "informs" || data?.kind === "derives-from";
-  const foreground = selected || hovered ? "var(--foreground)" : "var(--foreground-2)";
-  const showLabel = data?.zoomLevel === "full" || selected || hovered;
+  const theme = canvasEdgeTheme({
+    kind: "relationship",
+    active: selected || hovered,
+    supporting: supportingRelation,
+  });
+  const showLabel = data?.zoomLevel === "full"
+    || (data?.zoomLevel === "compact" && (selected || hovered));
   return (
     <>
       <g
@@ -63,14 +70,7 @@ export function RelationshipEdge({
           path={path}
           interactionWidth={0}
           className="dezin-flow-edge__halo"
-          style={{
-            stroke: "var(--background)",
-            strokeWidth: selected || hovered ? 3.6 : 3,
-            strokeLinecap: "round",
-            strokeLinejoin: "round",
-            opacity: 0.72,
-            pointerEvents: "none",
-          }}
+          style={theme.halo}
         />
         <BaseEdge
           id={id}
@@ -78,15 +78,7 @@ export function RelationshipEdge({
           markerEnd={markerEnd}
           interactionWidth={24}
           className="dezin-flow-edge__path"
-          style={{
-            stroke: foreground,
-            strokeWidth: selected || hovered ? 1.7 : 1.2,
-            strokeDasharray: supportingRelation ? "3 6" : undefined,
-            strokeLinecap: "round",
-            strokeLinejoin: "round",
-            opacity: selected || hovered ? 0.88 : 0.48,
-            vectorEffect: "non-scaling-stroke",
-          }}
+          style={theme.path}
         />
       </g>
       {showLabel && (

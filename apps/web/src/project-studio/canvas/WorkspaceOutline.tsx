@@ -2,6 +2,7 @@ import { ChevronRight, Component, Frame, PanelTop, Paperclip, SquareArrowOutUpRi
 import type { KeyboardEvent } from "react";
 import { Button } from "../../components/ui/Button.tsx";
 import { IconButton } from "../../components/ui/IconButton.tsx";
+import { StudioPanelHeader } from "../../components/ui/StudioHeader.tsx";
 import {
   Tooltip,
   TooltipContent,
@@ -44,6 +45,7 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
   onToggleCollapsed: (groupId: string, collapsed: boolean) => void;
 }) {
   const children = childrenByParent.get(node.id) ?? [];
+  const connectionCount = node.data.incomingCount + node.data.outgoingCount;
   const stopCanvasShortcuts = (event: KeyboardEvent) => event.stopPropagation();
   const openTooltip = `Open ${kindLabel(node)} ${node.data.name}`;
   const groupActionLabel = `${node.data.collapsed ? "Expand" : "Collapse"} group ${node.data.name}`;
@@ -55,18 +57,20 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
           aria-pressed={node.selected ?? false}
           aria-label={accessibleNodeName(node)}
           className="dezin-workspace-outline__item"
+          data-kind={node.data.kind}
           data-selected={node.selected || undefined}
           onClick={(event) => onSelect(node.id, event.metaKey || event.ctrlKey || event.shiftKey)}
           onKeyDown={stopCanvasShortcuts}
         >
           <span aria-hidden><KindIcon kind={node.data.kind} /></span>
           <span className="dezin-workspace-outline__name" title={node.data.name}>{node.data.name}</span>
-          {node.data.kind !== "group" && (
+          {node.data.kind !== "group" && connectionCount > 0 && (
             <span
               className="dezin-workspace-outline__count"
-              aria-label={`${node.data.incomingCount + node.data.outgoingCount} connections`}
+              aria-label={`${connectionCount} connections`}
+              title={`${connectionCount} connections`}
             >
-              {node.data.incomingCount + node.data.outgoingCount}
+              {connectionCount}
             </span>
           )}
         </button>
@@ -161,7 +165,7 @@ export function WorkspaceOutline({ projectId, nodes, onSelect, onToggleCollapsed
   return (
     <TooltipProvider delayDuration={300}>
       <aside className="dezin-workspace-outline" aria-label="Workspace structure">
-        <header>
+        <StudioPanelHeader>
           <div className="dezin-workspace-outline__heading">
             <strong>Outline</strong>
             <span>{nodes.length} {nodes.length === 1 ? "object" : "objects"}</span>
@@ -178,7 +182,7 @@ export function WorkspaceOutline({ projectId, nodes, onSelect, onToggleCollapsed
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={6}>Close outline</TooltipContent>
           </Tooltip>
-        </header>
+        </StudioPanelHeader>
         {roots.length > 0 ? (
           <ul aria-label="Workspace outline">
             {roots.map((node) => (

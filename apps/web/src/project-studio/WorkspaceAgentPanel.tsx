@@ -5,11 +5,15 @@ import {
   AgentComposerContextCards,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
+import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import {
   Button,
+  StudioHeaderCopy,
+  StudioHeaderIdentity,
+  StudioPanelHeader,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -62,6 +66,8 @@ export function WorkspaceAgentPanel({
   designSystems = [],
   designSystemId = "",
   onDesignSystemChange,
+  designSystemCatalogStatus = "ready",
+  onRetryDesignSystems,
 }: {
   projectName?: string;
   onBackHome?: () => void;
@@ -102,6 +108,8 @@ export function WorkspaceAgentPanel({
   designSystems?: DesignSystemCard[];
   designSystemId?: string;
   onDesignSystemChange?: (id: string) => void;
+  designSystemCatalogStatus?: "loading" | "ready" | "error";
+  onRetryDesignSystems?: () => void;
 }) {
   const pendingMessage = submissionBlockedPending
     ? submissionBlockedReason ?? "Checking Agent availability…"
@@ -126,6 +134,10 @@ export function WorkspaceAgentPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  const hasAgentPicker = onAgentChange !== undefined
+    && onModelChange !== undefined
+    && onRescanAgents !== undefined;
+  const hasDesignSystemPicker = onDesignSystemChange !== undefined;
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -138,61 +150,66 @@ export function WorkspaceAgentPanel({
   };
 
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-labelledby="workspace-agent-title">
-      <header className="app-drag titlebar-pad-left flex h-12 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+    <section className="flex h-full min-h-0 flex-col bg-sidebar" aria-labelledby="workspace-agent-title">
+      <StudioPanelHeader draggable className="titlebar-pad-left gap-2 bg-sidebar px-2.5">
         {onBackHome ? (
           <Button
             type="button"
             variant="ghost"
-            size="sm"
-            className="app-no-drag min-w-0 max-w-[58%] justify-start gap-1.5 px-1.5"
+            size="icon-sm"
+            className="app-no-drag shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Back to projects"
+            title={projectName ? `Back to projects · ${projectName}` : "Back to projects"}
             onClick={onBackHome}
           >
-            <ChevronLeft aria-hidden className="size-3.5 shrink-0" />
-            <span className="truncate">{projectName ?? "Projects"}</span>
+            <ChevronLeft aria-hidden className="size-3.5" />
           </Button>
         ) : null}
-        <div className="min-w-0 flex-1 text-right">
-          <h2 id="workspace-agent-title" className="truncate text-xs font-medium tracking-[-0.01em] text-foreground">
-            {title}
-          </h2>
-          <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{contextLabel}</p>
-        </div>
-      </header>
+        <StudioHeaderIdentity className="min-w-0 flex-1">
+          <StudioHeaderCopy
+            title={title}
+            subtitle={contextLabel}
+            titleId="workspace-agent-title"
+            headingLevel={2}
+            className="flex-1 text-left"
+          />
+        </StudioHeaderIdentity>
+      </StudioPanelHeader>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${title} transcript`}>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3.5 py-4" aria-label={`${title} transcript`}>
         {transcript.length === 0 ? (
-          <div className="grid min-h-32 place-items-center px-2 text-center">
-            <div className="max-w-48">
-              <span className="mx-auto grid size-8 place-items-center rounded-xl border border-border bg-surface-2 text-muted-foreground">
-                <MessageSquareText aria-hidden className="size-3.5" />
+          <div className="grid min-h-40 place-items-center px-3 text-center">
+            <div className="max-w-52">
+              <span className="mx-auto grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground">
+                <MessageSquareText aria-hidden className="size-4" />
               </span>
-              <p className="mt-2 text-[11px] font-medium text-foreground">Work in this scope</p>
-              <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+              <p className="mt-2.5 text-xs font-medium text-foreground">Work in this scope</p>
+              <p className="mt-1 text-[11px] leading-[1.55] text-muted-foreground">
                 Attach exact project revisions, then describe the design decision or change.
               </p>
             </div>
           </div>
         ) : (
-          <ol className="space-y-3">
+          <ol className="space-y-3.5">
             {transcript.map((entry) => (
-              <li key={entry.id} className={cn("flex", entry.role === "user" ? "justify-end" : "justify-start")}>
+              <li key={entry.id} className="min-w-0">
                 <article
                   data-agent-role={entry.role}
                   data-agent-turn-id={entry.turnId}
                   className={cn(
-                    "max-w-[90%] rounded-xl border px-2.5 py-2 text-[11px] leading-[1.55]",
                     entry.role === "user"
-                      ? "border-foreground/10 bg-foreground text-background"
-                      : "border-border bg-card text-foreground",
+                      ? "flex max-w-full flex-col items-end gap-1"
+                      : "-mx-2 min-w-0 rounded-xl px-2 py-1",
                   )}
                 >
-                  <p className="whitespace-pre-wrap break-words">{entry.content}</p>
-                  <p className={cn(
-                    "mt-1 text-[8px] font-medium uppercase tracking-[0.08em]",
-                    entry.role === "user" ? "text-background/55" : "text-muted-foreground",
-                  )}>
+                  <AgentMessageBody role={entry.role} content={entry.content} />
+                  <p
+                    data-agent-turn-state={entry.id}
+                    className={cn(
+                      "text-[11px] leading-4 text-muted-foreground",
+                      entry.role === "assistant" && "mt-1",
+                    )}
+                  >
                     {entry.state}
                   </p>
                 </article>
@@ -205,24 +222,26 @@ export function WorkspaceAgentPanel({
             role="status"
             aria-label={`${title} task status`}
             aria-live="polite"
-            className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-border/70 bg-card/90 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground shadow-[0_1px_2px_rgb(0_0_0/0.03)]"
+            className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-[11px] leading-4 text-muted-foreground"
           >
             <span className="min-w-0 truncate">{status}</span>
             {onStatusClick ? (
-              <button
+              <Button
                 type="button"
-                className="shrink-0 font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
+                variant="link"
+                size="xs"
+                className="h-auto shrink-0 px-0 text-[11px] text-foreground"
                 onClick={onStatusClick}
               >
                 {statusActionLabel}
-              </button>
+              </Button>
             ) : null}
           </div>
         ) : null}
         <div ref={transcriptEndRef} />
       </div>
 
-      <div className="shrink-0 p-2.5" data-workspace-agent-composer>
+      <div className="shrink-0 px-2.5 pb-2.5 pt-1" data-workspace-agent-composer>
         <input
           ref={fileInputRef}
           type="file"
@@ -261,9 +280,9 @@ export function WorkspaceAgentPanel({
           }}
         >
           <div className={cn(
-            "overflow-hidden rounded-2xl border border-input bg-card shadow-[0_1px_2px_rgb(0_0_0/0.04)] transition-[border-color,box-shadow] focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/15",
+            "overflow-hidden rounded-2xl border border-input bg-card transition-[border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
             draggingFiles && "border-ring bg-brand/5 ring-2 ring-ring/20",
-          )}>
+          )} data-agent-composer-shell>
             <AgentComposerContextCards
               items={contextItems}
               onChange={onContextItemsChange}
@@ -271,16 +290,6 @@ export function WorkspaceAgentPanel({
               ariaLabel="Selected Agent Context"
               className="border-border/60 px-2.5 pt-2.5"
             />
-            {onDesignSystemChange ? (
-              <div className="flex min-h-9 items-center border-b border-border/60 px-2 py-1">
-                <DesignSystemSelect
-                  compact
-                  systems={designSystems}
-                  value={designSystemId}
-                  onChange={onDesignSystemChange}
-                />
-              </div>
-            ) : null}
             <textarea
               id="workspace-agent-draft"
               aria-label={draftLabel}
@@ -295,12 +304,48 @@ export function WorkspaceAgentPanel({
                 }
               }}
               placeholder={draggingFiles ? "Drop files to attach…" : placeholder}
-              rows={4}
+              rows={2}
               spellCheck
-              className="block max-h-40 min-h-24 w-full resize-none bg-transparent px-3 py-2.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground/70"
+              className="block max-h-40 min-h-[72px] w-full resize-none bg-transparent px-3 pb-2 pt-2.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground/70"
             />
-            <div className="flex min-h-10 items-center justify-between gap-2 border-t border-border/70 px-2 py-1">
-              <div className="flex min-w-0 items-center gap-1">
+            {hasDesignSystemPicker || hasAgentPicker ? (
+              <div
+                data-workspace-agent-routing
+                className="flex min-w-0 flex-wrap items-center gap-0.5 px-2 pt-1"
+              >
+                {hasDesignSystemPicker ? (
+                  <div className="min-w-[8rem] flex-1 overflow-hidden [&_button]:min-w-0 [&_button]:w-full [&_button]:max-w-full [&_button]:overflow-hidden">
+                    <DesignSystemSelect
+                      compact
+                      systems={designSystems}
+                      value={designSystemId}
+                      onChange={onDesignSystemChange}
+                      catalogStatus={designSystemCatalogStatus}
+                      onRetry={onRetryDesignSystems}
+                    />
+                  </div>
+                ) : null}
+                {hasAgentPicker ? (
+                  <div className="min-w-[8rem] flex-1 overflow-hidden [&_button]:min-w-0 [&_button]:w-full [&_button]:max-w-full [&_button]:overflow-hidden [&_button>span]:min-w-0">
+                    <AgentModelSelect
+                      agents={agents}
+                      agent={agent}
+                      model={model}
+                      onAgentChange={onAgentChange}
+                      onModelChange={onModelChange}
+                      onRescan={onRescanAgents}
+                      agentDisabledReason={agentDisabledReason}
+                      dropUp
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <div
+              data-workspace-agent-actions
+              className="flex min-h-10 min-w-0 items-center justify-between gap-2 px-2 pb-2 pt-1"
+            >
+              <div className="flex min-w-0 flex-1 items-center">
                 {onAttachFiles ? (
                   <AttachMenu
                     fileActionLabel="Upload a reference"
@@ -314,21 +359,10 @@ export function WorkspaceAgentPanel({
                     allowFigImport={false}
                   />
                 ) : null}
-                {onAgentChange && onModelChange && onRescanAgents ? (
-                  <AgentModelSelect
-                    agents={agents}
-                    agent={agent}
-                    model={model}
-                    onAgentChange={onAgentChange}
-                    onModelChange={onModelChange}
-                    onRescan={onRescanAgents}
-                    agentDisabledReason={agentDisabledReason}
-                    dropUp
-                  />
-                ) : (
-                  <span className="truncate text-[10px] text-muted-foreground">Project context</span>
-                )}
-                <span className="hidden rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground min-[300px]:inline">{scopeLabel}</span>
+                {!hasAgentPicker && !hasDesignSystemPicker ? (
+                  <span className="truncate px-2 text-[11px] text-muted-foreground">Project context</span>
+                ) : null}
+                <span className="sr-only">{scopeLabel}</span>
               </div>
               {onSubmit ? (
                 <TooltipProvider delayDuration={180}>
@@ -339,18 +373,19 @@ export function WorkspaceAgentPanel({
                         tabIndex={activityMessage ? 0 : undefined}
                         aria-label={activityMessage ?? undefined}
                       >
-                        <button
+                        <Button
                           type="submit"
+                          size="icon-xs"
                           aria-label={submitLabel}
                           aria-describedby={activityMessage ? activityMessageId : undefined}
                           aria-busy={activityMessage ? true : undefined}
                           disabled={!canSubmit}
-                          className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-background transition-[opacity,transform] enabled:hover:scale-[1.03] enabled:active:scale-95 disabled:cursor-not-allowed disabled:opacity-30"
+                          className="size-7 shrink-0 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-30"
                         >
                           {activityMessage
                             ? <LoaderCircle aria-hidden className="size-3.5 animate-spin motion-reduce:animate-none" />
                             : <ArrowUp aria-hidden className="size-3.5" />}
-                        </button>
+                        </Button>
                       </span>
                     </TooltipTrigger>
                     {activityMessage ? (
@@ -377,7 +412,7 @@ export function WorkspaceAgentPanel({
             <p
               id={messageId}
               role="alert"
-              className="mt-1.5 px-1 text-[10px] leading-4 text-destructive"
+              className="mt-1.5 px-1 text-[11px] leading-4 text-destructive"
             >
               {visibleMessage}
             </p>

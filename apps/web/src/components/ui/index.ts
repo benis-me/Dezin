@@ -21,6 +21,8 @@ export {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuLabel,
   DropdownMenuSub,
@@ -51,4 +53,17 @@ export { Spinner, Skeleton, Loading } from "./feedback.tsx";
 export { Picker, type PickerOption } from "./Picker.tsx";
 export { Segmented, type SegmentedOption } from "./SegmentedControl.tsx";
 export { PanelBar } from "./PanelBar.tsx";
+export {
+  StudioDocumentHeader,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioHeaderIdentity,
+  StudioPanelHeader,
+  StudioToolbarHeader,
+} from "./StudioHeader.tsx";
+export {
+  StudioFactRow,
+  StudioInspectorSection,
+  StudioStatusBadge,
+} from "./StudioInspector.tsx";
 export { FadeIn, Stagger, StaggerItem } from "./motion-primitives.tsx";

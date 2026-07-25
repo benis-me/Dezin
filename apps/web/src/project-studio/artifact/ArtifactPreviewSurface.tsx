@@ -1,5 +1,6 @@
 import { CircleAlert, Copy, LoaderCircle, MousePointer2, PanelTop, RotateCw, X } from "lucide-react";
 import { useState, type RefObject } from "react";
+import { Button, IconButton } from "../../components/ui/index.ts";
 import type { WorkspaceArtifact, WorkspaceRenderFrameSpec } from "../../lib/api.ts";
 import { previewDocumentSrc } from "../../lib/preview-channel.ts";
 import type { RuntimeError } from "../../lib/preview-runtime-errors.ts";
@@ -104,10 +105,16 @@ export function ArtifactPreviewSurface({
           <div>
             <strong>Preview unavailable</strong>
             <p>{preview.error}</p>
-            <button type="button" onClick={preview.retry} aria-label="Retry artifact preview">
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={preview.retry}
+              aria-label="Retry artifact preview"
+            >
               <RotateCw aria-hidden size={13} />
               Retry assembly
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -138,9 +145,13 @@ export function ArtifactPreviewSurface({
                 <span>Revision {runtimeErrorIdentity.revisionId} · Frame {runtimeErrorIdentity.frameId}</span>
               </div>
               {runtimeErrors.fatal ? (
-                <button type="button" aria-label="Dismiss runtime error" onClick={onDismissRuntimeFatal}>
+                <IconButton
+                  className="artifact-runtime-errors__dismiss"
+                  aria-label="Dismiss runtime error"
+                  onClick={onDismissRuntimeFatal}
+                >
                   <X aria-hidden size={12} />
-                </button>
+                </IconButton>
               ) : null}
             </div>
             {runtimeErrors.fatal ? (
@@ -157,9 +168,13 @@ export function ArtifactPreviewSurface({
                 {runtimeErrors.nonFatal.map((error) => (
                   <li key={error.sig}>
                     <span>{error.message}{error.count > 1 ? ` ×${error.count}` : ""}</span>
-                    <button type="button" aria-label={`Dismiss ${error.message}`} onClick={() => onDismissRuntimeNonFatal(error.sig)}>
+                    <IconButton
+                      className="artifact-runtime-errors__dismiss"
+                      aria-label={`Dismiss ${error.message}`}
+                      onClick={() => onDismissRuntimeNonFatal(error.sig)}
+                    >
                       <X aria-hidden size={11} />
-                    </button>
+                    </IconButton>
                   </li>
                 ))}
               </ul>
@@ -167,8 +182,10 @@ export function ArtifactPreviewSurface({
             <details onToggle={() => setRepairContextCopied(false)}>
               <summary>Repair context</summary>
               <pre aria-label="Runtime repair context">{runtimeRepairContext}</pre>
-              <button
+              <Button
                 type="button"
+                size="xs"
+                variant="ghost"
                 onClick={() => {
                   void navigator.clipboard?.writeText(runtimeRepairContext).then(
                     () => setRepairContextCopied(true),
@@ -178,7 +195,7 @@ export function ArtifactPreviewSurface({
               >
                 <Copy aria-hidden size={11} />
                 {repairContextCopied ? "Copied" : "Copy repair context"}
-              </button>
+              </Button>
             </details>
           </aside>
         ) : null}
@@ -227,9 +244,15 @@ export function ArtifactPreviewSurface({
                     ? "Reconnecting state"
                     : "State pending"}
             {frameState.status === "rejected" && frameState.retryable ? (
-              <button type="button" onClick={onRetryFrame} aria-label="Retry frame state">
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={onRetryFrame}
+                aria-label="Retry frame state"
+              >
                 Retry
-              </button>
+              </Button>
             ) : null}
           </div>
           <div className="artifact-stage__status" aria-live="polite">

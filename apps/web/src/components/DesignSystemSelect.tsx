@@ -1,44 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput, Tabs } from "./ui/index.ts";
-import { BrandGlyph, DesignSystemMark, hasBrandLogo } from "./design-system-logos.tsx";
+import { DesignSystemMark } from "./design-system-logos.tsx";
 import { navigate } from "../router.tsx";
-import type { DesignSystemCard, Swatch } from "../lib/api.ts";
+import type { DesignSystemCard } from "../lib/api.ts";
 
-const FALLBACK_SWATCH: Swatch = { bg: "var(--surface)", surface: "var(--surface-2)", fg: "var(--foreground)", accent: "var(--muted-foreground)" };
-
-/** A compact, on-hover specimen of a design system: palette, type, and component shapes. */
-function DesignSystemPreview({ system }: { system: DesignSystemCard }) {
-  const sw = system.swatch ?? FALLBACK_SWATCH;
-  return (
-    <div className="dz-animate-in w-56 overflow-hidden rounded-lg border border-border bg-popover shadow-pop">
-      <div className="px-3 py-2.5" style={{ background: sw.bg, color: sw.fg }}>
-        <div className="flex items-center gap-1.5">
-          {hasBrandLogo(system.id) ? <BrandGlyph id={system.id} className="size-3.5 shrink-0" /> : null}
-          <span className="truncate text-[13px] font-semibold tracking-tight">{system.name}</span>
-        </div>
-        <div className="mt-0.5 text-[11px]" style={{ opacity: 0.55 }}>
-          Aa — the quick brown fox
-        </div>
-        <div className="mt-2 flex items-center gap-1.5">
-          <span className="rounded px-2 py-0.5 text-[10px] font-medium" style={{ background: sw.accent, color: "#fff" }}>
-            Button
-          </span>
-          <span className="rounded px-2 py-0.5 text-[10px]" style={{ background: sw.surface, color: sw.fg, border: `1px solid ${sw.accent}22` }}>
-            Input
-          </span>
-        </div>
-      </div>
-      <div className="flex h-5">
-        {[sw.bg, sw.surface, sw.fg, sw.accent].map((c, i) => (
-          <span key={i} className="flex-1" style={{ background: c }} />
-        ))}
-      </div>
-      {system.category ? <div className="truncate px-3 py-1.5 text-[10px] text-muted-foreground">{system.category}</div> : null}
-    </div>
-  );
-}
+const DesignSystemPreview = lazy(() => import("./DesignSystemPreview.tsx"));
 
 /** The "Design system" picker — searchable, with Clear + Create and an on-hover preview. */
 export function DesignSystemSelect({
@@ -63,7 +31,6 @@ export function DesignSystemSelect({
   const [tab, setTab] = useState<"built-in" | "custom">("built-in");
   const [preview, setPreview] = useState<{ system: DesignSystemCard; top: number; left: number } | null>(null);
   const selectedRef = useRef<HTMLButtonElement>(null);
-
   // On open, reveal the current selection: switch to its tab and centre it in the list.
   // setTimeout (not rAF — which is paused in background tabs) retries until the Radix
   // popover has positioned and the viewport is scrollable.
@@ -131,20 +98,22 @@ export function DesignSystemSelect({
           <button
             type="button"
             aria-label="Design system"
-            className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+            aria-description={`Current Design system: ${label}`}
+            className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
           >
             {value !== "" && current ? (
-              <DesignSystemMark id={current.id} swatch={current.swatch} className="size-5" />
+              <DesignSystemMark id={current.id} swatch={current.swatch} className="size-5 shrink-0" />
             ) : (
-              <Shapes size={13} strokeWidth={1.75} />
+              <Shapes size={13} strokeWidth={1.75} className="shrink-0" />
             )}
-            <span className="max-w-[12rem] truncate font-medium text-foreground">{label}</span>
-            <ChevronDown size={13} strokeWidth={2} />
+            <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">{label}</span>
+            <ChevronDown size={13} strokeWidth={2} className="shrink-0" />
           </button>
         ) : (
           <button
             type="button"
             aria-label="Design system"
+            aria-description={`Current Design system: ${label}`}
             className="flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-left transition-colors hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:border-border-strong"
           >
             {value !== "" && current ? <DesignSystemMark id={current.id} swatch={current.swatch} /> : null}
@@ -156,7 +125,7 @@ export function DesignSystemSelect({
           </button>
         )}
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 p-1">
+      <PopoverContent align="start" aria-label="Choose Design system" className="w-80 p-1">
           <div className="flex shrink-0 items-center gap-1.5 p-1 pb-1.5">
             <div className="flex-1">
               <SearchInput
@@ -221,6 +190,7 @@ export function DesignSystemSelect({
                 <li key={s.id}>
                   <button
                     type="button"
+                    aria-pressed={s.id === value}
                     ref={s.id === value ? selectedRef : undefined}
                     onMouseEnter={(e) => showPreview(e, s)}
                     onClick={() => {
@@ -245,6 +215,7 @@ export function DesignSystemSelect({
           <div className="flex shrink-0 items-center gap-2 border-t border-border/60 px-2">
             <button
               type="button"
+              aria-pressed={value === ""}
               onClick={() => {
                 onChange("");
                 setOpen(false);
@@ -262,7 +233,9 @@ export function DesignSystemSelect({
       {open && preview
         ? createPortal(
             <div className="pointer-events-none fixed z-[60]" style={{ top: preview.top, left: preview.left }}>
-              <DesignSystemPreview system={preview.system} />
+              <Suspense fallback={null}>
+                <DesignSystemPreview system={preview.system} />
+              </Suspense>
             </div>,
             document.body,
           )

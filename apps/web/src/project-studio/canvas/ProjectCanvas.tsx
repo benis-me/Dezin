@@ -4,6 +4,7 @@ import "./project-canvas.css";
 import {
   Background,
   BackgroundVariant,
+  ConnectionLineType,
   ReactFlow,
   SelectionMode,
   applyEdgeChanges,
@@ -18,7 +19,17 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import { Play } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Ref,
+} from "react";
+import { Button, StudioToolbarHeader } from "../../components/ui/index.ts";
 import type {
   WorkspaceGraph,
   WorkspaceGraphCommand,
@@ -62,9 +73,19 @@ import {
 } from "./workspace-layout.ts";
 
 const VIEWPORT_SAVE_DELAY_MS = 260;
-const MOVE_DEDUPE_WINDOW_MS = 80;
+const RESIZE_VIEWPORT_SAVE_DELAY_MS = 320;
 const PROPOSAL_FOCUS_MOUNT_RETRIES = 4;
 const OUTLINE_SAFE_SURFACE_WIDTH = 900;
+const CANVAS_MIN_ZOOM = 0.15;
+const CANVAS_MAX_ZOOM = 2.25;
+const CANVAS_CONNECTION_LINE_STYLE = {
+  stroke: "var(--foreground-2)",
+  strokeWidth: 1.25,
+  strokeLinecap: "round",
+  strokeLinejoin: "round",
+  opacity: 0.72,
+  vectorEffect: "non-scaling-stroke",
+} satisfies CSSProperties;
 const NOOP_VIEWPORT_CHANGE = () => {};
 const EMPTY_RESOURCE_REVISION_STATES = {} as const;
 const EMPTY_GENERATION_TARGET_STATES = {} as const;
@@ -94,7 +115,10 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
 }
 
 function sameViewport(left: Viewport, right: WorkspaceViewport): boolean {
-  return left.x === right.x && left.y === right.y && left.zoom === right.zoom;
+  const epsilon = 0.001;
+  return Math.abs(left.x - right.x) < epsilon
+    && Math.abs(left.y - right.y) < epsilon
+    && Math.abs(left.zoom - right.zoom) < epsilon;
 }
 
 function freshGroupId(): string {
@@ -154,6 +178,245 @@ export interface ProjectCanvasProps {
 type LayoutCommandSource = readonly WorkspaceLayoutCommand[]
   | ((layout: WorkspaceLayout) => readonly WorkspaceLayoutCommand[]);
 
+export interface PendingMovePosition {
+  generation: number;
+  position: { x: number; y: number };
+}
+
+export interface PendingResizeBounds {
+  generation: number;
+  position: { x: number; y: number };
+  width: number;
+  height: number;
+}
+
+interface ViewportIntent {
+  viewport: WorkspaceViewport;
+  version: number;
+}
+
+interface SurfaceResizeDelta {
+  x: number;
+  y: number;
+}
+
+function hasSurfaceResizeDelta(delta: SurfaceResizeDelta): boolean {
+  return delta.x !== 0 || delta.y !== 0;
+}
+
+function compensateViewportForSurfaceResize(
+  viewport: WorkspaceViewport,
+  delta: SurfaceResizeDelta,
+): WorkspaceViewport {
+  return {
+    ...viewport,
+    x: viewport.x + delta.x,
+    y: viewport.y + delta.y,
+  };
+}
+
+function samePosition(
+  left: WorkspaceFlowNode["position"],
+  right: WorkspaceFlowNode["position"],
+): boolean {
+  return left.x === right.x && left.y === right.y;
+}
+
+function sameShallowRecord(
+  left: Readonly<Record<string, unknown>> | undefined,
+  right: Readonly<Record<string, unknown>> | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
+}
+
+function sameNodeDefinition(
+  left: WorkspaceFlowNode,
+  right: WorkspaceFlowNode,
+): boolean {
+  return left.type === right.type
+    && left.ariaLabel === right.ariaLabel
+    && left.parentId === right.parentId
+    && left.extent === right.extent
+    && left.hidden === right.hidden
+    && left.selected === right.selected
+    && left.className === right.className
+    && left.focusable === right.focusable
+    && left.draggable === right.draggable
+    && left.connectable === right.connectable
+    && left.selectable === right.selectable
+    && left.deletable === right.deletable
+    && left.zIndex === right.zIndex
+    && sameShallowRecord(
+      left.style as Readonly<Record<string, unknown>> | undefined,
+      right.style as Readonly<Record<string, unknown>> | undefined,
+    )
+    && sameShallowRecord(left.data, right.data);
+}
+
+function sameNodeGeometryDefinition(
+  left: WorkspaceFlowNode,
+  right: WorkspaceFlowNode,
+): boolean {
+  const leftStyle = left.style as Readonly<Record<string, unknown>> | undefined;
+  const rightStyle = right.style as Readonly<Record<string, unknown>> | undefined;
+  return left.type === right.type
+    && left.parentId === right.parentId
+    && left.extent === right.extent
+    && left.hidden === right.hidden
+    && left.initialWidth === right.initialWidth
+    && left.initialHeight === right.initialHeight
+    && left.expandParent === right.expandParent
+    && leftStyle?.width === rightStyle?.width
+    && leftStyle?.height === rightStyle?.height
+    && left.data.zoomLevel === right.data.zoomLevel
+    && left.data.collapsed === right.data.collapsed;
+}
+
+function runtimeNodeGeometryMatchesDefinition(
+  current: WorkspaceFlowNode,
+  incoming: WorkspaceFlowNode,
+): boolean {
+  const style = incoming.style as Readonly<Record<string, unknown>> | undefined;
+  const declaredWidth = typeof style?.width === "number" ? style.width : incoming.width;
+  const declaredHeight = typeof style?.height === "number" ? style.height : incoming.height;
+  const currentWidth = current.width;
+  const currentHeight = current.height;
+  return (declaredWidth === undefined || currentWidth === undefined || Math.abs(currentWidth - declaredWidth) < 0.5)
+    && (declaredHeight === undefined || currentHeight === undefined || Math.abs(currentHeight - declaredHeight) < 0.5);
+}
+
+function sameOptionalRecord(
+  left: unknown,
+  right: unknown,
+): boolean {
+  if (left === right) return true;
+  if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) return false;
+  return sameShallowRecord(
+    left as Readonly<Record<string, unknown>>,
+    right as Readonly<Record<string, unknown>>,
+  );
+}
+
+function sameEdgeDefinition(
+  left: WorkspaceFlowEdge,
+  right: WorkspaceFlowEdge,
+): boolean {
+  return left.source === right.source
+    && left.target === right.target
+    && left.sourceHandle === right.sourceHandle
+    && left.targetHandle === right.targetHandle
+    && left.type === right.type
+    && left.ariaLabel === right.ariaLabel
+    && left.hidden === right.hidden
+    && left.selected === right.selected
+    && left.className === right.className
+    && left.focusable === right.focusable
+    && left.selectable === right.selectable
+    && left.deletable === right.deletable
+    && left.animated === right.animated
+    && left.zIndex === right.zIndex
+    && left.interactionWidth === right.interactionWidth
+    && sameOptionalRecord(left.markerStart, right.markerStart)
+    && sameOptionalRecord(left.markerEnd, right.markerEnd)
+    && sameShallowRecord(
+      left.style as Readonly<Record<string, unknown>> | undefined,
+      right.style as Readonly<Record<string, unknown>> | undefined,
+    )
+    && sameShallowRecord(
+      left.data as Readonly<Record<string, unknown>> | undefined,
+      right.data as Readonly<Record<string, unknown>> | undefined,
+    );
+}
+
+export function reconcileCanvasNodes(
+  current: readonly WorkspaceFlowNode[],
+  incoming: readonly WorkspaceFlowNode[],
+  pendingMoves: ReadonlyMap<string, PendingMovePosition>,
+  pendingResizes: ReadonlyMap<string, PendingResizeBounds> = new Map(),
+): WorkspaceFlowNode[] {
+  const live = new Map(current.map((node) => [node.id, node]));
+  let changed = current.length !== incoming.length;
+  const next = incoming.map((node, index) => {
+    const existing = live.get(node.id);
+    const pendingMove = pendingMoves.get(node.id);
+    const pendingResize = pendingResizes.get(node.id);
+    const activeResize = existing?.resizing === true;
+    const resolvedNode = pendingResize && !activeResize
+      ? {
+          ...node,
+          position: pendingResize.position,
+          style: {
+            ...node.style,
+            width: pendingResize.width,
+            height: pendingResize.height,
+          },
+          width: pendingResize.width,
+          height: pendingResize.height,
+          measured: { width: pendingResize.width, height: pendingResize.height },
+          resizing: false,
+        }
+      : node;
+    const pendingPosition = pendingMove && pendingResize
+      ? pendingMove.generation > pendingResize.generation
+        ? pendingMove.position
+        : pendingResize.position
+      : pendingMove?.position ?? pendingResize?.position;
+    const position = existing?.dragging || activeResize
+      ? existing.position
+      : pendingPosition ?? resolvedNode.position;
+    const runtimeGeometryMatches = existing !== undefined
+      && runtimeNodeGeometryMatchesDefinition(existing, resolvedNode);
+    if (current[index]?.id !== node.id) changed = true;
+    if (existing
+      && runtimeGeometryMatches
+      && samePosition(existing.position, position)
+      && sameNodeDefinition(existing, resolvedNode)) {
+      return existing;
+    }
+    changed = true;
+    const preserveRuntimeGeometry = activeResize;
+    const preserveMeasured = existing !== undefined
+      && (preserveRuntimeGeometry
+        || (runtimeGeometryMatches && sameNodeGeometryDefinition(existing, resolvedNode)));
+    return {
+      ...resolvedNode,
+      position,
+      ...(pendingResize && !activeResize
+        ? {
+            measured: { width: pendingResize.width, height: pendingResize.height },
+            width: pendingResize.width,
+            height: pendingResize.height,
+          }
+        : preserveMeasured && existing.measured ? { measured: existing.measured } : {}),
+      ...((!pendingResize || activeResize) && preserveRuntimeGeometry && existing.width !== undefined ? { width: existing.width } : {}),
+      ...((!pendingResize || activeResize) && preserveRuntimeGeometry && existing.height !== undefined ? { height: existing.height } : {}),
+      ...(existing?.dragging ? { dragging: true } : {}),
+      ...((!pendingResize || activeResize) && preserveRuntimeGeometry ? { resizing: true } : {}),
+    };
+  });
+  return changed ? next : current as WorkspaceFlowNode[];
+}
+
+export function reconcileCanvasEdges(
+  current: readonly WorkspaceFlowEdge[],
+  incoming: readonly WorkspaceFlowEdge[],
+): WorkspaceFlowEdge[] {
+  const live = new Map(current.map((edge) => [edge.id, edge]));
+  let changed = current.length !== incoming.length;
+  const next = incoming.map((edge, index) => {
+    const existing = live.get(edge.id);
+    if (current[index]?.id !== edge.id) changed = true;
+    if (existing && sameEdgeDefinition(existing, edge)) return existing;
+    changed = true;
+    return edge;
+  });
+  return changed ? next : current as WorkspaceFlowEdge[];
+}
+
 export function ProjectCanvas({
   projectId,
   projectName,
@@ -179,16 +442,26 @@ export function ProjectCanvas({
 }: ProjectCanvasProps) {
   const canvasRef = useRef<HTMLElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const surfaceSizeRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
   const flowRef = useRef<ReactFlowInstance<WorkspaceFlowNode, WorkspaceFlowEdge> | null>(null);
   const viewportTimerRef = useRef<number | null>(null);
-  const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
+  const resizeViewportTimerRef = useRef<number | null>(null);
+  const pendingViewportRef = useRef<ViewportIntent | null>(null);
+  const pendingResizeViewportRef = useRef<ViewportIntent | null>(null);
+  const deferredSurfaceResizeRef = useRef<SurfaceResizeDelta>({ x: 0, y: 0 });
+  const viewportIntentVersionRef = useRef(0);
+  const canvasProjectRef = useRef(projectId);
+  const canvasProjectEpochRef = useRef(0);
+  const persistViewportRef = useRef<((
+    viewport: WorkspaceViewport,
+    message: string,
+    intentVersion: number,
+  ) => Promise<boolean>) | null>(null);
   const viewportSaveJobsRef = useRef(0);
-  const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
-  const moveGenerationRef = useRef(0);
-  const pendingMovePositionsRef = useRef(new Map<string, {
-    generation: number;
-    position: { x: number; y: number };
-  }>());
+  const persistedMoveInteractionsRef = useRef(new WeakMap<object, Set<string>>());
+  const geometryGenerationRef = useRef(0);
+  const pendingMovePositionsRef = useRef(new Map<string, PendingMovePosition>());
+  const pendingResizeBoundsRef = useRef(new Map<string, PendingResizeBounds>());
   const componentLibraryNormalizationRef = useRef<string | null>(null);
   const componentLibraryNormalizationFailureRef = useRef<{ key: string; count: number } | null>(null);
   const relationshipMutationPendingRef = useRef(false);
@@ -196,6 +469,12 @@ export function ProjectCanvas({
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
   const proposalViewportPreviewRef = useRef<{ proposalId: string; changeKey: string } | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const nodeTypesRef = useRef(proposalNodeTypes);
+  const edgeTypesRef = useRef(proposalEdgeTypes);
+  if (canvasProjectRef.current !== projectId) {
+    canvasProjectRef.current = projectId;
+    canvasProjectEpochRef.current += 1;
+  }
   const [tool, setTool] = useState<CanvasTool>("select");
   const [edgeFilter, setEdgeFilter] = useState<WorkspaceEdgeFilter>("flow");
   const [outlineOpen, setOutlineOpen] = useState(false);
@@ -212,39 +491,95 @@ export function ProjectCanvas({
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
+    const initialRect = surface.getBoundingClientRect();
+    if (initialRect.width > 0 && initialRect.height > 0) {
+      surfaceSizeRef.current = {
+        left: initialRect.left,
+        top: initialRect.top,
+        width: initialRect.width,
+        height: initialRect.height,
+      };
+      setSurfaceMeasured(true);
+    }
     let active = true;
     let measurementFrame: number | null = null;
-    let pendingMeasurement: { measured: boolean; width: number } | null = null;
+    let pendingMeasurement: { left: number; top: number; width: number; height: number } | null = null;
     const observer = new ResizeObserver((entries) => {
       if (!active) return;
       const entry = entries.find((candidate) => candidate.target === surface);
       if (!entry) return;
-      const measured = entry.contentRect.width > 0 && entry.contentRect.height > 0;
-      pendingMeasurement = { measured, width: entry.contentRect.width };
+      const rect = surface.getBoundingClientRect();
+      pendingMeasurement = {
+        left: rect.left,
+        top: rect.top,
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      };
       if (measurementFrame !== null) return;
       measurementFrame = window.requestAnimationFrame(() => {
         measurementFrame = null;
         const measurement = pendingMeasurement;
         pendingMeasurement = null;
         if (!active || !measurement) return;
-        setSurfaceMeasured((current) => current === measurement.measured ? current : measurement.measured);
-        if (measurement.measured && measurement.width < OUTLINE_SAFE_SURFACE_WIDTH) setOutlineOpen(false);
+        if (measurement.width <= 0 || measurement.height <= 0) return;
+        const previous = surfaceSizeRef.current;
+        surfaceSizeRef.current = measurement;
+        setSurfaceMeasured(true);
+        if (measurement.width < OUTLINE_SAFE_SURFACE_WIDTH) setOutlineOpen(false);
+        const instance = flowRef.current;
+        if (!instance || previous === null
+          || (previous.left === measurement.left
+            && previous.top === measurement.top
+            && previous.width === measurement.width
+            && previous.height === measurement.height)) return;
+        const delta = {
+          x: previous.left - measurement.left,
+          y: previous.top - measurement.top,
+        };
+        if (!hasSurfaceResizeDelta(delta)) return;
+        if (proposalViewportPreviewRef.current !== null || pendingViewportRef.current !== null) {
+          deferredSurfaceResizeRef.current = {
+            x: deferredSurfaceResizeRef.current.x + delta.x,
+            y: deferredSurfaceResizeRef.current.y + delta.y,
+          };
+          return;
+        }
+        const effectiveDelta = {
+          x: delta.x + deferredSurfaceResizeRef.current.x,
+          y: delta.y + deferredSurfaceResizeRef.current.y,
+        };
+        deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+        const current = instance.getViewport();
+        const intent: ViewportIntent = {
+          viewport: compensateViewportForSurfaceResize(current, effectiveDelta),
+          version: ++viewportIntentVersionRef.current,
+        };
+        pendingResizeViewportRef.current = intent;
+        void instance.setViewport(intent.viewport).catch(() => {});
+        if (resizeViewportTimerRef.current !== null) {
+          window.clearTimeout(resizeViewportTimerRef.current);
+        }
+        resizeViewportTimerRef.current = window.setTimeout(() => {
+          resizeViewportTimerRef.current = null;
+          const pending = pendingResizeViewportRef.current;
+          if (!pending || pending.version !== intent.version || proposalViewportPreviewRef.current !== null) return;
+          pendingResizeViewportRef.current = null;
+          void persistViewportRef.current?.(intent.viewport, "Viewport adjusted", intent.version);
+        }, RESIZE_VIEWPORT_SAVE_DELAY_MS);
       });
     });
     observer.observe(surface);
     return () => {
       active = false;
       if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
+      if (resizeViewportTimerRef.current !== null) {
+        window.clearTimeout(resizeViewportTimerRef.current);
+        resizeViewportTimerRef.current = null;
+      }
       observer.disconnect();
+      surfaceSizeRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    if (!surfaceMeasured) {
-      flowRef.current = null;
-      setFlowReady(false);
-    }
-  }, [surfaceMeasured]);
 
   useEffect(() => {
     if (selectedEdgeGraphRevisionRef.current === graph.revision) return;
@@ -253,9 +588,33 @@ export function ProjectCanvas({
   }, [graph.revision]);
 
   useEffect(() => {
-    moveGenerationRef.current = 0;
+    if (viewportTimerRef.current !== null) {
+      window.clearTimeout(viewportTimerRef.current);
+      viewportTimerRef.current = null;
+    }
+    if (resizeViewportTimerRef.current !== null) {
+      window.clearTimeout(resizeViewportTimerRef.current);
+      resizeViewportTimerRef.current = null;
+    }
     pendingMovePositionsRef.current.clear();
-    lastMoveBatchRef.current = null;
+    pendingResizeBoundsRef.current.clear();
+    persistedMoveInteractionsRef.current = new WeakMap();
+    pendingViewportRef.current = null;
+    pendingResizeViewportRef.current = null;
+    deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+    viewportIntentVersionRef.current += 1;
+    layoutMutationQueueRef.current = Promise.resolve();
+    queuedLayoutJobsRef.current = 0;
+    viewportSaveJobsRef.current = 0;
+    componentLibraryNormalizationRef.current = null;
+    componentLibraryNormalizationFailureRef.current = null;
+    handledProposalFocusRef.current = null;
+    proposalViewportPreviewRef.current = null;
+    relationshipMutationPendingRef.current = false;
+    setRelationshipMutationPending(false);
+    setSelectedEdgeIds([]);
+    setPendingDeleteGroupId(null);
+    setStatus("Canvas ready");
   }, [projectId]);
 
   const canvasLayout = useMemo(() => materializeWorkspaceLayout(graph, layout), [graph, layout]);
@@ -289,7 +648,9 @@ export function ProjectCanvas({
   const synchronizeAuthoritativeViewport = useCallback((
     instance: ReactFlowInstance<WorkspaceFlowNode, WorkspaceFlowEdge>,
   ) => {
-    if (pendingViewportRef.current !== null || viewportSaveJobsRef.current > 0) return;
+    if (pendingViewportRef.current !== null
+      || pendingResizeViewportRef.current !== null
+      || viewportSaveJobsRef.current > 0) return;
     proposalViewportPreviewRef.current = null;
     if (sameViewport(instance.getViewport(), viewport)) return;
     if (viewportTimerRef.current !== null) {
@@ -311,26 +672,30 @@ export function ProjectCanvas({
     source: LayoutCommandSource,
     successMessage: string,
   ): Promise<boolean> => {
+    const projectEpoch = canvasProjectEpochRef.current;
     queuedLayoutJobsRef.current += 1;
     const run = async (): Promise<boolean> => {
+      if (projectEpoch !== canvasProjectEpochRef.current) return false;
       try {
         const commands = typeof source === "function" ? source(workingLayoutRef.current) : source;
         if (commands.length === 0) return false;
         setStatus("Saving canvas…");
         const saved = await onSaveLayout(commands);
+        if (projectEpoch !== canvasProjectEpochRef.current) return false;
         authoritativeLayoutRef.current = saved;
         workingLayoutRef.current = saved;
         setStatus(successMessage);
         return true;
       } catch (error) {
+        if (projectEpoch !== canvasProjectEpochRef.current) return false;
         workingLayoutRef.current = authoritativeLayoutRef.current;
         setStatus(error instanceof Error && error.message ? error.message : "Couldn't save the canvas. Try again.");
         setReconcileVersion((version) => version + 1);
         return false;
       } finally {
-        queuedLayoutJobsRef.current -= 1;
-        if (queuedLayoutJobsRef.current === 0) {
-          workingLayoutRef.current = authoritativeLayoutRef.current;
+        if (projectEpoch === canvasProjectEpochRef.current) {
+          queuedLayoutJobsRef.current = Math.max(0, queuedLayoutJobsRef.current - 1);
+          if (queuedLayoutJobsRef.current === 0) workingLayoutRef.current = authoritativeLayoutRef.current;
         }
       }
     };
@@ -356,7 +721,9 @@ export function ProjectCanvas({
     const previousFailure = componentLibraryNormalizationFailureRef.current;
     if (previousFailure?.key === key && previousFailure.count >= 2) return;
     componentLibraryNormalizationRef.current = key;
+    const projectEpoch = canvasProjectEpochRef.current;
     void persistLayout(commands, "Canvas ready").then((saved) => {
+      if (projectEpoch !== canvasProjectEpochRef.current) return;
       if (componentLibraryNormalizationRef.current === key) {
         componentLibraryNormalizationRef.current = null;
       }
@@ -375,17 +742,39 @@ export function ProjectCanvas({
   const persistViewport = useCallback(async (
     next: WorkspaceViewport,
     successMessage: string,
+    intentVersion: number,
   ): Promise<boolean> => {
+    const projectEpoch = canvasProjectEpochRef.current;
     viewportSaveJobsRef.current += 1;
     let saved: boolean;
     try {
       saved = await persistLayout([{ type: "set-viewport", viewport: next }], successMessage);
     } finally {
-      viewportSaveJobsRef.current -= 1;
+      if (projectEpoch === canvasProjectEpochRef.current) {
+        viewportSaveJobsRef.current = Math.max(0, viewportSaveJobsRef.current - 1);
+      }
+    }
+    if (projectEpoch !== canvasProjectEpochRef.current) {
+      if (pendingViewportRef.current === null
+        && pendingResizeViewportRef.current === null
+        && viewportSaveJobsRef.current === 0) {
+        const authoritative = authoritativeLayoutRef.current.viewport;
+        setZoom(authoritative.zoom);
+        setAdapterZoom(authoritative.zoom);
+        const instance = flowRef.current;
+        if (instance && !sameViewport(instance.getViewport(), authoritative)) {
+          void instance.setViewport(authoritative).catch(() => {});
+        }
+      }
+      return false;
     }
     const authoritative = authoritativeLayoutRef.current.viewport;
-    onViewportChange(authoritative);
-    if (pendingViewportRef.current === null && viewportSaveJobsRef.current === 0) {
+    const ownsLatestIntent = intentVersion === viewportIntentVersionRef.current;
+    if (ownsLatestIntent) onViewportChange(authoritative);
+    if (ownsLatestIntent
+      && pendingViewportRef.current === null
+      && pendingResizeViewportRef.current === null
+      && viewportSaveJobsRef.current === 0) {
       setZoom(authoritative.zoom);
       setAdapterZoom(authoritative.zoom);
       const instance = flowRef.current;
@@ -396,7 +785,15 @@ export function ProjectCanvas({
     return saved;
   }, [onViewportChange, persistLayout]);
 
+  useEffect(() => {
+    persistViewportRef.current = persistViewport;
+    return () => {
+      persistViewportRef.current = null;
+    };
+  }, [persistViewport]);
+
   const toggleCollapsed = useCallback((groupId: string, collapsed: boolean) => {
+    const projectEpoch = canvasProjectEpochRef.current;
     const previousSelection = [...selectedNodeIds];
     if (collapsed) {
       const next = selectedNodeIds.filter((id) => !isLayoutDescendant(canvasLayout, id, groupId));
@@ -404,7 +801,10 @@ export function ProjectCanvas({
       if (!sameIds(next, selectedNodeIds)) onSelectionChange(next);
     }
     void persistLayout([{ type: "set-collapsed", groupId, collapsed }], collapsed ? "Group collapsed" : "Group expanded")
-      .then((saved) => { if (!saved) onSelectionChange(previousSelection); });
+      .then((saved) => {
+        if (projectEpoch !== canvasProjectEpochRef.current) return;
+        if (!saved) onSelectionChange(previousSelection);
+      });
   }, [canvasLayout, onSelectionChange, persistLayout, selectedNodeIds]);
 
   const renameGroup = useCallback((groupId: string, label: string) => {
@@ -413,10 +813,22 @@ export function ProjectCanvas({
   }, [persistLayout]);
 
   const resizeGroup = useCallback((groupId: string, bounds: { x: number; y: number; width: number; height: number }) => {
+    const generation = geometryGenerationRef.current + 1;
+    geometryGenerationRef.current = generation;
+    pendingResizeBoundsRef.current.set(groupId, {
+      generation,
+      position: { x: bounds.x, y: bounds.y },
+      width: bounds.width,
+      height: bounds.height,
+    });
     void persistLayout([
       { type: "move", objectId: groupId, x: bounds.x, y: bounds.y },
       { type: "resize-group", groupId, width: bounds.width, height: bounds.height },
-    ], "Group resized");
+    ], "Group resized").then((saved) => {
+      if (pendingResizeBoundsRef.current.get(groupId)?.generation !== generation) return;
+      pendingResizeBoundsRef.current.delete(groupId);
+      if (!saved) setReconcileVersion((version) => version + 1);
+    });
   }, [persistLayout]);
 
   const { canonicalModel, model, overlayModel } = useMemo(() => {
@@ -495,24 +907,20 @@ export function ProjectCanvas({
 
   useEffect(() => {
     setNodes((current) => {
-      const live = new Map(current.map((node) => [node.id, node]));
-      const next = model.nodes.map((node) => {
-        const existing = live.get(node.id);
-        const pendingMove = pendingMovePositionsRef.current.get(node.id);
-        if (pendingMove) {
-          return {
-            ...node,
-            position: pendingMove.position,
-            ...(existing?.dragging ? { dragging: true } : {}),
-          };
-        }
-        return existing?.dragging ? { ...node, position: existing.position, dragging: true } : node;
-      });
+      const next = reconcileCanvasNodes(
+        current,
+        model.nodes,
+        pendingMovePositionsRef.current,
+        pendingResizeBoundsRef.current,
+      );
       nodesRef.current = next;
       return next;
     });
-    edgesRef.current = model.edges;
-    setEdges(model.edges);
+    setEdges((current) => {
+      const next = reconcileCanvasEdges(current, model.edges);
+      edgesRef.current = next;
+      return next;
+    });
   }, [model]);
 
   useEffect(() => {
@@ -528,7 +936,13 @@ export function ProjectCanvas({
       window.clearTimeout(viewportTimerRef.current);
       viewportTimerRef.current = null;
     }
+    if (resizeViewportTimerRef.current !== null) {
+      window.clearTimeout(resizeViewportTimerRef.current);
+      resizeViewportTimerRef.current = null;
+    }
     pendingViewportRef.current = null;
+    pendingResizeViewportRef.current = null;
+    viewportIntentVersionRef.current += 1;
     proposalViewportPreviewRef.current = { proposalId: proposal.id, changeKey: viewportChange.key };
     handledProposalFocusRef.current = {
       proposalId: proposal.id,
@@ -608,16 +1022,49 @@ export function ProjectCanvas({
       && proposalDiff?.viewportChanges.some((change) => change.key === preview.changeKey) === true;
     if (previewStillExists) return;
     const instance = flowRef.current;
-    if (instance) synchronizeAuthoritativeViewport(instance);
-    else proposalViewportPreviewRef.current = null;
+    proposalViewportPreviewRef.current = null;
+    if (!instance) return;
+    const deferred = deferredSurfaceResizeRef.current;
+    if (!hasSurfaceResizeDelta(deferred)) {
+      synchronizeAuthoritativeViewport(instance);
+      return;
+    }
+    deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+    const intent: ViewportIntent = {
+      viewport: compensateViewportForSurfaceResize(authoritativeLayoutRef.current.viewport, deferred),
+      version: ++viewportIntentVersionRef.current,
+    };
+    pendingResizeViewportRef.current = intent;
+    setZoom(intent.viewport.zoom);
+    setAdapterZoom(intent.viewport.zoom);
+    void instance.setViewport(intent.viewport).catch(() => {});
+    if (resizeViewportTimerRef.current !== null) window.clearTimeout(resizeViewportTimerRef.current);
+    resizeViewportTimerRef.current = window.setTimeout(() => {
+      resizeViewportTimerRef.current = null;
+      if (pendingResizeViewportRef.current?.version !== intent.version) return;
+      pendingResizeViewportRef.current = null;
+      void persistViewportRef.current?.(intent.viewport, "Viewport adjusted", intent.version);
+    }, RESIZE_VIEWPORT_SAVE_DELAY_MS);
   }, [proposal, proposalDiff, synchronizeAuthoritativeViewport]);
 
   useEffect(() => () => {
     if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
-    const pending = pendingViewportRef.current;
+    if (resizeViewportTimerRef.current !== null) window.clearTimeout(resizeViewportTimerRef.current);
+    const pendingPan = pendingViewportRef.current;
+    const pendingResize = pendingResizeViewportRef.current;
     pendingViewportRef.current = null;
+    pendingResizeViewportRef.current = null;
+    const pending = pendingPan && (!pendingResize || pendingPan.version >= pendingResize.version)
+      ? pendingPan
+      : pendingResize;
     if (pending) {
-      void layoutMutationQueueRef.current.then(() => onSaveLayout([{ type: "set-viewport", viewport: pending }])).catch(() => {});
+      const viewport = pendingPan?.version === pending.version && hasSurfaceResizeDelta(deferredSurfaceResizeRef.current)
+        ? compensateViewportForSurfaceResize(pending.viewport, deferredSurfaceResizeRef.current)
+        : pending.viewport;
+      deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+      void layoutMutationQueueRef.current
+        .then(() => onSaveLayout([{ type: "set-viewport", viewport }]))
+        .catch(() => {});
     }
   }, [onSaveLayout]);
 
@@ -650,8 +1097,8 @@ export function ProjectCanvas({
     positions: ReadonlyMap<string, { x: number; y: number }>,
     successMessage: string,
   ) => {
-    const generation = moveGenerationRef.current + 1;
-    moveGenerationRef.current = generation;
+    const generation = geometryGenerationRef.current + 1;
+    geometryGenerationRef.current = generation;
     for (const id of ids) {
       const position = positions.get(id);
       if (position) pendingMovePositionsRef.current.set(id, { generation, position });
@@ -672,16 +1119,23 @@ export function ProjectCanvas({
     });
   }, [persistLayout]);
 
-  const saveMovedNodes = useCallback((movedNodes: readonly WorkspaceFlowNode[]) => {
+  const saveMovedNodes = useCallback((
+    interaction: object,
+    movedNodes: readonly WorkspaceFlowNode[],
+  ) => {
     const canonicalNodes = movedNodes.filter((node) => canonicalNodeIds.has(node.id));
     const ids = canonicalNodes.map((node) => node.id);
     const positions = new Map(canonicalNodes.map((node) => [node.id, node.position]));
     const commands = buildMoveCommands(workingLayoutRef.current, ids, positions);
     if (commands.length === 0) return;
-    const key = commands.map((command) => `${command.objectId}:${command.x}:${command.y}`).join("|");
-    const now = Date.now();
-    if (lastMoveBatchRef.current?.key === key && now - lastMoveBatchRef.current.at < MOVE_DEDUPE_WINDOW_MS) return;
-    lastMoveBatchRef.current = { key, at: now };
+    const key = commands
+      .map((command) => `${command.objectId}:${command.x}:${command.y}`)
+      .sort()
+      .join("|");
+    const persistedBatches = persistedMoveInteractionsRef.current.get(interaction);
+    if (persistedBatches?.has(key)) return;
+    if (persistedBatches) persistedBatches.add(key);
+    else persistedMoveInteractionsRef.current.set(interaction, new Set([key]));
     persistMovedPositions(
       ids,
       positions,
@@ -697,11 +1151,19 @@ export function ProjectCanvas({
       window.clearTimeout(viewportTimerRef.current);
       viewportTimerRef.current = null;
     }
+    if (resizeViewportTimerRef.current !== null) {
+      window.clearTimeout(resizeViewportTimerRef.current);
+      resizeViewportTimerRef.current = null;
+    }
     pendingViewportRef.current = null;
+    pendingResizeViewportRef.current = null;
+    deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+    const intentVersion = ++viewportIntentVersionRef.current;
     const surfaceWidth = surfaceRef.current?.clientWidth || 960;
     const keepOutlineOpen = outlineOpen && surfaceWidth >= OUTLINE_SAFE_SURFACE_WIDTH;
     if (outlineOpen && !keepOutlineOpen) setOutlineOpen(false);
     void instance.fitView({ padding: 0.18, duration: reducedMotion() ? 0 : 220 }).then(() => {
+      if (viewportIntentVersionRef.current !== intentVersion) return false;
       const fitted = instance.getViewport();
       const outlineOffset = keepOutlineOpen ? Math.min(132, surfaceWidth * 0.14) : 0;
       const next = outlineOffset > 0 ? { ...fitted, x: fitted.x + outlineOffset } : fitted;
@@ -709,23 +1171,65 @@ export function ProjectCanvas({
         ? instance.setViewport(next, { duration: reducedMotion() ? 0 : 120 })
         : Promise.resolve(true);
       return align.then(() => {
+        if (viewportIntentVersionRef.current !== intentVersion) return false;
         setZoom(next.zoom);
         setAdapterZoom(next.zoom);
-        return persistViewport(next, "Fit workspace");
+        return persistViewport(next, "Fit workspace", intentVersion);
       });
     });
   }, [outlineOpen, persistViewport]);
+
+  const setWorkspaceZoom = useCallback((requestedZoom: number) => {
+    const instance = flowRef.current;
+    if (!instance) return;
+    const nextZoom = Math.min(CANVAS_MAX_ZOOM, Math.max(CANVAS_MIN_ZOOM, requestedZoom));
+    if (viewportTimerRef.current !== null) {
+      window.clearTimeout(viewportTimerRef.current);
+      viewportTimerRef.current = null;
+    }
+    if (resizeViewportTimerRef.current !== null) {
+      window.clearTimeout(resizeViewportTimerRef.current);
+      resizeViewportTimerRef.current = null;
+    }
+    pendingViewportRef.current = null;
+    pendingResizeViewportRef.current = null;
+    deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+    const intentVersion = ++viewportIntentVersionRef.current;
+    const message = `Zoom ${Math.round(nextZoom * 100)}%`;
+    setStatus(message);
+    void instance.zoomTo(nextZoom, { duration: reducedMotion() ? 0 : 140 }).then(() => {
+      if (viewportIntentVersionRef.current !== intentVersion) return false;
+      const next = instance.getViewport();
+      setZoom(next.zoom);
+      setAdapterZoom(next.zoom);
+      return persistViewport(next, message, intentVersion);
+    });
+  }, [persistViewport]);
+
+  const zoomWorkspaceOut = useCallback(() => {
+    setWorkspaceZoom((flowRef.current?.getZoom() ?? zoom) * 0.88);
+  }, [setWorkspaceZoom, zoom]);
+
+  const zoomWorkspaceIn = useCallback(() => {
+    setWorkspaceZoom((flowRef.current?.getZoom() ?? zoom) * 1.14);
+  }, [setWorkspaceZoom, zoom]);
 
   const handleConnect = useCallback((connection: Connection) => {
     if (!isValidWorkspaceConnection(connection, graph)) {
       setStatus("Prototype links connect Page nodes.");
       return;
     }
+    const projectEpoch = canvasProjectEpochRef.current;
     const command = createPlannedPrototypeCommand(graph, connection);
     setStatus("Adding planned prototype link…");
     void onApplyGraphCommands([command])
-      .then(() => setStatus("Planned prototype link added"))
-      .catch((error: unknown) => setStatus(error instanceof Error && error.message ? error.message : "Couldn't add the prototype link."));
+      .then(() => {
+        if (projectEpoch === canvasProjectEpochRef.current) setStatus("Planned prototype link added");
+      })
+      .catch((error: unknown) => {
+        if (projectEpoch !== canvasProjectEpochRef.current) return;
+        setStatus(error instanceof Error && error.message ? error.message : "Couldn't add the prototype link.");
+      });
   }, [graph, onApplyGraphCommands]);
 
   const handleGroup = useCallback(() => {
@@ -786,8 +1290,16 @@ export function ProjectCanvas({
     setZoom(next.zoom);
     setAdapterZoom((current) => semanticZoomLevel(current) === semanticZoomLevel(next.zoom) ? current : next.zoom);
     if (event !== null) {
+      if (resizeViewportTimerRef.current !== null) {
+        window.clearTimeout(resizeViewportTimerRef.current);
+        resizeViewportTimerRef.current = null;
+      }
+      pendingResizeViewportRef.current = null;
       proposalViewportPreviewRef.current = null;
-      pendingViewportRef.current = next;
+      pendingViewportRef.current = {
+        viewport: next,
+        version: ++viewportIntentVersionRef.current,
+      };
     }
   }, []);
 
@@ -798,12 +1310,39 @@ export function ProjectCanvas({
 
   const handleViewportEnd = useCallback((event: MouseEvent | TouchEvent | null, next: Viewport) => {
     if (event === null) return;
-    pendingViewportRef.current = next;
+    if (resizeViewportTimerRef.current !== null) {
+      window.clearTimeout(resizeViewportTimerRef.current);
+      resizeViewportTimerRef.current = null;
+    }
+    pendingResizeViewportRef.current = null;
+    const deferred = deferredSurfaceResizeRef.current;
+    deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+    const adjusted = hasSurfaceResizeDelta(deferred)
+      ? compensateViewportForSurfaceResize(next, deferred)
+      : next;
+    const intent: ViewportIntent = {
+      viewport: adjusted,
+      version: ++viewportIntentVersionRef.current,
+    };
+    pendingViewportRef.current = intent;
+    if (!sameViewport(adjusted, next)) {
+      void flowRef.current?.setViewport(adjusted).catch(() => {});
+    }
     if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
     viewportTimerRef.current = window.setTimeout(() => {
       viewportTimerRef.current = null;
+      const pending = pendingViewportRef.current;
+      if (pending?.version !== intent.version) return;
+      const latestDeferred = deferredSurfaceResizeRef.current;
+      deferredSurfaceResizeRef.current = { x: 0, y: 0 };
+      const latestViewport = hasSurfaceResizeDelta(latestDeferred)
+        ? compensateViewportForSurfaceResize(pending.viewport, latestDeferred)
+        : pending.viewport;
       pendingViewportRef.current = null;
-      void persistViewport(next, "Viewport saved");
+      if (!sameViewport(latestViewport, flowRef.current?.getViewport() ?? latestViewport)) {
+        void flowRef.current?.setViewport(latestViewport).catch(() => {});
+      }
+      void persistViewport(latestViewport, "Viewport saved", pending.version);
     }, VIEWPORT_SAVE_DELAY_MS);
   }, [persistViewport]);
 
@@ -852,6 +1391,7 @@ export function ProjectCanvas({
 
   const deleteSelectedRelationships = useCallback(async (): Promise<void> => {
     if (relationshipMutationPendingRef.current) return;
+    const projectEpoch = canvasProjectEpochRef.current;
     const selectedIds = new Set(selectedEdgeIds);
     const selected = graph.edges.filter((edge) => selectedIds.has(edge.id));
     if (selected.length === 0) return;
@@ -870,13 +1410,17 @@ export function ProjectCanvas({
     setStatus(commands.length === 1 ? "Removing relationship…" : `Removing ${commands.length} relationships…`);
     try {
       await onApplyGraphCommands(commands);
+      if (projectEpoch !== canvasProjectEpochRef.current) return;
       setSelectedEdgeIds((current) => current.filter((id) => !removedIds.has(id)));
       setStatus(commands.length === 1 ? "Relationship removed" : `${commands.length} relationships removed`);
     } catch (error) {
+      if (projectEpoch !== canvasProjectEpochRef.current) return;
       setStatus(error instanceof Error && error.message ? error.message : "Couldn't remove the relationship.");
     } finally {
-      relationshipMutationPendingRef.current = false;
-      setRelationshipMutationPending(false);
+      if (projectEpoch === canvasProjectEpochRef.current) {
+        relationshipMutationPendingRef.current = false;
+        setRelationshipMutationPending(false);
+      }
     }
   }, [graph.edges, onApplyGraphCommands, selectedEdgeIds]);
 
@@ -973,24 +1517,32 @@ export function ProjectCanvas({
       className="dezin-project-canvas"
       onKeyDownCapture={handleKeyDownCapture}
     >
-      <header className="dezin-project-canvas__header app-drag">
+      <StudioToolbarHeader draggable className="dezin-project-canvas__header">
         <div className="dezin-project-canvas__identity">
           <h1 title={projectName}>{projectName}</h1>
           <span>Canvas</span>
         </div>
         <div className="dezin-project-canvas__header-actions app-no-drag">
           {onPresentFlow ? (
-            <button ref={presentFlowButtonRef} type="button" className="dezin-project-canvas__present" aria-label="Present prototype flow" onClick={onPresentFlow}>
+            <Button
+              ref={presentFlowButtonRef}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="dezin-project-canvas__present"
+              aria-label="Present prototype flow"
+              onClick={onPresentFlow}
+            >
               <Play aria-hidden size={11} fill="currentColor" />
               Present flow
-            </button>
+            </Button>
           ) : null}
           <div className="dezin-project-canvas__measure" aria-label={`${canonicalModel.nodes.length} objects at ${Math.round(zoom * 100)} percent zoom`}>
             <span>{canonicalModel.nodes.length} objects</span>
             <span>{Math.round(zoom * 100)}%</span>
           </div>
         </div>
-      </header>
+      </StudioToolbarHeader>
 
       <div ref={surfaceRef} className="dezin-project-canvas__surface" data-tool={tool}>
         {surfaceMeasured ? (
@@ -1000,11 +1552,11 @@ export function ProjectCanvas({
           ariaLabelConfig={CANVAS_ARIA_LABEL_CONFIG}
           nodes={nodes}
           edges={edges}
-          nodeTypes={proposalNodeTypes}
-          edgeTypes={proposalEdgeTypes}
+          nodeTypes={nodeTypesRef.current}
+          edgeTypes={edgeTypesRef.current}
           defaultViewport={viewport}
-          minZoom={0.15}
-          maxZoom={2.25}
+          minZoom={CANVAS_MIN_ZOOM}
+          maxZoom={CANVAS_MAX_ZOOM}
           selectionMode={SelectionMode.Partial}
           selectionOnDrag={tool === "select"}
           panOnDrag={tool === "hand" ? true : [1, 2]}
@@ -1015,6 +1567,9 @@ export function ProjectCanvas({
           nodesDraggable={tool === "select"}
           nodesConnectable={tool === "select"}
           connectOnClick
+          connectionLineType={ConnectionLineType.SmoothStep}
+          connectionLineStyle={CANVAS_CONNECTION_LINE_STYLE}
+          elevateEdgesOnSelect
           deleteKeyCode={null}
           multiSelectionKeyCode={["Meta", "Control", "Shift"]}
           nodeDragThreshold={2}
@@ -1035,8 +1590,8 @@ export function ProjectCanvas({
           onNodeDoubleClick={(event, node) => {
             if (canonicalNodeIds.has(node.id) && !isCanvasShortcutTarget(event.target)) openNode(node);
           }}
-          onNodeDragStop={(_event, node, movedNodes) => saveMovedNodes(movedNodes.length ? movedNodes : [node])}
-          onSelectionDragStop={(_event, movedNodes) => saveMovedNodes(movedNodes)}
+          onNodeDragStop={(event, node, movedNodes) => saveMovedNodes(event, movedNodes.length ? movedNodes : [node])}
+          onSelectionDragStop={(event, movedNodes) => saveMovedNodes(event, movedNodes)}
           isValidConnection={(connection) => isValidWorkspaceConnection(connection, graph)}
           onConnect={handleConnect}
           onMove={handleViewportMove}
@@ -1060,6 +1615,10 @@ export function ProjectCanvas({
           onEdgeFilterChange={handleEdgeFilterChange}
           onToggleOutline={() => setOutlineOpen((open) => !open)}
           onFitView={fitWorkspace}
+          zoom={zoom}
+          onZoomOut={zoomWorkspaceOut}
+          onZoomIn={zoomWorkspaceIn}
+          onSetZoom={setWorkspaceZoom}
           onGroup={handleGroup}
           onUngroup={handleUngroup}
           onDeleteGroup={requestDeleteGroup}
@@ -1102,8 +1661,12 @@ export function ProjectCanvas({
               <strong id="remove-group-title">Remove this group frame?</strong>
               <span>Its contents stay on the canvas.</span>
             </div>
-            <button ref={deleteCancelRef} type="button" onClick={closeDeleteConfirmation}>Cancel</button>
-            <button type="button" data-destructive onClick={confirmDeleteGroup}>Remove frame</button>
+            <Button ref={deleteCancelRef} type="button" size="sm" variant="outline" onClick={closeDeleteConfirmation}>
+              Cancel
+            </Button>
+            <Button type="button" size="sm" variant="destructive" onClick={confirmDeleteGroup}>
+              Remove frame
+            </Button>
           </div>
         )}
 

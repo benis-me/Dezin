@@ -729,7 +729,7 @@ export interface ResourceRevisionHistoryPage {
 export interface CreateResearchDirectionArtifactIntentInput {
   selectionRequestId: string;
   artifactId: string;
-  agentCommand: "claude" | "codebuddy";
+  agentCommand: string;
   model?: string | null;
   expectedResourceHeadRevisionId: string;
   expectedGraphRevision: number;
@@ -880,9 +880,11 @@ export interface WorkspaceGenerationCapability {
   required: boolean;
 }
 
-export type WorkspaceGenerationAgentSelection =
-  | { providerId: "claude"; command: "claude"; model: string | null }
-  | { providerId: "codebuddy"; command: "codebuddy"; model: string | null };
+export interface WorkspaceGenerationAgentSelection {
+  providerId: string;
+  command: string;
+  model: string | null;
+}
 
 export interface WorkspaceRenderFrameSpec {
   id: string;
@@ -2945,11 +2947,16 @@ function encodeCreateResearchDirectionArtifactIntentInput(
   if (typeof input.confirmHypothesis !== "boolean") {
     throw new TypeError("Research direction confirmHypothesis must be boolean");
   }
-  const agentCommand = codecEnum(
+  const agentCommand = codecBoundedString(
     input.agentCommand,
-    ["claude", "codebuddy"] as const,
     "Research direction Agent command",
+    256,
   );
+  if (agentCommand !== agentCommand.trim()
+    || agentCommand.includes("\0")
+    || new TextEncoder().encode(agentCommand).byteLength > 256) {
+    throw new TypeError("Research direction Agent command must be canonical and bounded to 256 bytes");
+  }
   const model = input.model === undefined
     ? undefined
     : input.model === null

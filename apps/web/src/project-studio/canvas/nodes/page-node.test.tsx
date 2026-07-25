@@ -92,7 +92,18 @@ describe("page node", () => {
     expect(screen.getByRole("heading", { name: "Home" })).toBeInTheDocument();
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-artifact-kind", "page");
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-zoom", "overview");
+    expect(screen.getByLabelText("Home status: running")).toHaveClass("dezin-flow-card__overview-meta");
     expect(screen.getByLabelText("Home status: running")).toHaveTextContent("running");
     expect(screen.queryByText(/rev revision/i)).toBeNull();
+  });
+
+  test("marks an overview selection for the stronger canvas selection treatment", () => {
+    const { container } = render(<PageNode {...{
+      data: { ...data, zoomLevel: "overview" },
+      selected: true,
+      isConnectable: true,
+    } as unknown as NodeProps<WorkspaceFlowNode>} />);
+
+    expect(container.querySelector(".dezin-flow-card")).toHaveAttribute("data-selection-emphasis", "overview");
   });
 });

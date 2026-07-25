@@ -99,8 +99,8 @@ export interface WorkspaceFlowModel {
 }
 
 export function semanticZoomLevel(zoom: number): SemanticZoomLevel {
-  if (zoom < 0.38) return "overview";
-  if (zoom < 0.72) return "compact";
+  if (zoom < 0.5) return "overview";
+  if (zoom < 0.8) return "compact";
   return "full";
 }
 
@@ -352,7 +352,7 @@ function adaptEdge(
         ? "var(--foreground)"
         : status === "broken"
           ? "var(--destructive)"
-          : "var(--foreground-2)",
+          : "var(--muted-foreground)",
     },
     data: {
       kind: edge.kind,

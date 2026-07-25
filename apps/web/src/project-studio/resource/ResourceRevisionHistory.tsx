@@ -1,6 +1,12 @@
 import { ChevronDown, History, LoaderCircle, RotateCcw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
+import {
+  Button,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
 import type { ResourceRevision, ResourceRevisionViewIdentity } from "../../lib/api.ts";
 
@@ -32,8 +38,10 @@ export function ResourceRevisionHistory({
   onReturnToHead: () => void;
 }) {
   const api = useApi();
+  const statusDescriptionId = useId();
   const epochRef = useRef(0);
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const openRef = useRef(false);
+  const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<HistoryStatus>("idle");
   const [items, setItems] = useState<ResourceRevision[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -73,7 +81,7 @@ export function ResourceRevisionHistory({
     setItems([]);
     setNextCursor(null);
     setError(null);
-    if (detailsRef.current?.open) void load(null, epoch);
+    if (openRef.current) void load(null, epoch);
   }, [current?.id, headRevisionId, load, projectId, resourceId]);
 
   const statusLabel = current === null
@@ -84,28 +92,62 @@ export function ResourceRevisionHistory({
 
   return (
     <div className={["dezin-resource-history", className].filter(Boolean).join(" ")}>
-      <details
-        ref={detailsRef}
-        onToggle={(event) => {
-          if (event.currentTarget.open && status === "idle") void load(null);
+      <Popover
+        open={open}
+        onOpenChange={(nextOpen) => {
+          openRef.current = nextOpen;
+          setOpen(nextOpen);
+          if (nextOpen && status === "idle") void load(null);
         }}
       >
-        <summary aria-label="Open Resource Revision history">
-          <span data-pinned={pinned || undefined}>{statusLabel}</span>
-          <ChevronDown aria-hidden size={13} />
-        </summary>
-        <div className="dezin-resource-history__menu">
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="dezin-resource-history__trigger"
+            aria-label="Open Resource Revision history"
+            aria-describedby={statusDescriptionId}
+          >
+            <span id={statusDescriptionId} className="sr-only">
+              Current Resource checkout: {statusLabel}
+            </span>
+            <span data-pinned={pinned || undefined}>{statusLabel}</span>
+            <ChevronDown aria-hidden size={13} />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="end"
+          className="dezin-resource-history__menu"
+          aria-label="Resource Revision history"
+        >
           <div className="dezin-resource-history__heading">
             <span><History aria-hidden size={12} /> Immutable history</span>
             {pinned && headRevisionId !== null ? (
-              <button type="button" onClick={onReturnToHead}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  openRef.current = false;
+                  setOpen(false);
+                  onReturnToHead();
+                }}
+              >
                 <RotateCcw aria-hidden size={11} /> Return to Head
-              </button>
+              </Button>
             ) : null}
           </div>
 
           {status === "loading" && items.length === 0 ? (
-            <p className="dezin-resource-history__state"><LoaderCircle aria-hidden size={13} /> Loading 20 newest Revisions…</p>
+            <p
+              className="dezin-resource-history__state"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <LoaderCircle aria-hidden size={13} /> Loading 20 newest Revisions…
+            </p>
           ) : null}
           {items.length > 0 ? (
             <ol className="dezin-resource-history__list">
@@ -113,10 +155,15 @@ export function ResourceRevisionHistory({
                 const active = revision.id === current?.id;
                 return (
                   <li key={revision.id}>
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
                       aria-current={active ? "page" : undefined}
-                      onClick={() => onOpenRevision(revision.id)}
+                      onClick={() => {
+                        openRef.current = false;
+                        setOpen(false);
+                        onOpenRevision(revision.id);
+                      }}
                     >
                       <span>
                         <strong>Revision {revision.sequence}</strong>
@@ -126,7 +173,7 @@ export function ResourceRevisionHistory({
                       <time dateTime={new Date(revision.createdAt).toISOString()}>
                         {new Date(revision.createdAt).toLocaleString()}
                       </time>
-                    </button>
+                    </Button>
                   </li>
                 );
               })}
@@ -135,25 +182,34 @@ export function ResourceRevisionHistory({
           {status === "error" ? (
             <div className="dezin-resource-history__error" role="alert">
               <span>{error}</span>
-              <button type="button" onClick={() => void load(items.length === 0 ? null : nextCursor)}>Retry</button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void load(items.length === 0 ? null : nextCursor)}
+              >
+                Retry
+              </Button>
             </div>
           ) : null}
           {status === "ready" && items.length === 0 ? (
             <p className="dezin-resource-history__state">No immutable Revisions yet.</p>
           ) : null}
           {items.length > 0 && nextCursor !== null && status !== "error" ? (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               className="dezin-resource-history__older"
               disabled={status === "loading"}
               onClick={() => void load(nextCursor)}
             >
               {status === "loading" ? <LoaderCircle aria-hidden size={12} /> : null}
               {status === "loading" ? "Loading older…" : "Load older Revisions"}
-            </button>
+            </Button>
           ) : null}
-        </div>
-      </details>
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }

@@ -35,11 +35,9 @@ export type ContextItemRef =
 
 export type AgentIntent = "plan" | "generate" | "edit" | "repair" | "analyze-impact";
 
-export type StructuredAgentProviderId = "claude" | "codebuddy";
-
 export interface AgentExecutionSelection {
-  providerId: StructuredAgentProviderId;
-  command: StructuredAgentProviderId;
+  providerId: string;
+  command: string;
   model: string | null;
 }
 
@@ -466,11 +464,6 @@ function runtimeId(value: unknown, label: string): string {
   return value;
 }
 
-const STRUCTURED_AGENT_PROVIDER_BY_COMMAND = Object.freeze({
-  claude: "claude",
-  codebuddy: "codebuddy",
-} satisfies Record<StructuredAgentProviderId, StructuredAgentProviderId>);
-
 export function normalizeAgentExecutionSelection(value: unknown): AgentExecutionSelection {
   const input = runtimeRecord(value, "Agent execution selection");
   exactRuntimeFields(
@@ -479,17 +472,18 @@ export function normalizeAgentExecutionSelection(value: unknown): AgentExecution
     [],
     "Agent execution selection",
   );
-  if (typeof input.command !== "string"
-    || !Object.hasOwn(STRUCTURED_AGENT_PROVIDER_BY_COMMAND, input.command)) {
-    throw new ContextIntegrityError(
-      "Agent execution command must be a canonical supported structured provider command",
-    );
-  }
-  const command = input.command as StructuredAgentProviderId;
-  const providerId = STRUCTURED_AGENT_PROVIDER_BY_COMMAND[command];
-  if (input.providerId !== providerId) {
-    throw new ContextIntegrityError("Agent execution provider does not match its canonical command");
-  }
+  const boundedIdentity = (entry: unknown, field: "provider" | "command"): string => {
+    if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim() !== entry
+      || !isWellFormedContextText(entry) || entry.includes("\0")
+      || Buffer.byteLength(entry, "utf8") > 256) {
+      throw new ContextIntegrityError(
+        `Agent execution ${field} must be canonical and bounded to 256 bytes`,
+      );
+    }
+    return entry;
+  };
+  const providerId = boundedIdentity(input.providerId, "provider");
+  const command = boundedIdentity(input.command, "command");
   let model: string | null = null;
   if (input.model !== null && input.model !== "") {
     if (typeof input.model !== "string" || input.model.trim() !== input.model

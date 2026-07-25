@@ -59,7 +59,7 @@ test("an open inspector docks only when the middle surface can retain its minimu
   const shell = screen.getByTestId("project-studio-shell");
   expect(shell).toHaveAttribute("data-inspector-layout", "open");
   expect(screen.getByTestId("project-studio-content").className)
-    .toContain("xl:grid-cols-[minmax(640px,1fr)_minmax(224px,18vw)]");
+    .toContain("xl:grid-cols-[minmax(640px,1fr)_minmax(288px,20vw)]");
   expect(screen.getByRole("complementary", { name: "Inspector" })).toHaveTextContent("Inspector content");
 
   fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));
@@ -75,6 +75,8 @@ test("the narrow Inspector moves focus inside on open and restores the trigger o
   fireEvent.click(initialHide);
   const show = screen.getByRole("button", { name: "Show inspector" });
   expect(show).toHaveFocus();
+  expect(show).toHaveClass("top-1/2");
+  expect(show).not.toHaveClass("top-3");
 
   fireEvent.click(show);
   const hide = screen.getByRole("button", { name: "Hide inspector" });
@@ -84,7 +86,7 @@ test("the narrow Inspector moves focus inside on open and restores the trigger o
   expect(screen.getByRole("button", { name: "Show inspector" })).toHaveFocus();
 });
 
-test("the floating Inspector delegates scrolling to its inner panel", () => {
+test("the edge Inspector delegates scrolling to its inner panel", () => {
   render(
     <ProjectStudioShell
       agent={<div>Agent content</div>}
@@ -98,6 +100,25 @@ test("the floating Inspector delegates scrolling to its inner panel", () => {
   expect(inspector).toHaveClass("overflow-hidden");
   expect(inspector).not.toHaveClass("overflow-auto");
   expect(screen.getByTestId("scrolling-inspector-content")).toHaveClass("overflow-y-auto");
+});
+
+test("an Inspector with its own dismiss action does not receive a competing Shell collapse control", () => {
+  const onClose = vi.fn();
+  render(
+    <ProjectStudioShell
+      agent={<div>Agent content</div>}
+      main={<div>Main canvas</div>}
+      inspector={<button type="button" onClick={onClose}>Close build plan</button>}
+      inspectorOpen
+      inspectorToggleLabel="build plan"
+      narrowInspectorContentOwnsClose
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "Hide build plan" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Show build plan" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  expect(onClose).toHaveBeenCalledTimes(1);
 });
 
 test("mobile keeps the stacked Agent-over-canvas layout without a desktop resize handle", () => {
@@ -122,6 +143,6 @@ test("presentation keeps side panel state mounted but gives the design surface t
   expect(screen.getByText("Inspector content").closest("aside")).toHaveAttribute("hidden");
   expect(screen.queryByRole("separator", { name: "Resize Workspace Agent" })).not.toBeInTheDocument();
   expect(screen.getByTestId("project-studio-content").className)
-    .not.toContain("xl:grid-cols-[minmax(640px,1fr)_minmax(224px,18vw)]");
+    .not.toContain("xl:grid-cols-[minmax(640px,1fr)_minmax(288px,20vw)]");
   expect(screen.getByRole("region", { name: "Studio surface" })).toHaveTextContent("Main canvas");
 });

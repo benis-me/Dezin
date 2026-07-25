@@ -24,6 +24,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  StudioToolbarHeader,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -96,7 +97,7 @@ export function ArtifactHeader({
   const name = artifact?.name ?? "Artifact unavailable";
   return (
     <TooltipProvider delayDuration={120}>
-      <header className="artifact-header app-drag">
+      <StudioToolbarHeader draggable className="artifact-header">
         <div className="artifact-header__identity">
           <HeaderTool label="Back to workspace canvas" onClick={onBack}>
             <ArrowLeft aria-hidden size={15} strokeWidth={1.8} />
@@ -151,7 +152,8 @@ export function ArtifactHeader({
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="artifact-action artifact-action--return"
+                  data-artifact-action="return"
+                  className="artifact-action--return"
                   aria-label="Return to Head"
                   onClick={onReturnToHead}
                 >
@@ -167,7 +169,8 @@ export function ArtifactHeader({
               <Button
                 size="sm"
                 variant="ghost"
-                className="artifact-action artifact-action--secondary"
+                data-artifact-action="secondary"
+                className="artifact-action--secondary"
                 aria-label="Versions"
                 disabled={presentation || !artifactId}
                 onClick={onOpenVersions}
@@ -183,7 +186,8 @@ export function ArtifactHeader({
               <Button
                 size="sm"
                 variant="ghost"
-                className="artifact-action artifact-action--secondary"
+                data-artifact-action="secondary"
+                className="artifact-action--secondary"
                 aria-label="Compare"
                 disabled={presentation || !artifactId}
                 onClick={onOpenCompare}
@@ -203,13 +207,12 @@ export function ArtifactHeader({
                 <Ellipsis aria-hidden size={15} strokeWidth={1.8} />
               </IconButton>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="artifact-more__content z-[90]">
+            <DropdownMenuContent align="end" className="z-[90] min-w-[10.5rem]">
               <DropdownMenuLabel className="artifact-more__label">
                 Preview
                 <span>{Math.round(zoom * 100)}%</span>
               </DropdownMenuLabel>
               <DropdownMenuItem
-                className="artifact-more__item"
                 aria-label="Zoom out"
                 onSelect={() => onZoomChange(Math.max(0.25, zoom - 0.1))}
               >
@@ -217,7 +220,6 @@ export function ArtifactHeader({
                 Zoom out
               </DropdownMenuItem>
               <DropdownMenuItem
-                className="artifact-more__item"
                 aria-label="Zoom in"
                 onSelect={() => onZoomChange(Math.min(1.5, zoom + 0.1))}
               >
@@ -225,7 +227,6 @@ export function ArtifactHeader({
                 Zoom in
               </DropdownMenuItem>
               <DropdownMenuItem
-                className="artifact-more__item"
                 aria-label="Fit preview"
                 onSelect={onFitPreview}
               >
@@ -234,7 +235,6 @@ export function ArtifactHeader({
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                className="artifact-more__item"
                 aria-label="Versions"
                 disabled={presentation || !artifactId}
                 onSelect={onOpenVersions}
@@ -243,7 +243,6 @@ export function ArtifactHeader({
                 Versions
               </DropdownMenuItem>
               <DropdownMenuItem
-                className="artifact-more__item"
                 aria-label="Compare"
                 disabled={presentation || !artifactId}
                 onSelect={onOpenCompare}
@@ -258,7 +257,8 @@ export function ArtifactHeader({
               <Button
                 size="sm"
                 variant={presentation ? "outline" : "default"}
-                className="artifact-action artifact-action--primary"
+                data-artifact-action="primary"
+                className="artifact-action--primary"
                 aria-label={presentation ? "Exit present" : "Present"}
                 aria-pressed={presentation}
                 disabled={!presentation && !previewReady}
@@ -271,7 +271,7 @@ export function ArtifactHeader({
             <TooltipContent className="z-[90]">{presentation ? "Exit present" : "Present"}</TooltipContent>
           </Tooltip>
         </div>
-      </header>
+      </StudioToolbarHeader>
     </TooltipProvider>
   );
 }

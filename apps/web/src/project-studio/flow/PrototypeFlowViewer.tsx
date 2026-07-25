@@ -18,6 +18,16 @@ import {
   type PreviewChannelMessage,
 } from "../../lib/preview-channel.ts";
 import { previewSandboxForSrc } from "../../lib/preview-sandbox.ts";
+import {
+  Button,
+  IconButton,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  StudioToolbarHeader,
+} from "../../components/ui/index.ts";
 import { buildPreviewFrameCommand, PREVIEW_FRAME_ACK_TIMEOUT_MS } from "../artifact/usePreviewBridge.ts";
 import { useArtifactPreview } from "../artifact/useArtifactPreview.ts";
 import {
@@ -760,7 +770,7 @@ function PrototypeFlowViewerSession({
       role="region"
       aria-label="Prototype flow viewer"
     >
-      <header className="prototype-flow-viewer__header app-drag">
+      <StudioToolbarHeader draggable className="prototype-flow-viewer__header">
         <div className="prototype-flow-viewer__identity">
           <span className="prototype-flow-viewer__mark" aria-hidden><Play size={12} fill="currentColor" /></span>
           <div>
@@ -769,8 +779,11 @@ function PrototypeFlowViewerSession({
           </div>
         </div>
         <div className="prototype-flow-viewer__controls app-no-drag">
-          <button
+          <Button
             type="button"
+            size="xs"
+            variant="outline"
+            className="prototype-flow-viewer__back"
             aria-label="Back in prototype flow"
             disabled={history.length <= 1 || pending !== null}
             onClick={() => {
@@ -786,19 +799,18 @@ function PrototypeFlowViewerSession({
           >
             <ArrowLeft aria-hidden size={14} />
             <span className="prototype-flow-viewer__back-label">Back</span>
-          </button>
+          </Button>
           <label>
             <span>Start Page</span>
-            <select
-              aria-label="Prototype flow start Page"
+            <Select
               value={currentPage.artifactId}
               disabled={pending !== null}
-              onChange={(event) => {
-                const targetPage = session.pages.find((page) => page.artifactId === event.currentTarget.value);
+              onValueChange={(artifactId) => {
+                const targetPage = session.pages.find((page) => page.artifactId === artifactId);
                 const targetFrame = targetPage?.frames?.find((frame) => frame.id === currentFrame?.id)
                   ?? targetPage?.frames?.[0]
                   ?? null;
-                const location = { artifactId: event.currentTarget.value, stateKey: null, frameId: targetFrame?.id ?? null };
+                const location = { artifactId, stateKey: null, frameId: targetFrame?.id ?? null };
                 beginNavigation({
                   location,
                   history: [location],
@@ -806,14 +818,29 @@ function PrototypeFlowViewerSession({
                 });
               }}
             >
-              {session.pages.map((page) => <option key={page.artifactId} value={page.artifactId}>{page.name}</option>)}
-            </select>
+              <SelectTrigger
+                size="sm"
+                aria-label="Prototype flow start Page"
+                className="prototype-flow-viewer__page-select"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end" className="z-[90]">
+                {session.pages.map((page) => (
+                  <SelectItem key={page.artifactId} value={page.artifactId}>{page.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </label>
-          <button type="button" aria-label="Close prototype flow" onClick={onClose}>
+          <IconButton
+            className="prototype-flow-viewer__close"
+            aria-label="Close prototype flow"
+            onClick={onClose}
+          >
             <X aria-hidden size={14} />
-          </button>
+          </IconButton>
         </div>
-      </header>
+      </StudioToolbarHeader>
 
       <div className="prototype-flow-viewer__body">
         <main className="prototype-flow-viewer__stage">
@@ -861,28 +888,38 @@ function PrototypeFlowViewerSession({
               <CircleAlert aria-hidden size={14} />
               <span>{visibleError}</span>
               {activePreparationFailure !== null ? (
-                <button
+                <Button
                   type="button"
+                  size="xs"
+                  variant="outline"
+                  className="prototype-flow-viewer__blocked-action"
                   aria-label="Retry exact Page preparation"
                   disabled={pending !== null}
                   onClick={retryActivePreparation}
                 >
                   <RotateCw aria-hidden size={12} />
                   Retry
-                </button>
+                </Button>
               ) : failedNavigation !== null ? (
-                <button
+                <Button
                   type="button"
+                  size="xs"
+                  variant="outline"
+                  className="prototype-flow-viewer__blocked-action"
                   aria-label="Retry prototype navigation"
                   onClick={() => beginNavigation(failedNavigation.request)}
                 >
                   <RotateCw aria-hidden size={12} />
                   Retry
-                </button>
+                </Button>
               ) : commandError === null ? (
-                <button type="button" aria-label="Dismiss blocked prototype navigation" onClick={() => setBlockedReason(null)}>
+                <IconButton
+                  className="prototype-flow-viewer__blocked-dismiss"
+                  aria-label="Dismiss blocked prototype navigation"
+                  onClick={() => setBlockedReason(null)}
+                >
                   <X aria-hidden size={12} />
-                </button>
+                </IconButton>
               ) : null}
             </div>
           ) : null}

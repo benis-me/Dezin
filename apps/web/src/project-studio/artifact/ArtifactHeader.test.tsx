@@ -90,6 +90,16 @@ test("responsive artifact actions keep accessible names and tooltips when their 
   expect(versions.querySelector(".artifact-action__label")).toHaveTextContent("Versions");
   expect(compare.querySelector(".artifact-action__label")).toHaveTextContent("Compare");
   expect(present.querySelector(".artifact-action__label")).toHaveTextContent("Present");
+  expect(versions).toHaveAttribute("data-size", "sm");
+  expect(compare).toHaveAttribute("data-size", "sm");
+  expect(present).toHaveAttribute("data-size", "sm");
+  expect(versions).toHaveAttribute("data-artifact-action", "secondary");
+  expect(compare).toHaveAttribute("data-artifact-action", "secondary");
+  expect(present).toHaveAttribute("data-artifact-action", "primary");
+  expect(versions).not.toHaveClass("artifact-action");
+  expect(compare).not.toHaveClass("artifact-action");
+  expect(present).not.toHaveClass("artifact-action");
+  expect(screen.getByRole("combobox", { name: "Preview frame" })).toHaveAttribute("data-size", "sm");
 
   await user.hover(compare);
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Compare");
@@ -111,7 +121,12 @@ test("compact More menu keeps lower-priority controls keyboard reachable", async
   const more = screen.getByRole("button", { name: "More artifact controls" });
   more.focus();
   await user.keyboard("{Enter}");
-  expect(await screen.findByRole("menuitem", { name: "Zoom out" })).toBeInTheDocument();
+  const zoomOut = await screen.findByRole("menuitem", { name: "Zoom out" });
+  expect(zoomOut).toBeInTheDocument();
+  expect(zoomOut).toHaveClass("text-sm");
+  expect(zoomOut).not.toHaveClass("artifact-more__item");
+  expect(document.querySelector('[data-slot="dropdown-menu-content"]'))
+    .not.toHaveClass("artifact-more__content");
   expect(screen.getByRole("menuitem", { name: "Zoom in" })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "Fit preview" })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "Versions" })).toBeInTheDocument();

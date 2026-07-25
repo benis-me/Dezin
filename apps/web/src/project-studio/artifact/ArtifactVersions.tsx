@@ -9,7 +9,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { Dialog } from "../../components/ui/index.ts";
+import { Button, Dialog, IconButton, Input } from "../../components/ui/index.ts";
 import type { VersionCompareSide } from "../../components/VersionCompare.tsx";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
@@ -376,8 +376,9 @@ export function ArtifactVersions({
               </p>
             </div>
             {initialMode === "compare" ? (
-              <button
+              <Button
                 type="button"
+                size="sm"
                 className="artifact-versions__compare"
                 disabled={selectedRevisions.length !== 2 || selectionHydrating}
                 aria-label="Compare selected revisions"
@@ -391,7 +392,7 @@ export function ArtifactVersions({
                   ? <LoaderCircle aria-hidden className="artifact-spin" size={14} />
                   : <GitCompareArrows aria-hidden size={14} />}
                 Compare {selectedIds.length}/2
-              </button>
+              </Button>
             ) : null}
           </header>
 
@@ -410,7 +411,9 @@ export function ArtifactVersions({
             {history.status === "error" && history.items.length === 0 ? (
               <div className="artifact-versions__message artifact-versions__message--error" role="alert">
                 <p>{history.error}</p>
-                <button type="button" onClick={() => void loadPage()}>Try again</button>
+                <Button type="button" size="xs" variant="link" onClick={() => void loadPage()}>
+                  Try again
+                </Button>
               </div>
             ) : null}
             {history.status === "ready" && history.items.length === 0 ? (
@@ -433,7 +436,7 @@ export function ArtifactVersions({
                       <div className="artifact-version-row">
                         {initialMode === "compare" ? (
                           <label className="artifact-version-row__select">
-                            <input
+                            <Input
                               type="checkbox"
                               checked={selected}
                               aria-label={`Select Revision ${revision.sequence} on ${trackLabel} for compare`}
@@ -463,24 +466,33 @@ export function ArtifactVersions({
                           aria-label={`Actions for Revision ${revision.sequence} on ${trackLabel}`}
                         >
                           {!isPinned ? (
-                            <button type="button" onClick={() => onViewRevision(revision.id)}>
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => onViewRevision(revision.id)}
+                            >
                               <span className="sr-only">View Revision {revision.sequence} on {trackLabel}</span>
                               <span aria-hidden>View</span> <ArrowUpRight aria-hidden size={11} />
-                            </button>
+                            </Button>
                           ) : null}
                           {!isHead ? (
-                            <button
+                            <Button
                               type="button"
+                              size="xs"
+                              variant="ghost"
                               disabled={!canPublish || action !== null}
                               aria-label={`Restore Revision ${revision.sequence} on ${trackLabel} as a new revision`}
                               onClick={() => void publishRestore(revision)}
                             >
                               {actionPending && action?.kind === "restore" ? <LoaderCircle aria-hidden className="artifact-spin" size={11} /> : <RotateCcw aria-hidden size={11} />}
                               Restore
-                            </button>
+                            </Button>
                           ) : null}
-                          <button
+                          <Button
                             type="button"
+                            size="xs"
+                            variant="ghost"
                             disabled={!canPublish || action !== null}
                             aria-label={`Fork a track from Revision ${revision.sequence} on ${trackLabel}`}
                             onClick={() => {
@@ -491,7 +503,7 @@ export function ArtifactVersions({
                           >
                             <GitBranch aria-hidden size={11} />
                             Fork
-                          </button>
+                          </Button>
                         </div>
                       </div>
                       {forking ? (
@@ -504,7 +516,7 @@ export function ArtifactVersions({
                         >
                           <label>
                             <span>New track name</span>
-                            <input
+                            <Input
                               autoFocus
                               aria-label="New track name"
                               value={trackName}
@@ -512,13 +524,17 @@ export function ArtifactVersions({
                               onChange={(event) => setTrackName(event.target.value)}
                             />
                           </label>
-                          <button type="submit" disabled={!trackName.trim() || action !== null}>
+                          <Button type="submit" size="sm" disabled={!trackName.trim() || action !== null}>
                             {actionPending && action?.kind === "fork" ? <LoaderCircle aria-hidden className="artifact-spin" size={12} /> : null}
                             Create track
-                          </button>
-                          <button type="button" aria-label="Cancel track fork" onClick={() => setForkingRevisionId(null)}>
+                          </Button>
+                          <IconButton
+                            type="button"
+                            aria-label="Cancel track fork"
+                            onClick={() => setForkingRevisionId(null)}
+                          >
                             <X aria-hidden size={12} />
-                          </button>
+                          </IconButton>
                         </form>
                       ) : null}
                     </li>
@@ -532,12 +548,21 @@ export function ArtifactVersions({
             {history.status === "error" && history.items.length > 0 ? (
               <div className="artifact-versions__page-error" role="alert">
                 <span>{history.error}</span>
-                <button type="button" onClick={() => void loadPage(history.nextCursor ?? undefined)}>Retry</button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="link"
+                  onClick={() => void loadPage(history.nextCursor ?? undefined)}
+                >
+                  Retry
+                </Button>
               </div>
             ) : null}
             {history.nextCursor ? (
-              <button
+              <Button
                 type="button"
+                size="sm"
+                variant="outline"
                 className="artifact-versions__load"
                 aria-label="Load older revisions"
                 disabled={history.status === "loading"}
@@ -545,7 +570,7 @@ export function ArtifactVersions({
               >
                 {history.status === "loading" ? <LoaderCircle aria-hidden className="artifact-spin" size={13} /> : null}
                 Load older Revisions
-              </button>
+              </Button>
             ) : null}
           </div>
         </div>

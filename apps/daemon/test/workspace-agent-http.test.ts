@@ -228,8 +228,8 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         turnId: "turn-00000000-0000-4000-8000-000000000031",
-        agentCommand: "codebuddy",
-        model: "gpt-5.6-sol",
+        agentCommand: "trae-cli",
+        model: "doubao-seed-1.6",
         message: "Plan a pricing page",
         explicitContext: [],
         graphRevision: ready.graph.revision,
@@ -249,7 +249,7 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       scope: { type: "workspace", id: ready.workspace.id, workspaceId: ready.workspace.id },
       intent: "plan",
       turnId: "turn-00000000-0000-4000-8000-000000000031",
-      agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+      agent: { providerId: "trae", command: "trae-cli", model: "doubao-seed-1.6" },
       message: "Plan a pricing page",
       explicitContext: [],
       graphRevision: ready.graph.revision,
@@ -320,14 +320,14 @@ test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects 
       });
       assert.equal(invalid.status, 400);
     }
-    for (const agentCommand of [undefined, "/usr/local/bin/codebuddy", "codex"]) {
+    for (const agentCommand of [undefined, "unknown-agent"]) {
       const invalid = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           turnId: "turn-00000000-0000-4000-8000-000000000033",
           ...(agentCommand === undefined ? {} : { agentCommand }),
-          model: "gpt-5.6-sol",
+          model: "doubao-seed-1.6",
           message: "Invalid Agent selection",
           explicitContext: [],
           graphRevision: ready.graph.revision,
@@ -429,7 +429,7 @@ test("Workspace Agent HTTP replays the current terminal Proposal before the curr
     const endpoint = `${base}/api/projects/${project.id}/workspace/agent/turns`;
     const input = {
       turnId,
-      agentCommand: "claude",
+      agentCommand: "trae-cli",
       message: committedMessage,
       explicitContext: [],
       graphRevision: ready.graph.revision,
@@ -522,7 +522,7 @@ test("Artifact Agent HTTP proves an exact immutable element before returning the
     const endpoint = `${base}/api/projects/${project.id}/artifacts/${artifact.id}/agent/turns`;
     const input = {
       turnId: "turn-00000000-0000-4000-8000-000000000001",
-      agentCommand: "claude",
+      agentCommand: "trae-cli",
       intent: "edit",
       message: "Tighten the selected call to action",
       explicitContext: [],
@@ -552,11 +552,11 @@ test("Artifact Agent HTTP proves an exact immutable element before returning the
     assert.equal(receipt.task.status, "materialization-pending");
     assert.match(receipt.contextPackId, /^context-pack-[0-9a-f]{64}$/);
     const { agentCommand, ...turnInput } = input;
-    assert.equal(agentCommand, "claude");
+    assert.equal(agentCommand, "trae-cli");
     assert.deepEqual(turns.at(-1), {
       scope: { type: "artifact", id: artifact.id, workspaceId: ready.workspace.id },
       ...turnInput,
-      agent: { providerId: "claude", command: "claude", model: null },
+      agent: { providerId: "trae", command: "trae-cli", model: null },
     });
 
     const forged = await fetch(endpoint, {

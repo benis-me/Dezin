@@ -52,7 +52,6 @@ import { useToast } from "../components/Toast.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import {
   agentAvailabilityReason,
-  agentModeDisabledReason,
   normalizeAgentModel,
   selectableAgents,
 } from "../lib/agent-availability.ts";
@@ -269,7 +268,7 @@ export function HomeScreen({
   const [mode, setModeState] = useState<ProjectMode>(initialComposerPrefs.mode ?? "prototype");
   const selectedHomeAgent = agents.find((candidate) => candidate.command === homeAgent);
   const homeAgentBlockedReason = homeAgent
-    ? agentAvailabilityReason(selectedHomeAgent) ?? agentModeDisabledReason(selectedHomeAgent, mode)
+    ? agentAvailabilityReason(selectedHomeAgent)
     : null;
   // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading; forces mode to
   // "standard" and swaps the composer's textarea for a URL input (desktop-only entry).
@@ -1068,7 +1067,6 @@ export function HomeScreen({
                     onAgentChange={changeHomeAgent}
                     onModelChange={changeHomeModel}
                     onRescan={rescanAgents}
-                    agentDisabledReason={(agent) => agentModeDisabledReason(agent, mode)}
                   />
                   <Button
                     size="lg"

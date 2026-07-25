@@ -64,6 +64,12 @@ export type ProjectStudioLoadState =
   | { status: "prototype"; project: Project; workspace: UnsupportedProjectWorkspacePayload }
   | { status: "error"; message: string };
 
+interface ViewportOverride {
+  projectId: string;
+  baseViewport: WorkspaceViewport | null;
+  viewport: WorkspaceViewport;
+}
+
 export interface ProjectStudioState {
   load: ProjectStudioLoadState;
   proposals: WorkspaceProposal[];
@@ -135,6 +141,17 @@ export interface ProjectStudioState {
 }
 
 const DEFAULT_VIEWPORT: WorkspaceViewport = { x: 0, y: 0, zoom: 1 };
+
+function sameWorkspaceViewport(
+  left: WorkspaceViewport | null,
+  right: WorkspaceViewport | null,
+): boolean {
+  return left === right || (left !== null
+    && right !== null
+    && left.x === right.x
+    && left.y === right.y
+    && left.zoom === right.zoom);
+}
 const CONTEXT_PACK_ID = /^context-pack-[0-9a-f]{64}$/;
 const SCOPED_PLAN_POLL_MS = 2_000;
 const SCOPED_PLAN_RETRY_MS = 250;
@@ -708,7 +725,7 @@ export function useProjectStudio(
   const [scopedAgentReceipts, setScopedAgentReceipts] = useState<Record<string, ScopedAgentTurnReceipt>>({});
   const [scopedAgentPlanIds, setScopedAgentPlanIds] = useState<Record<string, string>>({});
   const [selectedGraphObjectIds, setSelectedGraphObjectIds] = useState<string[]>([]);
-  const [viewportOverride, setViewport] = useState<WorkspaceViewport | null>(null);
+  const [viewportOverride, setViewportOverride] = useState<ViewportOverride | null>(null);
   const [taskQueue, setTaskQueue] = useState<WorkspaceStudioTask[]>([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const loadRef = useRef<ProjectStudioLoadState>(load);
@@ -758,6 +775,25 @@ export function useProjectStudio(
     agentSessionCacheRef.current.clear();
     lastReconciledAgentScopeRef.current = null;
   }
+  const setViewport = useCallback<Dispatch<SetStateAction<WorkspaceViewport | null>>>((next) => {
+    const activeProjectId = epochProjectIdRef.current;
+    const currentLoad = loadRef.current;
+    const baseViewport = currentLoad.status === "ready" && currentLoad.project.id === activeProjectId
+      ? currentLoad.workspace.layout.viewport
+      : null;
+    setViewportOverride((current) => {
+      const previous = current?.projectId === activeProjectId
+        && sameWorkspaceViewport(current.baseViewport, baseViewport)
+        ? current.viewport
+        : baseViewport;
+      const viewport = typeof next === "function" ? next(previous) : next;
+      return viewport === null ? null : {
+        projectId: activeProjectId,
+        baseViewport: baseViewport === null ? null : { ...baseViewport },
+        viewport,
+      };
+    });
+  }, []);
   const readCachedAgentSession = (scopeKey: AgentScopeKey): AgentSession => {
     const cached = agentSessionCacheRef.current.get(scopeKey);
     if (cached) return cached;
@@ -939,7 +975,12 @@ export function useProjectStudio(
               break;
             }
             const resolved = resolveLoadState(latest.project, payload);
-            if (resolved.status === "ready" && canAdvanceReadyWorkspace(latest.workspace, resolved.workspace)) {
+            if (resolved.status === "ready"
+              && canAdvanceReadyWorkspace(latest.workspace, resolved.workspace)
+              && !sameReadyWorkspaceHead(
+                readyWorkspaceHead(latest.workspace),
+                readyWorkspaceHead(resolved.workspace),
+              )) {
               updateReadyWorkspace(resolved.workspace);
             }
             break;
@@ -1144,12 +1185,16 @@ export function useProjectStudio(
       let current = requireReady();
       if (commands.length === 0) return current.workspace.layout;
       const baseLayoutChecksum = current.workspace.layout.checksum;
-      const save = (ready: ReadyLoadState) => api.saveWorkspaceLayout(projectId, {
-        layoutId: ready.workspace.layout.layoutId,
-        graphRevision: ready.workspace.graph.revision,
-        baseLayoutChecksum: ready.workspace.layout.checksum,
-        commands,
-      });
+      let saveStartedAt = readyWorkspaceHead(current.workspace);
+      const save = (ready: ReadyLoadState) => {
+        saveStartedAt = readyWorkspaceHead(ready.workspace);
+        return api.saveWorkspaceLayout(projectId, {
+          layoutId: ready.workspace.layout.layoutId,
+          graphRevision: ready.workspace.graph.revision,
+          baseLayoutChecksum: ready.workspace.layout.checksum,
+          commands,
+        });
+      };
       let saved: WorkspaceLayout;
       try {
         saved = await save(current);
@@ -1169,7 +1214,11 @@ export function useProjectStudio(
         saved = await save(current);
       }
       if (epoch !== projectEpochRef.current) throw new Error("The project changed while the layout was saving.");
-      updateReadyWorkspace({ ...requireReady().workspace, layout: saved });
+      const latest = requireReady();
+      if (latest.workspace.layout.checksum !== saveStartedAt.layoutChecksum) {
+        return latest.workspace.layout;
+      }
+      updateReadyWorkspace({ ...latest.workspace, layout: saved });
       return saved;
     });
   }, [api, enqueueMutation, projectId, requireReady, updateReadyWorkspace]);
@@ -1207,21 +1256,23 @@ export function useProjectStudio(
         result = await apply(current, resolution.commands);
       }
       if (epoch !== projectEpochRef.current) return;
-      const snapshots = current.workspace.snapshots.some((snapshot) => snapshot.id === result.snapshot.id)
-        ? current.workspace.snapshots.map((snapshot) => snapshot.id === result.snapshot.id ? result.snapshot : snapshot)
-        : [...current.workspace.snapshots, result.snapshot];
-      updateReadyWorkspace({
-        ...current.workspace,
+      const latest = requireReady();
+      const snapshots = latest.workspace.snapshots.some((snapshot) => snapshot.id === result.snapshot.id)
+        ? latest.workspace.snapshots.map((snapshot) => snapshot.id === result.snapshot.id ? result.snapshot : snapshot)
+        : [...latest.workspace.snapshots, result.snapshot];
+      const candidate: ReadyProjectWorkspacePayload = {
+        ...latest.workspace,
         workspace: {
-          ...current.workspace.workspace,
+          ...latest.workspace.workspace,
           graphRevision: result.graph.revision,
           activeSnapshotId: result.snapshot.id,
-          updatedAt: Math.max(current.workspace.workspace.updatedAt, result.snapshot.createdAt),
+          updatedAt: Math.max(latest.workspace.workspace.updatedAt, result.snapshot.createdAt),
         },
         graph: result.graph,
         activeSnapshot: result.snapshot,
         snapshots,
-      });
+      };
+      if (canAdvanceReadyWorkspace(latest.workspace, candidate)) updateReadyWorkspace(candidate);
     });
   }, [api, enqueueMutation, projectId, requireReady, updateReadyWorkspace]);
 
@@ -2079,8 +2130,14 @@ export function useProjectStudio(
     commitProposalReview({ status: "idle" });
   }, [commitProposalReview]);
 
-  const viewport = viewportOverride
-    ?? (load.status === "ready" ? load.workspace.layout.viewport : DEFAULT_VIEWPORT);
+  const authoritativeViewport = load.status === "ready" ? load.workspace.layout.viewport : DEFAULT_VIEWPORT;
+  const viewport = viewportOverride?.projectId === projectId
+    && sameWorkspaceViewport(
+      viewportOverride.baseViewport,
+      load.status === "ready" ? load.workspace.layout.viewport : null,
+    )
+    ? viewportOverride.viewport
+    : authoritativeViewport;
 
   return {
     load,

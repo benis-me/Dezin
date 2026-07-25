@@ -741,6 +741,21 @@ test("only manual previews activate stage scrolling; fitted and message stages c
   expect(stageOverflowRules).toEqual(['.artifact-stage[data-preview-zoom-mode="manual"]']);
 });
 
+test("keeps the Artifact Inspector header fixed while only its content scrolls", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  const inspectorStart = css.indexOf(".artifact-inspector {");
+  const inspectorEnd = css.indexOf("}", inspectorStart);
+  const inspectorRule = css.slice(inspectorStart, inspectorEnd);
+  const bodyStart = css.indexOf(".artifact-inspector__body {");
+  const bodyEnd = css.indexOf("}", bodyStart);
+  const bodyRule = css.slice(bodyStart, bodyEnd);
+
+  expect(inspectorRule).toMatch(/overflow:\s*hidden/);
+  expect(bodyStart).toBeGreaterThan(-1);
+  expect(bodyRule).toMatch(/min-height:\s*0/);
+  expect(bodyRule).toMatch(/overflow-y:\s*auto/);
+});
+
 test("keeps empty, loading, and error preview stages in fitted non-scrolling mode", () => {
   const idlePreview = {
     status: "idle",
@@ -2339,6 +2354,10 @@ test("coalesces a selected text edit on blur into a bounded CAS mutation", async
   await dispatchSelection();
 
   const text = await screen.findByRole("textbox", { name: "Text content" });
+  expect(text).toHaveClass("text-sm");
+  expect(text).not.toHaveClass("text-xs");
+  expect(screen.getByRole("textbox", { name: "Accessible label" })).toHaveClass("h-9", "text-sm");
+  expect(screen.getByRole("textbox", { name: "Color token" })).toHaveClass("h-9", "text-sm");
   fireEvent.change(text, { target: { value: "A quieter place for useful objects" } });
   expect(applyArtifactMutation).not.toHaveBeenCalled();
   fireEvent.blur(text);
@@ -2763,7 +2782,10 @@ test("restores and forks saved history when the active Track has no Head", async
   const fork = within(versions).getByRole("button", { name: "Fork a track from Revision 4 on Main" });
   expect(fork).toBeEnabled();
   fireEvent.click(fork);
-  fireEvent.change(within(versions).getByRole("textbox", { name: "New track name" }), {
+  const trackName = within(versions).getByRole("textbox", { name: "New track name" });
+  expect(trackName).toHaveClass("h-9", "text-sm");
+  expect(trackName).not.toHaveClass("h-8", "text-xs");
+  fireEvent.change(trackName, {
     target: { value: "Recovered direction" },
   });
   fireEvent.click(within(versions).getByRole("button", { name: "Create track" }));

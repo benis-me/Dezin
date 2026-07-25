@@ -13,17 +13,14 @@
   gap: 10px;
   padding: 11px 12px;
   border: 1px solid var(--foreground);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--background);
   color: var(--foreground);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 10%, transparent);
+  box-shadow: none;
 }
 
 .dezin-proposal-node[data-change="modification"] {
-  box-shadow:
-    3px 3px 0 var(--background),
-    4px 4px 0 var(--foreground),
-    0 8px 24px color-mix(in srgb, var(--foreground) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 14%, transparent);
 }
 
 .dezin-proposal-node[data-change="removal"] {
@@ -76,7 +73,7 @@
 
 .dezin-proposal-node__marker[data-shape="modification"] {
   border-radius: 50%;
-  box-shadow: 2px 2px 0 var(--background), 3px 3px 0 var(--foreground);
+  box-shadow: inset 0 0 0 3px var(--background);
 }
 
 .dezin-proposal-node__marker[data-shape="removal"] {
@@ -88,8 +85,8 @@
   display: grid;
   min-width: 0;
   gap: 2px;
-  font-size: 10px;
-  line-height: 1.25;
+  font-size: 11px;
+  line-height: 1.35;
   text-transform: capitalize;
 }
 
@@ -105,9 +102,9 @@
 
 .dezin-proposal-node__status {
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 650;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -122,7 +119,7 @@
   border-radius: 999px;
   background: var(--background);
   color: var(--foreground);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 590;
   line-height: 1;
   white-space: nowrap;

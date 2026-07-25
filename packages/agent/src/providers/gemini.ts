@@ -31,6 +31,13 @@ export const geminiProvider: AgentProvider = {
       return [];
     }
   },
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "gemini", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "gemini",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

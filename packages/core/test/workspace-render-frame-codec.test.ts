@@ -5,6 +5,7 @@ import {
   normalizeCreateKernelRevisionInput,
   normalizeCreateWorkspaceProposalInput,
   normalizeUpdateWorkspaceProposalInput,
+  normalizeWorkspaceGenerationAgentSelection,
 } from "../src/workspace-codecs.ts";
 
 function frame(overrides: Partial<RenderFrameSpec> = {}): RenderFrameSpec {
@@ -196,6 +197,55 @@ test("new executable Workspace Proposal mutations require a frozen Agent selecti
     }),
     /freeze an Agent selection/i,
   );
+});
+
+test("Workspace generation Agent persistence preserves bounded provider and command identities independently", () => {
+  assert.deepEqual(
+    normalizeWorkspaceGenerationAgentSelection({
+      providerId: "trae",
+      command: "trae-cli",
+      model: "doubao-seed-1.6",
+    }),
+    {
+      providerId: "trae",
+      command: "trae-cli",
+      model: "doubao-seed-1.6",
+    },
+  );
+  assert.deepEqual(
+    normalizeWorkspaceGenerationAgentSelection({
+      providerId: "legacy-provider",
+      command: "legacy-cli",
+      model: null,
+    }),
+    {
+      providerId: "legacy-provider",
+      command: "legacy-cli",
+      model: null,
+    },
+    "Core persistence must not consult the current runtime registry when reading old records",
+  );
+
+  for (const [field, value] of [
+    ["providerId", ""],
+    ["providerId", " trae"],
+    ["providerId", "trae\0"],
+    ["providerId", "p".repeat(257)],
+    ["command", ""],
+    ["command", "trae-cli "],
+    ["command", "trae\0cli"],
+    ["command", "c".repeat(257)],
+  ] as const) {
+    assert.throws(
+      () => normalizeWorkspaceGenerationAgentSelection({
+        providerId: "trae",
+        command: "trae-cli",
+        model: null,
+        [field]: value,
+      }),
+      new RegExp(`${field === "providerId" ? "provider" : "command"}.*canonical|${field === "providerId" ? "provider" : "command"}.*256`, "i"),
+    );
+  }
 });
 
 test("Kernel and Proposal persistence enforce the Viewer bridge fixture clone budget", () => {

@@ -1122,8 +1122,8 @@ export interface WorkspaceGenerationCapability {
 }
 
 export interface WorkspaceGenerationAgentSelection {
-  providerId: "claude" | "codebuddy";
-  command: "claude" | "codebuddy";
+  providerId: string;
+  command: string;
   model: string | null;
 }
 

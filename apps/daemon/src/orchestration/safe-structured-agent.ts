@@ -1,10 +1,12 @@
 import {
   AgentOutputLimitError,
+  getProvider,
   NodeSpawner,
+  type AgentProvider,
   type NodeSpawnerOptions,
   type ProcessSpawner,
 } from "../../../../packages/agent/src/index.ts";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 
@@ -18,12 +20,24 @@ const MAX_SYSTEM_PROMPT_BYTES = 64 * 1024;
 const MAX_MESSAGE_BYTES = 512 * 1024;
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const SAFE_REQUEST_ENVIRONMENT_KEYS = new Set([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-]);
+const SAFE_REQUEST_ENVIRONMENT_KEYS = Object.freeze({
+  claude: new Set([
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ]),
+  codebuddy: new Set<string>(),
+  codex: new Set([
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+  ]),
+  gemini: new Set([
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+  ]),
+} satisfies Record<string, ReadonlySet<string>>);
 const SAFE_AMBIENT_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "USER"] as const;
 
 export type SafeStructuredAgentErrorCode =
@@ -84,7 +98,7 @@ export interface SafeStructuredAgentImage {
 }
 
 export interface SafeStructuredAgentResult {
-  readonly providerId: "claude" | "codebuddy";
+  readonly providerId: string;
   readonly text: string;
 }
 
@@ -93,6 +107,11 @@ export interface SafeStructuredAgentOptions {
   /** Test seam; production always resolves the official CLI from fixed install roots. */
   readonly resolveClaudeExecutable?: () => string;
   readonly resolveCodeBuddyExecutable?: () => string;
+  /** Test seam; production resolves the registry's canonical binary through fixed search roots. */
+  readonly resolveRegisteredExecutable?: (command: string) => string;
+  /** Test seams for deterministic outer-confinement coverage on non-macOS CI. */
+  readonly platform?: NodeJS.Platform;
+  readonly resolveSandboxExecutable?: () => string;
   readonly stderrLimitBytes?: number;
 }
 
@@ -104,12 +123,14 @@ function safeEnvironmentValue(value: string | undefined, label: string): string 
   return value;
 }
 
-function safeClaudeSearchDirectories(): string[] {
-  const home = homedir();
+export function safeRegisteredSearchDirectories(home = homedir()): string[] {
   return [...new Set([
     `${home}/.local/bin`,
     dirname(process.execPath),
+    `${home}/.bun/bin`,
+    `${home}/.deno/bin`,
     `${home}/.npm-global/bin`,
+    `${home}/.cargo/bin`,
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
@@ -150,7 +171,7 @@ export function isTrustedClaudeExecutablePath(value: string, trustedHome = homed
 
 function resolveTrustedClaudeExecutable(): string {
   const executableNames = process.platform === "win32" ? ["claude.exe", "claude.cmd"] : ["claude"];
-  for (const directory of safeClaudeSearchDirectories()) {
+  for (const directory of safeRegisteredSearchDirectories()) {
     for (const name of executableNames) {
       const candidate = join(directory, name);
       try {
@@ -185,7 +206,7 @@ function resolveTrustedCodeBuddyExecutable(): string {
   const executableNames = process.platform === "win32"
     ? ["codebuddy.exe", "codebuddy.cmd"]
     : ["codebuddy"];
-  for (const directory of safeClaudeSearchDirectories()) {
+  for (const directory of safeRegisteredSearchDirectories()) {
     for (const name of executableNames) {
       const candidate = join(directory, name);
       try {
@@ -203,10 +224,168 @@ function resolveTrustedCodeBuddyExecutable(): string {
   );
 }
 
-function safeStructuredAgentEnvironment(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+export function resolveRegisteredProviderExecutable(
+  command: string,
+  trustedHome = homedir(),
+): string {
+  const executableNames = process.platform === "win32"
+    ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`, command]
+    : [command];
+  for (const directory of safeRegisteredSearchDirectories(trustedHome)) {
+    for (const name of executableNames) {
+      const candidate = join(directory, name);
+      try {
+        accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+        const exact = realpathSync(candidate);
+        if (statSync(exact).isFile()) return exact;
+      } catch {
+        // Keep searching only the daemon-owned fixed path list.
+      }
+    }
+  }
+  throw new SafeStructuredAgentError(
+    "provider-unavailable",
+    `The registered ${command} CLI executable could not be resolved through fixed install roots`,
+  );
+}
+
+function assertEmptyStructuredScratch(cwd: string): void {
+  try {
+    const exact = realpathSync(cwd);
+    if (!statSync(exact).isDirectory() || readdirSync(exact).length !== 0) {
+      throw new Error("not an empty directory");
+    }
+  } catch (error) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      "Generic structured planning requires an existing empty per-run scratch directory",
+      error,
+    );
+  }
+}
+
+function resolveSeatbeltExecutable(): string {
+  const candidate = "/usr/bin/sandbox-exec";
+  try {
+    accessSync(candidate, constants.X_OK);
+    const exact = realpathSync(candidate);
+    if (exact === candidate && statSync(exact).isFile()) return exact;
+  } catch {
+    // Fall through to the capability error.
+  }
+  throw new SafeStructuredAgentError(
+    "provider-unavailable",
+    "Generic structured Agent outer filesystem confinement is unavailable",
+  );
+}
+
+function seatbeltString(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
+}
+
+function seatbeltSubpaths(paths: readonly string[]): string {
+  return paths.map((path) => `(subpath ${seatbeltString(path)})`).join(" ");
+}
+
+function genericExecutableRuntimeRoot(executable: string): string {
+  const path = executable.replaceAll("\\", "/");
+  const marker = "/node_modules/";
+  const markerIndex = path.lastIndexOf(marker);
+  if (markerIndex === -1) return dirname(executable);
+  const prefix = path.slice(0, markerIndex + marker.length);
+  const packagePath = path.slice(markerIndex + marker.length).split("/");
+  const packageSegments = packagePath[0]?.startsWith("@") ? 2 : 1;
+  return `${prefix}${packagePath.slice(0, packageSegments).join("/")}`;
+}
+
+function genericProviderAuthRoots(providerId: string, home: string): string[] {
+  const roots: Record<string, readonly string[]> = {
+    codex: [".codex"],
+    gemini: [".gemini", ".config/gemini", ".cache/gemini"],
+    "cursor-agent": [
+      ".cursor",
+      ".config/Cursor",
+      ".local/share/cursor-agent",
+      "Library/Application Support/Cursor",
+      "Library/Caches/Cursor",
+    ],
+    copilot: [
+      ".copilot",
+      ".config/gh",
+      "Library/Application Support/GitHub Copilot",
+      "Library/Caches/GitHub Copilot",
+    ],
+    qwen: [".qwen", ".config/qwen", ".cache/qwen"],
+    opencode: [".config/opencode", ".local/share/opencode", ".cache/opencode"],
+    kimi: [".kimi", ".config/kimi", ".cache/kimi"],
+    trae: [".trae", ".config/trae", ".cache/trae", "Library/Application Support/Trae"],
+    pi: [".pi", ".config/pi", ".cache/pi"],
+    hermes: [".hermes"],
+  };
+  return (roots[providerId] ?? []).map((path) => join(home, ...path.split("/")));
+}
+
+/**
+ * Generic coding CLIs do not share an inspectable hard no-tools mode. On macOS
+ * this outer Seatbelt boundary still prevents their one-shot process and any
+ * subprocess from reading unrelated user/tmp/volume data or writing outside
+ * the owned scratch and provider auth roots. Network remains available so the
+ * selected provider can complete its model request.
+ */
+export function buildSafeStructuredGenericSeatbeltProfile(input: {
+  readonly providerId: string;
+  readonly executable: string;
+  readonly scratch: string;
+  readonly hostHome?: string;
+}): string {
+  const home = input.hostHome ?? homedir();
+  const authRoots = genericProviderAuthRoots(input.providerId, home);
+  const readRoots = [...new Set([
+    input.scratch,
+    genericExecutableRuntimeRoot(input.executable),
+    ...authRoots,
+    "/System",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/Library",
+    "/opt/homebrew",
+    "/usr/local",
+    "/private/etc",
+    "/private/var/db",
+    "/private/var/run",
+    "/dev",
+    resolve(dirname(process.execPath), ".."),
+  ])];
+  const writeRoots = [...new Set([
+    input.scratch,
+    ...authRoots,
+    "/dev",
+  ])];
+  return [
+    "(version 1)",
+    "(allow default)",
+    '(deny file-read-data (subpath "/Users"))',
+    '(deny file-read-data (subpath "/private/tmp"))',
+    '(deny file-read-data (subpath "/tmp"))',
+    '(deny file-read-data (subpath "/private/var/folders"))',
+    '(deny file-read-data (subpath "/var/folders"))',
+    '(deny file-read-data (subpath "/Volumes"))',
+    `(allow file-read-data ${seatbeltSubpaths(readRoots)})`,
+    "(deny file-write*)",
+    `(allow file-write* ${seatbeltSubpaths(writeRoots)})`,
+  ].join("\n");
+}
+
+function safeStructuredAgentEnvironment(
+  extra: NodeJS.ProcessEnv | undefined,
+  providerId: string,
+): NodeJS.ProcessEnv {
+  const permittedKeys = SAFE_REQUEST_ENVIRONMENT_KEYS[providerId as keyof typeof SAFE_REQUEST_ENVIRONMENT_KEYS]
+    ?? new Set<string>();
   const environment: NodeJS.ProcessEnv = {
     HOME: homedir(),
-    PATH: safeClaudeSearchDirectories().join(delimiter),
+    PATH: safeRegisteredSearchDirectories().join(delimiter),
     TMPDIR: tmpdir(),
     TERM: "dumb",
     NO_COLOR: "1",
@@ -229,7 +408,7 @@ function safeStructuredAgentEnvironment(extra: NodeJS.ProcessEnv | undefined): N
       }
       continue;
     }
-    if (!SAFE_REQUEST_ENVIRONMENT_KEYS.has(key)) {
+    if (!permittedKeys.has(key)) {
       if (rawValue !== undefined) {
         throw new SafeStructuredAgentError(
           "output-invalid",
@@ -244,12 +423,6 @@ function safeStructuredAgentEnvironment(extra: NodeJS.ProcessEnv | undefined): N
   return environment;
 }
 
-/**
- * Claude is currently the only installed coding CLI with a hard, inspectable
- * no-tools mode. Other coding CLIs are deliberately rejected here: a read-only
- * cwd or prompt instruction does not stop them from reading unrelated files or
- * invoking shell/network tools.
- */
 export function safeStructuredClaudeArgs(
   systemPrompt: string,
   model?: string,
@@ -273,6 +446,47 @@ export function safeStructuredClaudeArgs(
   ];
   if (model) args.push("--model", model);
   return args;
+}
+
+export function safeStructuredCodexArgs(model?: string): string[] {
+  return [
+    "exec",
+    "--skip-git-repo-check",
+    // The outer Seatbelt profile is authoritative. Avoid nesting Codex's
+    // /tmp-granting sandbox inside that exact filesystem boundary.
+    "--sandbox", "danger-full-access",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--color", "never",
+    "--json",
+    ...(model ? ["--model", model] : []),
+    "-",
+  ];
+}
+
+function safeStructuredGenericPrompt(systemPrompt: string, message: string): string {
+  return [
+    systemPrompt,
+    "--- DEZIN STRUCTURED REQUEST ---",
+    message,
+  ].join("\n\n");
+}
+
+function safeStructuredGenericInvocation(
+  provider: AgentProvider,
+  request: SafeStructuredAgentRequest,
+): { readonly args: string[]; readonly stdin: string } {
+  const prompt = safeStructuredGenericPrompt(request.systemPrompt, request.message);
+  const config = provider.genericConfig;
+  if (config === undefined) {
+    return { args: provider.oneShotArgs(request.model, prompt), stdin: "" };
+  }
+  const viaStdin = config.viaStdin === true;
+  return {
+    args: config.buildArgs(request.model, viaStdin ? "" : prompt),
+    stdin: viaStdin ? prompt : "",
+  };
 }
 
 function safeStructuredCodeBuddyArgs(
@@ -379,6 +593,208 @@ export function parseSafeStructuredClaudeStream(stdout: string): string {
     );
   }
   return result;
+}
+
+/**
+ * Codex `exec --json` is a protocol envelope, not assistant text. Accept one
+ * complete turn and return only its single completed Agent message.
+ */
+export function parseSafeStructuredCodexJsonl(stdout: string): string {
+  let threadStarted = false;
+  let turnStarted = false;
+  let terminalSeen = false;
+  let message: string | undefined;
+  for (const [index, rawLine] of stdout.split("\n").entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(line);
+    } catch {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        `Codex structured stream line ${index + 1} is not valid JSON`,
+      );
+    }
+    const event = plainRecord(decoded);
+    if (!event || typeof event.type !== "string") {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        `Codex structured stream line ${index + 1} is not a protocol event`,
+      );
+    }
+    if (terminalSeen) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex structured stream emitted events after its terminal turn",
+      );
+    }
+    if (event.type === "thread.started") {
+      if (threadStarted || turnStarted || typeof event.thread_id !== "string"
+        || event.thread_id.length === 0 || event.thread_id.includes("\0")) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Codex structured stream has a malformed thread start",
+        );
+      }
+      threadStarted = true;
+      continue;
+    }
+    if (event.type === "turn.started") {
+      if (!threadStarted || turnStarted) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Codex structured stream has a malformed turn start",
+        );
+      }
+      turnStarted = true;
+      continue;
+    }
+    if (event.type === "item.started" || event.type === "item.updated"
+      || event.type === "item.completed") {
+      const item = plainRecord(event.item);
+      if (!turnStarted || !item || typeof item.type !== "string") {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          `Codex structured stream ${event.type} event is malformed`,
+        );
+      }
+      if (event.type === "item.completed" && item.type === "agent_message") {
+        if (message !== undefined || typeof item.text !== "string"
+          || item.text.length === 0 || item.text.includes("\0")) {
+          throw new SafeStructuredAgentError(
+            "output-invalid",
+            "Codex structured stream must contain exactly one completed Agent message",
+          );
+        }
+        message = item.text;
+      }
+      continue;
+    }
+    if (event.type === "turn.completed") {
+      if (!threadStarted || !turnStarted || message === undefined) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Codex structured stream has an incomplete terminal turn",
+        );
+      }
+      terminalSeen = true;
+      continue;
+    }
+    if (event.type === "turn.failed" || event.type === "error") {
+      throw new SafeStructuredAgentError(
+        "process-failed",
+        "Codex structured stream reported an unsuccessful turn",
+      );
+    }
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Codex structured stream contains unsupported event ${event.type}`,
+    );
+  }
+  if (!terminalSeen || message === undefined) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      "Codex structured stream has no completed terminal turn",
+    );
+  }
+  return message;
+}
+
+/**
+ * Copilot's `--output-format json` emits JSONL. Treat its result event as the
+ * terminal owner and never scrape diagnostic/tool output as a model response.
+ */
+export function parseSafeStructuredCopilotJsonl(stdout: string): string {
+  let message: string | undefined;
+  let terminalSeen = false;
+  for (const [index, rawLine] of stdout.split("\n").entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(line);
+    } catch {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        `Copilot structured stream line ${index + 1} is not valid JSON`,
+      );
+    }
+    const event = plainRecord(decoded);
+    if (!event || typeof event.type !== "string") {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        `Copilot structured stream line ${index + 1} is not a protocol event`,
+      );
+    }
+    if (terminalSeen) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Copilot structured stream emitted events after its terminal result",
+      );
+    }
+    if (event.type === "session.start" || event.type === "session.started"
+      || event.type === "session.tools_updated") {
+      if (!plainRecord(event.data)) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          `Copilot structured stream ${event.type} event is malformed`,
+        );
+      }
+      continue;
+    }
+    if (event.type === "assistant.message") {
+      const data = plainRecord(event.data);
+      if (message !== undefined || !data || typeof data.content !== "string"
+        || data.content.length === 0 || data.content.includes("\0")) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Copilot structured stream must contain exactly one Agent message",
+        );
+      }
+      message = data.content;
+      continue;
+    }
+    if (event.type.startsWith("tool.")) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Copilot structured planning invoked a tool outside its semantic response contract",
+      );
+    }
+    if (event.type === "result") {
+      if (message === undefined || event.exitCode !== 0
+        || typeof event.sessionId !== "string" || event.sessionId.length === 0) {
+        throw new SafeStructuredAgentError(
+          event.exitCode === 0 ? "output-invalid" : "process-failed",
+          "Copilot structured stream has a malformed terminal result",
+        );
+      }
+      terminalSeen = true;
+      continue;
+    }
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Copilot structured stream contains unsupported event ${event.type}`,
+    );
+  }
+  if (!terminalSeen || message === undefined) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      "Copilot structured stream has no completed terminal result",
+    );
+  }
+  return message;
+}
+
+function parseSafeStructuredPlainResponse(stdout: string): string {
+  const text = stdout.trim();
+  if (!text || text.includes("\0")) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      "Generic structured Agent response is malformed",
+    );
+  }
+  return text;
 }
 
 function safeStructuredAgentStdin(request: SafeStructuredAgentRequest): string {
@@ -578,17 +994,17 @@ export async function runSafeStructuredAgent(
   options: SafeStructuredAgentOptions = {},
 ): Promise<SafeStructuredAgentResult> {
   if (request.signal.aborted) throw abortReason(request.signal);
-  const providerId = request.command === "claude"
-    ? "claude"
-    : request.command === "codebuddy"
-      ? "codebuddy"
-      : undefined;
-  if (!providerId) {
+  const provider = getProvider(request.command);
+  const canonicalCommand = provider === undefined
+    ? false
+    : request.command === provider.id || request.command === provider.command;
+  if (!provider || !canonicalCommand) {
     throw new SafeStructuredAgentError(
       "provider-unavailable",
-      "The hard no-tools structured-output transport accepts only built-in provider CLI entries, not executable paths or wrappers",
+      "Structured output accepts only canonical registered provider CLI entries, not executable paths or wrappers",
     );
   }
+  const providerId = provider.id;
   if (!request.systemPrompt || !request.message || !Number.isSafeInteger(request.maxOutputBytes)
     || request.maxOutputBytes < 1) {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent request is invalid");
@@ -600,14 +1016,74 @@ export async function runSafeStructuredAgent(
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent message exceeds the 512 KiB byte limit");
   }
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const command = providerId === "claude"
+  const providerExecutable = providerId === "claude"
     ? (options.resolveClaudeExecutable ?? resolveTrustedClaudeExecutable)()
-    : (options.resolveCodeBuddyExecutable ?? resolveTrustedCodeBuddyExecutable)();
-  const environment = safeStructuredAgentEnvironment(request.env);
-  const stdin = safeStructuredAgentStdin(request);
+    : providerId === "codebuddy"
+      ? (options.resolveCodeBuddyExecutable ?? resolveTrustedCodeBuddyExecutable)()
+      : (options.resolveRegisteredExecutable ?? resolveRegisteredProviderExecutable)(provider.command);
+  const environment = safeStructuredAgentEnvironment(request.env, providerId);
+  if (providerId !== "claude" && providerId !== "codebuddy"
+    && (request.images?.length ?? 0) > 0) {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      `${provider.label} structured planning does not accept inline image evidence`,
+    );
+  }
+  if (providerId !== "claude" && providerId !== "codebuddy") {
+    assertEmptyStructuredScratch(request.cwd);
+  }
+  const genericInvocation = providerId === "claude" || providerId === "codebuddy"
+    ? undefined
+    : providerId === "codex"
+      ? {
+          args: safeStructuredCodexArgs(request.model),
+          stdin: safeStructuredGenericPrompt(request.systemPrompt, request.message),
+        }
+      : safeStructuredGenericInvocation(provider, request);
+  const stdin = genericInvocation?.stdin ?? safeStructuredAgentStdin(request);
   if (Buffer.byteLength(stdin, "utf8") > MAX_STDIN_BYTES) {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent stdin exceeds the 16 MiB byte limit");
   }
+  const requiresOuterConfinement = providerId !== "claude"
+    && providerId !== "codebuddy";
+  if (requiresOuterConfinement && (options.platform ?? process.platform) !== "darwin") {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      "Registered structured Agent outer filesystem confinement requires macOS Seatbelt and is unavailable on this platform",
+    );
+  }
+  const sandboxExecutable = requiresOuterConfinement
+    ? (options.resolveSandboxExecutable ?? resolveSeatbeltExecutable)()
+    : undefined;
+  const sandboxProfile = requiresOuterConfinement
+    ? buildSafeStructuredGenericSeatbeltProfile({
+        providerId,
+        executable: providerExecutable,
+        scratch: request.cwd,
+      })
+    : undefined;
+  if (requiresOuterConfinement) {
+    environment.TMPDIR = request.cwd;
+    environment.TMP = request.cwd;
+    environment.TEMP = request.cwd;
+  }
+  const command = sandboxExecutable ?? providerExecutable;
+  const providerArgs = providerId === "claude"
+    ? safeStructuredClaudeArgs(
+        request.systemPrompt,
+        request.model,
+        request.images?.length ? "stream-json" : "text",
+      )
+    : providerId === "codebuddy"
+      ? safeStructuredCodeBuddyArgs(
+          request.systemPrompt,
+          request.model,
+          request.images?.length ? "stream-json" : "text",
+        )
+      : genericInvocation!.args;
+  const args = sandboxProfile === undefined
+    ? providerArgs
+    : ["-p", sandboxProfile, providerExecutable, ...providerArgs];
   const spawner = (options.createSpawner ?? ((input) => new NodeSpawner(input)))({
     timeoutMs,
     stdoutLimitBytes: request.maxOutputBytes,
@@ -615,7 +1091,6 @@ export async function runSafeStructuredAgent(
     killDelayMs: 500,
     inheritEnvironment: false,
   });
-  const inputFormat = request.images?.length ? "stream-json" : "text";
   const attempts = providerId === "codebuddy" ? 3 : 1;
   const deadlineMs = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -627,9 +1102,7 @@ export async function runSafeStructuredAgent(
     try {
       result = await spawner.run({
         command,
-        args: providerId === "claude"
-          ? safeStructuredClaudeArgs(request.systemPrompt, request.model, inputFormat)
-          : safeStructuredCodeBuddyArgs(request.systemPrompt, request.model, inputFormat),
+        args,
         cwd: request.cwd,
         stdin,
         timeoutMs: attemptTimeoutMs,
@@ -665,9 +1138,15 @@ export async function runSafeStructuredAgent(
       throw new SafeStructuredAgentError("output-limit", "Structured Agent stdout exceeded its byte limit");
     }
     try {
-      const text = providerId === "codebuddy" || request.images?.length
-        ? parseSafeStructuredClaudeStream(result.stdout)
-        : result.stdout;
+      const text = providerId === "codex"
+        ? parseSafeStructuredCodexJsonl(result.stdout)
+        : providerId === "copilot"
+          ? parseSafeStructuredCopilotJsonl(result.stdout)
+        : providerId === "codebuddy" || request.images?.length
+          ? parseSafeStructuredClaudeStream(result.stdout)
+          : providerId === "claude"
+            ? result.stdout
+            : parseSafeStructuredPlainResponse(result.stdout);
       return Object.freeze({ providerId, text });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);

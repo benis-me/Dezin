@@ -1,8 +1,15 @@
-import { BaseEdge, EdgeLabelRenderer, getBezierPath, Position, type EdgeProps } from "@xyflow/react";
+import {
+  BaseEdge,
+  EdgeLabelRenderer,
+  getSmoothStepPath,
+  Position,
+  type EdgeProps,
+} from "@xyflow/react";
 import { CornerDownRight } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceFlowEdge } from "../workspace-graph-adapter.ts";
-import { workspaceEdgeLaneExpansion } from "./edge-lane-geometry.ts";
+import { canvasEdgeTheme } from "./edge-theme.ts";
+import { workspaceEdgeRouteGeometry } from "./edge-lane-geometry.ts";
 
 interface PrototypeEdgeGeometryInput {
   source: string;
@@ -11,17 +18,52 @@ interface PrototypeEdgeGeometryInput {
   sourceY: number;
   targetX: number;
   targetY: number;
-  sourcePosition?: Parameters<typeof getBezierPath>[0]["sourcePosition"];
-  targetPosition?: Parameters<typeof getBezierPath>[0]["targetPosition"];
+  sourcePosition?: Parameters<typeof getSmoothStepPath>[0]["sourcePosition"];
+  targetPosition?: Parameters<typeof getSmoothStepPath>[0]["targetPosition"];
   lane?: number;
 }
 
+interface EdgePoint {
+  x: number;
+  y: number;
+}
+
+function roundedOrthogonalPath(rawPoints: readonly EdgePoint[], radius: number): string {
+  const points = rawPoints.filter((point, index) => (
+    index === 0
+    || point.x !== rawPoints[index - 1]!.x
+    || point.y !== rawPoints[index - 1]!.y
+  ));
+  const first = points[0]!;
+  const last = points.at(-1)!;
+  let path = `M ${first.x} ${first.y}`;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = points[index - 1]!;
+    const current = points[index]!;
+    const next = points[index + 1]!;
+    const incomingLength = Math.hypot(current.x - previous.x, current.y - previous.y);
+    const outgoingLength = Math.hypot(next.x - current.x, next.y - current.y);
+    const bend = Math.min(radius, incomingLength / 2, outgoingLength / 2);
+    if (bend === 0) continue;
+    const entry = {
+      x: current.x - ((current.x - previous.x) / incomingLength) * bend,
+      y: current.y - ((current.y - previous.y) / incomingLength) * bend,
+    };
+    const exit = {
+      x: current.x + ((next.x - current.x) / outgoingLength) * bend,
+      y: current.y + ((next.y - current.y) / outgoingLength) * bend,
+    };
+    path += ` L ${entry.x} ${entry.y} Q ${current.x} ${current.y} ${exit.x} ${exit.y}`;
+  }
+  return `${path} L ${last.x} ${last.y}`;
+}
+
 export function prototypeEdgeGeometry(input: PrototypeEdgeGeometryInput): { path: string; labelX: number; labelY: number } {
-  const laneExpansion = workspaceEdgeLaneExpansion(input.lane);
+  const routeGeometry = workspaceEdgeRouteGeometry(input.lane);
   if (input.source === input.target) {
     const loopDirection = (input.lane ?? 0) > 0 ? 1 : -1;
-    const horizontalReach = Math.max(72, Math.abs(input.sourceX - input.targetX) * 0.28) + laneExpansion * 18;
-    const lift = Math.max(104, Math.abs(input.sourceX - input.targetX) * 0.42) + laneExpansion * 24;
+    const horizontalReach = Math.max(72, Math.abs(input.sourceX - input.targetX) * 0.28) + routeGeometry.laneOffset;
+    const lift = Math.max(104, Math.abs(input.sourceX - input.targetX) * 0.42) + routeGeometry.laneOffset;
     const apexY = loopDirection > 0
       ? Math.max(input.sourceY, input.targetY) + lift
       : Math.min(input.sourceY, input.targetY) - lift;
@@ -31,26 +73,63 @@ export function prototypeEdgeGeometry(input: PrototypeEdgeGeometryInput): { path
       labelY: apexY,
     };
   }
-  if (
-    laneExpansion > 0
-    && input.sourcePosition !== undefined
-    && input.sourcePosition === input.targetPosition
-  ) {
-    const reach = 30 + laneExpansion * 18;
-    const horizontalSide = input.sourcePosition === Position.Top || input.sourcePosition === Position.Bottom;
-    const direction = input.sourcePosition === Position.Top || input.sourcePosition === Position.Left ? -1 : 1;
-    const offsetX = horizontalSide ? 0 : direction * reach;
-    const offsetY = horizontalSide ? direction * reach : 0;
+  const lane = input.lane ?? 0;
+  const sourcePosition = input.sourcePosition ?? Position.Bottom;
+  const targetPosition = input.targetPosition ?? Position.Top;
+  const horizontalHandles = (
+    (sourcePosition === Position.Left || sourcePosition === Position.Right)
+    && (targetPosition === Position.Left || targetPosition === Position.Right)
+  );
+  const verticalHandles = (
+    (sourcePosition === Position.Top || sourcePosition === Position.Bottom)
+    && (targetPosition === Position.Top || targetPosition === Position.Bottom)
+  );
+  if (lane !== 0 && sourcePosition !== targetPosition && (horizontalHandles || verticalHandles)) {
+    const direction = lane > 0 ? 1 : -1;
+    const laneDistance = routeGeometry.routeOffset;
+    const sourceGap = routeGeometry.terminalOffset;
+    if (horizontalHandles) {
+      const sourceGapX = input.sourceX + (sourcePosition === Position.Right ? sourceGap : -sourceGap);
+      const targetGapX = input.targetX + (targetPosition === Position.Right ? sourceGap : -sourceGap);
+      const laneY = direction > 0
+        ? Math.max(input.sourceY, input.targetY) + laneDistance
+        : Math.min(input.sourceY, input.targetY) - laneDistance;
+      return {
+        path: roundedOrthogonalPath([
+          { x: input.sourceX, y: input.sourceY },
+          { x: sourceGapX, y: input.sourceY },
+          { x: sourceGapX, y: laneY },
+          { x: targetGapX, y: laneY },
+          { x: targetGapX, y: input.targetY },
+          { x: input.targetX, y: input.targetY },
+        ], routeGeometry.cornerRadius),
+        labelX: (sourceGapX + targetGapX) / 2,
+        labelY: laneY,
+      };
+    }
+    const sourceGapY = input.sourceY + (sourcePosition === Position.Bottom ? sourceGap : -sourceGap);
+    const targetGapY = input.targetY + (targetPosition === Position.Bottom ? sourceGap : -sourceGap);
+    const laneX = direction > 0
+      ? Math.max(input.sourceX, input.targetX) + laneDistance
+      : Math.min(input.sourceX, input.targetX) - laneDistance;
     return {
-      path: `M ${input.sourceX} ${input.sourceY} C ${input.sourceX + offsetX} ${input.sourceY + offsetY} ${input.targetX + offsetX} ${input.targetY + offsetY} ${input.targetX} ${input.targetY}`,
-      labelX: (input.sourceX + input.targetX) / 2 + offsetX * 0.75,
-      labelY: (input.sourceY + input.targetY) / 2 + offsetY * 0.75,
+      path: roundedOrthogonalPath([
+        { x: input.sourceX, y: input.sourceY },
+        { x: input.sourceX, y: sourceGapY },
+        { x: laneX, y: sourceGapY },
+        { x: laneX, y: targetGapY },
+        { x: input.targetX, y: targetGapY },
+        { x: input.targetX, y: input.targetY },
+      ], routeGeometry.cornerRadius),
+      labelX: laneX,
+      labelY: (sourceGapY + targetGapY) / 2,
     };
   }
-  const { lane: _lane, ...pathInput } = input;
-  const [path, labelX, labelY] = getBezierPath({
+  const { source: _source, target: _target, lane: _lane, ...pathInput } = input;
+  const [path, labelX, labelY] = getSmoothStepPath({
     ...pathInput,
-    curvature: 0.24 + laneExpansion * 0.08,
+    borderRadius: routeGeometry.cornerRadius,
+    offset: routeGeometry.routeOffset,
   });
   return { path, labelX, labelY };
 }
@@ -82,12 +161,13 @@ export function PrototypeEdge({
     lane: data?.lane,
   });
   const broken = data?.status === "broken";
-  const foreground = broken
-    ? "var(--destructive)"
-    : selected || hovered
-      ? "var(--foreground)"
-      : "var(--foreground-2)";
-  const showLabel = data?.zoomLevel === "full" || selected || broken || hovered;
+  const theme = canvasEdgeTheme({
+    kind: "prototype",
+    active: selected || hovered,
+    broken,
+  });
+  const showLabel = data?.zoomLevel === "full"
+    || (data?.zoomLevel === "compact" && (selected || hovered));
   return (
     <>
       <g
@@ -100,14 +180,7 @@ export function PrototypeEdge({
           path={path}
           interactionWidth={0}
           className="dezin-flow-edge__halo"
-          style={{
-            stroke: "var(--background)",
-            strokeWidth: selected || hovered ? 3.8 : 3.2,
-            strokeLinecap: "round",
-            strokeLinejoin: "round",
-            opacity: 0.78,
-            pointerEvents: "none",
-          }}
+          style={theme.halo}
         />
         <BaseEdge
           id={id}
@@ -115,14 +188,7 @@ export function PrototypeEdge({
           markerEnd={markerEnd}
           interactionWidth={24}
           className="dezin-flow-edge__path"
-          style={{
-            stroke: foreground,
-            strokeWidth: selected || hovered ? 1.8 : 1.25,
-            strokeLinecap: "round",
-            strokeLinejoin: "round",
-            opacity: selected || hovered || broken ? 0.96 : 0.68,
-            vectorEffect: "non-scaling-stroke",
-          }}
+          style={theme.path}
         />
       </g>
       {showLabel && (

@@ -27,6 +27,13 @@ export const codexProvider: AgentProvider = {
       return [];
     }
   },
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "codex", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "codex",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

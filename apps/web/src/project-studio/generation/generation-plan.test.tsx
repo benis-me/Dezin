@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
@@ -27,6 +28,14 @@ function deferred<T>(): {
     reject = fail;
   });
   return { promise, resolve, reject };
+}
+
+async function chooseGenerationPlan(
+  user: ReturnType<typeof userEvent.setup>,
+  planId: string,
+): Promise<void> {
+  await user.click(screen.getByRole("combobox", { name: "Selected generation plan" }));
+  await user.click(await screen.findByRole("option", { name: new RegExp(planId) }));
 }
 
 function plan(status: GenerationPlan["status"] = "running"): GenerationPlan {
@@ -107,16 +116,18 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   const user = userEvent.setup();
   const onRetry = vi.fn(async () => {});
   const onCancel = vi.fn(async () => {});
+  const onClose = vi.fn();
   render(
     <GenerationPlanPanel
       projectId="project-1"
-      plans={[plan()]}
+      plans={[plan(), { ...plan(), id: "plan-2", createdAt: 9 }]}
       detail={detail()}
       connection="live"
       busyAction={null}
       onSelectPlan={() => {}}
       onRetry={onRetry}
       onCancel={onCancel}
+      onClose={onClose}
     />,
   );
 
@@ -130,12 +141,28 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   expect(screen.getByRole("list", { name: "Generation tasks" })).toHaveTextContent("Component");
   expect(screen.getByText("Desktop frame overflowed its artboard")).toBeInTheDocument();
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  const planSelector = screen.getByRole("combobox", { name: "Selected generation plan" });
+  expect(planSelector).toHaveAttribute("data-slot", "select-trigger");
+  expect(planSelector).toHaveAttribute("data-size", "sm");
+  const css = readFileSync(
+    `${process.cwd()}/src/project-studio/generation/generation-plan.css`,
+    "utf8",
+  );
+  expect(css).not.toMatch(
+    /\.dezin-generation-plan__selector-trigger\s*\{[^}]*(?:height|font-size|border-color|background|box-shadow)\s*:/s,
+  );
+  expect(screen.getByRole("button", { name: "Close build plan" })).toHaveAttribute("data-slot", "button");
+  expect(screen.getByRole("group", { name: "Page retry options" })).toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "Retry Page with the same context" }));
+  const sameContext = screen.getByRole("button", { name: "Retry Page with the same context" });
+  expect(sameContext).toHaveAttribute("data-slot", "button");
+  await user.click(sameContext);
   expect(onRetry).toHaveBeenCalledWith("task-3", "same-context");
   await user.click(screen.getByRole("button", { name: "Retry Page with refreshed context" }));
   expect(onRetry).toHaveBeenCalledWith("task-3", "latest-context");
-  await user.click(screen.getByRole("button", { name: "Cancel generation plan" }));
+  const cancel = screen.getByRole("button", { name: "Cancel generation plan" });
+  expect(cancel).toHaveAttribute("data-slot", "button");
+  await user.click(cancel);
   expect(onCancel).toHaveBeenCalledTimes(1);
 });
 
@@ -771,7 +798,7 @@ test("GenerationPlanInspector ignores an older Plan refresh that completes after
   );
 
   await refreshStarted.promise;
-  await user.selectOptions(screen.getByRole("combobox", { name: "Selected generation plan" }), newerPlan.id);
+  await chooseGenerationPlan(user, newerPlan.id);
   await waitFor(() => expect(screen.getByText("New Page")).toBeInTheDocument());
 
   await act(async () => {
@@ -817,7 +844,7 @@ test("GenerationPlanInspector does not apply a retry response after the operator
   );
 
   await user.click(await screen.findByRole("button", { name: "Retry Page with the same context" }));
-  await user.selectOptions(screen.getByRole("combobox", { name: "Selected generation plan" }), newerPlan.id);
+  await chooseGenerationPlan(user, newerPlan.id);
   await waitFor(() => expect(screen.getByRole("combobox", { name: "Selected generation plan" })).toHaveValue(newerPlan.id));
   expect(screen.getByRole("button", { name: "Retry Component with the same context" })).toBeEnabled();
 
@@ -988,10 +1015,8 @@ test("GenerationPlanInspector hides stale controls while loading and safely rest
     </ApiProvider>,
   );
 
-  await user.selectOptions(
-    await screen.findByRole("combobox", { name: "Selected generation plan" }),
-    newerPlan.id,
-  );
+  await screen.findByRole("combobox", { name: "Selected generation plan" });
+  await chooseGenerationPlan(user, newerPlan.id);
 
   expect(screen.queryByRole("button", { name: "Cancel generation plan" })).not.toBeInTheDocument();
   expect(screen.queryByText("Component")).not.toBeInTheDocument();
@@ -1118,7 +1143,7 @@ test("GenerationPlanInspector preserves history and retry recovery when the init
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("temporarily unavailable"));
   const selector = screen.getByRole("combobox", { name: "Selected generation plan" });
   expect(selector).toHaveValue(brokenPlan.id);
-  await user.selectOptions(selector, workingDetail.plan.id);
+  await chooseGenerationPlan(user, workingDetail.plan.id);
   await waitFor(() => expect(screen.getAllByText("Component")).toHaveLength(2));
   expect(screen.getByRole("combobox", { name: "Selected generation plan" })).toHaveValue(workingDetail.plan.id);
   rendered.unmount();

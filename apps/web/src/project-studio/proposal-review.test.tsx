@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ReactFlow } from "@xyflow/react";
@@ -899,7 +900,7 @@ test("canvas merges the proposal into one ReactFlow and keeps proposal focus out
 
   expect(container.querySelectorAll(".react-flow")).toHaveLength(1);
   expect(container.querySelector("iframe")).toBeNull();
-  expect(screen.getByText("Added")).toBeInTheDocument();
+  expect(screen.getByText("Added", { selector: ".dezin-proposal-node__status" })).toBeInTheDocument();
   expect(container.querySelector('[data-shape="addition"]')).not.toBeNull();
   const overlayNode = container.querySelector<HTMLElement>('.react-flow__node[data-id="proposal:proposal-canvas:node:page-checkout"]');
   expect(overlayNode).toHaveAttribute("aria-label", "Proposed addition: Page Checkout");
@@ -1082,6 +1083,46 @@ test("proposal review panel exposes editable rationale review actions and non-co
   expect(onFocusItem).toHaveBeenCalledWith("node:page-checkout");
   fireEvent.click(screen.getByRole("button", { name: "Revert added page Checkout" }));
   await waitFor(() => expect(onRevert).toHaveBeenCalledWith(diff.nodeChanges[0]));
+});
+
+test("proposal review composes shared controls without panel-level primitive skinning", () => {
+  const proposal = draftProposal();
+  const diff = buildProposalDiff(proposal, {
+    graph: baseGraph,
+    activeSnapshotId: "snapshot-7",
+    layoutChecksum: "layout-7",
+  });
+
+  render(
+    <ProposalReviewPanel
+      review={{ status: "draft", proposal, diff }}
+      focusedChangeKey={null}
+      onEdit={async () => proposal}
+      onRevert={async () => proposal}
+      onFocusItem={() => {}}
+      onApprove={async () => {}}
+      onReject={async () => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("textbox", { name: "Proposal rationale" }))
+    .toHaveAttribute("data-slot", "textarea");
+  const proposalName = screen.getByRole("textbox", { name: "Proposal name for Checkout" });
+  expect(proposalName).toHaveAttribute("data-slot", "input");
+  expect(proposalName).toHaveClass("h-9", "text-sm");
+  expect(proposalName).not.toHaveClass("h-7", "text-xs");
+  expect(screen.getByRole("button", { name: "Approve and generate" }))
+    .toHaveAttribute("data-slot", "button");
+
+  const css = readFileSync(
+    `${process.cwd()}/src/project-studio/proposal/proposal-review-panel.css`,
+    "utf8",
+  );
+  expect(css).not.toMatch(
+    /\.dezin-proposal-review[^{]*(?:\bbutton\b|\binput\b|\btextarea\b)[^{]*\{/,
+  );
+  expect(css).not.toContain("!important");
 });
 
 test("Proposal review terminal states explain rejected and superseded outcomes without approval copy", () => {

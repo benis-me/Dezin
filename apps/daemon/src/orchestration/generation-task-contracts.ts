@@ -232,20 +232,26 @@ export function validateFrozenGenerationTaskAgent(
   label: string,
 ): WorkspaceGenerationAgentSelection {
   const agent = exactObject(value, ["providerId", "command", "model"], [], label);
-  if (agent.command !== "claude" && agent.command !== "codebuddy") {
-    fail(`${label} command is unsupported`);
-  }
-  if (agent.providerId !== agent.command) {
-    fail(`${label} provider must match its command`);
-  }
+  const boundedIdentity = (entry: unknown, field: "provider" | "command"): string => {
+    if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim() !== entry
+      || !isWellFormedUtf16(entry) || entry.includes("\0")) {
+      fail(`${label} ${field} must be canonical and bounded to 256 bytes`);
+    }
+    if (Buffer.byteLength(entry, "utf8") > 256) {
+      fail(`${label} ${field} cannot exceed 256 bytes`);
+    }
+    return entry;
+  };
+  const providerId = boundedIdentity(agent.providerId, "provider");
+  const command = boundedIdentity(agent.command, "command");
   const model = agent.model === null ? null : canonicalString(agent.model, `${label} model`);
   if (model !== null && model.includes("\0")) fail(`${label} model cannot contain NUL characters`);
   if (model !== null && Buffer.byteLength(model, "utf8") > 256) {
     fail(`${label} model cannot exceed 256 bytes`);
   }
   return Object.freeze({
-    providerId: agent.command,
-    command: agent.command,
+    providerId,
+    command,
     model,
   });
 }

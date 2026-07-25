@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { IconButton } from "../components/ui/index.ts";
 import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 import {
   readPanelPercent,
@@ -19,6 +21,7 @@ export function ProjectStudioShell({
   inspectorOpen = false,
   inspectorLabel = "Inspector",
   inspectorToggleLabel = "inspector",
+  narrowInspectorContentOwnsClose = false,
   agentLabel = "Workspace Agent",
   presentation = false,
 }: {
@@ -28,6 +31,7 @@ export function ProjectStudioShell({
   inspectorOpen?: boolean;
   inspectorLabel?: string;
   inspectorToggleLabel?: string;
+  narrowInspectorContentOwnsClose?: boolean;
   agentLabel?: string;
   presentation?: boolean;
 }) {
@@ -58,7 +62,7 @@ export function ProjectStudioShell({
       aria-label={agentLabel}
       inert={presentation ? true : undefined}
       hidden={presentation}
-      className={`h-full min-h-0 min-w-0 overflow-hidden bg-sidebar/50 ${mobile ? "border-b border-border" : ""}`}
+      className={`h-full min-h-0 min-w-0 overflow-hidden bg-sidebar ${mobile ? "border-b border-border" : ""}`}
     >
       {agent}
     </aside>
@@ -68,23 +72,24 @@ export function ProjectStudioShell({
     <div
       data-testid="project-studio-content"
       className={`relative grid h-full min-h-0 min-w-0 grid-cols-1 overflow-hidden ${inspectorOpen && !presentation
-        ? "xl:grid-cols-[minmax(640px,1fr)_minmax(224px,18vw)]"
+        ? "xl:grid-cols-[minmax(640px,1fr)_minmax(288px,20vw)]"
         : ""}`}
     >
       <section aria-label="Studio surface" className="min-h-0 min-w-0 overflow-hidden bg-background">{main}</section>
-      {inspectorOpen && !presentation && !narrowReachable ? (
-        <button
+      {inspectorOpen && !presentation && !narrowReachable && !narrowInspectorContentOwnsClose ? (
+        <IconButton
           ref={showInspectorRef}
           type="button"
-          className="absolute bottom-3 right-3 z-30 border border-border bg-sidebar px-2.5 py-1.5 text-[11px] font-medium text-foreground shadow-sm xl:hidden"
+          className="absolute right-0 top-1/2 z-30 -translate-y-1/2 rounded-r-none border-r-0 bg-background xl:hidden"
           aria-controls="project-studio-inspector"
           aria-expanded="false"
           aria-label={`Show ${inspectorToggleLabel}`}
+          title={`Show ${inspectorToggleLabel}`}
           inert={presentation ? true : undefined}
           onClick={() => setNarrowInspectorOpen(true)}
         >
-          Open {inspectorToggleLabel}
-        </button>
+          <PanelRightOpen aria-hidden className="size-3.5" />
+        </IconButton>
       ) : null}
       {inspectorOpen ? (
         <aside
@@ -94,21 +99,22 @@ export function ProjectStudioShell({
           hidden={presentation}
           data-narrow-reachable={narrowReachable || undefined}
           className={narrowReachable
-            ? "absolute inset-x-2 bottom-2 z-30 max-h-[min(70%,640px)] min-h-0 min-w-0 overflow-hidden border border-border bg-sidebar shadow-lg sm:left-auto sm:right-2 sm:w-[320px] xl:static xl:block xl:max-h-none xl:w-auto xl:border-y-0 xl:border-r-0 xl:shadow-none"
-            : "hidden min-h-0 min-w-0 overflow-hidden border-l border-border bg-sidebar/35 xl:block"}
+            ? "absolute inset-y-0 right-0 z-30 min-h-0 w-[min(360px,100%)] min-w-0 overflow-hidden border-l border-border bg-background xl:static xl:block xl:w-auto"
+            : "hidden min-h-0 min-w-0 overflow-hidden border-l border-border bg-background xl:block"}
         >
-          {narrowReachable ? (
-            <button
+          {narrowReachable && !narrowInspectorContentOwnsClose ? (
+            <IconButton
               ref={hideInspectorRef}
               type="button"
-              className="absolute right-2 top-2 z-10 border border-border bg-sidebar px-1.5 py-1 text-[10px] text-muted-foreground shadow-sm xl:hidden"
+              className="absolute left-0 top-1/2 z-10 -translate-y-1/2 rounded-l-none border-l-0 bg-background xl:hidden"
               aria-controls="project-studio-inspector"
               aria-expanded="true"
               aria-label={`Hide ${inspectorToggleLabel}`}
+              title={`Hide ${inspectorToggleLabel}`}
               onClick={() => setNarrowInspectorOpen(false)}
             >
-              Hide
-            </button>
+              <PanelRightClose aria-hidden className="size-3.5" />
+            </IconButton>
           ) : null}
           {inspector}
         </aside>
@@ -147,8 +153,8 @@ export function ProjectStudioShell({
         >
           <Panel
             id={PROJECT_STUDIO_AGENT_PANEL}
-            minSize="220px"
-            maxSize="420px"
+            minSize="236px"
+            maxSize="380px"
             groupResizeBehavior="preserve-pixel-size"
             hidden={presentation}
             style={{ overflow: "hidden" }}

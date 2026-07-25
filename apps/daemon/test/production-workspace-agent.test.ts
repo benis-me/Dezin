@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,9 @@ import { createProductionWorkspaceAgentOrchestrator } from "../src/orchestration
 const WORKSPACE_TURN_ID = "turn-00000000-0000-4000-8000-000000000010";
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
 const TEST_CODEBUDDY_EXECUTABLE = "/trusted/codebuddy/install/bin/codebuddy";
+const TEST_CODEX_EXECUTABLE = "/trusted/codex/install/bin/codex";
+const TEST_CURSOR_EXECUTABLE = "/trusted/cursor-agent/install/bin/cursor-agent";
+const TEST_GEMINI_EXECUTABLE = "/trusted/gemini/install/bin/gemini";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CLAUDE_AGENT = Object.freeze({
   providerId: "claude",
@@ -1957,34 +1960,351 @@ test("production scoped Artifact Agent bounds selection indexing across the comp
   assert.equal(queued, 0);
 });
 
-test("production Workspace Agent rejects a noncanonical selected provider before spawn", async (t) => {
+test("production Workspace Agent runs a selected Codex planner in empty scratch and deterministically compiles its semantic intent", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-provider-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
   t.after(() => store.close());
-  store.updateSettings({ agentCommand: "codex" });
+  store.updateSettings({
+    agentCommand: "codex",
+    apiKey: "selected-openai-key",
+    apiBaseUrl: "https://provider.example.test",
+  });
   const project = store.createProject({ name: "Workspace Agent provider boundary", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  let spawnCount = 0;
+  const semanticIntent = {
+    pages: [{
+      existingNodeId: null,
+      name: "Checkout",
+      instructions: "Focused checkout with realistic cart, address, payment, validation, loading, failure, and success states.",
+    }],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Create one coherent checkout Page while preserving the immutable Design Kernel.",
+    assumptions: ["The current product catalog remains available."],
+  };
+  let scratchWasEmptyAtSpawn = false;
+  const spawner = new RecordingSpawner(async (input) => {
+    scratchWasEmptyAtSpawn = existsSync(input.cwd) && readdirSync(input.cwd).length === 0;
+    return {
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-workspace-codex" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "message-workspace-codex",
+            type: "agent_message",
+            text: JSON.stringify(semanticIntent),
+          },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 10 },
+        }),
+      ].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
-    createSpawner() {
-      spawnCount += 1;
-      return new RecordingSpawner({ stdout: plannerResponse(), stderr: "", exitCode: 0 });
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "codex");
+      return TEST_CODEX_EXECUTABLE;
     },
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner() {
+      return spawner;
+    },
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.6-codex" },
+    turnId: WORKSPACE_TURN_ID,
+    message: "Plan a checkout flow.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(spawner.inputs.length, 1);
+  const spawned = spawner.inputs[0]!;
+  assert.equal(spawned.command, "/usr/bin/sandbox-exec");
+  assert.match(spawned.cwd, /workspace-agent-tmp\/turn-/);
+  assert.equal(scratchWasEmptyAtSpawn, true);
+  assert.ok(spawned.args.includes("--ephemeral"));
+  assert.equal(spawned.args[0], "-p");
+  assert.match(spawned.args[1] ?? "", /\(deny file-read-data \(subpath "\/Users"\)\)/);
+  assert.equal(spawned.args[2], TEST_CODEX_EXECUTABLE);
+  assert.equal(spawned.args[spawned.args.indexOf("--sandbox") + 1], "danger-full-access");
+  assert.ok(spawned.args.includes("--ignore-user-config"));
+  assert.ok(spawned.args.includes("--ignore-rules"));
+  assert.ok(spawned.args.includes("--json"));
+  assert.match(spawned.stdin, /compact semantic Workspace intent/i);
+  assert.match(spawned.stdin, /Plan a checkout flow/);
+  assert.equal(spawned.env?.OPENAI_API_KEY, "selected-openai-key");
+  assert.equal(spawned.env?.OPENAI_BASE_URL, "https://provider.example.test");
+  assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
+  assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+  assert.equal(existsSync(spawned.cwd), false, "the per-turn planner scratch is removed after terminalization");
+  assert.deepEqual(
+    result.kind === "proposal"
+      ? result.proposal.operations.flatMap((operation) => (
+          operation.type === "add-node" ? [{ kind: operation.node.kind, name: operation.node.name }] : []
+        ))
+      : [],
+    [{ kind: "page", name: "Checkout" }],
+  );
+  assert.equal(store.workspace.listProposals(project.id).length, 1);
+});
+
+test("production Workspace Agent compiles a Cursor component-only intent into a legal Component shelf plan", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-cursor-component-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Cursor component-only planner", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const semanticIntent = {
+    pages: [],
+    components: [{
+      existingNodeId: null,
+      name: "Filter Chip",
+      instructions: "Reusable filter chip with selected, unselected, hover, focus, disabled, and compact responsive states.",
+    }],
+    resources: [],
+    relations: [],
+    rationale: "Add the requested reusable primitive without manufacturing an unrelated Page.",
+    assumptions: [],
+  };
+  const spawner = new RecordingSpawner({
+    stdout: JSON.stringify(semanticIntent),
+    stderr: "",
+    exitCode: 0,
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "cursor-agent");
+      return TEST_CURSOR_EXECUTABLE;
+    },
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "cursor-agent", command: "cursor-agent", model: "gpt-5" },
+    turnId: "turn-00000000-0000-4000-8000-000000000041",
+    message: "Create only a reusable Filter Chip component.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  const spawned = spawner.inputs[0]!;
+  assert.deepEqual(spawned.args.slice(3, 8), [
+    "--output-format",
+    "text",
+    "--model",
+    "gpt-5",
+    "-p",
+  ]);
+  assert.equal(spawned.stdin, "");
+  const componentNode = result.proposal.operations.flatMap((operation) => (
+    operation.type === "add-node" && operation.node.kind === "component" ? [operation.node] : []
+  ))[0]!;
+  assert.equal(componentNode.name, "Filter Chip");
+  assert.deepEqual(
+    result.proposal.operations.flatMap((operation) => (
+      operation.type === "add-node" ? [operation.node.kind] : []
+    )),
+    ["component"],
+  );
+  assert.ok(result.proposal.layoutOperations.some((operation) => (
+    operation.type === "add-group"
+    && operation.groupId === "dezin-component-library"
+    && operation.label === "Components"
+  )));
+  assert.ok(result.proposal.layoutOperations.some((operation) => (
+    operation.type === "set-parent"
+    && operation.objectId === componentNode.id
+    && operation.parentGroupId === "dezin-component-library"
+  )));
+  assert.ok(result.proposal.layoutOperations.some((operation) => (
+    operation.type === "move" && operation.objectId === componentNode.id
+  )));
+  assert.deepEqual(
+    result.proposal.generation.kind === "workspace-generation"
+      ? {
+          artifactPlans: result.proposal.generation.artifactPlans.map((plan) => ({
+            kind: plan.kind,
+            name: plan.name,
+            instructions: plan.instructions,
+          })),
+          resourceOperations: result.proposal.generation.resourceOperations,
+        }
+      : null,
+    {
+      artifactPlans: [{
+        kind: "component",
+        name: "Filter Chip",
+        instructions: semanticIntent.components[0]!.instructions,
+      }],
+      resourceOperations: [],
+    },
+  );
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  assert.equal(compiled.plan.status, "queued");
+  assert.equal(compiled.tasks.filter((task) => task.kind === "component").length, 1);
+  assert.equal(compiled.tasks.filter((task) => task.kind === "page").length, 0);
+});
+
+test("production Workspace Agent compiles a generic resource-only intent into a legal root Resource plan", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-gemini-resource-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Gemini resource-only planner", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const semanticIntent = {
+    pages: [],
+    components: [],
+    resources: [{
+      existingNodeId: null,
+      operation: "generate",
+      kind: "research",
+      title: "Mobile commerce checkout research",
+    }],
+    relations: [],
+    rationale: "Research the requested problem before introducing any Page or Component.",
+    assumptions: [],
+  };
+  const spawner = new RecordingSpawner({
+    stdout: JSON.stringify(semanticIntent),
+    stderr: "",
+    exitCode: 0,
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "gemini");
+      return TEST_GEMINI_EXECUTABLE;
+    },
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "gemini", command: "gemini", model: "gemini-2.5-pro" },
+    turnId: "turn-00000000-0000-4000-8000-000000000042",
+    message: "Create only Research for the mobile checkout problem.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  const resourceNode = result.proposal.operations.flatMap((operation) => (
+    operation.type === "add-node" && operation.node.kind === "resource" ? [operation.node] : []
+  ))[0]!;
+  assert.equal(resourceNode.name, semanticIntent.resources[0]!.title);
+  assert.deepEqual(
+    result.proposal.operations.flatMap((operation) => (
+      operation.type === "add-node" ? [operation.node.kind] : []
+    )),
+    ["resource"],
+  );
+  assert.ok(!result.proposal.layoutOperations.some((operation) => operation.type === "add-group"));
+  assert.ok(result.proposal.layoutOperations.some((operation) => (
+    operation.type === "move"
+    && operation.objectId === resourceNode.id
+    && Number.isFinite(operation.x)
+    && Number.isFinite(operation.y)
+  )));
+  assert.deepEqual(
+    result.proposal.generation.kind === "workspace-generation"
+      ? {
+          artifactPlans: result.proposal.generation.artifactPlans,
+          resourceOperations: result.proposal.generation.resourceOperations.map((operation) => ({
+            operation: operation.operation,
+            kind: operation.kind,
+            title: operation.title,
+            revisionPolicy: operation.revisionPolicy,
+          })),
+        }
+      : null,
+    {
+      artifactPlans: [],
+      resourceOperations: [{
+        operation: "create",
+        kind: "research",
+        title: semanticIntent.resources[0]!.title,
+        revisionPolicy: { kind: "generate" },
+      }],
+    },
+  );
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  assert.equal(compiled.plan.status, "queued");
+  assert.equal(compiled.tasks.filter((task) => task.kind === "resource").length, 1);
+  assert.deepEqual(
+    compiled.tasks.map((task) => task.kind),
+    ["resource", "prototype-validation", "checkpoint"],
+  );
+});
+
+test("production Workspace Agent rejects a completely empty semantic intent", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-empty-semantic-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Empty semantic planner", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_GEMINI_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: JSON.stringify({
+        pages: [],
+        components: [],
+        resources: [],
+        relations: [],
+        rationale: "No requested work.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
   });
 
   await assert.rejects(orchestrator.turn({
     scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
     intent: "plan",
-    agent: { providerId: "codex", command: "codex", model: null },
-    turnId: WORKSPACE_TURN_ID,
-    message: "Plan a checkout flow.",
+    agent: { providerId: "gemini", command: "gemini", model: null },
+    turnId: "turn-00000000-0000-4000-8000-000000000043",
+    message: "Return no changes.",
     explicitContext: [],
     graphRevision: workspace.graphRevision,
-  }, new AbortController().signal), /canonical supported structured provider command/i);
-  assert.equal(spawnCount, 0);
+  }, new AbortController().signal), /at least one Page, Component, or Resource/i);
   assert.deepEqual(store.workspace.listProposals(project.id), []);
 });
 

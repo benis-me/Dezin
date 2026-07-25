@@ -67,10 +67,14 @@ describe("layout group node", () => {
     const onRenameGroup = vi.fn();
     const onToggleCollapsed = vi.fn();
     render(<LayoutGroupNode {...{
-      data: { ...data, onRenameGroup, onToggleCollapsed },
+      data: { ...data, zoomLevel: "overview", onRenameGroup, onToggleCollapsed },
       selected: true,
     } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
+    expect(screen.getByRole("group", { name: "Shared components group, 3 components" })).toHaveAttribute(
+      "data-selection-emphasis",
+      "overview",
+    );
     expect(screen.getByTestId("group-resizer")).toHaveAttribute("data-visible", "false");
     expect(screen.getByRole("toolbar", { name: "Group actions for Components" })).toMatchObject({
       dataset: expect.objectContaining({

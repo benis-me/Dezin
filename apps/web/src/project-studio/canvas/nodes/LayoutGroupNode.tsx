@@ -1,6 +1,7 @@
 import { NodeResizer, NodeToolbar, Position, type NodeProps } from "@xyflow/react";
 import { ChevronDown, ChevronRight, Component, Frame, Pencil } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Button, Input } from "../../../components/ui/index.ts";
 import type { WorkspaceFlowNode } from "../workspace-graph-adapter.ts";
 
 export function LayoutGroupNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
@@ -40,6 +41,8 @@ export function LayoutGroupNode({ data, selected }: NodeProps<WorkspaceFlowNode>
       data-selected={selected || undefined}
       data-collapsed={data.collapsed || undefined}
       data-role={data.groupRole ?? undefined}
+      data-zoom={data.zoomLevel}
+      data-selection-emphasis={data.zoomLevel === "overview" && selected ? "overview" : undefined}
       role="group"
       aria-label={componentLibrary
         ? `Shared components group, ${data.memberCount} ${data.memberCount === 1 ? "component" : "components"}`
@@ -63,7 +66,7 @@ export function LayoutGroupNode({ data, selected }: NodeProps<WorkspaceFlowNode>
         aria-label={`Group actions for ${data.name}`}
       >
         {!componentLibrary && (editing ? (
-          <input
+          <Input
             ref={inputRef}
             className="nodrag nopan nowheel dezin-flow-group__input"
             aria-label={`Rename group ${data.name}`}
@@ -84,18 +87,22 @@ export function LayoutGroupNode({ data, selected }: NodeProps<WorkspaceFlowNode>
             }}
           />
         ) : (
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             className="nodrag nopan dezin-flow-group__toolbar-action"
             onClick={startRename}
             aria-label={`Rename group ${data.name}`}
           >
             <Pencil size={13} aria-hidden />
             <span>Rename</span>
-          </button>
+          </Button>
         ))}
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           className="nodrag nopan dezin-flow-group__toolbar-action"
           aria-label={`${data.collapsed ? "Expand" : "Collapse"} group ${data.name}`}
           aria-expanded={!data.collapsed}
@@ -103,7 +110,7 @@ export function LayoutGroupNode({ data, selected }: NodeProps<WorkspaceFlowNode>
         >
           {data.collapsed ? <ChevronRight size={14} aria-hidden /> : <ChevronDown size={14} aria-hidden />}
           <span>{data.collapsed ? "Expand" : "Collapse"}</span>
-        </button>
+        </Button>
       </NodeToolbar>
       <div className="dezin-flow-group__header">
         {componentLibrary ? (

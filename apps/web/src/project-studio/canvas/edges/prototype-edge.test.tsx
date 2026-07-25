@@ -50,7 +50,7 @@ const baseProps = {
 } as unknown as EdgeProps<WorkspaceFlowEdge>;
 
 describe("prototype edge", () => {
-  test("routes non-self relations as one continuous curve", () => {
+  test("routes non-self relations as a calm orthogonal connector", () => {
     const geometry = prototypeEdgeGeometry({
       source: "page-home",
       target: "page-search",
@@ -62,9 +62,30 @@ describe("prototype edge", () => {
       targetPosition: Position.Left,
     });
 
-    expect(geometry.path).toContain("C");
+    expect(geometry.path).toContain("L");
+    expect(geometry.path).not.toContain("C");
     expect(geometry.labelX).toBeGreaterThan(280);
     expect(geometry.labelX).toBeLessThan(440);
+  });
+
+  test("routes symmetric parallel lanes on opposite sides of the direct path", () => {
+    const base = {
+      source: "page-home",
+      target: "page-search",
+      sourceX: 280,
+      sourceY: 111,
+      targetX: 440,
+      targetY: 111,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+    } as const;
+
+    const upper = prototypeEdgeGeometry({ ...base, lane: -0.5 });
+    const lower = prototypeEdgeGeometry({ ...base, lane: 0.5 });
+
+    expect(upper.path).not.toBe(lower.path);
+    expect(upper.labelY).toBeLessThan(111);
+    expect(lower.labelY).toBeGreaterThan(111);
   });
 
   test("separates sibling self-loop lanes above and below the page", () => {
@@ -96,6 +117,14 @@ describe("prototype edge", () => {
     render(<PrototypeEdge {...baseProps} />);
 
     expect(screen.getByTestId("prototype-path").style.strokeDasharray).toBe("");
+  });
+
+  test("keeps the halo and foreground stroke widths stable while the canvas zooms", () => {
+    render(<PrototypeEdge {...baseProps} />);
+
+    expect(screen.getByTestId("prototype-halo").style.stroke).toBe("var(--dezin-canvas-plane, var(--background))");
+    expect(screen.getByTestId("prototype-halo").style.vectorEffect).toBe("non-scaling-stroke");
+    expect(screen.getByTestId("prototype-path").style.vectorEffect).toBe("non-scaling-stroke");
   });
 
   test("uses a semantic direction mark instead of a decorative status dot", () => {

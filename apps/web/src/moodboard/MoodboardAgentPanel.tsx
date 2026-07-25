@@ -8,11 +8,10 @@ import {
   upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
-import { AgentOutputText } from "../components/AgentOutputText.tsx";
+import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
-import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { cn } from "../lib/utils.ts";
@@ -555,10 +554,8 @@ function MoodboardMessageRow({
 }) {
   if (message.role === "user") {
     return (
-      <div className="group/moodboard-user flex flex-col items-end gap-1.5" data-message-kind="user">
-        <div className="dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
-          <Markdown className="space-y-1.5 text-foreground">{message.content}</Markdown>
-        </div>
+      <div className="group/moodboard-user flex flex-col items-end gap-1.5">
+        <AgentMessageBody role="user" content={message.content} />
         <TooltipProvider delayDuration={120}>
           <div className="-mt-0.5 flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover/moodboard-user:opacity-100 focus-within:opacity-100">
             <Tooltip>
@@ -577,9 +574,7 @@ function MoodboardMessageRow({
 
   return (
     <div className="group/moodboard-assistant -mx-2 rounded-xl px-2 py-1">
-      <div data-message-kind="assistant" className="dz-selectable text-sm leading-relaxed text-foreground">
-        <AgentOutputText text={message.content} />
-      </div>
+      <AgentMessageBody role="assistant" content={message.content} />
       {!busy ? (
         <TooltipProvider delayDuration={120}>
           <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/moodboard-assistant:opacity-100 focus-within:opacity-100">

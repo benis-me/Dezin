@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { Check, ChevronDown, CircleAlert, RotateCw } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger, Spinner } from "./ui/index.ts";
+import { lazy, Suspense, useState } from "react";
+import { ChevronDown, CircleAlert } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/index.ts";
 import { AgentLogo, agentLabel } from "./agent-logos.tsx";
-import { cn } from "../lib/utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { agentAvailabilityReason, selectableAgents } from "../lib/agent-availability.ts";
+
+const AgentModelSelectContent = lazy(() => import("./AgentModelSelectContent.tsx"));
 
 /**
  * Combined agent + model picker. The panel mirrors Settings → Provider: a grid of the
@@ -30,28 +31,21 @@ export function AgentModelSelect({
   dropUp?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [scanning, setScanning] = useState(false);
-
   const selectable = selectableAgents(agents);
   const current = agents.find((a) => a.command === agent);
   const currentUnavailableReason = current
     ? agentAvailabilityReason(current) ?? agentDisabledReason?.(current) ?? null
     : null;
   const models = current?.available && currentUnavailableReason === null ? current.models : [];
-
-  const rescan = async (): Promise<void> => {
-    setScanning(true);
-    try {
-      await onRescan();
-    } finally {
-      setScanning(false);
-    }
-  };
+  const currentSelectionLabel = current
+    ? `${agentLabel(current.id)}${model ? `, ${model}` : ""}`
+    : "No Agent selected";
 
   return (
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
         aria-label="Agent and model"
+        aria-description={`Current Agent and model: ${currentSelectionLabel}`}
         title={currentUnavailableReason ?? undefined}
         className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
@@ -64,82 +58,23 @@ export function AgentModelSelect({
       <PopoverContent
         side={dropUp ? "top" : "bottom"}
         align="start"
+        aria-label="Choose Agent and model"
         className="w-80 max-w-[calc(100vw-16px)] overflow-y-auto p-2"
       >
-        <p className="label-mono px-0.5 pb-1.5">Agent</p>
-        {selectable.length === 0 ? (
-          <p className="px-1 py-4 text-center text-xs text-muted-foreground">No agents detected.</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-1.5">
-            {selectable.map((a) => {
-              const selected = a.command === agent;
-              const disabledReason = agentAvailabilityReason(a) ?? agentDisabledReason?.(a) ?? null;
-              return (
-                <button
-                  key={a.id}
-                  type="button"
-                  disabled={disabledReason !== null}
-                  title={disabledReason ?? undefined}
-                  onClick={() => {
-                    onAgentChange(a.command);
-                  }}
-                  className={cn(
-                    "relative flex flex-col gap-1.5 rounded-lg border p-2 text-left transition-colors",
-                    selected ? "border-ring bg-surface ring-1 ring-ring/30" : "border-border hover:bg-surface-2/60",
-                    disabledReason && "cursor-not-allowed opacity-55 hover:bg-transparent",
-                  )}
-                >
-                  {selected ? <Check size={12} strokeWidth={2.5} className="absolute right-1.5 top-1.5 text-foreground" /> : null}
-                  <span className="grid size-7 place-items-center rounded-md bg-surface-2 text-foreground">
-                    <AgentLogo id={a.id} className="size-4" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block truncate text-xs font-medium leading-tight">{agentLabel(a.id)}</span>
-                    {a.version ? <span className="block truncate text-[10px] text-muted-foreground">{a.version.slice(0, 18)}</span> : null}
-                    {disabledReason ? (
-                      <span className="mt-0.5 block text-[9px] leading-3 text-muted-foreground">
-                        {disabledReason}
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {models.length > 0 ? (
-          <>
-            <p className="label-mono px-0.5 pb-1.5 pt-3">Model</p>
-            <div className="flex max-h-44 flex-wrap gap-1 overflow-y-auto pr-0.5">
-              {["", ...models].map((m) => (
-                <button
-                  key={m || "default"}
-                  type="button"
-                  onClick={() => onModelChange(m)}
-                  className={cn(
-                    "rounded-md border px-2 py-1 text-xs font-medium transition-colors",
-                    model === m ? "border-ring bg-surface text-foreground ring-1 ring-inset ring-ring/30" : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
-                  )}
-                >
-                  {m || "Default"}
-                </button>
-              ))}
-            </div>
-          </>
-        ) : null}
-
-        <div className="mt-2.5 border-t border-border/60 pt-1.5">
-          <button
-            type="button"
-            onClick={() => void rescan()}
-            disabled={scanning}
-            className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
-          >
-            {scanning ? <Spinner size={13} /> : <RotateCw size={13} strokeWidth={1.75} />}
-            {scanning ? "Scanning…" : "Rescan agents"}
-          </button>
-        </div>
+        <Suspense
+          fallback={<p className="px-1 py-5 text-center text-xs text-muted-foreground">Loading agents…</p>}
+        >
+          <AgentModelSelectContent
+            agents={selectable}
+            agent={agent}
+            model={model}
+            models={models}
+            onAgentChange={onAgentChange}
+            onModelChange={onModelChange}
+            onRescan={onRescan}
+            agentDisabledReason={agentDisabledReason}
+          />
+        </Suspense>
       </PopoverContent>
     </Popover>
   );

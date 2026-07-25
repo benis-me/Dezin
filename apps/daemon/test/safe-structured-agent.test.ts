@@ -20,7 +20,9 @@ import type {
 import {
   isTrustedCodeBuddyExecutablePath,
   isTrustedClaudeExecutablePath,
+  parseSafeStructuredCodexJsonl,
   parseSafeStructuredClaudeStream,
+  resolveRegisteredProviderExecutable,
   runSafeStructuredAgent,
   SafeStructuredAgentError,
   safeStructuredClaudeArgs,
@@ -28,6 +30,8 @@ import {
 
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
 const TEST_CODEBUDDY_EXECUTABLE = "/trusted/codebuddy/install/bin/codebuddy";
+const TEST_CODEX_EXECUTABLE = "/trusted/codex/install/bin/codex";
+const TEST_CURSOR_EXECUTABLE = "/trusted/cursor-agent/install/bin/cursor-agent";
 const resolveTestClaudeExecutable = () => TEST_CLAUDE_EXECUTABLE;
 
 class RecordingSpawner implements ProcessSpawner {
@@ -80,6 +84,7 @@ test("hard no-tools structured transport runs CodeBuddy with the requested model
     command: "codebuddy",
     model: "gpt-5.6-terra",
   }), {
+    platform: "darwin",
     createSpawner() {
       return spawner;
     },
@@ -103,6 +108,218 @@ test("hard no-tools structured transport runs CodeBuddy with the requested model
   assert.ok(spawned.args.includes("--strict-mcp-config"));
   assert.ok(spawned.args.includes("--no-session-persistence"));
   assert.ok(!spawned.args.some((argument) => /bypass|danger|yolo/i.test(argument)));
+});
+
+test("registry structured transport runs Codex inside outer confinement and extracts only its terminal JSONL message", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const inputs: SpawnInput[] = [];
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      inputs.push(input);
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-test" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "reasoning-1", type: "reasoning", text: "private reasoning" },
+          }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: '{"pages":[]}' },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 12, cached_input_tokens: 0, output_tokens: 4 },
+          }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    model: "gpt-5.6-codex",
+    cwd: scratch,
+    env: {
+      OPENAI_API_KEY: "selected-provider-key",
+      OPENAI_BASE_URL: "https://provider.example.test",
+      DEZIN_DAEMON_TOKEN: undefined,
+    },
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "codex");
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.deepEqual(result, { providerId: "codex", text: '{"pages":[]}' });
+  assert.equal(inputs.length, 1);
+  const spawned = inputs[0]!;
+  assert.equal(spawned.command, "/usr/bin/sandbox-exec");
+  assert.equal(spawned.cwd, scratch);
+  assert.equal(spawned.args[0], "-p");
+  const profile = spawned.args[1] ?? "";
+  assert.match(profile, /\(deny file-read-data \(subpath "\/Users"\)\)/);
+  assert.match(profile, /\(deny file-read-data \(subpath "\/private\/tmp"\)\)/);
+  assert.match(profile, /\(deny file-read-data \(subpath "\/Volumes"\)\)/);
+  assert.match(profile, new RegExp(`\\(subpath "${scratch.replaceAll("\\", "\\\\")}"\\)`));
+  assert.match(profile, /subpath "\/trusted\/codex\/install\/bin"/);
+  assert.match(profile, /\.codex/);
+  assert.doesNotMatch(profile, new RegExp(`${process.env.HOME ?? "/Users/test"}/Documents`));
+  assert.equal(spawned.args[2], TEST_CODEX_EXECUTABLE);
+  assert.deepEqual(spawned.args.slice(3, 5), ["exec", "--skip-git-repo-check"]);
+  assert.equal(spawned.args[spawned.args.indexOf("--sandbox") + 1], "danger-full-access");
+  assert.equal(spawned.args[spawned.args.indexOf("--model") + 1], "gpt-5.6-codex");
+  assert.ok(spawned.args.includes("--ephemeral"));
+  assert.ok(spawned.args.includes("--ignore-user-config"));
+  assert.ok(spawned.args.includes("--ignore-rules"));
+  assert.ok(spawned.args.includes("--json"));
+  assert.ok(spawned.args.includes("-"), "Codex prompt must be delivered over stdin");
+  assert.match(spawned.stdin, /Return one JSON object/);
+  assert.match(spawned.stdin, /Plan this exact workspace/);
+  assert.equal(spawned.env?.OPENAI_API_KEY, "selected-provider-key");
+  assert.equal(spawned.env?.OPENAI_BASE_URL, "https://provider.example.test");
+  assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
+  assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+});
+
+test("registry generic structured adapter invokes Gemini one-shot in an empty scratch with a restricted environment", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-gemini-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const inputs: SpawnInput[] = [];
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      inputs.push(input);
+      return { stdout: '  {"pages":[]}  \n', stderr: "", exitCode: 0 };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "gemini",
+    model: "gemini-2.5-pro",
+    cwd: scratch,
+    env: {
+      GEMINI_API_KEY: "selected-provider-key",
+      DEZIN_DAEMON_TOKEN: undefined,
+    },
+  }), {
+    createSpawner() {
+      return spawner;
+    },
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "gemini");
+      return "/trusted/gemini/install/bin/gemini";
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.deepEqual(result, { providerId: "gemini", text: '{"pages":[]}' });
+  assert.equal(inputs.length, 1);
+  const spawned = inputs[0]!;
+  assert.equal(spawned.command, "/usr/bin/sandbox-exec");
+  assert.equal(spawned.cwd, scratch);
+  assert.equal(spawned.stdin, "");
+  assert.equal(spawned.args[0], "-p");
+  const profile = spawned.args[1] ?? "";
+  assert.match(profile, /\(deny file-read-data \(subpath "\/Users"\)\)/);
+  assert.match(profile, /\(deny file-read-data \(subpath "\/private\/tmp"\)\)/);
+  assert.match(profile, /\(deny file-read-data \(subpath "\/Volumes"\)\)/);
+  assert.match(profile, new RegExp(`\\(subpath "${scratch.replaceAll("\\", "\\\\")}"\\)`));
+  assert.match(profile, /subpath "\/trusted\/gemini\/install\/bin"/);
+  assert.doesNotMatch(profile, new RegExp(`${process.env.HOME ?? "/Users/test"}/Documents`));
+  assert.equal(spawned.args[2], "/trusted/gemini/install/bin/gemini");
+  assert.equal(spawned.args[spawned.args.indexOf("-m") + 1], "gemini-2.5-pro");
+  assert.match(spawned.args[spawned.args.lastIndexOf("-p") + 1] ?? "", /Return one JSON object/);
+  assert.match(spawned.args[spawned.args.lastIndexOf("-p") + 1] ?? "", /Plan this exact workspace/);
+  assert.equal(spawned.env?.GEMINI_API_KEY, "selected-provider-key");
+  assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
+  assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+  assert.equal(spawned.env?.TMPDIR, scratch);
+});
+
+test("registry structured transport forces Cursor Agent terminal text into the strict response parser", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-cursor-agent-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const inputs: SpawnInput[] = [];
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      inputs.push(input);
+      return { stdout: '  {"pages":[],"components":[{"name":"Card"}]}  \n', stderr: "", exitCode: 0 };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "cursor-agent",
+    model: "gpt-5",
+    cwd: scratch,
+    env: { DEZIN_DAEMON_TOKEN: undefined },
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveRegisteredExecutable(command) {
+      assert.equal(command, "cursor-agent");
+      return TEST_CURSOR_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.deepEqual(result, {
+    providerId: "cursor-agent",
+    text: '{"pages":[],"components":[{"name":"Card"}]}',
+  });
+  assert.equal(inputs.length, 1);
+  const spawned = inputs[0]!;
+  assert.equal(spawned.command, "/usr/bin/sandbox-exec");
+  assert.equal(spawned.args[2], TEST_CURSOR_EXECUTABLE);
+  assert.deepEqual(spawned.args.slice(3, 8), [
+    "--output-format",
+    "text",
+    "--model",
+    "gpt-5",
+    "-p",
+  ]);
+  assert.match(spawned.args[8] ?? "", /Return one JSON object/);
+  assert.match(spawned.args[8] ?? "", /Plan this exact workspace/);
+  assert.equal(spawned.stdin, "");
+});
+
+test("registry generic structured adapter fails closed when an outer confinement capability is unavailable", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-generic-unsupported-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let spawns = 0;
+  await assert.rejects(
+    runSafeStructuredAgent(request({
+      command: "gemini",
+      cwd: scratch,
+      env: { DEZIN_DAEMON_TOKEN: undefined },
+    }), {
+      platform: "linux",
+      resolveRegisteredExecutable: () => "/trusted/gemini/install/bin/gemini",
+      createSpawner() {
+        spawns += 1;
+        return new RecordingSpawner();
+      },
+    }),
+    /outer filesystem confinement.*unavailable|requires macOS Seatbelt/i,
+  );
+  assert.equal(spawns, 0);
 });
 
 test("CodeBuddy structured transport retries bounded transient remote 5xx failures within one deadline", async () => {
@@ -595,6 +812,20 @@ test("trusted CodeBuddy executable policy accepts only its fixed official packag
   assert.equal(isTrustedCodeBuddyExecutablePath(realpathSync(externalCli), trustedHome), false);
 });
 
+test("registered structured providers resolve from the same fixed Bun toolchain root used by Agent scan", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-registered-provider-bun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const executable = join(home, ".bun", "bin", "gemini");
+  mkdirSync(join(executable, ".."), { recursive: true });
+  writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+  assert.equal(
+    resolveRegisteredProviderExecutable("gemini", home),
+    realpathSync(executable),
+  );
+});
+
 test("hard no-tools structured transport passes only a minimal credential environment", async (t) => {
   const previousSecret = process.env.DEZIN_TEST_AMBIENT_SECRET;
   const previousPath = process.env.PATH;
@@ -715,6 +946,33 @@ test("safe Claude stream parser rejects protocol noise, tool use, missing status
   assert.throws(
     () => parseSafeStructuredClaudeStream('{"type":"result","subtype":"success","result":"{}","is_error":false}\n{"type":"system","subtype":"late"}'),
     /events after.*terminal/i,
+  );
+});
+
+test("safe Codex JSONL parser rejects incomplete, ambiguous, and post-terminal envelopes", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: "{}" },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([turn, message, terminal].join("\n")),
+    /malformed turn start/i,
+  );
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, message, message, terminal].join("\n")),
+    /exactly one completed Agent message/i,
+  );
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, message, terminal, '{"type":"turn.started"}'].join("\n")),
+    /events after.*terminal/i,
+  );
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, message].join("\n")),
+    /no completed terminal turn/i,
   );
 });
 

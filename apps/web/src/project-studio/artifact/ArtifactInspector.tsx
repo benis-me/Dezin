@@ -1,5 +1,15 @@
 import { AlignCenter, AlignLeft, AlignRight, Braces, Layers3, Link2, LockKeyhole, Type } from "lucide-react";
 import { useEffect, useState } from "react";
+import {
+  Button,
+  Input,
+  StudioFactRow,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioInspectorSection,
+  StudioPanelHeader,
+  Textarea,
+} from "../../components/ui/index.ts";
 import type { ArtifactEditorController } from "./ArtifactEditorSurface.tsx";
 
 export function ArtifactInspector({ editor }: { editor: ArtifactEditorController }) {
@@ -20,51 +30,78 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
     && editor.frameState.frameId === editor.activeFrame.id;
   return (
     <section className="artifact-inspector" aria-labelledby="artifact-inspector-title">
-      <header className="artifact-inspector__header app-drag">
-        <div>
-          <h2 id="artifact-inspector-title">Inspector</h2>
-          <p>{editor.artifact?.kind === "component" ? "Component properties" : "Page properties"}</p>
-        </div>
+      <StudioPanelHeader draggable className="artifact-inspector__header">
+        <StudioHeaderCopy
+          title="Inspector"
+          subtitle={editor.artifact?.kind === "component" ? "Component properties" : "Page properties"}
+          titleId="artifact-inspector-title"
+          headingLevel={2}
+        />
         {selection ? (
-          <button type="button" className="app-no-drag" onClick={editor.clearSelection}>Clear</button>
+          <StudioHeaderActions>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={editor.clearSelection}
+            >
+              Clear
+            </Button>
+          </StudioHeaderActions>
         ) : null}
-      </header>
+      </StudioPanelHeader>
 
-      {editor.preview.readOnly ? (
-        <div role="status" aria-label="Historical preview is read-only" className="artifact-inspector__readonly">
-          <LockKeyhole aria-hidden size={14} />
-          <span>This exact Revision is immutable. Restore it as a new Revision or fork a Track; saved history is never rewritten.</span>
-        </div>
-      ) : null}
+      <div className="artifact-inspector__body">
+        {editor.preview.readOnly ? (
+          <div role="status" aria-label="Historical preview is read-only" className="artifact-inspector__readonly">
+            <LockKeyhole aria-hidden size={14} />
+            <span>This exact Revision is immutable. Restore it as a new Revision or fork a Track; saved history is never rewritten.</span>
+          </div>
+        ) : null}
 
-      <section className="artifact-inspector__section" aria-labelledby="artifact-outline-title">
-        <h3 id="artifact-outline-title"><Layers3 aria-hidden size={13} /> Outline</h3>
-        <div className="artifact-outline-row">
-          <span>{editor.artifact?.kind === "component" ? "Master" : "Frame"}</span>
-          <strong>{editor.artifact?.name ?? "Unavailable"}</strong>
-        </div>
-        <div className="artifact-outline-row">
-          <span>Source root</span>
-          <code>{editor.artifact?.sourceRoot ?? "—"}</code>
-        </div>
-      </section>
+        <StudioInspectorSection
+          className="artifact-inspector__section"
+          heading="Outline"
+          headingId="artifact-outline-title"
+          icon={<Layers3 aria-hidden size={13} />}
+        >
+          <dl className="divide-y divide-border">
+            <StudioFactRow
+              label={editor.artifact?.kind === "component" ? "Master" : "Frame"}
+              value={editor.artifact?.name ?? "Unavailable"}
+              valueClassName="font-medium"
+            />
+            <StudioFactRow
+              label="Source root"
+              value={editor.artifact?.sourceRoot ?? "—"}
+              metadata
+              mono
+            />
+          </dl>
+        </StudioInspectorSection>
 
-      <section className="artifact-inspector__section" aria-labelledby="artifact-selection-title">
-        <h3 id="artifact-selection-title"><Braces aria-hidden size={13} /> Selection</h3>
+      <StudioInspectorSection
+        className="artifact-inspector__section"
+        heading="Selection"
+        headingId="artifact-selection-title"
+        icon={<Braces aria-hidden size={13} />}
+      >
         {selection === null ? (
           <div className="artifact-inspector__empty">
             <p>{editor.notGenerated
               ? "Generate this Artifact before selecting and editing elements."
               : "Choose an element in the live preview. Its stable locator becomes typed Agent Context and unlocks bounded direct edits."}</p>
-            <button
+            <Button
               type="button"
+              size="sm"
+              variant="outline"
               disabled={!pickerReady}
               onClick={editor.beginSelection}
               aria-pressed={editor.pickerActive}
               aria-label="Select an element in the preview"
             >
               {editor.pickerActive ? "Picker active" : "Select in preview"}
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="artifact-selection-card">
@@ -82,16 +119,21 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
             ) : null}
           </div>
         )}
-      </section>
+      </StudioInspectorSection>
 
       {selection ? (
-        <section className="artifact-inspector__section artifact-inspector__properties" aria-labelledby="artifact-properties-title">
-          <h3 id="artifact-properties-title"><Type aria-hidden size={13} /> Direct properties</h3>
+        <StudioInspectorSection
+          className="artifact-inspector__section artifact-inspector__properties"
+          heading="Direct properties"
+          headingId="artifact-properties-title"
+          icon={<Type aria-hidden size={13} />}
+        >
           <label>
             <span>Text content</span>
-            <textarea
+            <Textarea
               data-artifact-mutation
               aria-label="Text content"
+              className="min-h-20"
               value={textDraft}
               disabled={textMutationDisabled}
               rows={3}
@@ -115,7 +157,7 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
           </label>
           <label>
             <span>Accessible label</span>
-            <input
+            <Input
               data-artifact-mutation
               aria-label="Accessible label"
               value={labelDraft}
@@ -135,15 +177,17 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
           <label>
             <span>Color token</span>
             <div className="artifact-property-inline">
-              <input
+              <Input
                 data-artifact-mutation
                 aria-label="Color token"
                 value={tokenDraft}
                 disabled={mutationDisabled}
                 onChange={(event) => setTokenDraft(event.target.value)}
               />
-              <button
+              <Button
                 type="button"
+                size="sm"
+                variant="outline"
                 data-artifact-mutation
                 disabled={mutationDisabled || tokenDraft.trim().length === 0}
                 onClick={() => void editor.applyMutation({
@@ -154,7 +198,7 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
                 })}
               >
                 Apply
-              </button>
+              </Button>
             </div>
           </label>
           <fieldset disabled={mutationDisabled}>
@@ -165,9 +209,11 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
                 ["center", AlignCenter, "Align center"],
                 ["end", AlignRight, "Align end"],
               ] as const).map(([alignment, Icon, label]) => (
-                <button
+                <Button
                   key={alignment}
                   type="button"
+                  size="sm"
+                  variant="ghost"
                   data-artifact-mutation
                   aria-label={label}
                   disabled={mutationDisabled}
@@ -178,31 +224,46 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
                   })}
                 >
                   <Icon aria-hidden size={14} />
-                </button>
+                </Button>
               ))}
             </div>
           </fieldset>
-        </section>
+        </StudioInspectorSection>
       ) : null}
 
-      <section className="artifact-inspector__section" aria-labelledby="artifact-context-title">
-        <h3 id="artifact-context-title"><Link2 aria-hidden size={13} /> Context</h3>
-        <dl className="artifact-context-list">
-          <div><dt>Track</dt><dd>{editor.tracks.find((track) => track.id === editor.artifact?.activeTrackId)?.name ?? "Main"}</dd></div>
-          <div><dt>Revision</dt><dd>{editor.revision ? `r${editor.revision.sequence}` : "Unpublished"}</dd></div>
-          <div>
-            <dt>Dependencies</dt>
-            <dd>{editor.notGenerated
+      <StudioInspectorSection
+        className="artifact-inspector__section"
+        heading="Context"
+        headingId="artifact-context-title"
+        icon={<Link2 aria-hidden size={13} />}
+      >
+        <dl className="divide-y divide-border">
+          <StudioFactRow
+            label="Track"
+            value={editor.tracks.find((track) => track.id === editor.artifact?.activeTrackId)?.name ?? "Main"}
+          />
+          <StudioFactRow
+            label="Revision"
+            value={editor.revision ? `r${editor.revision.sequence}` : "Unpublished"}
+            metadata={editor.revision != null}
+            mono={editor.revision != null}
+          />
+          <StudioFactRow
+            label="Dependencies"
+            value={editor.notGenerated
               ? "Not available"
-              : editor.preview.resolved?.dependencyLockHash.slice(0, 8) ?? "Resolving"}</dd>
-          </div>
+              : editor.preview.resolved?.dependencyLockHash.slice(0, 8) ?? "Resolving"}
+            metadata={!editor.notGenerated && editor.preview.resolved != null}
+            mono={!editor.notGenerated && editor.preview.resolved != null}
+          />
         </dl>
-      </section>
+      </StudioInspectorSection>
 
-      <div className="artifact-inspector__save" aria-live="polite">
-        {editor.mutationState.status === "saving" ? "Publishing direct edit…" : null}
-        {editor.mutationState.status === "saved" ? `Saved as Revision ${editor.mutationState.revisionSequence}` : null}
-        {editor.mutationState.status === "error" ? <span role="alert">{editor.mutationState.message}</span> : null}
+        <div className="artifact-inspector__save" aria-live="polite">
+          {editor.mutationState.status === "saving" ? "Publishing direct edit…" : null}
+          {editor.mutationState.status === "saved" ? `Saved as Revision ${editor.mutationState.revisionSequence}` : null}
+          {editor.mutationState.status === "error" ? <span role="alert">{editor.mutationState.message}</span> : null}
+        </div>
       </div>
     </section>
   );

@@ -64,10 +64,10 @@ const layout: WorkspaceLayout = {
 };
 
 test("semantic zoom uses the exact overview, compact, and full boundaries", () => {
-  expect(semanticZoomLevel(0.3799)).toBe("overview");
-  expect(semanticZoomLevel(0.38)).toBe("compact");
-  expect(semanticZoomLevel(0.7199)).toBe("compact");
-  expect(semanticZoomLevel(0.72)).toBe("full");
+  expect(semanticZoomLevel(0.4999)).toBe("overview");
+  expect(semanticZoomLevel(0.5)).toBe("compact");
+  expect(semanticZoomLevel(0.7999)).toBe("compact");
+  expect(semanticZoomLevel(0.8)).toBe("full");
 });
 
 test("adapter uses immutable revision thumbnails, parent-relative layout, and stable outer sizes", () => {
@@ -606,7 +606,18 @@ test("prototype edges use only side routing handles for forward, vertical, and r
     .edges.find((edge) => edge.id === "prototype-1")!;
   expect(forward.sourceHandle).toBe("page-source-right");
   expect(forward.targetHandle).toBe("page-target-left");
-  expect(forward.markerEnd).toMatchObject({ width: 12, height: 12 });
+  expect(forward.markerEnd).toMatchObject({
+    width: 12,
+    height: 12,
+    color: "var(--muted-foreground)",
+  });
+
+  const selectedForward = workspaceGraphToFlow(graph, layout, {
+    zoom: 1,
+    edgeFilter: "flow",
+    selectedEdgeIds: new Set(["prototype-1"]),
+  }).edges.find((edge) => edge.id === "prototype-1")!;
+  expect(selectedForward.markerEnd).toMatchObject({ color: "var(--foreground)" });
 
   const verticalLayout: WorkspaceLayout = {
     ...layout,

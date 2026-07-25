@@ -1,5 +1,6 @@
 import { Component, ImageOff, LoaderCircle, PanelTop, RotateCcw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "../../../components/ui/index.ts";
 import type { ApiClient } from "../../../lib/api.ts";
 import { useApi } from "../../../lib/api-context.tsx";
 import type { SemanticZoomLevel, WorkspaceFlowNodeData } from "../workspace-graph-adapter.ts";
@@ -164,13 +165,33 @@ export function ArtifactNodePreview({
   const [request, setRequest] = useState<ThumbnailRequestState>(IDLE_REQUEST);
   const [loadedObjectUrl, setLoadedObjectUrl] = useState<string | null>(null);
   const [failedObjectUrl, setFailedObjectUrl] = useState<string | null>(null);
-  const enabled = zoomLevel !== "overview"
-    && projectId !== null
+  const previewRef = useRef<HTMLDivElement>(null);
+  const hasPublishedRevision = projectId !== null
     && artifactId !== null
     && revisionId !== null;
+  const [hasEnteredPreloadMargin, setHasEnteredPreloadMargin] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
+  const enabled = hasPublishedRevision && hasEnteredPreloadMargin;
   const requestKey = enabled
     ? `${projectId}\u0000${artifactId}\u0000${revisionId}\u0000${attempt}`
     : "idle";
+
+  useEffect(() => {
+    if (!hasPublishedRevision || hasEnteredPreloadMargin) return;
+    const preview = previewRef.current;
+    if (preview === null || typeof IntersectionObserver === "undefined") {
+      setHasEnteredPreloadMargin(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setHasEnteredPreloadMargin(true);
+      observer.disconnect();
+    }, { rootMargin: "480px" });
+    observer.observe(preview);
+    return () => observer.disconnect();
+  }, [hasEnteredPreloadMargin, hasPublishedRevision]);
 
   useEffect(() => {
     if (!enabled || projectId === null || artifactId === null || revisionId === null) {
@@ -214,9 +235,7 @@ export function ArtifactNodePreview({
   const unpublishedState = generationState === "awaiting-selection" || generationState === "idle"
     ? "empty"
     : generationState;
-  const visualState = zoomLevel === "overview"
-    ? "idle"
-    : revisionId === null
+  const visualState = revisionId === null
       ? unpublishedState
     : visibleRequest.status === "error" || imageFailed
       ? "error"
@@ -225,7 +244,7 @@ export function ArtifactNodePreview({
         : "loading";
   const KindIcon = artifactKind === "page" ? PanelTop : Component;
   const kindLabel = artifactKind === "page" ? "Page" : "Component";
-  const quietLoading = zoomLevel === "compact";
+  const quietLoading = zoomLevel !== "full";
   const previewMessage = useMemo(() => {
     if (visualState === "empty") return "Not generated";
     if (visualState === "queued") return "Queued for generation";
@@ -239,23 +258,10 @@ export function ArtifactNodePreview({
     return null;
   }, [generationState, visualState]);
 
-  if (zoomLevel === "overview") {
-    return (
-      <div
-        className="dezin-flow-card__preview dezin-flow-card__preview--overview"
-        data-artifact-kind={artifactKind}
-        data-state="overview"
-        role="group"
-        aria-label={`${kindLabel} artifact`}
-      >
-        <span className="dezin-flow-card__kind"><KindIcon size={11} aria-hidden /> {kindLabel}</span>
-      </div>
-    );
-  }
-
   return (
     <div
-      className="dezin-flow-card__preview"
+      ref={previewRef}
+      className={`dezin-flow-card__preview${zoomLevel === "overview" ? " dezin-flow-card__preview--overview" : ""}`}
       data-artifact-kind={artifactKind}
       data-state={visualState}
       role="group"
@@ -276,6 +282,12 @@ export function ArtifactNodePreview({
           onError={() => setFailedObjectUrl(visibleRequest.objectUrl)}
         />
       )}
+      {zoomLevel === "overview" ? (
+        <span className="dezin-flow-card__kind dezin-flow-card__overview-kind">
+          <KindIcon size={11} aria-hidden />
+          {kindLabel}
+        </span>
+      ) : null}
       {visualState !== "ready" && (
         <div
           className="dezin-flow-card__placeholder"
@@ -294,8 +306,10 @@ export function ArtifactNodePreview({
             <small title={generationMessage}>{generationMessage}</small>
           ) : null}
           {visualState === "error" && (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="xs"
               className="nodrag nopan dezin-flow-card__preview-retry"
               aria-label={`Retry ${name} preview`}
               onPointerDown={(event) => event.stopPropagation()}
@@ -310,7 +324,7 @@ export function ArtifactNodePreview({
             >
               <RotateCcw size={11} aria-hidden />
               Retry
-            </button>
+            </Button>
           )}
         </div>
       )}

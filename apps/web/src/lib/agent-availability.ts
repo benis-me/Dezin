@@ -1,23 +1,4 @@
-import type { AgentInfo, ProjectMode } from "./api.ts";
-
-export type AgentCapabilityMode = ProjectMode | "design-workspace";
-
-const STANDARD_AGENT_IDS = new Set(["claude", "codebuddy"]);
-
-/**
- * Standard projects and their Design Workspace need agents that support the
- * structured multi-artifact generation contract. Prototype keeps the broader
- * ready-agent surface because it only produces a self-contained artifact.
- */
-export function agentModeDisabledReason(
-  agent: AgentInfo | undefined,
-  mode: AgentCapabilityMode,
-): string | null {
-  if (!agent || mode === "prototype" || STANDARD_AGENT_IDS.has(agent.id)) return null;
-  return mode === "standard"
-    ? "Standard projects require Claude Code or CodeBuddy."
-    : "Design Workspace generation requires Claude Code or CodeBuddy.";
-}
+import type { AgentInfo } from "./api.ts";
 
 export function agentAvailabilityReason(agent: AgentInfo | undefined): string | null {
   if (!agent) return "Choose an available Agent.";

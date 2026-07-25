@@ -1215,7 +1215,7 @@ test("HomeScreen drops a saved model that the restored agent no longer advertise
   );
 });
 
-test("HomeScreen keeps Codex usable in Prototype but disables it for Standard while CodeBuddy stays selectable", async () => {
+test("HomeScreen keeps every ready Agent selectable in Prototype and Standard", async () => {
   const user = userEvent.setup();
   const onNewProject = vi.fn(async () => {});
   const agents = [
@@ -1242,18 +1242,12 @@ test("HomeScreen keeps Codex usable in Prototype but disables it for Standard wh
   await user.click(await screen.findByRole("menuitem", { name: /^Standard/ }));
   await user.click(picker);
   const codex = await screen.findByRole("button", { name: /^Codex/ });
-  expect(codex).toBeDisabled();
-  expect(codex).toHaveTextContent("Standard projects require Claude Code or CodeBuddy.");
+  expect(codex).toBeEnabled();
   expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
   await user.keyboard("{Escape}");
 
   await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
   const design = screen.getByRole("button", { name: "Design" });
-  expect(design).toBeDisabled();
-
-  await user.click(picker);
-  await user.click(await screen.findByRole("button", { name: /^CodeBuddy/ }));
-  await user.keyboard("{Escape}");
   await waitFor(() => expect(design).toBeEnabled());
   await user.click(design);
   await waitFor(() => expect(onNewProject).toHaveBeenCalledWith(
@@ -1262,7 +1256,7 @@ test("HomeScreen keeps Codex usable in Prototype but disables it for Standard wh
     "modern-minimal",
     "standard",
     undefined,
-    { agentCommand: "codebuddy" },
+    { agentCommand: "codex", model: "gpt-5" },
   ));
 });
 

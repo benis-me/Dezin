@@ -13,6 +13,18 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import {
+  Button,
+  IconButton,
+  Input,
+  StudioFactRow,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioInspectorSection,
+  StudioPanelHeader,
+  StudioStatusBadge,
+  Textarea,
+} from "../../components/ui/index.ts";
 import type {
   GenerationPlan,
   WorkspaceGraphCommand,
@@ -204,7 +216,7 @@ function ProposalNodeNameEditor({
   return (
     <label className="dezin-proposal-review__name-editor">
       <span>Name</span>
-      <input
+      <Input
         aria-label={`Proposal name for ${authoritativeName}`}
         autoComplete="off"
         value={name}
@@ -344,7 +356,9 @@ export function ProposalReviewPanel({
           <div><h2 tabIndex={-1}>Proposal unavailable</h2><p>{review.message}</p></div>
         </div>
         <footer className="dezin-proposal-review__footer">
-          <button type="button" className="dezin-proposal-review__secondary" onClick={onClose}>Close review</button>
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>
+            Close review
+          </Button>
         </footer>
       </section>
     );
@@ -367,9 +381,9 @@ export function ProposalReviewPanel({
           <result.Icon size={16} aria-hidden />
           <h2 ref={headingRef} tabIndex={-1}>{result.label}</h2>
           <p>{result.message}</p>
-          <button type="button" onClick={onClose}>
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>
             {review.status === "approved" && review.plan ? "View build plan" : "Close review"}
-          </button>
+          </Button>
         </div>
       </section>
     );
@@ -405,13 +419,20 @@ export function ProposalReviewPanel({
       aria-label="Proposal review"
       aria-busy={busy || undefined}
     >
-      <header className="dezin-proposal-review__header">
-        <div>
-          <span>Review queue</span>
-          <h2 ref={headingRef} tabIndex={-1}>Workspace proposal</h2>
-        </div>
-        <span className="dezin-proposal-review__revision">r{review.proposal.revision}</span>
-      </header>
+      <StudioPanelHeader className="dezin-proposal-review__header">
+        <StudioHeaderCopy
+          title="Workspace proposal"
+          subtitle="Review queue"
+          headingLevel={2}
+          headingRef={headingRef}
+          headingTabIndex={-1}
+        />
+        <StudioHeaderActions>
+          <StudioStatusBadge className="dezin-proposal-review__revision">
+            r{review.proposal.revision}
+          </StudioStatusBadge>
+        </StudioHeaderActions>
+      </StudioPanelHeader>
 
       {review.status === "validation-error" ? (
         <div className="dezin-proposal-review__notice" role="alert">
@@ -430,22 +451,43 @@ export function ProposalReviewPanel({
           <div>
             <h3 ref={alertHeadingRef} tabIndex={-1}>Proposal base changed</h3>
             <p>This proposal is read-only. Review it against the current workspace before creating a replacement.</p>
-            <dl>
-              <div><dt>Graph</dt><dd>{review.conflict.expectedGraphRevision} → {review.conflict.actualGraphRevision}</dd></div>
-              <div><dt>Snapshot</dt><dd>{review.conflict.expectedSnapshotId} → {review.conflict.actualSnapshotId}</dd></div>
+            <dl className="divide-y divide-border">
+              <StudioFactRow
+                label="Graph"
+                value={`${review.conflict.expectedGraphRevision} → ${review.conflict.actualGraphRevision}`}
+                metadata
+                mono
+              />
+              <StudioFactRow
+                label="Snapshot"
+                value={`${review.conflict.expectedSnapshotId} → ${review.conflict.actualSnapshotId}`}
+                metadata
+                mono
+              />
               {review.conflict.layoutChanged ? (
-                <div><dt>Layout</dt><dd>{review.conflict.expectedLayoutChecksum} → {review.conflict.actualLayoutChecksum}</dd></div>
+                <StudioFactRow
+                  label="Layout"
+                  value={`${review.conflict.expectedLayoutChecksum} → ${review.conflict.actualLayoutChecksum}`}
+                  metadata
+                  mono
+                />
               ) : null}
             </dl>
           </div>
         </div>
       ) : null}
 
-      <div className="dezin-proposal-review__fields">
+      <StudioInspectorSection
+        className="dezin-proposal-review__fields"
+        heading="Proposal brief"
+        description={editable ? "Edit the intent before approval." : "Read-only proposal intent."}
+        contentClassName="dezin-proposal-review__fields-content"
+      >
         <label>
           <span>Rationale</span>
-          <textarea
+          <Textarea
             aria-label="Proposal rationale"
+            className="min-h-[50px] resize-y"
             value={rationale}
             readOnly={!editable}
             onChange={(event) => {
@@ -459,8 +501,9 @@ export function ProposalReviewPanel({
         </label>
         <label>
           <span>Assumptions <small>one per line</small></span>
-          <textarea
+          <Textarea
             aria-label="Proposal assumptions"
+            className="min-h-[50px] resize-y"
             value={assumptions}
             readOnly={!editable}
             onChange={(event) => {
@@ -472,14 +515,16 @@ export function ProposalReviewPanel({
             onBlur={commitAssumptions}
           />
         </label>
-      </div>
+      </StudioInspectorSection>
 
       {qualityContract ? (
-        <section className="dezin-proposal-review__quality" aria-label="Effective quality contract">
-          <div className="dezin-proposal-review__quality-heading">
-            <h3>Quality contract</h3>
-            <span>Enforced</span>
-          </div>
+        <StudioInspectorSection
+          className="dezin-proposal-review__quality"
+          aria-label="Effective quality contract"
+          heading="Quality contract"
+          actions={<StudioStatusBadge tone="success">Enforced</StudioStatusBadge>}
+          contentClassName="dezin-proposal-review__quality-content"
+        >
           <div className="dezin-proposal-review__quality-frames" aria-label="Required review frames">
             {qualityContract.responsiveFrames
               .filter((frame) => qualityContract.qualityProfile.requiredFrameIds.includes(frame.id))
@@ -491,27 +536,31 @@ export function ProposalReviewPanel({
               ))}
           </div>
           <dl>
-            <div>
-              <dt>Runtime</dt>
-              <dd>{qualityContract.qualityProfile.requireRuntimeChecks ? "Required" : "Optional"}</dd>
-            </div>
-            <div>
-              <dt>Visual review</dt>
-              <dd>{qualityContract.qualityProfile.requireVisualReview ? "Required" : "Optional"}</dd>
-            </div>
-            <div>
-              <dt>Blocks on</dt>
-              <dd>{qualityContract.qualityProfile.blockingSeverities.join(" · ") || "None"}</dd>
-            </div>
+            <StudioFactRow
+              stacked
+              label="Runtime"
+              value={qualityContract.qualityProfile.requireRuntimeChecks ? "Required" : "Optional"}
+            />
+            <StudioFactRow
+              stacked
+              label="Visual review"
+              value={qualityContract.qualityProfile.requireVisualReview ? "Required" : "Optional"}
+            />
+            <StudioFactRow
+              stacked
+              label="Blocks on"
+              value={qualityContract.qualityProfile.blockingSeverities.join(" · ") || "None"}
+            />
           </dl>
-        </section>
+        </StudioInspectorSection>
       ) : null}
 
-      <div className="dezin-proposal-review__changes">
-        <div className="dezin-proposal-review__section-heading">
-          <h3>Proposed changes</h3>
-          <span>{reviewItems.length}</span>
-        </div>
+      <StudioInspectorSection
+        className="dezin-proposal-review__changes"
+        heading="Proposed changes"
+        actions={<StudioStatusBadge>{reviewItems.length}</StudioStatusBadge>}
+        contentClassName="dezin-proposal-review__changes-content"
+      >
         {reviewItems.length === 0 ? (
           <p className="dezin-proposal-review__empty">No structural changes remain.</p>
         ) : (
@@ -521,8 +570,11 @@ export function ProposalReviewPanel({
               const active = focusedChangeKey === change.key;
               return (
                 <li key={change.key}>
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-auto min-h-[38px] w-full justify-start px-2 py-1.5 text-left aria-[current=true]:bg-surface-2 aria-[current=true]:text-foreground"
                     data-review-control
                     aria-label={reviewActionLabel(change, "Review")}
                     aria-current={active ? "true" : undefined}
@@ -531,19 +583,21 @@ export function ProposalReviewPanel({
                     <span className="dezin-proposal-review__shape" data-status-shape={change.changeKind} aria-hidden>
                       <status.Icon size={10} strokeWidth={2} />
                     </span>
-                    <span><strong>{status.label}</strong><small>{subjectLabel(change)}</small></span>
+                    <span className="dezin-proposal-review__change-copy">
+                      <strong>{status.label}</strong>
+                      <small>{subjectLabel(change)}</small>
+                    </span>
                     <LocateFixed size={12} aria-hidden />
-                  </button>
+                  </Button>
                   {editable ? (
-                    <button
-                      type="button"
-                      className="dezin-proposal-review__revert"
+                    <IconButton
+                      className="h-full min-h-[38px] w-full"
                       aria-label={reviewActionLabel(change, "Revert")}
                       disabled={busy}
                       onClick={() => void revert(change, index)}
                     >
                       <Undo2 size={11} aria-hidden />
-                    </button>
+                    </IconButton>
                   ) : null}
                   <ProposalNodeNameEditor
                     change={change}
@@ -563,7 +617,7 @@ export function ProposalReviewPanel({
             })}
           </ol>
         )}
-      </div>
+      </StudioInspectorSection>
 
       {busy ? (
         <p className="dezin-proposal-review__live" role="status" aria-live="polite">
@@ -573,34 +627,39 @@ export function ProposalReviewPanel({
 
       {review.status === "conflicted" ? (
         <footer className="dezin-proposal-review__footer">
-          <button type="button" className="dezin-proposal-review__secondary" onClick={onClose}>Close review</button>
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>
+            Close review
+          </Button>
         </footer>
       ) : (
         <footer className="dezin-proposal-review__footer">
-          <button
+          <Button
             type="button"
-            className="dezin-proposal-review__secondary"
+            variant="outline"
+            size="sm"
             disabled={busy || approvalBlocked}
             onClick={() => void onApprove("structure-only")}
           >
             <Check size={12} aria-hidden /> Apply structure only
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="dezin-proposal-review__primary"
+            size="sm"
             disabled={busy || approvalBlocked}
             onClick={() => void onApprove("generate")}
           >
             <WandSparkles size={12} aria-hidden /> Approve and generate
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="dezin-proposal-review__reject"
+            variant="ghost"
+            size="sm"
+            className="w-full"
             disabled={busy}
             onClick={() => void onReject()}
           >
             <X size={12} aria-hidden /> Reject proposal
-          </button>
+          </Button>
         </footer>
       )}
     </section>

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { ArtifactNodePreview } from "./ArtifactNodePreview.tsx";
 
@@ -11,6 +11,56 @@ vi.mock("../../../lib/api-context.tsx", () => ({
   useApi: () => thumbnailApi,
 }));
 
+function installControllableIntersectionObserver() {
+  const observers: FakeIntersectionObserver[] = [];
+
+  class FakeIntersectionObserver {
+    readonly root: Element | Document | null;
+    readonly rootMargin: string;
+    readonly thresholds: readonly number[];
+    readonly targets = new Set<Element>();
+
+    constructor(
+      readonly callback: IntersectionObserverCallback,
+      options: IntersectionObserverInit = {},
+    ) {
+      this.root = options.root ?? null;
+      this.rootMargin = options.rootMargin ?? "0px";
+      this.thresholds = Array.isArray(options.threshold)
+        ? options.threshold
+        : [options.threshold ?? 0];
+      observers.push(this);
+    }
+
+    observe(target: Element) {
+      this.targets.add(target);
+    }
+
+    unobserve(target: Element) {
+      this.targets.delete(target);
+    }
+
+    disconnect() {
+      this.targets.clear();
+    }
+
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+
+    emit(isIntersecting: boolean) {
+      this.callback([...this.targets].map((target) => ({
+        isIntersecting,
+        intersectionRatio: isIntersecting ? 1 : 0,
+        target,
+      } as IntersectionObserverEntry)), this as unknown as IntersectionObserver);
+    }
+  }
+
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+  return observers;
+}
+
 describe("artifact node preview", () => {
   beforeEach(() => {
     getArtifactThumbnail.mockReset();
@@ -20,6 +70,74 @@ describe("artifact node preview", () => {
     let sequence = 0;
     createObjectURL.mockImplementation(() => `blob:thumbnail-${++sequence}`);
     vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    vi.stubGlobal("IntersectionObserver", undefined);
+  });
+
+  test("does not request a published thumbnail while its preview is outside the preload margin", () => {
+    const observers = installControllableIntersectionObserver();
+    render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-lazy-offscreen"
+        artifactId="artifact-lazy-offscreen"
+        name="Offscreen checkout"
+        revisionId="revision-lazy-offscreen"
+      />,
+    );
+
+    expect(observers).toHaveLength(1);
+    expect(observers[0]!.rootMargin).not.toBe("0px");
+    expect(getArtifactThumbnail).not.toHaveBeenCalled();
+    expect(screen.queryByRole("img", { name: "Offscreen checkout design preview" })).toBeNull();
+  });
+
+  test("requests a published thumbnail when its preview enters the preload margin", async () => {
+    const observers = installControllableIntersectionObserver();
+    render(
+      <ArtifactNodePreview
+        artifactKind="component"
+        projectId="project-lazy-enter"
+        artifactId="artifact-lazy-enter"
+        name="Nearby summary"
+        revisionId="revision-lazy-enter"
+      />,
+    );
+    expect(getArtifactThumbnail).not.toHaveBeenCalled();
+
+    act(() => observers[0]!.emit(true));
+
+    expect(await screen.findByRole("img", { name: "Nearby summary design preview" })).toBeInTheDocument();
+    expect(getArtifactThumbnail).toHaveBeenCalledWith(
+      "project-lazy-enter",
+      "artifact-lazy-enter",
+      "revision-lazy-enter",
+      expect.any(AbortSignal),
+    );
+  });
+
+  test("keeps a loaded thumbnail mounted after its preview leaves the preload margin", async () => {
+    const observers = installControllableIntersectionObserver();
+    const { container } = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-lazy-retained"
+        artifactId="artifact-lazy-retained"
+        name="Retained checkout"
+        revisionId="revision-lazy-retained"
+      />,
+    );
+    act(() => observers[0]!.emit(true));
+    const image = await screen.findByRole("img", { name: "Retained checkout design preview" });
+    fireEvent.load(image);
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "ready");
+
+    act(() => observers[0]!.emit(false));
+
+    expect(screen.getByRole("img", { name: "Retained checkout design preview" })).toBe(image);
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "ready");
+    expect(screen.queryByText("Rendering preview…")).toBeNull();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(1);
   });
 
   test("distinguishes empty, loading, ready, and retryable failure states", async () => {
@@ -128,7 +246,7 @@ describe("artifact node preview", () => {
     expect(getArtifactThumbnail).not.toHaveBeenCalled();
   });
 
-  test("deduplicates a revision request across semantic zoom changes and revokes mount-owned object URLs", async () => {
+  test("deduplicates a revision request and retains its loaded image across semantic zoom changes", async () => {
     let resolveThumbnail!: (blob: Blob) => void;
     getArtifactThumbnail.mockReturnValue(new Promise<Blob>((resolve) => {
       resolveThumbnail = resolve;
@@ -154,8 +272,8 @@ describe("artifact node preview", () => {
         zoomLevel="overview"
       />,
     );
-    expect(rendered.container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "overview");
-    expect(rendered.container.querySelector(".dezin-flow-card__placeholder")).toBeNull();
+    expect(rendered.container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "loading");
+    expect(rendered.container.querySelector(".dezin-flow-card__placeholder")).toHaveAttribute("data-motion", "quiet");
     expect(screen.queryByRole("img", { name: "Cached checkout design preview" })).toBeNull();
 
     rendered.rerender(
@@ -184,7 +302,8 @@ describe("artifact node preview", () => {
         zoomLevel="overview"
       />,
     );
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1");
+    expect(screen.getByRole("img", { name: "Cached checkout design preview" })).toBe(firstImage);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
 
     rendered.rerender(
       <ArtifactNodePreview
@@ -197,10 +316,11 @@ describe("artifact node preview", () => {
       />,
     );
     const secondImage = await screen.findByRole("img", { name: "Cached checkout design preview" });
-    expect(secondImage).toHaveAttribute("src", "blob:thumbnail-2");
+    expect(secondImage).toBe(firstImage);
+    expect(secondImage).toHaveAttribute("src", "blob:thumbnail-1");
     expect(getArtifactThumbnail).toHaveBeenCalledTimes(1);
     rendered.unmount();
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-2");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1");
   });
 
   test("shares one revision request while keeping object URLs local to each mounted preview", async () => {
@@ -332,7 +452,7 @@ describe("artifact node preview", () => {
     expect(screen.getByRole("button", { name: "Retry Checkout preview" })).toBeInTheDocument();
   });
 
-  test("overview mode renders only the compact kind rail and does not request hidden previews", () => {
+  test("overview mode keeps a real thumbnail so zooming out never turns published work into a blank rail", async () => {
     const { container } = render(
       <ArtifactNodePreview
         artifactKind="component"
@@ -344,11 +464,47 @@ describe("artifact node preview", () => {
       />,
     );
 
-    expect(getArtifactThumbnail).not.toHaveBeenCalled();
-    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "overview");
-    expect(container.querySelector(".dezin-flow-card__placeholder")).toBeNull();
-    expect(screen.getByText("Component")).toBeInTheDocument();
-    expect(container.querySelector(".dezin-flow-card__preview-spinner")).toBeNull();
+    expect(getArtifactThumbnail).toHaveBeenCalledWith(
+      "project-1",
+      "artifact-1",
+      "revision-1",
+      expect.any(AbortSignal),
+    );
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "loading");
+    expect(screen.getByText("Component")).toHaveClass("dezin-flow-card__overview-kind");
+    const image = await screen.findByRole("img", { name: "Order summary design preview" });
+    fireEvent.load(image);
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "ready");
+  });
+
+  test("semantic zoom changes retain the loaded thumbnail and its object URL", async () => {
+    const rendered = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-retained"
+        artifactId="artifact-retained"
+        name="Checkout"
+        revisionId="revision-retained"
+        zoomLevel="full"
+      />,
+    );
+    const image = await screen.findByRole("img", { name: "Checkout design preview" });
+    fireEvent.load(image);
+
+    rendered.rerender(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-retained"
+        artifactId="artifact-retained"
+        name="Checkout"
+        revisionId="revision-retained"
+        zoomLevel="overview"
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: "Checkout design preview" })).toBe(image);
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
   });
 
   test("keeps full previews unobstructed while preserving a semantic kind label", () => {

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
@@ -587,6 +588,9 @@ test("Research directions use roving radio focus and arrow-key selection", async
 
   const first = await screen.findByRole("radio", { name: /Quiet confidence/ });
   const second = screen.getByRole("radio", { name: /Expressive confirmation/ });
+  expect(first).toHaveAttribute("data-slot", "button");
+  expect(first.closest('[data-slot="card"]')).toHaveClass("dezin-research-direction-card");
+  expect(first.querySelector('[data-slot="badge"]')).toHaveTextContent("evidence");
   expect(first).toHaveAttribute("tabindex", "0");
   expect(second).toHaveAttribute("tabindex", "-1");
 
@@ -631,6 +635,12 @@ test("Research viewer exposes evidence provenance and requires explicit confirma
   expect(screen.getByText("Verified checkout study")).toBeInTheDocument();
   expect(screen.getByText(`Receipt · ${STUDY_RECEIPT_ID}`)).toBeInTheDocument();
   expect(screen.getByText("Does expressive confirmation hold across a broader sample?")).toBeInTheDocument();
+  const artifactTarget = screen.getByRole("combobox", { name: "Artifact target" });
+  expect(artifactTarget).toHaveTextContent("Checkout page · new");
+  expect(artifactTarget).toHaveAttribute("data-size", "sm");
+  expect(
+    screen.getByLabelText("Create Artifact generation intent").querySelector('[data-slot="card"]'),
+  ).toHaveClass("dezin-research-viewer__handoff-card");
 
   const evidenceChain = screen.getByText("Evidence chain · 2 findings · 1 source");
   await user.click(evidenceChain);
@@ -661,7 +671,7 @@ test("Research viewer exposes evidence provenance and requires explicit confirma
   expect(onPlanCreated).toHaveBeenCalledWith("plan-successor");
 });
 
-test("Research direction generation waits for persisted Agent settings and freezes their exact selection", async () => {
+test("Research direction generation accepts Codex and freezes its exact persisted selection", async () => {
   const user = userEvent.setup();
   let releaseSettings!: () => void;
   const settingsPersisted = new Promise<void>((resolve) => {
@@ -678,7 +688,7 @@ test("Research direction generation waits for persisted Agent settings and freez
     _directionId: string,
     _input: CreateResearchDirectionArtifactIntentInput,
   ) => ({
-    plan: { id: "plan-codebuddy" },
+    plan: { id: "plan-codex" },
   } as unknown as ApprovedResearchDirectionArtifactIntentResult));
   const api = baseApi({ createResearchDirectionArtifactIntent: createIntent });
   const rendered = render(
@@ -688,8 +698,8 @@ test("Research direction generation waits for persisted Agent settings and freez
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
-        agentCommand="codebuddy"
-        model="gpt-5.6-sol"
+        agentCommand="codex"
+        model="gpt-5"
         agentSettingsReady={false}
         afterContextSettings={afterContextSettings}
         onBack={() => {}}
@@ -712,8 +722,8 @@ test("Research direction generation waits for persisted Agent settings and freez
         resourceId={resource.id}
         requestedRevisionId={revision.id}
         workspace={workspace()}
-        agentCommand="codebuddy"
-        model="gpt-5.6-sol"
+        agentCommand="codex"
+        model="gpt-5"
         agentSettingsReady
         afterContextSettings={afterContextSettings}
         onBack={() => {}}
@@ -732,8 +742,8 @@ test("Research direction generation waits for persisted Agent settings and freez
   releaseSettings();
   await waitFor(() => expect(createIntent).toHaveBeenCalledOnce());
   expect(createIntent.mock.calls[0]![4]).toEqual(expect.objectContaining({
-    agentCommand: "codebuddy",
-    model: "gpt-5.6-sol",
+    agentCommand: "codex",
+    model: "gpt-5",
   }));
   expect(createIntent.mock.calls[0]![4]).not.toHaveProperty("providerId");
 });
@@ -859,5 +869,33 @@ test("Research viewer refreshes its exact observation before creating a plan aft
       expectedSnapshotId: "snapshot-4",
       expectedLayoutChecksum: "c".repeat(64),
     }),
+  );
+});
+
+test("Research document header remains a single row at narrow widths", () => {
+  const css = readFileSync(
+    `${process.cwd()}/src/project-studio/research/research-resource-viewer.css`,
+    "utf8",
+  );
+  const narrowStart = css.indexOf("@media (max-width: 700px)");
+  const narrowEnd = css.indexOf("@media (max-width: 520px)", narrowStart);
+  const narrowRules = css.slice(narrowStart, narrowEnd);
+
+  expect(narrowStart).toBeGreaterThan(-1);
+  expect(narrowRules).toMatch(
+    /\.dezin-research-viewer__header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto/s,
+  );
+  expect(narrowRules).not.toMatch(
+    /\.dezin-research-viewer__history\s*\{[^}]*grid-column:\s*2/s,
+  );
+  expect(css).not.toContain("!important");
+  expect(css).not.toMatch(
+    /\.dezin-research-viewer__target-trigger\s*\{[^}]*(?:background|box-shadow|font-size)\s*:/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-research-viewer__(?:state-actions|create-target) \[data-slot="button"\]\s*\{/s,
+  );
+  expect(css).not.toMatch(
+    /\.dezin-research-viewer__(?:target-item|generate)\s*\{[^}]*font-size\s*:/s,
   );
 });

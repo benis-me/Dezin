@@ -3180,18 +3180,12 @@ export class ProductionGenerationTaskContextResolver implements GenerationTaskCo
     );
     const profileAgent = artifactExecutionProfile?.agent ?? resourceExecutionProfile?.agent;
     const contextAgent: WorkspaceGenerationAgentSelection = taskAgent
-      ?? (profileAgent?.command === "codebuddy" && profileAgent.providerId === "codebuddy"
+      ?? (profileAgent
         ? {
-            providerId: "codebuddy",
-            command: "codebuddy",
+            providerId: profileAgent.providerId,
+            command: profileAgent.command,
             model: profileAgent.model,
           }
-        : profileAgent?.command === "claude" && profileAgent.providerId === "claude"
-          ? {
-              providerId: "claude",
-              command: "claude",
-              model: profileAgent.model,
-            }
           : {
               // Historical Tasks may predate the durable Agent field. Their exact
               // payload remains in the message hash; this canonical selection is

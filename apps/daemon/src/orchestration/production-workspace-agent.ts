@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { NodeSpawnerOptions, ProcessSpawner } from "../../../../packages/agent/src/index.ts";
+import {
+  getProvider,
+  type NodeSpawnerOptions,
+  type ProcessSpawner,
+} from "../../../../packages/agent/src/index.ts";
 import {
   WorkspaceStoreCodecError,
   normalizeCreateWorkspaceProposalInput,
@@ -87,6 +91,11 @@ export interface ProductionWorkspaceAgentOptions {
   readonly resolveClaudeExecutable?: () => string;
   /** Test seam; production always resolves the official CodeBuddy CLI from fixed install roots. */
   readonly resolveCodeBuddyExecutable?: () => string;
+  /** Test seam; production resolves other registry CLIs through fixed install roots. */
+  readonly resolveRegisteredExecutable?: (command: string) => string;
+  /** Test seams for provider-neutral outer-confinement coverage. */
+  readonly structuredAgentPlatform?: NodeJS.Platform;
+  readonly resolveStructuredAgentSandboxExecutable?: () => string;
   readonly plannerTimeoutMs?: number;
   readonly scopedTasks?: ProductionScopedTaskQueuePort;
 }
@@ -920,14 +929,14 @@ function nextOpenRootPosition(
       return { x: candidate.x, y: candidate.y };
     }
   }
-  throw new ProductionWorkspacePlannerError("CodeBuddy semantic layout has no bounded open root position");
+  throw new ProductionWorkspacePlannerError("Workspace semantic layout has no bounded open root position");
 }
 
 function parseSemanticArtifacts(
   value: unknown,
   kind: SemanticArtifactIntent["kind"],
 ): SemanticArtifactIntent[] {
-  const label = kind === "page" ? "CodeBuddy semantic pages" : "CodeBuddy semantic components";
+  const label = kind === "page" ? "Workspace semantic pages" : "Workspace semantic components";
   const maxItems = kind === "page" ? MAX_SEMANTIC_PAGES : MAX_SEMANTIC_COMPONENTS;
   return semanticArray(value, label, maxItems).map((item, index) => {
     const candidate = exactJsonObject(item, `${label}[${index}]`);
@@ -961,8 +970,8 @@ function parseSemanticArtifacts(
 }
 
 function parseSemanticResources(value: unknown): SemanticResourceIntent[] {
-  return semanticArray(value, "CodeBuddy semantic resources", MAX_SEMANTIC_RESOURCES).map((item, index) => {
-    const label = `CodeBuddy semantic resources[${index}]`;
+  return semanticArray(value, "Workspace semantic resources", MAX_SEMANTIC_RESOURCES).map((item, index) => {
+    const label = `Workspace semantic resources[${index}]`;
     const entry = exactSemanticObject(item, label, ["existingNodeId", "operation", "kind", "title"]);
     const existingNodeId = entry.existingNodeId === null
       ? null
@@ -975,7 +984,7 @@ function parseSemanticResources(value: unknown): SemanticResourceIntent[] {
     }
     if (entry.operation === "reuse" && entry.kind === "research") {
       throw new ProductionWorkspacePlannerError(
-        "CodeBuddy semantic Research reuse is not supported without an exact immutable direction selection",
+        "Workspace semantic Research reuse is not supported without an exact immutable direction selection",
       );
     }
     if (entry.operation === "reuse" && existingNodeId === null) {
@@ -993,8 +1002,8 @@ function parseSemanticResources(value: unknown): SemanticResourceIntent[] {
 }
 
 function parseSemanticRelations(value: unknown): SemanticRelationIntent[] {
-  return semanticArray(value, "CodeBuddy semantic relations", MAX_SEMANTIC_RELATIONS).map((item, index) => {
-    const label = `CodeBuddy semantic relations[${index}]`;
+  return semanticArray(value, "Workspace semantic relations", MAX_SEMANTIC_RELATIONS).map((item, index) => {
+    const label = `Workspace semantic relations[${index}]`;
     const entry = exactSemanticObject(item, label, ["source", "target", "kind"]);
     if (entry.kind !== "prototype" && entry.kind !== "uses") {
       throw new ProductionWorkspacePlannerError(`${label}.kind must be prototype or uses`);
@@ -1049,7 +1058,7 @@ function assertAcyclicSemanticDependencies(
     if (seen === "visiting") {
       const artifact = artifacts.find((candidate) => candidate.artifactId === artifactId);
       throw new ProductionWorkspacePlannerError(
-        `CodeBuddy semantic uses relations contain a cycle at ${artifact?.name ?? artifactId}`,
+        `Workspace semantic uses relations contain a cycle at ${artifact?.name ?? artifactId}`,
       );
     }
     if (seen === "visited") return;
@@ -1060,7 +1069,7 @@ function assertAcyclicSemanticDependencies(
   for (const artifact of artifacts) visit(artifact.artifactId);
 }
 
-function compileCodeBuddySemanticProposal(
+function compileSemanticProposal(
   body: Record<string, unknown>,
   input: {
     projectId: string;
@@ -1076,7 +1085,7 @@ function compileCodeBuddySemanticProposal(
     agent: AgentTurnRequest["agent"];
   },
 ): CreateWorkspaceProposalInput {
-  const semantic = exactSemanticObject(body, "CodeBuddy semantic Workspace intent", [
+  const semantic = exactSemanticObject(body, "Workspace semantic Workspace intent", [
     "pages",
     "components",
     "resources",
@@ -1086,11 +1095,16 @@ function compileCodeBuddySemanticProposal(
   ]);
   const parsedPages = parseSemanticArtifacts(semantic.pages, "page");
   const components = parseSemanticArtifacts(semantic.components, "component");
-  if (parsedPages.length === 0) {
-    throw new ProductionWorkspacePlannerError("CodeBuddy semantic Workspace intent must contain at least one Page");
+  const resourceIntents = parseSemanticResources(semantic.resources);
+  if (parsedPages.length === 0 && components.length === 0 && resourceIntents.length === 0) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace semantic Workspace intent must contain at least one Page, Component, or Resource",
+    );
   }
-  const legacyBootstrapNodeId = claimableLegacyBootstrapPage(input.bundle, input.resources);
-  const claimedBootstrapNodeId = parsedPages[0]!.existingNodeId === null
+  const legacyBootstrapNodeId = parsedPages.length === 0
+    ? null
+    : claimableLegacyBootstrapPage(input.bundle, input.resources);
+  const claimedBootstrapNodeId = parsedPages[0]?.existingNodeId === null
     ? legacyBootstrapNodeId
     : null;
   const pages = claimedBootstrapNodeId === null
@@ -1100,24 +1114,23 @@ function compileCodeBuddySemanticProposal(
         ...parsedPages.slice(1),
       ];
   const artifacts = [...pages, ...components];
-  const resourceIntents = parseSemanticResources(semantic.resources);
   const relations = parseSemanticRelations(semantic.relations);
-  const rationale = semanticText(semantic.rationale, "CodeBuddy semantic rationale", 4_000);
-  const assumptions = semanticArray(semantic.assumptions, "CodeBuddy semantic assumptions", 16)
-    .map((value, index) => semanticText(value, `CodeBuddy semantic assumptions[${index}]`, 500));
+  const rationale = semanticText(semantic.rationale, "Workspace semantic rationale", 4_000);
+  const assumptions = semanticArray(semantic.assumptions, "Workspace semantic assumptions", 16)
+    .map((value, index) => semanticText(value, `Workspace semantic assumptions[${index}]`, 500));
 
   const artifactNames = new Set<string>();
   const existingNodeIds = new Set<string>();
   for (const artifact of artifacts) {
     const key = semanticNameKey(artifact.name);
     if (artifactNames.has(key)) {
-      throw new ProductionWorkspacePlannerError(`CodeBuddy semantic Artifact name ${artifact.name} is duplicated`);
+      throw new ProductionWorkspacePlannerError(`Workspace semantic Artifact name ${artifact.name} is duplicated`);
     }
     artifactNames.add(key);
     if (artifact.existingNodeId !== null) {
       if (existingNodeIds.has(artifact.existingNodeId)) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic existingNodeId ${artifact.existingNodeId} is reused`,
+          `Workspace semantic existingNodeId ${artifact.existingNodeId} is reused`,
         );
       }
       existingNodeIds.add(artifact.existingNodeId);
@@ -1134,7 +1147,7 @@ function compileCodeBuddySemanticProposal(
     const previous = plannedNodeNames.get(key);
     if (previous !== undefined) {
       throw new ProductionWorkspacePlannerError(
-        `CodeBuddy semantic Workspace names ${previous} and ${label} conflict`,
+        `Workspace semantic Workspace names ${previous} and ${label} conflict`,
       );
     }
     plannedNodeNames.set(key, label);
@@ -1143,7 +1156,7 @@ function compileCodeBuddySemanticProposal(
     ));
     if (collision !== undefined) {
       throw new ProductionWorkspacePlannerError(
-        `CodeBuddy semantic ${label} matches current node ${collision.name}; copy its exact existingNodeId instead of creating a substitute`,
+        `Workspace semantic ${label} matches current node ${collision.name}; copy its exact existingNodeId instead of creating a substitute`,
       );
     }
   }
@@ -1154,13 +1167,13 @@ function compileCodeBuddySemanticProposal(
       const node = input.bundle.graph.nodes.find((candidate) => candidate.id === artifact.existingNodeId);
       if (!node || node.kind !== artifact.kind || !("artifactId" in node)) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic existingNodeId ${artifact.existingNodeId} is not a current Workspace Artifact node of kind ${artifact.kind}`,
+          `Workspace semantic existingNodeId ${artifact.existingNodeId} is not a current Workspace Artifact node of kind ${artifact.kind}`,
         );
       }
       const record = input.bundle.artifacts.find((candidate) => candidate.id === node.artifactId);
       if (!record || record.archivedAt !== null) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic existingNodeId ${artifact.existingNodeId} targets an unavailable Artifact`,
+          `Workspace semantic existingNodeId ${artifact.existingNodeId} targets an unavailable Artifact`,
         );
       }
       if (node.name !== artifact.name) {
@@ -1174,7 +1187,7 @@ function compileCodeBuddySemanticProposal(
       const baseRevisionId = input.bundle.activeSnapshot.artifactRevisions[record.id] ?? null;
       if (artifact.operation === "reuse" && baseRevisionId === null) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic Artifact ${artifact.name} cannot be reused without an active Revision`,
+          `Workspace semantic Artifact ${artifact.name} cannot be reused without an active Revision`,
         );
       }
       return {
@@ -1256,22 +1269,22 @@ function compileCodeBuddySemanticProposal(
     const target = compiledByName.get(semanticNameKey(relation.target));
     if (!source || !target) {
       throw new ProductionWorkspacePlannerError(
-        `CodeBuddy semantic relation ${relation.source} -> ${relation.target} references an unknown Artifact`,
+        `Workspace semantic relation ${relation.source} -> ${relation.target} references an unknown Artifact`,
       );
     }
     if (source.artifactId === target.artifactId) {
-      throw new ProductionWorkspacePlannerError("CodeBuddy semantic relations cannot target the same Artifact");
+      throw new ProductionWorkspacePlannerError("Workspace semantic relations cannot target the same Artifact");
     }
     if (relation.kind === "prototype" && (source.kind !== "page" || target.kind !== "page")) {
-      throw new ProductionWorkspacePlannerError("CodeBuddy semantic prototype relations must connect two Pages");
+      throw new ProductionWorkspacePlannerError("Workspace semantic prototype relations must connect two Pages");
     }
     if (relation.kind === "uses" && target.kind !== "component") {
-      throw new ProductionWorkspacePlannerError("CodeBuddy semantic uses relations must target a Component");
+      throw new ProductionWorkspacePlannerError("Workspace semantic uses relations must target a Component");
     }
     const relationKey = `${source.artifactId}\0${target.artifactId}\0${relation.kind}`;
     if (seenRelations.has(relationKey)) {
       throw new ProductionWorkspacePlannerError(
-        `CodeBuddy semantic relation ${relation.source} -> ${relation.target} is duplicated`,
+        `Workspace semantic relation ${relation.source} -> ${relation.target} is duplicated`,
       );
     }
     seenRelations.add(relationKey);
@@ -1328,26 +1341,26 @@ function compileCodeBuddySemanticProposal(
       ? `new\0${intent.kind}\0${semanticNameKey(intent.title)}`
       : `existing\0${intent.existingNodeId}`;
     if (resourceKeys.has(key)) {
-      throw new ProductionWorkspacePlannerError(`CodeBuddy semantic Resource ${intent.title} is duplicated`);
+      throw new ProductionWorkspacePlannerError(`Workspace semantic Resource ${intent.title} is duplicated`);
     }
     resourceKeys.add(key);
     if (intent.existingNodeId !== null) {
       const node = input.bundle.graph.nodes.find((candidate) => candidate.id === intent.existingNodeId);
       if (!node || node.kind !== "resource") {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic Resource existingNodeId ${intent.existingNodeId} is not a current Workspace Resource node`,
+          `Workspace semantic Resource existingNodeId ${intent.existingNodeId} is not a current Workspace Resource node`,
         );
       }
       const existing = input.resources.find((resource) => resource.id === node.resourceId);
       if (!existing || existing.archivedAt !== null || existing.kind !== intent.kind) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic Resource existingNodeId ${intent.existingNodeId} targets an unavailable Resource of kind ${intent.kind}`,
+          `Workspace semantic Resource existingNodeId ${intent.existingNodeId} targets an unavailable Resource of kind ${intent.kind}`,
         );
       }
       const activeRevisionId = input.bundle.activeSnapshot.resourceRevisions[existing.id];
       if (activeRevisionId === undefined) {
         throw new ProductionWorkspacePlannerError(
-          `CodeBuddy semantic Resource ${intent.title} cannot be ${intent.operation === "reuse" ? "reused" : "revised"} without an active Revision`,
+          `Workspace semantic Resource ${intent.title} cannot be ${intent.operation === "reuse" ? "reused" : "revised"} without an active Revision`,
         );
       }
       if (node.name !== intent.title) {
@@ -1759,7 +1772,7 @@ function plannerSystemPrompt(): string {
   ].join("\n\n");
 }
 
-function codeBuddyPlannerSystemPrompt(): string {
+function semanticPlannerSystemPrompt(): string {
   return [
     "You are Dezin's proposal-only Workspace Agent for a professional design tool.",
     "Return one compact semantic Workspace intent. The server deterministically compiles it into graph commands, layout commands, canonical identities, generation payloads, responsive QA, and immutable Revision pins.",
@@ -1776,6 +1789,7 @@ function codeBuddyPlannerSystemPrompt(): string {
     "pages/components entries contain existingNodeId, name, instructions, and optionally operation.",
     "resources entries contain exactly existingNodeId, operation, kind, title.",
     "relations entries contain exactly source, target, kind.",
+    "At least one of pages, components, or resources must be non-empty. Component-only and Resource-only intents are valid; never invent an unrelated Page.",
     `Limits: pages <= ${MAX_SEMANTIC_PAGES}, components <= ${MAX_SEMANTIC_COMPONENTS}, resources <= ${MAX_SEMANTIC_RESOURCES}, relations <= ${MAX_SEMANTIC_RELATIONS}, assumptions <= 16.`,
     "Prefer a coherent small component system and explicit page flow over redundant one-off Artifacts. Preserve high design specificity in instructions while avoiding repeated boilerplate.",
     "Do not pretty-print. Keep the complete JSON response under 16,000 UTF-8 bytes. Do not wrap it in prose or Markdown.",
@@ -1812,6 +1826,9 @@ class ProductionWorkspacePlanner {
   readonly #createSpawner: ((options: NodeSpawnerOptions) => ProcessSpawner) | undefined;
   readonly #resolveClaudeExecutable: (() => string) | undefined;
   readonly #resolveCodeBuddyExecutable: (() => string) | undefined;
+  readonly #resolveRegisteredExecutable: ((command: string) => string) | undefined;
+  readonly #structuredAgentPlatform: NodeJS.Platform | undefined;
+  readonly #resolveStructuredAgentSandboxExecutable: (() => string) | undefined;
   readonly #timeoutMs: number;
 
   constructor(options: ProductionWorkspaceAgentOptions) {
@@ -1820,6 +1837,9 @@ class ProductionWorkspacePlanner {
     this.#createSpawner = options.createSpawner;
     this.#resolveClaudeExecutable = options.resolveClaudeExecutable;
     this.#resolveCodeBuddyExecutable = options.resolveCodeBuddyExecutable;
+    this.#resolveRegisteredExecutable = options.resolveRegisteredExecutable;
+    this.#structuredAgentPlatform = options.structuredAgentPlatform;
+    this.#resolveStructuredAgentSandboxExecutable = options.resolveStructuredAgentSandboxExecutable;
     this.#timeoutMs = options.plannerTimeoutMs ?? DEFAULT_PLANNER_TIMEOUT_MS;
   }
 
@@ -1839,10 +1859,13 @@ class ProductionWorkspacePlanner {
     try {
       const settings = this.#store.getSettings();
       const { command, model } = input.request.agent;
+      const selectedProviderId = getProvider(command)?.id ?? input.request.agent.providerId;
       const result = await runSafeStructuredAgent({
         command,
         model: model ?? undefined,
-        systemPrompt: command === "codebuddy" ? codeBuddyPlannerSystemPrompt() : plannerSystemPrompt(),
+        systemPrompt: selectedProviderId === "claude"
+          ? plannerSystemPrompt()
+          : semanticPlannerSystemPrompt(),
         message: plannerMessage({
           request: input.request,
           contextPack: input.contextPack,
@@ -1851,7 +1874,7 @@ class ProductionWorkspacePlanner {
         cwd: scratch,
         signal,
         env: {
-          ...(command === "codebuddy" ? {} : buildAgentEnv(settings, command)),
+          ...(selectedProviderId === "codebuddy" ? {} : buildAgentEnv(settings, command)),
           // Workspace planning never receives the daemon mutation capability.
           DEZIN_DAEMON_TOKEN: undefined,
         },
@@ -1865,6 +1888,15 @@ class ProductionWorkspacePlanner {
         ...(this.#resolveCodeBuddyExecutable === undefined
           ? {}
           : { resolveCodeBuddyExecutable: this.#resolveCodeBuddyExecutable }),
+        ...(this.#resolveRegisteredExecutable === undefined
+          ? {}
+          : { resolveRegisteredExecutable: this.#resolveRegisteredExecutable }),
+        ...(this.#structuredAgentPlatform === undefined
+          ? {}
+          : { platform: this.#structuredAgentPlatform }),
+        ...(this.#resolveStructuredAgentSandboxExecutable === undefined
+          ? {}
+          : { resolveSandboxExecutable: this.#resolveStructuredAgentSandboxExecutable }),
       });
       checkAbort(signal);
       const workspace = this.#store.workspace.getWorkspace(input.projectId);
@@ -1906,15 +1938,15 @@ class ProductionWorkspacePlanner {
         kernel,
         agent: input.request.agent,
       };
-      return command === "codebuddy"
-        ? compileCodeBuddySemanticProposal(parsed, {
+      return result.providerId === "claude"
+        ? normalizePlannerProposal(parsed, normalizationInput)
+        : compileSemanticProposal(parsed, {
             ...normalizationInput,
             contextPackId: input.contextPack.id,
             bundle,
             baseArtifactDependencies,
             resources: this.#store.workspace.listResources(input.projectId),
-          })
-        : normalizePlannerProposal(parsed, normalizationInput);
+          });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       if (error instanceof ProductionWorkspacePlannerError

@@ -1626,14 +1626,19 @@ export function normalizeWorkspaceGenerationAgentSelection(
 ): WorkspaceGenerationAgentSelection {
   const input = boundaryRecord(value, label);
   allowFields(input, ["providerId", "command", "model"], label);
-  if (input.command !== "claude" && input.command !== "codebuddy") {
-    throw new WorkspaceStoreCodecError(
-      `${label} command must be a canonical supported structured provider command`,
-    );
-  }
-  if (input.providerId !== input.command) {
-    throw new WorkspaceStoreCodecError(`${label} provider does not match its canonical command`);
-  }
+  const boundedIdentity = (entry: unknown, field: "provider" | "command"): string => {
+    const fieldLabel = `${label} ${field}`;
+    if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim() !== entry
+      || !isWellFormedUtf16(entry) || entry.includes("\0")
+      || Buffer.byteLength(entry, "utf8") > 256) {
+      throw new WorkspaceStoreCodecError(
+        `${fieldLabel} must be canonical and bounded to 256 bytes`,
+      );
+    }
+    return entry;
+  };
+  const providerId = boundedIdentity(input.providerId, "provider");
+  const command = boundedIdentity(input.command, "command");
   let model: string | null = null;
   if (input.model !== null) {
     model = canonicalString(input.model, `${label} model`);
@@ -1642,8 +1647,8 @@ export function normalizeWorkspaceGenerationAgentSelection(
     }
   }
   return {
-    providerId: input.command,
-    command: input.command,
+    providerId,
+    command,
     model,
   };
 }

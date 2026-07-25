@@ -251,7 +251,7 @@ test("accepts every fully populated payload frozen by compileGenerationPlan", ()
   for (const task of tasks) validateGenerationTaskPayload(task);
 });
 
-test("preserves legacy v2 leaves without Agent and strictly validates every present frozen Agent", () => {
+test("preserves legacy v2 leaves and independently validates every bounded frozen Agent identity", () => {
   const tasks = [taskOfKind("resource"), taskOfTarget("page-home")];
 
   for (const task of tasks) {
@@ -271,14 +271,42 @@ test("preserves legacy v2 leaves without Agent and strictly validates every pres
     extra.agent.extra = true;
     expectContractError(withPayload(task, extra), /Agent fields/i);
 
-    const mismatch = clonePayload(task) as any;
-    mismatch.agent.providerId = "claude";
-    expectContractError(withPayload(task, mismatch), /Agent provider.*command/i);
+    const registeredMismatch = clonePayload(task) as any;
+    registeredMismatch.agent = {
+      providerId: "trae",
+      command: "trae-cli",
+      model: "doubao-seed-1.6",
+    };
+    validateGenerationTaskPayload(withPayload(task, registeredMismatch));
 
-    const unsupported = clonePayload(task) as any;
-    unsupported.agent.command = "other";
-    unsupported.agent.providerId = "other";
-    expectContractError(withPayload(task, unsupported), /Agent command/i);
+    const readableLegacy = clonePayload(task) as any;
+    readableLegacy.agent = {
+      providerId: "legacy-provider",
+      command: "legacy-cli",
+      model: null,
+    };
+    validateGenerationTaskPayload(withPayload(task, readableLegacy));
+
+    for (const [field, value] of [
+      ["providerId", ""],
+      ["providerId", " trae"],
+      ["providerId", "p".repeat(257)],
+      ["command", ""],
+      ["command", "trae-cli "],
+      ["command", "c".repeat(257)],
+    ] as const) {
+      const invalidIdentity = clonePayload(task) as any;
+      invalidIdentity.agent = {
+        providerId: "trae",
+        command: "trae-cli",
+        model: null,
+        [field]: value,
+      };
+      expectContractError(
+        withPayload(task, invalidIdentity),
+        new RegExp(`Agent ${field === "providerId" ? "provider" : "command"}.*canonical|Agent ${field === "providerId" ? "provider" : "command"}.*256`, "i"),
+      );
+    }
 
     const nonCanonical = clonePayload(task) as any;
     nonCanonical.agent.model = " gpt-5.6-sol ";

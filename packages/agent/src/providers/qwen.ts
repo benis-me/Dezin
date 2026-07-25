@@ -13,6 +13,13 @@ export const qwenProvider: AgentProvider = {
   label: "Qwen Code",
   seedModels: ["qwen3-coder-plus", "qwen3-coder-flash"],
   genericConfig: config,
-  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "qwen", command, model, config, enforceArtifactUpdate }),
+  createRunner: ({ command, model, enforceArtifactUpdate, spawner }) => new GenericCliRunner({
+    id: "qwen",
+    command,
+    model,
+    config,
+    enforceArtifactUpdate,
+    spawner,
+  }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };
