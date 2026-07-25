@@ -114,7 +114,12 @@ function createFlatSelectionFixture(options: {
     snapshot,
     close() {
       store.close();
-      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(dataDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
     },
   };
 }
