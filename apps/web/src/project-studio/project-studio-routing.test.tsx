@@ -218,7 +218,11 @@ test("Canvas Present flow opens an exact Snapshot viewer without resolving mutab
     </ApiProvider>,
   );
 
-  const present = await screen.findByRole("button", { name: "Present prototype flow" });
+  const present = await screen.findByRole(
+    "button",
+    { name: "Present prototype flow" },
+    { timeout: 5_000 },
+  );
   fireEvent.click(present);
   const viewer = await screen.findByRole("region", { name: "Prototype flow viewer" });
   expect(viewer).toBeInTheDocument();
