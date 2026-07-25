@@ -214,6 +214,7 @@ test("registry generic structured adapter invokes Gemini one-shot in an empty sc
       DEZIN_DAEMON_TOKEN: undefined,
     },
   }), {
+    platform: "darwin",
     createSpawner() {
       return spawner;
     },
