@@ -547,7 +547,7 @@ test("keeps prototype navigation out of hard Task dependencies while retaining r
   assert.ok(images);
 
   for (const page of pageTasks) {
-    const expectedPageDependencies = page.target.id === "page-contact" ? [about.id] : [];
+    const expectedPageDependencies: string[] = page.target.id === "page-contact" ? [about.id] : [];
     assert.deepEqual(
       page.dependencyIds.filter((dependencyId) => pageTaskIds.has(dependencyId)),
       expectedPageDependencies,
