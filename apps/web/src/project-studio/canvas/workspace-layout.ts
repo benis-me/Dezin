@@ -265,7 +265,7 @@ interface EdgeCorridor {
   end: CanvasPoint;
 }
 
-export type WorkspaceEdgeSide = "left" | "right" | "top" | "bottom";
+export type WorkspaceEdgeSide = "left" | "right";
 
 export interface WorkspaceDirectionalEdgeRoute extends EdgeCorridor {
   sourceSide: WorkspaceEdgeSide;
@@ -282,10 +282,6 @@ function edgeAnchor(
       return { x: position.x, y: position.y + size.height / 2 };
     case "right":
       return { x: position.x + size.width, y: position.y + size.height / 2 };
-    case "top":
-      return { x: position.x + size.width / 2, y: position.y };
-    case "bottom":
-      return { x: position.x + size.width / 2, y: position.y + size.height };
   }
 }
 
@@ -346,7 +342,6 @@ export function resolveWorkspaceEdgeRoute(
   const deltaY = targetCenter.y - sourceCenter.y;
   const horizontal = Math.abs(deltaX) >= Math.abs(deltaY);
   if (lane !== 0) {
-    if (horizontal) return lane < 0 ? route("top", "top") : route("bottom", "bottom");
     return lane < 0 ? route("left", "left") : route("right", "right");
   }
   const directPathObstructed = [...graphNodes.entries()].some(([nodeId, node]) => {
@@ -386,16 +381,14 @@ export function resolveWorkspaceEdgeRoute(
     return true;
   });
   if (directPathObstructed) {
-    return horizontal ? route("top", "top") : route("right", "right");
+    return deltaX < 0 ? route("left", "left") : route("right", "right");
   }
   if (horizontal) {
     return deltaX >= 0
       ? route("right", "left")
       : route("left", "right");
   }
-  return deltaY >= 0
-    ? route("bottom", "top")
-    : route("top", "bottom");
+  return deltaY >= 0 ? route("right", "right") : route("left", "left");
 }
 
 function segmentIntersectsPaddedBounds(
@@ -685,7 +678,7 @@ export function buildComponentLibraryCommands(
     return [];
   } else {
     const origin = componentLibraryOrigin(graph, layout);
-    if (existingGroup.y < origin.y) {
+    if (commands.length > 0 && existingGroup.y < origin.y) {
       commands.push({
         type: "move",
         objectId: COMPONENT_LIBRARY_GROUP_ID,

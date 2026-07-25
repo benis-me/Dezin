@@ -570,6 +570,30 @@ function RoutedArtifactEditor({
   );
 }
 
+test("an Artifact without a Head Revision renders a not-generated state without resolving PreviewTarget", async () => {
+  const resolvePreviewTarget = vi.fn();
+  const acquirePreviewTargetLease = vi.fn();
+
+  render(
+    <ApiProvider client={editorApi({ resolvePreviewTarget, acquirePreviewTargetLease })}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        headRevisionId={null}
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Not generated yet")).toBeInTheDocument();
+  expect(screen.getByText(/does not have an immutable Revision/i)).toBeInTheDocument();
+  expect(screen.getByText("Generate this Artifact before selecting and editing elements.")).toBeInTheDocument();
+  expect(screen.getByText("Not available")).toBeInTheDocument();
+  expect(resolvePreviewTarget).not.toHaveBeenCalled();
+  expect(acquirePreviewTargetLease).not.toHaveBeenCalled();
+});
+
 async function dispatchSelection(
   locator = { designNodeId: "hero-title", sourcePath: "src/Hero.tsx", selector: "[data-design-node-id='hero-title']" },
   previewTitle = "Storefront home preview",

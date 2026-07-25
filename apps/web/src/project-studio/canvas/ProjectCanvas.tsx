@@ -26,6 +26,7 @@ import type {
   WorkspaceLayoutCommand,
   WorkspaceViewport,
 } from "../../lib/api.ts";
+import type { GenerationTargetState } from "../generation/generation-target-state.ts";
 import type { ProposalDiff } from "../proposal/proposal-diff.ts";
 import {
   EMPTY_PROPOSAL_OVERLAY_MODEL,
@@ -66,6 +67,7 @@ const PROPOSAL_FOCUS_MOUNT_RETRIES = 4;
 const OUTLINE_SAFE_SURFACE_WIDTH = 900;
 const NOOP_VIEWPORT_CHANGE = () => {};
 const EMPTY_RESOURCE_REVISION_STATES = {} as const;
+const EMPTY_GENERATION_TARGET_STATES = {} as const;
 const proposalNodeTypes = { ...workspaceNodeTypes, proposal: ProposalOverlay } satisfies NodeTypes;
 const proposalEdgeTypes = { ...workspaceEdgeTypes, proposal: ProposalOverlayEdge } satisfies EdgeTypes;
 const CANVAS_NODE_KEYBOARD_DESCRIPTION = "For Page and Component nodes, Enter opens the editor. For Resource nodes, Enter opens the exact revision viewer. Press Space to select; arrow keys move selected objects; Escape clears selection. Nodes are not deleted with the keyboard.";
@@ -133,6 +135,8 @@ export interface ProjectCanvasProps {
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
     qualityState: "grounded" | "needs-review" | null;
   }>>;
+  artifactGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
+  resourceGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   selectedNodeIds: readonly string[];
   onSelectionChange: (ids: string[]) => void;
   onViewportChange?: (viewport: WorkspaceViewport) => void;
@@ -158,6 +162,8 @@ export function ProjectCanvas({
   viewport = layout.viewport,
   artifactRevisionIds,
   resourceRevisionStates = EMPTY_RESOURCE_REVISION_STATES,
+  artifactGenerationStates = EMPTY_GENERATION_TARGET_STATES,
+  resourceGenerationStates = EMPTY_GENERATION_TARGET_STATES,
   selectedNodeIds,
   onSelectionChange,
   onViewportChange = NOOP_VIEWPORT_CHANGE,
@@ -178,6 +184,11 @@ export function ProjectCanvas({
   const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
   const viewportSaveJobsRef = useRef(0);
   const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
+  const moveGenerationRef = useRef(0);
+  const pendingMovePositionsRef = useRef(new Map<string, {
+    generation: number;
+    position: { x: number; y: number };
+  }>());
   const componentLibraryNormalizationRef = useRef<string | null>(null);
   const componentLibraryNormalizationFailureRef = useRef<{ key: string; count: number } | null>(null);
   const relationshipMutationPendingRef = useRef(false);
@@ -240,6 +251,12 @@ export function ProjectCanvas({
     selectedEdgeGraphRevisionRef.current = graph.revision;
     setSelectedEdgeIds([]);
   }, [graph.revision]);
+
+  useEffect(() => {
+    moveGenerationRef.current = 0;
+    pendingMovePositionsRef.current.clear();
+    lastMoveBatchRef.current = null;
+  }, [projectId]);
 
   const canvasLayout = useMemo(() => materializeWorkspaceLayout(graph, layout), [graph, layout]);
   const authoritativeLayoutRef = useRef(canvasLayout);
@@ -409,6 +426,8 @@ export function ProjectCanvas({
       projectId,
       artifactRevisionIds,
       resourceRevisionStates,
+      artifactGenerationStates,
+      resourceGenerationStates,
       awaitingSelectionResourceIds,
       selectedNodeIds: selectedSet,
       selectedEdgeIds: selectedEdgeSet,
@@ -449,6 +468,7 @@ export function ProjectCanvas({
   }, [
     adapterZoom,
     artifactRevisionIds,
+    artifactGenerationStates,
     awaitingSelectionResourceIds,
     canvasLayout,
     edgeFilter,
@@ -459,6 +479,7 @@ export function ProjectCanvas({
     renameGroup,
     resizeGroup,
     resourceRevisionStates,
+    resourceGenerationStates,
     selectedEdgeSet,
     selectedSet,
     toggleCollapsed,
@@ -477,6 +498,14 @@ export function ProjectCanvas({
       const live = new Map(current.map((node) => [node.id, node]));
       const next = model.nodes.map((node) => {
         const existing = live.get(node.id);
+        const pendingMove = pendingMovePositionsRef.current.get(node.id);
+        if (pendingMove) {
+          return {
+            ...node,
+            position: pendingMove.position,
+            ...(existing?.dragging ? { dragging: true } : {}),
+          };
+        }
         return existing?.dragging ? { ...node, position: existing.position, dragging: true } : node;
       });
       nodesRef.current = next;
@@ -616,6 +645,33 @@ export function ProjectCanvas({
     }
   }, [canonicalEdgeIds, selectedEdgeIds]);
 
+  const persistMovedPositions = useCallback((
+    ids: readonly string[],
+    positions: ReadonlyMap<string, { x: number; y: number }>,
+    successMessage: string,
+  ) => {
+    const generation = moveGenerationRef.current + 1;
+    moveGenerationRef.current = generation;
+    for (const id of ids) {
+      const position = positions.get(id);
+      if (position) pendingMovePositionsRef.current.set(id, { generation, position });
+    }
+    void persistLayout(
+      (currentLayout) => buildMoveCommands(currentLayout, ids, positions),
+      successMessage,
+    ).then((saved) => {
+      let clearedLatestMove = false;
+      for (const id of ids) {
+        if (pendingMovePositionsRef.current.get(id)?.generation !== generation) continue;
+        pendingMovePositionsRef.current.delete(id);
+        clearedLatestMove = true;
+      }
+      if (!saved && clearedLatestMove) {
+        setReconcileVersion((version) => version + 1);
+      }
+    });
+  }, [persistLayout]);
+
   const saveMovedNodes = useCallback((movedNodes: readonly WorkspaceFlowNode[]) => {
     const canonicalNodes = movedNodes.filter((node) => canonicalNodeIds.has(node.id));
     const ids = canonicalNodes.map((node) => node.id);
@@ -626,11 +682,12 @@ export function ProjectCanvas({
     const now = Date.now();
     if (lastMoveBatchRef.current?.key === key && now - lastMoveBatchRef.current.at < MOVE_DEDUPE_WINDOW_MS) return;
     lastMoveBatchRef.current = { key, at: now };
-    void persistLayout(
-      (currentLayout) => buildMoveCommands(currentLayout, ids, positions),
+    persistMovedPositions(
+      ids,
+      positions,
       commands.length === 1 ? "Object moved" : `${commands.length} objects moved`,
     );
-  }, [canonicalNodeIds, persistLayout]);
+  }, [canonicalNodeIds, persistMovedPositions]);
 
   const fitWorkspace = useCallback(() => {
     setStatus("Fit workspace");
@@ -769,11 +826,12 @@ export function ProjectCanvas({
     });
     nodesRef.current = nextNodes;
     setNodes(nextNodes);
-    void persistLayout(
-      (currentLayout) => buildMoveCommands(currentLayout, selectedNodeIds, positions),
+    persistMovedPositions(
+      selectedNodeIds,
+      positions,
       commands.length === 1 ? "Object nudged" : `${commands.length} objects nudged`,
     );
-  }, [persistLayout, selectedNodeIds]);
+  }, [persistMovedPositions, selectedNodeIds]);
 
   const selectedRelationships = useMemo(() => {
     const selectedIds = new Set(selectedEdgeIds);
@@ -959,7 +1017,6 @@ export function ProjectCanvas({
           connectOnClick
           deleteKeyCode={null}
           multiSelectionKeyCode={["Meta", "Control", "Shift"]}
-          onlyRenderVisibleElements
           nodeDragThreshold={2}
           nodeClickDistance={3}
           paneClickDistance={3}

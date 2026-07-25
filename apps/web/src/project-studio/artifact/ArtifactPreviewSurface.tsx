@@ -1,4 +1,4 @@
-import { CircleAlert, Copy, LoaderCircle, MousePointer2, RotateCw, X } from "lucide-react";
+import { CircleAlert, Copy, LoaderCircle, MousePointer2, PanelTop, RotateCw, X } from "lucide-react";
 import { useState, type RefObject } from "react";
 import type { WorkspaceArtifact, WorkspaceRenderFrameSpec } from "../../lib/api.ts";
 import { previewDocumentSrc } from "../../lib/preview-channel.ts";
@@ -14,6 +14,7 @@ import {
 
 export function ArtifactPreviewSurface({
   artifact,
+  notGenerated = false,
   preview,
   frame,
   stageRef,
@@ -33,6 +34,7 @@ export function ArtifactPreviewSurface({
   onPreviewLoad,
 }: {
   artifact: WorkspaceArtifact | null;
+  notGenerated?: boolean;
   preview: ArtifactPreviewController;
   frame: WorkspaceRenderFrameSpec;
   stageRef: RefObject<HTMLDivElement | null>;
@@ -60,6 +62,20 @@ export function ArtifactPreviewSurface({
           <div>
             <strong>Artifact is not in the active workspace</strong>
             <p>Return to the canvas and choose an active Page or Component.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (notGenerated) {
+    return (
+      <div className="artifact-stage artifact-stage--message" data-preview-zoom-mode="fitted">
+        <div role="status" className="artifact-stage-message artifact-stage-message--empty">
+          <PanelTop aria-hidden size={18} />
+          <div>
+            <strong>Not generated yet</strong>
+            <p>This Artifact does not have an immutable Revision. Open its build plan to inspect or retry generation.</p>
           </div>
         </div>
       </div>

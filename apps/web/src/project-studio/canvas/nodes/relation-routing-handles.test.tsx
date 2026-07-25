@@ -49,27 +49,31 @@ const baseData: WorkspaceFlowNodeData = {
   minimumGroupHeight: 0,
 };
 
-function expectRoutingHandles(kind: "component" | "resource") {
-  for (const side of ["left", "right", "top", "bottom"] as const) {
+function expectSideRoutingHandles(kind: "component" | "resource") {
+  for (const side of ["left", "right"] as const) {
     expect(screen.getByTestId(`handle-${kind}-source-${side}`)).toHaveAttribute("data-position", side);
     expect(screen.getByTestId(`handle-${kind}-target-${side}`)).toHaveAttribute(
       "data-class",
       expect.stringContaining("dezin-flow-handle--routing"),
     );
   }
+  for (const side of ["top", "bottom"] as const) {
+    expect(screen.queryByTestId(`handle-${kind}-source-${side}`)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(`handle-${kind}-target-${side}`)).not.toBeInTheDocument();
+  }
 }
 
 describe("semantic relation routing handles", () => {
-  test("component nodes expose four edge-aligned source and target anchors", () => {
+  test("component nodes expose only left and right source and target anchors", () => {
     render(<ComponentNode {...{
       data: baseData,
       selected: false,
     } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
-    expectRoutingHandles("component");
+    expectSideRoutingHandles("component");
   });
 
-  test("resource nodes expose four edge-aligned source and target anchors", () => {
+  test("resource nodes expose only left and right source and target anchors", () => {
     render(<ResourceNode {...{
       data: {
         ...baseData,
@@ -80,6 +84,24 @@ describe("semantic relation routing handles", () => {
       selected: false,
     } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
-    expectRoutingHandles("resource");
+    expectSideRoutingHandles("resource");
+  });
+
+  test("a published Resource shows its Revision quality instead of a stale completed generation state", () => {
+    render(<ResourceNode {...{
+      data: {
+        ...baseData,
+        kind: "resource",
+        artifactId: null,
+        resourceId: "resource-1",
+        revisionId: "revision-1",
+        resourceQualityState: "grounded",
+        generationState: "complete",
+      },
+      selected: false,
+    } as unknown as NodeProps<WorkspaceFlowNode>} />);
+
+    expect(screen.getByText("Grounded")).toBeInTheDocument();
+    expect(screen.queryByText("Finalizing revision")).not.toBeInTheDocument();
   });
 });

@@ -411,6 +411,93 @@ test("a top-level Research load failure retries in place and preserves the exact
   expect(getResource).toHaveBeenCalledTimes(2);
 });
 
+test("headless Research is a recoverable not-generated state and never requests a fake Revision", async () => {
+  const headlessResource = { ...resource, headRevisionId: null };
+  const headlessWorkspace = workspace();
+  headlessWorkspace.resources = [headlessResource];
+  headlessWorkspace.resourceRevisions = [];
+  headlessWorkspace.activeSnapshot = {
+    ...headlessWorkspace.activeSnapshot,
+    resourceRevisions: {},
+  };
+  const getResearchResourceRevision = vi.fn();
+  const onOpenPlan = vi.fn();
+
+  render(
+    <ApiProvider client={baseApi({
+      getResource: async () => headlessResource,
+      getResearchResourceRevision,
+    })}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={null}
+        workspace={headlessWorkspace}
+        generationState={{
+          state: "failed",
+          planId: "plan-1",
+          taskId: "task-research",
+          taskKind: "resource",
+          message: "CodeBuddy quota is exhausted.",
+        }}
+        {...READY_AGENT_PROPS}
+        onBack={() => {}}
+        onOpenPlan={onOpenPlan}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Research not generated")).toBeInTheDocument();
+  expect(screen.getByText("CodeBuddy quota is exhausted.")).toBeInTheDocument();
+  expect(getResearchResourceRevision).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+  expect(onOpenPlan).toHaveBeenCalledTimes(1);
+});
+
+test("a completed headless Research task shows a settled workspace-sync state", async () => {
+  const headlessResource = { ...resource, headRevisionId: null };
+  const headlessWorkspace = workspace();
+  headlessWorkspace.resources = [headlessResource];
+  headlessWorkspace.resourceRevisions = [];
+  headlessWorkspace.activeSnapshot = {
+    ...headlessWorkspace.activeSnapshot,
+    resourceRevisions: {},
+  };
+
+  render(
+    <ApiProvider client={baseApi({
+      getResource: async () => headlessResource,
+      getResearchResourceRevision: vi.fn(),
+    })}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={null}
+        workspace={headlessWorkspace}
+        generationState={{
+          state: "complete",
+          planId: "plan-1",
+          taskId: "task-research",
+          taskKind: "resource",
+          message: null,
+        }}
+        {...READY_AGENT_PROPS}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Research generated")).toBeInTheDocument();
+  expect(screen.getByText(/Syncing the published immutable Revision/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Research is being generated/i)).not.toBeInTheDocument();
+});
+
 test("an archived Research Resource has no writable Current Head surface", async () => {
   const archivedAt = 9_000;
   const archivedResource = { ...resource, archivedAt };

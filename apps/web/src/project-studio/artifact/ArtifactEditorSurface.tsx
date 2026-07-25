@@ -33,6 +33,7 @@ export interface ArtifactEditorController {
   headRevisionId: string | null;
   snapshotId: string | null;
   pinnedRevisionId: string | null;
+  notGenerated: boolean;
   preview: ReturnType<typeof useArtifactPreview>;
   iframeRef: React.RefObject<HTMLIFrameElement | null>;
   selection: ReturnType<typeof usePreviewBridge>["selection"];
@@ -183,13 +184,15 @@ export function useArtifactEditorController({
 
   const target = useMemo<PreviewTarget | null>(() => {
     if (artifactId === null || artifact === null) return null;
-    return targetOverride ?? {
+    if (targetOverride) return targetOverride;
+    if (activeRevisionId === null) return null;
+    return {
       kind: "artifact-current",
       projectId,
       artifactId,
       ...(artifact.activeTrackId ? { trackId: artifact.activeTrackId } : {}),
     };
-  }, [artifact, artifactId, projectId, targetOverride]);
+  }, [activeRevisionId, artifact, artifactId, projectId, targetOverride]);
   const preview = useArtifactPreview({
     projectId,
     target,
@@ -197,7 +200,7 @@ export function useArtifactEditorController({
     expectedRevisionId: target?.kind === "artifact-current"
       ? activeRevisionId ?? undefined
       : undefined,
-    enabled: artifactId !== null && artifact !== null,
+    enabled: target !== null,
   });
   const pinnedRevisionId = targetOverride?.kind === "artifact-revision" ? targetOverride.revisionId : null;
   const bundledPinnedRevision = pinnedRevisionId === null
@@ -348,6 +351,7 @@ export function useArtifactEditorController({
     headRevisionId,
     snapshotId,
     pinnedRevisionId,
+    notGenerated: artifactId !== null && artifact !== null && target === null,
     preview: controlledPreview,
     iframeRef,
     selection: bridge.selection,
@@ -468,6 +472,7 @@ export function ArtifactEditorSurface({
       />
       <ArtifactPreviewSurface
         artifact={editor.artifact}
+        notGenerated={editor.notGenerated}
         preview={editor.preview}
         frame={editor.activeFrame}
         stageRef={stageRef}

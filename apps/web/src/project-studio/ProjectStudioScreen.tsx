@@ -18,6 +18,7 @@ import {
 } from "../lib/pending-brief.ts";
 import type {
   DesignSystemCard,
+  GenerationPlanDetail,
   Resource,
   ResourceRevision,
   ResourceRevisionOwnedSource,
@@ -30,6 +31,10 @@ import {
   GenerationPlanInspector,
   type GenerationPlanTargetLabels,
 } from "./generation/GenerationPlanPanel.tsx";
+import {
+  buildGenerationTargetStates,
+  generationPlanResultKey,
+} from "./generation/generation-target-state.ts";
 import {
   createPrototypeFlowSession,
   presentablePrototypeFlowPages,
@@ -235,6 +240,8 @@ export function ProjectStudioScreen({
   const [attachingContext, setAttachingContext] = useState(false);
   const [resourceIntentPlanId, setResourceIntentPlanId] = useState<string | null>(null);
   const [workspacePlanId, setWorkspacePlanId] = useState<string | null>(null);
+  const [workspacePlanDetail, setWorkspacePlanDetail] = useState<GenerationPlanDetail | null>(null);
+  const workspacePlanResultKeyRef = useRef<string | null>(null);
   const [dismissedWorkspacePlanId, setDismissedWorkspacePlanId] = useState<string | null>(null);
   const [prototypeFlowSession, setPrototypeFlowSession] = useState<PrototypeFlowSession | null>(null);
   const presentFlowButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -280,6 +287,9 @@ export function ProjectStudioScreen({
       : resourceId !== null && resourceRevisionId === null
         ? studio.resourceAgentPlanId
         : null;
+  const observedGenerationPlanId = artifactId === null && resourceId === null
+    ? workspacePlanId
+    : resourceIntentPlanId ?? scopedGenerationPlanId ?? workspacePlanId;
   const scopedAgentSubmitting = artifactId !== null
     ? studio.artifactAgentSubmitting
     : resourceId !== null
@@ -520,8 +530,9 @@ export function ProjectStudioScreen({
 
   useEffect(() => {
     setWorkspacePlanId(null);
+    setWorkspacePlanDetail(null);
     setDismissedWorkspacePlanId(null);
-    if (artifactId !== null || resourceId !== null || workspaceId === null) return;
+    if (workspaceId === null) return;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
@@ -549,7 +560,51 @@ export function ProjectStudioScreen({
       controller.abort(new DOMException("Workspace view closed", "AbortError"));
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [api, artifactId, projectId, resourceId, workspaceId]);
+  }, [api, projectId, workspaceId]);
+
+  useEffect(() => {
+    setWorkspacePlanDetail(null);
+    workspacePlanResultKeyRef.current = null;
+    if (observedGenerationPlanId === null) return;
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const controller = new AbortController();
+    const refresh = async (): Promise<void> => {
+      try {
+        const detail = await api.getGenerationPlan(projectId, observedGenerationPlanId, controller.signal);
+        failures = 0;
+        if (!current) return;
+        setWorkspacePlanDetail(detail);
+        const resultKey = generationPlanResultKey(detail);
+        if (resultKey !== null && resultKey !== workspacePlanResultKeyRef.current) {
+          workspacePlanResultKeyRef.current = resultKey;
+          studio.reconcileGenerationPublication();
+        }
+        const terminal = detail.plan.status === "succeeded"
+          || detail.plan.status === "failed"
+          || detail.plan.status === "compile-failed"
+          || detail.plan.status === "requires-new-impact"
+          || detail.plan.status === "cancelled";
+        if (!terminal) timer = setTimeout(() => void refresh(), 1_500);
+      } catch {
+        if (controller.signal.aborted) return;
+        failures += 1;
+        if (current) {
+          timer = setTimeout(
+            () => void refresh(),
+            Math.min(500 * (2 ** Math.min(failures - 1, 3)), 4_000),
+          );
+        }
+      }
+    };
+    void refresh();
+    return () => {
+      current = false;
+      controller.abort(new DOMException("Generation Plan view closed", "AbortError"));
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [api, observedGenerationPlanId, projectId, studio.reconcileGenerationPublication]);
 
   useEffect(() => {
     if (approvedPlanFromReview === null) return;
@@ -604,6 +659,10 @@ export function ProjectStudioScreen({
     readyWorkspace?.activeSnapshot.resourceRevisions,
     readyWorkspace?.resourceRevisions,
   ]);
+  const generationTargetStates = useMemo(
+    () => buildGenerationTargetStates(workspacePlanDetail),
+    [workspacePlanDetail],
+  );
   const workspaceReferenceCards = useMemo(() => {
     if (readyWorkspace === null) return [] as DaemonContextCard[];
     const artifactCards = readyWorkspace.artifacts.flatMap((artifact): DaemonContextCard[] => {
@@ -799,6 +858,8 @@ export function ProjectStudioScreen({
             viewport={studio.viewport}
             artifactRevisionIds={load.workspace.activeSnapshot.artifactRevisions}
             resourceRevisionStates={resourceRevisionStates}
+            artifactGenerationStates={generationTargetStates.artifacts}
+            resourceGenerationStates={generationTargetStates.resources}
             selectedNodeIds={studio.selectedGraphObjectIds}
             onSelectionChange={studio.setSelectedGraphObjectIds}
             onViewportChange={studio.setViewport}
@@ -856,6 +917,8 @@ export function ProjectStudioScreen({
               studio.reconcileGenerationPublication();
             }}
             onWorkspaceChanged={studio.reconcileGenerationPublication}
+            generationState={generationTargetStates.resources[resourceId!] ?? null}
+            onOpenPlan={observedGenerationPlanId === null ? undefined : () => setScopedInspectorMode("plan")}
           />
         ) : (
           <ResourceEditorSurface
@@ -871,7 +934,7 @@ export function ProjectStudioScreen({
     : null;
   const preferredGenerationPlanId = workspaceScope
     ? workspacePlanId ?? approvedGenerationPlanId
-    : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedGenerationPlanId;
+    : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedGenerationPlanId ?? workspacePlanId;
   const proposalReviewOpen = studio.proposalReview.status !== "idle"
     && !(studio.proposalReview.status === "approved"
       && studio.proposalReview.plan?.status === "compile-failed");
@@ -1020,7 +1083,7 @@ export function ProjectStudioScreen({
             ? preferredGenerationPlanId !== null && !proposalReviewOpen && !generationPlanOpen
               ? () => setDismissedWorkspacePlanId(null)
               : undefined
-            : scopedGenerationPlanId !== null && scopedInspectorMode === "inspector"
+            : preferredGenerationPlanId !== null && scopedInspectorMode === "inspector"
               ? () => setScopedInspectorMode("plan")
               : undefined}
           submitLabel={workspaceScope ? "Create proposal" : artifactScope ? "Queue artifact edit" : "Queue resource task"}

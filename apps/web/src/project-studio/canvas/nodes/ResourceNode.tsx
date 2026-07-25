@@ -5,6 +5,19 @@ import type { WorkspaceFlowNode } from "../workspace-graph-adapter.ts";
 export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
   const overview = data.zoomLevel === "overview";
   const awaitingSelection = data.generationState === "awaiting-selection";
+  const generationLabel = data.revisionId || data.generationState === "idle" || data.generationState === "awaiting-selection"
+    ? null
+    : data.generationState === "complete"
+      ? "Finalizing revision"
+      : data.generationState === "failed"
+        ? "Generation failed"
+        : data.generationState === "blocked"
+          ? "Blocked by dependency"
+          : data.generationState === "cancelled"
+            ? "Generation cancelled"
+            : data.generationState === "queued"
+              ? "Queued for generation"
+              : "Generating";
   const qualityLabel = data.resourceQualityState === "grounded"
     ? "Grounded"
     : data.resourceQualityState === "needs-review"
@@ -12,7 +25,7 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       : data.revisionId
         ? "Revision ready"
         : "Awaiting revision";
-  const statusLabel = awaitingSelection ? `${qualityLabel} · choose direction` : qualityLabel;
+  const statusLabel = generationLabel ?? (awaitingSelection ? `${qualityLabel} · choose direction` : qualityLabel);
   return (
     <div
       className="dezin-flow-card dezin-flow-resource"
@@ -20,11 +33,11 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       data-zoom={data.zoomLevel}
       data-resource-quality={data.resourceQualityState ?? undefined}
       data-awaiting-selection={awaitingSelection || undefined}
+      data-generation-state={data.generationState}
+      title={data.generationMessage ?? undefined}
     >
       <Handle id="resource-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="resource-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="resource-target-top" type="target" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="resource-target-bottom" type="target" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <div className="dezin-flow-resource__glyph" aria-hidden><BookOpenText size={17} strokeWidth={1.45} /></div>
       <div className="dezin-flow-resource__copy">
         <span className="dezin-flow-card__kind"><Orbit size={10} /> Context resource</span>
@@ -47,8 +60,6 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       </div>
       <Handle id="resource-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="resource-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="resource-source-top" type="source" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="resource-source-bottom" type="source" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
     </div>
   );
 }

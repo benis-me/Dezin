@@ -39,8 +39,6 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
       />
       <Handle id="page-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="page-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="page-target-top" type="target" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="page-target-bottom" type="target" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <ArtifactNodePreview
         artifactKind="page"
         projectId={data.projectId}
@@ -48,6 +46,8 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
         name={data.name}
         revisionId={data.revisionId}
         zoomLevel={data.zoomLevel}
+        generationState={data.generationState}
+        generationMessage={data.generationMessage}
       />
       <div className="dezin-flow-card__body">
         <div className="dezin-flow-card__title-row">
@@ -59,7 +59,13 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
         </div>
         {!overview && (
           <div className="dezin-flow-card__meta">
-            <span>{data.revisionId ? `rev ${data.revisionId.slice(0, 7)}` : "draft shell"}</span>
+            <span title={data.generationMessage ?? undefined}>
+              {data.revisionId
+                ? `rev ${data.revisionId.slice(0, 7)}`
+                : data.generationState === "idle"
+                  ? "not generated"
+                  : data.generationState.replace("-", " ")}
+            </span>
             {full && (
               <span data-quality={data.qualityState}>
                 {data.qualityScore === null ? data.qualityState.replace("-", " ") : `${data.qualityScore} quality`}
@@ -91,8 +97,6 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
       />
       <Handle id="page-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="page-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="page-source-top" type="source" position={Position.Top} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <Handle id="page-source-bottom" type="source" position={Position.Bottom} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
     </div>
   );
 }

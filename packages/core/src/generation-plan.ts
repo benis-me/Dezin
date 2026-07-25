@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
   normalizeGenerationTaskIntent,
 } from "./store-codecs.ts";
-import { applyWorkspaceGraphCommands } from "./workspace-graph.ts";
 import { compareBinary } from "./workspace-codecs.ts";
 import type {
   ArtifactGenerationTaskPayloadV2,
@@ -604,116 +603,6 @@ function stableTopologicalTaskOrder(
   return result;
 }
 
-function prototypeConnectedPlannedPageComponents(
-  proposal: WorkspaceProposal,
-  generation: WorkspaceGenerationPayload,
-): string[][] {
-  const plannedPages = new Set(generation.artifactPlans
-    .filter((plan) => plan.kind === "page")
-    .map((plan) => plan.artifactId));
-  const adjacency = new Map<string, Set<string>>();
-  const neighbors = (artifactId: string): Set<string> => {
-    const current = adjacency.get(artifactId);
-    if (current) return current;
-    const created = new Set<string>();
-    adjacency.set(artifactId, created);
-    return created;
-  };
-  const approvedGraph = proposal.operations.length === 0
-    ? proposal.baseGraph
-    : applyWorkspaceGraphCommands(proposal.baseGraph, proposal.operations);
-  const pageArtifactByNodeId = new Map(approvedGraph.nodes.flatMap((node) => (
-    node.kind === "page" ? [[node.id, node.artifactId] as const] : []
-  )));
-  for (const edge of approvedGraph.edges) {
-    if (edge.kind !== "prototype") continue;
-    const sourceArtifactId = pageArtifactByNodeId.get(edge.sourceNodeId);
-    const targetArtifactId = pageArtifactByNodeId.get(edge.targetNodeId);
-    if (sourceArtifactId === undefined || targetArtifactId === undefined) continue;
-    neighbors(sourceArtifactId).add(targetArtifactId);
-    neighbors(targetArtifactId).add(sourceArtifactId);
-  }
-  // Keep accepting the older direct Artifact relation contract for already
-  // approved Proposals while production proposal-only planning migrates to
-  // server-applied planned graph edges.
-  for (const intent of generation.prototypeIntents) {
-    neighbors(intent.sourceArtifactId).add(intent.targetArtifactId);
-    neighbors(intent.targetArtifactId).add(intent.sourceArtifactId);
-  }
-
-  const visited = new Set<string>();
-  const components: string[][] = [];
-  for (const start of [...plannedPages].sort(compareBinary)) {
-    if (visited.has(start)) continue;
-    const pending = [start];
-    const plannedMembers: string[] = [];
-    visited.add(start);
-    while (pending.length > 0) {
-      const current = pending.shift()!;
-      if (plannedPages.has(current)) plannedMembers.push(current);
-      for (const neighbor of [...(adjacency.get(current) ?? [])].sort(compareBinary)) {
-        if (visited.has(neighbor)) continue;
-        visited.add(neighbor);
-        pending.push(neighbor);
-      }
-    }
-    if (plannedMembers.length > 1) components.push(plannedMembers.sort(compareBinary));
-  }
-  return components;
-}
-
-function orderPrototypeConnectedPageTasks(
-  tasks: readonly GenerationTaskIntent[],
-  proposal: WorkspaceProposal,
-  generation: WorkspaceGenerationPayload,
-): GenerationTaskIntent[] {
-  const topological = stableTopologicalTaskOrder(tasks);
-  const position = new Map(topological.map((task, index) => [task.id, index]));
-  const pageTaskByArtifactId = new Map(tasks.flatMap((task) => (
-    task.kind === "page" && task.target.type === "artifact"
-      ? [[task.target.id, task] as const]
-      : []
-  )));
-  const addedDependencies = new Map<string, Set<string>>();
-  for (const component of prototypeConnectedPlannedPageComponents(proposal, generation)) {
-    const ordered = component
-      .map((artifactId) => pageTaskByArtifactId.get(artifactId))
-      .filter((task): task is GenerationTaskIntent => task !== undefined)
-      .sort((left, right) => (position.get(left.id)! - position.get(right.id)!));
-    for (let index = 1; index < ordered.length; index += 1) {
-      const task = ordered[index]!;
-      const previous = ordered[index - 1]!;
-      const dependencies = addedDependencies.get(task.id) ?? new Set<string>();
-      dependencies.add(previous.id);
-      addedDependencies.set(task.id, dependencies);
-    }
-  }
-  if (addedDependencies.size === 0) return [...tasks];
-  const orderedTasks = tasks.map((task) => {
-    const additions = addedDependencies.get(task.id);
-    if (!additions || [...additions].every((dependencyId) => task.dependencyIds.includes(dependencyId))) {
-      return task;
-    }
-    return deepFreeze(normalizeGenerationTaskIntent({
-      id: task.id,
-      ordinal: task.ordinal,
-      workspaceId: task.workspaceId,
-      planId: task.planId,
-      kind: task.kind,
-      target: task.target,
-      dependencyIds: [...new Set([...task.dependencyIds, ...additions])].sort(compareBinary),
-      payload: task.payload,
-      capabilities: task.capabilities,
-      qaProfile: task.qaProfile,
-      resourceLimits: task.resourceLimits,
-    }));
-  });
-  // The spanning order is a linear extension of the existing Task DAG, so it
-  // cannot introduce a cycle. Keep the assertion here as a fail-closed fence.
-  assertAcyclicTaskGraph(orderedTasks);
-  return orderedTasks;
-}
-
 function normalizedDependencyRows(
   planId: string,
   tasks: readonly GenerationTaskIntent[],
@@ -847,11 +736,10 @@ export function compileGenerationPlan(input: {
     });
   });
 
-  const generatedTasks = orderPrototypeConnectedPageTasks(
-    [...resourceTasks, ...artifactTasks],
-    input.proposal,
-    generation,
-  );
+  // Prototype edges describe navigation and validation, not publication
+  // prerequisites. Keep failure propagation limited to the explicit Artifact,
+  // Component Instance, and generated Resource dependencies compiled above.
+  const generatedTasks = [...resourceTasks, ...artifactTasks];
   const workspaceTarget: GenerationTaskTarget = {
     type: "workspace",
     workspaceId: input.shell.workspaceId,

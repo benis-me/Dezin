@@ -122,17 +122,41 @@ function createDiamondRetryFixture(label: string) {
     baseSnapshotId: workspace.activeSnapshotId,
     layoutId: layout.layoutId,
     baseLayoutChecksum: layout.checksum,
-    operations: artifactValues.map((artifact) => ({
-      id: `add-${artifact.nodeId}`,
-      type: "add-node" as const,
-      node: {
-        id: artifact.nodeId,
-        kind: "page" as const,
-        name: artifact.name,
-        artifactId: artifact.artifactId,
-        createIdentity: { initialTrackId: artifact.trackId },
+    operations: [
+      ...artifactValues.map((artifact) => ({
+        id: `add-${artifact.nodeId}`,
+        type: "add-node" as const,
+        node: {
+          id: artifact.nodeId,
+          kind: "page" as const,
+          name: artifact.name,
+          artifactId: artifact.artifactId,
+          createIdentity: { initialTrackId: artifact.trackId },
+        },
+      })),
+      {
+        id: `add-edge-a-b-${label}`,
+        type: "add-edge" as const,
+        edge: {
+          id: `edge-a-b-${label}`,
+          workspaceId: workspace.id,
+          sourceNodeId: artifacts.a.nodeId,
+          targetNodeId: artifacts.b.nodeId,
+          kind: "prototype" as const,
+        },
       },
-    })),
+      {
+        id: `add-edge-b-sibling-${label}`,
+        type: "add-edge" as const,
+        edge: {
+          id: `edge-b-sibling-${label}`,
+          workspaceId: workspace.id,
+          sourceNodeId: artifacts.b.nodeId,
+          targetNodeId: artifacts.sibling.nodeId,
+          kind: "prototype" as const,
+        },
+      },
+    ],
     layoutOperations: [],
     generation: {
       ...emptyGeneration(),
@@ -167,6 +191,13 @@ function createDiamondRetryFixture(label: string) {
     b: taskFor(artifacts.b.artifactId),
   } as const;
   const sibling = taskFor(artifacts.sibling.artifactId);
+  for (const task of [...Object.values(roots), sibling]) {
+    assert.deepEqual(
+      task.dependencyIds,
+      [],
+      "prototype navigation must not become a persisted Page execution dependency",
+    );
+  }
   const validation = detail.tasks.find((task) => task.kind === "prototype-validation");
   const checkpoint = detail.tasks.find((task) => task.kind === "checkpoint");
   assert.ok(validation);
@@ -522,6 +553,61 @@ function attemptClaimCount(
   ).get(taskId, attempt) as { count: number };
   return row.count;
 }
+
+test("persists prototype-connected Pages as independent work and contains Page failure propagation", () => {
+  const fixture = createDiamondRetryFixture("prototype-navigation-is-not-a-prerequisite");
+  try {
+    const persisted = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    const pageTaskIds = new Set(
+      persisted.tasks.filter((task) => task.kind === "page").map((task) => task.id),
+    );
+    assert.ok(pageTaskIds.size >= 3);
+    assert.equal(
+      persisted.dependencies.some((dependency) => (
+        pageTaskIds.has(dependency.taskId) && pageTaskIds.has(dependency.dependencyTaskId)
+      )),
+      false,
+    );
+
+    failDiamondRoot(fixture, fixture.roots.a, "prototype-page-a");
+
+    const afterFailure = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    );
+    assert.equal(
+      afterFailure.tasks.find((task) => task.id === fixture.roots.a.id)?.status,
+      "failed",
+    );
+    for (const independentPage of [fixture.roots.b, fixture.sibling]) {
+      const durable = afterFailure.tasks.find((task) => task.id === independentPage.id);
+      assert.equal(durable?.status, "materialization-pending");
+      assert.equal(durable?.blockedByTaskId, null);
+      assert.equal(durable?.blockedReason, null);
+      assert.doesNotThrow(() => (
+        fixture.store.workspace.observeGenerationTaskMaterializationForProject(
+          fixture.project.id,
+          fixture.plan.id,
+          independentPage.id,
+        )
+      ));
+    }
+    assert.equal(
+      afterFailure.tasks.find((task) => task.id === fixture.validation.id)?.blockedByTaskId,
+      fixture.roots.a.id,
+      "the real validation prerequisite must still contain the failed leaf",
+    );
+    assert.equal(
+      afterFailure.tasks.find((task) => task.id === fixture.checkpoint.id)?.blockedByTaskId,
+      fixture.roots.a.id,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
 
 test("manual retry advances the durable execution epoch and fences an old asynchronous observation", () => {
   const fixture = createControlFixture("epoch-fence");

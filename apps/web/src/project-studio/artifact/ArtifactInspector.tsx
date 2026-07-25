@@ -53,7 +53,9 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
         <h3 id="artifact-selection-title"><Braces aria-hidden size={13} /> Selection</h3>
         {selection === null ? (
           <div className="artifact-inspector__empty">
-            <p>Choose an element in the live preview. Its stable locator becomes typed Agent Context and unlocks bounded direct edits.</p>
+            <p>{editor.notGenerated
+              ? "Generate this Artifact before selecting and editing elements."
+              : "Choose an element in the live preview. Its stable locator becomes typed Agent Context and unlocks bounded direct edits."}</p>
             <button
               type="button"
               disabled={!pickerReady}
@@ -188,7 +190,12 @@ export function ArtifactInspector({ editor }: { editor: ArtifactEditorController
         <dl className="artifact-context-list">
           <div><dt>Track</dt><dd>{editor.tracks.find((track) => track.id === editor.artifact?.activeTrackId)?.name ?? "Main"}</dd></div>
           <div><dt>Revision</dt><dd>{editor.revision ? `r${editor.revision.sequence}` : "Unpublished"}</dd></div>
-          <div><dt>Dependencies</dt><dd>{editor.preview.resolved?.dependencyLockHash.slice(0, 8) ?? "Resolving"}</dd></div>
+          <div>
+            <dt>Dependencies</dt>
+            <dd>{editor.notGenerated
+              ? "Not available"
+              : editor.preview.resolved?.dependencyLockHash.slice(0, 8) ?? "Resolving"}</dd>
+          </div>
         </dl>
       </section>
 

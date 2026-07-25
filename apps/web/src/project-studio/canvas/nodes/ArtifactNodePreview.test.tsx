@@ -32,7 +32,7 @@ describe("artifact node preview", () => {
         revisionId={null}
       />,
     );
-    expect(screen.getByText("Generate to preview")).toBeInTheDocument();
+    expect(screen.getByText("Not generated")).toBeInTheDocument();
     expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "empty");
 
     rerender(
@@ -73,6 +73,59 @@ describe("artifact node preview", () => {
     expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "loading");
     await waitFor(() => expect(getArtifactThumbnail).toHaveBeenCalledTimes(3));
     expect(await screen.findByRole("img", { name: "Checkout design preview" })).not.toBe(secondImage);
+  });
+
+  test("projects a failed or blocked generation task without requesting a fake thumbnail", () => {
+    const { container, rerender } = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-1"
+        artifactId="artifact-1"
+        name="Checkout"
+        revisionId={null}
+        generationState="failed"
+        generationMessage="CodeBuddy quota is exhausted."
+      />,
+    );
+
+    expect(screen.getByText("Generation failed")).toBeInTheDocument();
+    expect(screen.getByText("CodeBuddy quota is exhausted.")).toBeInTheDocument();
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "failed");
+    expect(getArtifactThumbnail).not.toHaveBeenCalled();
+
+    rerender(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-1"
+        artifactId="artifact-1"
+        name="Checkout"
+        revisionId={null}
+        generationState="blocked"
+        generationMessage="Blocked by failed prerequisite Session Metadata"
+      />,
+    );
+    expect(screen.getByText("Blocked by dependency")).toBeInTheDocument();
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "blocked");
+    expect(getArtifactThumbnail).not.toHaveBeenCalled();
+  });
+
+  test("shows a settled sync state without an infinite generation spinner when publication has completed", () => {
+    const { container } = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-1"
+        artifactId="artifact-1"
+        name="Checkout"
+        revisionId={null}
+        generationState="complete"
+      />,
+    );
+
+    expect(screen.getByText("Generated · syncing revision")).toBeInTheDocument();
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "complete");
+    expect(container.querySelector(".dezin-flow-card__preview")).not.toHaveAttribute("aria-busy");
+    expect(container.querySelector(".dezin-flow-card__preview-spinner")).toBeNull();
+    expect(getArtifactThumbnail).not.toHaveBeenCalled();
   });
 
   test("deduplicates a revision request across semantic zoom changes and revokes mount-owned object URLs", async () => {

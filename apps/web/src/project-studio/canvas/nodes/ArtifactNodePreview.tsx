@@ -2,7 +2,7 @@ import { Component, ImageOff, LoaderCircle, PanelTop, RotateCcw } from "lucide-r
 import { useEffect, useMemo, useState } from "react";
 import type { ApiClient } from "../../../lib/api.ts";
 import { useApi } from "../../../lib/api-context.tsx";
-import type { SemanticZoomLevel } from "../workspace-graph-adapter.ts";
+import type { SemanticZoomLevel, WorkspaceFlowNodeData } from "../workspace-graph-adapter.ts";
 
 type ArtifactKind = "page" | "component";
 
@@ -147,6 +147,8 @@ export function ArtifactNodePreview({
   name,
   revisionId,
   zoomLevel = "full",
+  generationState = "idle",
+  generationMessage = null,
 }: {
   artifactKind: ArtifactKind;
   projectId: string | null;
@@ -154,6 +156,8 @@ export function ArtifactNodePreview({
   name: string;
   revisionId: string | null;
   zoomLevel?: SemanticZoomLevel;
+  generationState?: WorkspaceFlowNodeData["generationState"];
+  generationMessage?: string | null;
 }) {
   const api = useApi();
   const [attempt, setAttempt] = useState(0);
@@ -207,10 +211,13 @@ export function ArtifactNodePreview({
     && failedObjectUrl !== visibleRequest.objectUrl;
   const imageFailed = visibleRequest.objectUrl !== null
     && failedObjectUrl === visibleRequest.objectUrl;
+  const unpublishedState = generationState === "awaiting-selection" || generationState === "idle"
+    ? "empty"
+    : generationState;
   const visualState = zoomLevel === "overview"
     ? "idle"
     : revisionId === null
-    ? "empty"
+      ? unpublishedState
     : visibleRequest.status === "error" || imageFailed
       ? "error"
       : imageReady
@@ -220,11 +227,17 @@ export function ArtifactNodePreview({
   const kindLabel = artifactKind === "page" ? "Page" : "Component";
   const quietLoading = zoomLevel === "compact";
   const previewMessage = useMemo(() => {
-    if (visualState === "empty") return "Generate to preview";
+    if (visualState === "empty") return "Not generated";
+    if (visualState === "queued") return "Queued for generation";
+    if (visualState === "running") return "Generating…";
+    if (visualState === "complete") return "Generated · syncing revision";
+    if (visualState === "failed") return "Generation failed";
+    if (visualState === "blocked") return "Blocked by dependency";
+    if (visualState === "cancelled") return "Generation cancelled";
     if (visualState === "error") return "Preview unavailable";
     if (visualState === "loading") return "Rendering preview…";
     return null;
-  }, [visualState]);
+  }, [generationState, visualState]);
 
   if (zoomLevel === "overview") {
     return (
@@ -247,7 +260,7 @@ export function ArtifactNodePreview({
       data-state={visualState}
       role="group"
       aria-label={`${kindLabel} preview for ${name}`}
-      aria-busy={visualState === "loading" || undefined}
+      aria-busy={visualState === "loading" || visualState === "queued" || visualState === "running" || undefined}
     >
       {visibleRequest.objectUrl !== null && (
         <img
@@ -269,14 +282,17 @@ export function ArtifactNodePreview({
           data-state={visualState}
           data-motion={visualState === "loading" && quietLoading ? "quiet" : undefined}
         >
-          {visualState === "loading"
+          {visualState === "loading" || visualState === "queued" || visualState === "running"
             ? quietLoading
               ? <KindIcon className="dezin-flow-card__preview-static" size={17} strokeWidth={1.5} aria-hidden />
               : <LoaderCircle className="dezin-flow-card__preview-spinner" size={17} strokeWidth={1.5} aria-hidden />
-            : visualState === "error"
+            : visualState === "error" || visualState === "failed" || visualState === "blocked"
               ? <ImageOff size={17} strokeWidth={1.5} aria-hidden />
               : <KindIcon size={17} strokeWidth={1.5} aria-hidden />}
           <span>{previewMessage}</span>
+          {revisionId === null && generationMessage && zoomLevel === "full" ? (
+            <small title={generationMessage}>{generationMessage}</small>
+          ) : null}
           {visualState === "error" && (
             <button
               type="button"

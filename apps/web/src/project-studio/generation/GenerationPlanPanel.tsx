@@ -13,6 +13,7 @@ import {
   type GenerationTaskStatus,
 } from "../../lib/api.ts";
 import { navigate } from "../../router.tsx";
+import { generationPlanResultKey } from "./generation-target-state.ts";
 
 export type GenerationPlanConnection = "connecting" | "live" | "offline" | "error" | "settled";
 
@@ -477,14 +478,11 @@ export function GenerationPlanInspector({
     setDetail(next);
     setPlans((current) => current.map((plan) => plan.id === next.plan.id ? next.plan : plan));
     if (immutablePlan(next.plan)) setConnection("settled");
-    const results = next.tasks.flatMap((task) => {
-      const identities = [task.resultRevisionId, task.resultResourceRevisionId, task.resultSnapshotId];
-      return identities.some((value) => value !== null) ? [`${task.id}:${identities.join(":")}`] : [];
-    });
-    const resultKey = `${projectId}:${next.plan.id}:${results.join("|")}`;
-    if (resultKey !== workspaceResultKey.current) {
-      workspaceResultKey.current = resultKey;
-      if (results.length > 0) onWorkspaceChanged?.();
+    const resultKey = generationPlanResultKey(next);
+    const scopedResultKey = resultKey === null ? null : `${projectId}:${resultKey}`;
+    if (scopedResultKey !== workspaceResultKey.current) {
+      workspaceResultKey.current = scopedResultKey ?? "";
+      if (resultKey !== null) onWorkspaceChanged?.();
     }
   }, [onWorkspaceChanged, projectId]);
 

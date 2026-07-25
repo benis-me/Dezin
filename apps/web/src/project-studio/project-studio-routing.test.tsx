@@ -404,6 +404,32 @@ test("Workspace canvas restores its latest live Workspace Agent Plan after re-en
   expect(getLatestWorkspaceAgentPlanId).toHaveBeenCalledWith("p-1", expect.any(AbortSignal));
 });
 
+test("background Plan results reconcile published Revisions even when the Build plan Inspector is not mounted", async () => {
+  const completed = generationPlanDetail("plan-background-publication", "artifact-p-1", 2);
+  const getWorkspace = vi.fn(async () => readyWorkspace("p-1"));
+  const getGenerationPlan = vi.fn(async () => completed);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace,
+      listWorkspaceProposals: async () => { throw new Error("proposal index unavailable"); },
+      getLatestWorkspaceAgentPlanId: async () => completed.plan.id,
+      getGenerationPlan,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("heading", { name: "Proposal unavailable" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith(
+    "p-1",
+    completed.plan.id,
+    expect.any(AbortSignal),
+  ));
+  await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(2));
+});
+
 test("Workspace canvas restores a failed Workspace Agent Plan with its retry action after re-entry", async () => {
   const settled = generationPlanDetail("plan-failed-workspace-agent", "artifact-p-1", 2);
   const failed: GenerationPlanDetail = {
@@ -479,7 +505,7 @@ test("Artifact route restores the newest durable scoped Plan without displacing 
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
   const openPlan = await screen.findByRole("button", { name: "Open build plan" });
   expect(screen.getByLabelText("Artifact Agent task status")).toHaveTextContent(exact.plan.id);
-  await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(3));
   fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Selected generation plan" })).toHaveValue("plan-exact");

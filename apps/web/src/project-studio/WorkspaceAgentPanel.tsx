@@ -222,7 +222,7 @@ export function WorkspaceAgentPanel({
         <div ref={transcriptEndRef} />
       </div>
 
-      <div className="shrink-0 border-t border-border p-2.5">
+      <div className="shrink-0 p-2.5" data-workspace-agent-composer>
         <input
           ref={fileInputRef}
           type="file"

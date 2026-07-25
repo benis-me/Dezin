@@ -3362,7 +3362,11 @@ export interface ApiClient {
     artifactId: string,
     signal?: AbortSignal,
   ): Promise<string | null>;
-  getGenerationPlan(projectId: string, planId: string): Promise<GenerationPlanDetail>;
+  getGenerationPlan(
+    projectId: string,
+    planId: string,
+    signal?: AbortSignal,
+  ): Promise<GenerationPlanDetail>;
   streamGenerationPlanEvents(
     projectId: string,
     planId: string,
@@ -3808,8 +3812,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/agent/latest-plan`,
         signal === undefined ? undefined : { signal },
       ).then(({ planId }) => planId),
-    getGenerationPlan: (projectId, planId) =>
-      json<GenerationPlanDetail>(`/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}`),
+    getGenerationPlan: (projectId, planId, signal) =>
+      json<GenerationPlanDetail>(
+        `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}`,
+        signal === undefined ? undefined : { signal },
+      ),
     cancelGenerationPlan: (projectId, planId) =>
       json<GenerationPlanDetail>(
         `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/cancel`,

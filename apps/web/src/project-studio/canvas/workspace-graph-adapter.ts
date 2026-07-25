@@ -12,6 +12,7 @@ import type {
   WorkspaceLayoutObject,
   WorkspaceNode,
 } from "../../lib/api.ts";
+import type { GenerationTargetState } from "../generation/generation-target-state.ts";
 import {
   WORKSPACE_NODE_SIZES,
   isComponentLibraryGroupId,
@@ -40,7 +41,10 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   outgoingCount: number;
   qualityState: "passed" | "needs-attention" | "failed" | "unassessed" | "not-applicable";
   qualityScore: number | null;
-  generationState: "idle" | "awaiting-selection" | "queued" | "running" | "complete" | "failed";
+  generationState: "idle" | "awaiting-selection" | GenerationTargetState["state"];
+  generationMessage?: string | null;
+  generationPlanId?: string | null;
+  generationTaskId?: string | null;
   collapsed: boolean;
   parentGroupId: string | null;
   groupRole: "component-library" | "freeform" | null;
@@ -79,6 +83,8 @@ export interface WorkspaceGraphView {
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
     qualityState: "grounded" | "needs-review" | null;
   }>>;
+  artifactGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
+  resourceGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   awaitingSelectionResourceIds?: ReadonlySet<string>;
   selectedNodeIds?: ReadonlySet<string>;
   selectedEdgeIds?: ReadonlySet<string>;
@@ -213,6 +219,9 @@ function adaptGroup(
       qualityState: "not-applicable",
       qualityScore: null,
       generationState: "idle",
+      generationMessage: null,
+      generationPlanId: null,
+      generationTaskId: null,
       collapsed: group.collapsed,
       parentGroupId: group.parentGroupId,
       groupRole: componentLibrary ? "component-library" : "freeform",
@@ -239,6 +248,11 @@ function adaptGraphNode(
   const revisionId = node.kind === "resource"
     ? resourceState?.revisionId ?? null
     : view.artifactRevisionIds?.[node.artifactId] ?? null;
+  const generation = node.kind === "resource"
+    ? view.resourceGenerationStates?.[node.resourceId]
+    : view.artifactGenerationStates?.[node.artifactId];
+  const awaitingSelection = node.kind === "resource"
+    && view.awaitingSelectionResourceIds?.has(node.resourceId);
   const quality = node.kind === "resource" ? null : node.quality ?? null;
   const size = WORKSPACE_NODE_SIZES[node.kind];
   return {
@@ -266,9 +280,10 @@ function adaptGraphNode(
       outgoingCount: counts.get(node.id)?.outgoing ?? 0,
       qualityState: node.kind === "resource" ? "not-applicable" : quality?.state ?? "unassessed",
       qualityScore: node.kind === "resource" ? null : quality?.score ?? null,
-      generationState: node.kind === "resource" && view.awaitingSelectionResourceIds?.has(node.resourceId)
-        ? "awaiting-selection"
-        : "idle",
+      generationState: awaitingSelection ? "awaiting-selection" : generation?.state ?? "idle",
+      generationMessage: generation?.message ?? null,
+      generationPlanId: generation?.planId ?? null,
+      generationTaskId: generation?.taskId ?? null,
       collapsed: false,
       parentGroupId: layoutObject.parentGroupId,
       groupRole: null,

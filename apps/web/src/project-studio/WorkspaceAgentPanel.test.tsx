@@ -162,3 +162,18 @@ test("keeps task history in the transcript instead of below the composer", () =>
   fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
   expect(onStatusClick).toHaveBeenCalledTimes(1);
 });
+
+test("keeps the transcript and composer on one uninterrupted surface", () => {
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+    />,
+  );
+
+  const composerRegion = container.querySelector("[data-workspace-agent-composer]");
+  expect(composerRegion).not.toBeNull();
+  expect(composerRegion).not.toHaveClass("border-t");
+  expect(composerRegion).not.toHaveClass("border-border");
+});

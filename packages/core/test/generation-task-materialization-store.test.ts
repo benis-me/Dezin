@@ -210,7 +210,7 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
   store.close();
 });
 
-test("prototype-connected Page materialization observes the predecessor's published Revision Snapshot", () => {
+test("prototype-connected Pages stay independently schedulable while observing the current Snapshot", () => {
   const store = new Store(":memory:", fakeClock());
   try {
     const project = store.createProject({ name: "Prototype Page materialization order", mode: "standard" });
@@ -334,10 +334,14 @@ test("prototype-connected Page materialization observes the predecessor's publis
     const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
     const first = compiled.tasks.find((task) => task.target.id === "prototype-page-a")!;
     const second = compiled.tasks.find((task) => task.target.id === "prototype-page-b")!;
-    assert.deepEqual(second.dependencyIds, [first.id]);
+    assert.deepEqual(first.dependencyIds, []);
+    assert.deepEqual(second.dependencyIds, []);
     assert.deepEqual(
-      store.workspace.listGenerationTaskIdsReadyForMaterializationForProject(project.id, compiled.plan.id),
-      [first.id],
+      new Set(store.workspace.listGenerationTaskIdsReadyForMaterializationForProject(
+        project.id,
+        compiled.plan.id,
+      )),
+      new Set([first.id, second.id]),
     );
 
     const firstObservation = store.workspace.observeGenerationTaskMaterializationForProject(
@@ -484,12 +488,7 @@ test("prototype-connected Page materialization observes the predecessor's publis
       second.id,
     );
     assert.equal(secondObservation.expectedSnapshotId, successorSnapshot.id);
-    assert.deepEqual(secondObservation.dependencyOutputs, [{
-      taskId: first.id,
-      resultRevisionId: successor.id,
-      resultResourceRevisionId: null,
-      resultSnapshotId: successorSnapshot.id,
-    }]);
+    assert.deepEqual(secondObservation.dependencyOutputs, []);
     assert.equal(
       store.workspace.getSnapshotForProject(project.id, secondObservation.expectedSnapshotId)
         ?.artifactRevisions["prototype-page-a"],

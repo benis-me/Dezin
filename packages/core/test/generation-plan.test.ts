@@ -259,7 +259,7 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(card.target.type, "artifact");
   assert.equal(card.target.type === "artifact" ? card.target.trackId : null, "track-card");
   assert.deepEqual(card.dependencyIds, [images.id]);
-  assert.deepEqual(home.dependencyIds, [about.id, card.id, copy.id].sort());
+  assert.deepEqual(home.dependencyIds, [card.id, copy.id].sort());
   assert.deepEqual(about.dependencyIds, []);
 
   const validationTask = compiled.tasks.find((task) => task.kind === "prototype-validation");
@@ -405,22 +405,35 @@ test("preserves unique per-Artifact design instructions in the sealed leaf brief
   );
 });
 
-test("serializes prototype-connected Page generation so later Context can observe an earlier Revision", () => {
-  const compiled = compileGenerationPlan(approvedPlanFixture());
-  const about = compiled.tasks.find((task) => task.target.id === "page-about");
-  const home = compiled.tasks.find((task) => task.target.id === "page-home");
-  assert.ok(about);
-  assert.ok(home);
-
-  // Navigation direction is intentionally irrelevant. Stable Artifact order
-  // chooses the spanning order when the existing Task DAG imposes no Page order.
-  assert.equal(about.dependencyIds.includes(home.id), false);
-  assert.equal(home.dependencyIds.includes(about.id), true);
-});
-
-test("serializes Pages connected by the approved Proposal's planned graph edge", () => {
+test("keeps prototype navigation out of hard Task dependencies while retaining real dependencies", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
+  generation.artifactPlans.push(
+    {
+      operation: "create",
+      nodeId: "node-contact",
+      artifactId: "page-contact",
+      kind: "page",
+      name: "Contact",
+      trackId: "track-contact",
+      baseRevisionId: null,
+      dependsOnArtifactIds: ["page-about"],
+      capabilityIds: ["cap-text"],
+      responsiveFrameIds: ["desktop"],
+    },
+    {
+      operation: "create",
+      nodeId: "node-library",
+      artifactId: "page-library",
+      kind: "page",
+      name: "Library",
+      trackId: "track-library",
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: ["cap-text"],
+      responsiveFrameIds: ["desktop"],
+    },
+  );
   const proposal: WorkspaceProposal = {
     ...fixture.proposal,
     operations: [
@@ -447,6 +460,28 @@ test("serializes Pages connected by the approved Proposal's planned graph edge",
         },
       },
       {
+        id: "add-contact",
+        type: "add-node",
+        node: {
+          id: "node-contact",
+          kind: "page",
+          name: "Contact",
+          artifactId: "page-contact",
+          createIdentity: { initialTrackId: "track-contact" },
+        },
+      },
+      {
+        id: "add-library",
+        type: "add-node",
+        node: {
+          id: "node-library",
+          kind: "page",
+          name: "Library",
+          artifactId: "page-library",
+          createIdentity: { initialTrackId: "track-library" },
+        },
+      },
+      {
         id: "add-home-about-edge",
         type: "add-edge",
         edge: {
@@ -457,85 +492,71 @@ test("serializes Pages connected by the approved Proposal's planned graph edge",
           kind: "prototype",
         },
       },
+      {
+        id: "add-about-contact-edge",
+        type: "add-edge",
+        edge: {
+          id: "edge-about-contact",
+          workspaceId: "workspace-1",
+          sourceNodeId: "node-about",
+          targetNodeId: "node-contact",
+          kind: "prototype",
+        },
+      },
+      {
+        id: "add-contact-library-edge",
+        type: "add-edge",
+        edge: {
+          id: "edge-contact-library",
+          workspaceId: "workspace-1",
+          sourceNodeId: "node-contact",
+          targetNodeId: "node-library",
+          kind: "prototype",
+        },
+      },
     ],
     generation: {
       ...generation,
-      // Production proposal-only planning encodes relationships as planned
-      // graph edges and deliberately forbids interactive prototype intents.
-      prototypeIntents: [],
+      prototypeIntents: [
+        ...generation.prototypeIntents,
+        {
+          edgeId: "legacy-library-home",
+          sourceArtifactId: "page-library",
+          targetArtifactId: "page-home",
+          trigger: "click",
+        },
+      ],
     },
   };
 
   const compiled = compileGenerationPlan({ shell: fixture.shell, proposal });
-  const about = compiled.tasks.find((task) => task.target.id === "page-about");
-  const home = compiled.tasks.find((task) => task.target.id === "page-home");
-  assert.ok(about);
+  const tasksByTarget = new Map(compiled.tasks.map((task) => [task.target.id, task]));
+  const pageTasks = compiled.tasks.filter((task) => task.kind === "page");
+  const pageTaskIds = new Set(pageTasks.map((task) => task.id));
+  const home = tasksByTarget.get("page-home");
+  const about = tasksByTarget.get("page-about");
+  const contact = tasksByTarget.get("page-contact");
+  const card = tasksByTarget.get("component-card");
+  const copy = tasksByTarget.get("resource-copy");
+  const images = tasksByTarget.get("resource-images");
   assert.ok(home);
-  assert.equal(about.dependencyIds.includes(home.id), false);
-  assert.equal(home.dependencyIds.includes(about.id), true);
-});
+  assert.ok(about);
+  assert.ok(contact);
+  assert.ok(card);
+  assert.ok(copy);
+  assert.ok(images);
 
-test("uses an acyclic stable spanning order for bidirectional and cyclic prototype navigation", () => {
-  const fixture = approvedPlanFixture();
-  const generation = workspaceGeneration(fixture.proposal);
-  generation.artifactPlans.push({
-    operation: "create",
-    nodeId: "node-contact",
-    artifactId: "page-contact",
-    kind: "page",
-    name: "Contact",
-    trackId: "track-contact",
-    baseRevisionId: null,
-    dependsOnArtifactIds: [],
-    capabilityIds: ["cap-text"],
-    responsiveFrameIds: ["desktop"],
-  });
-  const aboutPlan = generation.artifactPlans.find((plan) => plan.artifactId === "page-about")!;
-  aboutPlan.dependsOnArtifactIds = ["page-home"];
-  generation.prototypeIntents.push(
-    {
-      edgeId: "edge-about-home",
-      sourceArtifactId: "page-about",
-      targetArtifactId: "page-home",
-      trigger: "click",
-    },
-    {
-      edgeId: "edge-about-contact",
-      sourceArtifactId: "page-about",
-      targetArtifactId: "page-contact",
-      trigger: "click",
-    },
-    {
-      edgeId: "edge-contact-home",
-      sourceArtifactId: "page-contact",
-      targetArtifactId: "page-home",
-      trigger: "click",
-    },
-  );
-
-  const compiled = compileGenerationPlan(fixture);
-  const repeated = compileGenerationPlan({
-    shell: { ...fixture.shell },
-    proposal: {
-      ...fixture.proposal,
-      generation: {
-        ...generation,
-        prototypeIntents: [...generation.prototypeIntents].reverse(),
-      },
-    },
-  });
-  assert.deepEqual(repeated, compiled);
-
-  const pages = new Map(compiled.tasks
-    .filter((task) => task.kind === "page")
-    .map((task) => [task.target.id, task]));
-  const about = pages.get("page-about")!;
-  const contact = pages.get("page-contact")!;
-  const home = pages.get("page-home")!;
-  assert.equal(contact.dependencyIds.includes(home.id), false);
-  assert.equal(home.dependencyIds.includes(contact.id), true);
-  assert.equal(about.dependencyIds.includes(home.id), true);
-  assert.equal(about.dependencyIds.includes(contact.id), false);
+  for (const page of pageTasks) {
+    const expectedPageDependencies = page.target.id === "page-contact" ? [about.id] : [];
+    assert.deepEqual(
+      page.dependencyIds.filter((dependencyId) => pageTaskIds.has(dependencyId)),
+      expectedPageDependencies,
+      `${page.target.id} must not treat navigation as a generation prerequisite`,
+    );
+  }
+  assert.ok(contact.dependencyIds.includes(about.id));
+  assert.deepEqual(home.dependencyIds, [card.id, copy.id].sort());
+  assert.deepEqual(card.dependencyIds, [images.id]);
 });
 
 test("compiles an exact dispatch Context Pack identity into only its scoped Artifact and Resource leaves", () => {

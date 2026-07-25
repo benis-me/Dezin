@@ -20,11 +20,13 @@ import type {
   ReadyProjectWorkspacePayload,
   ResearchResourceRevisionView,
 } from "../../lib/api.ts";
+import type { GenerationTargetState } from "../generation/generation-target-state.ts";
 import { ResourceRevisionHistory } from "../resource/ResourceRevisionHistory.tsx";
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
+  | { status: "empty"; title: string }
   | {
       status: "ready";
       view: ResearchResourceRevisionView;
@@ -52,6 +54,8 @@ export function ResearchResourceViewer({
   onReturnToHead,
   onPlanCreated,
   onWorkspaceChanged,
+  generationState = null,
+  onOpenPlan,
 }: {
   projectId: string;
   resourceId: string;
@@ -68,6 +72,8 @@ export function ResearchResourceViewer({
   onReturnToHead?: () => void;
   onPlanCreated: (planId: string) => void;
   onWorkspaceChanged: () => void;
+  generationState?: GenerationTargetState | null;
+  onOpenPlan?: () => void;
 }) {
   const api = useApi();
   const activeResourceRevisionId = workspace.activeSnapshot.resourceRevisions[resourceId] ?? null;
@@ -88,7 +94,10 @@ export function ResearchResourceViewer({
     setSelectedDirectionId(null);
     setHypothesisConfirmed(false);
     setSubmitError(null);
-    const readExact = async (attempt = 0): Promise<ResearchResourceRevisionView> => {
+    const readExact = async (attempt = 0): Promise<
+      | { status: "ready"; view: ResearchResourceRevisionView }
+      | { status: "empty"; title: string }
+    > => {
       const resource = await api.getResource(projectId, resourceId);
       const revisionId = requestedRevisionId ?? resource.headRevisionId;
       if (resource.id !== resourceId || resource.workspaceId !== workspace.workspace.id || resource.kind !== "research") {
@@ -97,7 +106,7 @@ export function ResearchResourceViewer({
       if (resource.archivedAt !== null && requestedRevisionId === null) {
         throw new Error("Archived Research has no writable Current Head. Open an exact immutable Revision from history.");
       }
-      if (revisionId === null) throw new Error("Research is still awaiting its first immutable Revision.");
+      if (revisionId === null) return { status: "empty", title: resource.title };
       const view = await api.getResearchResourceRevision(projectId, resourceId, revisionId);
       if (view.resource.id !== resourceId || view.resource.workspaceId !== resource.workspaceId
         || view.resource.kind !== "research" || view.revision.id !== revisionId
@@ -115,10 +124,15 @@ export function ResearchResourceViewer({
         || (activeResourceRevisionId !== null && view.observed.headRevisionId !== activeResourceRevisionId)) {
         throw new Error("Research observation no longer matches the active Workspace.");
       }
-      return view;
+      return { status: "ready", view };
     };
-    void readExact().then((view) => {
+    void readExact().then((result) => {
       if (epoch !== loadEpoch.current) return;
+      if (result.status === "empty") {
+        setLoad(result);
+        return;
+      }
+      const { view } = result;
       setLoad({
         status: "ready",
         view,
@@ -182,6 +196,39 @@ export function ResearchResourceViewer({
         <span role="alert">{currentLoad.message}</span>
         <button type="button" onClick={() => setLoadRetryEpoch((value) => value + 1)}>Try again</button>
         <button type="button" onClick={onBack}>Back to canvas</button>
+      </section>
+    );
+  }
+  if (currentLoad.status === "empty") {
+    const failed = generationState?.state === "failed" || generationState?.state === "blocked";
+    const complete = generationState?.state === "complete";
+    const stateMessage = generationState?.message
+      ?? (generationState?.state === "queued"
+        ? "Research is queued and will appear here after its first immutable Revision is published."
+        : generationState?.state === "running"
+          ? "Research is being generated. This view will update after its first immutable Revision is published."
+          : complete
+            ? "Generation finished. Syncing the published immutable Revision into this workspace."
+          : generationState?.state === "cancelled"
+            ? "Research generation was cancelled before an immutable Revision was published."
+            : "This Research resource has not published its first immutable Revision yet.");
+    return (
+      <section
+        className="dezin-research-viewer dezin-research-viewer--state dezin-research-viewer--empty"
+        aria-label="Research viewer"
+        role={failed ? "alert" : "status"}
+        data-generation-state={generationState?.state ?? "idle"}
+      >
+        {failed ? <CircleAlert aria-hidden /> : <BookOpenText aria-hidden />}
+        <span className="dezin-research-viewer__state-kicker">Research · {currentLoad.title}</span>
+        <strong>{complete ? "Research generated" : "Research not generated"}</strong>
+        <span>{stateMessage}</span>
+        <div className="dezin-research-viewer__state-actions">
+          {onOpenPlan && generationState ? (
+            <button type="button" onClick={onOpenPlan}>Open build plan</button>
+          ) : null}
+          <button type="button" onClick={onBack}>Back to canvas</button>
+        </div>
       </section>
     );
   }

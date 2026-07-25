@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, useState } from "react";
+import { StrictMode, useCallback, useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
 import {
@@ -188,6 +188,37 @@ function CanvasHarness({
   );
 }
 
+function AuthoritativeCanvasHarness({
+  onSaveLayout,
+}: {
+  onSaveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
+}) {
+  const [canvasLayout, setCanvasLayout] = useState(layout);
+  const saveLayout = useCallback(async (commands: readonly WorkspaceLayoutCommand[]) => {
+    const saved = await onSaveLayout(commands);
+    setCanvasLayout(saved);
+    return saved;
+  }, [onSaveLayout]);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setCanvasLayout((current) => ({
+          ...current,
+          checksum: `${current.checksum}-external-refresh`,
+        }))}
+      >
+        Refresh workspace model
+      </button>
+      <CanvasHarness
+        canvasLayout={canvasLayout}
+        initialSelectedNodeIds={["page-1"]}
+        onSaveLayout={saveLayout}
+      />
+    </>
+  );
+}
+
 function openWorkspaceOutline(): void {
   fireEvent.click(screen.getByRole("button", { name: "Toggle workspace outline" }));
 }
@@ -358,6 +389,26 @@ test("ReactFlow mounts after the ResizeObserver delivery frame and disconnects u
 
   rendered.unmount();
   expect(measureReactFlow.observedCanvasSurfaces()).toBe(0);
+});
+
+test("offscreen workspace nodes stay mounted after measurement so selection drags only use initialized nodes", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  const offscreenLayout: WorkspaceLayout = {
+    ...layout,
+    objects: layout.objects.map((object) => object.id === "page-2"
+      ? { ...object, x: 5_000, parentGroupId: null }
+      : object),
+    checksum: "layout-offscreen-node",
+  };
+  const { container } = render(
+    <CanvasHarness canvasLayout={offscreenLayout} onSaveLayout={async () => offscreenLayout} />,
+  );
+
+  await act(async () => measureReactFlow());
+  await act(async () => measureReactFlow());
+
+  expect(container.querySelector('.react-flow__node[data-id="page-1"]')).not.toBeNull();
+  expect(container.querySelector('.react-flow__node[data-id="page-2"]')).not.toBeNull();
 });
 
 test("canvas exposes a restrained Present flow entry when exact Snapshot playback is available", () => {
@@ -685,6 +736,113 @@ test("canvas keyboard controls open, clear, switch tools, fit, and persist one o
   ]));
   fireEvent.keyDown(canvas, { key: "Escape" });
   expect(screen.getByRole("button", { name: "Group selection" })).toBeDisabled();
+});
+
+test("an older move response cannot overwrite a newer optimistic node position", async () => {
+  let resolveFirst!: (next: WorkspaceLayout) => void;
+  let resolveSecond!: (next: WorkspaceLayout) => void;
+  const first = new Promise<WorkspaceLayout>((resolve) => { resolveFirst = resolve; });
+  const second = new Promise<WorkspaceLayout>((resolve) => { resolveSecond = resolve; });
+  const onSaveLayout = vi.fn()
+    .mockImplementationOnce(() => first)
+    .mockImplementationOnce(() => second)
+    .mockImplementationOnce(async (commands: readonly WorkspaceLayoutCommand[]) => (
+      applyWorkspaceLayoutCommands(
+        applyWorkspaceLayoutCommands(
+          applyWorkspaceLayoutCommands(layout, [{ type: "move", objectId: "page-1", x: 41, y: 70 }]),
+          [{ type: "move", objectId: "page-1", x: 42, y: 70 }],
+        ),
+        commands,
+      )
+    ));
+  render(<AuthoritativeCanvasHarness onSaveLayout={onSaveLayout} />);
+  const canvas = screen.getByRole("application", { name: "Project canvas" });
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+
+  await act(async () => {
+    resolveFirst(applyWorkspaceLayoutCommands(layout, onSaveLayout.mock.calls[0]![0]));
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+
+  await act(async () => {
+    resolveSecond(applyWorkspaceLayoutCommands(
+      applyWorkspaceLayoutCommands(layout, onSaveLayout.mock.calls[0]![0]),
+      onSaveLayout.mock.calls[1]![0],
+    ));
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(3));
+  expect(onSaveLayout.mock.calls[2]![0]).toEqual([
+    { type: "move", objectId: "page-1", x: 43, y: 70 },
+  ]);
+});
+
+test("an older move failure cannot roll back a newer optimistic node position", async () => {
+  let rejectFirst!: (reason: Error) => void;
+  let resolveSecond!: (next: WorkspaceLayout) => void;
+  const first = new Promise<WorkspaceLayout>((_resolve, reject) => { rejectFirst = reject; });
+  const second = new Promise<WorkspaceLayout>((resolve) => { resolveSecond = resolve; });
+  const onSaveLayout = vi.fn()
+    .mockImplementationOnce(() => first)
+    .mockImplementationOnce(() => second)
+    .mockImplementationOnce(async (commands: readonly WorkspaceLayoutCommand[]) => (
+      applyWorkspaceLayoutCommands(
+        applyWorkspaceLayoutCommands(layout, [{ type: "move", objectId: "page-1", x: 42, y: 70 }]),
+        commands,
+      )
+    ));
+  render(<AuthoritativeCanvasHarness onSaveLayout={onSaveLayout} />);
+  const canvas = screen.getByRole("application", { name: "Project canvas" });
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+
+  await act(async () => {
+    rejectFirst(new Error("first move failed"));
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+
+  await act(async () => {
+    resolveSecond(applyWorkspaceLayoutCommands(layout, onSaveLayout.mock.calls[1]![0]));
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(3));
+  expect(onSaveLayout.mock.calls[2]![0]).toEqual([
+    { type: "move", objectId: "page-1", x: 43, y: 70 },
+  ]);
+});
+
+test("a workspace model refresh preserves the optimistic node position while its move is pending", async () => {
+  let resolveFirst!: (next: WorkspaceLayout) => void;
+  const first = new Promise<WorkspaceLayout>((resolve) => { resolveFirst = resolve; });
+  const movedOnce = applyWorkspaceLayoutCommands(
+    layout,
+    [{ type: "move", objectId: "page-1", x: 41, y: 70 }],
+  );
+  const onSaveLayout = vi.fn()
+    .mockImplementationOnce(() => first)
+    .mockImplementationOnce(async (commands: readonly WorkspaceLayoutCommand[]) => (
+      applyWorkspaceLayoutCommands(movedOnce, commands)
+    ));
+  render(<AuthoritativeCanvasHarness onSaveLayout={onSaveLayout} />);
+  const canvas = screen.getByRole("application", { name: "Project canvas" });
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh workspace model" }));
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+
+  await act(async () => {
+    resolveFirst(movedOnce);
+  });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+  expect(onSaveLayout.mock.calls[1]![0]).toEqual([
+    { type: "move", objectId: "page-1", x: 42, y: 70 },
+  ]);
 });
 
 test("full semantic zoom exposes keyboard Page handles and compact zoom removes them from the accessibility tree", async () => {

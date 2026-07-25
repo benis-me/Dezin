@@ -114,6 +114,42 @@ test("adapter binds Research quality and awaiting-selection state to the exact a
   expect(research.ariaLabel).toContain("quality needs-review");
 });
 
+test("adapter projects direct generation states onto Artifact and Resource nodes without inventing Revisions", () => {
+  const flow = workspaceGraphToFlow(graph, layout, {
+    zoom: 0.8,
+    edgeFilter: "all",
+    artifactGenerationStates: {
+      "artifact-page-1": {
+        state: "failed",
+        planId: "plan-1",
+        taskId: "task-page",
+        taskKind: "page",
+        message: "Agent quota exhausted",
+      },
+    },
+    resourceGenerationStates: {
+      "research-1": {
+        state: "blocked",
+        planId: "plan-1",
+        taskId: "task-research",
+        taskKind: "resource",
+        message: "Blocked by a failed prerequisite",
+      },
+    },
+  });
+
+  expect(flow.nodes.find((node) => node.id === "page-1")?.data).toMatchObject({
+    revisionId: null,
+    generationState: "failed",
+    generationMessage: "Agent quota exhausted",
+  });
+  expect(flow.nodes.find((node) => node.id === "resource-1")?.data).toMatchObject({
+    revisionId: null,
+    generationState: "blocked",
+    generationMessage: "Blocked by a failed prerequisite",
+  });
+});
+
 test("layout groups are adapter-only parents and recursively collapsed descendants hide with incident edges", () => {
   const nested: WorkspaceLayout = {
     ...layout,
@@ -212,8 +248,8 @@ test("cyclic prototype flows expand across columns instead of stacking one retur
     c: { x: 800, y: 80 },
   });
   const returnEdge = flow.edges.find((edge) => edge.id === "c-a")!;
-  expect(returnEdge.sourceHandle).toBe("page-source-top");
-  expect(returnEdge.targetHandle).toBe("page-target-top");
+  expect(returnEdge.sourceHandle).toBe("page-source-left");
+  expect(returnEdge.targetHandle).toBe("page-target-left");
 });
 
 test("reciprocal prototype links use separate lanes instead of painting the same path twice", () => {
@@ -242,8 +278,8 @@ test("reciprocal prototype links use separate lanes instead of painting the same
 
   const outbound = flow.edges.find((edge) => edge.id === "a-b")!;
   const inbound = flow.edges.find((edge) => edge.id === "b-a")!;
-  expect([outbound.sourceHandle, outbound.targetHandle]).toEqual(["page-source-top", "page-target-top"]);
-  expect([inbound.sourceHandle, inbound.targetHandle]).toEqual(["page-source-bottom", "page-target-bottom"]);
+  expect([outbound.sourceHandle, outbound.targetHandle]).toEqual(["page-source-left", "page-target-left"]);
+  expect([inbound.sourceHandle, inbound.targetHandle]).toEqual(["page-source-right", "page-target-right"]);
 });
 
 test("four mixed links sharing endpoints preserve lane magnitude for distinct edge geometry", () => {
@@ -283,29 +319,29 @@ test("four mixed links sharing endpoints preserve lane magnitude for distinct ed
       id: "01-prototype-forward",
       type: "prototype",
       lane: -1.5,
-      sourceHandle: "page-source-top",
-      targetHandle: "page-target-top",
+      sourceHandle: "page-source-left",
+      targetHandle: "page-target-left",
     },
     {
       id: "02-informs-forward",
       type: "relation",
       lane: -0.5,
-      sourceHandle: "page-source-top",
-      targetHandle: "page-target-top",
+      sourceHandle: "page-source-left",
+      targetHandle: "page-target-left",
     },
     {
       id: "03-prototype-reverse",
       type: "prototype",
       lane: 0.5,
-      sourceHandle: "page-source-bottom",
-      targetHandle: "page-target-bottom",
+      sourceHandle: "page-source-right",
+      targetHandle: "page-target-right",
     },
     {
       id: "04-derives-reverse",
       type: "relation",
       lane: 1.5,
-      sourceHandle: "page-source-bottom",
-      targetHandle: "page-target-bottom",
+      sourceHandle: "page-source-right",
+      targetHandle: "page-target-right",
     },
   ]);
 });
@@ -525,8 +561,8 @@ test("fallback placement follows the visible vertical edge corridor instead of a
   const flow = workspaceGraphToFlow(verticalGraph, verticalLayout, { zoom: 1, edgeFilter: "all" });
   const edge = flow.edges.find((candidate) => candidate.id === "a-b")!;
 
-  expect([edge.sourceHandle, edge.targetHandle]).toEqual(["page-source-bottom", "page-target-top"]);
-  expect(flow.nodes.find((node) => node.id === "resource-new")?.position).toEqual({ x: 300, y: 360 });
+  expect([edge.sourceHandle, edge.targetHandle]).toEqual(["page-source-right", "page-target-right"]);
+  expect(flow.nodes.find((node) => node.id === "resource-new")?.position).toEqual({ x: 660, y: 360 });
 });
 
 test("edge filters and connection validation preserve semantic rules", () => {
@@ -565,7 +601,7 @@ test("edge filters and connection validation preserve semantic rules", () => {
   expect(selectedEdge.edges.find((edge) => edge.id === "uses-1")?.selected).toBe(true);
 });
 
-test("prototype edges select edge-aligned routing handles for forward, vertical, and reverse layouts", () => {
+test("prototype edges use only side routing handles for forward, vertical, and reverse layouts", () => {
   const forward = workspaceGraphToFlow(graph, layout, { zoom: 1, edgeFilter: "flow" })
     .edges.find((edge) => edge.id === "prototype-1")!;
   expect(forward.sourceHandle).toBe("page-source-right");
@@ -583,8 +619,8 @@ test("prototype edges select edge-aligned routing handles for forward, vertical,
   };
   const vertical = workspaceGraphToFlow(graph, verticalLayout, { zoom: 1, edgeFilter: "flow" })
     .edges.find((edge) => edge.id === "prototype-1")!;
-  expect(vertical.sourceHandle).toBe("page-source-bottom");
-  expect(vertical.targetHandle).toBe("page-target-top");
+  expect(vertical.sourceHandle).toBe("page-source-right");
+  expect(vertical.targetHandle).toBe("page-target-right");
 
   const reverseLayout: WorkspaceLayout = {
     ...verticalLayout,
@@ -603,8 +639,8 @@ test("prototype edges select edge-aligned routing handles for forward, vertical,
 test("semantic relations select directional handles across node kinds", () => {
   const forward = workspaceGraphToFlow(graph, layout, { zoom: 1, edgeFilter: "all" })
     .edges.find((edge) => edge.id === "uses-1")!;
-  expect(forward.sourceHandle).toBe("page-source-top");
-  expect(forward.targetHandle).toBe("component-target-top");
+  expect(forward.sourceHandle).toBe("page-source-right");
+  expect(forward.targetHandle).toBe("component-target-right");
 
   const verticalLayout: WorkspaceLayout = {
     ...layout,
@@ -614,8 +650,8 @@ test("semantic relations select directional handles across node kinds", () => {
   };
   const vertical = workspaceGraphToFlow(graph, verticalLayout, { zoom: 1, edgeFilter: "all" })
     .edges.find((edge) => edge.id === "uses-1")!;
-  expect(vertical.sourceHandle).toBe("page-source-bottom");
-  expect(vertical.targetHandle).toBe("component-target-top");
+  expect(vertical.sourceHandle).toBe("page-source-right");
+  expect(vertical.targetHandle).toBe("component-target-right");
 });
 
 describe("layout command conversion", () => {
@@ -780,6 +816,31 @@ describe("layout command conversion", () => {
     ]);
   });
 
+  test("moving an existing Page never causes a second automatic component-library jump", () => {
+    const layoutAfterOwnedPageMove: WorkspaceLayout = {
+      ...layout,
+      objects: [
+        { id: "page-1", kind: "node", x: 80, y: 520, parentGroupId: null },
+        { id: "page-2", kind: "node", x: 440, y: 80, parentGroupId: null },
+        { id: "resource-1", kind: "node", x: 80, y: 340, parentGroupId: null },
+        {
+          id: COMPONENT_LIBRARY_GROUP_ID,
+          kind: "group",
+          x: 80,
+          y: 398,
+          width: 360,
+          height: 300,
+          parentGroupId: null,
+          label: "Components",
+          collapsed: false,
+        },
+        { id: "component-1", kind: "node", x: 40, y: 64, parentGroupId: COMPONENT_LIBRARY_GROUP_ID },
+      ],
+    };
+
+    expect(buildComponentLibraryCommands(graph, layoutAfterOwnedPageMove)).toEqual([]);
+  });
+
   test("component library normalization preserves existing members and expands for newly generated components", () => {
     const graphWithNewComponent: WorkspaceGraph = {
       ...graph,
@@ -813,7 +874,7 @@ describe("layout command conversion", () => {
     expect(buildComponentLibraryCommands(graph, groupedLayout)).toEqual([]);
   });
 
-  test("component library normalization restores breathing room below root content", () => {
+  test("component library normalization preserves an existing shelf after root content moves", () => {
     const crowdedLayout: WorkspaceLayout = {
       ...layout,
       objects: [
@@ -835,9 +896,7 @@ describe("layout command conversion", () => {
       ],
     };
 
-    expect(buildComponentLibraryCommands(graph, crowdedLayout)).toEqual([
-      { type: "move", objectId: COMPONENT_LIBRARY_GROUP_ID, x: 100, y: 658 },
-    ]);
+    expect(buildComponentLibraryCommands(graph, crowdedLayout)).toEqual([]);
   });
 
   test("component library normalization migrates components out of legacy custom groups", () => {
