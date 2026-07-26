@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { agentSpawnEnv, type AgentRunner } from "../../../packages/agent/src/index.ts";
-import { Store } from "../../../packages/core/src/index.ts";
+import { RESOURCE_GENERATION_DEADLINE_BUDGET, Store } from "../../../packages/core/src/index.ts";
 import { BUNDLED_DESIGN_SYSTEMS, DesignRegistry } from "../../../packages/design/src/index.ts";
 import { resourceAdapters } from "../src/context/adapters/index.ts";
 import { stableStringify } from "../src/context/context-types.ts";
@@ -19,6 +19,7 @@ import type {
   ProductionResearchWebEvidenceRequest,
   ProductionResourceAgentRequest,
 } from "../src/orchestration/production-resource-generators.ts";
+import { MAX_MOODBOARD_ASSETS } from "../src/orchestration/production-resource-generators.ts";
 import {
   inspectStandardArtifactCandidate,
   type ProductionStandardArtifactQualityEvaluatorDependencies,
@@ -313,6 +314,13 @@ test("production Generation bootstrap shares the complete real leaf graph with r
   const runtimeSupervisor = new RuntimeSupervisor({ dataDir: root, store });
   let researchEvidenceReads = 0;
   let observedExternalFetch: SafeBoundedExternalFetcher | undefined;
+  let observedResourceRuntimeBudget:
+    | {
+        agentTimeoutMs: number | undefined;
+        imageTimeoutMs: number | undefined;
+        reviewTimeoutMs: number | undefined;
+      }
+    | undefined;
   const resourceExternalFetch: SafeBoundedExternalFetcher = async () => ({
     finalUrl: "https://evidence.dezin-design.dev/canonical",
     status: 200,
@@ -347,6 +355,11 @@ test("production Generation bootstrap shares the complete real leaf graph with r
     resourceExternalFetch,
     createResourceRuntimePorts: (options) => {
       observedExternalFetch = options.researchExternalFetch;
+      observedResourceRuntimeBudget = {
+        agentTimeoutMs: options.agentTimeoutMs,
+        imageTimeoutMs: options.imageTimeoutMs,
+        reviewTimeoutMs: options.reviewTimeoutMs,
+      };
       return resourceRuntime as any;
     },
     leaseMs: 2_000,
@@ -373,6 +386,19 @@ test("production Generation bootstrap shares the complete real leaf graph with r
   assert.ok(researchEvidenceReads >= 1, "bootstrap forwards the production Research evidence port into Resource generation");
   assert.equal(observedExternalFetch, resourceExternalFetch,
     "bootstrap forwards the daemon's shared safe external fetch boundary to Research");
+  assert.deepEqual(observedResourceRuntimeBudget, {
+    agentTimeoutMs: 7 * 60_000,
+    imageTimeoutMs: 5 * 60_000,
+    reviewTimeoutMs: 30_000,
+  });
+  assert.equal(
+    RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
+    (7 * 60_000)
+      + (RESOURCE_GENERATION_DEADLINE_BUDGET.imageCallTimeoutMs * MAX_MOODBOARD_ASSETS)
+      + (RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs * MAX_MOODBOARD_ASSETS)
+      + RESOURCE_GENERATION_DEADLINE_BUDGET.completionReserveMs,
+    "the runtime ceiling may be five minutes while each actual image deadline remains cardinality-aware inside the fixed outer Task",
+  );
 });
 
 test("same-Plan generated Research cannot become an Artifact input before human direction selection", async (t) => {

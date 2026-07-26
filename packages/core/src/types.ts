@@ -30,6 +30,12 @@ export interface ExtensionCredentialRecord extends ExtensionCredential {
 export type ProjectMode = "prototype" | "standard";
 
 /**
+ * Reserved persisted Project value for an explicit "No design system" choice.
+ * `null` remains the backward-compatible "inherit the global default" state.
+ */
+export const NO_DESIGN_SYSTEM_ID = "__dezin_no_design_system__";
+
+/**
  * Conversation ownership stays additive to the legacy Project foreign key.
  * Workspace scopes use the stable Project id so legacy conversations can be
  * backfilled before a normalized Workspace is lazily created.
@@ -44,7 +50,7 @@ export interface Project {
   name: string;
   /** Active skill id (artifact shape), e.g. "frontend-design". */
   skillId: string | null;
-  /** Active design-system id (brand visual language), e.g. "modern-minimal". */
+  /** Pinned design-system id, `NO_DESIGN_SYSTEM_ID`, or null to inherit the global default. */
   designSystemId: string | null;
   /** Build mode — prototype (single HTML) or standard (real project). */
   mode: ProjectMode;

@@ -130,6 +130,7 @@ import {
   WorkspaceGraphValidationError,
   WorkspaceRevisionConflictError,
 } from "./workspace-graph.ts";
+import { componentLibraryInvariantCommands } from "./workspace-component-library.ts";
 import {
   asArtifactRevision,
   asArtifactRevisionDependency,
@@ -1875,6 +1876,7 @@ interface GraphCommandsInTransactionInput {
   commands: readonly WorkspaceGraphCommand[];
   reason: string;
   provenance: WorkspaceSnapshotProvenance;
+  deferComponentLibraryInvariant?: boolean;
 }
 
 export interface WorkspaceProposalConflictSummary {
@@ -2218,6 +2220,28 @@ export class WorkspaceStore {
   constructor(db: DatabaseSync, clock: StoreClock) {
     this.db = db;
     this.clock = clock;
+    this.repairLegacyComponentLibraryLayouts();
+  }
+
+  private repairLegacyComponentLibraryLayouts(): void {
+    this.transactionImmediate(() => {
+      const workspaces = this.db.prepare(
+        "SELECT id, project_id FROM project_workspaces ORDER BY id COLLATE BINARY ASC",
+      ).all() as Array<{ id: string; project_id: string }>;
+      for (const workspace of workspaces) {
+        const graph = this.getGraph(workspace.project_id);
+        if (!graph.nodes.some((node) => node.kind === "component")) continue;
+        for (const layoutId of this.workspaceLayoutIdsInTransaction(workspace.id)) {
+          const draft = this.db.prepare(
+            `SELECT 1 FROM workspace_proposals
+             WHERE workspace_id = ? AND layout_id = ? AND status = 'draft'
+             LIMIT 1`,
+          ).get(workspace.id, layoutId);
+          if (draft) continue;
+          this.ensureComponentLibraryLayoutInTransaction(workspace.id, graph, layoutId);
+        }
+      }
+    });
   }
 
   readLegacyStandardWorkspaceFacts(projectId: string): LegacyWorkspaceFacts {
@@ -13953,7 +13977,13 @@ export class WorkspaceStore {
   private rejectProposalScoped(projectId: string | null, proposalId: string): WorkspaceProposalRecord {
     return this.transactionImmediate(() => {
       const proposal = this.requireDraftProposal(projectId, proposalId);
-      return this.markProposalStatusInTransaction(proposal, "rejected", { kind: "rejected" });
+      const rejected = this.markProposalStatusInTransaction(proposal, "rejected", { kind: "rejected" });
+      const workspace = this.requireWorkspaceById(proposal.workspaceId);
+      this.ensureComponentLibraryLayoutsInTransaction(
+        workspace.id,
+        this.getGraph(workspace.projectId),
+      );
+      return rejected;
     });
   }
 
@@ -14039,6 +14069,7 @@ export class WorkspaceStore {
         expectedSnapshotId: proposal.baseSnapshotId,
         commands: proposal.operations,
         reason: "proposal-approval",
+        deferComponentLibraryInvariant: true,
         provenance: {
           kind: "proposal-approval",
           proposalId: proposal.id,
@@ -14055,6 +14086,7 @@ export class WorkspaceStore {
         );
       }
     }
+    this.ensureComponentLibraryLayoutsInTransaction(workspace.id, result.graph);
     const approved = this.markProposalStatusInTransaction(proposal, "approved", { kind: "approved", mode });
     const plan = planId === null
       ? null
@@ -14496,23 +14528,48 @@ export class WorkspaceStore {
       }
       const planned = plannedResources.get(operation.resourceId);
       const resource = this.db.prepare(
-        "SELECT id, workspace_id, kind, archived_at FROM resources WHERE id = ?",
+        `SELECT resource.id,
+                resource.workspace_id,
+                resource.kind,
+                resource.head_revision_id,
+                resource.archived_at,
+                (SELECT COUNT(*)
+                 FROM resource_revisions revision
+                 WHERE revision.resource_id = resource.id
+                   AND revision.workspace_id = resource.workspace_id) AS revision_count
+         FROM resources resource
+         WHERE resource.id = ?`,
       ).get(operation.resourceId) as {
         id: string;
         workspace_id: string;
         kind: string;
+        head_revision_id: string | null;
         archived_at: number | null;
+        revision_count: number;
       } | undefined;
       const ownedResource = resource !== undefined
         && resource.workspace_id === proposal.workspaceId
         && resource.archived_at === null
         && resource.kind === operation.kind;
       if (operation.operation === "create") {
-        if (operation.revisionPolicy.kind !== "generate" || resource !== undefined
-          || basePins.has(operation.resourceId) || !planned
-          || planned.nodeId !== operation.nodeId || planned.resourceKind !== operation.kind) {
+        const hasNewPlannedIdentity = resource === undefined
+          && planned?.nodeId === operation.nodeId
+          && planned.resourceKind === operation.kind;
+        const baseNode = proposal.baseGraph.nodes.find((candidate) => (
+          candidate.kind === "resource"
+          && candidate.resourceId === operation.resourceId
+          && candidate.id === operation.nodeId
+        ));
+        const hasExactEmptyShell = planned === undefined
+          && ownedResource
+          && baseNode !== undefined
+          && resource.head_revision_id === null
+          && resource.revision_count === 0;
+        if (operation.revisionPolicy.kind !== "generate"
+          || basePins.has(operation.resourceId)
+          || (!hasNewPlannedIdentity && !hasExactEmptyShell)) {
           throw new WorkspaceProposalValidationError(
-            `generation Resource create operation ${operation.resourceId} requires a new matching planned identity`,
+            `generation Resource create operation ${operation.resourceId} requires a new matching planned identity or an exact owned empty shell`,
           );
         }
       } else if (operation.operation === "revise") {
@@ -15776,6 +15833,9 @@ export class WorkspaceStore {
         payload,
         now,
       );
+    }
+    if (input.deferComponentLibraryInvariant !== true) {
+      this.ensureComponentLibraryLayoutsInTransaction(workspace.id, next);
     }
     return { graph: next, snapshot };
   }
@@ -17068,6 +17128,38 @@ export class WorkspaceStore {
     }
   }
 
+  private ensureComponentLibraryLayoutInTransaction(
+    workspaceId: string,
+    graph: WorkspaceGraph,
+    layoutId: string,
+  ): void {
+    if (!this.db.isTransaction) throw new Error("Component library layout maintenance requires a transaction");
+    const layout = this.getLayoutByWorkspaceId(workspaceId, layoutId);
+    const commands = componentLibraryInvariantCommands(graph, layout);
+    if (commands.length === 0) return;
+    this.applyLayoutCommandsInTransaction(workspaceId, graph, layoutId, commands, false);
+  }
+
+  private workspaceLayoutIdsInTransaction(workspaceId: string): string[] {
+    if (!this.db.isTransaction) throw new Error("Workspace layout discovery requires a transaction");
+    const rows = this.db.prepare(
+      `SELECT layout_id FROM workspace_layout_nodes WHERE workspace_id = ?
+       UNION
+       SELECT layout_id FROM workspace_layout_viewports WHERE workspace_id = ?
+       ORDER BY layout_id COLLATE BINARY ASC`,
+    ).all(workspaceId, workspaceId) as Array<{ layout_id: string }>;
+    return [...new Set(["default", ...rows.map(({ layout_id }) => layout_id)])];
+  }
+
+  private ensureComponentLibraryLayoutsInTransaction(
+    workspaceId: string,
+    graph: WorkspaceGraph,
+  ): void {
+    for (const layoutId of this.workspaceLayoutIdsInTransaction(workspaceId)) {
+      this.ensureComponentLibraryLayoutInTransaction(workspaceId, graph, layoutId);
+    }
+  }
+
   private getLayoutByWorkspaceId(workspaceId: string, layoutId: string): WorkspaceLayout {
     const rows = this.db.prepare(
       `SELECT * FROM workspace_layout_nodes
@@ -17126,6 +17218,7 @@ export class WorkspaceStore {
     graph: WorkspaceGraph,
     layoutId: string,
     commands: readonly WorkspaceLayoutCommand[],
+    maintainComponentLibrary = true,
   ): void {
     const semanticNodeIds = new Set(graph.nodes.map((node) => node.id));
     const groupRow = (groupId: string) => this.db.prepare(
@@ -17247,6 +17340,9 @@ export class WorkspaceStore {
           ).run(workspaceId, layoutId, command.viewport.x, command.viewport.y, command.viewport.zoom, now);
           break;
       }
+    }
+    if (maintainComponentLibrary) {
+      this.ensureComponentLibraryLayoutInTransaction(workspaceId, graph, layoutId);
     }
     this.validateLayoutGroups(workspaceId, layoutId, semanticNodeIds);
   }

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useCallback, useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { ToastProvider } from "../components/Toast.tsx";
 import type {
   Project,
   ProjectWorkspacePayload,
@@ -21,8 +22,13 @@ const flowHarness = vi.hoisted(() => {
   };
   const instance = {
     getViewport: vi.fn(() => state.viewport),
+    getZoom: vi.fn(() => state.viewport.zoom),
     setViewport: vi.fn(async (viewport: WorkspaceViewport) => {
       state.viewport = viewport;
+      return true;
+    }),
+    zoomTo: vi.fn(async (zoom: number) => {
+      state.viewport = { ...state.viewport, zoom };
       return true;
     }),
     fitView: vi.fn(async () => {
@@ -39,6 +45,7 @@ vi.mock("@xyflow/react", async () => {
   const React = await import("react");
   function ReactFlow({
     onInit,
+    onConnect,
     onMove,
     onMoveEnd,
     children,
@@ -46,6 +53,7 @@ vi.mock("@xyflow/react", async () => {
     ...props
   }: {
     onInit?: (instance: typeof flowHarness.instance) => void;
+    onConnect?: (connection: { source: string; target: string | null }) => void;
     onMove?: (event: MouseEvent, viewport: WorkspaceViewport) => void;
     onMoveEnd?: (event: MouseEvent, viewport: WorkspaceViewport) => void;
     children?: React.ReactNode;
@@ -70,6 +78,13 @@ vi.mock("@xyflow/react", async () => {
           }}
         >
           Move viewport
+        </button>
+        <button
+          type="button"
+          aria-label="Simulate invalid relationship"
+          onClick={() => onConnect?.({ source: "page-1", target: null })}
+        >
+          Invalid relationship
         </button>
         {children}
       </div>
@@ -183,20 +198,22 @@ function renderCanvas({
   onViewportChange: (viewport: WorkspaceViewport) => void;
 }) {
   return render(
-    <ProjectCanvas
-      projectId="project-1"
-      projectName="Storefront"
-      graph={graph}
-      layout={layout}
-      viewport={layout.viewport}
-      artifactRevisionIds={{ "artifact-1": "revision-1" }}
-      selectedNodeIds={[]}
-      onSelectionChange={() => {}}
-      onViewportChange={onViewportChange}
-      onSaveLayout={onSaveLayout}
-      onApplyGraphCommands={async () => {}}
-      onOpenArtifact={() => {}}
-    />,
+    <ToastProvider>
+      <ProjectCanvas
+        projectId="project-1"
+        projectName="Storefront"
+        graph={graph}
+        layout={layout}
+        viewport={layout.viewport}
+        artifactRevisionIds={{ "artifact-1": "revision-1" }}
+        selectedNodeIds={[]}
+        onSelectionChange={() => {}}
+        onViewportChange={onViewportChange}
+        onSaveLayout={onSaveLayout}
+        onApplyGraphCommands={async () => {}}
+        onOpenArtifact={() => {}}
+      />
+    </ToastProvider>,
   );
 }
 
@@ -371,6 +388,100 @@ test("a failed viewport save never promotes the pending viewport and restores th
   expect(onViewportChange).toHaveBeenLastCalledWith(layout.viewport);
   expect(flowHarness.instance.setViewport).toHaveBeenLastCalledWith(layout.viewport);
   expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Viewport save failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Viewport save failed");
+});
+
+test("an invalid Page relationship reports a deduplicated global error without occupying canvas layout", async () => {
+  renderCanvas({ onSaveLayout: async () => layout, onViewportChange: () => {} });
+  await flushCanvasMeasurementFrame();
+
+  fireEvent.click(screen.getByRole("button", { name: "Simulate invalid relationship" }));
+  fireEvent.click(screen.getByRole("button", { name: "Simulate invalid relationship" }));
+
+  expect(screen.getByRole("status", { name: "Canvas status" })).toHaveClass("sr-only");
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  expect(screen.getByRole("alert")).toHaveTextContent("Prototype links connect Page nodes.");
+});
+
+test("routine pan and zoom persistence stays silent while saving and after success", async () => {
+  let resolveSave!: (saved: WorkspaceLayout) => void;
+  const save = new Promise<WorkspaceLayout>((resolve) => {
+    resolveSave = resolve;
+  });
+  const onSaveLayout = vi.fn(() => save);
+  const onViewportChange = vi.fn();
+  renderCanvas({ onSaveLayout, onViewportChange });
+  await flushCanvasMeasurementFrame();
+  const status = screen.getByRole("status", { name: "Canvas status" });
+
+  fireEvent.click(screen.getByRole("button", { name: "Simulate viewport move" }));
+  await act(async () => {
+    vi.advanceTimersByTime(300);
+    await Promise.resolve();
+  });
+
+  expect(onSaveLayout).toHaveBeenCalledWith([{
+    type: "set-viewport",
+    viewport: { x: 32, y: 48, zoom: 1.1 },
+  }]);
+  expect(status).toHaveTextContent("Canvas ready");
+  expect(status).toHaveClass("sr-only");
+  expect(screen.getByRole("region", { name: "Notifications" })).toBeEmptyDOMElement();
+
+  await act(async () => {
+    resolveSave({
+      ...layout,
+      viewport: { x: 32, y: 48, zoom: 1.1 },
+      checksum: "layout-panned",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(status).toHaveTextContent("Canvas ready");
+  expect(onViewportChange).toHaveBeenLastCalledWith({ x: 32, y: 48, zoom: 1.1 });
+});
+
+test("toolbar zoom persistence stays silent while saving and after success", async () => {
+  let resolveSave!: (saved: WorkspaceLayout) => void;
+  const save = new Promise<WorkspaceLayout>((resolve) => {
+    resolveSave = resolve;
+  });
+  const onSaveLayout = vi.fn(() => save);
+  const onViewportChange = vi.fn();
+  renderCanvas({ onSaveLayout, onViewportChange });
+  await flushCanvasMeasurementFrame();
+  const status = screen.getByRole("status", { name: "Canvas status" });
+
+  fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  const zoomedViewport = { x: 0, y: 0, zoom: 0.9119999999999999 };
+  expect(onSaveLayout).toHaveBeenCalledWith([{
+    type: "set-viewport",
+    viewport: {
+      x: 0,
+      y: 0,
+      zoom: expect.closeTo(0.912, 12),
+    },
+  }]);
+  expect(status).toHaveTextContent("Canvas ready");
+
+  await act(async () => {
+    resolveSave({
+      ...layout,
+      viewport: zoomedViewport,
+      checksum: "layout-zoomed",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(status).toHaveTextContent("Canvas ready");
+  expect(onViewportChange).toHaveBeenLastCalledWith(zoomedViewport);
 });
 
 test("a failed Fit workspace save follows the same authoritative rollback semantics", async () => {
@@ -387,6 +498,15 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
     await Promise.resolve();
   });
 
+  expect(flowHarness.instance.fitView).toHaveBeenCalledWith({
+    padding: {
+      top: 0.18,
+      right: 0.18,
+      bottom: 0.32,
+      left: 0.18,
+    },
+    duration: expect.any(Number),
+  });
   expect(onSaveLayout).toHaveBeenCalledWith([{
     type: "set-viewport",
     viewport: fittedViewport,
@@ -395,6 +515,7 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
   expect(onViewportChange).toHaveBeenLastCalledWith(layout.viewport);
   expect(flowHarness.instance.setViewport).toHaveBeenLastCalledWith(layout.viewport);
   expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Fit save failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Fit save failed");
 });
 
 test.each([

@@ -9,6 +9,8 @@ export interface SegmentedOption<T extends string> {
   icon?: ReactNode;
   /** Tooltip + accessible name (use for icon-only segments). */
   title?: string;
+  /** Optional richer tooltip content while `title` remains the accessible name. */
+  tooltip?: ReactNode;
 }
 
 /**
@@ -72,11 +74,11 @@ export function Segmented<T extends string>({
               </span>
             </button>
           );
-          if (!o.title) return button;
+          if (!o.title && !o.tooltip) return button;
           return (
             <Tooltip key={o.value}>
               <TooltipTrigger asChild>{button}</TooltipTrigger>
-              <TooltipContent sideOffset={2}>{o.title}</TooltipContent>
+              <TooltipContent sideOffset={2}>{o.tooltip ?? o.title}</TooltipContent>
             </Tooltip>
           );
         })}

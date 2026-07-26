@@ -45,6 +45,10 @@ import { VariantSwitcher } from "../components/VariantSwitcher.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AgentOutputText } from "../components/AgentOutputText.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
+import {
+  designSystemPickerValue,
+  persistedDesignSystemId,
+} from "../lib/design-system-selection.ts";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
@@ -3811,7 +3815,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           modeRef.current = proj.mode;
           setProjectMode(proj.mode);
           setProjectName(proj.name);
-          setDsId(proj.designSystemId ?? "");
+          setDsId(designSystemPickerValue(proj.designSystemId));
           if (proj.sharingan) setTab("Sharingan");
           if (proj.mode === "standard") void loadDevPreview();
         }
@@ -4210,7 +4214,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const changeDs = (id: string): void => {
     setDsId(id);
-    void api.patchProject(projectId, { designSystemId: id || null }).catch(() => toast("Couldn't change the design system.", { variant: "error" }));
+    void api.patchProject(projectId, {
+      designSystemId: persistedDesignSystemId(id),
+    }).catch(() => toast("Couldn't change the design system.", { variant: "error" }));
   };
 
   const renameConv = (cid: string, title: string): void => {

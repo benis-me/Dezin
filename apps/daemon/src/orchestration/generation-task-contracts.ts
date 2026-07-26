@@ -754,7 +754,7 @@ function validateResourcePayload(task: GenerationTask): void {
     "kind",
     "title",
     "revisionPolicy",
-  ], ["dispatchContextPackId"], "Resource operation");
+  ], ["instructions", "dispatchContextPackId"], "Resource operation");
   if (operation.operation !== "create" && operation.operation !== "revise") {
     fail("Resource operation must be create or revise");
   }
@@ -765,7 +765,14 @@ function validateResourcePayload(task: GenerationTask): void {
   if (typeof operation.kind !== "string" || !RESOURCE_KINDS.has(operation.kind)) {
     fail("Resource operation Resource kind is unsupported");
   }
-  canonicalString(operation.title, "Resource operation title");
+  const title = canonicalString(operation.title, "Resource operation title");
+  const resourceInstructions = operation.instructions === undefined
+    ? undefined
+    : canonicalString(operation.instructions, "Resource operation instructions");
+  if (resourceInstructions !== undefined
+    && Buffer.byteLength(resourceInstructions, "utf8") > 2_000) {
+    fail("Resource operation instructions cannot exceed 2000 UTF-8 bytes");
+  }
   if (operation.dispatchContextPackId !== undefined
     && !/^context-pack-[0-9a-f]{64}$/.test(canonicalString(
       operation.dispatchContextPackId,
@@ -779,7 +786,7 @@ function validateResourcePayload(task: GenerationTask): void {
   const instructions = exactObject(
     brief.targetInstructions,
     ["operation", "kind", "title"],
-    [],
+    ["instructions"],
     "Resource Task target instructions",
   );
   if (instructions.operation !== operation.operation) {
@@ -788,8 +795,20 @@ function validateResourcePayload(task: GenerationTask): void {
   if (instructions.kind !== operation.kind) {
     fail("Resource Task target instructions kind does not match its operation");
   }
-  if (canonicalString(instructions.title, "Resource Task target instructions title") !== operation.title) {
+  if (canonicalString(instructions.title, "Resource Task target instructions title") !== title) {
     fail("Resource Task target instructions title does not match its operation");
+  }
+  const briefInstructions = instructions.instructions === undefined
+    ? undefined
+    : canonicalString(
+        instructions.instructions,
+        "Resource Task target instructions brief",
+      );
+  if (briefInstructions !== undefined && Buffer.byteLength(briefInstructions, "utf8") > 2_000) {
+    fail("Resource Task target instructions brief cannot exceed 2000 UTF-8 bytes");
+  }
+  if (briefInstructions !== resourceInstructions) {
+    fail("Resource Task target instructions brief does not match its operation");
   }
   validateCapabilityDescriptors(
     payload.capabilityDescriptors,

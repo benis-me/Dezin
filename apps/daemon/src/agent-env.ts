@@ -59,7 +59,7 @@ export function buildAgentEnv(settings: Settings, command: string, daemonToken?:
 
 /**
  * Builds credentials only for a frozen Claude Visual QA reviewer. CodeBuddy
- * reviewers authenticate through their official host login and therefore
+ * and Codex reviewers authenticate through their official host login and therefore
  * receive no provider credentials here. A different provider's key must never
  * be relabeled.
  */
@@ -90,8 +90,8 @@ function sameEndpoint(left: string | undefined, right: string | undefined): bool
 }
 
 /**
- * Restores only the live credential that belongs to an immutable Claude or
- * CodeBuddy reviewer selection. The returned Settings object is
+ * Restores only the live credential that belongs to an immutable Claude,
+ * CodeBuddy, or Codex reviewer selection. The returned Settings object is
  * quality-process-only; it must never be reused for the Page/Component builder.
  */
 export function hydrateVisualReviewerSettings(
@@ -100,7 +100,9 @@ export function hydrateVisualReviewerSettings(
   reviewer: { readonly command: string; readonly model?: string | null },
 ): Settings {
   const reviewerProviderId = getProvider(reviewer.command)?.id;
-  if (reviewerProviderId !== "claude" && reviewerProviderId !== "codebuddy") {
+  if (reviewerProviderId !== "claude"
+    && reviewerProviderId !== "codebuddy"
+    && reviewerProviderId !== "codex") {
     throw new Error("Frozen visual reviewer must use a built-in structured-output command");
   }
 
@@ -117,7 +119,7 @@ export function hydrateVisualReviewerSettings(
     visualQaAgentCommand: reviewerProviderId,
     visualQaModel: reviewer.model ?? "",
   };
-  if (reviewerProviderId === "codebuddy") return quality;
+  if (reviewerProviderId === "codebuddy" || reviewerProviderId === "codex") return quality;
 
   // A frozen explicit profile is authoritative. Live endpoint/model/org
   // changes cannot enter the Attempt; only its exact provider credential can.

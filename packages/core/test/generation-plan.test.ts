@@ -326,7 +326,7 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
   }));
   assert.ok(executable
     .filter((task) => task.kind === "resource")
-    .every((task) => task.resourceLimits.timeoutMs === 12 * 60_000));
+    .every((task) => task.resourceLimits.timeoutMs === 25 * 60_000));
   assert.ok(executable
     .filter((task) => task.kind === "page" || task.kind === "component")
     .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
@@ -363,6 +363,68 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
       .filter((task) => task.kind === "page" || task.kind === "component")
       .every((task) => task.resourceLimits.timeoutMs === expectedTimeoutMs));
   }
+});
+
+test("gives frozen Codex generation enough bounded time for Resource review and visual Artifact QA", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const agent = {
+    providerId: "codex" as const,
+    command: "codex" as const,
+    model: "gpt-5.4-mini",
+  };
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: {
+      ...fixture.proposal,
+      generation: { ...generation, agent },
+    },
+  });
+
+  assert.ok(compiled.tasks
+    .filter((task) => task.kind === "resource")
+    .every((task) => task.resourceLimits.timeoutMs === 25 * 60_000));
+  assert.ok(compiled.tasks
+    .filter((task) => task.kind === "page" || task.kind === "component")
+    .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
+});
+
+test("freezes one provider-independent Resource deadline that covers every Moodboard image and review", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: {
+      ...fixture.proposal,
+      generation: {
+        ...generation,
+        agent: {
+          providerId: "anthropic",
+          command: "claude",
+          model: "claude-sonnet-4-5",
+        },
+      },
+    },
+  });
+
+  const resourceTasks = compiled.tasks.filter((task) => task.kind === "resource");
+  assert.ok(resourceTasks.length > 0);
+  assert.ok(resourceTasks.every((task) => task.resourceLimits.timeoutMs === (
+    (7 * 60_000)
+    + (8 * 90_000)
+    + (8 * 30_000)
+    + (2 * 60_000)
+  )));
+  const research = resourceTasks.find((task) => task.target.id === "resource-copy");
+  const moodboard = resourceTasks.find((task) => task.target.id === "resource-images");
+  assert.ok(research);
+  assert.ok(moodboard);
+  assert.equal(research.resourceLimits.maxOutputBytes, 8 * 1024 * 1024);
+  assert.equal(
+    moodboard.resourceLimits.maxOutputBytes,
+    48 * 1024 * 1024,
+    "Moodboard must budget the immutable bundle plus up to eight high-quality PNG Assets",
+  );
 });
 
 test("rejects executable generation that does not freeze its Agent selection", () => {
@@ -402,6 +464,62 @@ test("preserves unique per-Artifact design instructions in the sealed leaf brief
   assert.equal(
     ((home.payload.brief as Record<string, unknown>).targetInstructions as Record<string, unknown>).instructions,
     instructions,
+  );
+});
+
+test("preserves bounded per-Resource instructions in the operation and sealed leaf brief", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const instructions = [
+    "Produce exactly three visual references, one for each approved direction.",
+    "For every direction, cite the decisive evidence and record asset-count compliance.",
+  ].join(" ");
+  const normalized = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    resourceOperations: generation.resourceOperations.map((operation) => (
+      operation.resourceId === "resource-copy"
+        ? { ...operation, instructions }
+        : operation
+    )),
+  });
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: normalized },
+  });
+  const resource = compiled.tasks.find((task) => task.target.id === "resource-copy");
+  assert.ok(resource);
+
+  assert.equal((resource.payload.operation as Record<string, unknown>).instructions, instructions);
+  assert.equal(
+    ((resource.payload.brief as Record<string, unknown>).targetInstructions as Record<string, unknown>)
+      .instructions,
+    instructions,
+  );
+});
+
+test("bounds Resource instructions while preserving instruction-free reuse and historical operations", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+
+  assert.throws(
+    () => normalizeWorkspaceProposalGeneration({
+      ...generation,
+      resourceOperations: generation.resourceOperations.map((operation) => (
+        operation.resourceId === "resource-copy"
+          ? { ...operation, instructions: "x".repeat(2_001) }
+          : operation
+      )),
+    }),
+    /instructions.*bounded to 2000 UTF-8 bytes/i,
+  );
+  assert.doesNotThrow(() => normalizeWorkspaceProposalGeneration(generation));
+  const normalized = normalizeWorkspaceProposalGeneration(generation);
+  assert.equal(normalized.kind, "workspace-generation");
+  assert.equal(
+    normalized.kind === "workspace-generation"
+      ? normalized.resourceOperations.find((operation) => operation.operation === "reuse")?.instructions
+      : "unexpected",
+    undefined,
   );
 });
 

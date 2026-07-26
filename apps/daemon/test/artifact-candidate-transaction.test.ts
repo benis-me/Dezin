@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   ArtifactCandidateRefConflictError,
@@ -54,13 +54,24 @@ interface RepositoryFixture {
 function repositoryFixture(options: {
   advanceHead?: boolean;
   objectFormat?: "sha1" | "sha256";
+  trackedEphemeralDirectories?: boolean;
 } = {}): RepositoryFixture {
   const root = mkdtempSync(join(tmpdir(), "dezin-artifact-candidate-repo-"));
   git(root, "init", "-q", `--object-format=${options.objectFormat ?? "sha1"}`);
   git(root, "config", "user.name", "Fixture");
   git(root, "config", "user.email", "fixture@dezin.local");
   writeFileSync(join(root, "page.txt"), "base\n");
-  git(root, "add", "page.txt");
+  if (options.trackedEphemeralDirectories) {
+    for (const [directory, filename] of [
+      ["node_modules/tracked-package", "index.js"],
+      [".npm-cache/tracked-cache", "entry"],
+      [".pw-browsers/tracked-browser", "binary"],
+    ] as const) {
+      mkdirSync(join(root, directory), { recursive: true });
+      writeFileSync(join(root, directory, filename), `tracked ${directory}\n`);
+    }
+  }
+  git(root, "add", ".");
   git(root, "commit", "-q", "-m", "base");
   const baseCommitHash = git(root, "rev-parse", "HEAD");
   const baseTreeHash = git(root, "rev-parse", "HEAD^{tree}");
@@ -776,6 +787,91 @@ test("quality-loop commits advance the Attempt ref linearly while restore change
     assert.equal(git(fixture.root, "rev-parse", artifactCandidateAttemptRef(fixture.attempt)), third.commitHash);
   } finally {
     await transaction.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
+test("candidate fingerprints and commits exclude ephemeral dependency caches but retain authored source", async () => {
+  const fixture = repositoryFixture();
+  const transaction = await beginArtifactCandidateTransaction({
+    repositoryDir: fixture.root,
+    attempt: fixture.attempt,
+  });
+  const transactionRoot = dirname(transaction.worktreeDir);
+  try {
+    mkdirSync(join(transaction.worktreeDir, "node_modules", "package"), { recursive: true });
+    writeFileSync(join(transaction.worktreeDir, "node_modules", "package", "index.js"), "generated dependency\n");
+    mkdirSync(join(transaction.worktreeDir, ".npm-cache", "_cacache"), { recursive: true });
+    writeFileSync(join(transaction.worktreeDir, ".npm-cache", "_cacache", "sentinel"), "npm cache\n");
+    mkdirSync(join(transaction.worktreeDir, ".pw-browsers", "chromium"), { recursive: true });
+    writeFileSync(join(transaction.worktreeDir, ".pw-browsers", "chromium", "sentinel"), "browser binary\n");
+
+    assert.equal(
+      await transaction.fingerprint(new AbortController().signal),
+      fixture.baseTreeHash,
+      "ephemeral dependency caches must not alter the immutable candidate fingerprint",
+    );
+
+    mkdirSync(join(transaction.worktreeDir, "src"));
+    writeFileSync(join(transaction.worktreeDir, "src", "App.tsx"), "export const App = () => <main>authored</main>;\n");
+    assert.notEqual(
+      await transaction.fingerprint(new AbortController().signal),
+      fixture.baseTreeHash,
+      "authored source must remain part of the candidate fingerprint",
+    );
+    const authoredFingerprint = await transaction.fingerprint(new AbortController().signal);
+    for (const [directory, filename] of [
+      ["node_modules/package", "index.js"],
+      [".npm-cache/_cacache", "sentinel"],
+      [".pw-browsers/chromium", "sentinel"],
+    ] as const) {
+      mkdirSync(join(transaction.worktreeDir, "src", directory), { recursive: true });
+      writeFileSync(join(transaction.worktreeDir, "src", directory, filename), "nested ephemeral data\n");
+    }
+    assert.equal(
+      await transaction.fingerprint(new AbortController().signal),
+      authoredFingerprint,
+      "ephemeral directories must be excluded recursively without hiding adjacent authored source",
+    );
+
+    const candidate = await transaction.commit("Authored source without ephemeral caches", new AbortController().signal);
+    const files = git(fixture.root, "ls-tree", "-r", "--name-only", candidate.treeHash);
+    assert.match(files, /^page\.txt$/m);
+    assert.match(files, /^src\/App\.tsx$/m);
+    assert.doesNotMatch(files, /(?:^|\/)node_modules(?:\/|$)/m);
+    assert.doesNotMatch(files, /(?:^|\/)\.npm-cache(?:\/|$)/m);
+    assert.doesNotMatch(files, /(?:^|\/)\.pw-browsers(?:\/|$)/m);
+  } finally {
+    await transaction.dispose();
+    assert.equal(existsSync(transactionRoot), false);
+    removeFixture(fixture.root);
+  }
+});
+
+test("candidate transactions exactly preserve ephemeral-named directories tracked by the immutable baseline", async () => {
+  const fixture = repositoryFixture({ trackedEphemeralDirectories: true });
+  try {
+    const transaction = await beginArtifactCandidateTransaction({
+      repositoryDir: fixture.root,
+      attempt: fixture.attempt,
+    });
+    try {
+      assert.equal(await transaction.fingerprint(new AbortController().signal), fixture.baseTreeHash);
+      assert.match(readFileSync(join(transaction.worktreeDir, "node_modules", "tracked-package", "index.js"), "utf8"), /tracked/);
+      assert.match(readFileSync(join(transaction.worktreeDir, ".npm-cache", "tracked-cache", "entry"), "utf8"), /tracked/);
+      assert.match(readFileSync(join(transaction.worktreeDir, ".pw-browsers", "tracked-browser", "binary"), "utf8"), /tracked/);
+
+      writeFileSync(join(transaction.worktreeDir, "src.ts"), "export const trackedBaseline = true;\n");
+      const candidate = await transaction.commit("Preserve tracked baseline directories", new AbortController().signal);
+      const files = git(fixture.root, "ls-tree", "-r", "--name-only", candidate.treeHash);
+      assert.match(files, /^node_modules\/tracked-package\/index\.js$/m);
+      assert.match(files, /^\.npm-cache\/tracked-cache\/entry$/m);
+      assert.match(files, /^\.pw-browsers\/tracked-browser\/binary$/m);
+      assert.match(files, /^src\.ts$/m);
+    } finally {
+      await transaction.dispose();
+    }
+  } finally {
     removeFixture(fixture.root);
   }
 });

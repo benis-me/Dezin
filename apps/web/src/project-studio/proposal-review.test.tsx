@@ -1122,7 +1122,49 @@ test("proposal review composes shared controls without panel-level primitive ski
   expect(css).not.toMatch(
     /\.dezin-proposal-review[^{]*(?:\bbutton\b|\binput\b|\btextarea\b)[^{]*\{/,
   );
+  expect(css).not.toMatch(
+    /\.dezin-proposal-review__header(?:\s+[^{,]+)?\s*[{,]/,
+  );
   expect(css).not.toContain("!important");
+});
+
+test("proposal review keeps one shared header shell through loading, failure, and completion", () => {
+  const proposal = draftProposal({
+    revision: 2,
+    status: "approved",
+    review: { kind: "approved", mode: "structure-only" },
+    updatedAt: 2,
+  });
+  const props = {
+    focusedChangeKey: null,
+    onEdit: async () => proposal,
+    onRevert: async () => proposal,
+    onFocusItem: () => {},
+    onApprove: async () => {},
+    onReject: async () => {},
+    onClose: () => {},
+  };
+  const rendered = render(
+    <ProposalReviewPanel review={{ status: "loading" }} {...props} />,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-proposal-review__header");
+  expect(header).not.toBeNull();
+  expect(header).toHaveClass("h-10", "min-h-10", "border-b");
+  expect(header?.firstElementChild).toHaveClass("items-center", "gap-2.5");
+  expect(screen.getByRole("heading", { name: "Workspace proposal" })).toBeInTheDocument();
+
+  rendered.rerender(
+    <ProposalReviewPanel review={{ status: "error", message: "Proposal service unavailable" }} {...props} />,
+  );
+  expect(rendered.container.querySelector("header.dezin-proposal-review__header")).toBe(header);
+  expect(screen.getByRole("alert")).toHaveTextContent("Proposal service unavailable");
+
+  rendered.rerender(
+    <ProposalReviewPanel review={{ status: "approved", proposal, plan: null }} {...props} />,
+  );
+  expect(rendered.container.querySelector("header.dezin-proposal-review__header")).toBe(header);
+  expect(screen.getByRole("heading", { name: "Proposal approved" })).toBeInTheDocument();
 });
 
 test("Proposal review terminal states explain rejected and superseded outcomes without approval copy", () => {
@@ -1719,6 +1761,84 @@ test("a delayed Workspace Agent Plan discovery cannot reopen a newly approved Pl
     expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
   });
 });
+
+test.each(["failed", "blocked"] as const)(
+  "a %s generation target automatically replaces the approved Proposal with its Build plan",
+  async (targetStatus) => {
+    const approval = approvedResult("generate");
+    const runningPlan = {
+      ...approval.plan!,
+      status: "running" as const,
+      constructionSealed: true,
+    };
+    const targetMessage = targetStatus === "failed"
+      ? "Image generation timed out."
+      : "Required research context is unavailable.";
+    const targetDetail = {
+      plan: runningPlan,
+      tasks: [{
+        id: "task-page-home",
+        ordinal: 0,
+        workspaceId: "workspace-1",
+        planId: runningPlan.id,
+        kind: "page" as const,
+        target: {
+          type: "artifact" as const,
+          workspaceId: "workspace-1",
+          id: "artifact-home",
+          trackId: "track-home",
+        },
+        dependencyIds: [],
+        capabilities: [],
+        status: targetStatus,
+        blockedReason: targetStatus === "blocked" ? targetMessage : null,
+        blockedByTaskId: null,
+        pendingContextPolicy: null,
+        currentAttempt: 1,
+        materializationFailures: 0,
+        rebaseCount: 0,
+        failureClass: targetStatus === "failed" ? "provider" : "context",
+        error: { message: targetMessage },
+        nextEligibleAt: null,
+        resultRevisionId: null,
+        resultResourceRevisionId: null,
+        resultSnapshotId: null,
+        createdAt: 9,
+        finishedAt: 10,
+      }],
+      dependencies: [],
+      currentAttempts: [],
+    };
+    let resolveBackgroundPlan!: (detail: typeof targetDetail) => void;
+    const backgroundPlan = new Promise<typeof targetDetail>((resolve) => {
+      resolveBackgroundPlan = resolve;
+    });
+    const getGenerationPlan = vi.fn()
+      .mockReturnValueOnce(backgroundPlan)
+      .mockResolvedValue(targetDetail);
+    renderStudio({
+      approveWorkspaceProposal: async () => approval,
+      listGenerationPlans: async () => [runningPlan],
+      getGenerationPlan,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
+    expect(await screen.findByRole("heading", { name: "Proposal approved" })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveBackgroundPlan(targetDetail);
+      await backgroundPlan;
+    });
+
+    expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
+    expect(screen.getByText(targetMessage)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+    expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
+  },
+);
 
 test("a committed generation compile failure refreshes canonical workspace state and opens its Build plan", async () => {
   const approved = draftProposal({

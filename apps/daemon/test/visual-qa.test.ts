@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zlibSync } from "fflate";
-import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceScreenshotDiffFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, isRuntimeConsoleMessage, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceScreenshotDiffFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 
 function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
@@ -187,6 +187,46 @@ test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls
   const clippedText = findings.find((f) => f.id === "visual-text-clipped")!;
   assert.equal(clippedText.severity, "P2");
   assert.match(clippedText.fix, /wrapping|height|container/i);
+});
+
+test("findingsFromGeometry ignores intentionally offscreen 1px fixed sentinels", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 2400 },
+      elements: [{
+        selector: "div[data-focus-sentinel]",
+        tag: "div",
+        text: "",
+        rect: { left: 0, top: 2296, right: 1, bottom: 2297, width: 1, height: 1 },
+        position: "fixed",
+        overflowX: "hidden",
+        overflowY: "hidden",
+        scrollWidth: 1,
+        scrollHeight: 1,
+        clientWidth: 1,
+        clientHeight: 1,
+      }],
+    },
+    "desktop",
+  );
+
+  assert.equal(findings.some((finding) => finding.id === "visual-fixed-offscreen"), false);
+});
+
+test("runtime QA ignores an optional favicon 404 but keeps real missing assets blocking", () => {
+  assert.equal(isRuntimeConsoleMessage({
+    type: "response",
+    level: "error",
+    text: "404 http://127.0.0.1:62498/favicon.ico",
+    url: "http://127.0.0.1:62498/favicon.ico",
+  }), false);
+  assert.equal(isRuntimeConsoleMessage({
+    type: "response",
+    level: "error",
+    text: "404 http://127.0.0.1:62498/assets/hero.webp",
+    url: "http://127.0.0.1:62498/assets/hero.webp",
+  }), true);
 });
 
 test("findingsFromGeometry upgrades clipped text to a Sharingan-blocking defect in strict text layout mode", () => {
@@ -1185,6 +1225,36 @@ test("reviewScreenshotWithAgent routes a frozen CodeBuddy reviewer through the s
   assert.equal(safeRequest?.model, "gpt-5.6-sol");
   assert.equal(safeRequest?.timeoutMs, 300_000);
   assert.deepEqual(safeRequest?.env, {});
+  assert.ok(findings.some((finding) => finding.id === "visual-reviewed"));
+});
+
+test("reviewScreenshotWithAgent routes a frozen Codex reviewer through the safe image transport", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-codex-reviewer-"));
+  const screenshot = join(root, "screenshot.png");
+  writeFileSync(join(root, "index.html"), "<h1>Pricing</h1>", "utf8");
+  writeFileSync(screenshot, rgbaPng(1, 1, Buffer.from([255, 255, 255, 255])));
+  let safeRequest: Record<string, any> | undefined;
+
+  const findings = await reviewScreenshotWithAgent({
+    htmlPath: join(root, "index.html"),
+    projectRoot: root,
+    settings: {
+      visualQaEnabled: true,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    } as any,
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+  }, screenshot, async (request) => {
+    safeRequest = request as unknown as Record<string, any>;
+    return { providerId: "codex", text: '{"findings":[]}' };
+  });
+
+  assert.equal(safeRequest?.command, "codex");
+  assert.equal(safeRequest?.model, "gpt-5.4-mini");
+  assert.equal(safeRequest?.timeoutMs, 300_000);
+  assert.deepEqual(safeRequest?.env, {});
+  assert.equal(safeRequest?.images.length, 1);
   assert.ok(findings.some((finding) => finding.id === "visual-reviewed"));
 });
 

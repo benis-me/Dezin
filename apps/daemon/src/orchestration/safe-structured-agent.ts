@@ -6,7 +6,14 @@ import {
   type NodeSpawnerOptions,
   type ProcessSpawner,
 } from "../../../../packages/agent/src/index.ts";
-import { accessSync, constants, readdirSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 
@@ -18,7 +25,10 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_SYSTEM_PROMPT_BYTES = 64 * 1024;
 const MAX_MESSAGE_BYTES = 512 * 1024;
+const MAX_OUTPUT_SCHEMA_BYTES = 64 * 1024;
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
+const OUTPUT_SCHEMA_FILENAME = "dezin-final-output.schema.json";
+const IMAGE_EVIDENCE_FILENAME_PREFIX = "dezin-image-evidence";
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SAFE_REQUEST_ENVIRONMENT_KEYS = Object.freeze({
   claude: new Set([
@@ -80,9 +90,13 @@ export class SafeStructuredAgentError extends Error {
 export interface SafeStructuredAgentRequest {
   readonly command: string;
   readonly model?: string;
+  /** Codex-only JSON Schema for the terminal Agent message. */
+  readonly outputSchema?: Readonly<Record<string, unknown>>;
+  /** Codex-only, read-only Web Search capability for this exact structured turn. */
+  readonly allowWebSearch?: boolean;
   readonly systemPrompt: string;
   readonly message: string;
-  /** Inline image evidence delivered through Claude's stream-json user content. */
+  /** Image evidence delivered through a provider-native, no-tools transport. */
   readonly images?: readonly SafeStructuredAgentImage[];
   readonly cwd: string;
   readonly signal: AbortSignal;
@@ -107,6 +121,7 @@ export interface SafeStructuredAgentOptions {
   /** Test seam; production always resolves the official CLI from fixed install roots. */
   readonly resolveClaudeExecutable?: () => string;
   readonly resolveCodeBuddyExecutable?: () => string;
+  readonly resolveCodexExecutable?: () => string;
   /** Test seam; production resolves the registry's canonical binary through fixed search roots. */
   readonly resolveRegisteredExecutable?: (command: string) => string;
   /** Test seams for deterministic outer-confinement coverage on non-macOS CI. */
@@ -249,12 +264,136 @@ export function resolveRegisteredProviderExecutable(
   );
 }
 
-function assertEmptyStructuredScratch(cwd: string): void {
+function isTrustedCodexWrapperPath(value: string, trustedHome: string): boolean {
+  const path = value.replaceAll("\\", "/");
+  const home = trustedHome.replaceAll("\\", "/").replace(/\/$/, "");
+  const packageSuffix = join("@openai", "codex", "bin", "codex.js").replaceAll("\\", "/");
+  const fixedGlobalRoots = [
+    join(trustedHome, ".local", "lib", "node_modules"),
+    join(trustedHome, ".npm-global", "lib", "node_modules"),
+    join(trustedHome, ".bun", "install", "global", "node_modules"),
+    join(resolve(dirname(process.execPath), ".."), "lib", "node_modules"),
+    "/opt/homebrew/lib/node_modules",
+    "/usr/local/lib/node_modules",
+  ];
+  if (fixedGlobalRoots.some((root) => path === join(root, packageSuffix).replaceAll("\\", "/"))) {
+    return true;
+  }
+  return new RegExp(
+    `^${escapedRegExp(home)}/\\.nvm/versions/node/[^/]+/lib/node_modules/${escapedRegExp(packageSuffix)}$`,
+  ).test(path);
+}
+
+interface TrustedCodexNativeResolutionOptions {
+  readonly trustedHome?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly architecture?: string;
+}
+
+/**
+ * Resolve the official npm wrapper only as an install identity, then execute
+ * its platform-native binary directly. The JavaScript wrapper is intentionally
+ * never launched because it must spawn the native client after Seatbelt has
+ * denied subprocess execution.
+ */
+export function resolveTrustedCodexNativeExecutable(
+  options: TrustedCodexNativeResolutionOptions = {},
+): string {
+  const trustedHome = options.trustedHome ?? homedir();
+  const platform = options.platform ?? process.platform;
+  const architecture = options.architecture ?? process.arch;
+  const target = new Map<string, {
+    readonly packageName: string;
+    readonly triple: string;
+    readonly executableName: string;
+  }>([
+    ["linux:x64", {
+      packageName: "@openai/codex-linux-x64",
+      triple: "x86_64-unknown-linux-musl",
+      executableName: "codex",
+    }],
+    ["linux:arm64", {
+      packageName: "@openai/codex-linux-arm64",
+      triple: "aarch64-unknown-linux-musl",
+      executableName: "codex",
+    }],
+    ["android:x64", {
+      packageName: "@openai/codex-linux-x64",
+      triple: "x86_64-unknown-linux-musl",
+      executableName: "codex",
+    }],
+    ["android:arm64", {
+      packageName: "@openai/codex-linux-arm64",
+      triple: "aarch64-unknown-linux-musl",
+      executableName: "codex",
+    }],
+    ["darwin:x64", {
+      packageName: "@openai/codex-darwin-x64",
+      triple: "x86_64-apple-darwin",
+      executableName: "codex",
+    }],
+    ["darwin:arm64", {
+      packageName: "@openai/codex-darwin-arm64",
+      triple: "aarch64-apple-darwin",
+      executableName: "codex",
+    }],
+    ["win32:x64", {
+      packageName: "@openai/codex-win32-x64",
+      triple: "x86_64-pc-windows-msvc",
+      executableName: "codex.exe",
+    }],
+    ["win32:arm64", {
+      packageName: "@openai/codex-win32-arm64",
+      triple: "aarch64-pc-windows-msvc",
+      executableName: "codex.exe",
+    }],
+  ]).get(`${platform}:${architecture}`);
+  if (!target) {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      `The official Codex native executable is unavailable for ${platform}/${architecture}`,
+    );
+  }
+  const wrapper = resolveRegisteredProviderExecutable("codex", trustedHome);
+  if (!isTrustedCodexWrapperPath(wrapper, trustedHome)) {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      "The official Codex CLI wrapper could not be verified in a trusted install location",
+    );
+  }
+  const packageRoot = resolve(dirname(wrapper), "..");
+  const relativeNativePath = [
+    "vendor",
+    target.triple,
+    "bin",
+    target.executableName,
+  ] as const;
+  const candidates = [
+    join(packageRoot, "node_modules", ...target.packageName.split("/"), ...relativeNativePath),
+    join(packageRoot, ...relativeNativePath),
+  ];
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+      const exact = realpathSync(candidate);
+      if (exact === resolve(candidate) && statSync(exact).isFile()) return exact;
+    } catch {
+      // Keep checking only the two official wrapper-owned distribution layouts.
+    }
+  }
+  throw new SafeStructuredAgentError(
+    "provider-unavailable",
+    "The official Codex native executable could not be verified in its wrapper-owned package",
+  );
+}
+
+function exactEmptyStructuredScratch(cwd: string): string {
   try {
     const exact = realpathSync(cwd);
     if (!statSync(exact).isDirectory() || readdirSync(exact).length !== 0) {
       throw new Error("not an empty directory");
     }
+    return exact;
   } catch (error) {
     throw new SafeStructuredAgentError(
       "output-invalid",
@@ -362,9 +501,17 @@ export function buildSafeStructuredGenericSeatbeltProfile(input: {
     ...authRoots,
     "/dev",
   ])];
+  const processRules = input.providerId === "codex"
+    ? [
+        "(deny process-fork)",
+        "(deny process-exec*)",
+        `(allow process-exec (literal ${seatbeltString(input.executable)}))`,
+      ]
+    : [];
   return [
     "(version 1)",
     "(allow default)",
+    ...processRules,
     '(deny file-read-data (subpath "/Users"))',
     '(deny file-read-data (subpath "/private/tmp"))',
     '(deny file-read-data (subpath "/tmp"))',
@@ -448,7 +595,12 @@ export function safeStructuredClaudeArgs(
   return args;
 }
 
-export function safeStructuredCodexArgs(model?: string): string[] {
+export function safeStructuredCodexArgs(
+  model?: string,
+  outputSchemaPath?: string,
+  imagePaths: readonly string[] = [],
+  allowWebSearch = false,
+): string[] {
   return [
     "exec",
     "--skip-git-repo-check",
@@ -460,16 +612,24 @@ export function safeStructuredCodexArgs(model?: string): string[] {
     "--ignore-rules",
     "--color", "never",
     "--json",
+    ...(allowWebSearch ? ["--enable", "standalone_web_search"] : []),
+    ...imagePaths.flatMap((path) => ["--image", path]),
     ...(model ? ["--model", model] : []),
+    ...(outputSchemaPath ? ["--output-schema", outputSchemaPath] : []),
     "-",
   ];
 }
 
-function safeStructuredGenericPrompt(systemPrompt: string, message: string): string {
+function safeStructuredGenericPrompt(
+  systemPrompt: string,
+  message: string,
+  images: readonly ValidatedSafeStructuredAgentImage[] = [],
+): string {
   return [
     systemPrompt,
     "--- DEZIN STRUCTURED REQUEST ---",
     message,
+    ...images.map((image, index) => `Image evidence ${index + 1}: ${image.label}`),
   ].join("\n\n");
 }
 
@@ -597,9 +757,12 @@ export function parseSafeStructuredClaudeStream(stdout: string): string {
 
 /**
  * Codex `exec --json` is a protocol envelope, not assistant text. Accept one
- * complete turn and return only its single completed Agent message.
+ * complete turn and return only its final completed Agent message.
  */
-export function parseSafeStructuredCodexJsonl(stdout: string): string {
+export function parseSafeStructuredCodexJsonl(
+  stdout: string,
+  options: { readonly allowWebSearch?: boolean } = {},
+): string {
   let threadStarted = false;
   let turnStarted = false;
   let terminalSeen = false;
@@ -659,14 +822,30 @@ export function parseSafeStructuredCodexJsonl(stdout: string): string {
           `Codex structured stream ${event.type} event is malformed`,
         );
       }
-      if (event.type === "item.completed" && item.type === "agent_message") {
-        if (message !== undefined || typeof item.text !== "string"
-          || item.text.length === 0 || item.text.includes("\0")) {
+      if (item.type === "web_search") {
+        if (options.allowWebSearch !== true) {
           throw new SafeStructuredAgentError(
             "output-invalid",
-            "Codex structured stream must contain exactly one completed Agent message",
+            "Codex structured stream emitted Web Search while that capability was not enabled",
           );
         }
+        continue;
+      }
+      if (item.type !== "agent_message" && item.type !== "reasoning") {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          `Codex structured stream emitted forbidden item type ${item.type}`,
+        );
+      }
+      if (event.type === "item.completed" && item.type === "agent_message") {
+        if (typeof item.text !== "string" || item.text.length === 0 || item.text.includes("\0")) {
+          throw new SafeStructuredAgentError(
+            "output-invalid",
+            "Codex structured stream contains a malformed completed Agent message",
+          );
+        }
+        // Codex may emit intermediate Agent messages during one turn. Its JSONL
+        // contract defines the last completed Agent message as the final output.
         message = item.text;
       }
       continue;
@@ -797,13 +976,20 @@ function parseSafeStructuredPlainResponse(stdout: string): string {
   return text;
 }
 
-function safeStructuredAgentStdin(request: SafeStructuredAgentRequest): string {
-  const images = request.images ?? [];
-  if (images.length === 0) return request.message;
+interface ValidatedSafeStructuredAgentImage {
+  readonly label: string;
+  readonly mediaType: SafeStructuredAgentImage["mediaType"];
+  readonly bytes: Buffer;
+}
+
+function validateSafeStructuredAgentImages(
+  images: readonly SafeStructuredAgentImage[],
+): readonly ValidatedSafeStructuredAgentImage[] {
+  if (images.length === 0) return Object.freeze([]);
   if (images.length > MAX_IMAGE_COUNT) {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent accepts at most 2 images");
   }
-  const content: Array<Record<string, unknown>> = [{ type: "text", text: request.message }];
+  const validated: ValidatedSafeStructuredAgentImage[] = [];
   let totalImageBytes = 0;
   for (const image of images) {
     if (!image.label || image.label.includes("\0") || Buffer.byteLength(image.label, "utf8") > 256) {
@@ -840,15 +1026,55 @@ function safeStructuredAgentStdin(request: SafeStructuredAgentRequest): string {
     if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
       throw new SafeStructuredAgentError("output-invalid", "Structured Agent images exceed the 12 MiB total byte limit");
     }
+    validated.push(Object.freeze({
+      label: image.label,
+      mediaType: image.mediaType,
+      bytes: decoded,
+    }));
+  }
+  return Object.freeze(validated);
+}
+
+function safeStructuredAgentStdin(
+  request: SafeStructuredAgentRequest,
+  images: readonly ValidatedSafeStructuredAgentImage[],
+): string {
+  if (images.length === 0) return request.message;
+  const content: Array<Record<string, unknown>> = [{ type: "text", text: request.message }];
+  for (const image of images) {
     content.push(
       { type: "text", text: `Image evidence: ${image.label}` },
       {
         type: "image",
-        source: { type: "base64", media_type: image.mediaType, data: image.data },
+        source: {
+          type: "base64",
+          media_type: image.mediaType,
+          data: image.bytes.toString("base64"),
+        },
       },
     );
   }
   return `${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`;
+}
+
+function materializeCodexImageEvidence(
+  scratch: string,
+  images: readonly ValidatedSafeStructuredAgentImage[],
+): readonly string[] {
+  return Object.freeze(images.map((image, index) => {
+    const extension = image.mediaType === "image/png" ? "png" : "jpg";
+    const path = join(scratch, `${IMAGE_EVIDENCE_FILENAME_PREFIX}-${index + 1}.${extension}`);
+    try {
+      writeFileSync(path, image.bytes, { mode: 0o600, flag: "wx" });
+    } catch (error) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex image evidence could not be confined to the per-run scratch directory",
+        error,
+      );
+    }
+    return path;
+  }));
 }
 
 const UPSTREAM_UNAVAILABLE_PATTERN =
@@ -1015,32 +1241,102 @@ export async function runSafeStructuredAgent(
   if (request.message.includes("\0") || Buffer.byteLength(request.message, "utf8") > MAX_MESSAGE_BYTES) {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent message exceeds the 512 KiB byte limit");
   }
+  if (request.allowWebSearch !== undefined && typeof request.allowWebSearch !== "boolean") {
+    throw new SafeStructuredAgentError("output-invalid", "Structured Agent Web Search capability flag is invalid");
+  }
+  if (request.allowWebSearch !== undefined && providerId !== "codex") {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      `${provider.label} structured planning cannot enable Codex Web Search`,
+    );
+  }
+  const images = validateSafeStructuredAgentImages(request.images ?? []);
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const providerExecutable = providerId === "claude"
     ? (options.resolveClaudeExecutable ?? resolveTrustedClaudeExecutable)()
     : providerId === "codebuddy"
       ? (options.resolveCodeBuddyExecutable ?? resolveTrustedCodeBuddyExecutable)()
+      : providerId === "codex"
+        ? options.resolveCodexExecutable?.()
+          ?? (options.resolveRegisteredExecutable === undefined
+            ? resolveTrustedCodexNativeExecutable()
+            : options.resolveRegisteredExecutable(provider.command))
       : (options.resolveRegisteredExecutable ?? resolveRegisteredProviderExecutable)(provider.command);
   const environment = safeStructuredAgentEnvironment(request.env, providerId);
-  if (providerId !== "claude" && providerId !== "codebuddy"
-    && (request.images?.length ?? 0) > 0) {
+  if (providerId !== "claude" && providerId !== "codebuddy" && providerId !== "codex"
+    && images.length > 0) {
     throw new SafeStructuredAgentError(
       "provider-unavailable",
       `${provider.label} structured planning does not accept inline image evidence`,
     );
   }
+  if (request.outputSchema !== undefined && providerId !== "codex") {
+    throw new SafeStructuredAgentError(
+      "provider-unavailable",
+      `${provider.label} structured planning does not support a final-output schema`,
+    );
+  }
+  let structuredCwd = request.cwd;
   if (providerId !== "claude" && providerId !== "codebuddy") {
-    assertEmptyStructuredScratch(request.cwd);
+    structuredCwd = exactEmptyStructuredScratch(request.cwd);
+  }
+  const codexImagePaths = providerId === "codex"
+    ? materializeCodexImageEvidence(structuredCwd, images)
+    : [];
+  let outputSchemaPath: string | undefined;
+  if (request.outputSchema !== undefined) {
+    if (!plainRecord(request.outputSchema)) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex final-output schema must be a plain JSON object",
+      );
+    }
+    let serializedSchema: string | undefined;
+    try {
+      serializedSchema = JSON.stringify(request.outputSchema);
+    } catch (error) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex final-output schema is not JSON-serializable",
+        error,
+      );
+    }
+    if (!serializedSchema
+      || Buffer.byteLength(serializedSchema, "utf8") > MAX_OUTPUT_SCHEMA_BYTES) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex final-output schema exceeds the 64 KiB byte limit",
+      );
+    }
+    outputSchemaPath = join(structuredCwd, OUTPUT_SCHEMA_FILENAME);
+    try {
+      writeFileSync(outputSchemaPath, serializedSchema, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+    } catch (error) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex final-output schema could not be confined to the per-run scratch directory",
+        error,
+      );
+    }
   }
   const genericInvocation = providerId === "claude" || providerId === "codebuddy"
-    ? undefined
+      ? undefined
     : providerId === "codex"
       ? {
-          args: safeStructuredCodexArgs(request.model),
-          stdin: safeStructuredGenericPrompt(request.systemPrompt, request.message),
+          args: safeStructuredCodexArgs(
+            request.model,
+            outputSchemaPath,
+            codexImagePaths,
+            request.allowWebSearch === true,
+          ),
+          stdin: safeStructuredGenericPrompt(request.systemPrompt, request.message, images),
         }
       : safeStructuredGenericInvocation(provider, request);
-  const stdin = genericInvocation?.stdin ?? safeStructuredAgentStdin(request);
+  const stdin = genericInvocation?.stdin ?? safeStructuredAgentStdin(request, images);
   if (Buffer.byteLength(stdin, "utf8") > MAX_STDIN_BYTES) {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent stdin exceeds the 16 MiB byte limit");
   }
@@ -1059,13 +1355,13 @@ export async function runSafeStructuredAgent(
     ? buildSafeStructuredGenericSeatbeltProfile({
         providerId,
         executable: providerExecutable,
-        scratch: request.cwd,
+        scratch: structuredCwd,
       })
     : undefined;
   if (requiresOuterConfinement) {
-    environment.TMPDIR = request.cwd;
-    environment.TMP = request.cwd;
-    environment.TEMP = request.cwd;
+    environment.TMPDIR = structuredCwd;
+    environment.TMP = structuredCwd;
+    environment.TEMP = structuredCwd;
   }
   const command = sandboxExecutable ?? providerExecutable;
   const providerArgs = providerId === "claude"
@@ -1103,7 +1399,7 @@ export async function runSafeStructuredAgent(
       result = await spawner.run({
         command,
         args,
-        cwd: request.cwd,
+        cwd: structuredCwd,
         stdin,
         timeoutMs: attemptTimeoutMs,
         signal: request.signal,
@@ -1139,7 +1435,9 @@ export async function runSafeStructuredAgent(
     }
     try {
       const text = providerId === "codex"
-        ? parseSafeStructuredCodexJsonl(result.stdout)
+        ? parseSafeStructuredCodexJsonl(result.stdout, {
+            allowWebSearch: request.allowWebSearch === true,
+          })
         : providerId === "copilot"
           ? parseSafeStructuredCopilotJsonl(result.stdout)
         : providerId === "codebuddy" || request.images?.length

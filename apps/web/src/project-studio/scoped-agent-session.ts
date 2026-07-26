@@ -32,6 +32,9 @@ export type AgentTurnOutbox =
       fingerprint: string;
       request: WorkspaceAgentTurnInput;
       createdAt: number;
+      delivery:
+        | { status: "pending" }
+        | { status: "failed"; error: string; failedAt: number };
     }
   | {
       kind: "scoped";
@@ -166,6 +169,28 @@ function parseSelection(value: unknown): ScopedAgentTurnInput["selection"] | nul
   }
 }
 
+function parseWorkspaceDelivery(
+  value: unknown,
+  createdAt: number,
+): Extract<AgentTurnOutbox, { kind: "workspace" }>["delivery"] | null {
+  if (value === undefined) {
+    return {
+      status: "failed",
+      error: "The previous Workspace Agent request needs an explicit retry.",
+      failedAt: createdAt,
+    };
+  }
+  const input = record(value);
+  if (input?.status === "pending") return { status: "pending" };
+  if (input?.status !== "failed" || typeof input.error !== "string"
+    || input.error.trim().length === 0 || !Number.isFinite(input.failedAt)) return null;
+  return {
+    status: "failed",
+    error: input.error.trim().slice(0, MAX_DRAFT_LENGTH),
+    failedAt: Number(input.failedAt),
+  };
+}
+
 function parseOutbox(value: unknown, scopeKey: AgentScopeKey): AgentTurnOutbox | null {
   const input = record(value);
   const turnId = canonicalTurnId(input?.turnId);
@@ -179,11 +204,14 @@ function parseOutbox(value: unknown, scopeKey: AgentScopeKey): AgentTurnOutbox |
   if (explicitContext === null || selection === null) return null;
   if (input.kind === "workspace") {
     if (scopeKey !== WORKSPACE_AGENT_SCOPE) return null;
+    const delivery = parseWorkspaceDelivery(input.delivery, Number(input.createdAt));
+    if (delivery === null) return null;
     return {
       kind: "workspace",
       turnId,
       fingerprint: input.fingerprint,
       createdAt: Number(input.createdAt),
+      delivery,
       request: {
         turnId,
         message: request.message.trim(),

@@ -120,6 +120,7 @@ function infrastructure(worktreeDir: string): ArtifactRunInfrastructureInput {
     hasExactSharinganCapture: false,
     sharinganReference: null,
     repositoryDir: join(worktreeDir, "repository"),
+    candidateWorktreeDir: worktreeDir,
     worktreeDir,
   };
 }

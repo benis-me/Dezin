@@ -1110,6 +1110,28 @@ for (const { name, mutate } of [
   });
 }
 
+test("Generation Task Artifact quality gate identifies the first active blocking finding", () => {
+  const input = validInput();
+  assert.throws(
+    () => validateGenerationTaskArtifactQualityGate({
+      ...input,
+      quality: {
+        state: "needs-attention",
+        score: 80,
+        findings: [{
+          severity: "P1",
+          id: "broken-hierarchy",
+          message: "Hierarchy is broken",
+          fix: "Restore the approved hierarchy",
+          reviewStatus: "active",
+        }],
+      },
+    }),
+    (error: unknown) => error instanceof GenerationTaskQualityGateError
+      && error.message === "Artifact quality contains active blocking P1 finding broken-hierarchy: Hierarchy is broken. Fix: Restore the approved hierarchy",
+  );
+});
+
 test("Generation Task Artifact quality gate fails safely for hostile evidence", () => {
   const revocable = Proxy.revocable({}, {});
   revocable.revoke();

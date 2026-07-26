@@ -1,4 +1,7 @@
-import type { Store } from "../../../../packages/core/src/index.ts";
+import {
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+  type Store,
+} from "../../../../packages/core/src/index.ts";
 import type { DesignRegistry } from "../../../../packages/design/src/index.ts";
 import { createWorkspaceContextPackRepository } from "../context/context-pack-store.ts";
 import type { RuntimeSupervisor } from "../runtime-supervisor.ts";
@@ -79,6 +82,9 @@ export function createProductionGenerationBootstrap(
     store: options.store,
     dataDir: options.dataDir,
     researchExternalFetch: options.resourceExternalFetch,
+    agentTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs,
+    imageTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.maxImageCallTimeoutMs,
+    reviewTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs,
   });
   const resourceImplementations = createProductionResourceGenerationImplementations({
     contextPacks,

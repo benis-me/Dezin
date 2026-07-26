@@ -814,6 +814,8 @@ interface WorkspaceGenerationResourceOperationBase {
   resourceId: string;
   kind: WorkspaceResourceKind;
   title: string;
+  /** Optional only for historical persisted Proposals. */
+  instructions?: string;
 }
 
 export type WorkspaceGenerationResourceOperation =

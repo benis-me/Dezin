@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
@@ -458,14 +458,27 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
       finishedAt: null,
     })),
   };
-  const retryGenerationTask = vi.fn(async () => queued);
-  render(
+  let authoritativeDetail = failed;
+  let parentObservationCalls = 0;
+  const getGenerationPlan = vi.fn(async (
+    _projectId: string,
+    _planId: string,
+    signal?: AbortSignal,
+  ) => {
+    if (signal !== undefined) parentObservationCalls += 1;
+    return authoritativeDetail;
+  });
+  const retryGenerationTask = vi.fn(async () => {
+    authoritativeDetail = queued;
+    return queued;
+  });
+  const { container } = render(
     <ApiProvider client={makeFakeApi({
       getProject: async () => project("p-1"),
       getWorkspace: async () => readyWorkspace("p-1"),
       getLatestWorkspaceAgentPlanId: async () => failed.plan.id,
       listGenerationPlans: async () => [failed.plan],
-      getGenerationPlan: async () => failed,
+      getGenerationPlan,
       retryGenerationTask,
     })}>
       <App />
@@ -474,6 +487,11 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
 
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
   expect(screen.getByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
+  const canvasNode = container.querySelector<HTMLElement>('[data-id="node-p-1"]');
+  expect(canvasNode).not.toBeNull();
+  expect(within(canvasNode!).getByText("failed")).toBeInTheDocument();
+  expect(parentObservationCalls).toBe(1);
+
   fireEvent.click(screen.getByRole("button", { name: "Retry Page with the same context" }));
   await waitFor(() => expect(retryGenerationTask).toHaveBeenCalledWith(
     "p-1",
@@ -481,6 +499,8 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
     failed.tasks[0]!.id,
     "same-context",
   ));
+  await waitFor(() => expect(within(canvasNode!).getByText("queued")).toBeInTheDocument());
+  await waitFor(() => expect(parentObservationCalls).toBeGreaterThan(1));
 });
 
 test("Artifact route restores the newest durable scoped Plan without displacing the Inspector", async () => {
@@ -668,7 +688,9 @@ test("closing a failed Proposal review restores the scoped Resource Inspector af
   expect(await screen.findByRole("heading", { name: "Proposal unavailable" })).toBeInTheDocument();
   act(() => navigate("/projects/p-1/resources/resource-1"));
   expect(screen.getByRole("heading", { name: "Proposal unavailable" })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Resource" })).not.toBeInTheDocument();
+  // The routed Resource surface remains mounted behind the independent Proposal
+  // Inspector, so its shared Studio header must stay stable while review is open.
+  expect(screen.getByRole("heading", { name: "Resource" })).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Close review" }));
 

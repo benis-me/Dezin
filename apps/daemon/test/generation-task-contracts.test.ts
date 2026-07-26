@@ -17,6 +17,10 @@ const FROZEN_CODEBUDDY_AGENT = {
   command: "codebuddy",
   model: "gpt-5.6-sol",
 } as const;
+const RESOURCE_INSTRUCTIONS = [
+  "Compare exactly three research directions.",
+  "Bind every recommendation to evidence and state the decisive tradeoffs.",
+].join(" ");
 
 function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProposal } {
   const shell: GenerationPlan = {
@@ -65,6 +69,7 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
         resourceId: "resource-research",
         kind: "research",
         title: "Audience research",
+        instructions: RESOURCE_INSTRUCTIONS,
         revisionPolicy: { kind: "generate" },
       }],
       artifactPlans: [
@@ -457,6 +462,11 @@ test("validates Resource operation and generate policy recursively", () => {
     [(payload: any) => { payload.operation.extra = true; }, /fields/i],
     [(payload: any) => { payload.brief.targetInstructions.title = "Different research"; }, /instructions.*title/i],
     [(payload: any) => { payload.brief.targetInstructions.kind = "file"; }, /instructions.*kind/i],
+    [(payload: any) => { payload.brief.targetInstructions.instructions = "Substituted brief"; }, /instructions brief.*match/i],
+    [(payload: any) => {
+      payload.operation.instructions = "x".repeat(2_001);
+      payload.brief.targetInstructions.instructions = payload.operation.instructions;
+    }, /instructions.*2000/i],
     [(payload: any) => { payload.capabilityDescriptors[0].required = false; }, /required/i],
     [(payload: any) => { payload.adapter.id = "dezin.resource-adapter.file"; }, /adapter id/i],
     [(payload: any) => { payload.adapter.version = 2; }, /adapter version/i],
@@ -467,6 +477,11 @@ test("validates Resource operation and generate policy recursively", () => {
     mutate(payload);
     expectContractError(withPayload(resource, payload), pattern);
   }
+
+  const legacy = clonePayload(resource) as any;
+  delete legacy.operation.instructions;
+  delete legacy.brief.targetInstructions.instructions;
+  validateGenerationTaskPayload(withPayload(resource, legacy));
 });
 
 test("validates Prototype intents, transitions, Frames, and Artifact ids recursively", () => {

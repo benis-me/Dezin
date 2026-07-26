@@ -12,7 +12,14 @@ import {
   LoaderCircle,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import {
   Badge,
@@ -25,8 +32,10 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  StudioDocumentHeader,
+  StudioHeaderActions,
   StudioHeaderCopy,
+  StudioHeaderIdentity,
+  StudioPanelHeader,
 } from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
@@ -51,6 +60,36 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message
     : "This Research Revision could not be opened.";
+}
+
+function ResearchViewerHeader({
+  title,
+  onBack,
+  history,
+}: {
+  title: string;
+  onBack: () => void;
+  history?: ReactNode;
+}) {
+  return (
+    <StudioPanelHeader className="dezin-research-viewer__header z-[3] gap-3 px-3">
+      <StudioHeaderIdentity className="min-w-0 flex-1">
+        <IconButton className="shrink-0" onClick={onBack} aria-label="Back to project canvas">
+          <ArrowLeft size={15} aria-hidden />
+        </IconButton>
+        <StudioHeaderCopy
+          title={title}
+          subtitle={<span className="flex items-center gap-1.5"><BookOpenText size={13} aria-hidden /> Research</span>}
+          titleId="research-viewer-title"
+        />
+      </StudioHeaderIdentity>
+      {history === undefined ? null : (
+        <StudioHeaderActions className="shrink-0">
+          {history}
+        </StudioHeaderActions>
+      )}
+    </StudioPanelHeader>
+  );
 }
 
 export function ResearchResourceViewer({
@@ -194,26 +233,32 @@ export function ResearchResourceViewer({
 
   if (currentLoad.status === "loading") {
     return (
-      <section className="dezin-research-viewer dezin-research-viewer--state" aria-label="Research viewer">
-        <LoaderCircle aria-hidden className="dezin-research-viewer__spinner" />
-        <strong>Opening immutable Research</strong>
-        <span>Verifying its exact Revision and evidence receipts…</span>
+      <section className="dezin-research-viewer" aria-label="Research viewer" aria-busy>
+        <ResearchViewerHeader title="Research" onBack={onBack} />
+        <div className="dezin-research-viewer--state" role="status" aria-live="polite">
+          <LoaderCircle aria-hidden className="dezin-research-viewer__spinner" />
+          <strong>Opening immutable Research</strong>
+          <span>Verifying its exact Revision and evidence receipts…</span>
+        </div>
       </section>
     );
   }
   if (currentLoad.status === "error") {
     return (
-      <section className="dezin-research-viewer dezin-research-viewer--state" aria-label="Research viewer">
-        <CircleAlert aria-hidden />
-        <strong>Research unavailable</strong>
-        <span role="alert">{currentLoad.message}</span>
-        <div className="dezin-research-viewer__state-actions">
-          <Button type="button" size="sm" onClick={() => setLoadRetryEpoch((value) => value + 1)}>
-            Try again
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={onBack}>
-            Back to canvas
-          </Button>
+      <section className="dezin-research-viewer" aria-label="Research viewer">
+        <ResearchViewerHeader title="Research" onBack={onBack} />
+        <div className="dezin-research-viewer--state" role="alert">
+          <CircleAlert aria-hidden />
+          <strong>Research unavailable</strong>
+          <span>{currentLoad.message}</span>
+          <div className="dezin-research-viewer__state-actions">
+            <Button type="button" size="sm" onClick={() => setLoadRetryEpoch((value) => value + 1)}>
+              Try again
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={onBack}>
+              Back to canvas
+            </Button>
+          </div>
         </div>
       </section>
     );
@@ -233,20 +278,25 @@ export function ResearchResourceViewer({
             : "This Research resource has not published its first immutable Revision yet.");
     return (
       <section
-        className="dezin-research-viewer dezin-research-viewer--state dezin-research-viewer--empty"
+        className="dezin-research-viewer"
         aria-label="Research viewer"
-        role={failed ? "alert" : "status"}
         data-generation-state={generationState?.state ?? "idle"}
       >
-        {failed ? <CircleAlert aria-hidden /> : <BookOpenText aria-hidden />}
-        <span className="dezin-research-viewer__state-kicker">Research · {currentLoad.title}</span>
-        <strong>{complete ? "Research generated" : "Research not generated"}</strong>
-        <span>{stateMessage}</span>
-        <div className="dezin-research-viewer__state-actions">
-          {onOpenPlan && generationState ? (
-            <Button type="button" size="sm" onClick={onOpenPlan}>Open build plan</Button>
-          ) : null}
-          <Button type="button" size="sm" variant="outline" onClick={onBack}>Back to canvas</Button>
+        <ResearchViewerHeader title={currentLoad.title} onBack={onBack} />
+        <div
+          className="dezin-research-viewer--state dezin-research-viewer--empty"
+          role={failed ? "alert" : "status"}
+        >
+          {failed ? <CircleAlert aria-hidden /> : <BookOpenText aria-hidden />}
+          <span className="dezin-research-viewer__state-kicker">Research · {currentLoad.title}</span>
+          <strong>{complete ? "Research generated" : "Research not generated"}</strong>
+          <span>{stateMessage}</span>
+          <div className="dezin-research-viewer__state-actions">
+            {onOpenPlan && generationState ? (
+              <Button type="button" size="sm" onClick={onOpenPlan}>Open build plan</Button>
+            ) : null}
+            <Button type="button" size="sm" variant="outline" onClick={onBack}>Back to canvas</Button>
+          </div>
         </div>
       </section>
     );
@@ -352,16 +402,10 @@ export function ResearchResourceViewer({
 
   return (
     <section className="dezin-research-viewer" aria-labelledby="research-viewer-title">
-      <StudioDocumentHeader className="dezin-research-viewer__header">
-        <IconButton className="dezin-research-viewer__back" onClick={onBack} aria-label="Back to project canvas">
-          <ArrowLeft size={15} aria-hidden />
-        </IconButton>
-        <StudioHeaderCopy
-          title={view.resource.title}
-          subtitle={<span className="flex items-center gap-1.5"><BookOpenText size={13} aria-hidden /> Research</span>}
-          titleId="research-viewer-title"
-        />
-        <ResourceRevisionHistory
+      <ResearchViewerHeader
+        title={view.resource.title}
+        onBack={onBack}
+        history={<ResourceRevisionHistory
           className="dezin-research-viewer__history"
           projectId={projectId}
           resourceId={resourceId}
@@ -370,8 +414,8 @@ export function ResearchResourceViewer({
           pinned={requestedRevisionId !== null}
           onOpenRevision={onOpenRevision}
           onReturnToHead={onReturnToHead ?? onBack}
-        />
-      </StudioDocumentHeader>
+        />}
+      />
 
       <div className="dezin-research-viewer__scroll">
         <div className="dezin-research-viewer__document">

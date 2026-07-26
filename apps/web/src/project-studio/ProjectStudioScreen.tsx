@@ -1,9 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ExoticComponent } from "react";
 
 import { type AgentComposerContextItem } from "../components/AgentComposerContext.tsx";
-import { useToast } from "../components/Toast.tsx";
 import { Button } from "../components/ui/index.ts";
 import { persistAgentModelDefaultsStrict } from "../lib/agent-model-defaults.ts";
+import {
+  designSystemPickerValue,
+  persistedDesignSystemId,
+} from "../lib/design-system-selection.ts";
 import {
   agentAvailabilityReason,
   normalizeAgentModel,
@@ -28,6 +31,7 @@ import { ArtifactEditorSurface, useArtifactEditorController } from "./artifact/A
 import { ArtifactInspector } from "./artifact/ArtifactInspector.tsx";
 import {
   GenerationPlanInspector,
+  type GenerationPlanDetailChange,
   type GenerationPlanTargetLabels,
 } from "./generation/GenerationPlanPanel.tsx";
 import {
@@ -73,6 +77,14 @@ interface ArtifactCandidateRouteIdentity {
 }
 
 const EMPTY_CANVAS_RESOURCE_REVISION_STATES: Readonly<Record<string, CanvasResourceRevisionState>> = {};
+
+function terminalGenerationPlan(detail: GenerationPlanDetail): boolean {
+  return detail.plan.status === "succeeded"
+    || detail.plan.status === "failed"
+    || detail.plan.status === "compile-failed"
+    || detail.plan.status === "requires-new-impact"
+    || detail.plan.status === "cancelled";
+}
 
 export function buildResourceRevisionStates(
   resources: readonly Resource[],
@@ -168,7 +180,6 @@ export function ProjectStudioScreen({
   onOpenSettings: (section?: string) => void;
 }) {
   const api = useApi();
-  const { toast } = useToast();
   const {
     provided: agentsProvided,
     agents,
@@ -242,6 +253,7 @@ export function ProjectStudioScreen({
   const [resourceIntentPlanId, setResourceIntentPlanId] = useState<string | null>(null);
   const [workspacePlanId, setWorkspacePlanId] = useState<string | null>(null);
   const [workspacePlanDetail, setWorkspacePlanDetail] = useState<GenerationPlanDetail | null>(null);
+  const [workspacePlanObservationEpoch, setWorkspacePlanObservationEpoch] = useState(0);
   const workspacePlanResultKeyRef = useRef<string | null>(null);
   const [dismissedWorkspacePlanId, setDismissedWorkspacePlanId] = useState<string | null>(null);
   const [prototypeFlowSession, setPrototypeFlowSession] = useState<PrototypeFlowSession | null>(null);
@@ -291,6 +303,23 @@ export function ProjectStudioScreen({
   const observedGenerationPlanId = artifactId === null && resourceId === null
     ? workspacePlanId
     : resourceIntentPlanId ?? scopedGenerationPlanId ?? workspacePlanId;
+  const commitWorkspacePlanDetail = useCallback((detail: GenerationPlanDetail): void => {
+    setWorkspacePlanDetail(detail);
+    const resultKey = generationPlanResultKey(detail);
+    if (resultKey !== null && resultKey !== workspacePlanResultKeyRef.current) {
+      workspacePlanResultKeyRef.current = resultKey;
+      studio.reconcileGenerationPublication();
+    }
+  }, [studio.reconcileGenerationPublication]);
+  const handleGenerationPlanDetailChange = useCallback((
+    change: GenerationPlanDetailChange,
+  ): void => {
+    if (change.detail.plan.id !== observedGenerationPlanId) return;
+    commitWorkspacePlanDetail(change.detail);
+    if (change.source === "retry" && !terminalGenerationPlan(change.detail)) {
+      setWorkspacePlanObservationEpoch((epoch) => epoch + 1);
+    }
+  }, [commitWorkspacePlanDetail, observedGenerationPlanId]);
   const scopedAgentSubmitting = artifactId !== null
     ? studio.artifactAgentSubmitting
     : resourceId !== null
@@ -359,7 +388,7 @@ export function ProjectStudioScreen({
 
   useEffect(() => {
     if (load.status !== "ready") return;
-    setDesignSystemId(load.project.designSystemId ?? "");
+    setDesignSystemId(designSystemPickerValue(load.project.designSystemId));
   }, [load.status, load.status === "ready" ? load.project.designSystemId : null, projectId]);
 
   const saveAgentModelDefaults = useCallback((agentCommand: string, model: string): void => {
@@ -391,11 +420,10 @@ export function ProjectStudioScreen({
         if (contextActionGuardRef.current.mounted) {
           setAgentSettingsError(message);
           setAgentSettingsReady(false);
-          toast("Couldn't save Agent settings.", { variant: "error" });
         }
       },
     );
-  }, [api, toast]);
+  }, [api]);
 
   useEffect(() => {
     if (settingsAgent === null) return;
@@ -429,29 +457,27 @@ export function ProjectStudioScreen({
     setDesignSystemId(nextId);
     const write = designSystemWriteRef.current
       .catch(() => {})
-      .then(() => api.patchProject(projectId, { designSystemId: nextId || null }))
+      .then(() => api.patchProject(projectId, {
+        designSystemId: persistedDesignSystemId(nextId),
+      }))
       .then((project) => {
         if (request !== designSystemRequestRef.current) return;
         designSystemErrorRef.current = null;
         if (contextActionGuardRef.current.mounted) {
           setDesignSystemError(null);
-          setDesignSystemId(project.designSystemId ?? "");
+          setDesignSystemId(designSystemPickerValue(project.designSystemId));
         }
       })
-      .catch((error) => {
+      .catch(() => {
         if (request !== designSystemRequestRef.current) return;
         const persistenceMessage = "Couldn't save the Design System. Choose it again to retry.";
         designSystemErrorRef.current = persistenceMessage;
         if (!contextActionGuardRef.current.mounted) return;
         setDesignSystemError(persistenceMessage);
         setDesignSystemId(previousId);
-        const message = error instanceof Error && error.message.trim()
-          ? error.message
-          : "Couldn't update the Design System.";
-        toast(message, { variant: "error" });
       });
     designSystemWriteRef.current = write;
-  }, [api, designSystemId, projectId, toast]);
+  }, [api, designSystemId, projectId]);
 
   const afterContextSettings = useCallback(async <T,>(action: () => T | Promise<T>): Promise<T | undefined> => {
     const guard = contextActionGuardRef.current;
@@ -575,6 +601,9 @@ export function ProjectStudioScreen({
   useEffect(() => {
     setWorkspacePlanDetail(null);
     workspacePlanResultKeyRef.current = null;
+  }, [observedGenerationPlanId, projectId]);
+
+  useEffect(() => {
     if (observedGenerationPlanId === null) return;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -585,18 +614,8 @@ export function ProjectStudioScreen({
         const detail = await api.getGenerationPlan(projectId, observedGenerationPlanId, controller.signal);
         failures = 0;
         if (!current) return;
-        setWorkspacePlanDetail(detail);
-        const resultKey = generationPlanResultKey(detail);
-        if (resultKey !== null && resultKey !== workspacePlanResultKeyRef.current) {
-          workspacePlanResultKeyRef.current = resultKey;
-          studio.reconcileGenerationPublication();
-        }
-        const terminal = detail.plan.status === "succeeded"
-          || detail.plan.status === "failed"
-          || detail.plan.status === "compile-failed"
-          || detail.plan.status === "requires-new-impact"
-          || detail.plan.status === "cancelled";
-        if (!terminal) timer = setTimeout(() => void refresh(), 1_500);
+        commitWorkspacePlanDetail(detail);
+        if (!terminalGenerationPlan(detail)) timer = setTimeout(() => void refresh(), 1_500);
       } catch {
         if (controller.signal.aborted) return;
         failures += 1;
@@ -614,7 +633,13 @@ export function ProjectStudioScreen({
       controller.abort(new DOMException("Generation Plan view closed", "AbortError"));
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [api, observedGenerationPlanId, projectId, studio.reconcileGenerationPublication]);
+  }, [
+    api,
+    commitWorkspacePlanDetail,
+    observedGenerationPlanId,
+    projectId,
+    workspacePlanObservationEpoch,
+  ]);
 
   useEffect(() => {
     if (approvedPlanFromReview === null) return;
@@ -673,6 +698,23 @@ export function ProjectStudioScreen({
     () => buildGenerationTargetStates(workspacePlanDetail),
     [workspacePlanDetail],
   );
+  const attentionGenerationPlanId = workspacePlanDetail !== null
+    && [
+      ...Object.values(generationTargetStates.artifacts),
+      ...Object.values(generationTargetStates.resources),
+    ].some((target) => target.state === "failed" || target.state === "blocked")
+    ? workspacePlanDetail.plan.id
+    : null;
+  const approvedProposalAttentionPlanId = studio.proposalReview.status === "approved"
+    ? attentionGenerationPlanId
+    : null;
+
+  useEffect(() => {
+    if (approvedProposalAttentionPlanId === null) return;
+    setDismissedWorkspacePlanId(null);
+    setScopedInspectorMode("plan");
+  }, [approvedProposalAttentionPlanId]);
+
   const workspaceReferenceCards = useMemo(() => {
     if (readyWorkspace === null) return [] as DaemonContextCard[];
     const artifactCards = readyWorkspace.artifacts.flatMap((artifact): DaemonContextCard[] => {
@@ -933,6 +975,8 @@ export function ProjectStudioScreen({
           <ResourceEditorSurface
             editor={resourceEditor}
             projectId={projectId}
+            generationState={generationTargetStates.resources[resourceId!] ?? null}
+            onOpenPlan={observedGenerationPlanId === null ? undefined : () => setScopedInspectorMode("plan")}
             onBack={() => navigate(`/projects/${encodeURIComponent(projectId)}/canvas`)}
             onOpenRevision={(revisionId) => openResourceRevision(resourceId!, revisionId)}
             onReturnToHead={() => navigate(`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId!)}`)}
@@ -945,6 +989,7 @@ export function ProjectStudioScreen({
     ? workspacePlanId ?? approvedGenerationPlanId
     : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedGenerationPlanId ?? workspacePlanId;
   const proposalReviewOpen = studio.proposalReview.status !== "idle"
+    && approvedProposalAttentionPlanId === null
     && !(studio.proposalReview.status === "approved"
       && studio.proposalReview.plan?.status === "compile-failed");
   const generationPlanOpen = !proposalReviewOpen
@@ -972,6 +1017,7 @@ export function ProjectStudioScreen({
       projectId={projectId}
       preferredPlanId={preferredGenerationPlanId}
       targetLabels={generationPlanTargetLabels}
+      onDetailChange={handleGenerationPlanDetailChange}
       onWorkspaceChanged={studio.reconcileGenerationPublication}
       onClose={() => {
         if (workspaceScope) setDismissedWorkspacePlanId(preferredGenerationPlanId);
@@ -1024,7 +1070,6 @@ export function ProjectStudioScreen({
         ? error.message
         : "Couldn't save this Agent Context.";
       recordAttachmentError(attachmentScopeKey, message);
-      toast(message, { variant: "error" });
     } finally {
       setAttachingContext(false);
     }
@@ -1140,7 +1185,6 @@ export function ProjectStudioScreen({
             } catch (error) {
               const message = error instanceof Error && error.message.trim() ? error.message : "Couldn't attach this file.";
               recordAttachmentError(attachmentScopeKey, message);
-              toast(message, { variant: "error" });
             } finally {
               setAttachingContext(false);
             }

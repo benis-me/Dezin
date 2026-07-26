@@ -140,6 +140,43 @@ test("rejects malformed daemon identities instead of replaying an untrusted outb
   });
 });
 
+test("restores a legacy Workspace outbox as terminal instead of silently replaying it", () => {
+  localStorage.setItem(
+    "dezin.project-studio.agent.v1:project-1:workspace",
+    JSON.stringify({
+      version: 1,
+      projectId: "project-1",
+      scopeKey: "workspace",
+      draft: "Retry this only when I ask",
+      contextItems: [],
+      transcript: [],
+      outbox: {
+        kind: "workspace",
+        turnId: TURN_ID,
+        fingerprint: "legacy-request",
+        createdAt: 7,
+        request: {
+          turnId: TURN_ID,
+          message: "Retry this only when I ask",
+          explicitContext: [],
+          graphRevision: 1,
+        },
+      },
+      receipt: null,
+    }),
+  );
+
+  expect(readAgentSession("project-1", "workspace").outbox).toEqual(expect.objectContaining({
+    kind: "workspace",
+    turnId: TURN_ID,
+    delivery: {
+      status: "failed",
+      error: "The previous Workspace Agent request needs an explicit retry.",
+      failedAt: 7,
+    },
+  }));
+});
+
 test("does not restore data whose persisted project or scope identity was changed", () => {
   localStorage.setItem(
     "dezin.project-studio.agent.v1:project-1:artifact%3Aartifact-1",

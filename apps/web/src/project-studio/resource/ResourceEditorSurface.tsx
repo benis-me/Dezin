@@ -3,6 +3,7 @@ import "./resource-revision-viewer.css";
 import {
   ArrowLeft,
   CheckCircle2,
+  CircleAlert,
   Code2,
   Download,
   FileArchive,
@@ -15,9 +16,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   Button,
   IconButton,
-  StudioDocumentHeader,
   StudioFactRow,
+  StudioHeaderActions,
   StudioHeaderCopy,
+  StudioHeaderIdentity,
   StudioInspectorSection,
   StudioPanelHeader,
   StudioStatusBadge,
@@ -29,6 +31,7 @@ import type {
   ResourceRevisionPreviewKind,
   ResourceRevisionView,
 } from "../../lib/api.ts";
+import type { GenerationTargetState } from "../generation/generation-target-state.ts";
 import { ResourceRevisionHistory } from "./ResourceRevisionHistory.tsx";
 
 type ResourceEditorLoad =
@@ -702,52 +705,105 @@ export function ResourceRevisionBody({ view }: { view: ResourceRevisionView }) {
   return <>{body}<PayloadFooter view={view} /></>;
 }
 
+function ResourceViewerHeader({
+  title,
+  subtitle,
+  onBack,
+  history,
+}: {
+  title: string;
+  subtitle: string;
+  onBack: () => void;
+  history?: React.ReactNode;
+}) {
+  return (
+    <StudioPanelHeader className="dezin-resource-viewer__header z-10 gap-3 px-3">
+      <StudioHeaderIdentity className="min-w-0 flex-1">
+        <IconButton aria-label="Back to project canvas" className="shrink-0" onClick={onBack}>
+          <ArrowLeft aria-hidden size={15} />
+        </IconButton>
+        <StudioHeaderCopy
+          title={title}
+          subtitle={subtitle}
+          titleId="resource-viewer-title"
+        />
+      </StudioHeaderIdentity>
+      {history === undefined ? null : (
+        <StudioHeaderActions className="shrink-0">
+          {history}
+        </StudioHeaderActions>
+      )}
+    </StudioPanelHeader>
+  );
+}
+
 export function ResourceEditorSurface({
   editor,
   projectId,
   onBack,
   onOpenRevision,
   onReturnToHead,
+  generationState = null,
+  onOpenPlan,
 }: {
   editor: ResourceEditorController;
   projectId: string;
   onBack: () => void;
   onOpenRevision: (revisionId: string) => void;
   onReturnToHead: () => void;
+  generationState?: GenerationTargetState | null;
+  onOpenPlan?: () => void;
 }) {
   if (editor.load.status === "idle" || editor.load.status === "loading") {
     return (
-      <section role="status" aria-label="Resource editor" className="dezin-resource-viewer dezin-resource-viewer--state">
-        <LoaderCircle aria-hidden />
-        <strong>Opening immutable Resource</strong>
-        <span>Verifying the exact Revision payload…</span>
+      <section role="region" aria-label="Resource editor" aria-busy className="dezin-resource-viewer">
+        <ResourceViewerHeader title="Resource" subtitle="Immutable Revision" onBack={onBack} />
+        <div className="dezin-resource-viewer--state" role="status" aria-live="polite">
+          <LoaderCircle aria-hidden />
+          <strong>Opening immutable Resource</strong>
+          <span>Verifying the exact Revision payload…</span>
+        </div>
       </section>
     );
   }
   if (editor.load.status === "error") {
     return (
-      <section role="alert" aria-label="Resource editor" className="dezin-resource-viewer dezin-resource-viewer--state">
-        <FileArchive aria-hidden />
-        <strong>Resource unavailable</strong>
-        <span>{editor.load.message}</span>
-        <Button type="button" size="sm" onClick={editor.retry}>Try again</Button>
-        <Button type="button" variant="outline" size="sm" onClick={onBack}>Back to canvas</Button>
+      <section role="region" aria-label="Resource editor" className="dezin-resource-viewer">
+        <ResourceViewerHeader title="Resource" subtitle="Immutable Revision" onBack={onBack} />
+        <div className="dezin-resource-viewer--state" role="alert">
+          <FileArchive aria-hidden />
+          <strong>Resource unavailable</strong>
+          <span>{editor.load.message}</span>
+          <Button type="button" size="sm" onClick={editor.retry}>Try again</Button>
+          <Button type="button" variant="outline" size="sm" onClick={onBack}>Back to canvas</Button>
+        </div>
       </section>
     );
   }
 
   const { resource, view } = editor.load;
+  const resourceLabel = resource.kind
+    .replaceAll("-", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const failed = generationState?.state === "failed" || generationState?.state === "blocked";
+  const complete = generationState?.state === "complete";
+  const generationMessage = generationState?.message
+    ?? (generationState?.state === "queued"
+      ? `${resourceLabel} is queued and will appear after its first immutable Revision is published.`
+      : generationState?.state === "running"
+        ? `${resourceLabel} is being generated. This view will update after publication.`
+        : complete
+          ? `Generation finished. Syncing the published immutable Revision into this workspace.`
+          : generationState?.state === "cancelled"
+            ? `${resourceLabel} generation was cancelled before an immutable Revision was published.`
+            : "This Resource has an identity, but no published payload yet.");
   return (
     <section role="region" aria-label="Resource editor" className="dezin-resource-viewer">
-      <StudioDocumentHeader className="dezin-resource-viewer__header">
-        <IconButton aria-label="Back to project canvas" className="shrink-0" onClick={onBack}>
-          <ArrowLeft aria-hidden size={15} />
-        </IconButton>
-        <StudioHeaderCopy
-          title={resource.title}
-          subtitle={`${resource.kind.replaceAll("-", " ")} / immutable resource`}
-        />
-        <ResourceRevisionHistory
+      <ResourceViewerHeader
+        title={resource.title}
+        subtitle={`${resource.kind.replaceAll("-", " ")} / immutable resource`}
+        onBack={onBack}
+        history={<ResourceRevisionHistory
           projectId={projectId}
           resourceId={resource.id}
           current={view?.revision ?? null}
@@ -755,13 +811,24 @@ export function ResourceEditorSurface({
           pinned={editor.pinned}
           onOpenRevision={onOpenRevision}
           onReturnToHead={onReturnToHead}
-        />
-      </StudioDocumentHeader>
+        />}
+      />
       {view === null ? (
-        <div className="dezin-resource-viewer__empty">
-          <ImageIcon aria-hidden size={26} />
-          <strong>Awaiting the first immutable Revision</strong>
-          <span>This Resource has an identity, but no published payload yet.</span>
+        <div
+          className="dezin-resource-viewer__empty"
+          role={failed ? "alert" : "status"}
+          data-generation-state={generationState?.state ?? "idle"}
+        >
+          {failed ? <CircleAlert aria-hidden size={26} /> : <ImageIcon aria-hidden size={26} />}
+          <strong>
+            {failed
+              ? `${resourceLabel} generation failed`
+              : complete ? `${resourceLabel} generated` : "Awaiting the first immutable Revision"}
+          </strong>
+          <span>{generationMessage}</span>
+          {onOpenPlan && generationState ? (
+            <Button type="button" size="sm" onClick={onOpenPlan}>Open build plan</Button>
+          ) : null}
         </div>
       ) : (
         <div className="dezin-resource-viewer__scroll">

@@ -711,9 +711,16 @@ function validateResearchBrief(value: unknown, scope: ResearchBundleScope): void
     brief.targetInstructions,
     ["operation", "kind", "title"],
     "Research brief target instructions",
+    ["instructions"],
   );
   if (target.operation !== scope.operation || target.kind !== "research" || target.title !== scope.title) {
     return fail("Research brief substituted its exact Task target");
+  }
+  if (target.instructions !== undefined) {
+    const instructions = text(target.instructions, "Research brief target instructions brief", 2_000);
+    if (Buffer.byteLength(instructions, "utf8") > 2_000) {
+      return fail("Research brief target instructions brief exceeds its UTF-8 byte limit");
+    }
   }
 }
 

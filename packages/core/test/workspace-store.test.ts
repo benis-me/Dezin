@@ -2109,6 +2109,322 @@ test("stale graph and stale active Snapshot graph batches roll back every table"
   staleSnapshotStore.close();
 });
 
+test("component graph mutations durably place new components in the canonical Components group", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Component layout invariant", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-component-layout-invariant",
+      type: "add-node",
+      node: {
+        id: "component-layout-invariant",
+        kind: "component",
+        name: "Checkout summary",
+        artifactId: "artifact-component-layout-invariant",
+        createIdentity: { initialTrackId: "track-component-layout-invariant" },
+      },
+    }],
+  });
+
+  const layout = store.workspace.getLayout(project.id);
+  assert.deepEqual(
+    layout.objects.find(({ id }) => id === "dezin-component-library"),
+    {
+      id: "dezin-component-library",
+      kind: "group",
+      x: 80,
+      y: 80,
+      width: 360,
+      height: 300,
+      parentGroupId: null,
+      label: "Components",
+      collapsed: false,
+    },
+  );
+  assert.deepEqual(
+    layout.objects.find(({ id }) => id === "component-layout-invariant"),
+    {
+      id: "component-layout-invariant",
+      kind: "node",
+      x: 40,
+      y: 64,
+      parentGroupId: "dezin-component-library",
+    },
+  );
+  store.close();
+});
+
+test("sequential root generation keeps the existing Components group stable and places new roots around it", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Stable Component shelf", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-stable-shelf-component",
+      type: "add-node",
+      node: {
+        id: "stable-shelf-component",
+        kind: "component",
+        name: "Shared shell",
+        artifactId: "artifact-stable-shelf-component",
+        createIdentity: { initialTrackId: "track-stable-shelf-component" },
+      },
+    }],
+  });
+  const initialGroup = store.workspace.getLayout(project.id).objects.find(
+    ({ id }) => id === "dezin-component-library",
+  );
+  assert.ok(initialGroup?.kind === "group");
+
+  for (let index = 0; index < 7; index += 1) {
+    const current = store.workspace.getWorkspace(project.id)!;
+    store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: current.graphRevision,
+      expectedSnapshotId: current.activeSnapshotId,
+      commands: [{
+        id: `add-root-after-shelf-${index}`,
+        type: "add-node",
+        node: {
+          id: `page-after-shelf-${index}`,
+          kind: "page",
+          name: `Page ${index + 1}`,
+          artifactId: `artifact-page-after-shelf-${index}`,
+          createIdentity: { initialTrackId: `track-page-after-shelf-${index}` },
+        },
+      }],
+    });
+    const layout = store.workspace.getLayout(project.id);
+    const group = layout.objects.find(({ id }) => id === "dezin-component-library");
+    const page = layout.objects.find(({ id }) => id === `page-after-shelf-${index}`);
+    assert.ok(group?.kind === "group");
+    assert.ok(page?.kind === "node");
+    assert.deepEqual(
+      { x: group.x, y: group.y },
+      { x: initialGroup.x, y: initialGroup.y },
+      "ordinary root materialization must not move a visible Components group",
+    );
+    assert.equal(
+      page.x + 280 + 24 <= group.x
+        || group.x + group.width + 24 <= page.x
+        || page.y + 222 + 24 <= group.y
+        || group.y + group.height + 24 <= page.y,
+      true,
+      "new root Pages must route around the stable Components group",
+    );
+  }
+  store.close();
+});
+
+test("layout mutations cannot detach components from the canonical Components group", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Component layout write invariant", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const mutation = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-component-layout-write-invariant",
+      type: "add-node",
+      node: {
+        id: "component-layout-write-invariant",
+        kind: "component",
+        name: "Price badge",
+        artifactId: "artifact-component-layout-write-invariant",
+        createIdentity: { initialTrackId: "track-component-layout-write-invariant" },
+      },
+    }],
+  });
+  const canonical = store.workspace.getLayout(project.id);
+
+  const first = store.workspace.saveLayout(project.id, {
+    graphRevision: mutation.graph.revision,
+    baseLayoutChecksum: canonical.checksum,
+    commands: [{
+      type: "set-parent",
+      objectId: "component-layout-write-invariant",
+      parentGroupId: null,
+    }],
+  });
+  const second = store.workspace.saveLayout(project.id, {
+    graphRevision: mutation.graph.revision,
+    baseLayoutChecksum: first.checksum,
+    commands: [{
+      type: "set-parent",
+      objectId: "component-layout-write-invariant",
+      parentGroupId: null,
+    }],
+  });
+
+  assert.deepEqual(first, canonical);
+  assert.deepEqual(second, canonical);
+  assert.equal(
+    second.objects.find(({ id }) => id === "component-layout-write-invariant")?.parentGroupId,
+    "dezin-component-library",
+  );
+  store.close();
+});
+
+test("new components join the canonical Components group in every existing layout", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Component multi-layout invariant", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const alternate = store.workspace.getLayout(project.id, "alternate");
+  store.workspace.saveLayout(project.id, {
+    layoutId: "alternate",
+    graphRevision: workspace.graphRevision,
+    baseLayoutChecksum: alternate.checksum,
+    commands: [{ type: "set-viewport", viewport: { x: 120, y: 80, zoom: 0.8 } }],
+  });
+  const mutation = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-component-multi-layout-invariant",
+      type: "add-node",
+      node: {
+        id: "component-multi-layout-invariant",
+        kind: "component",
+        name: "Shared navigation",
+        artifactId: "artifact-component-multi-layout-invariant",
+        createIdentity: { initialTrackId: "track-component-multi-layout-invariant" },
+      },
+    }],
+  });
+
+  for (const layoutId of ["default", "alternate"]) {
+    const layout = store.workspace.getLayout(project.id, layoutId);
+    assert.equal(layout.objects.filter(({ id }) => id === "dezin-component-library").length, 1);
+    assert.equal(
+      layout.objects.find(({ id }) => id === "component-multi-layout-invariant")?.parentGroupId,
+      "dezin-component-library",
+    );
+    assert.equal(mutation.graph.nodes.some(({ id }) => id === "component-multi-layout-invariant"), true);
+  }
+  store.close();
+});
+
+test("store startup repairs a legacy component layout once and subsequent reads stay read-only", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-component-layout-legacy-")), "store.db");
+  const clock = fakeClock();
+  const seed = new Store(file, clock);
+  const project = seed.createProject({ name: "Legacy component layout", mode: "standard" });
+  const workspace = seed.workspace.ensureWorkspaceRecord(project.id);
+  seed.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-legacy-component-layout",
+      type: "add-node",
+      node: {
+        id: "legacy-component-layout",
+        kind: "component",
+        name: "Legacy card",
+        artifactId: "artifact-legacy-component-layout",
+        createIdentity: { initialTrackId: "track-legacy-component-layout" },
+      },
+    }],
+  });
+  seed.db.prepare(
+    `UPDATE workspace_layout_nodes
+     SET parent_group_id = NULL
+     WHERE workspace_id = ? AND layout_id = 'default' AND object_id = 'legacy-component-layout'`,
+  ).run(workspace.id);
+  seed.db.prepare(
+    `DELETE FROM workspace_layout_nodes
+     WHERE workspace_id = ? AND layout_id = 'default' AND object_id = 'dezin-component-library'`,
+  ).run(workspace.id);
+  seed.close();
+
+  const migrated = new Store(file, clock);
+  const changesBeforeReads = (migrated.db.prepare(
+    "SELECT total_changes() AS count",
+  ).get() as { count: number }).count;
+  const layout = migrated.workspace.getLayout(project.id);
+  assert.deepEqual(migrated.workspace.getLayout(project.id), layout);
+  assert.equal(
+    (migrated.db.prepare("SELECT total_changes() AS count").get() as { count: number }).count,
+    changesBeforeReads,
+  );
+
+  assert.equal(
+    layout.objects.find(({ id }) => id === "legacy-component-layout")?.parentGroupId,
+    "dezin-component-library",
+  );
+  assert.equal(
+    layout.objects.filter(({ id }) => id === "dezin-component-library").length,
+    1,
+  );
+  const rowsAfterMigration = migrated.db.prepare(
+    `SELECT object_id, object_kind, x, y, parent_group_id, label, updated_at
+     FROM workspace_layout_nodes
+     WHERE workspace_id = ?
+     ORDER BY object_kind ASC, object_id ASC`,
+  ).all(workspace.id);
+  migrated.close();
+
+  const idempotent = new Store(file, clock);
+  assert.deepEqual(idempotent.db.prepare(
+    `SELECT object_id, object_kind, x, y, parent_group_id, label, updated_at
+     FROM workspace_layout_nodes
+     WHERE workspace_id = ?
+     ORDER BY object_kind ASC, object_id ASC`,
+  ).all(workspace.id), rowsAfterMigration);
+  idempotent.close();
+});
+
+test("legacy component layout repair preserves a draft Proposal checksum until the draft is rejected", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-component-layout-draft-")), "store.db");
+  const clock = fakeClock();
+  const seed = new Store(file, clock);
+  const project = seed.createProject({ name: "Legacy component draft", mode: "standard" });
+  const workspace = seed.workspace.ensureWorkspaceRecord(project.id);
+  seed.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-legacy-component-draft",
+      type: "add-node",
+      node: {
+        id: "legacy-component-draft",
+        kind: "component",
+        name: "Legacy footer",
+        artifactId: "artifact-legacy-component-draft",
+        createIdentity: { initialTrackId: "track-legacy-component-draft" },
+      },
+    }],
+  });
+  seed.db.prepare(
+    `UPDATE workspace_layout_nodes
+     SET parent_group_id = NULL
+     WHERE workspace_id = ? AND layout_id = 'default' AND object_id = 'legacy-component-draft'`,
+  ).run(workspace.id);
+  seed.db.prepare(
+    `DELETE FROM workspace_layout_nodes
+     WHERE workspace_id = ? AND layout_id = 'default' AND object_id = 'dezin-component-library'`,
+  ).run(workspace.id);
+  const legacyLayout = seed.workspace.getLayout(project.id);
+  const proposal = seed.workspace.createProposal(workspaceGenerationProposalInput(seed, project.id, []));
+  seed.close();
+
+  const reopened = new Store(file, clock);
+  assert.equal(reopened.workspace.getLayout(project.id).checksum, legacyLayout.checksum);
+  assert.equal(reopened.workspace.getProposal(proposal.id)?.baseLayoutChecksum, legacyLayout.checksum);
+
+  reopened.workspace.rejectProposal(proposal.id);
+  const repaired = reopened.workspace.getLayout(project.id);
+  assert.equal(
+    repaired.objects.find(({ id }) => id === "legacy-component-draft")?.parentGroupId,
+    "dezin-component-library",
+  );
+  reopened.close();
+});
+
 test("graph deltas create, attach, rename, and archive durable identity shells atomically", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Identities", mode: "standard" });
@@ -7427,6 +7743,53 @@ test("structure-only Proposal approval applies graph and layout in one transacti
   assert.notEqual(result.layout.checksum, proposal.baseLayoutChecksum);
   assert.equal(result.layout.objects.find(({ id }) => id === "proposal-node-approved")?.parentGroupId, "approved-group");
   assert.equal(result.layout.objects.find(({ id }) => id === "approved-group")?.kind, "group");
+  store.close();
+});
+
+test("component Proposal approval applies its planned Components group without racing the store invariant", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Component proposal layout", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const componentNodeId = "proposal-component-node";
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [{
+      id: "proposal-component-command",
+      type: "add-node",
+      node: {
+        id: componentNodeId,
+        kind: "component",
+        name: "Navigation item",
+        artifactId: "proposal-component-artifact",
+        createIdentity: { initialTrackId: "proposal-component-track" },
+      },
+    }],
+    {
+      layoutOperations: [
+        {
+          type: "add-group",
+          groupId: "dezin-component-library",
+          label: "Components",
+          bounds: { x: 80, y: 80, width: 360, height: 300 },
+        },
+        { type: "move", objectId: componentNodeId, x: 40, y: 64 },
+        {
+          type: "set-parent",
+          objectId: componentNodeId,
+          parentGroupId: "dezin-component-library",
+        },
+      ],
+    },
+  ));
+
+  const approved = store.workspace.approveProposal(proposal.id, "structure-only");
+
+  assert.equal(approved.layout.objects.filter(({ id }) => id === "dezin-component-library").length, 1);
+  assert.equal(
+    approved.layout.objects.find(({ id }) => id === componentNodeId)?.parentGroupId,
+    "dezin-component-library",
+  );
   store.close();
 });
 

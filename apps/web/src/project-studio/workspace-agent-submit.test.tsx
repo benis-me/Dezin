@@ -6,6 +6,9 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
+import { decodeWorkspaceAgentConversation } from "../../../../packages/core/src/workspace-agent-conversation.ts";
+import { ApiError } from "../lib/api.ts";
+import { ToastProvider } from "../components/Toast.tsx";
 import type {
   AgentInfo,
   Project,
@@ -566,16 +569,18 @@ test("an attachment error from scope A does not invalidate the Agent composer in
     throw new Error("Scope A attachment failed");
   });
   const rendered = render(
-    <ApiProvider client={makeFakeApi({
-      getProject: async () => project("p-1"),
-      getWorkspace: async () => ready,
-      listResources: async () => ready.resources!,
-      getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
-      getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
-      uploadRef,
-    })}>
-      <App />
-    </ApiProvider>,
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        listResources: async () => ready.resources!,
+        getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
+        getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
+        uploadRef,
+      })}>
+        <App />
+      </ApiProvider>
+    </ToastProvider>,
   );
 
   const scopeADraft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
@@ -585,17 +590,18 @@ test("an attachment error from scope A does not invalidate the Agent composer in
     target: { files: [new File(["scope A"], "scope-a.txt", { type: "text/plain" })] },
   });
 
-  await waitFor(() => expect(document.getElementById("workspace-agent-error")).toHaveTextContent(
-    "Scope A attachment failed",
-  ));
-  expect(scopeADraft).toHaveAttribute("aria-invalid", "true");
+  const scopeAError = await screen.findByRole("alert");
+  expect(scopeAError).toHaveTextContent("Scope A attachment failed");
+  expect(scopeAError.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(document.querySelector("[data-workspace-agent-error]")).toBeNull();
+  expect(scopeADraft).not.toHaveAttribute("aria-invalid");
 
   act(() => navigate("/projects/p-1/resources/resource-2"));
 
   const scopeBDraft = await screen.findByRole("textbox", { name: "Resource Agent draft" });
   expect(scopeBDraft).not.toHaveAttribute("aria-invalid");
   expect(scopeBDraft).not.toHaveAttribute("aria-describedby");
-  expect(document.getElementById("workspace-agent-error")).toBeNull();
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
 test("a successful scoped submission clears its attachment error and reveals queued status", async () => {
@@ -603,19 +609,21 @@ test("a successful scoped submission clears its attachment error and reveals que
   const resourceAgentTurn = vi.fn(async () => resourceReceipt("resource-1"));
   window.history.pushState({}, "", "/projects/p-1/resources/resource-1");
   const rendered = render(
-    <ApiProvider client={makeFakeApi({
-      getProject: async () => project("p-1"),
-      getWorkspace: async () => ready,
-      listResources: async () => ready.resources!,
-      getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
-      getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
-      uploadRef: async () => {
-        throw new Error("Attachment upload failed");
-      },
-      resourceAgentTurn,
-    })}>
-      <App />
-    </ApiProvider>,
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        listResources: async () => ready.resources!,
+        getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
+        getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
+        uploadRef: async () => {
+          throw new Error("Attachment upload failed");
+        },
+        resourceAgentTurn,
+      })}>
+        <App />
+      </ApiProvider>
+    </ToastProvider>,
   );
 
   const draft = await screen.findByRole("textbox", { name: "Resource Agent draft" });
@@ -625,10 +633,11 @@ test("a successful scoped submission clears its attachment error and reveals que
     target: { files: [new File(["failed"], "failed.txt", { type: "text/plain" })] },
   });
 
-  await waitFor(() => expect(document.getElementById("workspace-agent-error")).toHaveTextContent(
-    "Attachment upload failed",
-  ));
-  expect(draft).toHaveAttribute("aria-invalid", "true");
+  const attachmentError = await screen.findByRole("alert");
+  expect(attachmentError).toHaveTextContent("Attachment upload failed");
+  expect(attachmentError.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(document.querySelector("[data-workspace-agent-error]")).toBeNull();
+  expect(draft).not.toHaveAttribute("aria-invalid");
 
   fireEvent.change(draft, { target: { value: "Use this exact Resource revision" } });
   fireEvent.click(screen.getByRole("button", { name: "Queue resource task" }));
@@ -639,7 +648,7 @@ test("a successful scoped submission clears its attachment error and reveals que
   );
   expect(draft).not.toHaveAttribute("aria-invalid");
   expect(draft).not.toHaveAttribute("aria-describedby");
-  expect(document.getElementById("workspace-agent-error")).toBeNull();
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
 test("Workspace Agent submission creates a scoped draft and focuses Proposal review without a reload", async () => {
@@ -1047,21 +1056,23 @@ test("Workspace Agent blocks generation when a changed Agent selection cannot be
     throw new Error("Settings storage unavailable");
   });
   render(
-    <ApiProvider client={makeFakeApi({
-      getProject: async () => project("p-1"),
-      getWorkspace: async () => ready,
-      getSettings: async () => ({ ...currentSettings, agentCommand: "codex", model: "gpt-5" }),
-      listAgents: async () => [
-        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
-        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
-      ],
-      updateSettings,
-      workspaceAgentTurn,
-    })}>
-      <AgentsProvider>
-        <App />
-      </AgentsProvider>
-    </ApiProvider>,
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({ ...currentSettings, agentCommand: "codex", model: "gpt-5" }),
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] },
+          { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        ],
+        updateSettings,
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
   );
 
   const agentPicker = await screen.findByRole("button", { name: "Agent and model" });
@@ -1070,9 +1081,11 @@ test("Workspace Agent blocks generation when a changed Agent selection cannot be
   await user.click(await screen.findByRole("button", { name: /^Claude Code/ }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "claude", model: "" }));
   await user.keyboard("{Escape}");
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  const saveError = await screen.findByRole("alert");
+  expect(saveError).toHaveTextContent(
     "Couldn't save the selected Agent setting. Choose it again to retry.",
   );
+  expect(saveError.closest('[aria-label="Notifications"]')).not.toBeNull();
   fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
     target: { value: "Build a safe workspace" },
   });
@@ -1328,6 +1341,201 @@ test("Workspace Agent reuses its turnId only for an unchanged failed request", a
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
   expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(firstTurnId);
   expect(firstTurnId).toMatch(CANONICAL_TURN_ID);
+});
+
+test("Workspace Agent keeps an explicit Planner failure terminal across remount until the user retries", async () => {
+  const ready = readyWorkspace("p-1");
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    throw new ApiError(500, "Workspace Planner is unavailable: structured Agent timed out");
+  });
+  const api = makeFakeApi({
+    getProject: async () => project("p-1"),
+    getWorkspace: async () => ready,
+    workspaceAgentTurn,
+  });
+  const first = render(
+    <ApiProvider client={api}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: "Build the exact twelve Page matrix" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  expect(await screen.findByRole("status", { name: "Workspace Agent error" })).toHaveTextContent(
+    "Workspace Planner is unavailable",
+  );
+  const firstTurnId = workspaceAgentTurn.mock.calls[0]![1].turnId;
+  first.unmount();
+
+  render(
+    <ApiProvider client={api}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+  await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("status", { name: "Workspace Agent error" })).toHaveTextContent(
+    "Workspace Planner is unavailable",
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(firstTurnId);
+});
+
+test("Workspace Agent resumes an uncertain lost network response after remount", async () => {
+  const ready = readyWorkspace("p-1");
+  let attempt = 0;
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    attempt += 1;
+    if (attempt === 1) throw new TypeError("Failed to fetch");
+    return draftProposal(ready);
+  });
+  const api = makeFakeApi({
+    getProject: async () => project("p-1"),
+    getWorkspace: async () => ready,
+    workspaceAgentTurn,
+  });
+  const first = render(
+    <ApiProvider client={api}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: "Recover only an uncertain delivery" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  expect(await screen.findByRole("status", { name: "Workspace Agent error" })).toHaveTextContent(
+    "Failed to fetch",
+  );
+  const firstTurnId = workspaceAgentTurn.mock.calls[0]![1].turnId;
+  first.unmount();
+
+  render(
+    <ApiProvider client={api}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(firstTurnId);
+  expect(await screen.findByRole("status", { name: "Proposal review state" })).toHaveTextContent("draft");
+});
+
+test("Workspace Agent carries the unresolved original brief into a changed retry", async () => {
+  const ready = readyWorkspace("p-1");
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    throw new TypeError("Failed to fetch");
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      workspaceAgentTurn,
+    })}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const original = "3 directions: cinematic, paper, cobalt. Each has Home, Film, Schedule, Checkout.";
+  const correction = "Retry all requested Pages as new items.";
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: original } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  await screen.findByText("Failed to fetch");
+
+  fireEvent.change(prompt, { target: { value: correction } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+
+  const firstRequest = workspaceAgentTurn.mock.calls[0]![1];
+  const retryRequest = workspaceAgentTurn.mock.calls[1]![1];
+  expect(retryRequest.turnId).not.toBe(firstRequest.turnId);
+  expect(decodeWorkspaceAgentConversation(retryRequest.message)).toEqual({
+    priorRequests: [original],
+    currentRequest: correction,
+  });
+  expect(new TextEncoder().encode(retryRequest.message).byteLength).toBeLessThanOrEqual(64 * 1024);
+});
+
+test("Workspace Agent starts an independent request without carrying a failed brief", async () => {
+  const ready = readyWorkspace("p-1");
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    throw new TypeError("Failed to fetch");
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      workspaceAgentTurn,
+    })}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const original = "Create 3 visual directions. Each has Home, Film, Schedule, and Checkout.";
+  const independent = "Create a settings page.";
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: original } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  await screen.findByText("Failed to fetch");
+
+  fireEvent.change(prompt, { target: { value: independent } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+
+  const firstRequest = workspaceAgentTurn.mock.calls[0]![1];
+  const independentRequest = workspaceAgentTurn.mock.calls[1]![1];
+  expect(independentRequest.turnId).not.toBe(firstRequest.turnId);
+  expect(independentRequest.message).toBe(independent);
+  expect(decodeWorkspaceAgentConversation(independentRequest.message)).toEqual({
+    priorRequests: [],
+    currentRequest: independent,
+  });
+});
+
+test("Workspace Agent clears a stale scope error as soon as its draft changes", async () => {
+  const ready = readyWorkspace("p-1");
+  const workspaceAgentTurn = vi.fn(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      workspaceAgentTurn,
+    })}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: "Create a complete festival workspace" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  expect(await screen.findByRole("status", { name: "Workspace Agent error" }))
+    .toHaveTextContent("Failed to fetch");
+
+  fireEvent.change(prompt, { target: { value: "Create a complete festival workspace with three directions" } });
+  expect(screen.getByRole("status", { name: "Workspace Agent error" })).toHaveTextContent("none");
 });
 
 test("Workspace Agent rotates turnId when message, selection, or graph identity changes", async () => {

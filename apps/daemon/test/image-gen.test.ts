@@ -212,6 +212,30 @@ test("requestImage routes Azure v1 image generation with the deployment model in
   });
 });
 
+test("requestImage canonicalizes a valid unpadded provider payload before the immutable Resource boundary", async () => {
+  const canonical = Buffer.from("PNG64").toString("base64");
+  const unpadded = canonical.replace(/=+$/, "");
+  const fetcher: FetchLike = async () =>
+    new Response(JSON.stringify({ data: [{ b64_json: unpadded }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  const result = await requestImage(
+    {
+      baseUrl: "https://dezin-resource.openai.azure.com/openai/v1/",
+      apiKey: "azure-key",
+      model: "gpt-image-2",
+      providerId: "azure-openai",
+      apiVersion: "2025-04-01-preview",
+    },
+    "a desk lamp",
+    fetcher,
+  );
+
+  assert.equal(result, canonical);
+});
+
 test("requestImage passes supported Azure GPT image parameters through provider options", async () => {
   const calls: Array<{ url: string; init?: Parameters<FetchLike>[1] }> = [];
   const imageBase64 = Buffer.from("PNG64").toString("base64");

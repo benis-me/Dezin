@@ -10,6 +10,7 @@ import {
   setPendingBrief,
   setPendingDesignWorkspaceTurn,
 } from "./lib/pending-brief.ts";
+import { persistedDesignSystemId } from "./lib/design-system-selection.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
 const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
@@ -109,7 +110,9 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
               const project = await api.createProject({
                 name: briefToName(brief),
                 skillId,
-                designSystemId: sharingan ? null : designSystemId,
+                designSystemId: sharingan
+                  ? null
+                  : persistedDesignSystemId(designSystemId ?? ""),
                 mode,
                 sharingan: !!sharingan,
                 sourceUrl: sharingan?.sourceUrl,

@@ -103,6 +103,15 @@ test("adapter binds Research quality and awaiting-selection state to the exact a
         qualityState: "needs-review",
       },
     },
+    resourceRevisionPreviews: {
+      "research-1": {
+        kind: "research",
+        executiveSummary: "Checkout confidence depends on a concise decision hierarchy.",
+        findingCount: 4,
+        evidenceDirectionCount: 2,
+        hypothesisDirectionCount: 1,
+      },
+    },
     awaitingSelectionResourceIds: new Set(["research-1"]),
   });
   const research = flow.nodes.find((node) => node.id === "resource-1")!;
@@ -110,6 +119,13 @@ test("adapter binds Research quality and awaiting-selection state to the exact a
   expect(research.data.revisionId).toBe("research-revision-7");
   expect(research.data.resourceKind).toBe("research");
   expect(research.data.resourceQualityState).toBe("needs-review");
+  expect(research.data.resourcePreview).toEqual({
+    kind: "research",
+    executiveSummary: "Checkout confidence depends on a concise decision hierarchy.",
+    findingCount: 4,
+    evidenceDirectionCount: 2,
+    hypothesisDirectionCount: 1,
+  });
   expect(research.data.generationState).toBe("awaiting-selection");
   expect(research.ariaLabel).toContain("quality needs-review");
 });

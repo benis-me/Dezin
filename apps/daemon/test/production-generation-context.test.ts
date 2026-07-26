@@ -277,7 +277,7 @@ function executionProfile(projectName: string, hasExactSharinganCapture = false)
     },
     quality: {
       visualQaEnabled: true,
-      reviewer: { command: "claude", providerId: "claude", model: null },
+      reviewer: { command: "codex", providerId: "codex", model: "gpt-5.4-reviewer" },
       expectedSharinganRequestedUrl: hasExactSharinganCapture
         ? "https://example.com/checkout"
         : null,

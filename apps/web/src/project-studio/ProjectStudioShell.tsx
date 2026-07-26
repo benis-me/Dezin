@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Group, Panel, Separator } from "react-resizable-panels";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { IconButton } from "../components/ui/index.ts";
 import { useMediaQuery } from "../hooks/useMediaQuery.ts";
@@ -11,8 +11,11 @@ import {
 } from "../lib/panel-layout.ts";
 
 const PROJECT_STUDIO_AGENT_WIDTH_KEY = "dezin.project-studio.agent.width";
+const PROJECT_STUDIO_INSPECTOR_WIDTH_KEY = "dezin.project-studio.inspector.width";
 const PROJECT_STUDIO_AGENT_PANEL = "workspace-agent";
 const PROJECT_STUDIO_CONTENT_PANEL = "studio-content";
+const PROJECT_STUDIO_SURFACE_PANEL = "studio-surface-panel";
+const PROJECT_STUDIO_INSPECTOR_PANEL = "studio-inspector";
 
 export function ProjectStudioShell({
   agent,
@@ -37,25 +40,51 @@ export function ProjectStudioShell({
 }) {
   const [narrowInspectorOpen, setNarrowInspectorOpen] = useState(inspectorOpen);
   const mobile = useMediaQuery("(max-width: 639px)");
+  const wideDesktop = useMediaQuery("(min-width: 1280px)");
+  const inspectorGroupRef = useGroupRef();
   const showInspectorRef = useRef<HTMLButtonElement>(null);
   const hideInspectorRef = useRef<HTMLButtonElement>(null);
   const wasNarrowReachableRef = useRef(false);
   const agentPercent = readPanelPercent(PROJECT_STUDIO_AGENT_WIDTH_KEY, 20, 12, 34);
+  const inspectorPercent = readPanelPercent(PROJECT_STUDIO_INSPECTOR_WIDTH_KEY, 24, 18, 38);
+  const wideInspectorActive = wideDesktop && inspectorOpen && !presentation;
+  const inspectorLayout = useMemo(
+    () => wideInspectorActive
+      ? twoPanelLayout(
+          PROJECT_STUDIO_SURFACE_PANEL,
+          100 - inspectorPercent,
+          PROJECT_STUDIO_INSPECTOR_PANEL,
+        )
+      : {
+          [PROJECT_STUDIO_SURFACE_PANEL]: 100,
+          [PROJECT_STUDIO_INSPECTOR_PANEL]: 0,
+        },
+    [inspectorPercent, wideInspectorActive],
+  );
 
   useEffect(() => {
     setNarrowInspectorOpen(inspectorOpen);
   }, [inspectorOpen]);
 
-  const narrowReachable = inspectorOpen && narrowInspectorOpen;
+  const narrowInspectorEligible = inspectorOpen && narrowInspectorOpen && !wideDesktop;
+  const narrowReachable = narrowInspectorEligible && !presentation;
+
+  useLayoutEffect(() => {
+    inspectorGroupRef.current?.setLayout(inspectorLayout);
+  }, [inspectorGroupRef, inspectorLayout]);
 
   useEffect(() => {
+    if (presentation) {
+      wasNarrowReachableRef.current = narrowInspectorEligible;
+      return;
+    }
     if (narrowReachable && !wasNarrowReachableRef.current) {
       hideInspectorRef.current?.focus();
     } else if (!narrowReachable && wasNarrowReachableRef.current && inspectorOpen) {
       showInspectorRef.current?.focus();
     }
     wasNarrowReachableRef.current = narrowReachable;
-  }, [inspectorOpen, narrowReachable]);
+  }, [inspectorOpen, narrowInspectorEligible, narrowReachable, presentation]);
 
   const agentPanel = (
     <aside
@@ -71,16 +100,13 @@ export function ProjectStudioShell({
   const studioContent = (
     <div
       data-testid="project-studio-content"
-      className={`relative grid h-full min-h-0 min-w-0 grid-cols-1 overflow-hidden ${inspectorOpen && !presentation
-        ? "xl:grid-cols-[minmax(640px,1fr)_minmax(288px,20vw)]"
-        : ""}`}
+      className="relative h-full min-h-0 min-w-0 overflow-hidden"
     >
-      <section aria-label="Studio surface" className="min-h-0 min-w-0 overflow-hidden bg-background">{main}</section>
-      {inspectorOpen && !presentation && !narrowReachable && !narrowInspectorContentOwnsClose ? (
+      {inspectorOpen && !presentation && !wideDesktop && !narrowReachable && !narrowInspectorContentOwnsClose ? (
         <IconButton
           ref={showInspectorRef}
           type="button"
-          className="absolute right-0 top-1/2 z-30 -translate-y-1/2 rounded-r-none border-r-0 bg-background xl:hidden"
+          className="absolute right-0 top-1/2 z-30 -translate-y-1/2 rounded-r-none border-r-0 bg-background"
           aria-controls="project-studio-inspector"
           aria-expanded="false"
           aria-label={`Show ${inspectorToggleLabel}`}
@@ -91,34 +117,79 @@ export function ProjectStudioShell({
           <PanelRightOpen aria-hidden className="size-3.5" />
         </IconButton>
       ) : null}
-      {inspectorOpen ? (
-        <aside
-          id="project-studio-inspector"
-          aria-label={inspectorLabel}
-          inert={presentation ? true : undefined}
-          hidden={presentation}
-          data-narrow-reachable={narrowReachable || undefined}
-          className={narrowReachable
-            ? "absolute inset-y-0 right-0 z-30 min-h-0 w-[min(360px,100%)] min-w-0 overflow-hidden border-l border-border bg-background xl:static xl:block xl:w-auto"
-            : "hidden min-h-0 min-w-0 overflow-hidden border-l border-border bg-background xl:block"}
+      <Group
+        id="dezin-project-studio-inspector-layout"
+        groupRef={inspectorGroupRef}
+        className="h-full min-w-0"
+        defaultLayout={inspectorLayout}
+        onLayoutChanged={(layout) => {
+          if (wideInspectorActive) {
+            savePanelFraction(
+              PROJECT_STUDIO_INSPECTOR_WIDTH_KEY,
+              layout,
+              PROJECT_STUDIO_INSPECTOR_PANEL,
+            );
+          }
+        }}
+        resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+      >
+        <Panel
+          id={PROJECT_STUDIO_SURFACE_PANEL}
+          minSize={wideDesktop ? "640px" : "0px"}
+          style={{ overflow: "hidden" }}
         >
-          {narrowReachable && !narrowInspectorContentOwnsClose ? (
-            <IconButton
-              ref={hideInspectorRef}
-              type="button"
-              className="absolute left-0 top-1/2 z-10 -translate-y-1/2 rounded-l-none border-l-0 bg-background xl:hidden"
-              aria-controls="project-studio-inspector"
-              aria-expanded="true"
-              aria-label={`Hide ${inspectorToggleLabel}`}
-              title={`Hide ${inspectorToggleLabel}`}
-              onClick={() => setNarrowInspectorOpen(false)}
+          <section aria-label="Studio surface" className="h-full min-h-0 min-w-0 overflow-hidden bg-background">
+            {main}
+          </section>
+        </Panel>
+        {wideDesktop && inspectorOpen && !presentation ? (
+          <Separator
+            id="studio-inspector-resize"
+            aria-label="Resize Inspector"
+            className={RESIZE_SEPARATOR_CLASS}
+          />
+        ) : null}
+        <Panel
+          id={PROJECT_STUDIO_INSPECTOR_PANEL}
+          minSize={wideDesktop ? "288px" : "0px"}
+          maxSize={wideDesktop ? "480px" : undefined}
+          groupResizeBehavior="preserve-pixel-size"
+          hidden={!inspectorOpen || presentation || (!wideDesktop && !narrowReachable)}
+          className={!wideDesktop && narrowReachable
+            ? "absolute inset-y-0 right-0 z-30 !min-w-0 !w-[min(360px,100%)] !max-w-[360px]"
+            : undefined}
+          style={{ overflow: "hidden" }}
+        >
+          {inspectorOpen ? (
+            <aside
+              id="project-studio-inspector"
+              aria-label={inspectorLabel}
+              inert={presentation ? true : undefined}
+              hidden={presentation}
+              data-narrow-reachable={narrowReachable || undefined}
+              className={`h-full min-h-0 min-w-0 overflow-hidden bg-background ${narrowReachable
+                ? "border-l border-border"
+                : ""}`}
             >
-              <PanelRightClose aria-hidden className="size-3.5" />
-            </IconButton>
+              {narrowReachable && !narrowInspectorContentOwnsClose ? (
+                <IconButton
+                  ref={hideInspectorRef}
+                  type="button"
+                  className="absolute left-0 top-1/2 z-10 -translate-y-1/2 rounded-l-none border-l-0 bg-background"
+                  aria-controls="project-studio-inspector"
+                  aria-expanded="true"
+                  aria-label={`Hide ${inspectorToggleLabel}`}
+                  title={`Hide ${inspectorToggleLabel}`}
+                  onClick={() => setNarrowInspectorOpen(false)}
+                >
+                  <PanelRightClose aria-hidden className="size-3.5" />
+                </IconButton>
+              ) : null}
+              {inspector}
+            </aside>
           ) : null}
-          {inspector}
-        </aside>
-      ) : null}
+        </Panel>
+      </Group>
     </div>
   );
 

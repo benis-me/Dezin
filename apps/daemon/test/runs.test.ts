@@ -1452,8 +1452,8 @@ test("prototype run folds visual QA findings into score, result, and persisted r
       assert.equal(visual.findings && Array.isArray(visual.findings), true);
       assert.equal(done.score, 92);
       assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "visual-horizontal-overflow");
-      assert.equal(visualInput?.agentCommand, "claude");
-      assert.equal(visualInput?.model, undefined);
+      assert.equal(visualInput?.agentCommand, "codex");
+      assert.equal(visualInput?.model, "gpt-5");
       assert.equal(visualInput?.brief, "make a hero");
       assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
       assert.deepEqual(visualInput?.conversationHistory?.map((m) => m.content), [
@@ -2454,6 +2454,26 @@ test("settings.defaultDesignSystemId is used when the project pins none", async 
     await res.text();
     // editorial's ink-red accent token appears verbatim in the prompt
     assert.match(runner.calls[0]?.systemPrompt ?? "", /--accent:\s*#b3261e/);
+  });
+});
+
+test("an explicit no-design-system Project does not inherit the global default", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({ defaultDesignSystemId: "editorial" });
+    const project = store.createProject({
+      name: "Unconstrained directions",
+      designSystemId: "__dezin_no_design_system__",
+    });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "Create three intentionally different visual directions." }),
+    });
+    await res.text();
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.doesNotMatch(prompt, /Active design system/);
+    assert.doesNotMatch(prompt, /--accent:\s*#b3261e/);
   });
 });
 

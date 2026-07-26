@@ -1808,6 +1808,75 @@ test("workspace graph HTTP commands preserve exact replay and expose typed confl
   });
 });
 
+test("component graph HTTP replay is layout-idempotent and Workspace reads stay zero-write", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Component invariant HTTP", mode: "standard" });
+    const initial = await readyWorkspace(base, project.id);
+    const request = {
+      baseGraphRevision: initial.graph.revision,
+      expectedSnapshotId: initial.activeSnapshot.id,
+      commands: [{
+        id: "add-http-component-invariant",
+        type: "add-node",
+        node: {
+          id: "http-component-invariant",
+          kind: "component",
+          name: "HTTP component",
+          artifactId: "http-component-artifact",
+          createIdentity: { initialTrackId: "http-component-track" },
+        },
+      }],
+    };
+    const apply = () => fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+
+    const first = await apply();
+    assert.equal(first.status, 200);
+    const firstBody = await first.json();
+    const layoutRowsAfterFirst = store.db.prepare(
+      `SELECT object_id, object_kind, x, y, parent_group_id, label, updated_at
+       FROM workspace_layout_nodes
+       WHERE workspace_id = ?
+       ORDER BY object_kind ASC, object_id ASC`,
+    ).all(initial.workspace.id);
+
+    const replay = await apply();
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), firstBody);
+    assert.deepEqual(store.db.prepare(
+      `SELECT object_id, object_kind, x, y, parent_group_id, label, updated_at
+       FROM workspace_layout_nodes
+       WHERE workspace_id = ?
+       ORDER BY object_kind ASC, object_id ASC`,
+    ).all(initial.workspace.id), layoutRowsAfterFirst);
+
+    const changesBeforeReads = (store.db.prepare(
+      "SELECT total_changes() AS count",
+    ).get() as { count: number }).count;
+    const canonical = await readyWorkspace(base, project.id);
+    const repeated = await readyWorkspace(base, project.id);
+    const changesAfterReads = (store.db.prepare(
+      "SELECT total_changes() AS count",
+    ).get() as { count: number }).count;
+    const objects = canonical.layout.objects as Array<{
+      id: string;
+      kind?: string;
+      parentGroupId?: string | null;
+    }>;
+
+    assert.equal(changesAfterReads, changesBeforeReads);
+    assert.deepEqual(repeated.layout, canonical.layout);
+    assert.equal(objects.filter(({ id }) => id === "dezin-component-library").length, 1);
+    assert.equal(
+      objects.find(({ id }) => id === "http-component-invariant")?.parentGroupId,
+      "dezin-component-library",
+    );
+  });
+});
+
 test("workspace layout HTTP persistence stays outside semantic history and stale writes roll back", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const project = store.createProject({ name: "Layout HTTP", mode: "standard" });

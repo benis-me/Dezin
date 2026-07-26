@@ -20,6 +20,7 @@ import {
   StudioFactRow,
   StudioHeaderActions,
   StudioHeaderCopy,
+  StudioHeaderIdentity,
   StudioInspectorSection,
   StudioPanelHeader,
   StudioStatusBadge,
@@ -341,9 +342,30 @@ export function ProposalReviewPanel({
   }, [review.status]);
 
   if (review.status === "idle") return null;
+  const header = (
+    <StudioPanelHeader className="dezin-proposal-review__header gap-3 px-3">
+      <StudioHeaderIdentity className="min-w-0 flex-1">
+        <StudioHeaderCopy
+          title="Workspace proposal"
+          subtitle="Review queue"
+          headingLevel={2}
+          headingRef={headingRef}
+          headingTabIndex={-1}
+        />
+      </StudioHeaderIdentity>
+      {proposal === null ? null : (
+        <StudioHeaderActions>
+          <StudioStatusBadge className="dezin-proposal-review__revision">
+            r{proposal.revision}
+          </StudioStatusBadge>
+        </StudioHeaderActions>
+      )}
+    </StudioPanelHeader>
+  );
   if (review.status === "loading") {
     return (
       <section className="dezin-proposal-review" role="region" aria-label="Proposal review">
+        {header}
         <p className="dezin-proposal-review__loading" role="status" aria-live="polite">Loading proposal review…</p>
       </section>
     );
@@ -351,6 +373,7 @@ export function ProposalReviewPanel({
   if (review.status === "error") {
     return (
       <section className="dezin-proposal-review" role="region" aria-label="Proposal review">
+        {header}
         <div className="dezin-proposal-review__notice" role="alert">
           <AlertTriangle size={15} aria-hidden />
           <div><h2 tabIndex={-1}>Proposal unavailable</h2><p>{review.message}</p></div>
@@ -377,9 +400,10 @@ export function ProposalReviewPanel({
         : { label: "Proposal superseded", message: "A newer proposal replaced this review.", Icon: GitCompareArrows };
     return (
       <section className="dezin-proposal-review" role="region" aria-label="Proposal review">
+        {header}
         <div className="dezin-proposal-review__result" data-result-state={review.status} role="status" aria-live="polite">
           <result.Icon size={16} aria-hidden />
-          <h2 ref={headingRef} tabIndex={-1}>{result.label}</h2>
+          <h2>{result.label}</h2>
           <p>{result.message}</p>
           <Button type="button" variant="outline" size="sm" onClick={onClose}>
             {review.status === "approved" && review.plan ? "View build plan" : "Close review"}
@@ -419,20 +443,7 @@ export function ProposalReviewPanel({
       aria-label="Proposal review"
       aria-busy={busy || undefined}
     >
-      <StudioPanelHeader className="dezin-proposal-review__header">
-        <StudioHeaderCopy
-          title="Workspace proposal"
-          subtitle="Review queue"
-          headingLevel={2}
-          headingRef={headingRef}
-          headingTabIndex={-1}
-        />
-        <StudioHeaderActions>
-          <StudioStatusBadge className="dezin-proposal-review__revision">
-            r{review.proposal.revision}
-          </StudioStatusBadge>
-        </StudioHeaderActions>
-      </StudioPanelHeader>
+      {header}
 
       {review.status === "validation-error" ? (
         <div className="dezin-proposal-review__notice" role="alert">

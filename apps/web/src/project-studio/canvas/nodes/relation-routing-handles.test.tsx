@@ -1,6 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import type { NodeProps } from "@xyflow/react";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { ApiProvider } from "../../../lib/api-context.tsx";
+import { makeFakeApi } from "../../../test/fake-api.ts";
 import type { WorkspaceFlowNode, WorkspaceFlowNodeData } from "../workspace-graph-adapter.ts";
 import { ComponentNode } from "./ComponentNode.tsx";
 import { ResourceNode } from "./ResourceNode.tsx";
@@ -48,6 +50,10 @@ const baseData: WorkspaceFlowNodeData = {
   minimumGroupWidth: 0,
   minimumGroupHeight: 0,
 };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function expectSideRoutingHandles(kind: "component" | "resource") {
   for (const side of ["left", "right"] as const) {
@@ -103,5 +109,73 @@ describe("semantic relation routing handles", () => {
 
     expect(screen.getByText("Grounded")).toBeInTheDocument();
     expect(screen.queryByText("Finalizing revision")).not.toBeInTheDocument();
+  });
+
+  test("Research nodes render a compact decision-brief preview from the exact Revision", () => {
+    render(<ResourceNode {...{
+      data: {
+        ...baseData,
+        kind: "resource",
+        artifactId: null,
+        resourceId: "research-1",
+        revisionId: "research-revision-1",
+        resourceKind: "research",
+        resourcePreview: {
+          kind: "research",
+          executiveSummary: "Festival audiences need a strong first-glance programming hierarchy.",
+          findingCount: 4,
+          evidenceDirectionCount: 2,
+          hypothesisDirectionCount: 1,
+        },
+      },
+      selected: false,
+    } as unknown as NodeProps<WorkspaceFlowNode>} />);
+
+    expect(screen.getByRole("group", { name: "Research decision brief preview" })).toBeInTheDocument();
+    expect(screen.getByText("Festival audiences need a strong first-glance programming hierarchy.")).toBeInTheDocument();
+    expect(screen.getByText("4 findings · 3 directions")).toBeInTheDocument();
+  });
+
+  test("Moodboard nodes load the exact authenticated cover Asset as a blob image", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moodboard-cover");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const getResourceRevisionBlob = vi.fn(async () => new Blob(["cover"], { type: "image/webp" }));
+    const client = makeFakeApi({ getResourceRevisionBlob });
+
+    render(
+      <ApiProvider client={client}>
+        <ResourceNode {...{
+          data: {
+            ...baseData,
+            kind: "resource",
+            name: "Festival moodboard",
+            artifactId: null,
+            resourceId: "moodboard-1",
+            revisionId: "moodboard-revision-1",
+            resourceKind: "moodboard",
+            resourcePreview: {
+              kind: "moodboard",
+              boardName: "KITE / Direction A",
+              cover: {
+                assetId: "asset-cover",
+                path: "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
+                alt: "KITE / Direction A cover",
+                width: 1600,
+                height: 900,
+              },
+              assetCount: 7,
+            },
+          },
+          selected: false,
+        } as unknown as NodeProps<WorkspaceFlowNode>} />
+      </ApiProvider>,
+    );
+
+    const cover = await screen.findByRole("img", { name: "KITE / Direction A cover" });
+    expect(cover).toHaveAttribute("src", "blob:moodboard-cover");
+    expect(getResourceRevisionBlob).toHaveBeenCalledWith(
+      "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
+      expect.any(AbortSignal),
+    );
   });
 });

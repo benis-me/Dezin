@@ -2,6 +2,8 @@
  * @dezin/core — domain types + the local-first metadata store.
  */
 
+export { NO_DESIGN_SYSTEM_ID } from "./types.ts";
+
 export type {
   Project,
   Conversation,
@@ -352,6 +354,7 @@ export {
   compileGenerationPlan,
   GenerationPlanCompileError,
   isAgentGeneratableResourceKind,
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
   type CompiledGenerationPlan,
   type GenerationPlanCompileErrorCode,
 } from "./generation-plan.ts";

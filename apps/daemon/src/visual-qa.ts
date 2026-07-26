@@ -455,6 +455,10 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, 
   const fixedOffscreen = snapshot.elements.find((el) => {
     if (el.position !== "fixed" && el.position !== "sticky") return false;
     const r = el.rect;
+    // Focus traps, measurement probes, and other accessibility sentinels are
+    // intentionally 1px and offscreen. They are not visible controls and
+    // should not force an Artifact through impossible layout repair rounds.
+    if (r.width < 4 || r.height < 4) return false;
     return r.left < -2 || r.top < -2 || r.right > viewport.width + 2 || r.bottom > viewport.height + 2;
   });
   if (fixedOffscreen) {
@@ -826,7 +830,18 @@ export function sourceScreenshotDiffFindings(sourcePath?: string, generatedPath?
   return sourceScreenshotDiffFromDecoded(source, generated);
 }
 
-function isRuntimeConsoleMessage(message: VisualQaConsoleMessage): boolean {
+function isOptionalBrowserMetadataRequest(message: VisualQaConsoleMessage): boolean {
+  if (message.type !== "response" && message.type !== "requestfailed") return false;
+  if (!message.url) return false;
+  try {
+    return new URL(message.url).pathname === "/favicon.ico";
+  } catch {
+    return false;
+  }
+}
+
+export function isRuntimeConsoleMessage(message: VisualQaConsoleMessage): boolean {
+  if (isOptionalBrowserMetadataRequest(message)) return false;
   return message.type === "pageerror"
     || message.type === "requestfailed"
     || message.type === "response"
@@ -1709,8 +1724,8 @@ export async function reviewScreenshotWithAgent(
   const command = input.agentCommand || input.settings.agentCommand || "claude";
   let scratchDir: string | undefined;
   try {
-    if (command !== "claude" && command !== "codebuddy") {
-      throw new Error("the hard no-tools visual reviewer accepts only built-in Claude or CodeBuddy providers");
+    if (command !== "claude" && command !== "codebuddy" && command !== "codex") {
+      throw new Error("the hard no-tools visual reviewer requires a supported built-in provider");
     }
     const evidenceRoot = input.projectRoot ?? dirname(input.htmlPath);
     const screenshotRoot = input.screenshotEvidenceRoot ?? evidenceRoot;
@@ -1740,7 +1755,7 @@ export async function reviewScreenshotWithAgent(
       cwd: scratchDir,
       signal,
       env: buildVisualReviewerEnv(input.settings, command),
-      timeoutMs: command === "codebuddy"
+      timeoutMs: command === "codebuddy" || command === "codex"
         ? HOST_LOGIN_VISUAL_REVIEW_TIMEOUT_MS
         : SAFE_VISUAL_REVIEW_TIMEOUT_MS,
       maxOutputBytes: 512 * 1024,
@@ -1758,7 +1773,7 @@ export async function reviewScreenshotWithAgent(
           severity: "P1",
           id: "visual-agent-review-failed",
           message: `Agent visual review failed: ${err instanceof Error ? err.message : "request error"}.`,
-          fix: "Select a built-in Claude or CodeBuddy reviewer with valid authentication, or disable Visual QA in Settings.",
+          fix: "Select a supported built-in reviewer with valid authentication, or disable Visual QA in Settings.",
         },
       ],
       input,

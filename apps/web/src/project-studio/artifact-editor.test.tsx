@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
+import { ToastProvider } from "../components/Toast.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type {
   ArtifactElementSelectionManifest,
@@ -1453,14 +1454,16 @@ test("Artifact Agent does not open an older discovered Plan when the current sub
   });
   const artifactAgentTurn = vi.fn(() => failedTurn);
   render(
-    <ApiProvider client={editorApi({
-      artifactAgentTurn,
-      getLatestScopedArtifactPlanId: async () => discoveredPlan,
-      listGenerationPlans: async () => [work.detail.plan],
-      getGenerationPlan: async () => work.detail,
-    })}>
-      <App />
-    </ApiProvider>,
+    <ToastProvider>
+      <ApiProvider client={editorApi({
+        artifactAgentTurn,
+        getLatestScopedArtifactPlanId: async () => discoveredPlan,
+        listGenerationPlans: async () => [work.detail.plan],
+        getGenerationPlan: async () => work.detail,
+      })}>
+        <App />
+      </ApiProvider>
+    </ToastProvider>,
   );
 
   await screen.findByTitle("Storefront home preview");
@@ -1477,7 +1480,9 @@ test("Artifact Agent does not open an older discovered Plan when the current sub
   expect(screen.getByLabelText("Artifact Agent activity")).toBeInTheDocument();
   act(() => rejectTurn(new Error("Queue connection failed")));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("Queue connection failed");
+  const queueError = await screen.findByRole("alert");
+  expect(queueError).toHaveTextContent("Queue connection failed");
+  expect(queueError.closest('[aria-label="Notifications"]')).not.toBeNull();
   expect(screen.getByRole("heading", { name: "Inspector" })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
 });

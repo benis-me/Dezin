@@ -1040,6 +1040,11 @@ interface WorkspaceGenerationResourceOperationBase {
   resourceId: string;
   kind: ResourceKind;
   title: string;
+  /**
+   * Resource-specific evidence, asset-count, and direction requirements.
+   * Optional only so historical persisted Proposals remain readable.
+   */
+  instructions?: string;
 }
 
 export type WorkspaceGenerationResourceOperation =
@@ -1162,6 +1167,8 @@ export interface GenerationTaskResourceTargetInstructions {
   operation: "create" | "revise";
   kind: ResourceKind;
   title: string;
+  /** Exact Resource-specific brief frozen by the approved Workspace Proposal. */
+  instructions?: string;
 }
 
 export interface GenerationTaskArtifactBrief extends GenerationTaskProposalBrief {

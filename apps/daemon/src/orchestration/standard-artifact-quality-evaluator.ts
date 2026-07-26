@@ -43,6 +43,7 @@ import {
   type VisualQaSourceCaptureResult,
 } from "../visual-qa.ts";
 import type { ArtifactRunInfrastructureInput } from "./artifact-run-preparation.ts";
+import { artifactTaskReviewBrief } from "./artifact-task-review-brief.ts";
 import { verifyArtifactCandidateObject } from "./artifact-candidate-transaction.ts";
 import { collectStandardLintSurface } from "../standard-lint-surface.ts";
 import type { PngEvidenceIdentity } from "../png-evidence.ts";
@@ -855,7 +856,7 @@ implements StandardArtifactQualityEvaluatorPort {
             agentCommand: reviewerAgentCommand(visualSettings, this.agentCommand),
             model: reviewerModel(visualSettings, this.model, this.agentCommand),
             provider: providerFamily(getProvider(this.agentCommand)?.id, this.model),
-            brief: this.payload.brief.proposalRationale,
+            brief: artifactTaskReviewBrief(this.payload),
             directionSpec: this.directionSpec,
             sharinganReference: reference,
             isSharingan: this.sharingan,

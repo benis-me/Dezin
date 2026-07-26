@@ -287,7 +287,12 @@ function validateQuality(
     fail("Artifact quality findings are invalid");
   }
   const findingIds = new Set<string>();
-  const activeSeverities: string[] = [];
+  const activeFindings: Array<{
+    severity: string;
+    id: string;
+    message: string;
+    fix: string;
+  }> = [];
   const allowed = new Set([
     "severity", "id", "message", "fix", "snippet", "selector", "screenshotPath", "screenshotUrl",
     "reviewSummary", "reviewStatus", "reviewRound", "corroborated",
@@ -303,8 +308,8 @@ function validateQuality(
     const id = text(finding.id, `Artifact quality finding ${index} id`, 512);
     if (findingIds.has(id)) fail(`Artifact quality finding id ${id} is duplicated`);
     findingIds.add(id);
-    text(finding.message, `Artifact quality finding ${id} message`);
-    text(finding.fix, `Artifact quality finding ${id} fix`);
+    const message = text(finding.message, `Artifact quality finding ${id} message`);
+    const fix = text(finding.fix, `Artifact quality finding ${id} fix`);
     for (const field of [
       "snippet", "selector", "screenshotPath", "screenshotUrl", "reviewSummary",
     ] as const) {
@@ -321,17 +326,23 @@ function validateQuality(
     if (finding.corroborated !== undefined && typeof finding.corroborated !== "boolean") {
       fail(`Artifact quality finding ${id} corroboration is invalid`);
     }
-    if (finding.reviewStatus !== "resolved") activeSeverities.push(finding.severity);
+    if (finding.reviewStatus !== "resolved") {
+      activeFindings.push({ severity: finding.severity, id, message, fix });
+    }
   }
   const blocking = new Set(blockingSeverities);
-  const blockingSeverity = activeSeverities.find((severity) => blocking.has(severity));
-  if (blockingSeverity !== undefined) {
-    fail(`Artifact quality contains an active blocking ${blockingSeverity} finding`);
+  const blockingFinding = activeFindings.find((finding) => blocking.has(finding.severity));
+  if (blockingFinding !== undefined) {
+    const diagnostic = (value: string): string => value.replace(/\s+/gu, " ").trim().slice(0, 512);
+    fail(
+      `Artifact quality contains active blocking ${blockingFinding.severity} finding ${blockingFinding.id}: `
+      + `${diagnostic(blockingFinding.message)}. Fix: ${diagnostic(blockingFinding.fix)}`,
+    );
   }
   if (quality.state === "failed" || quality.state === "unassessed") {
     fail(`Artifact quality state ${quality.state} cannot be published`);
   }
-  if ((activeSeverities.length === 0) !== (quality.state === "passed")) {
+  if ((activeFindings.length === 0) !== (quality.state === "passed")) {
     fail("Artifact quality state does not match its active findings");
   }
   return {

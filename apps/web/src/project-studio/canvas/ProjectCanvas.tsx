@@ -29,6 +29,7 @@ import {
   type CSSProperties,
   type Ref,
 } from "react";
+import { useToast } from "../../components/Toast.tsx";
 import { Button, StudioToolbarHeader } from "../../components/ui/index.ts";
 import type {
   WorkspaceGraph,
@@ -53,6 +54,10 @@ import { WorkspaceOutline } from "./WorkspaceOutline.tsx";
 import { workspaceEdgeTypes } from "./edge-types.tsx";
 import { workspaceNodeTypes } from "./node-types.tsx";
 import {
+  useResourceNodeRevisionPreviews,
+  type ResourceNodeRevisionBinding,
+} from "./resource-node-preview.ts";
+import {
   createPlannedPrototypeCommand,
   isValidWorkspaceConnection,
   semanticZoomLevel,
@@ -62,7 +67,6 @@ import {
   type WorkspaceFlowNode,
 } from "./workspace-graph-adapter.ts";
 import {
-  buildComponentLibraryCommands,
   buildDeleteGroupCommands,
   buildGroupCommands,
   buildMoveCommands,
@@ -78,6 +82,7 @@ const PROPOSAL_FOCUS_MOUNT_RETRIES = 4;
 const OUTLINE_SAFE_SURFACE_WIDTH = 900;
 const CANVAS_MIN_ZOOM = 0.15;
 const CANVAS_MAX_ZOOM = 2.25;
+const CANVAS_PROBLEM_TOAST_DEDUPE_MS = 4_000;
 const CANVAS_CONNECTION_LINE_STYLE = {
   stroke: "var(--foreground-2)",
   strokeWidth: 1.25,
@@ -440,6 +445,7 @@ export function ProjectCanvas({
   proposalDiff = null,
   proposalFocus = null,
 }: ProjectCanvasProps) {
+  const { toast } = useToast();
   const canvasRef = useRef<HTMLElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const surfaceSizeRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -454,7 +460,6 @@ export function ProjectCanvas({
   const canvasProjectEpochRef = useRef(0);
   const persistViewportRef = useRef<((
     viewport: WorkspaceViewport,
-    message: string,
     intentVersion: number,
   ) => Promise<boolean>) | null>(null);
   const viewportSaveJobsRef = useRef(0);
@@ -462,13 +467,12 @@ export function ProjectCanvas({
   const geometryGenerationRef = useRef(0);
   const pendingMovePositionsRef = useRef(new Map<string, PendingMovePosition>());
   const pendingResizeBoundsRef = useRef(new Map<string, PendingResizeBounds>());
-  const componentLibraryNormalizationRef = useRef<string | null>(null);
-  const componentLibraryNormalizationFailureRef = useRef<{ key: string; count: number } | null>(null);
   const relationshipMutationPendingRef = useRef(false);
   const selectedEdgeGraphRevisionRef = useRef(graph.revision);
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
   const proposalViewportPreviewRef = useRef<{ proposalId: string; changeKey: string } | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const recentProblemToastsRef = useRef(new Map<string, number>());
   const nodeTypesRef = useRef(proposalNodeTypes);
   const edgeTypesRef = useRef(proposalEdgeTypes);
   if (canvasProjectRef.current !== projectId) {
@@ -487,6 +491,30 @@ export function ProjectCanvas({
   const [reconcileVersion, setReconcileVersion] = useState(0);
   const [surfaceMeasured, setSurfaceMeasured] = useState(false);
   const [flowReady, setFlowReady] = useState(false);
+  const reportCanvasProblem = useCallback((message: string) => {
+    setStatus(message);
+    const now = Date.now();
+    const lastReportedAt = recentProblemToastsRef.current.get(message);
+    if (lastReportedAt !== undefined && now - lastReportedAt < CANVAS_PROBLEM_TOAST_DEDUPE_MS) return;
+    recentProblemToastsRef.current.set(message, now);
+    for (const [reportedMessage, reportedAt] of recentProblemToastsRef.current) {
+      if (now - reportedAt >= CANVAS_PROBLEM_TOAST_DEDUPE_MS) {
+        recentProblemToastsRef.current.delete(reportedMessage);
+      }
+    }
+    toast(message, { variant: "error" });
+  }, [toast]);
+  const resourcePreviewBindings = useMemo(() => graph.nodes.flatMap((node): ResourceNodeRevisionBinding[] => {
+    if (node.kind !== "resource") return [];
+    const revision = resourceRevisionStates[node.resourceId];
+    return revision === undefined ? [] : [{
+      workspaceId: graph.workspaceId,
+      resourceId: node.resourceId,
+      revisionId: revision.revisionId,
+      resourceKind: revision.resourceKind,
+    }];
+  }), [graph.nodes, resourceRevisionStates]);
+  const resourceRevisionPreviews = useResourceNodeRevisionPreviews(projectId, resourcePreviewBindings);
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
@@ -564,7 +592,7 @@ export function ProjectCanvas({
           const pending = pendingResizeViewportRef.current;
           if (!pending || pending.version !== intent.version || proposalViewportPreviewRef.current !== null) return;
           pendingResizeViewportRef.current = null;
-          void persistViewportRef.current?.(intent.viewport, "Viewport adjusted", intent.version);
+          void persistViewportRef.current?.(intent.viewport, intent.version);
         }, RESIZE_VIEWPORT_SAVE_DELAY_MS);
       });
     });
@@ -606,14 +634,13 @@ export function ProjectCanvas({
     layoutMutationQueueRef.current = Promise.resolve();
     queuedLayoutJobsRef.current = 0;
     viewportSaveJobsRef.current = 0;
-    componentLibraryNormalizationRef.current = null;
-    componentLibraryNormalizationFailureRef.current = null;
     handledProposalFocusRef.current = null;
     proposalViewportPreviewRef.current = null;
     relationshipMutationPendingRef.current = false;
     setRelationshipMutationPending(false);
     setSelectedEdgeIds([]);
     setPendingDeleteGroupId(null);
+    recentProblemToastsRef.current.clear();
     setStatus("Canvas ready");
   }, [projectId]);
 
@@ -670,7 +697,7 @@ export function ProjectCanvas({
 
   const persistLayout = useCallback(async (
     source: LayoutCommandSource,
-    successMessage: string,
+    successMessage: string | null,
   ): Promise<boolean> => {
     const projectEpoch = canvasProjectEpochRef.current;
     queuedLayoutJobsRef.current += 1;
@@ -679,17 +706,17 @@ export function ProjectCanvas({
       try {
         const commands = typeof source === "function" ? source(workingLayoutRef.current) : source;
         if (commands.length === 0) return false;
-        setStatus("Saving canvas…");
+        if (successMessage !== null) setStatus("Saving canvas…");
         const saved = await onSaveLayout(commands);
         if (projectEpoch !== canvasProjectEpochRef.current) return false;
         authoritativeLayoutRef.current = saved;
         workingLayoutRef.current = saved;
-        setStatus(successMessage);
+        if (successMessage !== null) setStatus(successMessage);
         return true;
       } catch (error) {
         if (projectEpoch !== canvasProjectEpochRef.current) return false;
         workingLayoutRef.current = authoritativeLayoutRef.current;
-        setStatus(error instanceof Error && error.message ? error.message : "Couldn't save the canvas. Try again.");
+        reportCanvasProblem(error instanceof Error && error.message ? error.message : "Couldn't save the canvas. Try again.");
         setReconcileVersion((version) => version + 1);
         return false;
       } finally {
@@ -702,53 +729,17 @@ export function ProjectCanvas({
     const result = layoutMutationQueueRef.current.then(run);
     layoutMutationQueueRef.current = result.then(() => undefined, () => undefined);
     return result;
-  }, [onSaveLayout]);
-
-  useEffect(() => {
-    if (proposal !== null) {
-      componentLibraryNormalizationRef.current = null;
-      componentLibraryNormalizationFailureRef.current = null;
-      return;
-    }
-    const commands = buildComponentLibraryCommands(graph, layout);
-    if (commands.length === 0) {
-      componentLibraryNormalizationRef.current = null;
-      componentLibraryNormalizationFailureRef.current = null;
-      return;
-    }
-    const key = `${graph.revision}\u0000${layout.checksum}\u0000${JSON.stringify(commands)}`;
-    if (componentLibraryNormalizationRef.current === key) return;
-    const previousFailure = componentLibraryNormalizationFailureRef.current;
-    if (previousFailure?.key === key && previousFailure.count >= 2) return;
-    componentLibraryNormalizationRef.current = key;
-    const projectEpoch = canvasProjectEpochRef.current;
-    void persistLayout(commands, "Canvas ready").then((saved) => {
-      if (projectEpoch !== canvasProjectEpochRef.current) return;
-      if (componentLibraryNormalizationRef.current === key) {
-        componentLibraryNormalizationRef.current = null;
-      }
-      if (saved) {
-        componentLibraryNormalizationFailureRef.current = null;
-        return;
-      }
-      const failure = componentLibraryNormalizationFailureRef.current;
-      componentLibraryNormalizationFailureRef.current = {
-        key,
-        count: failure?.key === key ? failure.count + 1 : 1,
-      };
-    });
-  }, [graph, layout, persistLayout, proposal, reconcileVersion]);
+  }, [onSaveLayout, reportCanvasProblem]);
 
   const persistViewport = useCallback(async (
     next: WorkspaceViewport,
-    successMessage: string,
     intentVersion: number,
   ): Promise<boolean> => {
     const projectEpoch = canvasProjectEpochRef.current;
     viewportSaveJobsRef.current += 1;
     let saved: boolean;
     try {
-      saved = await persistLayout([{ type: "set-viewport", viewport: next }], successMessage);
+      saved = await persistLayout([{ type: "set-viewport", viewport: next }], null);
     } finally {
       if (projectEpoch === canvasProjectEpochRef.current) {
         viewportSaveJobsRef.current = Math.max(0, viewportSaveJobsRef.current - 1);
@@ -838,6 +829,7 @@ export function ProjectCanvas({
       projectId,
       artifactRevisionIds,
       resourceRevisionStates,
+      resourceRevisionPreviews,
       artifactGenerationStates,
       resourceGenerationStates,
       awaitingSelectionResourceIds,
@@ -891,6 +883,7 @@ export function ProjectCanvas({
     renameGroup,
     resizeGroup,
     resourceRevisionStates,
+    resourceRevisionPreviews,
     resourceGenerationStates,
     selectedEdgeSet,
     selectedSet,
@@ -1043,7 +1036,7 @@ export function ProjectCanvas({
       resizeViewportTimerRef.current = null;
       if (pendingResizeViewportRef.current?.version !== intent.version) return;
       pendingResizeViewportRef.current = null;
-      void persistViewportRef.current?.(intent.viewport, "Viewport adjusted", intent.version);
+      void persistViewportRef.current?.(intent.viewport, intent.version);
     }, RESIZE_VIEWPORT_SAVE_DELAY_MS);
   }, [proposal, proposalDiff, synchronizeAuthoritativeViewport]);
 
@@ -1162,7 +1155,15 @@ export function ProjectCanvas({
     const surfaceWidth = surfaceRef.current?.clientWidth || 960;
     const keepOutlineOpen = outlineOpen && surfaceWidth >= OUTLINE_SAFE_SURFACE_WIDTH;
     if (outlineOpen && !keepOutlineOpen) setOutlineOpen(false);
-    void instance.fitView({ padding: 0.18, duration: reducedMotion() ? 0 : 220 }).then(() => {
+    void instance.fitView({
+      padding: {
+        top: 0.18,
+        right: 0.18,
+        bottom: 0.32,
+        left: 0.18,
+      },
+      duration: reducedMotion() ? 0 : 220,
+    }).then(() => {
       if (viewportIntentVersionRef.current !== intentVersion) return false;
       const fitted = instance.getViewport();
       const outlineOffset = keepOutlineOpen ? Math.min(132, surfaceWidth * 0.14) : 0;
@@ -1174,7 +1175,7 @@ export function ProjectCanvas({
         if (viewportIntentVersionRef.current !== intentVersion) return false;
         setZoom(next.zoom);
         setAdapterZoom(next.zoom);
-        return persistViewport(next, "Fit workspace", intentVersion);
+        return persistViewport(next, intentVersion);
       });
     });
   }, [outlineOpen, persistViewport]);
@@ -1195,14 +1196,12 @@ export function ProjectCanvas({
     pendingResizeViewportRef.current = null;
     deferredSurfaceResizeRef.current = { x: 0, y: 0 };
     const intentVersion = ++viewportIntentVersionRef.current;
-    const message = `Zoom ${Math.round(nextZoom * 100)}%`;
-    setStatus(message);
     void instance.zoomTo(nextZoom, { duration: reducedMotion() ? 0 : 140 }).then(() => {
       if (viewportIntentVersionRef.current !== intentVersion) return false;
       const next = instance.getViewport();
       setZoom(next.zoom);
       setAdapterZoom(next.zoom);
-      return persistViewport(next, message, intentVersion);
+      return persistViewport(next, intentVersion);
     });
   }, [persistViewport]);
 
@@ -1216,7 +1215,7 @@ export function ProjectCanvas({
 
   const handleConnect = useCallback((connection: Connection) => {
     if (!isValidWorkspaceConnection(connection, graph)) {
-      setStatus("Prototype links connect Page nodes.");
+      reportCanvasProblem("Prototype links connect Page nodes.");
       return;
     }
     const projectEpoch = canvasProjectEpochRef.current;
@@ -1228,9 +1227,9 @@ export function ProjectCanvas({
       })
       .catch((error: unknown) => {
         if (projectEpoch !== canvasProjectEpochRef.current) return;
-        setStatus(error instanceof Error && error.message ? error.message : "Couldn't add the prototype link.");
+        reportCanvasProblem(error instanceof Error && error.message ? error.message : "Couldn't add the prototype link.");
       });
-  }, [graph, onApplyGraphCommands]);
+  }, [graph, onApplyGraphCommands, reportCanvasProblem]);
 
   const handleGroup = useCallback(() => {
     const livePositions = new Map((flowRef.current?.getNodes() ?? nodes).map((node) => [node.id, node.position]));
@@ -1342,7 +1341,7 @@ export function ProjectCanvas({
       if (!sameViewport(latestViewport, flowRef.current?.getViewport() ?? latestViewport)) {
         void flowRef.current?.setViewport(latestViewport).catch(() => {});
       }
-      void persistViewport(latestViewport, "Viewport saved", pending.version);
+      void persistViewport(latestViewport, pending.version);
     }, VIEWPORT_SAVE_DELAY_MS);
   }, [persistViewport]);
 
@@ -1396,7 +1395,7 @@ export function ProjectCanvas({
     const selected = graph.edges.filter((edge) => selectedIds.has(edge.id));
     if (selected.length === 0) return;
     if (selected.some((edge) => edge.kind === "uses")) {
-      setStatus("Uses relationships are derived and read-only");
+      reportCanvasProblem("Uses relationships are derived and read-only");
       return;
     }
     const removedIds = new Set(selected.map((edge) => edge.id));
@@ -1415,14 +1414,14 @@ export function ProjectCanvas({
       setStatus(commands.length === 1 ? "Relationship removed" : `${commands.length} relationships removed`);
     } catch (error) {
       if (projectEpoch !== canvasProjectEpochRef.current) return;
-      setStatus(error instanceof Error && error.message ? error.message : "Couldn't remove the relationship.");
+      reportCanvasProblem(error instanceof Error && error.message ? error.message : "Couldn't remove the relationship.");
     } finally {
       if (projectEpoch === canvasProjectEpochRef.current) {
         relationshipMutationPendingRef.current = false;
         setRelationshipMutationPending(false);
       }
     }
-  }, [graph.edges, onApplyGraphCommands, selectedEdgeIds]);
+  }, [graph.edges, onApplyGraphCommands, reportCanvasProblem, selectedEdgeIds]);
 
   const handleKeyDownCapture = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     const key = event.key.toLowerCase();
@@ -1671,11 +1670,10 @@ export function ProjectCanvas({
         )}
 
         <p
-          className="dezin-project-canvas__status"
+          className="sr-only"
           role="status"
           aria-label="Canvas status"
           aria-live="polite"
-          data-idle={status === "Canvas ready" || undefined}
         >
           {status}
         </p>

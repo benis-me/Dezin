@@ -105,13 +105,28 @@ test("an editable selected relationship exposes its delete action", async () => 
   expect(onDeleteRelationship).toHaveBeenCalledOnce();
 });
 
-test("only the active canvas tool uses the primary accent language", () => {
-  renderToolbar();
+test("select and hand share Dezin's quiet segmented interaction control", async () => {
+  const user = userEvent.setup();
+  const onToolChange = vi.fn();
+  renderToolbar({ onToolChange });
 
   expect(screen.getByRole("navigation", { name: "Canvas tools" })).toHaveClass("app-no-drag");
-  expect(screen.getByRole("button", { name: "Select tool" })).toHaveClass("!bg-primary", "!text-primary-foreground");
-  expect(screen.getByRole("button", { name: "Relationship filter: Prototype flow" })).not.toHaveClass("!bg-primary", "!text-primary-foreground");
-  expect(screen.getByRole("button", { name: "Hand tool" })).not.toHaveClass("!bg-primary");
+  const interactionMode = screen.getByRole("group", { name: "Canvas interaction mode" });
+  expect(interactionMode).toHaveClass("border-border", "bg-surface-2/60");
+
+  const select = screen.getByRole("button", { name: "Select tool" });
+  const hand = screen.getByRole("button", { name: "Hand tool" });
+  expect(select).toHaveAttribute("aria-pressed", "true");
+  expect(hand).toHaveAttribute("aria-pressed", "false");
+  expect(select).not.toHaveClass("!bg-primary", "!text-primary-foreground");
+  expect(hand).not.toHaveClass("!bg-primary", "!text-primary-foreground");
+  expect(screen.getByRole("button", { name: "Toggle workspace outline" })).not.toHaveClass(
+    "!bg-primary",
+    "!text-primary-foreground",
+  );
+
+  await user.click(hand);
+  expect(onToolChange).toHaveBeenCalledWith("hand");
 });
 
 test("zoom controls expose the current percentage, presets, and direct adjustments", async () => {

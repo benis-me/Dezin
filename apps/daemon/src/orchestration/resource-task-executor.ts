@@ -48,6 +48,10 @@ export interface ResourceGenerationAdapterInput {
   readonly resourceKind: ResourceKind;
   readonly brief: ResourceGenerationTaskPayloadV2["brief"];
   readonly capabilityDescriptors: readonly WorkspaceGenerationCapability[];
+  /** Exact frozen outer deadline compiled into this immutable Task. */
+  readonly taskTimeoutMs: number;
+  /** Exact frozen payload budget compiled into this immutable Task. */
+  readonly maxOutputBytes: number;
   readonly signal: AbortSignal;
 }
 
@@ -314,6 +318,8 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
         resourceKind: payload.operation.kind,
         brief: payload.brief,
         capabilityDescriptors: payload.capabilityDescriptors,
+        taskTimeoutMs: claim.task.resourceLimits.timeoutMs,
+        maxOutputBytes: claim.task.resourceLimits.maxOutputBytes,
         signal,
       } satisfies ResourceGenerationAdapterInput));
     } catch (error) {
@@ -1014,12 +1020,15 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   const rawOperation = payload.operation;
   const operationHasDispatchContext = rawOperation !== null && typeof rawOperation === "object"
     && Object.prototype.hasOwnProperty.call(rawOperation, "dispatchContextPackId");
+  const operationHasInstructions = rawOperation !== null && typeof rawOperation === "object"
+    && Object.prototype.hasOwnProperty.call(rawOperation, "instructions");
   const operation = exactRecord(rawOperation, [
     "operation",
     "nodeId",
     "resourceId",
     "kind",
     "title",
+    ...(operationHasInstructions ? ["instructions"] : []),
     "revisionPolicy",
     ...(operationHasDispatchContext ? ["dispatchContextPackId"] : []),
   ], "Resource Task operation");
@@ -1029,6 +1038,9 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   const nodeId = canonicalText(operation.nodeId, "Resource Task node id", 512);
   const resourceId = canonicalText(operation.resourceId, "Resource Task Resource id", 512);
   const title = canonicalText(operation.title, "Resource Task title", 4_096);
+  const resourceInstructions = operationHasInstructions
+    ? canonicalText(operation.instructions, "Resource Task instructions", 2_000)
+    : undefined;
   const dispatchContextPackId = operation.dispatchContextPackId === undefined
     ? undefined
     : canonicalText(operation.dispatchContextPackId, "Resource Task dispatch Context Pack id", 77);
@@ -1060,13 +1072,26 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   );
   const assumptions = denseArray(brief.assumptions, "Resource Task assumptions")
     .map((assumption, index) => canonicalText(assumption, `Resource Task assumption[${index}]`, 32_000));
-  const instructions = exactRecord(
-    brief.targetInstructions,
-    ["operation", "kind", "title"],
+  const rawTargetInstructions = brief.targetInstructions;
+  const targetHasInstructions = rawTargetInstructions !== null
+    && typeof rawTargetInstructions === "object"
+    && Object.prototype.hasOwnProperty.call(rawTargetInstructions, "instructions");
+  const targetInstructions = exactRecord(
+    rawTargetInstructions,
+    ["operation", "kind", "title", ...(targetHasInstructions ? ["instructions"] : [])],
     "Resource Task target instructions",
   );
-  if (instructions.operation !== operation.operation || instructions.kind !== operation.kind
-    || canonicalText(instructions.title, "Resource Task target instructions title", 4_096) !== title) {
+  const targetResourceInstructions = targetHasInstructions
+    ? canonicalText(
+        targetInstructions.instructions,
+        "Resource Task target instructions brief",
+        2_000,
+      )
+    : undefined;
+  if (targetInstructions.operation !== operation.operation
+    || targetInstructions.kind !== operation.kind
+    || canonicalText(targetInstructions.title, "Resource Task target instructions title", 4_096) !== title
+    || targetResourceInstructions !== resourceInstructions) {
     invalidPayload("Resource Task target instructions do not match its operation");
   }
   const capabilityDescriptors = denseArray(
@@ -1116,6 +1141,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
       resourceId,
       kind: operation.kind as ResourceKind,
       title,
+      ...(resourceInstructions === undefined ? {} : { instructions: resourceInstructions }),
       revisionPolicy: Object.freeze({ kind: "generate" as const }),
       ...(dispatchContextPackId === undefined ? {} : { dispatchContextPackId }),
     }),
@@ -1126,6 +1152,7 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
         operation: operation.operation,
         kind: operation.kind as ResourceKind,
         title,
+        ...(resourceInstructions === undefined ? {} : { instructions: resourceInstructions }),
       }),
     }),
     capabilityDescriptors: Object.freeze(capabilityDescriptors),

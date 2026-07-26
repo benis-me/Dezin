@@ -16,6 +16,7 @@ import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDi
 import { createApp, createRuntimeSupervisor } from "./app.ts";
 import { startDaemonAfterGenerationRecovery } from "./daemon-startup.ts";
 import { shutdownDaemon } from "./daemon-shutdown.ts";
+import { watchElectronParent } from "./electron-parent-lifecycle.ts";
 import { createProductionGenerationBootstrap } from "./orchestration/production-generation-bootstrap.ts";
 import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snapshot.ts";
 import { createProductionSafeBoundedExternalFetcher } from "./production-safe-external-fetch.ts";
@@ -146,9 +147,11 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   const startupController = new AbortController();
+  let stopWatchingElectronParent = (): void => {};
   const shutdown = (signal: string, exitCode = 0): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopWatchingElectronParent();
     startupController.abort(new Error(`${signal} during daemon startup`));
     console.log(`\n${signal} — shutting down`);
     try {
@@ -172,6 +175,11 @@ async function main(): Promise<void> {
   });
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  stopWatchingElectronParent = watchElectronParent({
+    enabled: process.env.DEZIN_ELECTRON === "1",
+    parent: process,
+    shutdown,
+  });
 
   let startupRolledBack = false;
   const rollbackStartup = async (): Promise<void> => {
@@ -206,6 +214,10 @@ async function main(): Promise<void> {
       rollback: rollbackStartup,
     });
   } catch (error) {
+    // A failed Electron-owned startup must release its IPC disconnect listener
+    // before the top-level catch sets exitCode, otherwise the live channel keeps
+    // the failed daemon around until the desktop supervisor times out.
+    stopWatchingElectronParent();
     await generationRecovery.stop();
     await rollbackStartup();
     if (shuttingDown) return;

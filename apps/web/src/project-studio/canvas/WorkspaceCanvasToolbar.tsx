@@ -16,6 +16,7 @@ import {
 import {
   IconButton,
   Kbd,
+  Segmented,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -32,7 +33,7 @@ import type { WorkspaceEdgeFilter } from "./workspace-graph-adapter.ts";
 
 export type CanvasTool = "select" | "hand";
 
-const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
+const ACTIVE_TOOL_BUTTON_CLASS = "bg-surface-2 text-foreground hover:bg-surface-2 hover:text-foreground";
 const ZOOM_PRESETS = [0.5, 1, 2] as const;
 
 const EDGE_FILTER_OPTIONS: ReadonlyArray<{
@@ -193,12 +194,36 @@ export function WorkspaceCanvasToolbar({
     <TooltipProvider delayDuration={120}>
       <nav className="dezin-canvas-toolbar app-no-drag" aria-label="Canvas tools">
       <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Navigation tools">
-        <ToolButton label="Select tool" shortcut="V" active={tool === "select"} onClick={() => onToolChange("select")}>
-          <MousePointer2 size={14} />
-        </ToolButton>
-        <ToolButton label="Hand tool" shortcut="H" active={tool === "hand"} onClick={() => onToolChange("hand")}>
-          <Hand size={14} />
-        </ToolButton>
+        <Segmented<CanvasTool>
+          ariaLabel="Canvas interaction mode"
+          size="sm"
+          value={tool}
+          onChange={onToolChange}
+          options={[
+            {
+              value: "select",
+              title: "Select tool",
+              icon: <MousePointer2 size={14} />,
+              tooltip: (
+                <span className="flex items-center gap-2">
+                  <span>Select</span>
+                  <Kbd>V</Kbd>
+                </span>
+              ),
+            },
+            {
+              value: "hand",
+              title: "Hand tool",
+              icon: <Hand size={14} />,
+              tooltip: (
+                <span className="flex items-center gap-2">
+                  <span>Hand</span>
+                  <Kbd>H</Kbd>
+                </span>
+              ),
+            },
+          ]}
+        />
         <ToolButton label="Fit workspace" shortcut="⇧1" onClick={onFitView}>
           <Focus size={14} />
         </ToolButton>

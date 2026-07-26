@@ -20,6 +20,7 @@ import type {
 } from "../../../../packages/core/src/index.ts";
 import {
   MAX_PROTOTYPE_TRANSITION_DURATION_MS,
+  NO_DESIGN_SYSTEM_ID,
   normalizeWorkspaceGenerationAgentSelection,
   readFrozenPrototypeRenderFrames,
   resolveFrozenPrototypeRelations,
@@ -292,8 +293,8 @@ export interface FrozenResourceExecutionProfile {
   };
   /** Independent no-tools quality reviewer identity, frozen separately from the generating Agent. */
   readonly reviewer: {
-    readonly command: "claude" | "codebuddy";
-    readonly providerId: "claude" | "codebuddy";
+    readonly command: "claude" | "codebuddy" | "codex";
+    readonly providerId: "claude" | "codebuddy" | "codex";
     readonly model: string | null;
     readonly baseUrl: string;
     readonly credentialSource: "anthropic-profile" | "agent" | "session";
@@ -369,11 +370,30 @@ function settingsForFrozenTaskAgent(
   agent: WorkspaceGenerationAgentSelection | null,
 ): Settings {
   if (agent === null) return settings;
-  const reviewerProviderId = agent.providerId === "claude" || agent.providerId === "codebuddy"
+  const selectedProviderId = providerIdentity(agent.command);
+  if (selectedProviderId !== agent.providerId) {
+    throw new ContextIntegrityError(
+      "Frozen Task Agent provider does not match its command identity",
+    );
+  }
+  const currentCommand = settings.agentCommand.trim() || "claude";
+  const currentProviderId = providerIdentity(currentCommand);
+  const reviewerProviderId = agent.providerId === "claude"
+    || agent.providerId === "codebuddy"
+    || agent.providerId === "codex"
     ? agent.providerId
     : null;
   return {
     ...settings,
+    ...(currentProviderId === selectedProviderId
+      ? {}
+      : {
+          // A Task-level provider selection must never relabel the mutable
+          // global provider's endpoint or credential as the frozen provider.
+          apiBaseUrl: "",
+          apiKey: "",
+          ...(Object.hasOwn(settings, "apiKeyConfigured") ? { apiKeyConfigured: false } : {}),
+        }),
     agentCommand: agent.command,
     model: agent.model ?? "",
     ...(reviewerProviderId === null
@@ -552,11 +572,15 @@ function artifactAgentCredentialSemantic(
   }
   const usesAnthropicEndpoint = providerId === "claude";
   const usesOpenAiEndpoint = providerId === "codex";
+  const credentialRequired = Boolean(settings.apiKey.trim() || settings.apiKeyConfigured);
+  const baseUrl = usesAnthropicEndpoint || usesOpenAiEndpoint ? settings.apiBaseUrl.trim() : "";
   return {
     credentialProviderId: resourceCredentialProviderId(providerId),
-    baseUrl: usesAnthropicEndpoint || usesOpenAiEndpoint ? settings.apiBaseUrl.trim() : "",
-    organization: usesOpenAiEndpoint ? settings.aiProviderOrganization.trim() : "",
-    credentialRequired: Boolean(settings.apiKey.trim() || settings.apiKeyConfigured),
+    baseUrl,
+    organization: usesOpenAiEndpoint && (baseUrl || credentialRequired)
+      ? settings.aiProviderOrganization.trim()
+      : "",
+    credentialRequired,
   };
 }
 
@@ -571,7 +595,7 @@ function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionPro
     settings.model.trim() || undefined,
     settings.agentCommand,
   ) ?? null;
-  if (command === "codebuddy") {
+  if (command === "codebuddy" || command === "codex") {
     return Object.freeze({
       command,
       providerId: command,
@@ -670,6 +694,8 @@ export function freezeResourceExecutionProfile(
   const providerId = providerIdentity(command);
   const credentialProviderId = resourceCredentialProviderId(providerId);
   const hostAuthenticated = providerId === "codebuddy";
+  const agentBaseUrl = hostAuthenticated ? "" : credentialFreeAgentBaseUrl(input.settings.apiBaseUrl);
+  const agentCredentialRequired = hostAuthenticated ? false : resourceCredentialConfigured(input.settings);
   const body = {
     protocol: RESOURCE_EXECUTION_PROFILE_PROTOCOL,
     ownership: structuredClone(input.ownership),
@@ -680,10 +706,12 @@ export function freezeResourceExecutionProfile(
       command,
       providerId,
       model: input.settings.model.trim() || null,
-      baseUrl: hostAuthenticated ? "" : credentialFreeAgentBaseUrl(input.settings.apiBaseUrl),
-      organization: hostAuthenticated ? "" : input.settings.aiProviderOrganization.trim(),
+      baseUrl: agentBaseUrl,
+      organization: providerId === "codex" && !agentBaseUrl && !agentCredentialRequired
+        ? ""
+        : hostAuthenticated ? "" : input.settings.aiProviderOrganization.trim(),
       credentialProviderId,
-      credentialRequired: hostAuthenticated ? false : resourceCredentialConfigured(input.settings),
+      credentialRequired: agentCredentialRequired,
     },
     reviewer: resourceReviewerProfile(input.settings),
     imageGeneration: resourceImageGenerationProfile(input.resourceKind, input.settings),
@@ -784,7 +812,9 @@ export function validateResourceExecutionProfile(
   exactKeys(reviewerRecord, [
     "command", "providerId", "model", "baseUrl", "credentialSource", "credentialRequired",
   ], "Resource execution reviewer");
-  if ((reviewerRecord.command !== "claude" && reviewerRecord.command !== "codebuddy")
+  if ((reviewerRecord.command !== "claude"
+      && reviewerRecord.command !== "codebuddy"
+      && reviewerRecord.command !== "codex")
     || reviewerRecord.providerId !== reviewerRecord.command
     || (reviewerRecord.credentialSource !== "anthropic-profile"
       && reviewerRecord.credentialSource !== "agent"
@@ -803,7 +833,8 @@ export function validateResourceExecutionProfile(
     credentialRequired: reviewerRecord.credentialRequired,
   };
   if ((reviewer.credentialSource === "session" && (reviewer.baseUrl || reviewer.credentialRequired))
-    || (reviewer.command === "codebuddy" && reviewer.credentialSource !== "session")) {
+    || ((reviewer.command === "codebuddy" || reviewer.command === "codex")
+      && reviewer.credentialSource !== "session")) {
     throw new ContextIntegrityError("Resource execution reviewer credential policy is invalid");
   }
   let imageGeneration: FrozenResourceExecutionProfile["imageGeneration"] = null;
@@ -1139,11 +1170,12 @@ function validateArtifactExecutionProfile(
       content: structuredClone(content),
     };
   })();
-  const requestedDesignSystemId = hasExactSharinganCapture
+  const designSystemDisabled = projectBody.designSystemId === NO_DESIGN_SYSTEM_ID;
+  const requestedDesignSystemId = hasExactSharinganCapture || designSystemDisabled
     ? null
     : (projectBody.designSystemId ?? settings.defaultDesignSystemId) || null;
-  if ((hasExactSharinganCapture && designSystem !== null)
-    || (!hasExactSharinganCapture && designSystem === null)
+  if (((hasExactSharinganCapture || designSystemDisabled) && designSystem !== null)
+    || (!hasExactSharinganCapture && !designSystemDisabled && designSystem === null)
     || (designSystem !== null && designSystem.requestedId !== requestedDesignSystemId)) {
     throw new ContextIntegrityError("Artifact execution design system does not match the exact Task semantic");
   }
@@ -1408,7 +1440,7 @@ export function hydrateResourceReviewerExecution(
   liveSettings: Settings,
 ): BoundResourceReviewerExecution {
   const exact = validateResourceExecutionProfile(profile).reviewer;
-  if (exact.providerId === "codebuddy") {
+  if (exact.providerId === "codebuddy" || exact.providerId === "codex") {
     return Object.freeze({ ...exact, apiKey: "" });
   }
   const current = resourceReviewerProfile(liveSettings);
@@ -2631,7 +2663,7 @@ function resolvedDesignSystem(
   registry: DesignRegistry,
   hasExactSharinganCapture: boolean,
 ): { requestedId: string | null; resolvedId: string; content: DesignSystem } | null {
-  if (hasExactSharinganCapture) return null;
+  if (hasExactSharinganCapture || project.designSystemId === NO_DESIGN_SYSTEM_ID) return null;
   const requestedId = (project.designSystemId ?? settings.defaultDesignSystemId) || null;
   const resolved = requestedId ? (registry.get(requestedId) ?? registry.default()) : registry.default();
   if (!resolved) throw new ContextIntegrityError("Artifact execution design system is unavailable");

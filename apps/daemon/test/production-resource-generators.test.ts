@@ -85,6 +85,11 @@ function pack(
   imageConfigured = true,
 ): ContextPack {
   const title = kind === "research" ? "Climate product research" : kind === "moodboard" ? "Editorial moodboard" : "Exact capture";
+  const instructions = kind === "research"
+    ? "Compare exactly three evidence-backed directions and recommend one with explicit tradeoffs."
+    : kind === "moodboard"
+      ? "Generate exactly three actionable visual references, one for each named direction."
+      : "Capture the exact selected region and preserve its measured visual evidence.";
   const executionProfile = freezeResourceExecutionProfile({
     ownership: {
       projectId: "project-1",
@@ -122,12 +127,13 @@ function pack(
       version: 2,
       operation: {
         operation: "revise", nodeId: "node-resource-1", resourceId, kind, title,
+        instructions,
         revisionPolicy: { kind: "generate" },
       },
       brief: {
         proposalRationale: "Build one evidence-led, reusable direction before producing pages.",
         assumptions: ["The audience needs dense information without visual noise."],
-        targetInstructions: { operation: "revise", kind, title },
+        targetInstructions: { operation: "revise", kind, title, instructions },
       },
       capabilityDescriptors: [{ id: "browser", kind: "browser", required: true }],
       adapter: executionProfile.adapter,
@@ -214,6 +220,11 @@ function exactPackForId(_workspaceId: string, id: string): ContextPack | null {
 }
 
 function input(kind: ResourceGenerationAdapterInput["resourceKind"]): ResourceGenerationAdapterInput {
+  const instructions = kind === "research"
+    ? "Compare exactly three evidence-backed directions and recommend one with explicit tradeoffs."
+    : kind === "moodboard"
+      ? "Generate exactly three actionable visual references, one for each named direction."
+      : "Capture the exact selected region and preserve its measured visual evidence.";
   return {
     taskId: "task-1",
     planId: "plan-1",
@@ -230,9 +241,16 @@ function input(kind: ResourceGenerationAdapterInput["resourceKind"]): ResourceGe
     brief: {
       proposalRationale: "Build one evidence-led, reusable direction before producing pages.",
       assumptions: ["The audience needs dense information without visual noise."],
-      targetInstructions: { operation: "revise", kind, title: "ignored by fixture typing" },
+      targetInstructions: {
+        operation: "revise",
+        kind,
+        title: "ignored by fixture typing",
+        instructions,
+      },
     },
     capabilityDescriptors: [{ id: "browser", kind: "browser", required: true }],
+    taskTimeoutMs: 25 * 60_000,
+    maxOutputBytes: kind === "moodboard" ? 48 * 1024 * 1024 : 8 * 1024 * 1024,
     signal: new AbortController().signal,
   } as ResourceGenerationAdapterInput;
 }
@@ -336,7 +354,7 @@ function verifiedResearchEvidence(overrides: Record<string, unknown> = {}): Prod
   };
 }
 
-function moodboardDraft() {
+function moodboardDraft(assetCount = 1) {
   return {
     protocol: "dezin.moodboard-generation.v2",
     concept: "A field notebook for live climate evidence: tactile, restrained, and exact.",
@@ -358,14 +376,14 @@ function moodboardDraft() {
       { id: "reference-1", title: "Field report paper texture", locator: "generated:field-report-paper", notes: "Material and lighting reference." },
       { id: "reference-2", title: "Editorial data spread", locator: "context-pack:editorial-spread", notes: "Hierarchy and annotation reference." },
     ],
-    assetSpecs: [{
-      id: "asset-1",
-      fileName: "field-report.png",
-      prompt: "Editorial still life of a field research notebook, warm paper, precise ink annotations, soft natural side light, restrained lichen and ember accents, no text or logos.",
-      caption: "A restrained paper and ink material reference.",
+    assetSpecs: Array.from({ length: assetCount }, (_item, index) => ({
+      id: `asset-${index + 1}`,
+      fileName: `field-report-${index + 1}.png`,
+      prompt: `Editorial still life ${index + 1} of a field research notebook, warm paper, precise ink annotations, soft natural side light, restrained lichen and ember accents, no text or logos.`,
+      caption: `A restrained paper and ink material reference ${index + 1}.`,
       aspectRatio: "3:2" as const,
       referenceIds: ["reference-1", "reference-2"],
-    }],
+    })),
   };
 }
 
@@ -375,6 +393,11 @@ function moodboardImplementation(
   draft: ReturnType<typeof moodboardDraft>,
   bytes: Buffer = MOODBOARD_PNG,
   review: "pass" | "fail" = "pass",
+  observeImageRequest?: (request: {
+    readonly callTimeoutMs: number;
+    readonly maxOutputBytes: number;
+    readonly asset: { readonly id: string };
+  }) => void,
 ) {
   return createProductionResourceGenerationImplementations({
     contextPacks: { get: exactPackForId },
@@ -390,6 +413,7 @@ function moodboardImplementation(
     },
     moodboardImages: {
       async generateImage(request) {
+        observeImageRequest?.(request);
         const profile = request.executionProfile.imageGeneration!;
         return {
           protocol: "dezin.moodboard-image-result.v1",
@@ -464,6 +488,14 @@ test("Research generation consumes one exact Context Pack and emits structured t
   assert.equal(bundle.supportReceipts.length, 6);
   assert.equal(bundle.sources[0].verification, "verified");
   assert.equal(bundle.sources[0].receiptId, bundle.receipts[0].id);
+  assert.equal(
+    requests[0]?.brief.targetInstructions.instructions,
+    "Compare exactly three evidence-backed directions and recommend one with explicit tradeoffs.",
+  );
+  assert.match(
+    requests[0]?.systemPrompt ?? "",
+    /brief\.targetInstructions\.instructions.*direction names.*cardinalities.*evidence goals/i,
+  );
   assert.deepEqual(bundle.receipts[0], {
     protocol: "dezin.research-evidence-receipt.v1",
     id: bundle.receipts[0].id,
@@ -538,7 +570,53 @@ test("Research generation consumes one exact Context Pack and emits structured t
     id: "dezin.resource-adapter.research", version: 1, kind: "research",
   });
   assert.equal(requests[0]!.executionProfile.agent.providerId, "claude");
-  assert.equal(JSON.parse(requests[0]!.message).protocol, "dezin.research-generation-prompt.v3");
+  const researchPrompt = JSON.parse(requests[0]!.message) as {
+    protocol: string;
+    contextSourceOptions: Array<{
+      optionId: string;
+      kind: string;
+      locator: string;
+      excerpt: string;
+      binding: {
+        contextPackId: string;
+        contextPackHash: string;
+        itemOrdinal: number;
+        itemChecksum: string;
+      };
+    }>;
+  };
+  assert.equal(researchPrompt.protocol, "dezin.research-generation-prompt.v3");
+  assert.ok(researchPrompt.contextSourceOptions.length >= 2);
+  for (const option of researchPrompt.contextSourceOptions) {
+    const item: ContextPack["items"][number] =
+      requests[0]!.contextPack.items[option.binding.itemOrdinal]!;
+    assert.equal(option.kind, "context");
+    assert.equal(option.locator, `context-pack:${requests[0]!.contextPack.id}#item:${item.ordinal}`);
+    assert.equal(option.binding.contextPackId, requests[0]!.contextPack.id);
+    assert.equal(option.binding.contextPackHash, requests[0]!.contextPack.hash);
+    assert.equal(option.binding.itemChecksum, item.checksum);
+    assert.equal(item.content.includes(option.excerpt), true);
+  }
+  assert.equal(
+    researchPrompt.contextSourceOptions.some((option) => option.excerpt === CONTEXT_CONTENT),
+    true,
+    "the transport exposes a useful exact source excerpt instead of asking the model to retype Context JSON",
+  );
+  assert.equal(
+    researchPrompt.contextSourceOptions.some(
+      (option) => option.binding.itemOrdinal === 1
+        && option.excerpt === "Build one evidence-led, reusable direction before producing pages.",
+    ),
+    true,
+    "structured target Context prioritizes decision-bearing prose over protocol ids",
+  );
+  assert.match(requests[0]!.systemPrompt, /content\.includes\(excerpt\) === true/);
+  assert.match(requests[0]!.systemPrompt, /source\.excerpt\.includes\(quote\) === true/);
+  assert.match(requests[0]!.systemPrompt, /contextSourceOptions/);
+  assert.match(
+    requests[0]!.systemPrompt,
+    /When Web Search is available.*authoritative primary sources.*unsupported claims as hypotheses/i,
+  );
   assert.ok(requests[0]!.maxOutputBytes >= result.bytes.byteLength);
   assert.equal(requests[0]!.signal.aborted, false);
 
@@ -991,11 +1069,74 @@ test("Moodboard Agent emits only Asset specs; daemon-generated reviewed PNGs own
     id: "asset-1", checksum: sha256(MOODBOARD_PNG), decision: "pass", semanticMatch: true, visualQuality: "pass",
   }]);
   assert.match(agentRequest!.systemPrompt, /Never return pixels/i);
+  assert.match(agentRequest!.systemPrompt, /composition.*3-24/i);
+  assert.match(agentRequest!.systemPrompt, /motion.*2-24/i);
+  assert.match(agentRequest!.systemPrompt, /avoid.*2-24/i);
   assert.doesNotMatch(`${agentRequest!.systemPrompt}\n${agentRequest!.message}`, /bytesBase64|canonical base64/i);
+  assert.equal(agentRequest!.callTimeoutMs, 7 * 60_000);
+  assert.equal(agentRequest!.maxOutputBytes, 48 * 1024 * 1024);
   assert.equal(imageRequest.protocol, "dezin.moodboard-image-request.v1");
+  assert.equal(
+    imageRequest.maxOutputBytes,
+    8 * 1024 * 1024,
+    "the immutable Moodboard Task budget must not silently shrink a production PNG to the old 4.8 MiB aggregate default",
+  );
+  assert.equal(imageRequest.callTimeoutMs, 5 * 60_000);
   assert.equal(imageRequest.scope.attempt, 2);
   assert.equal(imageRequest.asset.prompt, moodboardDraft().assetSpecs[0]!.prompt);
+  assert.equal(qualityRequest.callTimeoutMs, 30_000);
   assert.equal(qualityRequest.image.checksum, sha256(MOODBOARD_PNG));
+});
+
+test("Moodboard derives a safe cardinality-aware image deadline from the live outer Task budget", async () => {
+  for (let assetCount = 1; assetCount <= 8; assetCount += 1) {
+    const observed: number[] = [];
+    const implementations = moodboardImplementation(
+      moodboardDraft(assetCount),
+      MOODBOARD_PNG,
+      "pass",
+      (request) => observed.push(request.callTimeoutMs),
+    );
+
+    await implementations.moodboard!(input("moodboard"));
+
+    const maximum = Math.min(
+      5 * 60_000,
+      Math.floor((
+        (25 * 60_000)
+        - (2 * 60_000)
+        - (assetCount * 30_000)
+      ) / assetCount),
+    );
+    assert.equal(observed.length, assetCount);
+    assert.ok(
+      observed[0]! <= maximum && observed[0]! >= maximum - 1_000,
+      `${assetCount} assets must initially share the remaining Task budget without falling back to the old 90s ceiling`,
+    );
+    assert.ok(
+      observed.every((timeoutMs) => timeoutMs <= 5 * 60_000 && timeoutMs >= observed[0]!),
+      "unused time from an early image may be safely redistributed, but no call may exceed the runtime ceiling",
+    );
+  }
+});
+
+test("Moodboard shares its raw image budget fairly across every remaining Asset", async () => {
+  const observed: number[] = [];
+  const implementations = moodboardImplementation(
+    moodboardDraft(8),
+    MOODBOARD_PNG,
+    "pass",
+    (request) => observed.push(request.maxOutputBytes),
+  );
+
+  await implementations.moodboard!(input("moodboard"));
+
+  const rawBudget = Math.floor((48 * 1024 * 1024) * 0.6);
+  assert.equal(observed.length, 8);
+  assert.equal(observed[0], Math.floor(rawBudget / 8));
+  assert.ok(observed.every((budget, index) =>
+    budget <= Math.floor(rawBudget / (8 - index))),
+  "an early provider call must not consume bytes reserved for later Assets");
 });
 
 test("Moodboard publication rejects 1x1, malformed, scope-substituted, and independently failed images", async () => {

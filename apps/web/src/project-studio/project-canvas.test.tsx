@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { StrictMode, useCallback, useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { ToastProvider } from "../components/Toast.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import {
   ApiError,
@@ -188,22 +189,24 @@ function CanvasHarness({
 }) {
   const [selection, setSelection] = useState<string[]>([...initialSelectedNodeIds]);
   return (
-    <ProjectCanvas
-      projectId="project-1"
-      projectName="Storefront system"
-      graph={canvasGraph}
-      layout={canvasLayout}
-      artifactRevisionIds={artifactRevisionIds}
-      resourceRevisionStates={resourceRevisionStates}
-      selectedNodeIds={selection}
-      onSelectionChange={setSelection}
-      onSaveLayout={onSaveLayout}
-      onApplyGraphCommands={onApplyGraphCommands}
-      onOpenArtifact={onOpenArtifact}
-      onOpenResource={onOpenResource}
-      onPresentFlow={onPresentFlow}
-      proposal={proposal}
-    />
+    <ToastProvider>
+      <ProjectCanvas
+        projectId="project-1"
+        projectName="Storefront system"
+        graph={canvasGraph}
+        layout={canvasLayout}
+        artifactRevisionIds={artifactRevisionIds}
+        resourceRevisionStates={resourceRevisionStates}
+        selectedNodeIds={selection}
+        onSelectionChange={setSelection}
+        onSaveLayout={onSaveLayout}
+        onApplyGraphCommands={onApplyGraphCommands}
+        onOpenArtifact={onOpenArtifact}
+        onOpenResource={onOpenResource}
+        onPresentFlow={onPresentFlow}
+        proposal={proposal}
+      />
+    </ToastProvider>
   );
 }
 
@@ -325,10 +328,8 @@ test("component library migration does not invalidate a proposal's sealed layout
   expect(onSaveLayout).not.toHaveBeenCalled();
 });
 
-test("component library migration retries after a transient background save failure", async () => {
-  const onSaveLayout = vi.fn()
-    .mockRejectedValueOnce(new Error("temporary write failure"))
-    .mockResolvedValue(layout);
+test("canvas mount never persists component-library normalization", async () => {
+  const onSaveLayout = vi.fn(async () => layout);
   const graphWithComponent: WorkspaceGraph = {
     ...graph,
     nodes: [
@@ -345,8 +346,9 @@ test("component library migration retries after a transient background save fail
   render(
     <CanvasHarness canvasGraph={graphWithComponent} onSaveLayout={onSaveLayout} />,
   );
+  await act(async () => {});
 
-  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+  expect(onSaveLayout).not.toHaveBeenCalled();
 });
 
 test("Outline opens the same exact Resource revision as the canvas keyboard path", () => {
@@ -737,6 +739,7 @@ test.each(["prototype", "informs", "derives-from"] as const)(
     ]));
     await waitFor(() => expect(remove).toBeDisabled());
     expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Relationship removed");
+    expect(screen.queryByRole("alert")).toBeNull();
   },
 );
 
@@ -782,6 +785,7 @@ test("a failed relationship removal keeps the relationship selected and exposes 
   fireEvent.click(remove);
 
   await waitFor(() => expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Relationship removal failed"));
+  expect(screen.getByRole("alert")).toHaveTextContent("Relationship removal failed");
   expect(remove).toBeEnabled();
 });
 
@@ -813,9 +817,12 @@ test("derived uses relationships are explicitly read-only and never submit a rem
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Uses relationships are derived and read-only");
   expect(screen.getByRole("tooltip")).not.toHaveTextContent("Select a relationship to delete");
   fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Delete" });
+  fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Delete" });
 
   expect(onApplyGraphCommands).not.toHaveBeenCalled();
   expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Uses relationships are derived and read-only");
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  expect(screen.getByRole("alert")).toHaveTextContent("Uses relationships are derived and read-only");
 });
 
 test("changing the relationship filter clears a selected relationship before hiding it", async () => {
@@ -981,11 +988,15 @@ test("canvas keyboard controls open, clear, switch tools, fit, and persist one o
   fireEvent.keyDown(canvas, { key: "v" });
   expect(screen.getByRole("button", { name: "Select tool" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.keyDown(canvas, { key: "1", shiftKey: true });
-  expect(screen.getByRole("status", { name: "Canvas status" })).toHaveTextContent("Fit workspace");
+  const status = screen.getByRole("status", { name: "Canvas status" });
+  expect(status).toHaveTextContent("Fit workspace");
+  expect(status).toHaveClass("sr-only");
+  expect(screen.getByRole("region", { name: "Notifications" })).toBeEmptyDOMElement();
   fireEvent.keyDown(canvas, { key: "ArrowRight" });
   await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
     { type: "move", objectId: "page-1", x: 41, y: 70 },
   ]));
+  expect(screen.getByRole("region", { name: "Notifications" })).toBeEmptyDOMElement();
   fireEvent.keyDown(canvas, { key: "Escape" });
   expect(screen.queryByRole("button", { name: "Group selection" })).toBeNull();
 });

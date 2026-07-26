@@ -21,6 +21,7 @@ import {
   SelectValue,
   StudioHeaderActions,
   StudioHeaderCopy,
+  StudioHeaderIdentity,
   StudioInspectorSection,
   StudioPanelHeader,
   StudioStatusBadge,
@@ -43,6 +44,13 @@ export type GenerationPlanConnection = "connecting" | "live" | "offline" | "erro
 export interface GenerationPlanTargetLabels {
   readonly artifacts: ReadonlyMap<string, string>;
   readonly resources: ReadonlyMap<string, string>;
+}
+
+export type GenerationPlanDetailChangeSource = "load" | "observation" | "retry" | "cancel";
+
+export interface GenerationPlanDetailChange {
+  readonly detail: GenerationPlanDetail;
+  readonly source: GenerationPlanDetailChangeSource;
 }
 
 const TERMINAL_PLAN_STATUSES = new Set<GenerationPlan["status"]>([
@@ -93,7 +101,7 @@ function displayState(
   if (status === "failed" || status === "blocked" || status === "blocked-context"
     || status === "compile-failed" || status === "requires-new-impact") return "failure";
   if (status === "cancelled") return "cancelled";
-  if (status === "running" || status === "candidate-ready" || status === "needs-rebase"
+  if (status === "running" || status === "retry-wait" || status === "candidate-ready" || status === "needs-rebase"
     || status === "awaiting-context-refresh" || status === "cancel-requested") return "active";
   return "idle";
 }
@@ -311,6 +319,7 @@ export function GenerationPlanPanel({
   onRetry,
   onCancel,
   onClose,
+  showHeader = true,
 }: {
   projectId: string;
   plans: readonly GenerationPlan[];
@@ -322,10 +331,9 @@ export function GenerationPlanPanel({
   onRetry: (taskId: string, mode: GenerationTaskRetryMode) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
   onClose?: () => void;
+  showHeader?: boolean;
 }) {
   const complete = detail.tasks.filter((task) => task.status === "succeeded").length;
-  const planStatus = statusLabel(detail.plan.status, true);
-  const planState = displayState(detail.plan.status);
   const failureMessage = planMessage(detail.plan);
   const connectionLabel = connection === "live"
     ? "Live updates"
@@ -338,28 +346,14 @@ export function GenerationPlanPanel({
         : "Durable snapshot";
 
   return (
-    <section className="dezin-generation-plan" aria-labelledby="generation-plan-title">
-      <StudioPanelHeader className="dezin-generation-plan__header">
-        <StudioHeaderCopy
-          title="Build plan"
-          subtitle="Generation progress"
-          titleId="generation-plan-title"
-          headingLevel={2}
-          className="dezin-generation-plan__heading"
-        />
-        <StudioHeaderActions className="dezin-generation-plan__header-actions">
-          <StudioStatusBadge
-            className="dezin-generation-plan__plan-state"
-            data-state={planState}
-            tone={statusTone(planState)}
-            aria-label={`Plan status: ${planStatus}`}
-          >
-            <i aria-hidden />
-            <span>{planStatus}</span>
-          </StudioStatusBadge>
-          <PlanCloseButton onClose={onClose} />
-        </StudioHeaderActions>
-      </StudioPanelHeader>
+    <section
+      className="dezin-generation-plan"
+      aria-labelledby={showHeader ? "generation-plan-title" : undefined}
+      aria-label={showHeader ? undefined : "Generation Plan details"}
+    >
+      {showHeader ? (
+        <GenerationPlanHeader plan={detail.plan} state="ready" onClose={onClose} />
+      ) : null}
 
       <StudioInspectorSection
         className="dezin-generation-plan__overview"
@@ -410,21 +404,20 @@ export function GenerationPlanPanel({
             const state = awaitingDirectionSelection ? "active" : displayState(task.status);
             const message = taskMessage(task);
             const artifactDestination = artifactRevisionDestination(projectId, task, detail);
+            const target = targetLabel(task, targetLabels);
             return (
               <li key={task.id} className="dezin-generation-plan__task" data-state={state}>
                 <span className="dezin-generation-plan__task-marker" data-state={state} aria-hidden />
                 <div className="dezin-generation-plan__task-body">
                   <div className="dezin-generation-plan__task-topline">
-                    <div>
-                      <span>{label}</span>
-                      <strong>{targetLabel(task, targetLabels)}</strong>
-                    </div>
+                    <span className="dezin-generation-plan__task-kind">{label}</span>
                     <StudioStatusBadge
                       className="dezin-generation-plan__task-status"
                       tone={statusTone(state)}
                     >
-                      {awaitingDirectionSelection ? "Awaiting direction selection" : statusLabel(task.status)}
+                      {awaitingDirectionSelection ? "Choose direction" : statusLabel(task.status)}
                     </StudioStatusBadge>
+                    <strong title={target}>{target}</strong>
                   </div>
                   <p className="dezin-generation-plan__task-meta">{dependencyLabel(task)}</p>
                   {message ? <p className="dezin-generation-plan__task-message">{message}</p> : null}
@@ -500,9 +493,6 @@ export function GenerationPlanPanel({
       </StudioInspectorSection>
 
       <footer className="dezin-generation-plan__footer">
-        <span className="dezin-generation-plan__identity" title={detail.plan.id}>
-          {detail.plan.id.slice(-12)}
-        </span>
         {canCancel(detail.plan) ? (
           <Button
             type="button"
@@ -529,6 +519,57 @@ export function GenerationPlanPanel({
 
 type InspectorLoadState = "loading" | "ready" | "empty" | "error";
 
+function GenerationPlanHeader({
+  plan,
+  state,
+  onClose,
+}: {
+  plan: GenerationPlan | null;
+  state: InspectorLoadState;
+  onClose?: () => void;
+}) {
+  const planStatus = plan === null
+    ? state === "loading"
+      ? "Loading"
+      : state === "empty"
+        ? "No plan"
+        : state === "error"
+          ? "Unavailable"
+          : "Ready"
+    : statusLabel(plan.status, true);
+  const planState: ReturnType<typeof displayState> = plan === null
+    ? state === "loading"
+      ? "active"
+      : state === "error"
+        ? "failure"
+        : "idle"
+    : displayState(plan.status);
+  return (
+    <StudioPanelHeader className="dezin-generation-plan__header gap-3 px-3">
+      <StudioHeaderIdentity className="min-w-0 flex-1">
+        <StudioHeaderCopy
+          title="Build plan"
+          subtitle="Generation progress"
+          titleId="generation-plan-title"
+          headingLevel={2}
+        />
+      </StudioHeaderIdentity>
+      <StudioHeaderActions>
+        <StudioStatusBadge
+          className="dezin-generation-plan__plan-state"
+          data-state={planState}
+          tone={statusTone(planState)}
+          aria-label={plan === null ? `Build plan state: ${planStatus}` : `Plan status: ${planStatus}`}
+        >
+          <i aria-hidden />
+          <span>{planStatus}</span>
+        </StudioStatusBadge>
+        <PlanCloseButton onClose={onClose} />
+      </StudioHeaderActions>
+    </StudioPanelHeader>
+  );
+}
+
 function preferredPlan(plans: readonly GenerationPlan[], preferredPlanId: string | null): GenerationPlan | null {
   if (preferredPlanId !== null) {
     const preferred = plans.find((plan) => plan.id === preferredPlanId);
@@ -542,12 +583,14 @@ export function GenerationPlanInspector({
   projectId,
   preferredPlanId,
   targetLabels,
+  onDetailChange,
   onWorkspaceChanged,
   onClose,
 }: {
   projectId: string;
   preferredPlanId: string | null;
   targetLabels?: GenerationPlanTargetLabels;
+  onDetailChange?: (change: GenerationPlanDetailChange) => void;
   onWorkspaceChanged?: () => void;
   onClose?: () => void;
 }) {
@@ -564,21 +607,26 @@ export function GenerationPlanInspector({
   const actionLock = useRef(false);
   const workspaceResultKey = useRef("");
 
-  const commitDetail = useCallback((next: GenerationPlanDetail) => {
+  const commitDetail = useCallback((
+    next: GenerationPlanDetail,
+    source: GenerationPlanDetailChangeSource,
+  ) => {
     setDetail(next);
     setPlans((current) => current.map((plan) => plan.id === next.plan.id ? next.plan : plan));
     if (immutablePlan(next.plan)) setConnection("settled");
+    onDetailChange?.({ detail: next, source });
     const resultKey = generationPlanResultKey(next);
     const scopedResultKey = resultKey === null ? null : `${projectId}:${resultKey}`;
     if (scopedResultKey !== workspaceResultKey.current) {
       workspaceResultKey.current = scopedResultKey ?? "";
       if (resultKey !== null) onWorkspaceChanged?.();
     }
-  }, [onWorkspaceChanged, projectId]);
+  }, [onDetailChange, onWorkspaceChanged, projectId]);
 
   const refresh = useCallback(async (
     planId: string,
     epoch: number,
+    source: GenerationPlanDetailChangeSource,
   ): Promise<GenerationPlanDetail | null> => {
     if (actionLock.current) return null;
     const mutationEpoch = detailMutationEpoch.current;
@@ -587,7 +635,7 @@ export function GenerationPlanInspector({
     if (epoch !== selectionEpoch.current
       || mutationEpoch !== detailMutationEpoch.current
       || actionLock.current) return null;
-    commitDetail(next);
+    commitDetail(next, source);
     return next;
   }, [api, commitDetail, projectId]);
 
@@ -613,8 +661,9 @@ export function GenerationPlanInspector({
         }
         setSelectedPlanId(selected.id);
         const next = await api.getGenerationPlan(projectId, selected.id);
-        if (epoch !== selectionEpoch.current || next.plan.id !== selected.id) return;
-        commitDetail(next);
+        if (epoch !== selectionEpoch.current) return;
+        if (next.plan.id !== selected.id) throw new Error("Generation Plan identity mismatch");
+        commitDetail(next, "load");
         setConnection(immutablePlan(next.plan) ? "settled" : "connecting");
         setLoadState("ready");
       })
@@ -675,7 +724,7 @@ export function GenerationPlanInspector({
                 item = batched;
               } while (!item.done && ownsSelection());
               if (observedCursor > cursor) {
-                const next = await refresh(streamPlanId, epoch);
+                const next = await refresh(streamPlanId, epoch, "observation");
                 if (next === null || !ownsSelection()) break;
                 cursor = observedCursor;
                 delay = 250;
@@ -719,11 +768,10 @@ export function GenerationPlanInspector({
     actionLock.current = false;
     setBusyAction(null);
     setSelectedPlanId(planId);
-    setDetail(null);
     setLoadState("loading");
     setConnection("connecting");
     setMessage(null);
-    void refresh(planId, epoch)
+    void refresh(planId, epoch, "load")
       .then((next) => {
         if (next !== null) setLoadState("ready");
       })
@@ -755,7 +803,7 @@ export function GenerationPlanInspector({
       if (epoch !== selectionEpoch.current
         || mutationEpoch !== detailMutationEpoch.current
         || next.plan.id !== planId) return;
-      commitDetail(next);
+      commitDetail(next, "retry");
       setConnection("connecting");
     } catch (error) {
       if (epoch === selectionEpoch.current) {
@@ -782,7 +830,7 @@ export function GenerationPlanInspector({
       if (epoch !== selectionEpoch.current
         || mutationEpoch !== detailMutationEpoch.current
         || next.plan.id !== planId) return;
-      commitDetail(next);
+      commitDetail(next, "cancel");
     } catch (error) {
       if (epoch === selectionEpoch.current) {
         setMessage(error instanceof Error ? error.message : "The Generation Plan could not be stopped.");
@@ -795,65 +843,72 @@ export function GenerationPlanInspector({
     }
   }, [api, commitDetail, projectId, selectedPlanId]);
 
-  if (loadState === "loading") {
-    return (
-      <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-label="Generation Plan">
-        <PlanCloseButton onClose={onClose} />
-        <LoaderCircle className="dezin-generation-plan__placeholder-icon motion-safe:animate-spin" aria-hidden />
-        <p role="status">Loading build plan…</p>
-      </section>
-    );
-  }
-  if (loadState === "empty") {
-    return (
-      <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-labelledby="empty-generation-plan-title">
-        <PlanCloseButton onClose={onClose} />
-        <ListChecks className="dezin-generation-plan__placeholder-icon" aria-hidden />
-        <h2 id="empty-generation-plan-title">No build plan yet</h2>
-        <p>Approved generation work will appear here as a durable task sequence.</p>
-      </section>
-    );
-  }
-  if (loadState === "error" || detail === null) {
-    return (
-      <section className="dezin-generation-plan dezin-generation-plan--placeholder" aria-labelledby="unavailable-generation-plan-title">
-        <PlanCloseButton onClose={onClose} />
-        <TriangleAlert className="dezin-generation-plan__placeholder-icon" aria-hidden />
-        <h2 id="unavailable-generation-plan-title">Build plan unavailable</h2>
-        <p role="alert">{message ?? "The Generation Plan could not be loaded."}</p>
-        {plans.length > 1 ? (
-          <PlanHistorySelect plans={plans} value={selectedPlanId ?? ""} onChange={selectPlan} />
-        ) : null}
-        {selectedPlanId !== null ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => selectPlan(selectedPlanId)}
-            aria-label="Retry loading build plan"
-          >
-            <RefreshCw aria-hidden />
-            Try again
-          </Button>
-        ) : null}
-      </section>
-    );
-  }
+  const readyDetail = loadState === "ready"
+    && selectedPlanId !== null
+    && detail?.plan.id === selectedPlanId
+    ? detail
+    : null;
+  const renderedState: InspectorLoadState = loadState === "ready" && readyDetail === null
+    ? "error"
+    : loadState;
   return (
-    <div className="dezin-generation-plan__container">
-      <GenerationPlanPanel
-        projectId={projectId}
-        plans={plans}
-        detail={detail}
-        connection={connection}
-        busyAction={busyAction}
-        targetLabels={targetLabels}
-        onSelectPlan={selectPlan}
-        onRetry={retry}
-        onCancel={cancel}
+    <section className="dezin-generation-plan__container" aria-labelledby="generation-plan-title">
+      <GenerationPlanHeader
+        plan={renderedState === "ready" ? readyDetail?.plan ?? null : null}
+        state={renderedState}
         onClose={onClose}
       />
-      {message ? <p className="dezin-generation-plan__action-error" role="alert">{message}</p> : null}
-    </div>
+      <div className="dezin-generation-plan__body">
+        {renderedState === "loading" ? (
+          <div className="dezin-generation-plan dezin-generation-plan--placeholder">
+            <LoaderCircle className="dezin-generation-plan__placeholder-icon motion-safe:animate-spin" aria-hidden />
+            <p role="status">Loading build plan…</p>
+          </div>
+        ) : renderedState === "empty" ? (
+          <div className="dezin-generation-plan dezin-generation-plan--placeholder">
+            <ListChecks className="dezin-generation-plan__placeholder-icon" aria-hidden />
+            <h2>No build plan yet</h2>
+            <p>Approved generation work will appear here as a durable task sequence.</p>
+          </div>
+        ) : renderedState === "error" || readyDetail === null ? (
+          <div className="dezin-generation-plan dezin-generation-plan--placeholder">
+            <TriangleAlert className="dezin-generation-plan__placeholder-icon" aria-hidden />
+            <h2>Build plan unavailable</h2>
+            <p role="alert">{message ?? "The Generation Plan could not be loaded."}</p>
+            {plans.length > 1 ? (
+              <PlanHistorySelect plans={plans} value={selectedPlanId ?? ""} onChange={selectPlan} />
+            ) : null}
+            {selectedPlanId !== null ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => selectPlan(selectedPlanId)}
+                aria-label="Retry loading build plan"
+              >
+                <RefreshCw aria-hidden />
+                Try again
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <GenerationPlanPanel
+            projectId={projectId}
+            plans={plans}
+            detail={readyDetail}
+            connection={connection}
+            busyAction={busyAction}
+            targetLabels={targetLabels}
+            onSelectPlan={selectPlan}
+            onRetry={retry}
+            onCancel={cancel}
+            showHeader={false}
+          />
+        )}
+        {renderedState === "ready" && message ? (
+          <p className="dezin-generation-plan__action-error" role="alert">{message}</p>
+        ) : null}
+      </div>
+    </section>
   );
 }

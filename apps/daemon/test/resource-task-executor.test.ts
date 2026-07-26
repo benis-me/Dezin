@@ -26,6 +26,10 @@ const PLAN_ID = "plan-resource-executor";
 const TASK_ID = "task-resource-executor";
 const RESOURCE_ID = "resource-generated-hero";
 const DISPATCH_CONTEXT_PACK_ID = `context-pack-${"a".repeat(64)}`;
+const RESOURCE_INSTRUCTIONS = [
+  "Generate exactly three evidence-backed hero directions.",
+  "Compare cinematic, editorial, and cobalt-grid treatments before recommending one.",
+].join(" ");
 
 function taskFixture(): GenerationTask {
   return {
@@ -46,6 +50,7 @@ function taskFixture(): GenerationTask {
           resourceId: RESOURCE_ID,
           kind: "asset",
           title: "Generated hero",
+          instructions: RESOURCE_INSTRUCTIONS,
           revisionPolicy: { kind: "generate" },
           dispatchContextPackId: DISPATCH_CONTEXT_PACK_ID,
         },
@@ -56,6 +61,7 @@ function taskFixture(): GenerationTask {
             operation: "revise",
             kind: "asset",
             title: "Generated hero",
+            instructions: RESOURCE_INSTRUCTIONS,
           },
         },
         capabilityDescriptors: [{ id: "image-generation", kind: "image", required: true }],
@@ -267,6 +273,23 @@ test("selects the exact frozen adapter while the executor authors durable Resour
   const result = await executor.execute(claim, new AbortController().signal);
 
   assert.equal(adapterInputs.length, 1);
+  assert.equal(
+    (adapterInputs[0] as { taskTimeoutMs?: number }).taskTimeoutMs,
+    claim.task.resourceLimits.timeoutMs,
+    "the adapter receives the exact immutable outer Task timeout instead of relying only on its AbortSignal",
+  );
+  assert.equal(
+    (adapterInputs[0] as { maxOutputBytes?: number }).maxOutputBytes,
+    claim.task.resourceLimits.maxOutputBytes,
+    "the adapter receives the exact immutable output budget instead of silently applying a smaller global default",
+  );
+  assert.equal(
+    (adapterInputs[0] as {
+      brief?: { targetInstructions?: { instructions?: string } };
+    }).brief?.targetInstructions?.instructions,
+    RESOURCE_INSTRUCTIONS,
+    "the exact approved Resource leaf brief reaches the generation adapter boundary",
+  );
   assert.equal(stageInputs.length, 1);
   assert.deepEqual(stageInputs[0]?.adapter, {
     id: "dezin.resource-adapter.asset",
@@ -361,6 +384,7 @@ test("parses only the exact frozen v2 adapter and Resource operation contract", 
       resourceId: RESOURCE_ID,
       kind: "asset",
       title: "Generated hero",
+      instructions: RESOURCE_INSTRUCTIONS,
       revisionPolicy: { kind: "generate" },
       dispatchContextPackId: DISPATCH_CONTEXT_PACK_ID,
     },
@@ -371,10 +395,64 @@ test("parses only the exact frozen v2 adapter and Resource operation contract", 
         operation: "revise",
         kind: "asset",
         title: "Generated hero",
+        instructions: RESOURCE_INSTRUCTIONS,
       },
     },
     capabilityDescriptors: [{ id: "image-generation", kind: "image", required: true }],
   });
+});
+
+test("rejects substituted or oversized Resource instructions while reading exact legacy pairs", () => {
+  const base = taskFixture();
+  const payload = structuredClone(base.payload) as Record<string, unknown>;
+  const operation = payload.operation as Record<string, unknown>;
+  const brief = payload.brief as Record<string, unknown>;
+  const targetInstructions = brief.targetInstructions as Record<string, unknown>;
+
+  assert.throws(
+    () => parseResourceGenerationTaskPayloadV2({
+      ...base,
+      payload: {
+        ...payload,
+        brief: {
+          ...brief,
+          targetInstructions: { ...targetInstructions, instructions: "Substituted brief" },
+        },
+      },
+    }),
+    (error) => error instanceof ResourceTaskContractError
+      && error.code === "RESOURCE_TASK_PAYLOAD_INVALID"
+      && /target instructions do not match/i.test(error.message),
+  );
+  const oversized = "x".repeat(2_001);
+  assert.throws(
+    () => parseResourceGenerationTaskPayloadV2({
+      ...base,
+      payload: {
+        ...payload,
+        operation: { ...operation, instructions: oversized },
+        brief: {
+          ...brief,
+          targetInstructions: { ...targetInstructions, instructions: oversized },
+        },
+      },
+    }),
+    (error) => error instanceof ResourceTaskContractError
+      && error.code === "RESOURCE_TASK_PAYLOAD_INVALID",
+  );
+
+  const { instructions: _operationInstructions, ...legacyOperation } = operation;
+  const { instructions: _targetInstructions, ...legacyTargetInstructions } = targetInstructions;
+  const legacy = parseResourceGenerationTaskPayloadV2({
+    ...base,
+    payload: {
+      ...payload,
+      operation: legacyOperation,
+      brief: { ...brief, targetInstructions: legacyTargetInstructions },
+    },
+  });
+  assert.equal(legacy.operation.instructions, undefined);
+  assert.equal(legacy.brief.targetInstructions.instructions, undefined);
 });
 
 test("preserves legacy v2 payloads without Agent and bounds every present frozen Agent identity", () => {

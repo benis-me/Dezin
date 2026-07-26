@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +20,7 @@ import type {
   SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
 import { Store } from "../../../packages/core/src/index.ts";
+import { composeWorkspaceAgentConversation } from "../../../packages/core/src/workspace-agent-conversation.ts";
 import { BlockedContextError } from "../src/context/context-types.ts";
 import { createWorkspaceContextPackRepository } from "../src/context/context-pack-store.ts";
 import { createProductionScopedAgentTaskQueue } from "../src/orchestration/production-scoped-agent-task-queue.ts";
@@ -102,6 +110,25 @@ function plannerResponse(overrides: Record<string, unknown> = {}): string {
     assumptions: ["The current design kernel remains authoritative."],
     ...overrides,
   });
+}
+
+function codexPlannerResponse(body: Record<string, unknown>): string {
+  return [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-workspace-codex" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "message-workspace-codex",
+        type: "agent_message",
+        text: JSON.stringify(body),
+      },
+    }),
+    JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 10 },
+    }),
+  ].join("\n");
 }
 
 test("production Workspace Agent resolves immutable context in a scratch directory and persists only a draft Proposal", async (t) => {
@@ -225,6 +252,7 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
       operation: "generate",
       kind: "research",
       title: "Atlas audience and Kyoto editorial research",
+      instructions: "Find decision-grade audience evidence and Kyoto editorial references for the planned Home and City Guide.",
     }],
     relations: [
       { source: "Home", target: "City Guide", kind: "prototype" },
@@ -381,6 +409,7 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
           operation: operation.operation,
           kind: operation.kind,
           title: operation.title,
+          instructions: operation.instructions,
           revisionPolicy: operation.revisionPolicy,
         }))
       : [],
@@ -388,6 +417,7 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
       operation: "create",
       kind: "research",
       title: semanticIntent.resources[0]!.title,
+      instructions: semanticIntent.resources[0]!.instructions,
       revisionPolicy: { kind: "generate" },
     }],
   );
@@ -828,6 +858,7 @@ test("production Workspace Agent keeps new root placements clear of occupied can
         operation: "generate",
         kind: "moodboard",
         title: "New visual direction",
+        instructions: "Generate a coherent visual reference set for the new Page and shared Action Component.",
       }],
       relations: [{ source: "New Page", target: "New Action", kind: "uses" }],
       rationale: "Add a coherent Page, shared Component, and visual direction without covering existing work.",
@@ -997,6 +1028,153 @@ test("production Workspace Agent pins an exact existing Component without regene
     : undefined;
   assert.ok(dependency?.kind === "component-instance");
   assert.equal(dependency.componentRevisionId, componentRevision.id);
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  assert.equal(compiled.tasks.filter((task) => task.kind === "page").length, 1);
+  assert.equal(compiled.tasks.filter((task) => task.kind === "component").length, 0);
+});
+
+test("production Workspace Agent attaches a reused Moodboard only to generated Artifacts so mixed reuse compiles", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-mixed-reuse-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent mixed reuse", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const componentMutation = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [{
+      id: "add-mixed-reuse-component",
+      type: "add-node",
+      node: {
+        id: "mixed-reuse-component-node",
+        kind: "component",
+        name: "Existing Navigation",
+        artifactId: "mixed-reuse-component",
+        createIdentity: { initialTrackId: "mixed-reuse-component-track" },
+      },
+    }],
+  });
+  const component = store.workspace.getArtifact("mixed-reuse-component");
+  assert.ok(component);
+  const source = seedArtifactSource({
+    root,
+    projectId: project.id,
+    sourceRoot: component.sourceRoot,
+    designNodeId: "mixed-reuse-component-root",
+  });
+  const componentRevision = store.workspace.createArtifactRevision({
+    artifactId: component.id,
+    trackId: "mixed-reuse-component-track",
+    parentRevisionId: null,
+    sourceCommitHash: source.commitHash,
+    sourceTreeHash: source.treeHash,
+    kernelRevisionId: foundation.activeKernelRevisionId,
+    renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+    quality: { state: "passed", score: 100, findings: [] },
+    contextPackHash: null,
+    dependencies: [],
+    resourcePins: [],
+  });
+  store.workspace.publishArtifactRevision(componentRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentMutation.snapshot.id,
+  });
+  const afterComponent = store.workspace.ensureWorkspaceRecord(project.id);
+  const moodboard = store.workspace.createResourceForProject(project.id, {
+    kind: "moodboard",
+    title: "Existing Visual Direction",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: afterComponent.graphRevision,
+    expectedSnapshotId: afterComponent.activeSnapshotId,
+  });
+  const moodboardRevision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    moodboard.resource.id,
+    {
+      revisionId: "mixed-reuse-moodboard-revision",
+      parentRevisionId: null,
+      manifestPath: "resource-revisions/mixed-reuse-moodboard-revision/manifest.json",
+      summary: "Published visual direction",
+      metadata: { mimeType: "application/json" },
+      checksum: "b".repeat(64),
+      provenance: { source: "test" },
+    },
+  );
+  store.workspace.publishResourceRevisionForProject(
+    project.id,
+    moodboard.resource.id,
+    moodboardRevision.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: moodboard.snapshot.id,
+      reason: "Seed exact immutable Moodboard",
+    },
+  );
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const moodboardNode = store.workspace.getCompactBundleByProjectId(project.id)?.graph.nodes.find(
+    (node) => node.kind === "resource" && node.resourceId === moodboard.resource.id,
+  );
+  assert.ok(moodboardNode);
+  const stdout = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: JSON.stringify({
+      pages: [{
+        existingNodeId: null,
+        operation: "generate",
+        name: "Checkout",
+        instructions: "A complete checkout Page using the existing navigation and visual direction.",
+      }],
+      components: [{
+        existingNodeId: "mixed-reuse-component-node",
+        operation: "reuse",
+        name: "Existing Navigation",
+        instructions: "Reuse the exact published navigation Component.",
+      }],
+      resources: [{
+        existingNodeId: moodboardNode.id,
+        operation: "reuse",
+        kind: "moodboard",
+        title: moodboard.resource.title,
+        instructions: "Reuse this exact immutable visual direction without generating or altering its assets.",
+      }],
+      relations: [{ source: "Checkout", target: "Existing Navigation", kind: "uses" }],
+      rationale: "Generate one Page from exact existing Component and Moodboard context.",
+      assumptions: [],
+    }),
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({ stdout, stderr: "", exitCode: 0 }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+    turnId: "turn-00000000-0000-4000-8000-000000000022",
+    message: "Create Checkout using the exact existing Navigation and Moodboard.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  const generatedArtifactId = result.proposal.generation.artifactPlans[0]?.artifactId;
+  assert.ok(generatedArtifactId);
+  assert.deepEqual(
+    result.proposal.generation.dependencyPlans
+      .filter((dependency) => dependency.kind === "resource")
+      .map((dependency) => dependency.ownerArtifactId),
+    [generatedArtifactId],
+  );
   const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
   assert.ok(approved.plan);
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
@@ -1230,6 +1408,7 @@ test("production Workspace Agent never resolves a CodeBuddy Resource by kind and
         operation: "reuse",
         kind: existing.resource.kind,
         title: existing.resource.title,
+        instructions: "Reuse only the exact current Moodboard identity; never substitute by matching title or kind.",
       }],
       relations: [],
       rationale: "Attempt to infer a Resource identity from its title.",
@@ -1253,6 +1432,113 @@ test("production Workspace Agent never resolves a CodeBuddy Resource by kind and
     graphRevision: workspace.graphRevision,
   }, new AbortController().signal), /reuse.*existingNodeId/i);
   assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("production Workspace Agent generates the first Revision into an exact empty Resource shell with planned prototype history", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-empty-resource-shell-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent empty Resource shell", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const graphWithPrototype = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [
+      {
+        id: "add-empty-shell-source-page",
+        type: "add-node",
+        node: {
+          id: "empty-shell-source-page-node",
+          kind: "page",
+          name: "Source Page",
+          artifactId: "empty-shell-source-page-artifact",
+          createIdentity: { initialTrackId: "empty-shell-source-page-track" },
+        },
+      },
+      {
+        id: "add-empty-shell-target-page",
+        type: "add-node",
+        node: {
+          id: "empty-shell-target-page-node",
+          kind: "page",
+          name: "Target Page",
+          artifactId: "empty-shell-target-page-artifact",
+          createIdentity: { initialTrackId: "empty-shell-target-page-track" },
+        },
+      },
+      {
+        id: "add-empty-shell-planned-prototype",
+        type: "add-edge",
+        edge: {
+          id: "empty-shell-planned-prototype-edge",
+          workspaceId: foundation.id,
+          kind: "prototype",
+          sourceNodeId: "empty-shell-source-page-node",
+          targetNodeId: "empty-shell-target-page-node",
+        },
+      },
+    ],
+  });
+  const existing = store.workspace.createResourceForProject(project.id, {
+    kind: "research",
+    title: "KITE Film Festival Research",
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: graphWithPrototype.graph.revision,
+    expectedSnapshotId: graphWithPrototype.snapshot.id,
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse({
+        pages: [],
+        components: [],
+        resources: [{
+          existingNodeId: existing.node.id,
+          operation: "generate",
+          kind: "research",
+          title: existing.resource.title,
+          instructions: "Complete decision-grade film-festival evidence in this exact empty Research shell.",
+        }],
+        relations: [],
+        rationale: "Complete the exact empty Research shell left by the prior interrupted generation.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000047",
+    message: "Retry the failed Research generation in place.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  if (result.kind !== "proposal") return;
+  assert.deepEqual(result.proposal.generation.kind === "workspace-generation"
+    ? result.proposal.generation.resourceOperations.map((operation) => ({
+        operation: operation.operation,
+        nodeId: operation.nodeId,
+        resourceId: operation.resourceId,
+      }))
+    : [], [{
+    operation: "create",
+    nodeId: existing.node.id,
+    resourceId: existing.resource.id,
+  }]);
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  assert.equal(compiled.tasks.filter((task) => task.target.type === "resource").length, 1);
 });
 
 test("production Workspace Agent rejects existing Research reuse without an exact direction selection", async (t) => {
@@ -1313,6 +1599,7 @@ test("production Workspace Agent rejects existing Research reuse without an exac
         operation: "reuse",
         kind: "research",
         title: research.resource.title,
+        instructions: "Attempt to reuse this Research only if an exact immutable direction selection is present.",
       }],
       relations: [],
       rationale: "Attempt to reuse Research without selecting one immutable direction.",
@@ -1960,7 +2247,7 @@ test("production scoped Artifact Agent bounds selection indexing across the comp
   assert.equal(queued, 0);
 });
 
-test("production Workspace Agent runs a selected Codex planner in empty scratch and deterministically compiles its semantic intent", async (t) => {
+test("production Workspace Agent constrains Codex semantic identity to current graph node ids", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-provider-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
@@ -1971,10 +2258,27 @@ test("production Workspace Agent runs a selected Codex planner in empty scratch 
     apiBaseUrl: "https://provider.example.test",
   });
   const project = store.createProject({ name: "Workspace Agent provider boundary", mode: "standard" });
+  const initial = store.workspace.ensureWorkspaceRecord(project.id);
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: initial.graphRevision,
+    expectedSnapshotId: initial.activeSnapshotId,
+    commands: [{
+      id: "add-existing-page",
+      type: "add-node",
+      node: {
+        id: "existing-page-node",
+        kind: "page",
+        name: "Existing Page",
+        artifactId: "existing-page-artifact",
+        createIdentity: { initialTrackId: "existing-page-track" },
+      },
+    }],
+  });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   const semanticIntent = {
     pages: [{
       existingNodeId: null,
+      operation: "generate",
       name: "Checkout",
       instructions: "Focused checkout with realistic cart, address, payment, validation, loading, failure, and success states.",
     }],
@@ -1984,9 +2288,17 @@ test("production Workspace Agent runs a selected Codex planner in empty scratch 
     rationale: "Create one coherent checkout Page while preserving the immutable Design Kernel.",
     assumptions: ["The current product catalog remains available."],
   };
-  let scratchWasEmptyAtSpawn = false;
+  let scratchContainedOnlySchema = false;
+  let observedPlannerSchema: Record<string, unknown> | undefined;
   const spawner = new RecordingSpawner(async (input) => {
-    scratchWasEmptyAtSpawn = existsSync(input.cwd) && readdirSync(input.cwd).length === 0;
+    const schemaArgumentIndex = input.args.indexOf("--output-schema");
+    assert.notEqual(schemaArgumentIndex, -1, "Codex Workspace Planner must receive a final-output schema");
+    const schemaPath = input.args[schemaArgumentIndex + 1];
+    assert.equal(typeof schemaPath, "string");
+    scratchContainedOnlySchema = existsSync(input.cwd)
+      && readdirSync(input.cwd).length === 1
+      && readdirSync(input.cwd)[0] === "dezin-final-output.schema.json";
+    observedPlannerSchema = JSON.parse(readFileSync(schemaPath!, "utf8")) as Record<string, unknown>;
     return {
       stdout: [
         JSON.stringify({ type: "thread.started", thread_id: "thread-workspace-codex" }),
@@ -2037,7 +2349,7 @@ test("production Workspace Agent runs a selected Codex planner in empty scratch 
   const spawned = spawner.inputs[0]!;
   assert.equal(spawned.command, "/usr/bin/sandbox-exec");
   assert.match(spawned.cwd, /workspace-agent-tmp\/turn-/);
-  assert.equal(scratchWasEmptyAtSpawn, true);
+  assert.equal(scratchContainedOnlySchema, true);
   assert.ok(spawned.args.includes("--ephemeral"));
   assert.equal(spawned.args[0], "-p");
   assert.match(spawned.args[1] ?? "", /\(deny file-read-data \(subpath "\/Users"\)\)/);
@@ -2048,10 +2360,47 @@ test("production Workspace Agent runs a selected Codex planner in empty scratch 
   assert.ok(spawned.args.includes("--json"));
   assert.match(spawned.stdin, /compact semantic Workspace intent/i);
   assert.match(spawned.stdin, /Plan a checkout flow/);
+  assert.match(spawned.stdin, /"currentWorkspaceNodes":\[/);
+  assert.match(
+    spawned.stdin,
+    /"id":"existing-page-node","kind":"page","name":"Existing Page"/,
+  );
   assert.equal(spawned.env?.OPENAI_API_KEY, "selected-openai-key");
   assert.equal(spawned.env?.OPENAI_BASE_URL, "https://provider.example.test");
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+  const schemaProperties = observedPlannerSchema?.properties as Record<string, unknown> | undefined;
+  const pagesSchema = schemaProperties?.pages as Record<string, unknown> | undefined;
+  const pageItemSchema = pagesSchema?.items as Record<string, unknown> | undefined;
+  const pageItemProperties = pageItemSchema?.properties as Record<string, unknown> | undefined;
+  const resourcesSchema = schemaProperties?.resources as Record<string, unknown> | undefined;
+  const resourceItemSchema = resourcesSchema?.items as Record<string, unknown> | undefined;
+  const resourceItemProperties = resourceItemSchema?.properties as Record<string, unknown> | undefined;
+  assert.equal(Object.hasOwn(pagesSchema ?? {}, "minItems"), false);
+  assert.equal(Object.hasOwn(pageItemProperties ?? {}, "requestSlotId"), false);
+  assert.deepEqual(
+    (pageItemProperties?.existingNodeId as Record<string, unknown> | undefined)?.enum,
+    [null, "existing-page-node"],
+  );
+  assert.deepEqual(
+    (pageItemProperties?.existingNodeId as Record<string, unknown> | undefined)?.type,
+    ["string", "null"],
+  );
+  assert.equal(
+    ((pageItemProperties?.existingNodeId as Record<string, unknown> | undefined)?.enum as unknown[])
+      .includes("existing-page-artifact"),
+    false,
+  );
+  assert.ok(
+    (resourceItemSchema?.required as unknown[] | undefined)?.includes("instructions"),
+    "Codex Resource intent schema requires an implementation-grade leaf brief",
+  );
+  assert.deepEqual(resourceItemProperties?.instructions, {
+    type: "string",
+    minLength: 1,
+    maxLength: 2_000,
+  });
+  assert.equal(observedPlannerSchema?.additionalProperties, false);
   assert.equal(existsSync(spawned.cwd), false, "the per-turn planner scratch is removed after terminalization");
   assert.deepEqual(
     result.kind === "proposal"
@@ -2062,6 +2411,434 @@ test("production Workspace Agent runs a selected Codex planner in empty scratch 
     [{ kind: "page", name: "Checkout" }],
   );
   assert.equal(store.workspace.listProposals(project.id).length, 1);
+});
+
+test("production Workspace Agent rejects a compressed Codex response for an explicit Page matrix", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-matrix-underfill-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE explicit matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const original = "3 directions: cinematic black/red, warm paper/ink, electric cobalt grid. Each has Home, Film, Schedule, Checkout.";
+  const message = composeWorkspaceAgentConversation(
+    "Retry all requested Pages as new items and preserve every direction.",
+    original,
+  );
+  const compressedIntent = {
+    pages: [
+      {
+        existingNodeId: null,
+        operation: "generate",
+        requestSlotId: "direction-1-page-1",
+        name: "KITE Overview",
+        instructions: "One overview that summarizes all requested routes.",
+      },
+      {
+        existingNodeId: null,
+        operation: "generate",
+        requestSlotId: "direction-1-page-2",
+        name: "KITE Direction A",
+        instructions: "One page that compresses the complete cinematic direction.",
+      },
+      {
+        existingNodeId: null,
+        operation: "generate",
+        requestSlotId: "direction-1-page-3",
+        name: "KITE Direction B",
+        instructions: "One page that compresses the complete paper direction.",
+      },
+      {
+        existingNodeId: null,
+        operation: "generate",
+        requestSlotId: "direction-1-page-4",
+        name: "KITE Direction C",
+        instructions: "One page that compresses the complete cobalt direction.",
+      },
+    ],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Compress the request into four Pages.",
+    assumptions: [],
+  };
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse(compressedIntent),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  await assert.rejects(orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000044",
+    message,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal), /explicit Page matrix requires exactly 12 Page intents/i);
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("production Workspace Agent does not inherit a prior Page matrix for an independent current request", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-independent-intent-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Independent settings request", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const message = composeWorkspaceAgentConversation(
+    "Create a settings page.",
+    "3 directions: cinematic, paper, cobalt. Each has Home, Film, Schedule, Checkout.",
+  );
+  const observedSchemas: Record<string, unknown>[] = [];
+  let observedPlannerInput = "";
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      observedPlannerInput = input.stdin;
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      return {
+        stdout: codexPlannerResponse({
+          pages: [{
+            existingNodeId: null,
+            operation: "generate",
+            name: "Settings",
+            instructions: "A complete settings Page with profile, notification, privacy, billing, and account states.",
+          }],
+          components: [],
+          resources: [],
+          relations: [],
+          rationale: "Create only the newly requested Settings Page.",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000048",
+    message,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  const plans = result.proposal.generation.kind === "workspace-generation"
+    ? result.proposal.generation.artifactPlans
+    : [];
+  assert.deepEqual(plans.map((plan) => plan.name), ["Settings"]);
+  assert.doesNotMatch(observedPlannerInput, /3 directions: cinematic/);
+  assert.match(observedPlannerInput, /"priorUncommittedRequests":\[\]/);
+  assert.match(observedPlannerInput, /"request":"Create a settings page\."/);
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  const pageItem = pagesSchema.items as Record<string, unknown>;
+  const pageProperties = pageItem.properties as Record<string, unknown>;
+  assert.equal(Object.hasOwn(pagesSchema, "minItems"), false);
+  assert.equal(Object.hasOwn(pageProperties, "requestSlotId"), false);
+});
+
+test("production Workspace Agent rejects duplicate coverage inside a full-size explicit Page matrix", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-matrix-duplicate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE duplicate matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const message = composeWorkspaceAgentConversation(
+    "Retry all requested Pages as new items.",
+    "3 directions: cinematic black/red, warm paper/ink, electric cobalt grid. Each has Home, Film, Schedule, Checkout.",
+  );
+  const slotIds = [
+    "direction-1-page-1",
+    "direction-1-page-2",
+    "direction-1-page-3",
+    "direction-1-page-4",
+    "direction-2-page-1",
+    "direction-2-page-2",
+    "direction-2-page-3",
+    "direction-2-page-4",
+    "direction-3-page-1",
+    "direction-3-page-2",
+    "direction-3-page-3",
+    "direction-1-page-1",
+  ];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse({
+        pages: slotIds.map((requestSlotId, index) => ({
+          existingNodeId: null,
+          operation: "generate",
+          requestSlotId,
+          name: `KITE Page ${index + 1}`,
+          instructions: `Independent festival Page ${index + 1} with realistic content and complete states.`,
+        })),
+        components: [],
+        resources: [],
+        relations: [],
+        rationale: "Incorrectly repeat one matrix slot.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  await assert.rejects(orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000046",
+    message,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal), /explicit Page matrix requestSlotId direction-1-page-1 is duplicated/i);
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("production Workspace Agent preserves every explicit Page matrix cell as an independent Codex plan", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-matrix-complete-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE complete matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const stalePageNodeIds = [
+    "stale-kite-overview-hub-node",
+    "stale-kite-direction-a-node",
+    "stale-kite-direction-b-node",
+    "stale-kite-direction-c-node",
+  ];
+  const stalePages = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: stalePageNodeIds.map((nodeId, index) => ({
+      id: `add-${nodeId}`,
+      type: "add-node" as const,
+      node: {
+        id: nodeId,
+        kind: "page" as const,
+        name: ["KITE Overview Hub", "KITE Direction A", "KITE Direction B", "KITE Direction C"][index]!,
+        artifactId: `stale-kite-page-artifact-${index}`,
+        createIdentity: { initialTrackId: `stale-kite-page-track-${index}` },
+      },
+    })),
+  });
+  const original = [
+    "Rebuild the KITE film festival design workspace as exactly three distinct visual directions: Cinematic Black/Red, Warm Paper/Ink, and Electric Cobalt Grid.",
+    "Each direction must contain exactly four independent Page artifacts named Home, Film, Schedule, and Checkout, for exactly 12 Pages total.",
+    "Archive KITE Overview Hub and KITE Direction A/B/C; do not create or retain any Overview or Hub Page.",
+    "Regenerate every unpublished shared Component for navigation/direction switching, hero, film cards, schedule rows, checkout controls, revision navigation, and the shared shell.",
+    "Revise the existing Research into decision-grade evidence tied to these three directions.",
+    "Revise the existing Moodboard with exactly three high-quality generated image assets, one actionable visual reference per direction.",
+    "Keep the shared Component group, explicit Home → Film → Schedule → Checkout prototype links within each direction, high-fidelity desktop and mobile previews, immutable revisions, Versions, Viewer, and Present readiness.",
+  ].join(" ");
+  const message = composeWorkspaceAgentConversation(
+    "Retry all requested Pages as new items and preserve every direction.",
+    original,
+  );
+  const cells = [
+    ["direction-1-page-1", "Cinematic Black/Red", "Home"],
+    ["direction-1-page-2", "Cinematic Black/Red", "Film"],
+    ["direction-1-page-3", "Cinematic Black/Red", "Schedule"],
+    ["direction-1-page-4", "Cinematic Black/Red", "Checkout"],
+    ["direction-2-page-1", "Warm Paper/Ink", "Home"],
+    ["direction-2-page-2", "Warm Paper/Ink", "Film"],
+    ["direction-2-page-3", "Warm Paper/Ink", "Schedule"],
+    ["direction-2-page-4", "Warm Paper/Ink", "Checkout"],
+    ["direction-3-page-1", "Electric Cobalt Grid", "Home"],
+    ["direction-3-page-2", "Electric Cobalt Grid", "Film"],
+    ["direction-3-page-3", "Electric Cobalt Grid", "Schedule"],
+    ["direction-3-page-4", "Electric Cobalt Grid", "Checkout"],
+  ] as const;
+  const completeIntent = {
+    pages: cells.map(([requestSlotId, direction, page]) => ({
+      existingNodeId: null,
+      operation: "generate",
+      requestSlotId,
+      name: `${direction} — ${page}`,
+      instructions: `Design the ${page} experience with realistic content and complete states.`,
+    })),
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Preserve all twelve explicitly requested Page cells.",
+    assumptions: [],
+  };
+  const observedSchemas: Record<string, unknown>[] = [];
+  const observedTimeouts: number[] = [];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      observedTimeouts.push(input.timeoutMs ?? 0);
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      return {
+        stdout: codexPlannerResponse(completeIntent),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000045",
+    message,
+    explicitContext: [],
+    graphRevision: stalePages.graph.revision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  const plans = result.proposal.generation.kind === "workspace-generation"
+    ? result.proposal.generation.artifactPlans
+    : [];
+  assert.equal(plans.length, 12);
+  for (const [, direction, page] of cells) {
+    const plan = plans.find((candidate) => candidate.name === `${direction} — ${page}`);
+    assert.ok(plan, `missing independent Page plan for ${direction} / ${page}`);
+    assert.match(plan.instructions ?? "", new RegExp(`Direction: ${direction.replace("/", "\\/")}`));
+    assert.match(plan.instructions ?? "", new RegExp(`Page: ${page}`));
+  }
+  assert.equal(observedSchemas.length, 1);
+  assert.deepEqual(observedTimeouts, [6 * 60 * 1_000]);
+  assert.deepEqual(
+    result.proposal.operations
+      .filter((operation) => operation.type === "archive-node")
+      .map((operation) => operation.nodeId)
+      .sort(),
+    [...stalePageNodeIds].sort(),
+    "an exact replacement matrix removes unrelated unpublished Page shells",
+  );
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  assert.equal(pagesSchema.minItems, 12);
+  assert.equal(pagesSchema.maxItems, 12);
+  const pageItem = pagesSchema.items as Record<string, unknown>;
+  const pageProperties = pageItem.properties as Record<string, Record<string, unknown>>;
+  assert.ok(
+    (pageItem.required as unknown[] | undefined)?.includes("requestSlotId"),
+    "the exact matrix schema requires every Page to claim one requestSlotId",
+  );
+  assert.deepEqual(pageProperties.requestSlotId!.enum, cells.map(([slotId]) => slotId));
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.equal(
+    approved.graph.nodes.some((node) => stalePageNodeIds.includes(node.id)),
+    false,
+  );
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  assert.equal(compiled.tasks.filter((task) => task.kind === "page").length, 12);
+});
+
+test("production Workspace Agent freezes a Chinese direction-by-Page request as an exact matrix", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-chinese-matrix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "中文页面矩阵", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const message = [
+    "请生成三个方向，分别为：柔和极简、暖纸墨色、电光钴蓝网格。",
+    "每个方向包含4个独立页面，分别是：首页、影片、日程、结账页，共12个页面。",
+  ].join("\n");
+  const cells = [
+    ["direction-1-page-1", "柔和极简", "首页"],
+    ["direction-1-page-2", "柔和极简", "影片"],
+    ["direction-1-page-3", "柔和极简", "日程"],
+    ["direction-1-page-4", "柔和极简", "结账页"],
+    ["direction-2-page-1", "暖纸墨色", "首页"],
+    ["direction-2-page-2", "暖纸墨色", "影片"],
+    ["direction-2-page-3", "暖纸墨色", "日程"],
+    ["direction-2-page-4", "暖纸墨色", "结账页"],
+    ["direction-3-page-1", "电光钴蓝网格", "首页"],
+    ["direction-3-page-2", "电光钴蓝网格", "影片"],
+    ["direction-3-page-3", "电光钴蓝网格", "日程"],
+    ["direction-3-page-4", "电光钴蓝网格", "结账页"],
+  ] as const;
+  const observedSchemas: Record<string, unknown>[] = [];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      return {
+        stdout: codexPlannerResponse({
+          pages: cells.map(([requestSlotId, direction, page]) => ({
+            existingNodeId: null,
+            operation: "generate",
+            requestSlotId,
+            name: `${direction} — ${page}`,
+            instructions: `为${page}设计完整内容、状态与响应式层级。`,
+          })),
+          components: [],
+          resources: [],
+          relations: [],
+          rationale: "完整保留三个方向各四个页面。",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000047",
+    message,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  const plans = result.proposal.generation.kind === "workspace-generation"
+    ? result.proposal.generation.artifactPlans
+    : [];
+  assert.equal(plans.length, 12);
+  for (const [, direction, page] of cells) {
+    const plan = plans.find((candidate) => candidate.name === `${direction} — ${page}`);
+    assert.ok(plan, `缺少独立页面计划 ${direction} / ${page}`);
+    assert.match(plan.instructions ?? "", new RegExp(`Direction: ${direction}`));
+    assert.match(plan.instructions ?? "", new RegExp(`Page: ${page}`));
+  }
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  assert.equal(pagesSchema.minItems, 12);
+  assert.equal(pagesSchema.maxItems, 12);
 });
 
 test("production Workspace Agent compiles a Cursor component-only intent into a legal Component shelf plan", async (t) => {
@@ -2186,6 +2963,10 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
       operation: "generate",
       kind: "research",
       title: "Mobile commerce checkout research",
+      instructions: [
+        "Compare three checkout directions: guided single-page, progressive steps, and express wallet.",
+        "Return evidence-backed tradeoffs, mobile failure/recovery patterns, and one explicit recommendation.",
+      ].join(" "),
     }],
     relations: [],
     rationale: "Research the requested problem before introducing any Page or Component.",
@@ -2219,6 +3000,34 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
   }, new AbortController().signal);
 
   assert.equal(result.kind, "proposal");
+  const missingInstructions = {
+    ...semanticIntent,
+    resources: semanticIntent.resources.map(({ instructions: _instructions, ...resource }) => resource),
+  };
+  const invalidOrchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_GEMINI_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: JSON.stringify(missingInstructions),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+  await assert.rejects(
+    invalidOrchestrator.turn({
+      scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+      intent: "plan",
+      agent: { providerId: "gemini", command: "gemini", model: "gemini-2.5-pro" },
+      turnId: "turn-00000000-0000-4000-8000-000000000048",
+      message: "Retry Research without dropping its concrete evidence brief.",
+      explicitContext: [],
+      graphRevision: workspace.graphRevision,
+    }, new AbortController().signal),
+    /Resource.*missing required field instructions/i,
+  );
   const resourceNode = result.proposal.operations.flatMap((operation) => (
     operation.type === "add-node" && operation.node.kind === "resource" ? [operation.node] : []
   ))[0]!;
@@ -2244,6 +3053,7 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
             operation: operation.operation,
             kind: operation.kind,
             title: operation.title,
+            instructions: operation.instructions,
             revisionPolicy: operation.revisionPolicy,
           })),
         }
@@ -2254,6 +3064,7 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
         operation: "create",
         kind: "research",
         title: semanticIntent.resources[0]!.title,
+        instructions: semanticIntent.resources[0]!.instructions,
         revisionPolicy: { kind: "generate" },
       }],
     },
@@ -2263,6 +3074,13 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
   assert.equal(compiled.plan.status, "queued");
   assert.equal(compiled.tasks.filter((task) => task.kind === "resource").length, 1);
+  const resourceTask = compiled.tasks.find((task) => task.kind === "resource");
+  assert.ok(resourceTask);
+  assert.equal(
+    ((resourceTask.payload.brief as Record<string, unknown>).targetInstructions as Record<string, unknown>)
+      .instructions,
+    semanticIntent.resources[0]!.instructions,
+  );
   assert.deepEqual(
     compiled.tasks.map((task) => task.kind),
     ["resource", "prototype-validation", "checkpoint"],

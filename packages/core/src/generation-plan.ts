@@ -68,6 +68,14 @@ const RESOURCE_LIMITS: GenerationTaskResourceLimits = {
   capacityClasses: ["agent"],
 };
 
+const MOODBOARD_RESOURCE_LIMITS: GenerationTaskResourceLimits = {
+  ...RESOURCE_LIMITS,
+  // A Moodboard bundle owns several reviewed PNG assets encoded into one
+  // immutable payload. The generic text-resource budget cannot hold even three
+  // production images and previously failed before Components or Pages began.
+  maxOutputBytes: 48 * 1024 * 1024,
+};
+
 const ARTIFACT_LIMITS: GenerationTaskResourceLimits = {
   timeoutMs: 360_000,
   maxAgentTurns: 20,
@@ -75,10 +83,36 @@ const ARTIFACT_LIMITS: GenerationTaskResourceLimits = {
   maxOutputBytes: 24 * 1024 * 1024,
   capacityClasses: ["agent", "render-qa"],
 };
-const CODEBUDDY_RESOURCE_TIMEOUT_MS = 12 * 60_000;
-const CODEBUDDY_ARTIFACT_BASE_TIMEOUT_MS = 30 * 60_000;
-const CODEBUDDY_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS = 5 * 60_000;
-const CODEBUDDY_ARTIFACT_MAX_TIMEOUT_MS = 45 * 60_000;
+
+/**
+ * One immutable Resource Task deadline budget shared by every Agent provider.
+ *
+ * Moodboard is the worst-case Resource leaf: one structured Agent turn followed
+ * by up to eight sequential image generations and eight independent reviews.
+ * Keeping the arithmetic here makes the compiled outer Task deadline and every
+ * daemon-owned inner call cap one auditable contract instead of unrelated
+ * bootstrap constants.
+ */
+export const RESOURCE_GENERATION_DEADLINE_BUDGET = Object.freeze({
+  agentCallTimeoutMs: 7 * 60_000,
+  /** Minimum per-image reserve used to prove the fixed outer deadline before the draft cardinality is known. */
+  imageCallTimeoutMs: 90_000,
+  /** Runtime ceiling; the generator derives a smaller live cap after the Agent returns the exact Asset count. */
+  maxImageCallTimeoutMs: 5 * 60_000,
+  reviewCallTimeoutMs: 30_000,
+  completionReserveMs: 2 * 60_000,
+  maxMoodboardAssets: 8,
+  taskTimeoutMs: (
+    (7 * 60_000)
+    + (8 * 90_000)
+    + (8 * 30_000)
+    + (2 * 60_000)
+  ),
+} as const);
+
+const HOST_LOGIN_ARTIFACT_BASE_TIMEOUT_MS = 30 * 60_000;
+const HOST_LOGIN_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS = 5 * 60_000;
+const HOST_LOGIN_ARTIFACT_MAX_TIMEOUT_MS = 45 * 60_000;
 const MAX_ARTIFACT_VISUAL_QA_FRAMES = 5;
 
 const VALIDATION_LIMITS: GenerationTaskResourceLimits = {
@@ -414,28 +448,38 @@ function taskLimits(
   };
 }
 
-function resourceTaskLimits(generation: WorkspaceGenerationPayload): GenerationTaskResourceLimits {
-  if (generation.agent?.providerId !== "codebuddy") return RESOURCE_LIMITS;
-  // One host-login structured generation stage, one independent groundedness/
-  // moodboard review stage, and bounded evidence/publication settlement.
-  return { ...RESOURCE_LIMITS, timeoutMs: CODEBUDDY_RESOURCE_TIMEOUT_MS };
+function usesLongRunningHostLoginBudget(generation: WorkspaceGenerationPayload): boolean {
+  return generation.agent?.providerId === "codebuddy"
+    || generation.agent?.providerId === "codex";
+}
+
+function resourceTaskLimits(
+  generation: WorkspaceGenerationPayload,
+  resourceKind: ResourceKind,
+): GenerationTaskResourceLimits {
+  // Resource generation may delegate image work to a second provider, so the
+  // complete outer budget cannot depend only on the selected Agent CLI.
+  return {
+    ...(resourceKind === "moodboard" ? MOODBOARD_RESOURCE_LIMITS : RESOURCE_LIMITS),
+    timeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
+  };
 }
 
 function artifactTaskLimits(
   generation: WorkspaceGenerationPayload,
   plan: WorkspaceGenerationArtifactPlan,
 ): GenerationTaskResourceLimits {
-  if (generation.agent?.providerId !== "codebuddy") return ARTIFACT_LIMITS;
-  // CodeBuddy has an explicit per-turn cap in the provider sandbox and an
-  // explicit per-Frame critic cap. Scale the frozen outer deadline only with
-  // immutable Frame count and retain one finite hard ceiling.
+  if (!usesLongRunningHostLoginBudget(generation)) return ARTIFACT_LIMITS;
+  // Host-login coding CLIs have explicit per-turn and per-Frame critic caps.
+  // Scale the frozen outer deadline only with immutable Frame count and retain
+  // one finite hard ceiling.
   const extraFrames = Math.max(0, plan.responsiveFrameIds.length - 1);
   return {
     ...ARTIFACT_LIMITS,
     timeoutMs: Math.min(
-      CODEBUDDY_ARTIFACT_MAX_TIMEOUT_MS,
-      CODEBUDDY_ARTIFACT_BASE_TIMEOUT_MS
-        + extraFrames * CODEBUDDY_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS,
+      HOST_LOGIN_ARTIFACT_MAX_TIMEOUT_MS,
+      HOST_LOGIN_ARTIFACT_BASE_TIMEOUT_MS
+        + extraFrames * HOST_LOGIN_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS,
     ),
   };
 }
@@ -648,6 +692,9 @@ export function compileGenerationPlan(input: {
           operation: operation.operation,
           kind: operation.kind,
           title: operation.title,
+          ...(operation.instructions === undefined
+            ? {}
+            : { instructions: operation.instructions }),
         },
       },
       capabilityDescriptors: capabilityDescriptorsFor(requiredCapabilityIds, capabilitiesById),
@@ -666,7 +713,7 @@ export function compileGenerationPlan(input: {
       capabilities: requiredCapabilityIds,
       qaProfile: NO_QA,
       resourceLimits: taskLimits(
-        resourceTaskLimits(generation),
+        resourceTaskLimits(generation, operation.kind),
         requiredCapabilityIds,
         capabilitiesById,
       ),

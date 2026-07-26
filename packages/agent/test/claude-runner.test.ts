@@ -171,6 +171,61 @@ test("NodeSpawner never reports a signal-terminated provider as exit code zero",
   assert.notEqual(out.exitCode, 0);
 });
 
+test("NodeSpawner cleans up same-group descendants after a normal parent exit without changing success output", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-normal-exit-descendant-"));
+  const processRecordPath = join(dir, "processes.json");
+  let groupPid: number | null = null;
+  t.after(() => {
+    let recordedGroupPid = groupPid;
+    if (!recordedGroupPid) {
+      try {
+        recordedGroupPid = (JSON.parse(readFileSync(processRecordPath, "utf8")) as { groupPid?: number }).groupPid ?? null;
+      } catch {
+        return;
+      }
+    }
+    if (!recordedGroupPid) return;
+    try {
+      process.kill(-recordedGroupPid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  });
+  const descendant = [
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const parent = [
+    "const {spawn}=require('node:child_process')",
+    "const fs=require('node:fs')",
+    `const child=spawn(${JSON.stringify(process.execPath)},['-e',${JSON.stringify(descendant)}],{stdio:'ignore'})`,
+    "child.unref()",
+    `fs.writeFileSync(${JSON.stringify(processRecordPath)},JSON.stringify({groupPid:process.pid,descendantPid:child.pid}))`,
+    "process.stdout.write('parent-finished',()=>process.exit(0))",
+  ].join(";");
+
+  const out = await new NodeSpawner({ killDelayMs: 10, timeoutMs: 2_000 }).run({
+    command: process.execPath,
+    args: ["-e", parent],
+    cwd: dir,
+    stdin: "",
+  });
+  const record = JSON.parse(readFileSync(processRecordPath, "utf8")) as {
+    groupPid: number;
+    descendantPid: number;
+  };
+  groupPid = record.groupPid;
+
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.stdout, "parent-finished");
+  assert.throws(
+    () => process.kill(record.descendantPid, 0),
+    (error) => (error as NodeJS.ErrnoException).code === "ESRCH",
+  );
+});
+
 test("NodeSpawner times out a stuck process and escalates termination", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-timeout-"));
   const spawner = new NodeSpawner({ timeoutMs: 40, killDelayMs: 10 });

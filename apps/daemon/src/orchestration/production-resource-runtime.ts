@@ -15,15 +15,16 @@ import {
   type NodeSpawnerOptions,
   type ProcessSpawner,
 } from "../../../../packages/agent/src/index.ts";
-import type {
-  GenerationTaskFailureClass,
-  Project,
-  Store,
+import {
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+  type GenerationTaskFailureClass,
+  type Project,
+  type Store,
 } from "../../../../packages/core/src/index.ts";
 import { buildAgentEnv } from "../agent-env.ts";
 import { cloneAndFreeze } from "../context/context-types.ts";
 import { createWorkspaceContextPackRepository } from "../context/context-pack-store.ts";
-import type { ContextPackRepository } from "../context/context-types.ts";
+import type { ContextPack, ContextPackRepository } from "../context/context-types.ts";
 import { projectDir } from "../serve-static.ts";
 import { requestImage } from "../image-gen.ts";
 import { createProviderFetch } from "../provider-fetch.ts";
@@ -87,9 +88,11 @@ import {
 } from "./safe-structured-agent.ts";
 
 const DEFAULT_AGENT_TIMEOUT_MS = 5 * 60 * 1_000;
+const DEFAULT_IMAGE_TIMEOUT_MS = RESOURCE_GENERATION_DEADLINE_BUDGET.imageCallTimeoutMs;
 const DEFAULT_REVIEW_TIMEOUT_MS = 2 * 60 * 1_000;
 const HOST_LOGIN_REVIEW_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_AGENT_TIMEOUT_MS = 20 * 60 * 1_000;
+const MAX_IMAGE_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_AGENT_OUTPUT_BYTES = 48 * 1024 * 1024;
 const MAX_CAPTURE_MANIFEST_BYTES = 2 * 1024 * 1024;
 const MAX_CAPTURE_FILE_BYTES = 48 * 1024 * 1024;
@@ -97,6 +100,7 @@ const MAX_CAPTURE_FILES = 20_000;
 const STDERR_LIMIT_BYTES = 256 * 1024;
 const CAPTURE_MANIFEST_PATH = ".sharingan/pages.json";
 const CAPTURE_PROBE_PATH = ".sharingan/probe.mjs";
+const MAX_RESOURCE_SCHEMA_CONTEXT_ITEMS = 32;
 
 export type ProductionResourceRuntimeErrorCode =
   | "RESOURCE_RUNTIME_CONFIGURATION_INVALID"
@@ -114,6 +118,7 @@ export type ProductionResourceRuntimeErrorCode =
   | "RESEARCH_GROUNDEDNESS_REVIEW_FAILED"
   | "MOODBOARD_IMAGE_REQUEST_INVALID"
   | "MOODBOARD_IMAGE_PROVIDER_FAILED"
+  | "MOODBOARD_IMAGE_PROVIDER_TIMED_OUT"
   | "MOODBOARD_QUALITY_REQUEST_INVALID"
   | "MOODBOARD_QUALITY_REVIEW_FAILED"
   | "SHARINGAN_CAPTURE_REQUEST_INVALID"
@@ -200,6 +205,49 @@ function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
 }
 
+class ResourceCallDeadlineExceededError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(label: string, timeoutMs: number) {
+    super(`${label} exceeded its ${timeoutMs}ms call deadline`);
+    this.name = "ResourceCallDeadlineExceededError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+async function invokeWithCallDeadline<T>(
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+  label: string,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  checkAbort(parentSignal);
+  const controller = new AbortController();
+  const deadline = new ResourceCallDeadlineExceededError(label, timeoutMs);
+  const forwardParentAbort = (): void => {
+    if (!controller.signal.aborted) controller.abort(abortReason(parentSignal));
+  };
+  parentSignal.addEventListener("abort", forwardParentAbort, { once: true });
+  let abortListener: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(abortReason(controller.signal));
+    controller.signal.addEventListener("abort", abortListener, { once: true });
+  });
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(deadline);
+  }, timeoutMs);
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      aborted,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener("abort", forwardParentAbort);
+    if (abortListener !== null) controller.signal.removeEventListener("abort", abortListener);
+  }
+}
+
 function validSignal(value: unknown): value is AbortSignal {
   return Boolean(value && typeof value === "object"
     && typeof (value as AbortSignal).aborted === "boolean"
@@ -243,6 +291,192 @@ function compareBinary(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));
 }
 
+function schemaObject(
+  properties: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(properties),
+    properties,
+  };
+}
+
+function schemaText(maxLength = 32_000): Readonly<Record<string, unknown>> {
+  return { type: "string", minLength: 1, maxLength };
+}
+
+function schemaStringArray(
+  minItems: number,
+  maxItems: number,
+  maxLength = 32_000,
+): Readonly<Record<string, unknown>> {
+  return {
+    type: "array",
+    minItems,
+    maxItems,
+    items: schemaText(maxLength),
+  };
+}
+
+function researchSourceSchema(contextPack: ContextPack): Readonly<Record<string, unknown>> {
+  const common = {
+    id: schemaText(512),
+    title: schemaText(4_096),
+    notes: schemaText(16_384),
+  };
+  const web = schemaObject({
+    ...common,
+    kind: { type: "string", enum: ["web"] },
+    locator: schemaText(4_096),
+    excerpt: schemaText(8 * 1024),
+    binding: { type: "null" },
+  });
+  const providedItems = contextPack.items
+    .filter((item) => item.provided && item.content.length > 0)
+    .slice(0, MAX_RESOURCE_SCHEMA_CONTEXT_ITEMS);
+  const contextBranches = providedItems.map((item) =>
+    schemaObject({
+      ...common,
+      kind: { type: "string", enum: ["context", "user"] },
+      locator: {
+        type: "string",
+        enum: [`context-pack:${contextPack.id}#item:${item.ordinal}`],
+      },
+      // Strict Codex schemas reject escaped Context JSON as enum literals.
+      // contextReceipt still proves this bounded value is an exact substring.
+      excerpt: schemaText(8 * 1024),
+      binding: schemaObject({
+        contextPackId: { type: "string", enum: [contextPack.id] },
+        contextPackHash: { type: "string", enum: [contextPack.hash] },
+        itemOrdinal: { type: "integer", enum: [item.ordinal] },
+        itemChecksum: { type: "string", enum: [item.checksum] },
+      }),
+    }));
+  return {
+    anyOf: [web, ...contextBranches],
+  };
+}
+
+function researchAgentOutputSchema(contextPack: ContextPack): Readonly<Record<string, unknown>> {
+  const support = schemaObject({
+    sourceId: schemaText(512),
+    quote: schemaText(8 * 1024),
+  });
+  const finding = schemaObject({
+    id: schemaText(512),
+    statement: schemaText(),
+    implication: schemaText(),
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    supports: {
+      type: "array",
+      minItems: 1,
+      maxItems: 8,
+      items: support,
+    },
+  });
+  const principle = schemaObject({
+    id: schemaText(512),
+    title: schemaText(),
+    rationale: schemaText(),
+    findingIds: schemaStringArray(1, 16, 512),
+  });
+  const direction = schemaObject({
+    id: schemaText(512),
+    title: schemaText(),
+    thesis: schemaText(),
+    visualLanguage: schemaStringArray(
+      MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+      MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS,
+    ),
+    interactionPrinciples: schemaStringArray(1, 16),
+    risks: schemaStringArray(1, 16),
+    findingIds: schemaStringArray(1, 32, 512),
+  });
+  return schemaObject({
+    protocol: { type: "string", enum: ["dezin.research-generation.v3"] },
+    executiveSummary: schemaText(),
+    sources: {
+      type: "array",
+      minItems: 2,
+      maxItems: 64,
+      items: researchSourceSchema(contextPack),
+    },
+    findings: {
+      type: "array",
+      minItems: 3,
+      maxItems: 256,
+      items: finding,
+    },
+    designPrinciples: {
+      type: "array",
+      minItems: 3,
+      maxItems: 128,
+      items: principle,
+    },
+    directions: {
+      type: "array",
+      minItems: MIN_RESEARCH_DIRECTIONS,
+      maxItems: MAX_RESEARCH_DIRECTIONS,
+      items: direction,
+    },
+    openQuestions: schemaStringArray(1, 64),
+  });
+}
+
+function moodboardAgentOutputSchema(): Readonly<Record<string, unknown>> {
+  const palette = schemaObject({
+    name: schemaText(512),
+    value: schemaText(64),
+    role: schemaText(2_048),
+  });
+  const typography = schemaObject({
+    role: schemaText(512),
+    family: schemaText(1_024),
+    treatment: schemaText(8_192),
+  });
+  const reference = schemaObject({
+    id: schemaText(512),
+    title: schemaText(4_096),
+    locator: schemaText(4_096),
+    notes: schemaText(8_192),
+  });
+  const assetSpec = schemaObject({
+    id: schemaText(512),
+    fileName: schemaText(1_024),
+    prompt: schemaText(8_192),
+    caption: schemaText(8_192),
+    aspectRatio: { type: "string", enum: [...MOODBOARD_ASPECT_RATIOS] },
+    referenceIds: schemaStringArray(1, 16, 512),
+  });
+  return schemaObject({
+    protocol: { type: "string", enum: ["dezin.moodboard-generation.v2"] },
+    concept: schemaText(),
+    designThesis: schemaText(),
+    palette: { type: "array", minItems: 3, maxItems: 16, items: palette },
+    typography: { type: "array", minItems: 2, maxItems: 12, items: typography },
+    composition: schemaStringArray(3, 24),
+    motion: schemaStringArray(2, 24),
+    avoid: schemaStringArray(2, 24),
+    references: { type: "array", minItems: 2, maxItems: 64, items: reference },
+    assetSpecs: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_MOODBOARD_ASSETS,
+      items: assetSpec,
+    },
+  });
+}
+
+function resourceAgentOutputSchema(
+  kind: ProductionResourceAgentRequest["kind"],
+  contextPack: ContextPack,
+): Readonly<Record<string, unknown>> {
+  return kind === "research"
+    ? researchAgentOutputSchema(contextPack)
+    : moodboardAgentOutputSchema();
+}
+
 function structuredContract(kind: ProductionResourceAgentRequest["kind"]): string {
   if (kind === "research") {
     return [
@@ -255,8 +489,11 @@ function structuredContract(kind: ProductionResourceAgentRequest["kind"]): strin
       "Each support: sourceId, quote. quote must be an exact substring of that source excerpt and directly support the finding statement; source ids without claim-specific quotes are forbidden.",
       "Each design principle: id, title, rationale, findingIds.",
       "Each direction: id, title, thesis, visualLanguage, interactionPrinciples, risks, findingIds.",
+      "sources must be a JSON array with 2-64 items; findings 3-256 items; every finding supports array 1-8 items.",
+      "designPrinciples must be a JSON array with 3-128 items; every findingIds array 1-16 items.",
       `directions must be a JSON array with ${MIN_RESEARCH_DIRECTIONS}-${MAX_RESEARCH_DIRECTIONS} items.`,
-      `For every direction, visualLanguage must be a JSON array with ${MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS}-${MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS} non-empty strings; interactionPrinciples and risks must each be JSON arrays with 1-16 non-empty strings.`,
+      `For every direction, visualLanguage must be a JSON array with ${MIN_RESEARCH_VISUAL_LANGUAGE_ITEMS}-${MAX_RESEARCH_VISUAL_LANGUAGE_ITEMS} non-empty strings; interactionPrinciples and risks must each be JSON arrays with 1-16 non-empty strings; findingIds must contain 1-32 items.`,
+      "openQuestions must be a JSON array with 1-64 non-empty strings.",
     ].join("\n");
   }
   return [
@@ -265,8 +502,9 @@ function structuredContract(kind: ProductionResourceAgentRequest["kind"]): strin
     "Each palette entry: name, value(canonical #RRGGBB), role.",
     "Each typography entry: role, family, treatment.",
     "Each reference: id, title, locator, notes.",
+    "palette must contain 3-16 items; typography 2-12 items; composition 3-24 items; motion 2-24 items; avoid 2-24 items; references 2-64 items.",
     `assetSpecs must be a JSON array with 1-${MAX_MOODBOARD_ASSETS} items.`,
-    "Each Asset spec: id, fileName, prompt, caption, aspectRatio, referenceIds.",
+    "Each Asset spec: id, fileName, prompt, caption, aspectRatio, referenceIds. referenceIds must contain 1-16 items.",
     `For every Asset spec, aspectRatio must be exactly one of: ${MOODBOARD_ASPECT_RATIOS.join(", ")}.`,
     "Never return image bytes, base64, MIME, checksum, or pixel dimensions. The daemon generates and independently reviews every image from the Asset specs.",
   ].join("\n");
@@ -301,7 +539,9 @@ function validateAgentRequest(request: ProductionResourceAgentRequest): void {
     || typeof request.systemPrompt !== "string" || request.systemPrompt.length === 0
     || typeof request.message !== "string" || request.message.length === 0
     || !Number.isSafeInteger(request.maxOutputBytes) || request.maxOutputBytes < 1
-    || request.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES || !validSignal(request.signal)) {
+    || request.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES
+    || !Number.isSafeInteger(request.callTimeoutMs) || request.callTimeoutMs < 1
+    || request.callTimeoutMs > MAX_AGENT_TIMEOUT_MS || !validSignal(request.signal)) {
     fail("RESOURCE_AGENT_REQUEST_INVALID", "Production Resource Agent request is invalid", "adapter");
   }
   let exact;
@@ -353,6 +593,9 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
   readonly #createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
   readonly #resolveClaudeExecutable: (() => string) | undefined;
   readonly #resolveCodeBuddyExecutable: (() => string) | undefined;
+  readonly #resolveRegisteredExecutable: ((command: string) => string) | undefined;
+  readonly #structuredAgentPlatform: NodeJS.Platform | undefined;
+  readonly #resolveStructuredAgentSandboxExecutable: (() => string) | undefined;
 
   constructor(input: {
     store: Store;
@@ -360,12 +603,18 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
     createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
     resolveClaudeExecutable?: () => string;
     resolveCodeBuddyExecutable?: () => string;
+    resolveRegisteredExecutable?: (command: string) => string;
+    structuredAgentPlatform?: NodeJS.Platform;
+    resolveStructuredAgentSandboxExecutable?: () => string;
   }) {
     this.#store = input.store;
     this.#timeoutMs = input.timeoutMs;
     this.#createSpawner = input.createSpawner;
     this.#resolveClaudeExecutable = input.resolveClaudeExecutable;
     this.#resolveCodeBuddyExecutable = input.resolveCodeBuddyExecutable;
+    this.#resolveRegisteredExecutable = input.resolveRegisteredExecutable;
+    this.#structuredAgentPlatform = input.structuredAgentPlatform;
+    this.#resolveStructuredAgentSandboxExecutable = input.resolveStructuredAgentSandboxExecutable;
   }
 
   async generateStructured(request: ProductionResourceAgentRequest): Promise<ProductionResourceAgentResult> {
@@ -394,10 +643,16 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
         processResult = await runSafeStructuredAgent({
           command,
           model,
+          ...(execution.providerId === "codex"
+            ? { outputSchema: resourceAgentOutputSchema(request.kind, request.contextPack) }
+            : {}),
+          ...(request.kind === "research" && execution.providerId === "codex"
+            ? { allowWebSearch: true }
+            : {}),
           systemPrompt: resourceAgentSystemPrompt(request),
           message: resourceAgentMessage(request),
           cwd,
-          timeoutMs: this.#timeoutMs,
+          timeoutMs: Math.min(this.#timeoutMs, request.callTimeoutMs),
           signal: request.signal,
           maxOutputBytes: request.maxOutputBytes,
           env: {
@@ -419,6 +674,15 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
           ...(this.#resolveCodeBuddyExecutable === undefined
             ? {}
             : { resolveCodeBuddyExecutable: this.#resolveCodeBuddyExecutable }),
+          ...(this.#resolveRegisteredExecutable === undefined
+            ? {}
+            : { resolveRegisteredExecutable: this.#resolveRegisteredExecutable }),
+          ...(this.#structuredAgentPlatform === undefined
+            ? {}
+            : { platform: this.#structuredAgentPlatform }),
+          ...(this.#resolveStructuredAgentSandboxExecutable === undefined
+            ? {}
+            : { resolveSandboxExecutable: this.#resolveStructuredAgentSandboxExecutable }),
           stderrLimitBytes: STDERR_LIMIT_BYTES,
         });
       } catch (error) {
@@ -603,11 +867,18 @@ class StoreBackedMoodboardImageGenerator implements ProductionMoodboardImagePort
   readonly #store: Store;
   readonly #fetch: typeof fetch;
   readonly #requestImage: typeof requestImage;
+  readonly #timeoutMs: number;
 
-  constructor(input: { store: Store; fetch: typeof fetch; requestImage: typeof requestImage }) {
+  constructor(input: {
+    store: Store;
+    fetch: typeof fetch;
+    requestImage: typeof requestImage;
+    timeoutMs: number;
+  }) {
     this.#store = input.store;
     this.#fetch = input.fetch;
     this.#requestImage = input.requestImage;
+    this.#timeoutMs = input.timeoutMs;
   }
 
   async generateImage(request: ProductionMoodboardImageRequest): Promise<ProductionMoodboardImageResult> {
@@ -615,7 +886,9 @@ class StoreBackedMoodboardImageGenerator implements ProductionMoodboardImagePort
       || !validateExactResourcePortScope(request.scope, request.executionProfile, request.contextPack, "moodboard")
       || !exactMoodboardAsset(request.asset)
       || !Number.isSafeInteger(request.maxOutputBytes) || request.maxOutputBytes < 1
-      || request.maxOutputBytes > 8 * 1024 * 1024 || !validSignal(request.signal)) {
+      || request.maxOutputBytes > 8 * 1024 * 1024
+      || !Number.isSafeInteger(request.callTimeoutMs) || request.callTimeoutMs < 1
+      || request.callTimeoutMs > MAX_IMAGE_TIMEOUT_MS || !validSignal(request.signal)) {
       return fail("MOODBOARD_IMAGE_REQUEST_INVALID", "Moodboard image request is not one bounded exact Attempt", "adapter");
     }
     checkAbort(request.signal);
@@ -627,16 +900,29 @@ class StoreBackedMoodboardImageGenerator implements ProductionMoodboardImagePort
     }
     let encoded: string;
     try {
-      encoded = await this.#requestImage({
-        providerId: execution.providerId,
-        baseUrl: execution.baseUrl,
-        model: execution.model,
-        apiVersion: execution.apiVersion,
-        apiKey: execution.apiKey,
-        params: moodboardImageParams(request.asset.aspectRatio),
-      }, request.asset.prompt, this.#fetch, request.signal);
+      encoded = await invokeWithCallDeadline(
+        request.signal,
+        Math.min(this.#timeoutMs, request.callTimeoutMs),
+        `Moodboard image ${request.asset.id}`,
+        (signal) => this.#requestImage({
+          providerId: execution.providerId,
+          baseUrl: execution.baseUrl,
+          model: execution.model,
+          apiVersion: execution.apiVersion,
+          apiKey: execution.apiKey,
+          params: moodboardImageParams(request.asset.aspectRatio),
+        }, request.asset.prompt, this.#fetch, signal),
+      );
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
+      if (error instanceof ResourceCallDeadlineExceededError) {
+        return fail(
+          "MOODBOARD_IMAGE_PROVIDER_TIMED_OUT",
+          `Moodboard image ${request.asset.id} exceeded its ${error.timeoutMs}ms call deadline`,
+          "provider",
+          error,
+        );
+      }
       return fail("MOODBOARD_IMAGE_PROVIDER_FAILED", "Moodboard image provider request failed", "provider", error);
     }
     checkAbort(request.signal);
@@ -692,6 +978,33 @@ function exactReviewKeys(
   }
 }
 
+function groundednessReviewOutputSchema(
+  claims: ProductionResearchGroundednessRequest["claims"],
+): Readonly<Record<string, unknown>> {
+  return schemaObject({
+    verdicts: {
+      type: "array",
+      minItems: claims.length,
+      maxItems: claims.length,
+      items: schemaObject({
+        findingId: schemaText(256),
+        supported: { type: "boolean" },
+        supportReceiptIds: schemaStringArray(0, 8, 512),
+        rationale: schemaText(8 * 1024),
+      }),
+    },
+  });
+}
+
+function moodboardReviewOutputSchema(): Readonly<Record<string, unknown>> {
+  return schemaObject({
+    decision: { type: "string", enum: ["pass", "fail"] },
+    semanticMatch: { type: "boolean" },
+    visualQuality: { type: "string", enum: ["pass", "fail"] },
+    findings: schemaStringArray(0, 16, 8 * 1024),
+  });
+}
+
 function reviewStrings(
   value: unknown,
   minimum: number,
@@ -713,6 +1026,9 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
   readonly #createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
   readonly #resolveClaudeExecutable: (() => string) | undefined;
   readonly #resolveCodeBuddyExecutable: (() => string) | undefined;
+  readonly #resolveRegisteredExecutable: ((command: string) => string) | undefined;
+  readonly #structuredAgentPlatform: NodeJS.Platform | undefined;
+  readonly #resolveStructuredAgentSandboxExecutable: (() => string) | undefined;
   readonly #review: ResourceReviewTransport;
 
   constructor(input: {
@@ -721,6 +1037,9 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
     createSpawner: (options: NodeSpawnerOptions) => ProcessSpawner;
     resolveClaudeExecutable?: () => string;
     resolveCodeBuddyExecutable?: () => string;
+    resolveRegisteredExecutable?: (command: string) => string;
+    structuredAgentPlatform?: NodeJS.Platform;
+    resolveStructuredAgentSandboxExecutable?: () => string;
     review: ResourceReviewTransport;
   }) {
     this.#store = input.store;
@@ -728,6 +1047,9 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
     this.#createSpawner = input.createSpawner;
     this.#resolveClaudeExecutable = input.resolveClaudeExecutable;
     this.#resolveCodeBuddyExecutable = input.resolveCodeBuddyExecutable;
+    this.#resolveRegisteredExecutable = input.resolveRegisteredExecutable;
+    this.#structuredAgentPlatform = input.structuredAgentPlatform;
+    this.#resolveStructuredAgentSandboxExecutable = input.resolveStructuredAgentSandboxExecutable;
     this.#review = input.review;
   }
 
@@ -735,8 +1057,10 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
     executionProfile: ProductionResearchGroundednessRequest["executionProfile"];
     systemPrompt: string;
     message: string;
+    callTimeoutMs: number;
     signal: AbortSignal;
     image?: { label: string; mediaType: "image/png"; data: string };
+    outputSchema?: Readonly<Record<string, unknown>>;
   }): Promise<SafeStructuredAgentResult> {
     const cwd = await mkdtemp(join(tmpdir(), "dezin-resource-review-"));
     await chmod(cwd, 0o700);
@@ -756,12 +1080,16 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
         env,
         timeoutMs: Math.min(
           this.#timeoutMs,
-          reviewer.command === "codebuddy"
+          input.callTimeoutMs,
+          reviewer.command === "codebuddy" || reviewer.command === "codex"
             ? HOST_LOGIN_REVIEW_TIMEOUT_MS
             : DEFAULT_REVIEW_TIMEOUT_MS,
         ),
         maxOutputBytes: 256 * 1024,
         ...(input.image === undefined ? {} : { images: [input.image] }),
+        ...(reviewer.command === "codex" && input.outputSchema !== undefined
+          ? { outputSchema: input.outputSchema }
+          : {}),
       }, {
         createSpawner: this.#createSpawner,
         ...(this.#resolveClaudeExecutable === undefined
@@ -770,6 +1098,15 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
         ...(this.#resolveCodeBuddyExecutable === undefined
           ? {}
           : { resolveCodeBuddyExecutable: this.#resolveCodeBuddyExecutable }),
+        ...(this.#resolveRegisteredExecutable === undefined
+          ? {}
+          : { resolveRegisteredExecutable: this.#resolveRegisteredExecutable }),
+        ...(this.#structuredAgentPlatform === undefined
+          ? {}
+          : { platform: this.#structuredAgentPlatform }),
+        ...(this.#resolveStructuredAgentSandboxExecutable === undefined
+          ? {}
+          : { resolveSandboxExecutable: this.#resolveStructuredAgentSandboxExecutable }),
         stderrLimitBytes: STDERR_LIMIT_BYTES,
       });
       if (result.providerId !== reviewer.providerId) {
@@ -785,6 +1122,8 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
     if (!request || request.protocol !== "dezin.research-groundedness-request.v1"
       || !validateExactResourcePortScope(request.scope, request.executionProfile, request.contextPack, "research")
       || !exactGroundednessClaims(request.claims)
+      || !Number.isSafeInteger(request.callTimeoutMs) || request.callTimeoutMs < 1
+      || request.callTimeoutMs > HOST_LOGIN_REVIEW_TIMEOUT_MS
       || !validSignal(request.signal)) {
       return fail("RESEARCH_GROUNDEDNESS_REQUEST_INVALID", "Research groundedness request is invalid", "adapter");
     }
@@ -800,7 +1139,9 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
           "supported may be true only when at least one listed receipt directly entails the statement; list only receipts that do so.",
         ].join("\n"),
         message: JSON.stringify({ verdicts: request.claims }),
+        callTimeoutMs: request.callTimeoutMs,
         signal: request.signal,
+        outputSchema: groundednessReviewOutputSchema(request.claims),
       });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
@@ -875,6 +1216,8 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
       || !Number.isSafeInteger(request.image.height) || request.image.height < 512
       || !/^[a-f0-9]{64}$/.test(request.image.checksum)
       || createHash("sha256").update(request.image.bytes).digest("hex") !== request.image.checksum
+      || !Number.isSafeInteger(request.callTimeoutMs) || request.callTimeoutMs < 1
+      || request.callTimeoutMs > HOST_LOGIN_REVIEW_TIMEOUT_MS
       || !validSignal(request.signal)) {
       return fail("MOODBOARD_QUALITY_REQUEST_INVALID", "Moodboard quality request is invalid", "adapter");
     }
@@ -891,12 +1234,14 @@ class StoreBackedResourceQualityVerifier implements ProductionResearchGroundedne
           asset: request.asset,
           image: { width: request.image.width, height: request.image.height, checksum: request.image.checksum },
         }),
+        callTimeoutMs: request.callTimeoutMs,
         signal: request.signal,
         image: {
           label: "generated Moodboard reference",
           mediaType: "image/png",
           data: Buffer.from(request.image.bytes).toString("base64"),
         },
+        outputSchema: moodboardReviewOutputSchema(),
       });
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
@@ -1599,17 +1944,26 @@ export interface ProductionResourceRuntimeOptions {
   readonly researchExternalFetch?: SafeBoundedExternalFetcher;
   readonly now?: () => number;
   readonly agentTimeoutMs?: number;
+  /** Finite cap for each daemon-owned image-provider call. */
+  readonly imageTimeoutMs?: number;
+  /** Finite cap for each independent groundedness or image-review turn. */
+  readonly reviewTimeoutMs?: number;
   /** Test seam; production creates the bounded owned-process-group spawner. */
   readonly createSpawner?: (options: NodeSpawnerOptions) => ProcessSpawner;
   /** Test seam; production always resolves the official Claude CLI from fixed install roots. */
   readonly resolveClaudeExecutable?: () => string;
   /** Test seam; production always resolves the official CodeBuddy CLI from fixed install roots. */
   readonly resolveCodeBuddyExecutable?: () => string;
+  /** Test seam; production resolves registered Agent CLIs from fixed install roots. */
+  readonly resolveRegisteredExecutable?: (command: string) => string;
+  /** Test seams for deterministic registered-Agent confinement coverage on non-macOS CI. */
+  readonly structuredAgentPlatform?: NodeJS.Platform;
+  readonly resolveStructuredAgentSandboxExecutable?: () => string;
   /** Test seam; production reuses the canonical provider-aware fetch boundary. */
   readonly providerFetch?: typeof fetch;
   /** Test seam; production reuses the canonical AI SDK image request implementation. */
   readonly requestImage?: typeof requestImage;
-  /** Test seam; production uses the hard no-tools Claude structured transport. */
+  /** Test seam; production uses the provider-native hard no-tools structured transport. */
   readonly reviewTransport?: ResourceReviewTransport;
   /** Test seam for deterministic two-pass capture drift verification. */
   readonly afterCaptureReadPass?: (pass: 1 | 2) => void | Promise<void>;
@@ -1638,6 +1992,9 @@ export function createProductionResourceRuntimePorts(
   options: ProductionResourceRuntimeOptions,
 ): ProductionResourceRuntimePorts {
   const timeoutMs = options?.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
+  const imageTimeoutMs = options?.imageTimeoutMs ?? DEFAULT_IMAGE_TIMEOUT_MS;
+  const reviewTimeoutMs = options?.reviewTimeoutMs
+    ?? Math.min(timeoutMs, HOST_LOGIN_REVIEW_TIMEOUT_MS);
   if (!options?.store || typeof options.store !== "object"
     || typeof options.store.getSettings !== "function"
     || typeof options.store.listProjects !== "function"
@@ -1646,9 +2003,17 @@ export function createProductionResourceRuntimePorts(
     || (options.researchExternalFetch !== undefined && typeof options.researchExternalFetch !== "function")
     || (options.now !== undefined && typeof options.now !== "function")
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_AGENT_TIMEOUT_MS
+    || !Number.isSafeInteger(imageTimeoutMs) || imageTimeoutMs < 1
+    || imageTimeoutMs > MAX_IMAGE_TIMEOUT_MS
+    || !Number.isSafeInteger(reviewTimeoutMs) || reviewTimeoutMs < 1
+    || reviewTimeoutMs > HOST_LOGIN_REVIEW_TIMEOUT_MS
     || (options.createSpawner !== undefined && typeof options.createSpawner !== "function")
     || (options.resolveClaudeExecutable !== undefined && typeof options.resolveClaudeExecutable !== "function")
     || (options.resolveCodeBuddyExecutable !== undefined && typeof options.resolveCodeBuddyExecutable !== "function")
+    || (options.resolveRegisteredExecutable !== undefined && typeof options.resolveRegisteredExecutable !== "function")
+    || (options.structuredAgentPlatform !== undefined && typeof options.structuredAgentPlatform !== "string")
+    || (options.resolveStructuredAgentSandboxExecutable !== undefined
+      && typeof options.resolveStructuredAgentSandboxExecutable !== "function")
     || (options.providerFetch !== undefined && typeof options.providerFetch !== "function")
     || (options.requestImage !== undefined && typeof options.requestImage !== "function")
     || (options.reviewTransport !== undefined && typeof options.reviewTransport !== "function")
@@ -1667,7 +2032,7 @@ export function createProductionResourceRuntimePorts(
     });
   const quality = new StoreBackedResourceQualityVerifier({
     store: options.store,
-    timeoutMs,
+    timeoutMs: reviewTimeoutMs,
     createSpawner,
     ...(options.resolveClaudeExecutable === undefined
       ? {}
@@ -1675,6 +2040,15 @@ export function createProductionResourceRuntimePorts(
     ...(options.resolveCodeBuddyExecutable === undefined
       ? {}
       : { resolveCodeBuddyExecutable: options.resolveCodeBuddyExecutable }),
+    ...(options.resolveRegisteredExecutable === undefined
+      ? {}
+      : { resolveRegisteredExecutable: options.resolveRegisteredExecutable }),
+    ...(options.structuredAgentPlatform === undefined
+      ? {}
+      : { structuredAgentPlatform: options.structuredAgentPlatform }),
+    ...(options.resolveStructuredAgentSandboxExecutable === undefined
+      ? {}
+      : { resolveStructuredAgentSandboxExecutable: options.resolveStructuredAgentSandboxExecutable }),
     review: options.reviewTransport ?? runSafeStructuredAgent,
   });
   return Object.freeze({
@@ -1688,6 +2062,15 @@ export function createProductionResourceRuntimePorts(
       ...(options.resolveCodeBuddyExecutable === undefined
         ? {}
         : { resolveCodeBuddyExecutable: options.resolveCodeBuddyExecutable }),
+      ...(options.resolveRegisteredExecutable === undefined
+        ? {}
+        : { resolveRegisteredExecutable: options.resolveRegisteredExecutable }),
+      ...(options.structuredAgentPlatform === undefined
+        ? {}
+        : { structuredAgentPlatform: options.structuredAgentPlatform }),
+      ...(options.resolveStructuredAgentSandboxExecutable === undefined
+        ? {}
+        : { resolveStructuredAgentSandboxExecutable: options.resolveStructuredAgentSandboxExecutable }),
     }),
     ...(researchEvidence === undefined ? {} : { researchEvidence }),
     researchGroundedness: quality,
@@ -1695,6 +2078,7 @@ export function createProductionResourceRuntimePorts(
       store: options.store,
       fetch: options.providerFetch ?? createProviderFetch(),
       requestImage: options.requestImage ?? requestImage,
+      timeoutMs: imageTimeoutMs,
     }),
     moodboardQuality: quality,
     sharinganCaptures: new StoreBackedSharinganCaptureExporter({

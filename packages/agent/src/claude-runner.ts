@@ -207,7 +207,7 @@ export class NodeSpawner implements ProcessSpawner {
         void (async () => {
           let cleanupError: unknown;
           try {
-            await terminationPromise;
+            if (terminationPromise || groupAlive()) await terminate();
           } catch (error) {
             cleanupError = error;
           }

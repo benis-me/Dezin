@@ -766,7 +766,7 @@ function validateComponentDependencies(
   if (processed !== dependencyCounts.size) invalid("component dependency cycle detected");
 }
 
-function snapshotWorkspaceGraph(value: unknown): WorkspaceGraph {
+export function snapshotWorkspaceGraph(value: unknown): WorkspaceGraph {
   const graph = requireRecord(value, "workspace graph");
   rejectUnexpectedFields(graph, ["workspaceId", "revision", "nodes", "edges"], "workspace graph");
   const workspaceId = exactString(graph.workspaceId, "workspace id");

@@ -132,6 +132,9 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   );
 
   expect(screen.getByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  const header = screen.getByRole("heading", { name: "Build plan" }).closest("header");
+  expect(header).toHaveClass("h-10", "min-h-10", "border-b");
+  expect(header?.firstElementChild).toHaveClass("items-center", "gap-2.5");
   expect(screen.getByText("1 of 3 complete")).toBeInTheDocument();
   expect(screen.getByText("Live updates")).toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent(/1 of 3 complete.*Live updates/);
@@ -151,6 +154,9 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   expect(css).not.toMatch(
     /\.dezin-generation-plan__selector-trigger\s*\{[^}]*(?:height|font-size|border-color|background|box-shadow)\s*:/s,
   );
+  expect(css).not.toMatch(
+    /\.dezin-generation-plan__(?:header|heading|header-actions)(?:\s+[^{,]+)?\s*\{/,
+  );
   expect(screen.getByRole("button", { name: "Close build plan" })).toHaveAttribute("data-slot", "button");
   expect(screen.getByRole("group", { name: "Page retry options" })).toBeInTheDocument();
 
@@ -164,6 +170,137 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   expect(cancel).toHaveAttribute("data-slot", "button");
   await user.click(cancel);
   expect(onCancel).toHaveBeenCalledTimes(1);
+});
+
+test("GenerationPlanPanel keeps long target identities discoverable in a 23-task plan", () => {
+  const tasks = Array.from({ length: 23 }, (_, index) => task(
+    `task-${index + 10}`,
+    "page",
+    "materialization-pending",
+    {
+      ordinal: index,
+      target: {
+        type: "artifact",
+        workspaceId: "workspace-1",
+        id: `artifact-${index}`,
+        trackId: `track-${index}`,
+      },
+    },
+  ));
+  const longTarget = "Electric Cobalt Grid Checkout";
+  const targetLabels = {
+    artifacts: new Map(tasks.map((item, index) => [
+      item.target.id,
+      index === 0 ? longTarget : `KITE Page ${index + 1}`,
+    ])),
+    resources: new Map<string, string>(),
+  };
+
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({ tasks, dependencies: [] })}
+      connection="live"
+      busyAction={null}
+      targetLabels={targetLabels}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getAllByRole("listitem")).toHaveLength(23);
+  expect(screen.getByText(longTarget)).toHaveAttribute("title", longTarget);
+});
+
+test("GenerationPlanPanel gives the target its own row beneath task kind and status", () => {
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({ tasks: [task("task-10", "page", "materialization-pending")], dependencies: [] })}
+      connection="live"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  const target = screen.getByText("Page", { selector: "strong" });
+  expect(target.parentElement).toHaveClass("dezin-generation-plan__task-topline");
+  expect(target.parentElement).toContainElement(screen.getByText("Page", {
+    selector: ".dezin-generation-plan__task-kind",
+  }));
+  expect(target.parentElement).toContainElement(screen.getByText("Preparing"));
+});
+
+test("GenerationPlanPanel keeps narrow task rows and the footer dimensionally stable", () => {
+  const css = readFileSync(
+    `${process.cwd()}/src/project-studio/generation/generation-plan.css`,
+    "utf8",
+  );
+
+  expect(css).toMatch(
+    /\.dezin-generation-plan__task-topline\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
+  );
+  expect(css).toMatch(
+    /\.dezin-generation-plan__task-topline strong\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;[^}]*-webkit-line-clamp:\s*2;[^}]*overflow-wrap:\s*anywhere;/s,
+  );
+  expect(css).toMatch(
+    /\.dezin-generation-plan__task-status\s*\{[^}]*white-space:\s*nowrap;/s,
+  );
+  expect(css).toMatch(
+    /\.dezin-generation-plan__footer\s*\{[^}]*min-height:\s*44px;[^}]*flex:\s*0\s+0\s+44px;[^}]*justify-content:\s*flex-end;[^}]*background:\s*var\(--background\);/s,
+  );
+  expect(css).not.toContain(".dezin-generation-plan__identity");
+});
+
+test("GenerationPlanPanel presents scheduled retries and direction selection as compact active states", () => {
+  const scheduledRetry = task("task-10", "component", "retry-wait");
+  const directionSelection = task("task-11", "resource", "blocked-context", {
+    blockedReason: "Choose one visual direction before generation continues.",
+    error: {
+      message: "Choose one visual direction before generation continues.",
+      refs: ["research:resource-brand@revision-1:direction-selection"],
+    },
+  });
+
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({ tasks: [scheduledRetry, directionSelection], dependencies: [] })}
+      connection="live"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("Retry scheduled").closest("[data-tone]")).toHaveAttribute("data-tone", "active");
+  expect(screen.getByText("Choose direction").closest("[data-tone]")).toHaveAttribute("data-tone", "active");
+  expect(screen.queryByText("Awaiting direction selection")).not.toBeInTheDocument();
+});
+
+test("GenerationPlanPanel footer exposes the plan action without a raw plan identifier", () => {
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail()}
+      connection="live"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: "Cancel generation plan" })).toBeInTheDocument();
+  expect(screen.queryByText("plan-1")).not.toBeInTheDocument();
 });
 
 test("GenerationPlanPanel never exposes absolute local paths from legacy Task failures", () => {
@@ -288,7 +425,7 @@ test("Research context gate opens the exact immutable Revision and never offers 
     />,
   );
 
-  expect(screen.getByText("Awaiting direction selection")).toBeInTheDocument();
+  expect(screen.getByText("Choose direction")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Retry Page/ })).not.toBeInTheDocument();
   const link = screen.getByRole("link", {
     name: "Review Research directions from Revision revision-research-1",
@@ -515,6 +652,155 @@ test("GenerationPlanPanel fails closed when candidate identity is stale, missing
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
 
+test("GenerationPlanInspector keeps one header and close action across loading, ready, and history switching", async () => {
+  const user = userEvent.setup();
+  const oldPlan = plan("failed");
+  const newerPlan = { ...plan("failed"), id: "plan-2", createdAt: 20, finishedAt: 30 };
+  const oldDetail = detail({
+    plan: oldPlan,
+    tasks: [task("task-1", "component", "failed", { error: { message: "Old Plan finding" } })],
+    dependencies: [],
+  });
+  const newerDetail = detail({
+    plan: newerPlan,
+    tasks: [{
+      ...task("task-2", "page", "failed", { error: { message: "New Plan finding" } }),
+      planId: newerPlan.id,
+    }],
+    dependencies: [],
+  });
+  const initialRead = deferred<GenerationPlanDetail>();
+  const historyRead = deferred<GenerationPlanDetail>();
+  const onClose = vi.fn();
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({
+      listGenerationPlans: async () => [newerPlan, oldPlan],
+      getGenerationPlan: async (_projectId, planId) => (
+        planId === oldPlan.id ? initialRead.promise : historyRead.promise
+      ),
+    })}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId={oldPlan.id}
+        onClose={onClose}
+      />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-generation-plan__header");
+  const close = screen.getByRole("button", { name: "Close build plan" });
+  expect(header).not.toBeNull();
+  expect(header).toHaveClass("h-10", "min-h-10");
+
+  await act(async () => {
+    initialRead.resolve(oldDetail);
+    await initialRead.promise;
+  });
+  await screen.findByText("Old Plan finding");
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  expect(screen.getByRole("button", { name: "Close build plan" })).toBe(close);
+
+  await chooseGenerationPlan(user, newerPlan.id);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading build plan");
+  expect(screen.queryByText("Old Plan finding")).not.toBeInTheDocument();
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  expect(screen.getByRole("button", { name: "Close build plan" })).toBe(close);
+
+  await act(async () => {
+    historyRead.resolve(newerDetail);
+    await historyRead.promise;
+  });
+  await screen.findByText("New Plan finding");
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  expect(screen.getByRole("button", { name: "Close build plan" })).toBe(close);
+  expect(screen.getByRole("combobox", { name: "Selected generation plan" })).toHaveValue(newerPlan.id);
+
+  await user.click(close);
+  expect(onClose).toHaveBeenCalledTimes(1);
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector keeps its header and close action when loading resolves empty", async () => {
+  const user = userEvent.setup();
+  const plans = deferred<GenerationPlan[]>();
+  const onClose = vi.fn();
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({ listGenerationPlans: async () => plans.promise })}>
+      <GenerationPlanInspector projectId="project-1" preferredPlanId={null} onClose={onClose} />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-generation-plan__header");
+  const close = screen.getByRole("button", { name: "Close build plan" });
+  expect(header).not.toBeNull();
+
+  await act(async () => {
+    plans.resolve([]);
+    await plans.promise;
+  });
+  expect(await screen.findByRole("heading", { name: "No build plan yet" })).toBeInTheDocument();
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  expect(screen.getByRole("button", { name: "Close build plan" })).toBe(close);
+
+  await user.click(close);
+  expect(onClose).toHaveBeenCalledTimes(1);
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector keeps its header and close action when loading fails", async () => {
+  const user = userEvent.setup();
+  const plans = deferred<GenerationPlan[]>();
+  const onClose = vi.fn();
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({ listGenerationPlans: async () => plans.promise })}>
+      <GenerationPlanInspector projectId="project-1" preferredPlanId={null} onClose={onClose} />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-generation-plan__header");
+  const close = screen.getByRole("button", { name: "Close build plan" });
+  expect(header).not.toBeNull();
+
+  await act(async () => {
+    plans.reject(new Error("Plan index unavailable"));
+    await plans.promise.catch(() => {});
+  });
+  expect(await screen.findByRole("alert")).toHaveTextContent("Plan index unavailable");
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  expect(screen.getByRole("button", { name: "Close build plan" })).toBe(close);
+
+  await user.click(close);
+  expect(onClose).toHaveBeenCalledTimes(1);
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector rejects a mismatched initial detail without exposing the wrong Plan", async () => {
+  const selected = plan("failed");
+  const mismatchedPlan = { ...plan("failed"), id: "plan-2", createdAt: 20 };
+  const mismatchedDetail = detail({
+    plan: mismatchedPlan,
+    tasks: [{
+      ...task("task-2", "page", "failed", { error: { message: "Wrong Plan finding" } }),
+      planId: mismatchedPlan.id,
+    }],
+    dependencies: [],
+  });
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({
+      listGenerationPlans: async () => [selected],
+      getGenerationPlan: async () => mismatchedDetail,
+    })}>
+      <GenerationPlanInspector projectId="project-1" preferredPlanId={selected.id} onClose={() => {}} />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-generation-plan__header");
+  expect(await screen.findByRole("alert")).toHaveTextContent("identity mismatch");
+  expect(screen.queryByText("Wrong Plan finding")).not.toBeInTheDocument();
+  expect(rendered.container.querySelector("header.dezin-generation-plan__header")).toBe(header);
+  rendered.unmount();
+});
+
 test("GenerationPlanInspector reconnects from the durable cursor and refreshes authoritative detail", async () => {
   const initial = detail({
     plan: plan("queued"),
@@ -544,6 +830,7 @@ test("GenerationPlanInspector reconnects from the durable cursor and refreshes a
     };
     await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
   });
+  const onDetailChange = vi.fn();
   const api = makeFakeApi({
     listGenerationPlans: async () => [plan("queued")],
     getGenerationPlan,
@@ -552,7 +839,11 @@ test("GenerationPlanInspector reconnects from the durable cursor and refreshes a
 
   const { unmount } = render(
     <ApiProvider client={api}>
-      <GenerationPlanInspector projectId="project-1" preferredPlanId="plan-1" />
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        onDetailChange={onDetailChange}
+      />
     </ApiProvider>,
   );
 
@@ -564,6 +855,14 @@ test("GenerationPlanInspector reconnects from the durable cursor and refreshes a
     { after: 0 },
   );
   expect(getGenerationPlan).toHaveBeenCalledTimes(2);
+  expect(onDetailChange).toHaveBeenNthCalledWith(1, {
+    detail: initial,
+    source: "load",
+  });
+  expect(onDetailChange).toHaveBeenLastCalledWith({
+    detail: running,
+    source: "observation",
+  });
   unmount();
 });
 
@@ -961,6 +1260,7 @@ test("GenerationPlanInspector never lets an older stream refresh undo a complete
     };
     await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
   });
+  const onDetailChange = vi.fn();
   const rendered = render(
     <ApiProvider client={makeFakeApi({
       listGenerationPlans: async () => [running.plan],
@@ -968,7 +1268,11 @@ test("GenerationPlanInspector never lets an older stream refresh undo a complete
       cancelGenerationPlan: async () => cancelled,
       streamGenerationPlanEvents,
     })}>
-      <GenerationPlanInspector projectId="project-1" preferredPlanId="plan-1" />
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        onDetailChange={onDetailChange}
+      />
     </ApiProvider>,
   );
 
@@ -983,6 +1287,10 @@ test("GenerationPlanInspector never lets an older stream refresh undo a complete
 
   expect(screen.getAllByText("Cancelled")).toHaveLength(2);
   expect(screen.queryByRole("button", { name: "Cancel generation plan" })).not.toBeInTheDocument();
+  expect(onDetailChange).toHaveBeenCalledWith({
+    detail: cancelled,
+    source: "cancel",
+  });
   rendered.unmount();
 });
 
@@ -1095,6 +1403,7 @@ test("GenerationPlanInspector opens the durable stream when a settled task is re
     await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
   });
   const retryGenerationTask = vi.fn(async () => queued);
+  const onDetailChange = vi.fn();
   const api = makeFakeApi({
     listGenerationPlans: async () => [failed.plan],
     getGenerationPlan: async () => failed,
@@ -1104,7 +1413,11 @@ test("GenerationPlanInspector opens the durable stream when a settled task is re
 
   const rendered = render(
     <ApiProvider client={api}>
-      <GenerationPlanInspector projectId="project-1" preferredPlanId="plan-1" />
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        onDetailChange={onDetailChange}
+      />
     </ApiProvider>,
   );
 
@@ -1116,6 +1429,10 @@ test("GenerationPlanInspector opens the durable stream when a settled task is re
     { after: 0 },
   ));
   expect(retryGenerationTask).toHaveBeenCalledWith("project-1", "plan-1", "task-1", "same-context");
+  expect(onDetailChange).toHaveBeenCalledWith({
+    detail: queued,
+    source: "retry",
+  });
   rendered.unmount();
 });
 

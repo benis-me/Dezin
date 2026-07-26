@@ -12,7 +12,7 @@ import {
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 
-test("visual review policy always selects the hard no-tools Claude transport", () => {
+test("visual review policy preserves the hard no-tools Codex transport", () => {
   const settings = {
     agentCommand: "codex",
     model: "gpt-5",
@@ -20,10 +20,10 @@ test("visual review policy always selects the hard no-tools Claude transport", (
     visualQaModel: "gpt-5",
   } as Settings;
 
-  assert.equal(reviewerAgentCommand(settings, "gemini"), "claude");
+  assert.equal(reviewerAgentCommand(settings, "gemini"), "codex");
 });
 
-test("visual review policy never sends a Codex or Gemini model to Claude", () => {
+test("visual review policy preserves Codex models only for the Codex reviewer", () => {
   const inheritedCodex = {
     agentCommand: "codex",
     model: "gpt-5",
@@ -36,8 +36,8 @@ test("visual review policy never sends a Codex or Gemini model to Claude", () =>
     visualQaModel: "gpt-5-reviewer",
   };
 
-  assert.equal(reviewerModel(inheritedCodex, "gpt-5"), undefined);
-  assert.equal(reviewerModel(legacyCodexOverride, "gemini-2.5-pro"), undefined);
+  assert.equal(reviewerModel(inheritedCodex, "gpt-5"), "gpt-5");
+  assert.equal(reviewerModel(legacyCodexOverride, "gemini-2.5-pro"), "gpt-5-reviewer");
 });
 
 test("visual review policy preserves an explicit Claude reviewer model and same-provider fallback", () => {
@@ -58,8 +58,8 @@ test("visual review policy preserves an explicit Claude reviewer model and same-
   assert.equal(reviewerModel(inheritedClaude, "claude-opus-4-8"), "claude-opus-4-8");
   assert.equal(
     reviewerModel(inheritedClaude, "gpt-5", "codex"),
-    undefined,
-    "the Claude reviewer must never inherit a request-level model from a different provider",
+    "gpt-5",
+    "an immutable request-level Codex selection owns both reviewer provider and model",
   );
 });
 

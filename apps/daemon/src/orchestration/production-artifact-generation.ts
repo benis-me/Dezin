@@ -547,6 +547,7 @@ export function createProductionArtifactGenerationExecutor(
                 providerId: binding.providerId,
                 command: binding.agentCommand,
                 model: binding.model,
+                candidateWorktreeDir: infrastructure.candidateWorktreeDir,
                 worktreeDir: infrastructure.worktreeDir,
                 enforceArtifactUpdate: false,
               })

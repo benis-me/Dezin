@@ -13,6 +13,7 @@ import type {
   WorkspaceNode,
 } from "../../lib/api.ts";
 import type { GenerationTargetState } from "../generation/generation-target-state.ts";
+import type { ResourceNodeRevisionPreview } from "./resource-node-preview.ts";
 import {
   WORKSPACE_NODE_SIZES,
   isComponentLibraryGroupId,
@@ -35,6 +36,7 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   resourceId: string | null;
   resourceKind?: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference" | null;
   resourceQualityState?: "grounded" | "needs-review" | null;
+  resourcePreview?: ResourceNodeRevisionPreview | null;
   revisionId: string | null;
   zoomLevel: SemanticZoomLevel;
   incomingCount: number;
@@ -83,6 +85,7 @@ export interface WorkspaceGraphView {
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
     qualityState: "grounded" | "needs-review" | null;
   }>>;
+  resourceRevisionPreviews?: Readonly<Record<string, ResourceNodeRevisionPreview>>;
   artifactGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   resourceGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   awaitingSelectionResourceIds?: ReadonlySet<string>;
@@ -251,6 +254,9 @@ function adaptGraphNode(
   const generation = node.kind === "resource"
     ? view.resourceGenerationStates?.[node.resourceId]
     : view.artifactGenerationStates?.[node.artifactId];
+  const resourcePreview = node.kind === "resource"
+    ? view.resourceRevisionPreviews?.[node.resourceId] ?? null
+    : null;
   const awaitingSelection = node.kind === "resource"
     && view.awaitingSelectionResourceIds?.has(node.resourceId);
   const quality = node.kind === "resource" ? null : node.quality ?? null;
@@ -274,6 +280,7 @@ function adaptGraphNode(
       resourceId: node.kind === "resource" ? node.resourceId : null,
       resourceKind: node.kind === "resource" ? resourceState?.resourceKind ?? null : null,
       resourceQualityState: node.kind === "resource" ? resourceState?.qualityState ?? null : null,
+      resourcePreview,
       revisionId,
       zoomLevel: semanticZoomLevel(view.zoom),
       incomingCount: counts.get(node.id)?.incoming ?? 0,

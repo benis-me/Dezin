@@ -30,6 +30,16 @@ const MAX_ARTIFACT_REVISION_EVIDENCE_ENTRIES = 2_048;
 const MAX_ARTIFACT_REVISION_EVIDENCE_ENTRY_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_REVISION_EVIDENCE_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_ARTIFACT_REVISION_EVIDENCE_MANIFEST_BYTES = 4 * 1024 * 1024;
+const EPHEMERAL_ARTIFACT_DIRECTORIES = new Set([
+  "node_modules",
+  ".npm-cache",
+  ".pw-browsers",
+]);
+
+interface ArtifactCandidateTreePolicy {
+  readonly baselineEphemeralDirectories: Set<string>;
+  readonly captureBaseline: boolean;
+}
 
 export interface ArtifactCandidateAttempt {
   workspaceId: string;
@@ -1295,6 +1305,7 @@ async function buildDirectoryTree(
   worktreeDir: string,
   directory: string,
   relativeDirectory: string,
+  policy: ArtifactCandidateTreePolicy,
   signal?: AbortSignal,
 ): Promise<string> {
   checkAbort(signal);
@@ -1313,6 +1324,10 @@ async function buildDirectoryTree(
     assertSafeRepositoryPath(path);
     const absolutePath = join(directory, name);
     const metadata = await lstat(absolutePath);
+    if (metadata.isDirectory() && EPHEMERAL_ARTIFACT_DIRECTORIES.has(name)) {
+      if (policy.captureBaseline) policy.baselineEphemeralDirectories.add(path);
+      else if (!policy.baselineEphemeralDirectories.has(path)) continue;
+    }
     let mode: string;
     let type: "blob" | "tree";
     let objectId: string;
@@ -1325,6 +1340,7 @@ async function buildDirectoryTree(
         worktreeDir,
         absolutePath,
         path,
+        policy,
         signal,
       );
     } else if (metadata.isFile()) {
@@ -1359,6 +1375,7 @@ async function buildWorktreeTree(
   repository: ResolvedRepository,
   isolated: IsolatedGit,
   worktreeDir: string,
+  policy: ArtifactCandidateTreePolicy,
   signal?: AbortSignal,
 ): Promise<string> {
   const gitMetadata = await lstat(isolated.gitDir);
@@ -1366,7 +1383,7 @@ async function buildWorktreeTree(
     || await realpath(isolated.gitDir) !== isolated.realGitDir) {
     throw new ArtifactCandidateValidationError("isolated Artifact transaction Git metadata was replaced");
   }
-  return buildDirectoryTree(repository, isolated, worktreeDir, worktreeDir, "", signal);
+  return buildDirectoryTree(repository, isolated, worktreeDir, worktreeDir, "", policy, signal);
 }
 
 async function readRef(
@@ -1482,6 +1499,7 @@ export async function beginArtifactCandidateTransaction(
   let durableTree = attempt.sourceTreeHash;
   let lastCandidate: ArtifactCandidateResult | null = null;
   let lastMessage: string | null = null;
+  const baselineEphemeralDirectories = new Set<string>();
 
   const isolated: IsolatedGit = {
     gitDir,
@@ -1501,7 +1519,10 @@ export async function beginArtifactCandidateTransaction(
     await writeFile(join(gitDir, "objects", "info", "alternates"), `${repository.objectDir}\n`, { mode: 0o600 });
     await materializeTree(repository, attempt.sourceTreeHash, worktreeDir, input.signal);
     await pointIsolatedHead(isolated, worktreeDir, attempt.sourceCommitHash, attempt.sourceTreeHash, input.signal);
-    const reproducedTree = await buildWorktreeTree(repository, isolated, worktreeDir, input.signal);
+    const reproducedTree = await buildWorktreeTree(repository, isolated, worktreeDir, {
+      baselineEphemeralDirectories,
+      captureBaseline: true,
+    }, input.signal);
     if (reproducedTree !== attempt.sourceTreeHash) {
       throw new ArtifactCandidateValidationError("isolated Artifact worktree did not reproduce the exact Attempt tree");
     }
@@ -1519,7 +1540,10 @@ export async function beginArtifactCandidateTransaction(
     const signal = combinedSignal(input.signal, commitInput.signal);
     checkAbort(signal);
     const message = canonicalCommitMessage(commitInput.message);
-    const treeHash = await buildWorktreeTree(repository, isolated, worktreeDir, signal);
+    const treeHash = await buildWorktreeTree(repository, isolated, worktreeDir, {
+      baselineEphemeralDirectories,
+      captureBaseline: false,
+    }, signal);
     if (lastCandidate !== null && lastCandidate.treeHash === treeHash && lastMessage === message) {
       await advanceRef(repository, attemptRef, lastCandidate.commitHash, durableHead, signal);
       durableHead = lastCandidate.commitHash;
@@ -1564,7 +1588,10 @@ export async function beginArtifactCandidateTransaction(
     attemptRef,
     async fingerprint(signal: AbortSignal): Promise<string> {
       ensureOpen();
-      return buildWorktreeTree(repository, isolated, worktreeDir, combinedSignal(input.signal, signal));
+      return buildWorktreeTree(repository, isolated, worktreeDir, {
+        baselineEphemeralDirectories,
+        captureBaseline: false,
+      }, combinedSignal(input.signal, signal));
     },
     async commit(message: string, signal: AbortSignal): Promise<ArtifactCandidateResult> {
       return commitCandidate({ message, signal });

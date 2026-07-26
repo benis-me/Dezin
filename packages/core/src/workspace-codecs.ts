@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   normalizeWorkspaceGraphCommands,
+  snapshotWorkspaceGraph,
   validateWorkspaceGraph,
   WorkspaceGraphValidationError,
 } from "./workspace-graph.ts";
@@ -1365,7 +1366,8 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
   const label = `Workspace generation Resource operation at index ${index}`;
   const input = boundaryRecord(value, label);
   allowFields(input, [
-    "operation", "nodeId", "resourceId", "kind", "title", "revisionPolicy", "dispatchContextPackId",
+    "operation", "nodeId", "resourceId", "kind", "title", "instructions", "revisionPolicy",
+    "dispatchContextPackId",
   ], label);
   if (input.operation !== "create" && input.operation !== "revise" && input.operation !== "reuse") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
@@ -1377,11 +1379,21 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
     throw new WorkspaceStoreCodecError(`${label} Resource kind is unsupported`);
   }
   const operation = input.operation;
+  const instructions = input.instructions === undefined
+    ? undefined
+    : canonicalString(input.instructions, `${label} instructions`);
+  if (instructions !== undefined
+    && (instructions !== input.instructions || Buffer.byteLength(instructions, "utf8") > 2_000)) {
+    throw new WorkspaceStoreCodecError(
+      `${label} instructions must be canonical and bounded to 2000 UTF-8 bytes`,
+    );
+  }
   const normalized = {
     nodeId: canonicalString(input.nodeId, `${label} node id`),
     resourceId: canonicalString(input.resourceId, `${label} Resource id`),
     kind: resourceKind,
     title: canonicalString(input.title, `${label} title`),
+    ...(instructions === undefined ? {} : { instructions }),
     revisionPolicy: normalizeResourceRevisionPolicy(input.revisionPolicy, `${label} revision policy`),
     ...(input.dispatchContextPackId === undefined ? {} : {
       dispatchContextPackId: normalizeDispatchContextPackId(
@@ -1933,8 +1945,7 @@ export function asWorkspaceProposalValue(value: unknown): WorkspaceProposalRecor
     && input.status !== "superseded" && input.status !== "conflicted") {
     throw new WorkspaceStoreCodecError("Workspace Proposal status is unsupported");
   }
-  const baseGraph = canonicalJsonValue(input.baseGraph, "Workspace Proposal base graph") as unknown;
-  validateWorkspaceGraph(baseGraph);
+  const baseGraph = snapshotWorkspaceGraph(input.baseGraph);
   const baseLayout = asWorkspaceLayoutValue(input.baseLayout);
   const generation = normalizeWorkspaceProposalGeneration(input.generation);
   if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");

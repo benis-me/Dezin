@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
+import { ToastProvider } from "../components/Toast.tsx";
 import { WorkspaceAgentPanel } from "./WorkspaceAgentPanel.tsx";
 
 afterEach(cleanup);
@@ -53,15 +54,20 @@ test("Studio Agent restores project navigation, Agent selection, and Design Syst
 
   const composerShell = container.querySelector("[data-agent-composer-shell]");
   const composerActions = container.querySelector("[data-workspace-agent-actions]");
+  const designSystemControls = container.querySelector("[data-workspace-agent-design-system]");
+  const agentPicker = screen.getByRole("button", { name: "Agent and model" });
+  const designSystemPicker = screen.getByRole("button", { name: "Design system" });
   expect(composerShell).not.toBeNull();
   expect(composerShell).toContainElement(screen.getByRole("textbox", { name: "Workspace Agent draft" }));
-  expect(composerShell).toContainElement(screen.getByRole("button", { name: "Agent and model" }));
-  expect(composerShell).toContainElement(screen.getByRole("button", { name: "Design system" }));
+  expect(composerShell).toContainElement(agentPicker);
+  expect(composerShell).not.toContainElement(designSystemPicker);
+  expect(composerActions).toContainElement(agentPicker);
+  expect(designSystemControls).toContainElement(designSystemPicker);
   expect(composerActions).not.toHaveClass("border-t");
   expect(composerActions).not.toHaveClass("flex-wrap");
 });
 
-test("keeps context, attachment, routing, and send controls inside one compact composer", () => {
+test("keeps Design System above the composer and Agent selection beside send", () => {
   const { container } = render(
     <WorkspaceAgentPanel
       draft="Refine this page"
@@ -97,6 +103,7 @@ test("keeps context, attachment, routing, and send controls inside one compact c
 
   const composerShell = container.querySelector("[data-agent-composer-shell]");
   const composerActions = container.querySelector("[data-workspace-agent-actions]");
+  const designSystemControls = container.querySelector("[data-workspace-agent-design-system]");
   const composerRouting = container.querySelector("[data-workspace-agent-routing]");
   const agentPicker = screen.getByRole("button", { name: "Agent and model" });
   const designSystemPicker = screen.getByRole("button", { name: "Design system" });
@@ -105,22 +112,22 @@ test("keeps context, attachment, routing, and send controls inside one compact c
   expect(composerShell).not.toBeNull();
   expect(composerShell).toContainElement(screen.getByRole("list", { name: "Selected Agent Context" }));
   expect(composerShell).toContainElement(attach);
-  expect(composerShell).toContainElement(designSystemPicker);
+  expect(composerShell).not.toContainElement(designSystemPicker);
   expect(composerShell).toContainElement(agentPicker);
   expect(composerShell).toContainElement(submit);
   expect(agentPicker).toHaveTextContent("CodeBuddy");
   expect(composerActions).toContainElement(attach);
   expect(composerActions).toContainElement(submit);
-  expect(composerActions).not.toContainElement(agentPicker);
+  expect(composerActions).toContainElement(agentPicker);
   expect(composerActions).not.toContainElement(designSystemPicker);
   expect(composerActions).toHaveClass("min-w-0", "justify-between");
   expect(composerActions).not.toHaveClass("flex-wrap");
-  expect(composerRouting).toContainElement(agentPicker);
-  expect(composerRouting).toContainElement(designSystemPicker);
-  expect(composerRouting).toHaveClass("min-w-0", "flex-wrap");
-  expect(composerRouting).not.toHaveClass("overflow-hidden");
-  expect(agentPicker.parentElement).toHaveClass("min-w-[8rem]", "flex-1");
-  expect(designSystemPicker.parentElement).toHaveClass("min-w-[8rem]", "flex-1");
+  expect(composerRouting).toBeNull();
+  expect(designSystemControls).toContainElement(designSystemPicker);
+  expect(designSystemControls).toHaveClass("mb-1.5");
+  expect(
+    designSystemControls!.compareDocumentPosition(composerShell!) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
 });
 
 test("renders user and assistant turns with the shared Dezin message hierarchy and rich text", () => {
@@ -164,6 +171,105 @@ test("renders user and assistant turns with the shared Dezin message hierarchy a
   expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).toHaveTextContent("proposal");
 });
 
+test("preserves the reader's history position when a newer Agent turn arrives", () => {
+  const transcript = [
+    {
+      id: "turn-1",
+      turnId: "turn-1",
+      role: "assistant" as const,
+      content: "First answer",
+      createdAt: 1,
+      state: "proposal" as const,
+    },
+    {
+      id: "turn-2",
+      turnId: "turn-2",
+      role: "assistant" as const,
+      content: "Second answer",
+      createdAt: 2,
+      state: "proposal" as const,
+    },
+  ];
+  const renderPanel = (entries: typeof transcript) => (
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={entries}
+    />
+  );
+  const { rerender } = render(renderPanel(transcript));
+  const transcriptScroll = screen.getByLabelText("Workspace Agent transcript");
+  Object.defineProperties(transcriptScroll, {
+    scrollHeight: { configurable: true, value: 1_000 },
+    clientHeight: { configurable: true, value: 300 },
+    scrollTop: { configurable: true, value: 100, writable: true },
+    scrollTo: { configurable: true, value: vi.fn() },
+  });
+
+  fireEvent.scroll(transcriptScroll);
+  const scrollToLatest = screen.getByRole("button", { name: "Scroll to latest" });
+  expect(scrollToLatest).toBeInTheDocument();
+  const scrollTo = transcriptScroll.scrollTo as ReturnType<typeof vi.fn>;
+  scrollTo.mockClear();
+
+  rerender(renderPanel([
+    ...transcript,
+    {
+      id: "turn-3",
+      turnId: "turn-3",
+      role: "assistant",
+      content: "Newest answer",
+      createdAt: 3,
+      state: "proposal" as const,
+    },
+  ]));
+
+  expect(transcriptScroll.scrollTop).toBe(100);
+  expect(scrollTo).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Scroll to latest" })).toBeInTheDocument();
+});
+
+test("restores transcript auto-follow after the reader chooses Scroll to latest", () => {
+  const transcript = [{
+    id: "turn-1",
+    turnId: "turn-1",
+    role: "assistant" as const,
+    content: "First answer",
+    createdAt: 1,
+    state: "proposal" as const,
+  }];
+  const renderPanel = (status: string | null) => (
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={transcript}
+      status={status}
+    />
+  );
+  const { rerender } = render(renderPanel(null));
+  const transcriptScroll = screen.getByLabelText("Workspace Agent transcript");
+  const scrollTo = vi.fn();
+  Object.defineProperties(transcriptScroll, {
+    scrollHeight: { configurable: true, value: 1_000 },
+    clientHeight: { configurable: true, value: 300 },
+    scrollTop: { configurable: true, value: 100, writable: true },
+    scrollTo: { configurable: true, value: scrollTo },
+  });
+
+  fireEvent.scroll(transcriptScroll);
+  fireEvent.click(screen.getByRole("button", { name: "Scroll to latest" }));
+  expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "smooth" });
+  expect(screen.queryByRole("button", { name: "Scroll to latest" })).not.toBeInTheDocument();
+
+  scrollTo.mockClear();
+  Object.defineProperty(transcriptScroll, "scrollHeight", { configurable: true, value: 1_200 });
+  rerender(renderPanel("Queued · Plan 123"));
+  expect(scrollTo).toHaveBeenCalledWith({ top: 1_200, behavior: "auto" });
+  expect(screen.queryByRole("button", { name: "Scroll to latest" })).not.toBeInTheDocument();
+});
+
 test("passes Design System catalog failure and retry through the Agent composer", async () => {
   const user = userEvent.setup();
   const onRetryDesignSystems = vi.fn();
@@ -187,22 +293,28 @@ test("passes Design System catalog failure and retry through the Agent composer"
   expect(onRetryDesignSystems).toHaveBeenCalledOnce();
 });
 
-test("Studio Agent blocks submission when no safe generation Agent is available", () => {
+test("Studio Agent reports a blocked submission through the global toast without changing the composer", () => {
   const onSubmit = vi.fn();
-  render(
-    <WorkspaceAgentPanel
-      draft="Build the complete workspace"
-      onDraftChange={vi.fn()}
-      contextLabel="Workspace"
-      onSubmit={onSubmit}
-      submissionBlockedReason="Claude is required for safe Design Workspace generation."
-    />,
+  const { container } = render(
+    <ToastProvider>
+      <WorkspaceAgentPanel
+        draft="Build the complete workspace"
+        onDraftChange={vi.fn()}
+        contextLabel="Workspace"
+        onSubmit={onSubmit}
+        submissionBlockedReason="Claude is required for safe Design Workspace generation."
+      />
+    </ToastProvider>,
   );
 
   expect(screen.getByRole("button", { name: "Create proposal" })).toBeDisabled();
-  expect(screen.getByRole("alert")).toHaveTextContent(
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent(
     "Claude is required for safe Design Workspace generation.",
   );
+  expect(alert.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(container.querySelector("[data-workspace-agent-error]")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).not.toHaveAttribute("aria-invalid");
 });
 
 test("keeps pending Agent discovery inside the fixed submit control", () => {
@@ -277,6 +389,30 @@ test("keeps transient submit and attachment activity out of the footer layout", 
     "Saving immutable context…",
   );
   expect(screen.queryByText("Saving immutable context…", { selector: "p" })).not.toBeInTheDocument();
+});
+
+test("reports an Agent error once through the global toast without a persistent composer error", () => {
+  const message = "Workspace Planner returned an invalid structured response with additional diagnostic detail.";
+  const view = (contextLabel: string) => (
+    <ToastProvider>
+      <WorkspaceAgentPanel
+        draft="Retry this exact workspace"
+        onDraftChange={() => {}}
+        contextLabel={contextLabel}
+        error={message}
+      />
+    </ToastProvider>
+  );
+  const { container, rerender } = render(view("Workspace"));
+
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent(message);
+  expect(alert.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(container.querySelector("[data-workspace-agent-error]")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).not.toHaveAttribute("aria-invalid");
+
+  rerender(view("Page"));
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
 test("keeps task history in the transcript instead of below the composer", () => {

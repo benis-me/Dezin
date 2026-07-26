@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  composeWorkspaceAgentConversation,
+  decodeWorkspaceAgentConversation,
+  workspaceAgentConversationMode,
+} from "../../../../packages/core/src/workspace-agent-conversation.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { ApiError } from "../lib/api.ts";
 import type {
@@ -200,6 +205,12 @@ function errorMessage(error: unknown): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function isUncertainNetworkFailure(error: unknown): boolean {
+  return error instanceof TypeError
+    && /^(?:failed to fetch|fetch failed|load failed|networkerror(?: when attempting to fetch resource)?|(?:response )?connection (?:closed|reset|refused)(?:\s+.*)?)$/iu
+      .test(error.message.trim());
 }
 
 function resolveLoadState(project: Project, workspace: ProjectWorkspacePayload): ProjectStudioLoadState {
@@ -812,6 +823,12 @@ export function useProjectStudio(
   const workspaceAgentDraft = agentDrafts[currentAgentScopeKey] ?? currentAgentSession.draft;
   const setWorkspaceAgentDraft = useCallback<Dispatch<SetStateAction<string>>>((next) => {
     const scopeKey = currentAgentScopeKey;
+    setAgentErrors((current) => {
+      if (!(scopeKey in current)) return current;
+      const remaining = { ...current };
+      delete remaining[scopeKey];
+      return remaining;
+    });
     setAgentDrafts((current) => {
       const previous = current[scopeKey] ?? readCachedAgentSession(scopeKey).draft;
       const value = typeof next === "function" ? next(previous) : next;
@@ -824,7 +841,14 @@ export function useProjectStudio(
   const workspaceAgentSubmitting = activeAgentTurnScope === WORKSPACE_AGENT_SCOPE;
   const artifactAgentSubmitting = artifactAgentTargetId !== null && activeAgentTurnScope === currentAgentScopeKey;
   const resourceAgentSubmitting = resourceAgentTargetId !== null && activeAgentTurnScope === currentAgentScopeKey;
-  const workspaceAgentError = agentErrors[WORKSPACE_AGENT_SCOPE] ?? null;
+  const workspaceAgentSession = readCachedAgentSession(WORKSPACE_AGENT_SCOPE);
+  const persistedWorkspaceFailure = workspaceAgentSession.outbox?.kind === "workspace"
+    && workspaceAgentSession.outbox.delivery.status === "failed"
+    && decodeWorkspaceAgentConversation(workspaceAgentSession.outbox.request.message).currentRequest.trim()
+      === (agentDrafts[WORKSPACE_AGENT_SCOPE] ?? workspaceAgentSession.draft).trim()
+    ? workspaceAgentSession.outbox.delivery.error
+    : null;
+  const workspaceAgentError = agentErrors[WORKSPACE_AGENT_SCOPE] ?? persistedWorkspaceFailure;
   const artifactAgentError = artifactAgentTargetId === null ? null : agentErrors[currentAgentScopeKey] ?? null;
   const resourceAgentError = resourceAgentTargetId === null ? null : agentErrors[currentAgentScopeKey] ?? null;
   const artifactAgentReceipt = artifactAgentTargetId === null
@@ -1306,6 +1330,18 @@ export function useProjectStudio(
         graphRevision: ready.workspace.graph.revision,
         selection: [...new Set(selectedGraphObjectIds)].map((id) => ({ kind: "node" as const, id })),
       };
+      const previousOutbox = restoredOutbox === null && session.outbox?.kind === "workspace"
+        ? session.outbox
+        : null;
+      if (previousOutbox !== null
+        && previousOutbox.request.graphRevision === requestFacts.graphRevision
+        && decodeWorkspaceAgentConversation(previousOutbox.request.message).currentRequest.trim() !== message
+        && workspaceAgentConversationMode(message) === "continue") {
+        requestFacts = {
+          ...requestFacts,
+          message: composeWorkspaceAgentConversation(message, previousOutbox.request.message),
+        };
+      }
     } catch (error) {
       setAgentErrors((current) => ({ ...current, [scopeKey]: errorMessage(error) }));
       return;
@@ -1332,7 +1368,14 @@ export function useProjectStudio(
     const epoch = projectEpochRef.current;
     const controller = new AbortController();
     const submittedAt = restoredOutbox?.createdAt ?? Date.now();
-    const outbox: AgentTurnOutbox = { kind: "workspace", turnId, fingerprint, request, createdAt: submittedAt };
+    const outbox: AgentTurnOutbox = {
+      kind: "workspace",
+      turnId,
+      fingerprint,
+      request,
+      createdAt: submittedAt,
+      delivery: { status: "pending" },
+    };
     updateAgentSession(scopeKey, (current) => ({
       ...current,
       outbox,
@@ -1402,7 +1445,19 @@ export function useProjectStudio(
       if (epoch !== projectEpochRef.current || artifactAgentTargetIdRef.current !== null
         || resourceAgentTargetIdRef.current !== null
         || controller.signal.aborted || isAbortError(error)) return;
-      setAgentErrors((current) => ({ ...current, [scopeKey]: errorMessage(error) }));
+      const message = errorMessage(error);
+      if (!isUncertainNetworkFailure(error)) {
+        updateAgentSession(scopeKey, (stored) => ({
+          ...stored,
+          outbox: stored.outbox?.kind === "workspace" && stored.outbox.turnId === turnId
+            ? {
+                ...stored.outbox,
+                delivery: { status: "failed", error: message, failedAt: Date.now() },
+              }
+            : stored.outbox,
+        }));
+      }
+      setAgentErrors((current) => ({ ...current, [scopeKey]: message }));
     } finally {
       if (activeAgentTurnRef.current?.controller === controller) {
         activeAgentTurnRef.current = null;
@@ -1633,7 +1688,9 @@ export function useProjectStudio(
     const outbox = session.outbox;
     if (outbox === null) return;
     if (currentAgentTarget.type === "workspace") {
-      if (outbox.kind === "workspace") void submitWorkspaceAgentPromptInternal(outbox);
+      if (outbox.kind === "workspace" && outbox.delivery.status === "pending") {
+        void submitWorkspaceAgentPromptInternal(outbox);
+      }
       return;
     }
     if (outbox.kind !== "scoped" || outbox.scopeType !== currentAgentTarget.type

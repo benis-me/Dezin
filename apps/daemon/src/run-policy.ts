@@ -104,9 +104,11 @@ export function standardRepairPolicy(settings: Settings, isSharingan: boolean | 
   return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
 }
 
-function builtInStructuredReviewer(command: string): "claude" | "codebuddy" | null {
+function builtInStructuredReviewer(command: string): "claude" | "codebuddy" | "codex" | null {
   const providerId = getProvider(command)?.id;
-  return providerId === "claude" || providerId === "codebuddy" ? providerId : null;
+  return providerId === "claude" || providerId === "codebuddy" || providerId === "codex"
+    ? providerId
+    : null;
 }
 
 export function reviewerAgentCommand(settings: Settings, fallback: string): string {

@@ -20,6 +20,7 @@ import {
 } from "node:path";
 
 import {
+  GenericCliRunner,
   NodeSpawner,
   getProvider,
   type AgentProvider,
@@ -114,6 +115,13 @@ const GENERIC_PROVIDER_RUNTIME_RELATIVE_PATHS: Readonly<Record<string, readonly 
   hermes: [join(".local", "share", "uv")],
 });
 const SAFE_AMBIENT_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "USER"] as const;
+const DAEMON_OWNED_PACKAGE_MANAGER_ENVIRONMENT_KEYS = new Set([
+  "npm_config_cache",
+  "pnpm_config_store_dir",
+  "YARN_CACHE_FOLDER",
+  "COREPACK_HOME",
+  "BUN_INSTALL_CACHE_DIR",
+]);
 const CLAUDE_DENIED_TOOLS = [
   "Read",
   "Edit",
@@ -173,6 +181,9 @@ export interface ProductionArtifactProviderRunnerInput {
   readonly providerId: string;
   readonly command: string;
   readonly model?: string;
+  /** Root of the isolated Git candidate transaction. */
+  readonly candidateWorktreeDir: string;
+  /** Exact Artifact source scope used as the provider cwd. */
   readonly worktreeDir: string;
   readonly enforceArtifactUpdate?: boolean;
 }
@@ -208,6 +219,11 @@ export interface ProductionArtifactCodeBuddyArgsInput {
   readonly worktreeDir: string;
   readonly runtimeRoot: string;
   readonly hostHome: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+}
+
+export interface ProductionArtifactCodexArgsInput {
   readonly systemPrompt: string;
   readonly model?: string;
 }
@@ -284,23 +300,32 @@ interface ArtifactProviderRuntime {
 }
 
 function createArtifactProviderRuntime(
+  candidateWorktreeDir: string,
   worktreeDir: string,
   requestedRoot: string | undefined,
 ): ArtifactProviderRuntime {
-  const transactionRoot = exactPlainDirectory(dirname(worktreeDir), "Artifact transaction root");
+  if (!inside(candidateWorktreeDir, worktreeDir)) {
+    throw new ProductionArtifactProviderSandboxError(
+      "Artifact provider scoped worktree must remain inside the exact candidate worktree",
+    );
+  }
+  const transactionRoot = exactPlainDirectory(
+    dirname(candidateWorktreeDir),
+    "Artifact transaction root",
+  );
   const requestedPath = resolve(requestedRoot ?? join(transactionRoot, "provider-runtime"));
   const requestedParent = exactPlainDirectory(
     dirname(requestedPath),
     "Artifact provider runtime parent",
   );
   const rootPath = join(requestedParent, basename(requestedPath));
-  if (requestedParent !== transactionRoot || inside(worktreeDir, rootPath)) {
+  if (requestedParent !== transactionRoot || inside(candidateWorktreeDir, rootPath)) {
     throw new ProductionArtifactProviderSandboxError(
       "Artifact provider runtime must be a private sibling inside the exact candidate transaction",
     );
   }
   const root = ensurePrivateDirectory(rootPath, "Artifact provider runtime");
-  if (!inside(transactionRoot, root) || inside(worktreeDir, root)) {
+  if (!inside(transactionRoot, root) || inside(candidateWorktreeDir, root)) {
     throw new ProductionArtifactProviderSandboxError("Artifact provider runtime resolves outside its transaction");
   }
   return Object.freeze({
@@ -463,6 +488,11 @@ function providerProcessEnvironment(input: {
     HOME: input.hostHome,
     PATH: safeSearchDirectories(input.hostHome).join(delimiter),
     TMPDIR: input.runtime.tmp,
+    npm_config_cache: join(input.runtime.root, "npm-cache"),
+    pnpm_config_store_dir: join(input.runtime.root, "pnpm-store"),
+    YARN_CACHE_FOLDER: join(input.runtime.root, "yarn-cache"),
+    COREPACK_HOME: join(input.runtime.root, "corepack"),
+    BUN_INSTALL_CACHE_DIR: join(input.runtime.root, "bun-install-cache"),
     TERM: "dumb",
     NO_COLOR: "1",
     IMPECCABLE_HOOK_DISABLED: "1",
@@ -484,6 +514,14 @@ function providerProcessEnvironment(input: {
     );
   }
   for (const [key, rawValue] of Object.entries(input.request ?? {})) {
+    if (DAEMON_OWNED_PACKAGE_MANAGER_ENVIRONMENT_KEYS.has(key)) {
+      if (rawValue !== undefined) {
+        throw new ProductionArtifactProviderSandboxError(
+          `Artifact provider environment variable ${key} is daemon-owned and cannot be overridden`,
+        );
+      }
+      continue;
+    }
     if (key === "DEZIN_DAEMON_TOKEN") {
       if (rawValue !== undefined) {
         throw new ProductionArtifactProviderSandboxError(
@@ -695,6 +733,30 @@ export function buildProductionArtifactCodeBuddySeatbeltProfile(
     `(allow file-write* ${seatbeltSubpaths(writeRoots)})`,
     `(deny file-write* (subpath ${seatbeltString(join(input.worktreeDir, ".git"))}))`,
   ].join("\n");
+}
+
+/**
+ * Production Artifact runs keep Codex login state while refusing host-specific
+ * execution policy and cwd/parent AGENTS.md project documents. The selected
+ * model remains explicit, but reasoning effort is intentionally left to that
+ * model's own default.
+ */
+export function buildProductionArtifactCodexArgs(
+  input: ProductionArtifactCodexArgsInput,
+): string[] {
+  return [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "danger-full-access",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "-c",
+    "project_doc_max_bytes=0",
+    ...(input.model ? ["-m", input.model] : []),
+    input.systemPrompt,
+  ];
 }
 
 export function buildProductionArtifactClaudeArgs(
@@ -926,7 +988,16 @@ export function createProductionArtifactProviderRunner(
 ): AgentRunner {
   const provider = supportedProvider(input.providerId, input.command);
   const providerId = provider.id;
+  const candidateWorktreeDir = exactPlainDirectory(
+    input.candidateWorktreeDir,
+    "Artifact candidate worktree",
+  );
   const worktreeDir = exactPlainDirectory(input.worktreeDir, "Artifact provider worktree");
+  if (!inside(candidateWorktreeDir, worktreeDir)) {
+    throw new ProductionArtifactProviderSandboxError(
+      "Artifact provider scoped worktree must remain inside the exact candidate worktree",
+    );
+  }
   const hostHome = canonicalHostHome(dependencies.hostHome);
   let executable: string;
   if (providerId === "claude" || providerId === "codebuddy") {
@@ -937,7 +1008,11 @@ export function createProductionArtifactProviderRunner(
       ?? resolveCanonicalRegistryExecutable(provider, hostHome);
   }
   const exactExecutable = exactPlainFile(executable, "Artifact provider executable");
-  const runtime = createArtifactProviderRuntime(worktreeDir, dependencies.runtimeRoot);
+  const runtime = createArtifactProviderRuntime(
+    candidateWorktreeDir,
+    worktreeDir,
+    dependencies.runtimeRoot,
+  );
   const claudeConfigDir = providerId === "claude"
     ? canonicalOptionalDirectory(
         dependencies.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR,
@@ -1011,6 +1086,21 @@ export function createProductionArtifactProviderRunner(
         model: input.model,
       })
       : undefined;
+  if (providerId === "codex") {
+    return new GenericCliRunner({
+      id: "codex",
+      command: exactExecutable,
+      model: input.model,
+      config: {
+        buildArgs: (model, prompt) => buildProductionArtifactCodexArgs({
+          systemPrompt: prompt,
+          model,
+        }),
+      },
+      spawner,
+      enforceArtifactUpdate,
+    });
+  }
   return provider.createRunner({
     command: exactExecutable,
     model: input.model,

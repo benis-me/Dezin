@@ -9,7 +9,6 @@
   font-size: 12px;
 }
 
-.dezin-proposal-review__header,
 .dezin-proposal-review__section-heading,
 .dezin-proposal-review__footer {
   display: flex;
@@ -17,14 +16,6 @@
   justify-content: space-between;
 }
 
-.dezin-proposal-review__header {
-  min-height: 40px;
-  flex: 0 0 40px;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.dezin-proposal-review__header h2,
 .dezin-proposal-review__section-heading h3,
 .dezin-proposal-review__notice h3,
 .dezin-proposal-review__notice h2,
@@ -33,16 +24,6 @@
   font-size: 13px;
   font-weight: 590;
   letter-spacing: -0.01em;
-}
-
-.dezin-proposal-review__header h2 {
-  margin-top: 0;
-  font-size: 13px;
-}
-
-.dezin-proposal-review__header h2 + span {
-  display: block;
-  margin-top: 2px;
 }
 
 .dezin-proposal-review__revision {

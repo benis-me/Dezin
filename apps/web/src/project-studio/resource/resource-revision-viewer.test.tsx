@@ -117,6 +117,83 @@ test("a top-level Resource load failure retries in place and preserves the exact
   expect(getResource).toHaveBeenCalledTimes(2);
 });
 
+test("Resource loading and ready states share one compact Studio header shell", async () => {
+  let resolveResource!: (value: Resource) => void;
+  const pendingResource = new Promise<Resource>((resolve) => {
+    resolveResource = resolve;
+  });
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({
+      getResource: async () => pendingResource,
+      getResourceRevisionView: async () => fileView,
+    })}>
+      <Harness requestedRevisionId={null} />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-resource-viewer__header");
+  expect(header).not.toBeNull();
+  expect(header).toHaveClass("h-10", "min-h-10", "border-b");
+  expect(header?.firstElementChild).toHaveClass("items-center", "gap-2.5");
+  expect(screen.getByRole("heading", { name: "Resource" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Back to project canvas" })).toBeInTheDocument();
+
+  await act(async () => {
+    resolveResource(resource);
+    await pendingResource;
+  });
+  expect(await screen.findByRole("heading", { name: resource.title })).toBeInTheDocument();
+  expect(rendered.container.querySelector("header.dezin-resource-viewer__header")).toBe(header);
+});
+
+test("an empty Moodboard surfaces its failed generation task and opens the build plan", async () => {
+  const user = userEvent.setup();
+  const onOpenPlan = vi.fn();
+  const emptyMoodboard: Resource = {
+    ...resource,
+    id: "resource-moodboard",
+    kind: "moodboard",
+    title: "KITE Visual Directions Moodboard",
+    headRevisionId: null,
+  };
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <ResourceEditorSurface
+        editor={{
+          resourceId: emptyMoodboard.id,
+          requestedRevisionId: null,
+          load: {
+            status: "ready",
+            resource: emptyMoodboard,
+            view: null,
+            requestKey: "resource-moodboard\u0000head",
+          },
+          headRevisionId: null,
+          pinned: false,
+          retry: vi.fn(),
+        }}
+        projectId="project-1"
+        generationState={{
+          state: "failed",
+          planId: "plan-1",
+          taskId: "task-moodboard",
+          taskKind: "resource",
+          message: "Moodboard image provider request failed.",
+        }}
+        onOpenPlan={onOpenPlan}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onReturnToHead={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByRole("alert")).toHaveTextContent("Moodboard generation failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Moodboard image provider request failed.");
+  await user.click(screen.getByRole("button", { name: "Open build plan" }));
+  expect(onOpenPlan).toHaveBeenCalledTimes(1);
+});
+
 test("the exact Resource body is ready before lazy history, and history failure stays local", async () => {
   const user = userEvent.setup();
   const listHistory = vi.fn(async () => { throw new Error("History index is offline"); });
@@ -174,6 +251,10 @@ test("Resource states and Revision history preserve shared control sizing and sk
   expect(css).not.toMatch(
     /\.dezin-revision-(?:payload__download-error|media__state|image-state) button\s*\{[^}]*(?:border|border-radius|padding|background|font-size|font-weight)\s*:/s,
   );
+  expect(css).not.toMatch(
+    /\.dezin-resource-viewer__header(?:\s+[^{,]+)?\s*\{/,
+  );
+  expect(css).not.toContain(".dezin-resource-viewer__identity");
 });
 
 test("Resource history opens and closes from the keyboard while returning focus to its trigger", async () => {

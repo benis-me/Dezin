@@ -82,6 +82,29 @@ test("buildAgentEnv maps BYOK settings for Codex and Gemini CLIs", () => {
   });
 });
 
+test("hydrateVisualReviewerSettings keeps Codex on host login without borrowing project credentials", () => {
+  const frozen = {
+    ...SETTINGS,
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+    apiKey: "must-not-reach-reviewer",
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5.4-mini",
+  };
+  const quality = hydrateVisualReviewerSettings(frozen, {
+    ...frozen,
+    apiKey: "rotated-project-key-must-not-reach-reviewer",
+  }, {
+    command: "codex",
+    model: "gpt-5.4-mini",
+  });
+
+  assert.equal(quality.visualQaAgentCommand, "codex");
+  assert.equal(quality.visualQaModel, "gpt-5.4-mini");
+  assert.equal(quality.apiKey, "");
+  assert.deepEqual(buildVisualReviewerEnv(quality, "codex"), {});
+});
+
 test("buildAgentEnv does not guess env names for unknown CLIs", () => {
   assert.deepEqual(buildAgentEnv(SETTINGS, "custom-agent"), {});
 });

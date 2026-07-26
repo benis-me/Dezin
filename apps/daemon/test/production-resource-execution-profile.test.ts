@@ -180,7 +180,11 @@ function pack(executionProfile: FrozenResourceExecutionProfile): ContextPack {
 
 function resourceRequest(
   kind: "research" | "moodboard" | "sharingan-capture" = "research",
-  agent?: { providerId: "claude" | "codebuddy"; command: "claude" | "codebuddy"; model: string | null },
+  agent?: {
+    providerId: "claude" | "codebuddy" | "codex";
+    command: "claude" | "codebuddy" | "codex";
+    model: string | null;
+  },
 ): GenerationTaskContextRequest {
   const task = {
     id: OWNERSHIP.taskId,
@@ -356,6 +360,94 @@ test("Resource quality reviewer restores only the exact frozen Claude reviewer c
       /does not match the frozen Attempt/,
     );
   }
+});
+
+test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer identity", async () => {
+  const current = settings({
+    agentCommand: "claude",
+    model: "stale-global-model",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "stale-global-reviewer",
+  });
+  const fakeStore = {
+    getProject: () => ({ id: OWNERSHIP.projectId, archivedAt: null }),
+    getSettings: () => current,
+    workspace: {
+      getWorkspace: () => ({ id: OWNERSHIP.workspaceId, projectId: OWNERSHIP.projectId }),
+      getResourceForProject: () => ({
+        id: OWNERSHIP.targetResourceId,
+        workspaceId: OWNERSHIP.workspaceId,
+        kind: "moodboard",
+        archivedAt: null,
+      }),
+    },
+  } as unknown as Store;
+  const frozen = await createProductionResourceExecutionProfileLoader({ store: fakeStore })(
+    resourceRequest("moodboard", {
+      providerId: "codex",
+      command: "codex",
+      model: "gpt-5.4-mini",
+    }),
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(frozen.reviewer, {
+    command: "codex",
+    providerId: "codex",
+    model: "gpt-5.4-mini",
+    baseUrl: "",
+    credentialSource: "session",
+    credentialRequired: false,
+  });
+  assert.deepEqual(frozen.agent, {
+    command: "codex",
+    providerId: "codex",
+    model: "gpt-5.4-mini",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "openai",
+    credentialRequired: false,
+  });
+  assert.doesNotMatch(stableStringify(frozen), /must-never-enter-context|api\\.anthropic/);
+  assert.deepEqual(hydrateResourceReviewerExecution(frozen, {
+    ...current,
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5.4-mini",
+  }), {
+    ...frozen.reviewer,
+    apiKey: "",
+  });
+});
+
+test("Resource execution profile rejects a mismatched frozen Task Agent identity", () => {
+  const current = settings();
+  const fakeStore = {
+    getProject: () => ({ id: OWNERSHIP.projectId, archivedAt: null }),
+    getSettings: () => current,
+    workspace: {
+      getWorkspace: () => ({ id: OWNERSHIP.workspaceId, projectId: OWNERSHIP.projectId }),
+      getResourceForProject: () => ({
+        id: OWNERSHIP.targetResourceId,
+        workspaceId: OWNERSHIP.workspaceId,
+        kind: "research",
+        archivedAt: null,
+      }),
+    },
+  } as unknown as Store;
+
+  assert.throws(
+    () => createProductionResourceExecutionProfileLoader({ store: fakeStore })(
+      resourceRequest("research", {
+        providerId: "claude",
+        command: "codex",
+        model: "gpt-5.4-mini",
+      }),
+      new AbortController().signal,
+    ),
+    /Agent identity|provider.*command|does not match/i,
+  );
 });
 
 test("Moodboard execution profile freezes image semantics and hydrates only the exact current provider credential", () => {

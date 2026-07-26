@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -410,6 +410,45 @@ test("a top-level Research load failure retries in place and preserves the exact
 
   expect(await screen.findByText(researchView.executiveSummary)).toBeInTheDocument();
   expect(getResource).toHaveBeenCalledTimes(2);
+});
+
+test("Research loading and ready states share one compact Studio header shell", async () => {
+  let resolveResource!: (value: Resource) => void;
+  const pendingResource = new Promise<Resource>((resolve) => {
+    resolveResource = resolve;
+  });
+  const rendered = render(
+    <ApiProvider client={baseApi({
+      getResource: async () => pendingResource,
+      getResearchResourceRevision: async () => researchView,
+    })}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={null}
+        workspace={workspace()}
+        {...READY_AGENT_PROPS}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const header = rendered.container.querySelector("header.dezin-research-viewer__header");
+  expect(header).not.toBeNull();
+  expect(header).toHaveClass("h-10", "min-h-10", "border-b");
+  expect(header?.firstElementChild).toHaveClass("items-center", "gap-2.5");
+  expect(screen.getByRole("heading", { name: "Research" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Back to project canvas" })).toBeInTheDocument();
+
+  await act(async () => {
+    resolveResource(resource);
+    await pendingResource;
+  });
+  expect(await screen.findByRole("heading", { name: resource.title })).toBeInTheDocument();
+  expect(rendered.container.querySelector("header.dezin-research-viewer__header")).toBe(header);
 });
 
 test("headless Research is a recoverable not-generated state and never requests a fake Revision", async () => {
@@ -872,21 +911,14 @@ test("Research viewer refreshes its exact observation before creating a plan aft
   );
 });
 
-test("Research document header remains a single row at narrow widths", () => {
+test("Research viewer delegates its compact header layout and typography to Studio primitives", () => {
   const css = readFileSync(
     `${process.cwd()}/src/project-studio/research/research-resource-viewer.css`,
     "utf8",
   );
-  const narrowStart = css.indexOf("@media (max-width: 700px)");
-  const narrowEnd = css.indexOf("@media (max-width: 520px)", narrowStart);
-  const narrowRules = css.slice(narrowStart, narrowEnd);
 
-  expect(narrowStart).toBeGreaterThan(-1);
-  expect(narrowRules).toMatch(
-    /\.dezin-research-viewer__header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto/s,
-  );
-  expect(narrowRules).not.toMatch(
-    /\.dezin-research-viewer__history\s*\{[^}]*grid-column:\s*2/s,
+  expect(css).not.toMatch(
+    /\.dezin-research-viewer__header(?:\s+[^{,]+)?\s*\{/,
   );
   expect(css).not.toContain("!important");
   expect(css).not.toMatch(

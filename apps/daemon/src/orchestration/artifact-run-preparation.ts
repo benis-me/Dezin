@@ -13,6 +13,7 @@ import {
   type ContextPackRepository,
 } from "../context/context-types.ts";
 import { standardRepairPrompt } from "../run-policy.ts";
+import { artifactTaskReviewBrief } from "./artifact-task-review-brief.ts";
 import {
   beginArtifactCandidateTransaction,
   type ArtifactCandidateAttempt,
@@ -42,6 +43,9 @@ export interface ArtifactRunInfrastructureInput {
   readonly hasExactSharinganCapture: boolean;
   readonly sharinganReference: ImmutableSharinganCaptureReference | null;
   readonly repositoryDir: string;
+  /** Root of the isolated Git candidate transaction, before Artifact source scoping. */
+  readonly candidateWorktreeDir: string;
+  /** Exact Artifact source scope used as the provider cwd. */
   readonly worktreeDir: string;
 }
 
@@ -70,7 +74,10 @@ export interface ArtifactRunPreparationOptions {
   ) => StandardArtifactQualityEvaluatorPort | Promise<StandardArtifactQualityEvaluatorPort>;
   /** Existing design-agent prompt (design system, skills, craft rules), before the immutable Task overlay. */
   readonly baseSystemPrompt: (
-    input: Omit<ArtifactRunInfrastructureInput, "repositoryDir" | "worktreeDir">,
+    input: Omit<
+      ArtifactRunInfrastructureInput,
+      "repositoryDir" | "candidateWorktreeDir" | "worktreeDir"
+    >,
     signal: AbortSignal,
   ) => string | Promise<string>;
   readonly environment?: (
@@ -287,6 +294,7 @@ function systemPrompt(
     basePrompt,
     "You are executing one immutable Dezin Page or Component generation Task inside an isolated Git worktree. Edit the actual project files; do not publish branches, rewrite Git history, ask follow-up questions, or access paths outside the worktree.",
     "Preserve stable design-node identity (`data-design-node-id`, `data-dezin-id`, or `data-dezin-node-id`) on meaningful elements so Viewer selection, comments, version comparison, and surgical Agent edits remain reliable. Implement every required responsive Frame and keep Component instances/resource pins exact.",
+    "For this isolated generation Task, the daemon exclusively owns browser rendering, screenshots, and visual review. This overrides any general instruction above to perform a render check or use a headless browser. Never install or launch Playwright, Puppeteer, Chromium, Chrome, or another browser automation tool; validate only dependency installation, build, and a non-browser runtime smoke check.",
     ...(sharinganReference === null ? [] : [
       `The only Sharingan source is immutable Resource Revision ${sharinganReference.revisionId}, materialized inside this isolated worktree at .sharingan. Never read, probe, refresh, or copy a live project/capture outside this worktree; any reference change invalidates the Task.`,
     ]),
@@ -316,8 +324,14 @@ function initialMessage(
       responsiveFrames: payload.responsiveFrames,
       qualityProfile: claim.task.qaProfile,
       capabilityDescriptors: payload.capabilityDescriptors,
+      executionPolicy: {
+        visualEvidenceOwner: "daemon",
+        browserAutomation: "forbidden",
+        browserBinaryDownloads: "forbidden",
+        allowedValidation: ["dependency-install", "build", "runtime-smoke"],
+      },
     }),
-    "Finish only after the project builds and the requested design is visually complete. The daemon will independently render, inspect, and return exact repair findings when needed.",
+    "Finish only after the project builds and the requested design is visually complete. Do not add or launch Playwright, Puppeteer, Chromium, Chrome, or any other browser automation; do not download browser binaries, take screenshots, or perform your own visual review. Limit local validation to dependency installation, build, and a non-browser runtime smoke check. The daemon exclusively owns rendering, screenshots, visual inspection, and exact repair findings.",
   ].join("\n\n");
 }
 
@@ -523,6 +537,7 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
         hasExactSharinganCapture,
         sharinganReference: captureReference,
         repositoryDir,
+        candidateWorktreeDir: rawTransaction.dir,
         worktreeDir: transaction.dir,
       });
       // Keep setup sequential so a rejected factory cannot leave another
@@ -564,7 +579,7 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
           round,
           maxRepairRounds,
           prior.quality.score,
-          payload.brief.proposalRationale,
+          artifactTaskReviewBrief(payload),
           { isSharingan: hasExactSharinganCapture },
         ),
       };

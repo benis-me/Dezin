@@ -305,9 +305,18 @@ function generationSettings(opts: ImageGenOpts): {
 }
 
 function base64FromResult(result: GenerateImageResult): string {
-  const b64 = result.image?.base64.replace(/^data:[^,]+;base64,/, "");
-  if (!b64) throw new Error("image API returned no data");
-  return b64;
+  const raw = result.image?.base64.replace(/^data:[^,]+;base64,/, "");
+  if (!raw || !/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || raw.length % 4 === 1) {
+    throw new Error("image API returned no data");
+  }
+  const padded = raw.includes("=")
+    ? raw
+    : `${raw}${"=".repeat((4 - (raw.length % 4)) % 4)}`;
+  const bytes = Buffer.from(padded, "base64");
+  if (bytes.byteLength === 0 || bytes.toString("base64") !== padded) {
+    throw new Error("image API returned invalid data");
+  }
+  return padded;
 }
 
 function imageApiErrorDetail(err: unknown): string {

@@ -39,7 +39,13 @@ import {
 } from "./prototype-version-snapshot.ts";
 import { ensureDevServer, releaseVariantRuntime, workingTreeFingerprint } from "./project-runtime.ts";
 import { bestVersion } from "./best-version.ts";
-import type { Project, QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
+import {
+  NO_DESIGN_SYSTEM_ID,
+  type Project,
+  type QualityFinding,
+  type Run,
+  type Settings,
+} from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { requirePreviewLease } from "./preview-lease.ts";
@@ -182,9 +188,12 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
   const hasExactSharinganCapture = input.hasExactSharinganCapture ?? project.sharingan;
   const brief = input.brief.trim();
   const registry = input.designRegistry ?? defaultRegistry();
+  const designSystemDisabled = project.designSystemId === NO_DESIGN_SYSTEM_ID;
   const designSystemId = hasExactSharinganCapture
     ? undefined
-    : (project.designSystemId ?? settings.defaultDesignSystemId);
+    : designSystemDisabled
+      ? undefined
+      : (project.designSystemId ?? settings.defaultDesignSystemId);
   const designSystem = designSystemId
     ? (registry.get(designSystemId) ?? registry.default())
     : null;
@@ -204,7 +213,7 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
   const baseSystemPrompt = hasExactSharinganCapture
     ? buildSharinganSystemPrompt()
     : composeSystemPrompt({
-        designSystem: designSystem ?? registry.default(),
+        designSystem: designSystem ?? undefined,
         skills: catalog.map((candidate) => ({
           id: candidate.id,
           name: candidate.name,
@@ -227,7 +236,7 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
     skill,
     designSystemName: hasExactSharinganCapture
       ? null
-      : (designSystem ?? registry.default()).name,
+      : designSystem?.name ?? null,
   });
 }
 

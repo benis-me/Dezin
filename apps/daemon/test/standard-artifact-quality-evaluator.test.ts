@@ -197,6 +197,7 @@ function infrastructure(input: {
       ...SOURCE_AUTHORITY,
     } : null,
     repositoryDir: "/repo",
+    candidateWorktreeDir: "/repo/worktree",
     worktreeDir: "/repo/worktree",
   };
 }

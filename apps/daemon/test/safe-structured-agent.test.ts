@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type {
@@ -18,14 +21,17 @@ import type {
   SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
 import {
+  buildSafeStructuredGenericSeatbeltProfile,
   isTrustedCodeBuddyExecutablePath,
   isTrustedClaudeExecutablePath,
   parseSafeStructuredCodexJsonl,
   parseSafeStructuredClaudeStream,
   resolveRegisteredProviderExecutable,
+  resolveTrustedCodexNativeExecutable,
   runSafeStructuredAgent,
   SafeStructuredAgentError,
   safeStructuredClaudeArgs,
+  safeStructuredCodexArgs,
 } from "../src/orchestration/safe-structured-agent.ts";
 
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
@@ -154,8 +160,7 @@ test("registry structured transport runs Codex inside outer confinement and extr
     createSpawner() {
       return spawner;
     },
-    resolveRegisteredExecutable(command) {
-      assert.equal(command, "codex");
+    resolveCodexExecutable() {
       return TEST_CODEX_EXECUTABLE;
     },
     resolveSandboxExecutable() {
@@ -166,14 +171,21 @@ test("registry structured transport runs Codex inside outer confinement and extr
   assert.deepEqual(result, { providerId: "codex", text: '{"pages":[]}' });
   assert.equal(inputs.length, 1);
   const spawned = inputs[0]!;
+  const exactScratch = realpathSync(scratch);
   assert.equal(spawned.command, "/usr/bin/sandbox-exec");
-  assert.equal(spawned.cwd, scratch);
+  assert.equal(spawned.cwd, exactScratch);
   assert.equal(spawned.args[0], "-p");
   const profile = spawned.args[1] ?? "";
   assert.match(profile, /\(deny file-read-data \(subpath "\/Users"\)\)/);
   assert.match(profile, /\(deny file-read-data \(subpath "\/private\/tmp"\)\)/);
   assert.match(profile, /\(deny file-read-data \(subpath "\/Volumes"\)\)/);
-  assert.match(profile, new RegExp(`\\(subpath "${scratch.replaceAll("\\", "\\\\")}"\\)`));
+  assert.match(profile, /\(deny process-fork\)/);
+  assert.match(profile, /\(deny process-exec\*\)/);
+  assert.match(
+    profile,
+    new RegExp(`\\(allow process-exec \\(literal "${TEST_CODEX_EXECUTABLE.replaceAll("\\", "\\\\")}"\\)\\)`),
+  );
+  assert.match(profile, new RegExp(`\\(subpath "${exactScratch.replaceAll("\\", "\\\\")}"\\)`));
   assert.match(profile, /subpath "\/trusted\/codex\/install\/bin"/);
   assert.match(profile, /\.codex/);
   assert.doesNotMatch(profile, new RegExp(`${process.env.HOME ?? "/Users/test"}/Documents`));
@@ -192,6 +204,251 @@ test("registry structured transport runs Codex inside outer confinement and extr
   assert.equal(spawned.env?.OPENAI_BASE_URL, "https://provider.example.test");
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
+});
+
+test("Codex Web Search is an explicit feature-gated structured transport capability", () => {
+  const disabled = safeStructuredCodexArgs("gpt-5.4-mini");
+  const enabled = safeStructuredCodexArgs("gpt-5.4-mini", undefined, [], true);
+
+  assert.equal(disabled.includes("standalone_web_search"), false);
+  const enableIndex = enabled.indexOf("--enable");
+  assert.notEqual(enableIndex, -1);
+  assert.equal(enabled[enableIndex + 1], "standalone_web_search");
+});
+
+test("structured Web Search capability is rejected before spawn for a non-Codex provider", async () => {
+  let spawnerConstructions = 0;
+  let resolverCalls = 0;
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "claude",
+      allowWebSearch: true,
+    }), {
+      createSpawner() {
+        spawnerConstructions += 1;
+        return new RecordingSpawner();
+      },
+      resolveClaudeExecutable() {
+        resolverCalls += 1;
+        return TEST_CLAUDE_EXECUTABLE;
+      },
+    }),
+    (error: unknown) => error instanceof SafeStructuredAgentError
+      && error.code === "provider-unavailable"
+      && /Codex Web Search|Web Search.*Codex/i.test(error.message),
+  );
+
+  assert.equal(resolverCalls, 0);
+  assert.equal(spawnerConstructions, 0);
+});
+
+test("Codex outer confinement lets the native client start but blocks every subprocess exec", {
+  skip: process.platform !== "darwin",
+}, (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-no-subprocess-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const exactScratch = realpathSync(scratch);
+  const markerPath = join(exactScratch, "subprocess-was-started");
+  const profile = buildSafeStructuredGenericSeatbeltProfile({
+    providerId: "codex",
+    executable: process.execPath,
+    scratch: exactScratch,
+  });
+  const childProgram = [
+    "const {spawnSync}=require('node:child_process')",
+    `const child=spawnSync('/bin/sh',['-c',${JSON.stringify(`printf leaked > ${markerPath}`)}])`,
+    "process.stdout.write(JSON.stringify({status:child.status,errorCode:child.error?.code,signal:child.signal}))",
+  ].join(";");
+
+  const result = spawnSync(
+    "/usr/bin/sandbox-exec",
+    ["-p", profile, process.execPath, "-e", childProgram],
+    { cwd: exactScratch, encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: null,
+    errorCode: "EPERM",
+    signal: null,
+  });
+  assert.throws(
+    () => readFileSync(markerPath, "utf8"),
+    (error) => (error as NodeJS.ErrnoException).code === "ENOENT",
+  );
+});
+
+test("registry structured transport confines Codex image evidence and attaches only scratch paths", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-image-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+  const inputs: SpawnInput[] = [];
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      inputs.push(input);
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-image" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-image", type: "agent_message", text: '{"decision":"pass"}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    model: "gpt-5.4-mini",
+    cwd: scratch,
+    message: "Review only the supplied visual evidence.",
+    images: [
+      { label: "generated Moodboard reference", mediaType: "image/png", data: png.toString("base64") },
+      { label: "reference crop", mediaType: "image/jpeg", data: jpeg.toString("base64") },
+    ],
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.deepEqual(result, { providerId: "codex", text: '{"decision":"pass"}' });
+  assert.equal(inputs.length, 1);
+  const spawned = inputs[0]!;
+  const imageArgumentPaths = spawned.args.flatMap((argument, index) =>
+    argument === "--image" ? [spawned.args[index + 1]!] : []);
+  assert.equal(imageArgumentPaths.length, 2);
+  assert.deepEqual(imageArgumentPaths.map((path) => dirname(path)), [
+    realpathSync(scratch),
+    realpathSync(scratch),
+  ]);
+  assert.deepEqual(readFileSync(imageArgumentPaths[0]!), png);
+  assert.deepEqual(readFileSync(imageArgumentPaths[1]!), jpeg);
+  assert.equal(statSync(imageArgumentPaths[0]!).mode & 0o777, 0o600);
+  assert.equal(statSync(imageArgumentPaths[1]!).mode & 0o777, 0o600);
+  assert.match(spawned.stdin, /Image evidence 1: generated Moodboard reference/);
+  assert.match(spawned.stdin, /Image evidence 2: reference crop/);
+  assert.doesNotMatch(spawned.stdin, new RegExp(png.toString("base64")));
+  assert.doesNotMatch(spawned.stdin, new RegExp(jpeg.toString("base64")));
+});
+
+test("registry structured transport confines a requested Codex final-output schema", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-schema-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const outputSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["pages"],
+    properties: {
+      pages: { type: "array", items: { type: "object" } },
+    },
+  } as const;
+  let observedSchema: unknown;
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      const argumentIndex = input.args.indexOf("--output-schema");
+      assert.notEqual(argumentIndex, -1, "Codex must receive the requested final-output schema");
+      const schemaPath = input.args[argumentIndex + 1];
+      assert.equal(typeof schemaPath, "string");
+      assert.equal(dirname(schemaPath!), realpathSync(scratch));
+      observedSchema = JSON.parse(readFileSync(schemaPath!, "utf8"));
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-schema" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-schema", type: "agent_message", text: '{"pages":[]}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: scratch,
+    outputSchema,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.deepEqual(observedSchema, outputSchema);
+});
+
+test("registry structured transport canonicalizes its scratch before Seatbelt and spawn", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "dezin-safe-codex-canonical-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const canonicalScratch = join(parent, "canonical");
+  const aliasedScratch = join(parent, "alias");
+  mkdirSync(canonicalScratch, { mode: 0o700 });
+  symlinkSync(canonicalScratch, aliasedScratch, "dir");
+  const exactScratch = realpathSync(aliasedScratch);
+  const spawner: ProcessSpawner = {
+    async run(input): Promise<SpawnOutput> {
+      assert.equal(input.cwd, exactScratch, "Codex must run from the exact scratch identity");
+      assert.match(
+        input.args[1] ?? "",
+        new RegExp(exactScratch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        "Seatbelt must grant the same exact scratch identity",
+      );
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-canonical" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-canonical", type: "agent_message", text: "{}" },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: aliasedScratch,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
 });
 
 test("registry generic structured adapter invokes Gemini one-shot in an empty scratch with a restricted environment", async (t) => {
@@ -230,15 +487,16 @@ test("registry generic structured adapter invokes Gemini one-shot in an empty sc
   assert.deepEqual(result, { providerId: "gemini", text: '{"pages":[]}' });
   assert.equal(inputs.length, 1);
   const spawned = inputs[0]!;
+  const exactScratch = realpathSync(scratch);
   assert.equal(spawned.command, "/usr/bin/sandbox-exec");
-  assert.equal(spawned.cwd, scratch);
+  assert.equal(spawned.cwd, exactScratch);
   assert.equal(spawned.stdin, "");
   assert.equal(spawned.args[0], "-p");
   const profile = spawned.args[1] ?? "";
   assert.match(profile, /\(deny file-read-data \(subpath "\/Users"\)\)/);
   assert.match(profile, /\(deny file-read-data \(subpath "\/private\/tmp"\)\)/);
   assert.match(profile, /\(deny file-read-data \(subpath "\/Volumes"\)\)/);
-  assert.match(profile, new RegExp(`\\(subpath "${scratch.replaceAll("\\", "\\\\")}"\\)`));
+  assert.match(profile, new RegExp(`\\(subpath "${exactScratch.replaceAll("\\", "\\\\")}"\\)`));
   assert.match(profile, /subpath "\/trusted\/gemini\/install\/bin"/);
   assert.doesNotMatch(profile, new RegExp(`${process.env.HOME ?? "/Users/test"}/Documents`));
   assert.equal(spawned.args[2], "/trusted/gemini/install/bin/gemini");
@@ -248,7 +506,7 @@ test("registry generic structured adapter invokes Gemini one-shot in an empty sc
   assert.equal(spawned.env?.GEMINI_API_KEY, "selected-provider-key");
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
-  assert.equal(spawned.env?.TMPDIR, scratch);
+  assert.equal(spawned.env?.TMPDIR, exactScratch);
 });
 
 test("registry structured transport forces Cursor Agent terminal text into the strict response parser", async (t) => {
@@ -813,6 +1071,69 @@ test("trusted CodeBuddy executable policy accepts only its fixed official packag
   assert.equal(isTrustedCodeBuddyExecutablePath(realpathSync(externalCli), trustedHome), false);
 });
 
+test("trusted Codex resolver maps its official wrapper package to the exact native binary", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-trusted-codex-native-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const wrapper = join(
+    home,
+    ".local",
+    "lib",
+    "node_modules",
+    "@openai",
+    "codex",
+    "bin",
+    "codex.js",
+  );
+  const native = join(
+    home,
+    ".local",
+    "lib",
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    "codex-darwin-arm64",
+    "vendor",
+    "aarch64-apple-darwin",
+    "bin",
+    "codex",
+  );
+  const entrypoint = join(home, ".local", "bin", "codex");
+  mkdirSync(dirname(wrapper), { recursive: true });
+  mkdirSync(dirname(native), { recursive: true });
+  mkdirSync(dirname(entrypoint), { recursive: true });
+  writeFileSync(wrapper, "#!/usr/bin/env node\n", { mode: 0o700 });
+  writeFileSync(native, "native-codex-fixture", { mode: 0o700 });
+  symlinkSync(wrapper, entrypoint);
+  assert.equal(resolveTrustedCodexNativeExecutable({
+    trustedHome: realpathSync(home),
+    platform: "darwin",
+    architecture: "arm64",
+  }), realpathSync(native));
+});
+
+test("trusted Codex resolver rejects a fixed-search symlink to an external wrapper", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-untrusted-codex-wrapper-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const entrypoint = join(home, ".local", "bin", "codex");
+  const externalWrapper = join(root, "outside", "codex.js");
+  mkdirSync(dirname(entrypoint), { recursive: true });
+  mkdirSync(dirname(externalWrapper), { recursive: true });
+  writeFileSync(externalWrapper, "#!/usr/bin/env node\n", { mode: 0o700 });
+  symlinkSync(externalWrapper, entrypoint);
+  assert.throws(
+    () => resolveTrustedCodexNativeExecutable({
+      trustedHome: realpathSync(home),
+      platform: "darwin",
+      architecture: "arm64",
+    }),
+    /official Codex CLI wrapper|trusted install/i,
+  );
+});
+
 test("registered structured providers resolve from the same fixed Bun toolchain root used by Agent scan", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-registered-provider-bun-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -950,7 +1271,78 @@ test("safe Claude stream parser rejects protocol noise, tool use, missing status
   );
 });
 
-test("safe Codex JSONL parser rejects incomplete, ambiguous, and post-terminal envelopes", () => {
+test("safe Codex JSONL parser returns the final completed Agent message", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const progress = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: "Preparing the compact intent." },
+  });
+  const final = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-2", type: "agent_message", text: '{"pages":[]}' },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+
+  assert.equal(
+    parseSafeStructuredCodexJsonl([thread, turn, progress, final, terminal].join("\n")),
+    '{"pages":[]}',
+  );
+});
+
+test("safe Codex JSONL parser accepts Web Search items only when the request enabled them", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const search = JSON.stringify({
+    type: "item.completed",
+    item: {
+      id: "search-1",
+      type: "web_search",
+      query: "current accessible design research sources",
+    },
+  });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: '{"sources":[]}' },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+  const stdout = [thread, turn, search, message, terminal].join("\n");
+
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl(stdout),
+    /Web Search.*not enabled|hard no-tools/i,
+  );
+  assert.equal(
+    parseSafeStructuredCodexJsonl(stdout, { allowWebSearch: true }),
+    '{"sources":[]}',
+  );
+});
+
+test("safe Codex JSONL parser rejects command, file, and MCP tool items even with Web Search enabled", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: "{}" },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+
+  for (const forbiddenType of ["command_execution", "file_change", "mcp_tool_call"]) {
+    const forbidden = JSON.stringify({
+      type: "item.completed",
+      item: { id: "forbidden-1", type: forbiddenType },
+    });
+    assert.throws(
+      () => parseSafeStructuredCodexJsonl(
+        [thread, turn, forbidden, message, terminal].join("\n"),
+        { allowWebSearch: true },
+      ),
+      new RegExp(`forbidden.*${forbiddenType}`, "i"),
+    );
+  }
+});
+
+test("safe Codex JSONL parser rejects incomplete and post-terminal envelopes", () => {
   const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
   const turn = JSON.stringify({ type: "turn.started" });
   const message = JSON.stringify({
@@ -962,10 +1354,6 @@ test("safe Codex JSONL parser rejects incomplete, ambiguous, and post-terminal e
   assert.throws(
     () => parseSafeStructuredCodexJsonl([turn, message, terminal].join("\n")),
     /malformed turn start/i,
-  );
-  assert.throws(
-    () => parseSafeStructuredCodexJsonl([thread, turn, message, message, terminal].join("\n")),
-    /exactly one completed Agent message/i,
   );
   assert.throws(
     () => parseSafeStructuredCodexJsonl([thread, turn, message, terminal, '{"type":"turn.started"}'].join("\n")),

@@ -604,17 +604,16 @@ test("Artifact execution profile freezes every output and QA semantic without pe
   assert.equal(profile({ agentCommand: "" }).agent.command, "claude");
 });
 
-test("legacy Codex and Gemini reviewer settings freeze and bind as Claude without a foreign model or key", () => {
+test("Codex reviewer settings remain Codex while unsupported Gemini falls back to the frozen Codex Agent", () => {
   for (const legacyCommand of ["codex", "gemini"] as const) {
     const frozen = profile({
       visualQaAgentCommand: legacyCommand,
       visualQaModel: legacyCommand === "codex" ? "gpt-5-reviewer" : "gemini-2.5-pro",
     });
-    assert.deepEqual(frozen.quality.reviewer, {
-      command: "claude",
-      providerId: "claude",
-      model: null,
-    });
+    const expectedReviewer = legacyCommand === "codex"
+      ? { command: "codex", providerId: "codex", model: "gpt-5-reviewer" }
+      : { command: "codex", providerId: "codex", model: "gpt-5.4" };
+    assert.deepEqual(frozen.quality.reviewer, expectedReviewer);
 
     const bound = bindArtifactExecutionProfile({
       contextPack: packWithProfile(frozen),
@@ -632,10 +631,10 @@ test("legacy Codex and Gemini reviewer settings freeze and bind as Claude withou
       },
     });
 
-    assert.equal(bound.qualitySettings.visualQaAgentCommand, "claude");
-    assert.equal(bound.qualitySettings.visualQaModel, "");
+    assert.equal(bound.qualitySettings.visualQaAgentCommand, expectedReviewer.command);
+    assert.equal(bound.qualitySettings.visualQaModel, expectedReviewer.model ?? "");
     assert.equal(bound.environment.ANTHROPIC_API_KEY, undefined);
-    assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings), {});
+    assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings, expectedReviewer.command), {});
   }
 });
 
@@ -1565,6 +1564,59 @@ test("Artifact execution keeps pinned legacy Research v1/v2 directions usable as
     assert.deepEqual(direction.evidenceFindingIds, []);
     assert.deepEqual(direction.hypothesisFindingIds, ["finding-comparison", "finding-summary"]);
   }
+});
+
+test("Artifact execution preserves an explicit no-design-system selection", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-no-design-system-profile-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const designSystem = {
+    id: "global-default-system",
+    name: "Global Default System",
+    category: "Editorial",
+    summary: "Must not constrain this Task",
+    designMd: "# Global Default System\nUse only one visual direction.",
+    tokensCss: ":root { --color-accent: #123456; }",
+    craft: { applies: [] },
+  };
+  const project = store.createProject({
+    name: "Three unconstrained directions",
+    mode: "standard",
+    skillId: "frontend-design",
+    designSystemId: "__dezin_no_design_system__",
+  });
+  store.updateSettings({ defaultDesignSystemId: designSystem.id, visualQaEnabled: false });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const loader = createProductionArtifactExecutionProfileLoader({
+    store,
+    dataDir: root,
+    designRegistry: new DesignRegistry([designSystem]),
+    repositoryDirForWorkspace: () => root,
+  });
+  const frozen = await loader({
+    projectId: project.id,
+    planId: PLAN_ID,
+    task: {
+      id: TASK_ID,
+      planId: PLAN_ID,
+      workspaceId: workspace.id,
+      kind: "page",
+      target: {
+        type: "artifact",
+        workspaceId: workspace.id,
+        id: ARTIFACT_ID,
+        trackId: "track-profile",
+      },
+      payload: { brief: { proposalRationale: "Create three intentionally different visual directions." } },
+      qaProfile: { requireVisualReview: false },
+    },
+    observation: { resourcePins: [] },
+  } as never, new AbortController().signal);
+
+  assert.equal(frozen.designSystem, null);
+  assert.doesNotMatch(frozen.prompt.systemPrompt, /Active design system/);
+  assert.doesNotMatch(frozen.prompt.systemPrompt, /Global Default System/);
 });
 
 test("a Sharingan Project does not apply exact-Capture semantics to an unlinked Artifact Task", async (t) => {
