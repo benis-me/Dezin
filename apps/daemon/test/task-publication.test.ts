@@ -17,7 +17,8 @@ import {
 import type {
   ArtifactPreparedCandidate,
   GenerationTaskExecutionFailure,
-  PrototypeValidationResult,
+  PrototypeFinalizationResult,
+  PrototypeSnapshotValidationResult,
   ResourcePreparedCandidate,
 } from "../src/orchestration/generation-task-executor.ts";
 
@@ -135,7 +136,7 @@ function resourceResult(): ResourcePreparedCandidate {
   };
 }
 
-function validationResult(): PrototypeValidationResult {
+function validationResult(): PrototypeSnapshotValidationResult {
   return {
     kind: "snapshot-validation",
     taskId: "task-prototype-validation",
@@ -145,6 +146,55 @@ function validationResult(): PrototypeValidationResult {
     artifactRevisionIds: ["artifact-revision-home"],
     resourceRevisionIds: ["resource-revision-copy"],
     evidence: { protocol: "dezin-prototype-validation-v1" },
+  };
+}
+
+function finalizationResult(): PrototypeFinalizationResult {
+  return {
+    kind: "prototype-finalization",
+    taskId: "task-prototype-validation",
+    workspaceId: "workspace-1",
+    baseSnapshotId: "snapshot-planned",
+    baseGraphRevision: 7,
+    artifactRevisionIds: ["artifact-revision-home"],
+    resourceRevisionIds: [],
+    markerProofs: [{
+      protocol: "dezin.artifact-element-selection-manifest.v1",
+      workspaceId: "workspace-1",
+      artifactId: "artifact-home",
+      artifactRevisionId: "artifact-revision-home",
+      assemblyHash: "a".repeat(64),
+      designNodeId: "prototype-marker-home-details",
+      sourceArtifactId: "artifact-home",
+      sourceArtifactRevisionId: "artifact-revision-home",
+      sourceCommitHash: "b".repeat(40),
+      sourceTreeHash: "c".repeat(40),
+      sourcePath: "src/Home.tsx",
+      selectionManifestHash: "d".repeat(64),
+      runtimeProof: {
+        protocol: "dezin.artifact-prototype-runtime-proof.v1",
+        runtimeIdentityHash: "e".repeat(64),
+        workspaceId: "workspace-1",
+        artifactId: "artifact-home",
+        artifactRevisionId: "artifact-revision-home",
+        assemblyHash: "a".repeat(64),
+        designNodeId: "prototype-marker-home-details",
+        trigger: "click",
+        sourceTreeHash: "c".repeat(40),
+        dependencyLockHash: "f".repeat(64),
+        receiptNonce: "1".repeat(64),
+        frames: [{
+          frameId: "desktop",
+          width: 1_440,
+          height: 900,
+          tagName: "button",
+          role: null,
+          action: "button",
+          visible: true,
+        }],
+        receiptHash: "2".repeat(64),
+      },
+    }],
   };
 }
 
@@ -167,6 +217,10 @@ function recordingStore(calls: Array<{ name: string; args: unknown[] }>): Genera
     },
     completeGenerationTaskValidationForProject(...args) {
       calls.push({ name: "validation", args });
+      return {} as never;
+    },
+    completeGenerationTaskPrototypeFinalizationForProject(...args) {
+      calls.push({ name: "prototype-finalization", args });
       return {} as never;
     },
     publishGenerationPlanCheckpointForProject(...args) {
@@ -518,6 +572,40 @@ test("GenerationTaskPublication routes Resource and validation results without l
       evidence: validation.evidence,
     },
   }]);
+});
+
+test("GenerationTaskPublication routes v2 prototype finalization through one atomic Store call", async () => {
+  const calls: Array<{ name: string; args: unknown[] }> = [];
+  const notifications: string[] = [];
+  const publication = new GenerationTaskPublication({
+    store: recordingStore(calls),
+    artifactRetention: recordingRetention(calls),
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan(planId) {
+      notifications.push(planId);
+    },
+  });
+  const claim = {
+    ...claimFixture(),
+    task: { ...claimFixture().task, id: "task-prototype-validation" },
+    lease: { ...claimFixture().lease, taskId: "task-prototype-validation" },
+  };
+  const result = finalizationResult();
+
+  await publication.publishPreparedResult(claim, result, new AbortController().signal);
+
+  assert.deepEqual(calls.map((call) => call.name), ["prototype-finalization"]);
+  assert.deepEqual(calls[0]?.args, ["project-1", "plan-1", {
+    lease: claim.lease,
+    finalization: {
+      baseSnapshotId: "snapshot-planned",
+      baseGraphRevision: 7,
+      artifactRevisionIds: ["artifact-revision-home"],
+      resourceRevisionIds: [],
+      markerProofs: result.markerProofs,
+    },
+  }]);
+  assert.deepEqual(notifications, ["plan-1"]);
 });
 
 test("GenerationTaskPublication preserves candidate-ready state when aborted after staging", async () => {

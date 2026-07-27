@@ -7,6 +7,7 @@ import {
   designSystemPickerValue,
   persistedDesignSystemId,
 } from "../lib/design-system-selection.ts";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import {
   agentAvailabilityReason,
   normalizeAgentModel,
@@ -19,11 +20,14 @@ import {
   type PendingDesignWorkspaceTurn,
 } from "../lib/pending-brief.ts";
 import type {
+  ApiClient,
+  ArtifactRevision,
   DesignSystemCard,
   GenerationPlanDetail,
   Resource,
   ResourceRevision,
   ResourceRevisionOwnedSource,
+  Settings,
   WorkspaceResourceKind,
 } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
@@ -69,6 +73,11 @@ type CanvasResourceRevisionState = {
   resourceKind: WorkspaceResourceKind;
   qualityState: "grounded" | "needs-review" | null;
 };
+type CanvasArtifactRevisionQualityState = {
+  revisionId: string;
+  qualityState: "passed" | "needs-attention" | "failed" | "unassessed";
+  qualityScore: number | null;
+};
 
 interface ArtifactCandidateRouteIdentity {
   planId: string;
@@ -77,6 +86,51 @@ interface ArtifactCandidateRouteIdentity {
 }
 
 const EMPTY_CANVAS_RESOURCE_REVISION_STATES: Readonly<Record<string, CanvasResourceRevisionState>> = {};
+const EMPTY_CANVAS_ARTIFACT_REVISION_QUALITY_STATES: Readonly<Record<string, CanvasArtifactRevisionQualityState>> = {};
+const SETTINGS_LOAD_ERROR_AFTER_FAILURES = 5;
+const SETTINGS_LOAD_ERROR_MESSAGE = "Couldn't load Agent and Design System settings. Reconnecting…";
+interface SharedSettingsRead {
+  promise: Promise<Settings>;
+  consumers: number;
+  releaseTimer?: ReturnType<typeof setTimeout>;
+}
+interface AcquiredSettingsRead {
+  promise: Promise<Settings>;
+  release: () => void;
+}
+const inFlightSettingsReads = new WeakMap<ApiClient, SharedSettingsRead>();
+
+function acquireSettingsRead(api: ApiClient): AcquiredSettingsRead {
+  let shared = inFlightSettingsReads.get(api);
+  if (!shared) {
+    shared = {
+      promise: Promise.resolve().then(() => api.getSettings()),
+      consumers: 0,
+    };
+    inFlightSettingsReads.set(api, shared);
+  }
+  const entry = shared;
+  if (entry.releaseTimer !== undefined) {
+    clearTimeout(entry.releaseTimer);
+    entry.releaseTimer = undefined;
+  }
+  entry.consumers += 1;
+  let released = false;
+  return {
+    promise: entry.promise,
+    release: () => {
+      if (released) return;
+      released = true;
+      entry.consumers = Math.max(0, entry.consumers - 1);
+      if (entry.consumers !== 0) return;
+      entry.releaseTimer = setTimeout(() => {
+        if (inFlightSettingsReads.get(api) === entry && entry.consumers === 0) {
+          inFlightSettingsReads.delete(api);
+        }
+      }, 0);
+    },
+  };
+}
 
 function terminalGenerationPlan(detail: GenerationPlanDetail): boolean {
   return detail.plan.status === "succeeded"
@@ -105,6 +159,41 @@ export function buildResourceRevisionStates(
       revisionId,
       resourceKind: resource.kind,
       qualityState: qualityState === "grounded" || qualityState === "needs-review" ? qualityState : null,
+    };
+  }
+  return result;
+}
+
+export function buildArtifactRevisionQualityStates(
+  activeRevisionIds: Readonly<Record<string, string | null | undefined>>,
+  revisions: readonly ArtifactRevision[],
+): Readonly<Record<string, CanvasArtifactRevisionQualityState>> {
+  const revisionByArtifactAndId = new Map(revisions.map((revision) => [
+    `${revision.artifactId}\u0000${revision.id}`,
+    revision,
+  ]));
+  const result: Record<string, CanvasArtifactRevisionQualityState> = {};
+  for (const [artifactId, revisionId] of Object.entries(activeRevisionIds)) {
+    if (revisionId === null || revisionId === undefined) continue;
+    const revision = revisionByArtifactAndId.get(`${artifactId}\u0000${revisionId}`);
+    if (!revision) continue;
+    const state = revision.quality.state;
+    const qualityState = state === "passed"
+      || state === "needs-attention"
+      || state === "failed"
+      || state === "unassessed"
+      ? state
+      : "unassessed";
+    const score = revision.quality.score;
+    result[artifactId] = {
+      revisionId,
+      qualityState,
+      qualityScore: typeof score === "number"
+        && Number.isFinite(score)
+        && score >= 0
+        && score <= 100
+        ? score
+        : null,
     };
   }
   return result;
@@ -191,9 +280,25 @@ export function ProjectStudioScreen({
   const readyWorkspace = load.status === "ready" ? load.workspace : null;
   const [designSystems, setDesignSystems] = useState<DesignSystemCard[]>([]);
   const [designSystemCatalogStatus, setDesignSystemCatalogStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [designSystemId, setDesignSystemId] = useState("");
+  const [projectDesignSystemId, setProjectDesignSystemId] = useState<string | null | undefined>(undefined);
+  const [defaultDesignSystemId, setDefaultDesignSystemId] = useState("");
+  const [settingsLoadStatus, setSettingsLoadStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const designSystemId = projectDesignSystemId === null
+    ? defaultDesignSystemId
+    : designSystemPickerValue(projectDesignSystemId ?? null);
+  const designSystemSelectionStatus = projectDesignSystemId === undefined
+    ? "loading"
+    : projectDesignSystemId === null
+      ? settingsLoadStatus
+      : "ready";
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null);
   const [settingsModel, setSettingsModel] = useState("");
+  const settingsAgentSelectionRef = useRef<{ agent: string | null; model: string }>({
+    agent: null,
+    model: "",
+  });
+  settingsAgentSelectionRef.current = { agent: settingsAgent, model: settingsModel };
   const [studioAgent, setStudioAgent] = useState("");
   const [studioModel, setStudioModel] = useState("");
   const [agentSettingsReady, setAgentSettingsReady] = useState(false);
@@ -202,6 +307,8 @@ export function ProjectStudioScreen({
   const studioAgentRef = useRef("");
   const agentSettingsWriteRef = useRef<Promise<void>>(Promise.resolve());
   const agentSettingsErrorRef = useRef<string | null>(null);
+  const agentSettingsPendingWritesRef = useRef(0);
+  const settingsHydrationEpochRef = useRef(0);
   const designSystemWriteRef = useRef<Promise<void>>(Promise.resolve());
   const designSystemErrorRef = useRef<string | null>(null);
   const agentSettingsRequestRef = useRef(0);
@@ -374,25 +481,89 @@ export function ProjectStudioScreen({
 
   useEffect(() => {
     let alive = true;
-    void api.getSettings().then((settings) => {
-      if (!alive) return;
-      setSettingsAgent(settings.agentCommand ?? "");
-      setSettingsModel(settings.model ?? "");
-    }).catch(() => {
-      if (alive) setSettingsAgent("");
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const activeReads = new Set<AcquiredSettingsRead>();
+    setSettingsLoadStatus("loading");
+    setSettingsLoadError(null);
+    const refresh = async (): Promise<void> => {
+      const hydrationEpoch = settingsHydrationEpochRef.current;
+      const agentRequest = agentSettingsRequestRef.current;
+      const read = acquireSettingsRead(api);
+      activeReads.add(read);
+      try {
+        const settings = await read.promise;
+        if (!alive) return;
+        if (hydrationEpoch !== settingsHydrationEpochRef.current) return;
+        if (agentRequest === agentSettingsRequestRef.current
+          && agentSettingsPendingWritesRef.current === 0) {
+          setSettingsAgent(settings.agentCommand ?? "");
+          setSettingsModel(settings.model ?? "");
+        }
+        setDefaultDesignSystemId(settings.defaultDesignSystemId);
+        setSettingsLoadStatus("ready");
+        setSettingsLoadError(null);
+      } catch {
+        if (!alive) return;
+        if (hydrationEpoch !== settingsHydrationEpochRef.current) return;
+        failures += 1;
+        if (failures >= SETTINGS_LOAD_ERROR_AFTER_FAILURES) {
+          setSettingsLoadStatus("error");
+          setSettingsLoadError(SETTINGS_LOAD_ERROR_MESSAGE);
+        }
+        retryTimer = setTimeout(
+          () => {
+            if (!alive || hydrationEpoch !== settingsHydrationEpochRef.current) return;
+            void refresh();
+          },
+          Math.min(250 * (2 ** Math.min(failures - 1, 4)), 4_000),
+        );
+      } finally {
+        activeReads.delete(read);
+        read.release();
+      }
+    };
+    void refresh();
     return () => {
       alive = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      for (const read of activeReads) read.release();
+      activeReads.clear();
     };
   }, [api]);
 
   useEffect(() => {
+    const onSettingsUpdated = (event: Event): void => {
+      const settings = (event as CustomEvent<Settings>).detail;
+      if (!settings) return;
+      settingsHydrationEpochRef.current += 1;
+      setDefaultDesignSystemId(settings.defaultDesignSystemId);
+      setSettingsLoadStatus("ready");
+      setSettingsLoadError(null);
+      if (agentSettingsPendingWritesRef.current !== 0) return;
+      const nextAgent = settings.agentCommand ?? "";
+      const nextModel = settings.model ?? "";
+      const current = settingsAgentSelectionRef.current;
+      if (current.agent !== nextAgent || current.model !== nextModel) {
+        setAgentSettingsReady(false);
+      }
+      agentSettingsErrorRef.current = null;
+      setAgentSettingsError(null);
+      setSettingsAgent(nextAgent);
+      setSettingsModel(nextModel);
+    };
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
+  }, []);
+
+  useEffect(() => {
     if (load.status !== "ready") return;
-    setDesignSystemId(designSystemPickerValue(load.project.designSystemId));
+    setProjectDesignSystemId(load.project.designSystemId);
   }, [load.status, load.status === "ready" ? load.project.designSystemId : null, projectId]);
 
   const saveAgentModelDefaults = useCallback((agentCommand: string, model: string): void => {
     const request = ++agentSettingsRequestRef.current;
+    agentSettingsPendingWritesRef.current += 1;
     agentSettingsErrorRef.current = null;
     setAgentSettingsError(null);
     setAgentSettingsReady(false);
@@ -404,6 +575,7 @@ export function ProjectStudioScreen({
       ));
     agentSettingsWriteRef.current = write.then(
       () => {
+        agentSettingsPendingWritesRef.current = Math.max(0, agentSettingsPendingWritesRef.current - 1);
         if (request !== agentSettingsRequestRef.current) return;
         agentSettingsErrorRef.current = null;
         if (contextActionGuardRef.current.mounted) {
@@ -414,6 +586,7 @@ export function ProjectStudioScreen({
         }
       },
       () => {
+        agentSettingsPendingWritesRef.current = Math.max(0, agentSettingsPendingWritesRef.current - 1);
         if (request !== agentSettingsRequestRef.current) return;
         const message = "Couldn't save the selected Agent setting. Choose it again to retry.";
         agentSettingsErrorRef.current = message;
@@ -449,23 +622,24 @@ export function ProjectStudioScreen({
     if (studioAgentRef.current) saveAgentModelDefaults(studioAgentRef.current, model);
   }, [saveAgentModelDefaults]);
 
-  const changeDesignSystem = useCallback((nextId: string): void => {
-    const previousId = designSystemId;
+  const changeDesignSystem = useCallback((nextId: string | null): void => {
+    const previousId = projectDesignSystemId;
+    const nextProjectDesignSystemId = nextId === null ? null : persistedDesignSystemId(nextId);
     const request = ++designSystemRequestRef.current;
     designSystemErrorRef.current = null;
     setDesignSystemError(null);
-    setDesignSystemId(nextId);
+    setProjectDesignSystemId(nextProjectDesignSystemId);
     const write = designSystemWriteRef.current
       .catch(() => {})
       .then(() => api.patchProject(projectId, {
-        designSystemId: persistedDesignSystemId(nextId),
+        designSystemId: nextProjectDesignSystemId,
       }))
       .then((project) => {
         if (request !== designSystemRequestRef.current) return;
         designSystemErrorRef.current = null;
         if (contextActionGuardRef.current.mounted) {
           setDesignSystemError(null);
-          setDesignSystemId(designSystemPickerValue(project.designSystemId));
+          setProjectDesignSystemId(project.designSystemId);
         }
       })
       .catch(() => {
@@ -474,10 +648,10 @@ export function ProjectStudioScreen({
         designSystemErrorRef.current = persistenceMessage;
         if (!contextActionGuardRef.current.mounted) return;
         setDesignSystemError(persistenceMessage);
-        setDesignSystemId(previousId);
+        setProjectDesignSystemId(previousId);
       });
     designSystemWriteRef.current = write;
-  }, [api, designSystemId, projectId]);
+  }, [api, projectDesignSystemId, projectId]);
 
   const afterContextSettings = useCallback(async <T,>(action: () => T | Promise<T>): Promise<T | undefined> => {
     const guard = contextActionGuardRef.current;
@@ -694,6 +868,15 @@ export function ProjectStudioScreen({
     readyWorkspace?.activeSnapshot.resourceRevisions,
     readyWorkspace?.resourceRevisions,
   ]);
+  const artifactRevisionQualityStates = useMemo(() => readyWorkspace === null
+    ? EMPTY_CANVAS_ARTIFACT_REVISION_QUALITY_STATES
+    : buildArtifactRevisionQualityStates(
+        readyWorkspace.activeSnapshot.artifactRevisions,
+        readyWorkspace.revisions,
+      ), [
+    readyWorkspace?.activeSnapshot.artifactRevisions,
+    readyWorkspace?.revisions,
+  ]);
   const generationTargetStates = useMemo(
     () => buildGenerationTargetStates(workspacePlanDetail),
     [workspacePlanDetail],
@@ -843,6 +1026,7 @@ export function ProjectStudioScreen({
   const selectedStudioAgent = agents.find((candidate) => candidate.command === studioAgent);
   const agentCapabilityPending = agentsProvided && (
     agentsLoading
+    || settingsLoadStatus !== "ready"
     || settingsAgent === null
     || studioAgent.length === 0
     || (!agentSettingsReady && agentSettingsError === null)
@@ -908,6 +1092,7 @@ export function ProjectStudioScreen({
             layout={load.workspace.layout}
             viewport={studio.viewport}
             artifactRevisionIds={load.workspace.activeSnapshot.artifactRevisions}
+            artifactRevisionQualityStates={artifactRevisionQualityStates}
             resourceRevisionStates={resourceRevisionStates}
             artifactGenerationStates={generationTargetStates.artifacts}
             resourceGenerationStates={generationTargetStates.resources}
@@ -988,8 +1173,12 @@ export function ProjectStudioScreen({
   const preferredGenerationPlanId = workspaceScope
     ? workspacePlanId ?? approvedGenerationPlanId
     : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedGenerationPlanId ?? workspacePlanId;
+  const proposalReviewTerminal = studio.proposalReview.status === "approved"
+    || studio.proposalReview.status === "rejected"
+    || studio.proposalReview.status === "superseded";
   const proposalReviewOpen = studio.proposalReview.status !== "idle"
     && approvedProposalAttentionPlanId === null
+    && (workspaceScope || !proposalReviewTerminal)
     && !(studio.proposalReview.status === "approved"
       && studio.proposalReview.plan?.status === "compile-failed");
   const generationPlanOpen = !proposalReviewOpen
@@ -1034,25 +1223,46 @@ export function ProjectStudioScreen({
     ? "Artifact Agent is read-only while reviewing a Generation candidate."
     : artifactRevisionId !== null
       ? "Artifact Agent is read-only while viewing a pinned Revision."
-      : studio.artifactAgentReceipt !== null
-        ? `Queued · Plan ${studio.artifactAgentReceipt.task.planId}`
-        : studio.artifactAgentPlanId !== null
-          ? `Recent · Plan ${studio.artifactAgentPlanId}`
-          : artifactId !== null && artifactHeadRevisionId === null
-            ? "Artifact Agent needs an active Revision before work can be queued."
-            : null;
+      : artifactId !== null && artifactHeadRevisionId === null
+        ? "Artifact Agent needs an active Revision before work can be queued."
+        : null;
   const resourceAgentStatus = resourceRevisionId !== null
     ? "Resource Agent is read-only while viewing a pinned Revision."
-    : studio.resourceAgentReceipt !== null
-      ? `Queued · Plan ${studio.resourceAgentReceipt.task.planId}`
-      : studio.resourceAgentPlanId !== null
-        ? `Recent · Plan ${studio.resourceAgentPlanId}`
-        : resourceId !== null && resourceHeadRevisionId === null
-          ? "Resource Agent needs an active Revision before work can be queued."
-          : null;
-  const workspaceAgentStatus = preferredGenerationPlanId === null
+    : resourceId !== null && resourceHeadRevisionId === null
+      ? "Resource Agent needs an active Revision before work can be queued."
+      : null;
+  const planIsQueued = (artifactScope && studio.artifactAgentReceipt !== null)
+    || (resourceScope && studio.resourceAgentReceipt !== null);
+  const planAffordanceLabel = preferredGenerationPlanId === null
     ? null
-    : `Recent · Plan ${preferredGenerationPlanId}`;
+    : planIsQueued ? "Queued build plan" : "Recent build plan";
+  const planAffordance = preferredGenerationPlanId !== null
+    && planAffordanceLabel !== null
+    && !proposalReviewOpen
+    && !generationPlanOpen
+    ? {
+        label: planAffordanceLabel,
+        technicalLabel: `Build plan ${preferredGenerationPlanId}`,
+        onOpen: () => {
+          if (workspaceScope) setDismissedWorkspacePlanId(null);
+          else setScopedInspectorMode("plan");
+        },
+      }
+    : null;
+  const proposalGeneration = reviewableProposal?.proposal.generation.kind === "workspace-generation"
+    ? reviewableProposal.proposal.generation
+    : null;
+  const proposalBuildChangeCount = proposalGeneration === null
+    ? 0
+    : proposalGeneration.artifactPlans.length
+      + proposalGeneration.resourceOperations.filter((operation) => operation.operation !== "reuse").length;
+  const proposalAffordance = workspaceScope && reviewableProposal !== null
+    ? {
+        summary: reviewableProposal.proposal.rationale.trim() || "Review the proposed workspace changes.",
+        changeCount: proposalBuildChangeCount || reviewableProposal.diff.reviewItems.length,
+        onOpen: () => document.getElementById("workspace-proposal-review-title")?.focus(),
+      }
+    : undefined;
 
   const persistOwnedContext = async (input: {
     title: string;
@@ -1127,19 +1337,14 @@ export function ProjectStudioScreen({
                   })
                 : undefined}
           submitting={studio.agentTurnSubmitting}
-          error={attachmentError ?? (workspaceScope
+          error={settingsLoadError ?? attachmentError ?? (workspaceScope
             ? studio.workspaceAgentError
             : artifactScope
               ? studio.artifactAgentError
               : studio.resourceAgentError)}
-          status={workspaceScope ? workspaceAgentStatus : artifactScope ? artifactAgentStatus : resourceAgentStatus}
-          onStatusClick={workspaceScope
-            ? preferredGenerationPlanId !== null && !proposalReviewOpen && !generationPlanOpen
-              ? () => setDismissedWorkspacePlanId(null)
-              : undefined
-            : preferredGenerationPlanId !== null && scopedInspectorMode === "inspector"
-              ? () => setScopedInspectorMode("plan")
-              : undefined}
+          status={workspaceScope ? null : artifactScope ? artifactAgentStatus : resourceAgentStatus}
+          planAffordance={planAffordance}
+          proposalAffordance={proposalAffordance}
           submitLabel={workspaceScope ? "Create proposal" : artifactScope ? "Queue artifact edit" : "Queue resource task"}
           submittingLabel={workspaceScope
             ? "Creating a reviewable proposal…"
@@ -1218,7 +1423,11 @@ export function ProjectStudioScreen({
           submissionBlockedPending={agentCapabilityPending}
           designSystems={designSystems}
           designSystemId={designSystemId}
+          designSystemInherited={projectDesignSystemId === null}
+          defaultDesignSystemId={defaultDesignSystemId}
+          designSystemSelectionStatus={designSystemSelectionStatus}
           onDesignSystemChange={changeDesignSystem}
+          onUseDefaultDesignSystem={() => changeDesignSystem(null)}
           designSystemCatalogStatus={designSystemCatalogStatus}
           onRetryDesignSystems={refreshDesignSystems}
         />

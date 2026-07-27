@@ -334,6 +334,14 @@ function baseApi(overrides: Parameters<typeof makeFakeApi>[0] = {}) {
 test("Research decoder rejects credential locators and forged grounded evidence", () => {
   expect(decodeResearchResourceRevision(researchView)).toEqual(researchView);
 
+  const conservativeSubset = structuredClone(researchView);
+  conservativeSubset.qualityState = "needs-review";
+  conservativeSubset.findings[0]!.sourceIds.push("source-note");
+  conservativeSubset.findings[0]!.unverifiedSourceIds.push("source-note");
+  conservativeSubset.findings[0]!.supportReceiptIds.push(HYPOTHESIS_SUPPORT_ID);
+  conservativeSubset.findings[1]!.supportReceiptIds = [`research-support-${"f".repeat(64)}`];
+  expect(decodeResearchResourceRevision(conservativeSubset)).toEqual(conservativeSubset);
+
   const credentialLocator = structuredClone(researchView);
   credentialLocator.sources[0]!.locator = "https://example.test/study?access_token=not-for-the-viewer";
   expect(() => decodeResearchResourceRevision(credentialLocator)).toThrow(/credential-free/i);
@@ -449,6 +457,12 @@ test("Research loading and ready states share one compact Studio header shell", 
   });
   expect(await screen.findByRole("heading", { name: resource.title })).toBeInTheDocument();
   expect(rendered.container.querySelector("header.dezin-research-viewer__header")).toBe(header);
+  const immutableRevision = screen.getByText("Immutable Revision 1");
+  expect(immutableRevision).toHaveAttribute(
+    "title",
+    `Resource ${resource.id} · Revision ${revision.id} · Direction quiet-confidence`,
+  );
+  expect(screen.getByLabelText("Create Artifact generation intent")).not.toHaveTextContent(resource.id);
 });
 
 test("headless Research is a recoverable not-generated state and never requests a fake Revision", async () => {

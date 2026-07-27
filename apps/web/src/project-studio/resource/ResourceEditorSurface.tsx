@@ -24,6 +24,7 @@ import {
   StudioPanelHeader,
   StudioStatusBadge,
 } from "../../components/ui/index.ts";
+import { StudioTechnicalDetails } from "../ui/StudioTechnicalDetails.tsx";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
   ApiClient,
@@ -350,11 +351,13 @@ function AuthenticatedImage({
   alt,
   width,
   height,
+  fit,
 }: {
   path: string;
   alt: string;
   width?: number | null;
   height?: number | null;
+  fit?: "contain" | "cover";
 }) {
   const [attempt, setAttempt] = useState(0);
   const { targetRef, visible } = useNearViewport();
@@ -383,6 +386,7 @@ function AuthenticatedImage({
       decoding="async"
       {...(width === null || width === undefined ? {} : { width })}
       {...(height === null || height === undefined ? {} : { height })}
+      {...(fit === undefined ? {} : { style: { objectFit: fit } })}
     />
   );
 }
@@ -455,6 +459,10 @@ function PayloadFooter({ view }: { view: ResourceRevisionView }) {
 }
 
 type MoodboardNode = Extract<ResourceRevisionView, { kind: "moodboard" }>["content"]["nodes"][number];
+type MoodboardAsset = Extract<ResourceRevisionView, { kind: "moodboard" }>["content"]["assets"][number];
+type MoodboardDirection = NonNullable<
+  Extract<ResourceRevisionView, { kind: "moodboard" }>["content"]["board"]["directionContract"]
+>["directions"][number];
 
 function moodboardSpatialLayout(nodes: readonly MoodboardNode[]) {
   const positioned = nodes.filter((node): node is MoodboardNode & {
@@ -483,7 +491,7 @@ function MoodboardNodeCard({
   asset,
 }: {
   node: MoodboardNode;
-  asset: Extract<ResourceRevisionView, { kind: "moodboard" }>["content"]["assets"][number] | null;
+  asset: MoodboardAsset | null;
 }) {
   return (
     <article key={node.id} data-node-id={node.id} data-node-type={node.type}>
@@ -496,7 +504,13 @@ function MoodboardNodeCard({
         />
       ) : null}
       <div>
-        <span>{node.type}</span>
+        <span
+          title={asset?.directionId && asset.directionChecksum
+            ? `${asset.directionId} · ${asset.directionChecksum}`
+            : undefined}
+        >
+          {asset?.directionTitle ? `Research direction / ${asset.directionTitle}` : node.type}
+        </span>
         {node.label ? <strong>{node.label}</strong> : null}
         {node.text ? <p>{node.text}</p> : null}
       </div>
@@ -504,17 +518,87 @@ function MoodboardNodeCard({
   );
 }
 
+function MoodboardDirectionCard({
+  direction,
+  asset,
+  index,
+}: {
+  direction: MoodboardDirection;
+  asset: MoodboardAsset;
+  index: number;
+}) {
+  const intrinsicAspectRatio = asset.width !== null
+    && asset.height !== null
+    && asset.width > 0
+    && asset.height > 0
+    ? `${asset.width} / ${asset.height}`
+    : undefined;
+  return (
+    <article
+      className="dezin-moodboard__direction"
+      role="listitem"
+      data-direction-id={direction.id}
+      data-asset-id={asset.id}
+    >
+      <div
+        className="dezin-moodboard__direction-image"
+        {...(intrinsicAspectRatio === undefined ? {} : { style: { aspectRatio: intrinsicAspectRatio } })}
+      >
+        <AuthenticatedImage
+          path={asset.url!}
+          alt={`${direction.title} — ${asset.fileName}`}
+          width={asset.width}
+          height={asset.height}
+          fit="contain"
+        />
+      </div>
+      <div className="dezin-moodboard__direction-meta">
+        <span>Direction {String(index + 1).padStart(2, "0")}</span>
+        <strong>{direction.title}</strong>
+        <code title={`${direction.resourceId} · ${direction.revisionId} · ${direction.checksum}`}>
+          {direction.id}
+        </code>
+      </div>
+    </article>
+  );
+}
+
 function MoodboardView({ view }: { view: Extract<ResourceRevisionView, { kind: "moodboard" }> }) {
   const assetById = new Map(view.content.assets.map((asset) => [asset.id, asset]));
-  const layout = moodboardSpatialLayout(view.content.nodes);
+  const directionContract = view.content.board.directionContract ?? null;
+  const directionAssets = directionContract?.directions.map((direction) => ({
+    direction,
+    asset: assetById.get(direction.assetId)!,
+  })) ?? [];
+  const galleryAssetIds = new Set(directionAssets.map(({ asset }) => asset.id));
+  const auxiliaryNodes = directionContract === null
+    ? view.content.nodes
+    : view.content.nodes.filter((node) => node.assetId === null || !galleryAssetIds.has(node.assetId));
+  const layout = moodboardSpatialLayout(auxiliaryNodes);
   const positionedIds = new Set(layout?.nodes.map((node) => node.id) ?? []);
-  const unpositioned = view.content.nodes.filter((node) => !positionedIds.has(node.id));
+  const unpositioned = auxiliaryNodes.filter((node) => !positionedIds.has(node.id));
   return (
     <section className="dezin-moodboard" aria-label={`${view.content.board.name} Moodboard`}>
       <div className="dezin-moodboard__masthead">
-        <span>Moodboard / {view.content.totalNodeCount} nodes</span>
+        <span title={directionContract?.checksum}>
+          {directionContract === null
+            ? `Moodboard / ${view.content.totalNodeCount} nodes`
+            : `Moodboard / ${directionContract.directions.length} checksum-bound Research directions`}
+        </span>
         <h2>{view.content.board.name}</h2>
       </div>
+      {directionAssets.length > 0 ? (
+        <div className="dezin-moodboard__directions" role="list" aria-label="Research direction gallery">
+          {directionAssets.map(({ direction, asset }, index) => (
+            <MoodboardDirectionCard
+              key={direction.id}
+              direction={direction}
+              asset={asset}
+              index={index}
+            />
+          ))}
+        </div>
+      ) : null}
       {layout === null ? null : (
         <svg
           className="dezin-moodboard__canvas"
@@ -849,6 +933,20 @@ export function ResourceEditorSurface({
 export function ResourceInspector({ editor }: { editor: ResourceEditorController }) {
   const ready = editor.load.status === "ready" ? editor.load : null;
   const view = ready?.view ?? null;
+  const directionContract = view?.kind === "moodboard"
+    ? view.content.board.directionContract ?? null
+    : null;
+  const technicalDetails = ready === null ? null : {
+    resourceId: ready.resource.id,
+    workspaceId: ready.resource.workspaceId,
+    revisionId: view?.revision.id ?? null,
+    checksum: view?.payload.checksum ?? null,
+    directionContract: directionContract === null ? null : {
+      contextPackId: directionContract.contextPackId,
+      checksum: directionContract.checksum,
+      directionCount: directionContract.directions.length,
+    },
+  };
   return (
     <section className="flex h-full min-h-0 flex-col bg-background" aria-labelledby="resource-inspector-title">
       <StudioPanelHeader draggable className="titlebar-pad-right px-3">
@@ -864,24 +962,10 @@ export function ResourceInspector({ editor }: { editor: ResourceEditorController
           <p className="p-3.5 text-xs leading-5 text-muted-foreground">Resource identity is loading…</p>
         ) : (
           <StudioInspectorSection
-            heading="Revision identity"
-            description="Durable facts for the exact Resource checkout."
+            heading="Revision"
+            description="Immutable checkout status and format."
           >
             <dl className="divide-y divide-border">
-              <StudioFactRow
-                label="Resource"
-                value={ready.resource.id}
-                metadata
-                mono
-                valueClassName="break-all"
-              />
-              <StudioFactRow
-                label="Revision"
-                value={view?.revision.id ?? "None"}
-                metadata={view !== null}
-                mono={view !== null}
-                valueClassName="break-all"
-              />
               <StudioFactRow
                 label="Viewing"
                 value={(
@@ -890,19 +974,85 @@ export function ResourceInspector({ editor }: { editor: ResourceEditorController
                   </StudioStatusBadge>
                 )}
               />
+              <StudioFactRow
+                label="Revision"
+                value={view === null ? "Not published" : `Revision ${view.revision.sequence}`}
+              />
               {view ? (
-                <>
-                  <StudioFactRow label="MIME" value={view.payload.mimeType} />
+                <StudioFactRow label="Format" value={view.payload.mimeType} />
+              ) : null}
+              {directionContract === null ? null : (
+                <StudioFactRow
+                  label="Directions"
+                  value={`${directionContract.directions.length} checksum-bound Research directions`}
+                />
+              )}
+            </dl>
+            {technicalDetails === null ? null : (
+              <StudioTechnicalDetails
+                copyText={JSON.stringify(technicalDetails, null, 2)}
+                copyLabel="Copy Resource technical details"
+              >
+                <dl className="divide-y divide-border">
                   <StudioFactRow
-                    label="Checksum"
-                    value={view.payload.checksum}
+                    label="Resource ID"
+                    value={technicalDetails.resourceId}
                     metadata
                     mono
+                    stacked
                     valueClassName="break-all"
                   />
-                </>
-              ) : null}
-            </dl>
+                  <StudioFactRow
+                    label="Workspace ID"
+                    value={technicalDetails.workspaceId}
+                    metadata
+                    mono
+                    stacked
+                    valueClassName="break-all"
+                  />
+                  {technicalDetails.revisionId === null ? null : (
+                    <StudioFactRow
+                      label="Revision ID"
+                      value={technicalDetails.revisionId}
+                      metadata
+                      mono
+                      stacked
+                      valueClassName="break-all"
+                    />
+                  )}
+                  {technicalDetails.checksum === null ? null : (
+                    <StudioFactRow
+                      label="Checksum"
+                      value={technicalDetails.checksum}
+                      metadata
+                      mono
+                      stacked
+                      valueClassName="break-all"
+                    />
+                  )}
+                  {technicalDetails.directionContract === null ? null : (
+                    <>
+                      <StudioFactRow
+                        label="Direction Context"
+                        value={technicalDetails.directionContract.contextPackId}
+                        metadata
+                        mono
+                        stacked
+                        valueClassName="break-all"
+                      />
+                      <StudioFactRow
+                        label="Direction Contract"
+                        value={technicalDetails.directionContract.checksum}
+                        metadata
+                        mono
+                        stacked
+                        valueClassName="break-all"
+                      />
+                    </>
+                  )}
+                </dl>
+              </StudioTechnicalDetails>
+            )}
           </StudioInspectorSection>
         )}
       </div>

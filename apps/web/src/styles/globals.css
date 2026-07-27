@@ -358,22 +358,39 @@
 .dezin-resize-separator {
   position: relative;
   z-index: 40;
-  flex: 0 0 1px;
-  width: 1px;
-  cursor: col-resize;
   outline: none;
+}
+.dezin-resize-separator[aria-orientation="vertical"] {
+  flex: 0 0 9px;
+  width: 9px;
+  margin-inline: -4px;
+  cursor: col-resize;
+}
+.dezin-resize-separator[aria-orientation="horizontal"] {
+  flex: 0 0 9px;
+  height: 9px;
+  margin-block: -4px;
+  cursor: row-resize;
 }
 .dezin-resize-separator::before {
   content: "";
   position: absolute;
-  inset: 0;
   background-color: var(--border);
+}
+.dezin-resize-separator[aria-orientation="vertical"]::before {
+  inset-block: 0;
+  left: 4px;
+  width: 1px;
+}
+.dezin-resize-separator[aria-orientation="horizontal"]::before {
+  inset-inline: 0;
+  top: 4px;
+  height: 1px;
 }
 .dezin-resize-separator::after {
   content: "";
   position: absolute;
-  inset-block: 0;
-  inset-inline: -3px;
+  inset: 0;
 }
 .dezin-resize-separator:hover::before,
 .dezin-resize-separator:active::before,
@@ -381,6 +398,17 @@
 .dezin-resize-separator:focus-visible::before {
   background-image: linear-gradient(
     to bottom,
+    var(--border),
+    color-mix(in oklch, var(--foreground) 18%, var(--border)) 50%,
+    var(--border)
+  );
+}
+.dezin-resize-separator[aria-orientation="horizontal"]:hover::before,
+.dezin-resize-separator[aria-orientation="horizontal"]:active::before,
+.dezin-resize-separator[aria-orientation="horizontal"][data-separator="hover"]::before,
+.dezin-resize-separator[aria-orientation="horizontal"]:focus-visible::before {
+  background-image: linear-gradient(
+    to right,
     var(--border),
     color-mix(in oklch, var(--foreground) 18%, var(--border)) 50%,
     var(--border)

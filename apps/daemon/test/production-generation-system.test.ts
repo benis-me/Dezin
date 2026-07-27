@@ -20,6 +20,7 @@ import { persistGenerationTaskVisualEvidence } from "../src/orchestration/genera
 import {
   createProductionGenerationSystem,
   productionSharinganSourceAuthority,
+  withProductionPrototypeMarkerRuntimeSession,
 } from "../src/orchestration/production-generation-system.ts";
 import { createProductionResourceTaskExecutor } from "../src/orchestration/production-resource-task-adapter.ts";
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
@@ -62,6 +63,106 @@ async function waitFor(
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("prototype runtime scope releases its browser session and preview lease together on abort", async () => {
+  const controller = new AbortController();
+  let closeCount = 0;
+  let releaseCount = 0;
+  let openedWithSignal: AbortSignal | null = null;
+  const operation = withProductionPrototypeMarkerRuntimeSession({
+    lease: {
+      url: "http://127.0.0.1:4173/exact-revision",
+      async release() { releaseCount += 1; },
+    },
+    signal: controller.signal,
+    async openSession(_url, options) {
+      openedWithSignal = options.signal;
+      return {
+        async applyRenderFrame() {},
+        async close() { closeCount += 1; },
+        async probePrototypeMarker() {
+          return { tagName: "button", role: null, action: "button", visible: true };
+        },
+        async setViewport() {},
+        async settle() {},
+      };
+    },
+    async run() {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.signal.throwIfAborted();
+      assert.fail("aborted prototype runtime scope continued");
+    },
+  });
+  controller.abort(new Error("abort prototype runtime scope"));
+
+  await assert.rejects(operation, /abort prototype runtime scope/i);
+  assert.equal(openedWithSignal, controller.signal);
+  assert.equal(closeCount, 1);
+  assert.equal(releaseCount, 1);
+});
+
+test("prototype runtime scope exposes every cleanup failure after a successful probe", async () => {
+  const closeFailure = new Error("prototype browser close failed");
+  const releaseFailure = new Error("prototype preview lease release failed");
+  await assert.rejects(
+    withProductionPrototypeMarkerRuntimeSession({
+      lease: {
+        url: "http://127.0.0.1:4173/exact-revision",
+        async release() { throw releaseFailure; },
+      },
+      signal: new AbortController().signal,
+      async openSession() {
+        return {
+          async applyRenderFrame() {},
+          async close() { throw closeFailure; },
+          async probePrototypeMarker() {
+            return { tagName: "button", role: null, action: "button", visible: true };
+          },
+          async setViewport() {},
+          async settle() {},
+        };
+      },
+      async run() { return "proved"; },
+    }),
+    (error: unknown) => error instanceof AggregateError
+      && error.errors.length === 2
+      && error.errors[0] === closeFailure
+      && error.errors[1] === releaseFailure,
+  );
+});
+
+test("prototype runtime scope preserves the primary probe failure before cleanup failures", async () => {
+  const primaryFailure = new Error("prototype probe failed");
+  const closeFailure = new Error("prototype browser close failed");
+  const releaseFailure = new Error("prototype preview lease release failed");
+  await assert.rejects(
+    withProductionPrototypeMarkerRuntimeSession({
+      lease: {
+        url: "http://127.0.0.1:4173/exact-revision",
+        async release() { throw releaseFailure; },
+      },
+      signal: new AbortController().signal,
+      async openSession() {
+        return {
+          async applyRenderFrame() {},
+          async close() { throw closeFailure; },
+          async probePrototypeMarker() {
+            return { tagName: "button", role: null, action: "button", visible: true };
+          },
+          async setViewport() {},
+          async settle() {},
+        };
+      },
+      async run() { throw primaryFailure; },
+    }),
+    (error: unknown) => error instanceof AggregateError
+      && error.cause === primaryFailure
+      && error.errors.length === 3
+      && error.errors[0] === primaryFailure
+      && error.errors[1] === closeFailure
+      && error.errors[2] === releaseFailure,
+  );
+});
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -600,6 +701,9 @@ test("production Generation system publishes one real Resource to Component to P
     const resources = createProductionResourceTaskExecutor({
       storageRoot: root,
       store: store.workspace,
+      moodboardV2LineagePolicy: "allow-legacy-v2",
+      contextPacks: { get: () => null },
+      attemptContextAuthority: { resolveMoodboardAttemptContext: () => null },
       implementations: {
         async moodboard(input) {
           assert.equal(input.resourceId, "direction-moodboard");
@@ -824,6 +928,9 @@ test("production Generation system publishes one real Resource to Component to P
     const restartResources = createProductionResourceTaskExecutor({
       storageRoot: root,
       store: store.workspace,
+      moodboardV2LineagePolicy: "allow-legacy-v2",
+      contextPacks: { get: () => null },
+      attemptContextAuthority: { resolveMoodboardAttemptContext: () => null },
       implementations: {
         async moodboard() {
           executions.push("resource-after-restart");

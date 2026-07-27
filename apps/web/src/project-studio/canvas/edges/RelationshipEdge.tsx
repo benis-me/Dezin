@@ -56,8 +56,7 @@ export function RelationshipEdge({
     active: selected || hovered,
     supporting: supportingRelation,
   });
-  const showLabel = data?.zoomLevel === "full"
-    || (data?.zoomLevel === "compact" && (selected || hovered));
+  const showLabel = selected || hovered;
   return (
     <>
       <g

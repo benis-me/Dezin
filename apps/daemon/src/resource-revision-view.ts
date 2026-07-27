@@ -19,14 +19,19 @@ import type {
 } from "../../../packages/core/src/index.ts";
 import { inspectBoundedPngImage } from "./artifact-thumbnail.ts";
 import {
+  decodeMoodboardResourceBundle,
+  MoodboardResourceBundleError,
+  type ValidatedMoodboardResourceBundle,
+} from "./moodboard-resource-bundle.ts";
+import {
   decodeSharinganCaptureResourceBundle,
   SharinganCaptureResourceBundleError,
   validateSharinganCaptureResourceBundleSemantics,
 } from "./orchestration/sharingan-capture-resource-bundle.ts";
 import {
+  MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES,
   ResourceRevisionPayloadError,
   resolveResourceRevisionPayloadDescriptor,
-  verifyBoundedResourcePayloadBytes,
   verifyResourceRevisionPayload,
   type ResourceRevisionPayloadDescriptor,
 } from "./resource-revision-payload.ts";
@@ -39,7 +44,6 @@ const MAX_TEXT_PREVIEW_CODE_UNITS = 256 * 1024;
 const MAX_MOODBOARD_VIEW_NODES = 256;
 const MAX_MOODBOARD_VIEW_ASSETS = 128;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 const CREDENTIAL_PARAMETER = /(?:^|[_-])(?:access[_-]?token|token|api[_-]?key|secret|signature|sig|auth|authorization|password|credential)(?:$|[_-])/i;
 
 export class ResourceRevisionViewError extends Error {
@@ -88,10 +92,6 @@ function finite(value: unknown): number | null {
 
 function optionalText(value: unknown, maximum = 4_096): string {
   return typeof value === "string" ? safeLabel(value, "", maximum) : "";
-}
-
-function sha256(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export function resourceRevisionEmbeddedAssetId(path: string): string {
@@ -388,70 +388,36 @@ async function decodeSharinganContent(
   };
 }
 
-async function decodeMoodboardContent(
-  bytes: Buffer,
+function projectMoodboardContent(
+  bundle: ValidatedMoodboardResourceBundle,
   route: (assetId: string) => string,
-  signal?: AbortSignal,
-): Promise<MoodboardResourceRevisionContentView> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  } catch {
-    return fail(422, "Moodboard Revision payload is not valid UTF-8 JSON");
-  }
-  const bundle = record(parsed, "Moodboard Revision payload");
-  if (bundle.format !== "dezin-moodboard-resource-bundle"
-    || (bundle.version !== 1 && bundle.version !== 2)
-    || !Array.isArray(bundle.nodes) || bundle.nodes.length > 100_000
-    || !Array.isArray(bundle.assets) || bundle.assets.length > 1_024) {
-    return fail(422, "Moodboard Revision payload protocol is unsupported or unbounded");
-  }
-  const board = record(bundle.board, "Moodboard board");
-  const assetIds = new Set<string>();
-  let totalAssetBytes = 0;
-  const assets = [] as MoodboardResourceRevisionContentView["assets"];
-  for (const [index, raw] of bundle.assets.entries()) {
-    const asset = record(raw, `Moodboard Asset ${index}`);
-    const id = identifier(asset.id, `Moodboard Asset ${index} id`);
-    if (assetIds.has(id)) return fail(422, `Moodboard Asset ${id} is duplicated`);
-    assetIds.add(id);
-    const metadata = record(asset.metadata, `Moodboard Asset ${id} metadata`);
-    if (typeof asset.bytesBase64 !== "string" || asset.bytesBase64.length > 12 * 1024 * 1024
-      || !Number.isSafeInteger(asset.byteLength) || Number(asset.byteLength) < 0 || Number(asset.byteLength) > 6 * 1024 * 1024
-      || typeof asset.checksum !== "string" || !SHA256.test(asset.checksum)) {
-      return fail(422, `Moodboard Asset ${id} immutable metadata is invalid`);
-    }
-    const assetBytes = Buffer.from(asset.bytesBase64, "base64");
-    if (assetBytes.toString("base64") !== asset.bytesBase64
-      || assetBytes.byteLength !== asset.byteLength || sha256(assetBytes) !== asset.checksum) {
-      return fail(422, `Moodboard Asset ${id} checksum or bytes are invalid`);
-    }
-    totalAssetBytes += assetBytes.byteLength;
-    if (totalAssetBytes > 6 * 1024 * 1024) return fail(422, "Moodboard embedded Asset bytes exceed their bound");
-    const mimeType = requiredText(metadata.mimeType, `Moodboard Asset ${id} MIME`, 127).toLowerCase();
-    try {
-      await verifyBoundedResourcePayloadBytes(assetBytes, mimeType, signal);
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason ?? error;
-      if (error instanceof ResourceRevisionPayloadError) {
-        return fail(422, `Moodboard Asset ${id} bytes are invalid: ${error.message}`);
-      }
-      throw error;
-    }
-    const inline = resourceRevisionPreviewKind(mimeType) === "image";
+): MoodboardResourceRevisionContentView {
+  const board = bundle.board;
+  const assetIds = new Set(bundle.assets.map((asset) => asset.id));
+  type DirectionAwareAsset = MoodboardResourceRevisionContentView["assets"][number] & {
+    directionId: string | null;
+    directionTitle: string | null;
+    directionChecksum: string | null;
+  };
+  const assets: DirectionAwareAsset[] = [];
+  for (const asset of bundle.assets) {
+    const inline = resourceRevisionPreviewKind(asset.mimeType) === "image";
     if (assets.length < MAX_MOODBOARD_VIEW_ASSETS) {
-      const assetRoute = route(id);
+      const assetRoute = route(asset.id);
       assets.push({
-        id,
-        kind: safeLabel(metadata.kind, "asset", 128),
-        fileName: safeLabel(metadata.fileName, id, 255),
-        mimeType,
-        width: finite(metadata.width),
-        height: finite(metadata.height),
-        byteLength: assetBytes.byteLength,
+        id: asset.id,
+        kind: safeLabel(asset.metadata.kind, "asset", 128),
+        fileName: safeLabel(asset.metadata.fileName, asset.id, 255),
+        mimeType: asset.mimeType,
+        width: finite(asset.metadata.width),
+        height: finite(asset.metadata.height),
+        byteLength: asset.byteLength,
         checksum: asset.checksum,
         url: inline ? assetRoute : null,
         downloadUrl: `${assetRoute}?download=1`,
+        directionId: asset.directionId,
+        directionTitle: asset.directionTitle,
+        directionChecksum: asset.directionChecksum,
       });
     }
   }
@@ -500,11 +466,40 @@ async function decodeMoodboardContent(
   if (coverAssetId !== null && !assetIds.has(coverAssetId)) {
     return fail(422, "Moodboard cover Asset is unavailable");
   }
+  const directionContract = bundle.directionContract === null
+    ? null
+    : (() => {
+        const assetByDirectionId = new Map(
+          bundle.assets.map((asset) => [asset.directionId, asset] as const),
+        );
+        return {
+          protocol: bundle.directionContract.protocol,
+          contextPackId: bundle.directionContract.contextPackId,
+          checksum: bundle.directionContract.checksum,
+          directions: bundle.directionContract.directions.map((direction) => {
+            const asset = assetByDirectionId.get(direction.id);
+            if (asset === undefined
+              || asset.mimeType !== "image/png"
+              || resourceRevisionPreviewKind(asset.mimeType) !== "image") {
+              return fail(422, `Moodboard Research direction ${direction.id} has no displayable exact Asset`);
+            }
+            return {
+              resourceId: direction.resourceId,
+              revisionId: direction.revisionId,
+              id: direction.id,
+              title: direction.title,
+              checksum: direction.checksum,
+              assetId: asset.id,
+            };
+          }),
+        };
+      })();
   return {
     board: {
       id: identifier(board.id, "Moodboard board id"),
       name: safeLabel(board.name, "Untitled moodboard", 1_024),
       coverAssetId,
+      directionContract,
     },
     nodes,
     assets,
@@ -513,6 +508,23 @@ async function decodeMoodboardContent(
     nodesTruncated: bundle.nodes.length > nodes.length,
     assetsTruncated: bundle.assets.length > assets.length,
   };
+}
+
+async function decodeMoodboardContent(
+  bytes: Buffer,
+  route: (assetId: string) => string,
+  signal?: AbortSignal,
+): Promise<MoodboardResourceRevisionContentView> {
+  try {
+    const bundle = await decodeMoodboardResourceBundle(bytes, { signal });
+    return projectMoodboardContent(bundle, route);
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    if (error instanceof MoodboardResourceBundleError) {
+      return fail(422, `Moodboard Revision payload is invalid: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 export function resourceRevisionPreviewKind(mimeType: string): ResourceRevisionPreviewKind {
@@ -619,6 +631,9 @@ export async function readVerifiedExactResourceRevisionPayload(input: {
     || descriptor.manifestPath !== revision.manifestPath
     || descriptor.manifestChecksum !== revision.checksum) {
     return fail(422, "Resource Revision payload identity is invalid");
+  }
+  if (resource.kind === "moodboard" && descriptor.byteLength > MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES) {
+    return fail(422, "Moodboard Revision payload exceeds the 48 MiB Viewer decode boundary");
   }
 
   const verificationRoot = await mkdtemp(join(input.dataDir, ".resource-view-"));
@@ -857,38 +872,33 @@ export async function readResourceRevisionEmbeddedAsset(input: {
 }): Promise<VerifiedResourceRevisionEmbeddedAsset> {
   const exact = await readVerifiedExactResourceRevisionPayload(input);
   if (exact.resource.kind === "moodboard") {
-    await decodeMoodboardContent(exact.bytes, () => "/", input.signal);
-    const bundle = record(decodedJson(exact.bytes, "Moodboard Revision payload"), "Moodboard Revision payload");
-    if (!Array.isArray(bundle.assets)) return fail(422, "Moodboard Assets are unavailable");
-    const matches = bundle.assets.filter((raw) => {
-      const asset = record(raw, "Moodboard embedded Asset");
-      return asset.id === input.assetId;
-    });
-    if (matches.length !== 1) return fail(404, "Resource Revision embedded Asset was not found");
-    const asset = record(matches[0], "Moodboard embedded Asset");
-    const metadata = record(asset.metadata, "Moodboard embedded Asset metadata");
-    const mimeType = requiredText(metadata.mimeType, "Moodboard embedded Asset MIME", 127).toLowerCase();
-    if (typeof asset.bytesBase64 !== "string" || typeof asset.checksum !== "string" || !SHA256.test(asset.checksum)) {
-      return fail(422, "Moodboard embedded Asset metadata is invalid");
-    }
-    const bytes = Buffer.from(asset.bytesBase64, "base64");
-    if (bytes.toString("base64") !== asset.bytesBase64 || sha256(bytes) !== asset.checksum) {
-      return fail(422, "Moodboard embedded Asset checksum is invalid");
-    }
+    let bundle: ValidatedMoodboardResourceBundle;
     try {
-      await verifyBoundedResourcePayloadBytes(bytes, mimeType, input.signal);
+      bundle = await decodeMoodboardResourceBundle(exact.bytes, {
+        retainAssetId: input.assetId,
+        signal: input.signal,
+      });
     } catch (error) {
       if (input.signal?.aborted) throw input.signal.reason ?? error;
-      if (error instanceof ResourceRevisionPayloadError) {
-        return fail(422, `Moodboard embedded Asset failed MIME verification: ${error.message}`);
+      if (error instanceof MoodboardResourceBundleError) {
+        return fail(422, `Moodboard embedded Asset bundle is invalid: ${error.message}`);
       }
       throw error;
     }
+    // Embedded capability resolution is fail-closed over the complete bundle,
+    // including node/cover references, but reuses the one validated parse.
+    projectMoodboardContent(bundle, () => "/");
+    const matches = bundle.assets.filter((asset) => asset.id === input.assetId);
+    if (matches.length !== 1) return fail(404, "Resource Revision embedded Asset was not found");
+    const asset = matches[0]!;
+    if (asset.retainedBytes === null) {
+      return fail(422, "Moodboard embedded Asset bytes were not retained by the verified decode");
+    }
     return {
-      bytes,
-      mimeType,
+      bytes: asset.retainedBytes,
+      mimeType: asset.mimeType,
       checksum: asset.checksum,
-      fileName: safeLabel(metadata.fileName, input.assetId, 255),
+      fileName: safeLabel(asset.metadata.fileName, input.assetId, 255),
     };
   }
 

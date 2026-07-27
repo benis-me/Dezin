@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { MoodboardDetail } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -61,15 +61,24 @@ function board(overrides: Partial<MoodboardDetail> = {}): MoodboardDetail {
 }
 
 test("VisualResearchBoard loads the board and mounts the canvas", async () => {
-  const api = makeFakeApi({ getMoodboard: async (id) => board({ id }) });
-  const { findByTestId } = render(
+  let resolveBoard!: (detail: MoodboardDetail) => void;
+  const pendingBoard = new Promise<MoodboardDetail>((resolve) => {
+    resolveBoard = resolve;
+  });
+  const api = makeFakeApi({ getMoodboard: async () => pendingBoard });
+  const { getByTestId } = render(
     <ApiProvider client={api}>
       <VisualResearchBoard boardId="b1" />
     </ApiProvider>,
   );
-  const el = await findByTestId("visual-moodboard");
+  const el = getByTestId("visual-moodboard");
   expect(el).toBeTruthy();
-  expect(el.getAttribute("data-nodes")).toBe("1");
+
+  resolveBoard(board({ id: "b1" }));
+
+  await waitFor(() => {
+    expect(el.getAttribute("data-nodes")).toBe("1");
+  });
   expect(capturedCanvas.props?.capabilities).toBe(MOODBOARD_REVIEW_CAPABILITIES);
   for (const callback of ["onNodesChange", "onAddNote", "onAddSection", "onAddImageGenerator", "onUploadFiles", "onGenerateImage"]) {
     expect(capturedCanvas.props).not.toHaveProperty(callback);

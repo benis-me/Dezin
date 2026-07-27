@@ -7488,6 +7488,69 @@ test("Workspace Proposal drafts isolate canonical state and retain immutable CAS
   store.close();
 });
 
+test("new Workspace Proposal creation rejects historical prototype authority", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal prototype version fence", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const input = workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      prototypeIntents: [{
+        edgeId: "legacy-edge",
+        sourceArtifactId: "legacy-source",
+        targetArtifactId: "legacy-target",
+        sourceLocator: { designNodeId: "legacy-cta" },
+        trigger: "click",
+      }],
+    },
+  });
+
+  assert.throws(
+    () => store.workspace.createProposal(input),
+    (error: unknown) => error instanceof WorkspaceStoreCodecError
+      && /new.*prototype intents.*version 2/i.test(error.message),
+  );
+  assert.equal(rowCount(store.db, "workspace_proposals"), 0);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 0);
+  store.close();
+});
+
+test("Workspace Proposal edits cannot introduce historical prototype authority", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal prototype edit fence", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  if (proposal.generation.kind !== "workspace-generation") {
+    assert.fail("prototype edit fixture must be a Workspace generation Proposal");
+  }
+  const generation = proposal.generation;
+
+  assert.throws(
+    () => store.workspace.updateProposal(proposal.id, {
+      expectedProposalRevision: proposal.revision,
+      operations: proposal.operations,
+      layoutOperations: proposal.layoutOperations,
+      generation: {
+        ...generation,
+        prototypeIntents: [{
+          edgeId: "legacy-edge",
+          sourceArtifactId: "legacy-source",
+          targetArtifactId: "legacy-target",
+          sourceLocator: { designNodeId: "legacy-cta" },
+          trigger: "click",
+        }],
+      },
+      rationale: proposal.rationale,
+      assumptions: proposal.assumptions,
+    }),
+    (error: unknown) => error instanceof WorkspaceStoreCodecError
+      && /new.*prototype intents.*version 2/i.test(error.message),
+  );
+  assert.equal(store.workspace.getProposal(proposal.id)?.revision, proposal.revision);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 1);
+  store.close();
+});
+
 test("Workspace Proposal creation and edits cannot weaken their immutable base Kernel QA contract", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Proposal quality floor", mode: "standard" });
@@ -7572,6 +7635,128 @@ test("Workspace Proposal creation and edits cannot weaken their immutable base K
     },
   }), /Design Kernel severity|preserve/i);
   assert.equal(store.workspace.getProposal(proposal.id)?.revision, proposal.revision);
+  store.close();
+});
+
+test("Workspace Artifact generation applies a high-craft P2-blocking quality floor", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Workspace Artifact craft floor", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const command = proposalPageCommand("craft-floor", "Craft floor page");
+  if (command.type !== "add-node" || command.node.kind !== "page") {
+    assert.fail("craft-floor fixture must add one Page");
+  }
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [command],
+    {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        artifactPlans: [{
+          operation: "create",
+          nodeId: command.node.id,
+          artifactId: command.node.artifactId,
+          kind: "page",
+          name: command.node.name,
+          trackId: command.node.createIdentity!.initialTrackId,
+          baseRevisionId: null,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: [],
+        }],
+      },
+    },
+  ));
+
+  if (proposal.generation.kind !== "workspace-generation") {
+    assert.fail("craft-floor Proposal kind changed");
+  }
+  assert.deepEqual(
+    proposal.generation.qualityProfile.blockingSeverities,
+    ["P0", "P1", "P2"],
+    "Workspace design generation must repair active craft findings instead of publishing a low-fidelity needs-attention Revision",
+  );
+  store.close();
+});
+
+test("Workspace Artifact quality frames keep shared base viewports while isolating each Artifact state matrix", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Artifact-scoped state frames", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const home = proposalPageCommand("frame-home", "Home");
+  const schedule = proposalPageCommand("frame-schedule", "Schedule");
+  if (home.type !== "add-node" || home.node.kind !== "page"
+    || schedule.type !== "add-node" || schedule.node.kind !== "page") {
+    assert.fail("frame-scope fixtures must add Pages");
+  }
+  const homeArtifactId = home.node.artifactId;
+  const scheduleArtifactId = schedule.node.artifactId;
+  const responsiveFrames = [
+    { id: "home-menu-open", name: "Home menu open", width: 1_440, height: 900, initialState: "menu-open" },
+    {
+      id: "schedule-filtered",
+      name: "Schedule filtered",
+      width: 1_440,
+      height: 900,
+      fixture: { track: "documentary" },
+    },
+  ];
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [home, schedule],
+    {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        responsiveFrames,
+        artifactPlans: [
+          {
+            operation: "create",
+            nodeId: home.node.id,
+            artifactId: home.node.artifactId,
+            kind: "page",
+            name: home.node.name,
+            trackId: home.node.createIdentity!.initialTrackId,
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: ["home-menu-open"],
+          },
+          {
+            operation: "create",
+            nodeId: schedule.node.id,
+            artifactId: schedule.node.artifactId,
+            kind: "page",
+            name: schedule.node.name,
+            trackId: schedule.node.createIdentity!.initialTrackId,
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: ["schedule-filtered"],
+          },
+        ],
+      },
+    },
+  ));
+  if (proposal.generation.kind !== "workspace-generation") {
+    assert.fail("frame-scope Proposal kind changed");
+  }
+
+  const homePlan = proposal.generation.artifactPlans.find((plan) => plan.artifactId === homeArtifactId);
+  const schedulePlan = proposal.generation.artifactPlans.find((plan) => plan.artifactId === scheduleArtifactId);
+  assert.ok(homePlan);
+  assert.ok(schedulePlan);
+  assert.ok(homePlan.responsiveFrameIds.includes("desktop"));
+  assert.ok(homePlan.responsiveFrameIds.includes("mobile"));
+  assert.ok(schedulePlan.responsiveFrameIds.includes("desktop"));
+  assert.ok(schedulePlan.responsiveFrameIds.includes("mobile"));
+  assert.ok(homePlan.responsiveFrameIds.includes("home-menu-open"));
+  assert.equal(homePlan.responsiveFrameIds.includes("schedule-filtered"), false);
+  assert.ok(schedulePlan.responsiveFrameIds.includes("schedule-filtered"));
+  assert.equal(schedulePlan.responsiveFrameIds.includes("home-menu-open"), false);
+  assert.deepEqual(proposal.generation.qualityProfile.requiredFrameIds, ["desktop", "mobile"]);
+  assert.ok(proposal.generation.artifactPlans.every((plan) => plan.responsiveFrameIds.length <= 16));
   store.close();
 });
 
@@ -9083,11 +9268,69 @@ test("prototype intents use the exact Page Artifact endpoints of their final gra
     const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, operations, {
       generation: {
         ...emptyWorkspaceGenerationPayload(),
+        version: 2,
+        artifactPlans: [
+          {
+            operation: "create",
+            nodeId: "proposal-node-prototype-source",
+            artifactId: "proposal-artifact-prototype-source",
+            kind: "page",
+            name: "Page prototype-source",
+            trackId: "proposal-track-prototype-source",
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: [],
+            prototypeRequirements: {
+              outgoing: [{
+                edgeId: "proposal-prototype-edge",
+                sourceMarkerId: "prototype-source-to-target",
+                trigger: "click",
+              }],
+              incoming: [],
+            },
+          },
+          {
+            operation: "create",
+            nodeId: "proposal-node-prototype-target",
+            artifactId: "proposal-artifact-prototype-target",
+            kind: "page",
+            name: "Page prototype-target",
+            trackId: "proposal-track-prototype-target",
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: [],
+            prototypeRequirements: {
+              outgoing: [],
+              incoming: [{
+                edgeId: "proposal-prototype-edge",
+                sourceArtifactId: "proposal-artifact-prototype-source",
+                sourceMarkerId: "prototype-source-to-target",
+                targetState: "default",
+              }],
+            },
+          },
+          {
+            operation: "create",
+            nodeId: "proposal-node-prototype-component",
+            artifactId: "proposal-artifact-prototype-component",
+            kind: "component",
+            name: "Prototype component",
+            trackId: "proposal-track-prototype-component",
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: [],
+          },
+        ],
         prototypeIntents: [{
           edgeId: "proposal-prototype-edge",
           sourceArtifactId,
           targetArtifactId,
+          sourceMarkerId: "prototype-source-to-target",
           trigger: "click",
+          targetState: "default",
         }],
       },
     }));

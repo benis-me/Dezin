@@ -8,6 +8,8 @@ import type {
   FinishGenerationTaskAttemptFailureInput,
   FinishGenerationTaskAttemptResult,
   GenerationTaskAttemptClaim,
+  GenerationTaskAttemptLease,
+  GenerationTaskPrototypeMarkerProof,
   PublishGenerationPlanCheckpointInput,
   PublishGenerationPlanCheckpointResult,
   PublishGenerationTaskCandidateInput,
@@ -22,6 +24,17 @@ import type { ArtifactRevisionEvidenceBundleReceipt } from "./artifact-candidate
 import type {
   GenerationTaskEvidenceLifecycle,
 } from "./generation-task-evidence-lifecycle.ts";
+
+export interface CompleteGenerationTaskPrototypeFinalizationInput {
+  lease: GenerationTaskAttemptLease;
+  finalization: {
+    baseSnapshotId: string;
+    baseGraphRevision: number;
+    artifactRevisionIds: string[];
+    resourceRevisionIds: string[];
+    markerProofs: GenerationTaskPrototypeMarkerProof[];
+  };
+}
 
 export interface GenerationTaskPublicationStorePort {
   getArtifactRevision(revisionId: string): ArtifactRevisionRecord | null;
@@ -39,6 +52,11 @@ export interface GenerationTaskPublicationStorePort {
     projectId: string,
     planId: string,
     input: CompleteGenerationTaskValidationInput,
+  ): CompleteGenerationTaskValidationResult;
+  completeGenerationTaskPrototypeFinalizationForProject(
+    projectId: string,
+    planId: string,
+    input: CompleteGenerationTaskPrototypeFinalizationInput,
   ): CompleteGenerationTaskValidationResult;
   publishGenerationPlanCheckpointForProject(
     projectId: string,
@@ -196,6 +214,23 @@ export class GenerationTaskPublication implements GenerationTaskPublicationPort 
             evidence: result.evidence,
           },
         });
+        this.notifyBestEffort(claim.task.planId);
+        return;
+      case "prototype-finalization":
+        this.store.completeGenerationTaskPrototypeFinalizationForProject(
+          projectId,
+          claim.task.planId,
+          {
+            lease: claim.lease,
+            finalization: {
+              baseSnapshotId: result.baseSnapshotId,
+              baseGraphRevision: result.baseGraphRevision,
+              artifactRevisionIds: result.artifactRevisionIds,
+              resourceRevisionIds: result.resourceRevisionIds,
+              markerProofs: result.markerProofs,
+            },
+          },
+        );
         this.notifyBestEffort(claim.task.planId);
         return;
       default:

@@ -189,6 +189,144 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
   return { shell, proposal };
 }
 
+function approvedPrototypeV2Fixture(): { shell: GenerationPlan; proposal: WorkspaceProposal } {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const pageContact = {
+    operation: "create" as const,
+    nodeId: "node-contact",
+    artifactId: "page-contact",
+    kind: "page" as const,
+    name: "Contact",
+    trackId: "track-contact",
+    baseRevisionId: null,
+    dependsOnArtifactIds: [],
+    capabilityIds: ["cap-text"],
+    responsiveFrameIds: ["desktop"],
+    prototypeRequirements: {
+      outgoing: [],
+      incoming: [{
+        edgeId: "edge-home-contact",
+        sourceArtifactId: "page-home",
+        sourceMarkerId: "marker-home-contact",
+        targetState: "contact-ready",
+      }],
+    },
+  };
+  fixture.proposal = {
+    ...fixture.proposal,
+    baseGraph: {
+      workspaceId: fixture.proposal.workspaceId,
+      revision: fixture.proposal.baseGraphRevision,
+      nodes: [
+        {
+          id: "node-home",
+          workspaceId: fixture.proposal.workspaceId,
+          kind: "page",
+          name: "Home",
+          artifactId: "page-home",
+        },
+        {
+          id: "node-about",
+          workspaceId: fixture.proposal.workspaceId,
+          kind: "page",
+          name: "About",
+          artifactId: "page-about",
+        },
+        {
+          id: "node-contact",
+          workspaceId: fixture.proposal.workspaceId,
+          kind: "page",
+          name: "Contact",
+          artifactId: "page-contact",
+        },
+      ],
+      edges: [
+        {
+          id: "edge-home-about",
+          workspaceId: fixture.proposal.workspaceId,
+          sourceNodeId: "node-home",
+          targetNodeId: "node-about",
+          kind: "prototype",
+          prototype: { status: "planned" },
+        },
+        {
+          id: "edge-home-contact",
+          workspaceId: fixture.proposal.workspaceId,
+          sourceNodeId: "node-home",
+          targetNodeId: "node-contact",
+          kind: "prototype",
+          prototype: { status: "planned" },
+        },
+      ],
+    },
+    generation: {
+      ...generation,
+      version: 2,
+      artifactPlans: [
+        ...generation.artifactPlans.map((plan) => {
+          if (plan.artifactId === "page-home") {
+            return {
+              ...plan,
+              prototypeRequirements: {
+                outgoing: [
+                  {
+                    edgeId: "edge-home-contact",
+                    sourceMarkerId: "marker-home-contact",
+                    trigger: "submit" as const,
+                  },
+                  {
+                    edgeId: "edge-home-about",
+                    sourceMarkerId: "marker-home-about",
+                    trigger: "click" as const,
+                  },
+                ],
+                incoming: [],
+              },
+            };
+          }
+          if (plan.artifactId === "page-about") {
+            return {
+              ...plan,
+              prototypeRequirements: {
+                outgoing: [],
+                incoming: [{
+                  edgeId: "edge-home-about",
+                  sourceArtifactId: "page-home",
+                  sourceMarkerId: "marker-home-about",
+                  targetState: "about-ready",
+                }],
+              },
+            };
+          }
+          return plan;
+        }),
+        pageContact,
+      ],
+      prototypeIntents: [
+        {
+          edgeId: "edge-home-contact",
+          sourceArtifactId: "page-home",
+          targetArtifactId: "page-contact",
+          sourceMarkerId: "marker-home-contact",
+          trigger: "submit",
+          targetState: "contact-ready",
+          transition: { type: "fade", durationMs: 180 },
+        },
+        {
+          edgeId: "edge-home-about",
+          sourceArtifactId: "page-home",
+          targetArtifactId: "page-about",
+          sourceMarkerId: "marker-home-about",
+          trigger: "click",
+          targetState: "about-ready",
+        },
+      ],
+    } as WorkspaceGenerationPayload,
+  };
+  return fixture;
+}
+
 function targetId(task: ReturnType<typeof compileGenerationPlan>["tasks"][number]): string {
   return task.target.id;
 }
@@ -330,6 +468,10 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
   assert.ok(executable
     .filter((task) => task.kind === "page" || task.kind === "component")
     .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
+  assert.ok(executable
+    .filter((task) => task.kind === "page" || task.kind === "component")
+    .every((task) => task.resourceLimits.maxRepairRounds === 8),
+  "compiled Artifact tasks must retain the bounded eight-round production repair ceiling");
 
   for (const [extraFrameCount, expectedTimeoutMs] of [
     [1, 35 * 60_000],
@@ -338,8 +480,8 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
     const extraFrames = Array.from({ length: extraFrameCount }, (_, index) => ({
       id: `adaptive-${index}`,
       name: `Adaptive ${index}`,
-      width: 1_024 - index * 80,
-      height: 768 + index * 40,
+      width: 1_024,
+      height: 768,
     }));
     const responsiveFrames = [...generation.responsiveFrames, ...extraFrames];
     const requiredFrameIds = responsiveFrames.map((frame) => frame.id);
@@ -677,6 +819,247 @@ test("keeps prototype navigation out of hard Task dependencies while retaining r
   assert.deepEqual(card.dependencyIds, [images.id]);
 });
 
+test("compiles retained planned prototype edges into deterministic v2 finalization and Artifact requirements", () => {
+  const fixture = approvedPrototypeV2Fixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const canonical = normalizeWorkspaceProposalGeneration(generation);
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: canonical },
+  });
+  const normalized = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    prototypeIntents: [...generation.prototypeIntents].reverse(),
+    artifactPlans: generation.artifactPlans.map((plan) => {
+      const requirements = (
+        plan as typeof plan & {
+          prototypeRequirements?: {
+            outgoing: unknown[];
+            incoming: unknown[];
+          };
+        }
+      ).prototypeRequirements;
+      return requirements === undefined
+        ? plan
+        : {
+            ...plan,
+            prototypeRequirements: {
+              outgoing: [...requirements.outgoing].reverse(),
+              incoming: [...requirements.incoming].reverse(),
+            },
+          };
+    }),
+  });
+  const repeated = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: normalized },
+  });
+
+  assert.deepEqual(repeated, compiled, "v2 intent and requirement input ordering must not change task hashes");
+  const home = compiled.tasks.find((task) => task.target.id === "page-home");
+  const card = compiled.tasks.find((task) => task.target.id === "component-card");
+  const validation = compiled.tasks.find((task) => task.kind === "prototype-validation");
+  assert.ok(home);
+  assert.ok(card);
+  assert.ok(validation);
+  assert.deepEqual(
+    (
+      home.payload.artifactPlan as Record<string, unknown> & {
+        prototypeRequirements: { outgoing: Array<{ edgeId: string }> };
+      }
+    ).prototypeRequirements.outgoing.map((requirement) => requirement.edgeId),
+    ["edge-home-about", "edge-home-contact"],
+  );
+  assert.equal(
+    Object.hasOwn(card.payload.artifactPlan as Record<string, unknown>, "prototypeRequirements"),
+    false,
+    "an unrelated Component must not receive prototype implementation work",
+  );
+  assert.equal(validation.payload.version, 2);
+  assert.deepEqual(
+    (validation.payload.prototypeIntents as Array<{ edgeId: string }>).map((intent) => intent.edgeId),
+    ["edge-home-about", "edge-home-contact"],
+  );
+  assert.deepEqual(
+    validation.dependencyIds,
+    compiled.tasks
+      .filter((task) => task.kind !== "prototype-validation" && task.kind !== "checkpoint")
+      .map((task) => task.id)
+      .sort(),
+  );
+});
+
+test("rejects incomplete, foreign, drifted, or client-authoritative v2 prototype plans", () => {
+  const fixture = approvedPrototypeV2Fixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const cases: Array<{
+    name: string;
+    mutate: (value: WorkspaceGenerationPayload) => WorkspaceGenerationPayload;
+    pattern: RegExp;
+    code?: GenerationPlanCompileError["code"];
+  }> = [
+    {
+      name: "missing retained edge intent",
+      mutate: (value) => ({
+        ...value,
+        prototypeIntents: value.prototypeIntents.filter((intent) => intent.edgeId !== "edge-home-contact"),
+      }),
+      pattern: /missing.*prototype intent.*edge-home-contact/i,
+    },
+    {
+      name: "foreign edge intent",
+      mutate: (value) => ({
+        ...value,
+        prototypeIntents: [
+          ...value.prototypeIntents,
+          {
+            edgeId: "edge-foreign",
+            sourceArtifactId: "page-home",
+            targetArtifactId: "page-about",
+            sourceMarkerId: "marker-foreign",
+            trigger: "click",
+          } as typeof value.prototypeIntents[number],
+        ],
+      }),
+      pattern: /missing.*prototype edge.*edge-foreign|foreign.*edge-foreign/i,
+    },
+    {
+      name: "endpoint drift",
+      mutate: (value) => ({
+        ...value,
+        prototypeIntents: value.prototypeIntents.map((intent) => intent.edgeId === "edge-home-about"
+          ? { ...intent, sourceArtifactId: "page-contact" }
+          : intent),
+      }),
+      pattern: /prototype.*endpoint|edge-home-about/i,
+    },
+    {
+      name: "marker collision",
+      mutate: (value) => ({
+        ...value,
+        prototypeIntents: value.prototypeIntents.map((intent) => ({
+          ...intent,
+          sourceMarkerId: "marker-collision",
+        })),
+        artifactPlans: value.artifactPlans.map((plan) => plan.prototypeRequirements === undefined
+          ? plan
+          : {
+              ...plan,
+              prototypeRequirements: {
+                outgoing: plan.prototypeRequirements.outgoing.map((requirement) => ({
+                  ...requirement,
+                  sourceMarkerId: "marker-collision",
+                })),
+                incoming: plan.prototypeRequirements.incoming.map((requirement) => ({
+                  ...requirement,
+                  sourceMarkerId: "marker-collision",
+                })),
+              },
+            }),
+      }),
+      pattern: /duplicate.*source marker|marker.*unique/i,
+      code: "duplicate-id",
+    },
+    {
+      name: "missing source Artifact requirement",
+      mutate: (value) => ({
+        ...value,
+        artifactPlans: value.artifactPlans.map((plan) => plan.artifactId === "page-home"
+          ? {
+              ...plan,
+              prototypeRequirements: {
+                outgoing: [],
+                incoming: [],
+              },
+            } as typeof plan
+          : plan),
+      }),
+      pattern: /source.*requirement|marker requirement.*edge-home/i,
+    },
+  ];
+  for (const entry of cases) {
+    assert.throws(
+      () => compileGenerationPlan({
+        shell: fixture.shell,
+        proposal: {
+          ...fixture.proposal,
+          generation: entry.mutate(structuredClone(generation)),
+        },
+      }),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === (entry.code ?? "invalid-reference")
+        && entry.pattern.test(error.message),
+      entry.name,
+    );
+  }
+
+  for (const forbidden of [
+    { sourceLocator: { designNodeId: "client-authored" } },
+    { sourceRevisionId: "client-revision" },
+    { selector: "#client-authority" },
+  ]) {
+    assert.throws(
+      () => normalizeWorkspaceProposalGeneration({
+        ...generation,
+        prototypeIntents: generation.prototypeIntents.map((intent, index) => index === 0
+          ? { ...intent, ...forbidden }
+          : intent),
+      }),
+      /unsupported field|locator|Revision|selector/i,
+    );
+  }
+});
+
+test("keeps historical unversioned generation payloads byte-for-byte", () => {
+  const historicalPayloads = [
+    {
+      kind: "workspace-generation",
+      resourceOperations: [],
+      artifactPlans: [],
+      dependencyPlans: [],
+      prototypeIntents: [],
+      capabilities: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    },
+    {
+      kind: "workspace-generation",
+      resourceOperations: [],
+      artifactPlans: [],
+      dependencyPlans: [],
+      prototypeIntents: [{
+        edgeId: "legacy-edge",
+        sourceArtifactId: "legacy-source",
+        targetArtifactId: "legacy-target",
+        sourceLocator: { designNodeId: "legacy-cta" },
+        trigger: "click",
+        targetState: "legacy-ready",
+        transition: { type: "fade", durationMs: 120, easing: "ease-out" },
+      }],
+      capabilities: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    },
+  ] as const;
+
+  for (const historical of historicalPayloads) {
+    assert.equal(
+      JSON.stringify(normalizeWorkspaceProposalGeneration(historical)),
+      JSON.stringify(historical),
+    );
+  }
+});
+
 test("compiles an exact dispatch Context Pack identity into only its scoped Artifact and Resource leaves", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
@@ -970,17 +1353,35 @@ test("rejects empty or per-Artifact-incomplete responsive Frame contracts before
     );
   });
 
-  await t.test("visual QA exceeds the bounded per-Artifact Frame budget", () => {
+  await t.test("visual QA admits a bounded responsive state matrix", () => {
     const fixture = approvedPlanFixture();
     const generation = workspaceGeneration(fixture.proposal);
-    const extraFrames = Array.from({ length: 5 }, (_, index) => ({
+    const extraFrames = Array.from({ length: 15 }, (_, index) => ({
       id: `adaptive-${index}`,
       name: `Adaptive ${index}`,
       width: 1_024 - index * 80,
       height: 768 + index * 40,
+      initialState: `state-${index}`,
     }));
     generation.responsiveFrames.push(...extraFrames);
-    generation.qualityProfile.requiredFrameIds.push(...extraFrames.map((frame) => frame.id));
+    for (const plan of generation.artifactPlans) {
+      plan.responsiveFrameIds.push(...extraFrames.map((frame) => frame.id));
+    }
+
+    assert.doesNotThrow(() => compileGenerationPlan(fixture));
+  });
+
+  await t.test("visual QA rejects a state matrix beyond the bounded per-Artifact Frame budget", () => {
+    const fixture = approvedPlanFixture();
+    const generation = workspaceGeneration(fixture.proposal);
+    const extraFrames = Array.from({ length: 16 }, (_, index) => ({
+      id: `adaptive-${index}`,
+      name: `Adaptive ${index}`,
+      width: 1_024,
+      height: 768,
+      initialState: `state-${index}`,
+    }));
+    generation.responsiveFrames.push(...extraFrames);
     for (const plan of generation.artifactPlans) {
       plan.responsiveFrameIds.push(...extraFrames.map((frame) => frame.id));
     }
@@ -989,7 +1390,7 @@ test("rejects empty or per-Artifact-incomplete responsive Frame contracts before
       () => compileGenerationPlan(fixture),
       (error: unknown) => error instanceof GenerationPlanCompileError
         && error.code === "invalid-reference"
-        && /at most 5 responsive Frames/.test(error.message),
+        && /at most 16 responsive Frames/.test(error.message),
     );
   });
 });

@@ -421,6 +421,69 @@ test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer
   });
 });
 
+test("Codex Resource execution freezes host login even when project provider BYOK is configured", () => {
+  const projectProviderSettings = settings({
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+    apiBaseUrl: "https://azure-provider.example.test/v1",
+    apiKey: "project-provider-secret",
+    aiProviderId: "azure-openai",
+    aiProviderEnabled: true,
+    aiProviderOrganization: "project-provider-org",
+  });
+  const frozen = profile("research", projectProviderSettings);
+
+  assert.deepEqual(frozen.agent, {
+    command: "codex",
+    providerId: "codex",
+    model: "gpt-5.4-mini",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "openai",
+    credentialRequired: false,
+  });
+  assert.doesNotMatch(
+    stableStringify(frozen),
+    /azure-provider|project-provider-secret|project-provider-org/,
+  );
+  assert.deepEqual(hydrateResourceAgentExecution(frozen, {
+    ...projectProviderSettings,
+    apiBaseUrl: "",
+    apiKey: "",
+    aiProviderOrganization: "",
+  }), {
+    ...frozen.agent,
+    apiKey: "",
+  });
+});
+
+test("legacy Codex Resource profiles hydrate through host login without reusing frozen BYOK", () => {
+  const current = profile("research", settings({
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+  }));
+  const legacy = structuredClone(current) as any;
+  legacy.agent.baseUrl = "https://legacy-provider.example.test/v1";
+  legacy.agent.organization = "legacy-provider-org";
+  legacy.agent.credentialRequired = true;
+  const { checksum: _checksum, ...legacyBody } = legacy;
+  legacy.checksum = checksumBytes(stableStringify(legacyBody));
+
+  assert.deepEqual(hydrateResourceAgentExecution(legacy, settings({
+    agentCommand: "codex",
+    model: "gpt-5.4-mini",
+    apiBaseUrl: "",
+    apiKey: "",
+    aiProviderOrganization: "",
+  })), {
+    ...legacy.agent,
+    baseUrl: "",
+    organization: "",
+    credentialRequired: false,
+    apiKey: "",
+  });
+});
+
 test("Resource execution profile rejects a mismatched frozen Task Agent identity", () => {
   const current = settings();
   const fakeStore = {

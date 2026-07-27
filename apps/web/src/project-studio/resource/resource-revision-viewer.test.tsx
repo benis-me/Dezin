@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -8,6 +8,7 @@ import type { Resource, ResourceRevision, ResourceRevisionView } from "../../lib
 import { makeFakeApi } from "../../test/fake-api.ts";
 import {
   ResourceEditorSurface,
+  ResourceInspector,
   ResourceRevisionBody,
   useResourceEditorController,
 } from "./ResourceEditorSurface.tsx";
@@ -144,6 +145,52 @@ test("Resource loading and ready states share one compact Studio header shell", 
   });
   expect(await screen.findByRole("heading", { name: resource.title })).toBeInTheDocument();
   expect(rendered.container.querySelector("header.dezin-resource-viewer__header")).toBe(header);
+});
+
+test("keeps Resource identity and checksum in folded copyable Technical details", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async (_value: string) => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(
+    <ResourceInspector
+      editor={{
+        resourceId: resource.id,
+        requestedRevisionId: identity.id,
+        load: {
+          status: "ready",
+          resource,
+          view: fileView,
+          requestKey: `${resource.id}\0${identity.id}`,
+        },
+        headRevisionId: resource.headRevisionId,
+        pinned: true,
+        retry: vi.fn(),
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Pinned immutable Revision")).toBeVisible();
+  expect(screen.getByText("Revision 2")).toBeVisible();
+  const disclosure = screen.getByText("Technical details").closest("details");
+  expect(disclosure).not.toBeNull();
+  expect(disclosure).not.toHaveAttribute("open");
+  expect(within(disclosure!).getByText(resource.id)).not.toBeVisible();
+  expect(within(disclosure!).getByText(identity.id)).not.toBeVisible();
+  expect(within(disclosure!).getByText(payload.checksum)).not.toBeVisible();
+
+  await user.click(within(disclosure!).getByText("Technical details"));
+  expect(within(disclosure!).getByText(resource.id)).toBeVisible();
+  expect(within(disclosure!).getByText(identity.id)).toBeVisible();
+  expect(within(disclosure!).getByText(payload.checksum)).toBeVisible();
+  await user.click(within(disclosure!).getByRole("button", { name: "Copy Resource technical details" }));
+
+  expect(writeText).toHaveBeenCalledTimes(1);
+  expect(writeText.mock.calls[0]?.[0]).toContain(resource.id);
+  expect(writeText.mock.calls[0]?.[0]).toContain(identity.id);
+  expect(writeText.mock.calls[0]?.[0]).toContain(payload.checksum);
 });
 
 test("an empty Moodboard surfaces its failed generation task and opens the build plan", async () => {
@@ -430,7 +477,7 @@ test("replacing or unmounting authenticated media aborts obsolete Blob requests"
   expect(signals[1]?.aborted).toBe(true);
 });
 
-test("repeated exact images wait for the viewport, share one Blob fetch, and release it once", async () => {
+test("v3 Moodboard fits portrait, square, and landscape direction Assets without cropping or repeating spatial image nodes", async () => {
   const observers: FakeIntersectionObserver[] = [];
   class FakeIntersectionObserver {
     readonly root = null;
@@ -455,36 +502,62 @@ test("repeated exact images wait for the viewport, share one Blob fetch, and rel
     }
   }
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
-  const createObjectURL = vi.fn(() => "blob:shared-moodboard-image");
+  let blobIndex = 0;
+  const createObjectURL = vi.fn(() => `blob:direction-${++blobIndex}`);
   const revokeObjectURL = vi.fn();
   vi.spyOn(URL, "createObjectURL").mockImplementation(createObjectURL);
   vi.spyOn(URL, "revokeObjectURL").mockImplementation(revokeObjectURL);
-  const getResourceRevisionBlob = vi.fn(async () => new Blob(["shared-image"], { type: "image/png" }));
-  const assetUrl = "/api/projects/project-1/resources/resource-file/revisions/revision-2/embedded-assets/asset-1";
+  const getResourceRevisionBlob = vi.fn(async (path: string) => new Blob([path], { type: "image/png" }));
+  const directionRows = [
+    ["asset-1", "direction-field-notes", "Field Notes", "field-notes.png", 900, 1_600],
+    ["asset-2", "direction-signal-ledger", "Signal Ledger", "signal-ledger.png", 1_200, 1_200],
+    ["asset-3", "direction-quiet-atlas", "Quiet Atlas", "quiet-atlas.png", 1_600, 900],
+  ] as const;
   const moodboardView: ResourceRevisionView = {
     ...fileView,
     kind: "moodboard",
     resource: { ...resource, kind: "moodboard" },
     content: {
-      board: { id: "board-shared", name: "Shared image study", coverAssetId: "asset-1" },
+      board: {
+        id: "board-shared",
+        name: "Shared image study",
+        coverAssetId: "asset-1",
+        directionContract: {
+          protocol: "dezin.moodboard-direction-contract.v1",
+          contextPackId: "context-pack-shared-direction",
+          checksum: "e".repeat(64),
+          directions: directionRows.map(([assetId, id, title]) => ({
+            resourceId: "research-1",
+            revisionId: "research-revision-1",
+            id,
+            title,
+            checksum: "d".repeat(64),
+            assetId,
+          })),
+        },
+      },
       nodes: [
         { id: "node-a", type: "image", label: "Crop A", text: "", x: 0, y: 0, width: 200, height: 120, assetId: "asset-1" },
         { id: "node-b", type: "image", label: "Crop B", text: "", x: 220, y: 0, width: 200, height: 120, assetId: "asset-1" },
+        { id: "node-note", type: "note", label: "Editorial guardrail", text: "Keep evidence legible.", x: 0, y: 150, width: 420, height: 120, assetId: null },
       ],
-      assets: [{
-        id: "asset-1",
+      assets: directionRows.map(([id, directionId, directionTitle, fileName, width, height]) => ({
+        id,
         kind: "image",
-        fileName: "shared.png",
+        fileName,
         mimeType: "image/png",
-        width: 800,
-        height: 480,
+        width,
+        height,
         byteLength: 12,
         checksum: "f".repeat(64),
-        url: assetUrl,
-        downloadUrl: `${assetUrl}?download=1`,
-      }],
-      totalNodeCount: 2,
-      totalAssetCount: 1,
+        url: `/api/projects/project-1/resources/resource-file/revisions/revision-2/embedded-assets/${id}`,
+        downloadUrl: `/api/projects/project-1/resources/resource-file/revisions/revision-2/embedded-assets/${id}?download=1`,
+        directionId,
+        directionTitle,
+        directionChecksum: "d".repeat(64),
+      })),
+      totalNodeCount: 3,
+      totalAssetCount: 3,
       nodesTruncated: false,
       assetsTruncated: false,
     },
@@ -496,14 +569,29 @@ test("repeated exact images wait for the viewport, share one Blob fetch, and rel
   );
 
   expect(getResourceRevisionBlob).not.toHaveBeenCalled();
-  await waitFor(() => expect(observers).toHaveLength(2));
+  await waitFor(() => expect(observers).toHaveLength(3));
+  expect(screen.getByText("Keep evidence legible.")).toBeInTheDocument();
+  const directionFrames = rendered.container.querySelectorAll<HTMLElement>(".dezin-moodboard__direction-image");
+  expect([...directionFrames].map((frame) => frame.style.aspectRatio)).toEqual([
+    "900 / 1600",
+    "1200 / 1200",
+    "1600 / 900",
+  ]);
   act(() => observers.forEach((observer) => observer.reveal()));
-  expect(await screen.findAllByRole("img")).toHaveLength(2);
-  expect(getResourceRevisionBlob).toHaveBeenCalledTimes(1);
-  expect(createObjectURL).toHaveBeenCalledTimes(1);
+  const images = await screen.findAllByRole("img");
+  expect(images.map((image) => image.getAttribute("alt"))).toEqual([
+    "Field Notes — field-notes.png",
+    "Signal Ledger — signal-ledger.png",
+    "Quiet Atlas — quiet-atlas.png",
+  ]);
+  for (const image of images) expect(image).toHaveStyle({ objectFit: "contain" });
+  expect(getResourceRevisionBlob).toHaveBeenCalledTimes(3);
+  expect(getResourceRevisionBlob.mock.calls.map(([path]) => path)).toEqual(directionRows.map(
+    ([id]) => `/api/projects/project-1/resources/resource-file/revisions/revision-2/embedded-assets/${id}`,
+  ));
+  expect(createObjectURL).toHaveBeenCalledTimes(3);
   rendered.unmount();
-  expect(revokeObjectURL).toHaveBeenCalledTimes(1);
-  expect(revokeObjectURL).toHaveBeenCalledWith("blob:shared-moodboard-image");
+  expect(revokeObjectURL).toHaveBeenCalledTimes(3);
 });
 
 test("authenticated media failures stay visible instead of leaking a daemon URL", async () => {

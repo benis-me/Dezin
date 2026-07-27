@@ -9,6 +9,36 @@ import {
 } from "../src/generation-task-quality.ts";
 import { generationTaskVisualEvidenceFrameStorageSegment } from "../src/render-frame.ts";
 
+test("GenerationTaskQualityGateError owns an immutable JSON-safe optional details snapshot", () => {
+  const mutable = {
+    protocol: "dezin.test-quality-gate-details.v1",
+    observed: { count: 1 },
+    blockers: ["missing-proof"],
+  };
+  const error = new GenerationTaskQualityGateError("Quality gate rejected the candidate", mutable);
+
+  mutable.observed.count = 9;
+  mutable.blockers.push("late-mutation");
+
+  assert.deepEqual(error.details, {
+    protocol: "dezin.test-quality-gate-details.v1",
+    observed: { count: 1 },
+    blockers: ["missing-proof"],
+  });
+  assert.equal(Object.isFrozen(error.details), true);
+  assert.equal(Object.isFrozen(error.details?.observed), true);
+  assert.equal(Object.isFrozen(error.details?.blockers), true);
+  assert.equal(new GenerationTaskQualityGateError("Legacy call").details, undefined);
+
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  assert.throws(
+    () => new GenerationTaskQualityGateError("Unsafe details", cyclic),
+    (failure: unknown) => failure instanceof GenerationTaskQualityGateError
+      && /details|boundary|inspect/i.test(failure.message),
+  );
+});
+
 const SOURCE_AUTHORITY: GenerationTaskSourceVisualEvidenceAuthority = Object.freeze({
   resourceId: "resource-sharingan-1",
   revisionId: "resource-revision-sharingan-1",

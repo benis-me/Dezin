@@ -138,6 +138,16 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
         ? "Revision ready"
         : "Awaiting revision";
   const statusLabel = generationLabel ?? (awaitingSelection ? `${qualityLabel} · choose direction` : qualityLabel);
+  const resourceKindLabel = data.resourcePreview?.kind === "research"
+    ? "Research"
+    : data.resourcePreview?.kind === "moodboard"
+      ? "Moodboard"
+      : "Context resource";
+  const ResourceKindIcon = data.resourcePreview?.kind === "research"
+    ? BookOpenText
+    : data.resourcePreview?.kind === "moodboard"
+      ? Images
+      : Orbit;
   return (
     <div
       className="dezin-flow-card dezin-flow-resource"
@@ -154,7 +164,10 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       <Handle id="resource-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <ResourceVisualPreview preview={data.resourcePreview} />
       <div className="dezin-flow-resource__copy">
-        <span className="dezin-flow-card__kind"><Orbit size={10} /> Context resource</span>
+        <span className="dezin-flow-card__kind">
+          <ResourceKindIcon size={10} />
+          {resourceKindLabel}
+        </span>
         <h3 title={data.name}>{data.name}</h3>
         {!overview && (
           <div className="dezin-flow-card__meta">

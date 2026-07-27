@@ -119,8 +119,12 @@ import {
   type GenerationTaskSourceVisualEvidenceAuthority,
 } from "./generation-task-quality.ts";
 import {
+  buildGenerationTaskPrototypeFinalizationBindings,
+  buildGenerationTaskPrototypeFinalizationResult,
   buildGenerationTaskPrototypeValidationResult,
+  generationTaskPrototypeFinalizationCommandId,
   GenerationTaskPrototypeValidationError,
+  type GenerationTaskPrototypeMarkerProof,
 } from "./generation-task-validation.ts";
 import {
   applyWorkspaceGraphCommands,
@@ -226,6 +230,82 @@ const GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES = 1024 * 1024;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_REVISIONS = 256;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_DEPENDENCIES = 2_048;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_RESOURCE_PINS = 2_048;
+
+function exactGenerationTaskPayloadRecord(
+  value: unknown,
+  requiredFields: readonly string[],
+  optionalFields: readonly string[] = [],
+): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== "string")) return null;
+    const allowed = new Set([...requiredFields, ...optionalFields]);
+    if (requiredFields.some((field) => !keys.includes(field))
+      || keys.some((key) => !allowed.has(key as string))) {
+      return null;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (keys.some((key) => {
+      const descriptor = descriptors[key as string];
+      return descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true;
+    })) {
+      return null;
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function generationTaskResourceAdapterKind(
+  task: GenerationTask,
+): ResourceKind | null {
+  if (task.kind !== "resource" || task.target.type !== "resource"
+    || task.target.workspaceId !== task.workspaceId) {
+    return null;
+  }
+  const payload = exactGenerationTaskPayloadRecord(
+    task.payload,
+    ["version", "agent", "operation", "brief", "capabilityDescriptors", "adapter"],
+  );
+  const adapter = exactGenerationTaskPayloadRecord(
+    payload?.adapter,
+    ["id", "version", "kind"],
+  );
+  const operation = exactGenerationTaskPayloadRecord(
+    payload?.operation,
+    ["operation", "nodeId", "resourceId", "kind", "title", "revisionPolicy"],
+    ["instructions", "dispatchContextPackId"],
+  );
+  const revisionPolicy = exactGenerationTaskPayloadRecord(
+    operation?.revisionPolicy,
+    ["kind"],
+  );
+  let agent: WorkspaceGenerationAgentSelection;
+  try {
+    agent = normalizeWorkspaceGenerationAgentSelection(
+      payload?.agent,
+      "Generation Task Resource adapter Agent",
+    );
+  } catch {
+    return null;
+  }
+  if (payload?.version !== 2 || adapter?.version !== 1
+    || !isDeepStrictEqual(payload.agent, agent)
+    || (adapter?.kind !== "research" && adapter?.kind !== "moodboard"
+      && adapter?.kind !== "sharingan-capture")
+    || adapter.id !== `dezin.resource-adapter.${adapter.kind}`
+    || operation?.kind !== adapter.kind
+    || operation.resourceId !== task.target.id
+    || (operation.operation !== "create" && operation.operation !== "revise")
+    || revisionPolicy?.kind !== "generate") {
+    return null;
+  }
+  return adapter.kind;
+}
 
 export interface StageGenerationTaskCandidateResult {
   attempt: GenerationTaskAttempt;
@@ -507,6 +587,17 @@ export interface CompleteGenerationTaskValidationResult {
   snapshot: WorkspaceSnapshotRecord;
   validation: GenerationTaskValidationRecord;
   evidenceHash: string;
+}
+
+export interface CompleteGenerationTaskPrototypeFinalizationInput {
+  lease: GenerationTaskAttemptLease;
+  finalization: {
+    baseSnapshotId: string;
+    baseGraphRevision: number;
+    artifactRevisionIds: string[];
+    resourceRevisionIds: string[];
+    markerProofs: GenerationTaskPrototypeMarkerProof[];
+  };
 }
 
 export type GenerationPlanCheckpointConflict = {
@@ -1238,6 +1329,68 @@ function boundaryJsonObject(value: unknown, label: string): Record<string, unkno
 
 function canonicalJsonText(value: unknown, label: string): string {
   return JSON.stringify(boundaryJsonValue(value, label, { ancestors: new WeakSet<object>(), nodes: 0, textUnits: 0 }));
+}
+
+function normalizeCompleteGenerationTaskPrototypeFinalizationInput(
+  unsafeInput: CompleteGenerationTaskPrototypeFinalizationInput,
+): CompleteGenerationTaskPrototypeFinalizationInput {
+  const root = boundaryObject(
+    unsafeInput,
+    "Generation Task prototype finalization input",
+    ["lease", "finalization"],
+  );
+  const lease = normalizeGenerationTaskAttemptLease(root.lease);
+  const finalization = boundaryObject(
+    root.finalization,
+    "Generation Task prototype finalization",
+    [
+      "baseSnapshotId",
+      "baseGraphRevision",
+      "artifactRevisionIds",
+      "resourceRevisionIds",
+      "markerProofs",
+    ],
+  );
+  const stringIds = (value: unknown, label: string): string[] => {
+    if (!Array.isArray(value) || Object.keys(value).length !== value.length) {
+      throw new WorkspaceStoreCodecError(`${label} must be a dense array`);
+    }
+    const result = value.map((entry, index) => boundaryId(entry, `${label}[${index}]`));
+    if (new Set(result).size !== result.length) {
+      throw new WorkspaceStoreCodecError(`${label} must contain unique ids`);
+    }
+    return result;
+  };
+  if (!Array.isArray(finalization.markerProofs)
+    || Object.keys(finalization.markerProofs).length !== finalization.markerProofs.length) {
+    throw new WorkspaceStoreCodecError("Generation Task prototype marker proofs must be a dense array");
+  }
+  const markerProofs = JSON.parse(canonicalJsonText(
+    finalization.markerProofs,
+    "Generation Task prototype marker proofs",
+  )) as GenerationTaskPrototypeMarkerProof[];
+  return {
+    lease,
+    finalization: {
+      baseSnapshotId: boundaryId(
+        finalization.baseSnapshotId,
+        "Generation Task prototype finalization base Snapshot id",
+      ),
+      baseGraphRevision: boundarySafeInteger(
+        finalization.baseGraphRevision,
+        "Generation Task prototype finalization base graph Revision",
+      ),
+      artifactRevisionIds: stringIds(
+        finalization.artifactRevisionIds,
+        "Generation Task prototype finalization Artifact Revision ids",
+      ),
+      resourceRevisionIds: stringIds(
+        finalization.resourceRevisionIds,
+        "Generation Task prototype finalization Resource Revision ids",
+      ),
+      markerProofs,
+    },
+  };
 }
 
 function resourceKind(value: unknown, label: string): ResourceKind {
@@ -6967,6 +7120,287 @@ export class WorkspaceStore {
     });
   }
 
+  completeGenerationTaskPrototypeFinalizationForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: CompleteGenerationTaskPrototypeFinalizationInput,
+  ): CompleteGenerationTaskValidationResult {
+    const input = normalizeCompleteGenerationTaskPrototypeFinalizationInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId
+        || task.currentAttempt !== input.lease.attempt) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Prototype finalization Task identity is stale",
+        );
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      if (!attempt || attempt.planId !== task.planId || attempt.workspaceId !== task.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          input.lease.attempt,
+          "Prototype finalization Attempt identity is stale",
+        );
+      }
+      const requestHash = this.generationTaskPrototypeFinalizationRequestHash(
+        task,
+        attempt.attempt,
+        input.finalization,
+      );
+      const validationFenceHash = this.generationTaskValidationFenceHash(input.lease, requestHash);
+      if (task.status === "succeeded" && attempt.status === "succeeded") {
+        return this.readGenerationTaskPrototypeFinalizationOutcomeInTransaction({
+          taskId: task.id,
+          attempt: attempt.attempt,
+          validationFenceHash,
+        });
+      }
+
+      const now = boundarySafeInteger(
+        this.clock.now(),
+        "Generation Task prototype finalization completion time",
+      );
+      if (plan.status !== "running" || task.kind !== "prototype-validation"
+        || task.target.type !== "workspace" || task.target.id !== task.workspaceId
+        || attempt.target.type !== "workspace" || !isDeepStrictEqual(task.target, attempt.target)
+        || task.status !== "running" || attempt.status !== "running"
+        || attempt.executionMode !== "full" || attempt.contextPackId !== null
+        || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+        || !attempt.lease || attempt.lease.ownerId !== input.lease.ownerId
+        || attempt.lease.leaseToken !== input.lease.leaseToken
+        || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Prototype finalization lease is stale, expired, or not running",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, attempt.attempt);
+      if (live.ownerId !== input.lease.ownerId || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Prototype finalization claims are stale or expired",
+        );
+      }
+
+      const baseSnapshot = this.requireSnapshot(task.workspaceId, attempt.expectedSnapshotId);
+      const artifactRevisions = attempt.dependencyOutputs.flatMap((output) => (
+        output.resultRevisionId === null ? [] : [this.requireArtifactRevision(output.resultRevisionId)]
+      ));
+      const resourceRevisions = attempt.dependencyOutputs.flatMap((output) => (
+        output.resultResourceRevisionId === null
+          ? []
+          : [this.requireResourceRevision(output.resultResourceRevisionId)]
+      ));
+      let bindings: ReturnType<typeof buildGenerationTaskPrototypeFinalizationBindings>;
+      try {
+        bindings = buildGenerationTaskPrototypeFinalizationBindings({
+          task,
+          attempt,
+          snapshot: baseSnapshot,
+          artifactRevisions,
+          resourceRevisions,
+          markerProofs: input.finalization.markerProofs,
+        });
+      } catch (error) {
+        if (error instanceof GenerationTaskPrototypeValidationError) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} prototype finalization is invalid: ${error.message}`,
+          );
+        }
+        throw error;
+      }
+      if (!isDeepStrictEqual({
+        baseSnapshotId: bindings.preparation.baseSnapshotId,
+        baseGraphRevision: bindings.preparation.baseGraphRevision,
+        artifactRevisionIds: bindings.preparation.artifactRevisionIds,
+        resourceRevisionIds: bindings.preparation.resourceRevisionIds,
+      }, {
+        baseSnapshotId: input.finalization.baseSnapshotId,
+        baseGraphRevision: input.finalization.baseGraphRevision,
+        artifactRevisionIds: input.finalization.artifactRevisionIds,
+        resourceRevisionIds: input.finalization.resourceRevisionIds,
+      })) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} prototype finalization diverges from its immutable input`,
+        );
+      }
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const current = this.getGraph(projectId);
+      if (workspace.id !== task.workspaceId
+        || workspace.activeSnapshotId !== baseSnapshot.id
+        || current.revision !== baseSnapshot.graphRevision
+        || current.revision !== workspace.graphRevision
+        || !isDeepStrictEqual(current, baseSnapshot.graph)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Prototype finalization base Snapshot is no longer active",
+        );
+      }
+      const commands = normalizeWorkspaceGraphCommands(bindings.bindings.map(({ edgeId, binding }) => ({
+        id: generationTaskPrototypeFinalizationCommandId(task.id, attempt.attempt, edgeId),
+        type: "bind-prototype",
+        edgeId,
+        binding,
+      })));
+      const mutation = this.applyGraphCommandsInTransaction(workspace, current, {
+        expectedSnapshotId: baseSnapshot.id,
+        commands,
+        reason: "prototype-finalized",
+        provenance: { kind: "graph-command", commandIds: commands.map((command) => command.id) },
+      });
+      let validation: CompleteGenerationTaskValidationInput["validation"];
+      try {
+        validation = buildGenerationTaskPrototypeFinalizationResult({
+          task,
+          attempt,
+          snapshot: baseSnapshot,
+          finalSnapshot: mutation.snapshot,
+          artifactRevisions,
+          resourceRevisions,
+          markerProofs: input.finalization.markerProofs,
+        });
+      } catch (error) {
+        if (error instanceof GenerationTaskPrototypeValidationError) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} prototype finalization result is invalid: ${error.message}`,
+          );
+        }
+        throw error;
+      }
+      const evidenceBytes = Buffer.byteLength(
+        canonicalJsonText(validation.evidence, "Generation Task prototype finalization evidence"),
+        "utf8",
+      );
+      if (evidenceBytes > Math.min(
+        task.resourceLimits.maxOutputBytes,
+        GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES,
+      )) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} prototype finalization evidence exceeds its output budget`,
+        );
+      }
+      const evidenceHash = this.generationTaskValidationEvidenceHash(
+        task,
+        attempt.attempt,
+        validation,
+      );
+      const recordedValidation = this.db.prepare(
+        `INSERT INTO generation_task_validation_results (
+           task_id, plan_id, workspace_id, attempt, snapshot_id, graph_revision,
+           artifact_revision_ids_json, resource_revision_ids_json, evidence_json,
+           evidence_hash, validation_fence_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        mutation.snapshot.id,
+        validation.graphRevision,
+        canonicalJsonText(
+          validation.artifactRevisionIds,
+          "Generation Task prototype finalization Artifact Revision ids",
+        ),
+        canonicalJsonText(
+          validation.resourceRevisionIds,
+          "Generation Task prototype finalization Resource Revision ids",
+        ),
+        canonicalJsonText(validation.evidence, "Generation Task prototype finalization evidence"),
+        evidenceHash,
+        validationFenceHash,
+        now,
+      );
+      if (Number(recordedValidation.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task prototype finalization was not recorded");
+      }
+      const finishedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = 'succeeded', blocked_reason = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'running' AND execution_mode = 'full'
+           AND candidate_revision_id IS NULL AND candidate_resource_revision_id IS NULL
+           AND candidate_evidence_json IS NULL AND candidate_evidence_hash IS NULL
+           AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?
+           AND lease_expires_at > ?`,
+      ).run(
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        live.ownerId,
+        live.leaseToken,
+        live.leaseExpiresAt,
+        now,
+      );
+      if (Number(finishedAttempt.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Prototype finalization Attempt changed while completing",
+        );
+      }
+      const finishedTask = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'succeeded', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, result_revision_id = NULL,
+             result_resource_revision_id = NULL, result_snapshot_id = ?, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'running'
+           AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+           AND result_snapshot_id IS NULL`,
+      ).run(
+        mutation.snapshot.id,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+      );
+      if (Number(finishedTask.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Prototype finalization Task changed while completing",
+        );
+      }
+      this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-succeeded",
+        payload: {
+          attempt: attempt.attempt,
+          resultRevisionId: null,
+          resultResourceRevisionId: null,
+          resultSnapshotId: mutation.snapshot.id,
+          validatedGraphRevision: validation.graphRevision,
+          validationEvidenceHash: evidenceHash,
+          validationFenceHash,
+        },
+      });
+      this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+      return this.readGenerationTaskPrototypeFinalizationOutcomeInTransaction({
+        taskId: task.id,
+        attempt: attempt.attempt,
+        validationFenceHash,
+      });
+    });
+  }
+
   publishGenerationPlanCheckpointForProject(
     projectId: string,
     planId: string,
@@ -7338,11 +7772,35 @@ export class WorkspaceStore {
         || input.failure.failureClass === "provider"
         || input.failure.failureClass === "agent-transport"
         || input.failure.failureClass === "build-infrastructure";
-      const terminalFailure = input.failure.error.code === "RESOURCE_AGENT_QUOTA_EXHAUSTED";
-      const transient = transientFailure && !terminalFailure && !(source.target.type === "artifact"
+      // A non-Research quality-gate rejection gets one fresh same-input Attempt.
+      // Research already performs its initial generation plus one bounded repair
+      // inside each Attempt, so a Core successor would only duplicate that exact
+      // input after its final decision-grade rejection.
+      const resourceAdapterKind = task.kind === "resource"
+        ? this.exactGenerationTaskResourceAdapterKindInTransaction(task)
+        : null;
+      const qualityGateRetry = input.failure.failureClass === "qa"
+        && input.failure.error.code === "generation-task-quality-gate"
+        && (task.kind !== "resource"
+          || (resourceAdapterKind !== null && resourceAdapterKind !== "research"));
+      const failureDetails = input.failure.error.details;
+      const terminalResourceAgentTransport = task.kind === "resource"
+        && input.failure.failureClass === "agent-transport"
+        && failureDetails !== null
+        && typeof failureDetails === "object"
+        && !Array.isArray(failureDetails)
+        && "retryable" in failureDetails
+        && failureDetails.retryable === false;
+      const terminalFailure = input.failure.error.code === "RESOURCE_AGENT_QUOTA_EXHAUSTED"
+        || terminalResourceAgentTransport;
+      const transient = (transientFailure || qualityGateRetry)
+        && !terminalFailure && !(source.target.type === "artifact"
         && (source.sourceCommitHash === null || source.sourceTreeHash === null));
+      const retryDelays = qualityGateRetry
+        ? ([1_000] as const)
+        : ([1_000, 4_000, 16_000] as const);
       const retryDelay = transient
-        ? ([1_000, 4_000, 16_000] as const)[source.automaticRetryIndex] ?? null
+        ? retryDelays[source.automaticRetryIndex] ?? null
         : null;
       const nextEligibleAt = retryDelay === null ? null : now + retryDelay;
       if (nextEligibleAt !== null && !Number.isSafeInteger(nextEligibleAt)) {
@@ -10319,6 +10777,34 @@ export class WorkspaceStore {
           status: dependency.status,
         });
       }
+    } else if (task.target.type === "resource") {
+      for (const dependency of dependencyTasks) {
+        if (dependency.kind !== "resource" || dependency.target.type !== "resource") {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `Resource target dependency ${dependency.id} is not an exact Resource Task`,
+          );
+        }
+        const revisionId = dependency.resultResourceRevisionId;
+        if (revisionId === null) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `Resource dependency ${dependency.target.id} has no exact Revision result`,
+          );
+        }
+        const revision = this.requireResourceRevision(revisionId);
+        if (revision.workspaceId !== workspace.id || revision.resourceId !== dependency.target.id) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `Resource dependency ${dependency.target.id} Revision belongs to another target`,
+          );
+        }
+        resourcePins.push({
+          resourceId: dependency.target.id,
+          revisionId,
+          sourceTaskId: dependency.id,
+        });
+      }
     }
     let requiredContextPackId: string | null | undefined;
     if (task.pendingContextPolicy === "same-context" && task.currentAttempt > 0) {
@@ -10523,6 +11009,24 @@ export class WorkspaceStore {
       requiredCell(row.workspace_id, "Generation Task execution Workspace id"),
     ) as Row[];
     return asGenerationTask(row, dependencyRows);
+  }
+
+  private exactGenerationTaskResourceAdapterKindInTransaction(
+    task: GenerationTask,
+  ): ResourceKind | null {
+    const adapterKind = generationTaskResourceAdapterKind(task);
+    if (adapterKind === null || task.target.type !== "resource") return null;
+    const row = this.db.prepare(
+      "SELECT kind FROM resources WHERE id = ? AND workspace_id = ?",
+    ).get(task.target.id, task.workspaceId) as Row | undefined;
+    if (!row) return null;
+    try {
+      return resourceKind(row.kind, "Generation Task target Resource kind") === adapterKind
+        ? adapterKind
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   private appendExactGenerationTaskRetrySuccessorInTransaction(input: {
@@ -11901,6 +12405,21 @@ export class WorkspaceStore {
     }, "Generation Task validation evidence hash input"));
   }
 
+  private generationTaskPrototypeFinalizationRequestHash(
+    task: GenerationTask,
+    attempt: number,
+    finalization: CompleteGenerationTaskPrototypeFinalizationInput["finalization"],
+  ): string {
+    return checksum(canonicalJsonText({
+      protocol: "dezin-generation-task-prototype-finalization-request-v2",
+      taskId: task.id,
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      attempt,
+      finalization,
+    }, "Generation Task prototype finalization request hash input"));
+  }
+
   private generationTaskValidationFenceHash(
     lease: GenerationTaskAttemptLease,
     evidenceHash: string,
@@ -12130,6 +12649,177 @@ export class WorkspaceStore {
       task,
       attempt,
       snapshot,
+      validation,
+      evidenceHash,
+    };
+  }
+
+  private readGenerationTaskPrototypeFinalizationOutcomeInTransaction(input: {
+    taskId: string;
+    attempt: number;
+    validationFenceHash: string;
+  }): CompleteGenerationTaskValidationResult {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task prototype finalization outcome requires a transaction");
+    }
+    const task = this.readGenerationTaskForExecutionInTransaction(input.taskId);
+    const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+    if (!task || !attempt || task.kind !== "prototype-validation"
+      || task.target.type !== "workspace" || attempt.target.type !== "workspace"
+      || !isDeepStrictEqual(task.target, attempt.target)
+      || task.currentAttempt !== attempt.attempt
+      || task.status !== "succeeded" || attempt.status !== "succeeded"
+      || attempt.executionMode !== "full" || attempt.contextPackId !== null
+      || attempt.lease !== null || attempt.leaseExpiresAt !== null || attempt.heartbeatAt !== null
+      || attempt.finishedAt === null || task.finishedAt !== attempt.finishedAt
+      || task.failureClass !== null || task.error !== null
+      || attempt.failureClass !== null || attempt.error !== null
+      || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+      || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+      || task.resultRevisionId !== null || task.resultResourceRevisionId !== null
+      || task.resultSnapshotId === null || task.resultSnapshotId === attempt.expectedSnapshotId) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${input.taskId}/${input.attempt} prototype finalization outcome is internally inconsistent`,
+      );
+    }
+    this.assertGenerationTaskMaterializedEventInTransaction(attempt);
+    const eventRows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND task_id = ? AND type = 'task-succeeded'
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.workspaceId, task.id) as Row[];
+    const events = eventRows.map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    if (events.length !== 1) {
+      throw new WorkspaceStoreCodecError(
+        "Generation Task prototype finalization terminal event is missing or ambiguous",
+      );
+    }
+    const event = events[0]!;
+    const validation = this.readGenerationTaskValidationRecordInTransaction(task.id, attempt.attempt);
+    if (!validation) {
+      throw new WorkspaceStoreCodecError("Generation Task prototype finalization result record is missing");
+    }
+    if (event.payload.validationFenceHash !== input.validationFenceHash
+      || validation.validationFenceHash !== input.validationFenceHash) {
+      throw new GenerationTaskLeaseFenceError(
+        task.id,
+        attempt.attempt,
+        "Prototype finalization replay lease or request is stale",
+      );
+    }
+    const validationResult: CompleteGenerationTaskValidationInput["validation"] = {
+      snapshotId: validation.snapshotId,
+      graphRevision: validation.graphRevision,
+      artifactRevisionIds: validation.artifactRevisionIds,
+      resourceRevisionIds: validation.resourceRevisionIds,
+      evidence: validation.evidence,
+    };
+    const evidence = boundaryObject(
+      validationResult.evidence,
+      "Generation Task prototype finalization evidence",
+      [
+        "protocol",
+        "baseSnapshot",
+        "snapshot",
+        "dependencies",
+        "artifacts",
+        "resources",
+        "prototypeEdges",
+        "frames",
+      ],
+    );
+    if (evidence.protocol !== "dezin-prototype-finalization-v2"
+      || !Array.isArray(evidence.prototypeEdges)
+      || Object.keys(evidence.prototypeEdges).length !== evidence.prototypeEdges.length) {
+      throw new WorkspaceStoreCodecError("Generation Task prototype finalization evidence is invalid");
+    }
+    const markerProofs = evidence.prototypeEdges.map((value, index) => {
+      const edge = boundaryObject(
+        value,
+        `Generation Task prototype finalization edge[${index}]`,
+        [
+          "edgeId",
+          "sourceArtifactId",
+          "sourceRevisionId",
+          "sourceMarkerId",
+          "sourceLocator",
+          "markerProof",
+          "targetArtifactId",
+          "targetRevisionId",
+          "trigger",
+          "targetState",
+          "transition",
+          "frameIds",
+        ],
+      );
+      return edge.markerProof as GenerationTaskPrototypeMarkerProof;
+    });
+    const baseSnapshot = this.requireSnapshot(task.workspaceId, attempt.expectedSnapshotId);
+    const finalSnapshot = this.requireSnapshot(task.workspaceId, validation.snapshotId);
+    const artifactRevisions = attempt.dependencyOutputs.flatMap((output) => (
+      output.resultRevisionId === null ? [] : [this.requireArtifactRevision(output.resultRevisionId)]
+    ));
+    const resourceRevisions = attempt.dependencyOutputs.flatMap((output) => (
+      output.resultResourceRevisionId === null
+        ? []
+        : [this.requireResourceRevision(output.resultResourceRevisionId)]
+    ));
+    let expected: CompleteGenerationTaskValidationInput["validation"];
+    try {
+      expected = buildGenerationTaskPrototypeFinalizationResult({
+        task,
+        attempt,
+        snapshot: baseSnapshot,
+        finalSnapshot,
+        artifactRevisions,
+        resourceRevisions,
+        markerProofs,
+      });
+    } catch (error) {
+      if (error instanceof GenerationTaskPrototypeValidationError) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} stored prototype finalization is invalid: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    if (!isDeepStrictEqual(validationResult, expected)
+      || task.resultSnapshotId !== finalSnapshot.id) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} prototype finalization result diverges from its immutable input`,
+      );
+    }
+    const evidenceHash = this.generationTaskValidationEvidenceHash(
+      task,
+      attempt.attempt,
+      validationResult,
+    );
+    if (validation.taskId !== task.id || validation.planId !== task.planId
+      || validation.workspaceId !== task.workspaceId || validation.attempt !== attempt.attempt
+      || validation.createdAt !== attempt.finishedAt || validation.evidenceHash !== evidenceHash) {
+      throw new WorkspaceStoreCodecError(
+        "Generation Task prototype finalization result record is inconsistent",
+      );
+    }
+    if (!isDeepStrictEqual(event.payload, {
+      attempt: attempt.attempt,
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: finalSnapshot.id,
+      validatedGraphRevision: validation.graphRevision,
+      validationEvidenceHash: evidenceHash,
+      validationFenceHash: input.validationFenceHash,
+    })) {
+      throw new WorkspaceStoreCodecError(
+        "Generation Task prototype finalization terminal event is inconsistent",
+      );
+    }
+    return {
+      status: "succeeded",
+      task,
+      attempt,
+      snapshot: finalSnapshot,
       validation,
       evidenceHash,
     };
@@ -14640,9 +15330,12 @@ export class WorkspaceStore {
         operation.operation !== "reuse" || operation.revisionPolicy.kind !== "exact"
       ));
       if (generatedResearch !== undefined) {
-        throw new WorkspaceProposalValidationError(
-          `generation Artifact ${plan.artifactId} cannot consume Research generated in the same Plan; publish the Research Revision, choose one exact direction, then approve a successor Artifact Plan`,
-        );
+        if (researchDependencies.length !== 1 || selection !== undefined) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact ${plan.artifactId} must leave its one same-Plan generated Research dependency unselected so immutable Artifact instructions can freeze an exact direction contract after publication`,
+          );
+        }
+        continue;
       }
       if (researchDependencies.length === 0) {
         if (selection === undefined) continue;

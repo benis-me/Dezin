@@ -70,12 +70,21 @@ test("buildAgentEnv tombstones every provider credential for host-authenticated 
   assert.equal(env.DEZIN_DAEMON_TOKEN, "daemon-token");
 });
 
-test("buildAgentEnv maps BYOK settings for Codex and Gemini CLIs", () => {
-  assert.deepEqual(buildAgentEnv(SETTINGS, "codex"), {
-    OPENAI_API_KEY: "sk-test",
-    OPENAI_BASE_URL: "https://api.example.test",
-    OPENAI_ORG_ID: "org-test",
-  });
+test("buildAgentEnv keeps Codex on host login instead of borrowing project provider credentials", () => {
+  const env = buildAgentEnv(SETTINGS, "codex");
+  for (const key of [
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+  ]) {
+    assert.equal(Object.hasOwn(env, key), true, key);
+    assert.equal(env[key], undefined, key);
+  }
+});
+
+test("buildAgentEnv maps BYOK settings for the Gemini CLI", () => {
   assert.deepEqual(buildAgentEnv(SETTINGS, "gemini"), {
     GEMINI_API_KEY: "sk-test",
     GOOGLE_API_KEY: "sk-test",

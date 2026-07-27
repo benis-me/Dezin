@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zlibSync } from "fflate";
-import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, isRuntimeConsoleMessage, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceScreenshotDiffFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, auditVisualArtifactReport, boundComputedFindings, findingsFromGeometry, isRuntimeConsoleMessage, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceScreenshotDiffFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 
 function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
@@ -88,6 +88,8 @@ test("toComputedElements reshapes the geometry snapshot into pure computed-style
       selector: "p.fine",
       text: "Legalese",
       rect: { left: 10, top: 20, right: 210, bottom: 40, width: 200, height: 20 },
+      directTextLength: 8,
+      childElementCount: 0,
       style: { color: "rgb(0, 0, 0)", fontSizePx: 10 },
     }),
   ]);
@@ -97,6 +99,8 @@ test("toComputedElements reshapes the geometry snapshot into pure computed-style
   assert.equal(computed[0]!.rect.y, 20);
   assert.equal(computed[0]!.rect.width, 200);
   assert.equal(computed[0]!.style.fontSizePx, 10);
+  assert.equal(computed[0]!.directTextLength, 8);
+  assert.equal(computed[0]!.childElementCount, 0);
 });
 
 test("toComputedElements drops zero-area nodes the detector cannot judge", () => {
@@ -189,6 +193,177 @@ test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls
   assert.match(clippedText.fix, /wrapping|height|container/i);
 });
 
+test("findingsFromGeometry blocks substantial overlap between independently painted text", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 2400 },
+      elements: [
+        geomEl({
+          selector: ".schedule-row__time",
+          tag: "span",
+          text: "09:45",
+          directTextLength: 5,
+          textRects: [{
+            left: 286,
+            top: 729,
+            right: 333,
+            bottom: 747,
+            width: 47,
+            height: 18,
+          }],
+        }),
+        geomEl({
+          selector: ".schedule-row__title",
+          tag: "h3",
+          text: "Opening remarks and first-frame notes",
+          directTextLength: 37,
+          textRects: [{
+            left: 274,
+            top: 718,
+            right: 317,
+            bottom: 740,
+            width: 43,
+            height: 22,
+          }],
+        }),
+      ],
+    },
+    "desktop",
+  );
+
+  const overlap = findings.find((finding) => finding.id === "visual-text-overlap");
+  assert.equal(overlap?.severity, "P1");
+  assert.match(overlap?.message ?? "", /\.schedule-row__time/);
+  assert.match(overlap?.message ?? "", /\.schedule-row__title/);
+});
+
+test("findingsFromGeometry blocks a painted schedule spine that crosses a text run", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 2400 },
+      elements: [
+        geomEl({
+          selector: ".schedule-row__time-value",
+          tag: "time",
+          text: "09:00",
+          directTextLength: 5,
+          textRects: [{
+            left: 176,
+            top: 774,
+            right: 221,
+            bottom: 793,
+            width: 45,
+            height: 19,
+          }],
+        }),
+        geomEl({
+          selector: ".schedule-row__spine",
+          tag: "div",
+          text: "",
+          directTextLength: 0,
+          childElementCount: 0,
+          rect: {
+            left: 187,
+            top: 751,
+            right: 188,
+            bottom: 920,
+            width: 1,
+            height: 169,
+          },
+          style: {
+            backgroundColor: "rgba(0, 0, 0, 0)",
+            effectiveBg: "rgb(255, 255, 255)",
+            borderMaxPx: 1,
+          },
+        }),
+      ],
+    },
+    "desktop",
+  );
+
+  const overlap = findings.find((finding) => finding.id === "visual-painted-text-overlap");
+  assert.equal(overlap?.severity, "P1");
+  assert.match(overlap?.message ?? "", /\.schedule-row__spine/);
+  assert.match(overlap?.message ?? "", /\.schedule-row__time-value/);
+});
+
+test("findingsFromGeometry ignores normal line-box edge contact and overlapping container bounds", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 2400 },
+      elements: [
+        geomEl({
+          selector: ".eyebrow",
+          text: "Desktop preview",
+          directTextLength: 15,
+          textRects: [{
+            left: 201,
+            top: 540,
+            right: 329,
+            bottom: 557,
+            width: 128,
+            height: 17,
+          }],
+        }),
+        geomEl({
+          selector: "h2",
+          text: "Wide enough to hold the hierarchy",
+          directTextLength: 33,
+          textRects: [{
+            left: 201,
+            top: 553,
+            right: 513,
+            bottom: 586,
+            width: 312,
+            height: 33,
+          }],
+        }),
+        geomEl({
+          selector: ".overlapping-container-with-no-direct-text",
+          text: "Child text",
+          directTextLength: 0,
+          childElementCount: 1,
+          rect: { left: 190, top: 530, right: 530, bottom: 600, width: 340, height: 70 },
+        }),
+        geomEl({
+          selector: ".hero-eyebrow",
+          text: "Shared component",
+          directTextLength: 16,
+          style: { lineHeightPx: 18.6 },
+          textRects: [{
+            left: 160,
+            top: 1_255.2,
+            right: 305.5,
+            bottom: 1_272.2,
+            width: 145.5,
+            height: 17,
+          }],
+        }),
+        geomEl({
+          selector: "h1",
+          text: "KITE Direction Switcher",
+          directTextLength: 23,
+          style: { lineHeightPx: 67.2 },
+          textRects: [{
+            left: 160,
+            top: 1_262.5,
+            right: 582.2,
+            bottom: 1_352.5,
+            width: 422.2,
+            height: 90,
+          }],
+        }),
+      ],
+    },
+    "desktop",
+  );
+
+  assert.equal(findings.some((finding) => finding.id === "visual-text-overlap"), false);
+});
+
 test("findingsFromGeometry ignores intentionally offscreen 1px fixed sentinels", () => {
   const findings = findingsFromGeometry(
     {
@@ -253,6 +428,34 @@ test("findingsFromGeometry upgrades clipped text to a Sharingan-blocking defect 
 
   const clippedText = findings.find((f) => f.id === "visual-text-clipped");
   assert.equal(clippedText?.severity, "P1");
+});
+
+test("findingsFromGeometry ignores clipped screen-reader-only sentinel text", () => {
+  const snapshot = {
+    viewport: { width: 1440, height: 900 },
+    document: { scrollWidth: 1440, scrollHeight: 900 },
+    elements: [
+      geomEl({
+        selector: "legend.sr-only",
+        tag: "legend",
+        text: "KITE visual directions",
+        rect: { left: 367, top: 708, right: 368, bottom: 709, width: 1, height: 1 },
+        overflowX: "hidden",
+        overflowY: "hidden",
+        scrollWidth: 126,
+        scrollHeight: 18,
+        clientWidth: 1,
+        clientHeight: 1,
+        directTextLength: "KITE visual directions".length,
+        childElementCount: 0,
+      }),
+    ],
+  };
+
+  assert.ok(!findingsFromGeometry(snapshot, "desktop")
+    .some((finding) => finding.id === "visual-text-clipped"));
+  assert.ok(!findingsFromGeometry(snapshot, "desktop", { strictTextLayout: true })
+    .some((finding) => finding.id === "visual-text-clipped"));
 });
 
 test("findingsFromGeometry ignores clipped aggregate containers without direct text", () => {
@@ -507,6 +710,24 @@ test("agentReviewPrompt gates defects to provable pixel breakage and rejects inf
   assert.match(prompt, /dominant vertical scroller/i);
   assert.match(prompt, /not limited to the initial viewport/i);
   assert.match(prompt, /smaller nested/i);
+});
+
+test("agentReviewPrompt makes a product Page contract reject design-process and spec-sheet substitutes", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: [
+      'Review only the assigned page Artifact "Festival home".',
+      'Artifact-specific responsibility: produce the requested page named "Festival home".',
+    ].join("\n"),
+  } as unknown as VisualQaInput;
+
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+
+  assert.match(prompt, /page artifact/i);
+  assert.match(prompt, /design[- ]process|spec sheet|anatomy explainer|implementation notes/i);
+  assert.match(prompt, /substitut|masquerad|instead of the named product page/i);
+  assert.match(prompt, /contract.*P1|P1.*contract/i);
 });
 
 test("agentReviewPrompt adds a source-fidelity section when a Sharingan reference is present", () => {
@@ -1059,6 +1280,190 @@ test("auditVisualArtifact discards a stale screenshot before a failed render", a
   assert.equal(existsSync(screenshotPath), false, "failed capture must not leave the prior audit screenshot available for evidence persistence");
 });
 
+test("auditVisualArtifact measures painted text and blocks a real cross-column collision", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-text-overlap-"));
+  const htmlPath = join(root, "index.html");
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;min-height:100%;font:16px/20px monospace}",
+      "#time,#title{position:absolute;top:40px;white-space:nowrap}",
+      "#time{left:20px}#title{left:78px}",
+      "</style></head><body>",
+      "<span id='time'>09:00 to 09:45</span>",
+      "<strong id='title'>Opening remarks and first-frame notes</strong>",
+      "<p style='margin:100px 20px'>Enough body copy for the visual paint readiness probe.</p>",
+      "</body></html>",
+    ].join(""),
+  );
+
+  const findings = await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: false } as any,
+    runtimeOnly: true,
+  });
+
+  const overlap = findings.find((finding) => finding.id === "visual-text-overlap");
+  assert.equal(overlap?.severity, "P1");
+  assert.match(overlap?.message ?? "", /#time/);
+  assert.match(overlap?.message ?? "", /#title/);
+});
+
+test("auditVisualArtifact hard-fails a pixel-uniform screenshot on its first deterministic pass", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-uniform-"));
+  const htmlPath = join(root, "index.html");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;min-height:100%;background:#fff;color:#fff}",
+      "</style></head><body>",
+      "<main>Enough mounted body copy to prove that DOM readiness alone cannot certify visible paint.</main>",
+      "</body></html>",
+    ].join(""),
+  );
+
+  let reviewCalls = 0;
+  const report = await auditVisualArtifactReport({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: true, agentCommand: "codex" } as any,
+    agentCommand: "codex",
+  }, async () => {
+    reviewCalls += 1;
+    return { providerId: "codex", text: "{\"findings\":[]}" };
+  });
+  if (report.findings.some((finding) => finding.id === "visual-chrome-unavailable")) {
+    t.skip("Chrome is unavailable in this environment");
+    return;
+  }
+
+  const blank = report.findings.find((finding) => finding.id === "visual-uniform-screenshot");
+  assert.equal(blank?.severity, "P0");
+  assert.match(blank?.message ?? "", /pixel-uniform|blank/i);
+  assert.equal(reviewCalls, 0, "deterministic blank evidence must stop before spending a critic round");
+});
+
+test("auditVisualArtifact captures an absolute pseudo-element spine as a critic target and blocks its text collision", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-pseudo-spine-"));
+  const htmlPath = join(root, "index.html");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;min-height:100%;background:#fff;color:#111;font:16px/20px monospace}",
+      ".noise{display:block;margin-left:20px;font-size:12px;line-height:14px}",
+      "#timeline{position:relative;width:420px;height:180px;margin:20px}",
+      "#timeline::before{content:'';position:absolute;left:42px;top:0;width:1px;height:150px;background:#111}",
+      "#time{position:absolute;left:20px;top:42px;white-space:nowrap}",
+      "</style></head><body>",
+      Array.from({ length: 50 }, (_, index) => `<span id='noise-${index}' class='noise'>Context row ${index}</span>`).join(""),
+      "<section id='timeline'><time id='time'>09:00 opening remarks</time></section>",
+      "<p style='margin:20px'>Enough body copy for the visual paint readiness probe.</p>",
+      "</body></html>",
+    ].join(""),
+  );
+
+  let reviewRequest = "";
+  const report = await auditVisualArtifactReport({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: true, agentCommand: "codex" } as any,
+    agentCommand: "codex",
+  }, async (request) => {
+    reviewRequest = request.message;
+    return { providerId: "codex", text: "{\"findings\":[]}" };
+  });
+  if (report.findings.some((finding) => finding.id === "visual-chrome-unavailable")) {
+    t.skip("Chrome is unavailable in this environment");
+    return;
+  }
+
+  const overlap = report.findings.find((finding) => finding.id === "visual-painted-text-overlap");
+  assert.equal(overlap?.severity, "P1");
+  assert.match(overlap?.message ?? "", /#timeline::before/);
+  assert.match(overlap?.message ?? "", /#time/);
+  assert.match(reviewRequest, /"selector": "#timeline::before"/);
+});
+
+test("auditVisualArtifact excludes transparent text and text under a transparent ancestor from collision QA", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-transparent-text-"));
+  const htmlPath = join(root, "index.html");
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;min-height:100%;font:16px/20px monospace}",
+      ".label{position:absolute;left:20px;white-space:nowrap}",
+      "#visible-direct,#transparent-direct{top:40px}",
+      "#transparent-direct{opacity:0}",
+      "#visible-ancestor,.transparent-parent{top:90px}",
+      ".transparent-parent{position:absolute;left:20px;opacity:0}",
+      ".transparent-parent .label{position:static}",
+      "</style></head><body>",
+      "<span id='visible-direct' class='label'>Visible direct label</span>",
+      "<span id='transparent-direct' class='label'>Transparent direct label</span>",
+      "<span id='visible-ancestor' class='label'>Visible ancestor label</span>",
+      "<div class='transparent-parent'><span id='transparent-child' class='label'>Transparent child label</span></div>",
+      "<p style='margin:150px 20px'>Enough body copy for the visual paint readiness probe.</p>",
+      "</body></html>",
+    ].join(""),
+  );
+
+  const findings = await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: false } as any,
+    runtimeOnly: true,
+  });
+
+  assert.equal(findings.some((finding) => finding.id === "visual-text-overlap"), false);
+});
+
+test("auditVisualArtifact keeps state-bearing data attributes in deterministic repair selectors", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-state-selector-"));
+  const htmlPath = join(root, "index.html");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;min-height:100%;background:#fff;color:#111;font:16px/24px system-ui}",
+      ".program-chip{display:inline-flex;margin:40px;padding:8px 12px;background:#fff}",
+      ".program-chip[data-tone='danger']{color:#aaa}",
+      "</style></head><body>",
+      "<span class='program-chip' data-tone='danger'>Deadline missed</span>",
+      "<p style='margin:40px'>Enough body copy for the visual paint readiness probe.</p>",
+      "</body></html>",
+    ].join(""),
+  );
+
+  const report = await auditVisualArtifactReport({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: true, agentCommand: "codex" } as any,
+    agentCommand: "codex",
+  }, async () => ({
+    providerId: "codex",
+    text: "{\"findings\":[]}",
+  }));
+  const findings = report.findings;
+  if (findings.some((finding) => finding.id === "visual-chrome-unavailable")) {
+    t.skip("Chrome is unavailable in this environment");
+    return;
+  }
+  const contrast = findings.find((finding) => finding.id === "low-contrast");
+  assert.ok(
+    contrast,
+    `expected deterministic contrast finding, received ${JSON.stringify(findings.map(({ id, selector, message }) => ({ id, selector, message })))}`,
+  );
+  assert.equal(contrast?.selector, "span.program-chip[data-tone=\"danger\"]");
+});
+
 test("auditVisualArtifact limits Sharingan geometry QA to the captured source viewport", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-sharingan-source-viewport-"));
   const htmlPath = join(root, "index.html");
@@ -1252,6 +1657,7 @@ test("reviewScreenshotWithAgent routes a frozen Codex reviewer through the safe 
 
   assert.equal(safeRequest?.command, "codex");
   assert.equal(safeRequest?.model, "gpt-5.4-mini");
+  assert.equal(safeRequest?.remoteRetryMode, undefined);
   assert.equal(safeRequest?.timeoutMs, 300_000);
   assert.deepEqual(safeRequest?.env, {});
   assert.equal(safeRequest?.images.length, 1);

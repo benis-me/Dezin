@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { ProjectStudioShell } from "./ProjectStudioShell.tsx";
 
 afterEach(() => {
+  localStorage.removeItem("dezin.project-studio.agent.width");
   localStorage.removeItem("dezin.project-studio.inspector.width");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -17,6 +18,18 @@ function renderShell(inspectorOpen: boolean, presentation = false) {
       inspectorOpen={inspectorOpen}
       presentation={presentation}
     />,
+  );
+}
+
+function shellElement(inspectorOpen: boolean, presentation = false) {
+  return (
+    <ProjectStudioShell
+      agent={<div>Agent content</div>}
+      main={<div>Main canvas</div>}
+      inspector={<div>Inspector content</div>}
+      inspectorOpen={inspectorOpen}
+      presentation={presentation}
+    />
   );
 }
 
@@ -96,6 +109,25 @@ function installPanelDimensions() {
     }
   });
   vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    const left = this.offsetLeft;
+    const width = this.getAttribute("aria-label") === "Resize Workspace Agent"
+      ? 9
+      : this.offsetWidth;
+    return {
+      x: left,
+      y: 0,
+      top: 0,
+      right: left + width,
+      bottom: 800,
+      left,
+      width,
+      height: 800,
+      toJSON: () => ({}),
+    } as DOMRect;
+  });
 }
 
 test("a closed inspector leaves a true two-column Studio without mounting hidden inspector work", () => {
@@ -133,6 +165,32 @@ test("a wide desktop docks the open Inspector behind its own accessible resize s
   expect(screen.queryByRole("button", { name: "Show inspector" })).not.toBeInTheDocument();
 });
 
+test("a wide route transition unregisters a closed Inspector without applying a zero-percent panel layout", () => {
+  useWideDesktopViewport();
+  installPanelDimensions();
+  const rendered = render(shellElement(true));
+
+  expect(screen.getByTestId("studio-inspector")).toBeInTheDocument();
+  expect(() => rendered.rerender(shellElement(false))).not.toThrow();
+  expect(screen.queryByTestId("studio-inspector")).not.toBeInTheDocument();
+  expect(Number(screen.getByTestId("studio-surface-panel").style.flexGrow)).toBe(100);
+
+  expect(() => rendered.rerender(shellElement(true))).not.toThrow();
+  expect(Number(screen.getByTestId("studio-inspector").style.flexGrow)).toBeCloseTo(25, 2);
+});
+
+test("a wide desktop opens the Inspector at approximately 320px by default", async () => {
+  useWideDesktopViewport();
+  installPanelDimensions();
+
+  renderShell(true);
+
+  await waitFor(() => {
+    expect(Number(screen.getByTestId("studio-inspector").style.flexGrow)).toBeCloseTo(25, 2);
+    expect(Number(screen.getByTestId("studio-surface-panel").style.flexGrow)).toBeCloseTo(75, 2);
+  });
+});
+
 test("a wide Inspector resize persists its fraction for the next Shell mount", async () => {
   useWideDesktopViewport();
   installPanelDimensions();
@@ -158,13 +216,87 @@ test("a wide Inspector resize persists its fraction for the next Shell mount", a
     .toBeCloseTo(savedFraction * 100, 4);
 });
 
+test("keyboard resizing the Workspace Agent persists its completed layout for the next Shell mount", async () => {
+  installPanelDimensions();
+  const first = renderShell(false);
+  const resize = screen.getByRole("separator", { name: "Resize Workspace Agent" });
+  await waitFor(() => expect(Number(resize.getAttribute("aria-valuenow"))).toBeCloseTo(20, 2));
+
+  fireEvent.keyDown(resize, { key: "ArrowRight" });
+  await waitFor(() => {
+    expect(Number(resize.getAttribute("aria-valuenow"))).toBeGreaterThan(20);
+    expect(Number(localStorage.getItem("dezin.project-studio.agent.width"))).toBeGreaterThan(0.2);
+  });
+  const savedFraction = Number(localStorage.getItem("dezin.project-studio.agent.width"));
+
+  first.unmount();
+  renderShell(false);
+  expect(Number(screen.getByTestId("workspace-agent").style.flexGrow))
+    .toBeCloseTo(savedFraction * 100, 4);
+});
+
+test("pointer dragging the Workspace Agent separator resizes and persists only after release", async () => {
+  vi.stubGlobal("PointerEvent", MouseEvent);
+  installPanelDimensions();
+  renderShell(false);
+  const resize = screen.getByRole("separator", { name: "Resize Workspace Agent" });
+  await waitFor(() => expect(Number(resize.getAttribute("aria-valuenow"))).toBeCloseTo(20, 2));
+
+  fireEvent.pointerDown(resize, {
+    pointerId: 1,
+    pointerType: "mouse",
+    button: 0,
+    buttons: 1,
+    clientX: 320,
+    clientY: 400,
+  });
+  fireEvent.pointerMove(document, {
+    pointerId: 1,
+    pointerType: "mouse",
+    buttons: 1,
+    clientX: 360,
+    clientY: 400,
+    movementX: 40,
+  });
+
+  await waitFor(() => expect(Number(resize.getAttribute("aria-valuenow"))).toBeGreaterThan(20));
+  expect(localStorage.getItem("dezin.project-studio.agent.width")).toBeNull();
+
+  fireEvent.pointerUp(document, {
+    pointerId: 1,
+    pointerType: "mouse",
+    button: 0,
+    buttons: 0,
+    clientX: 360,
+    clientY: 400,
+  });
+  await waitFor(() => {
+    expect(Number(localStorage.getItem("dezin.project-studio.agent.width"))).toBeGreaterThan(0.2);
+  });
+});
+
+test("a saved wide Inspector is capped at 400px so the design surface keeps priority", async () => {
+  useWideDesktopViewport();
+  installPanelDimensions();
+  localStorage.setItem("dezin.project-studio.inspector.width", "0.38");
+
+  renderShell(true);
+
+  await waitFor(() => {
+    expect(Number(screen.getByTestId("studio-inspector").style.flexGrow)).toBeCloseTo(31.25, 2);
+    expect(Number(screen.getByTestId("studio-surface-panel").style.flexGrow)).toBeCloseTo(68.75, 2);
+  });
+  expect(localStorage.getItem("dezin.project-studio.inspector.width")).toBe("0.38");
+});
+
 test("a narrower Studio keeps the Inspector as the focus-managed edge overlay", () => {
   useNarrowStudioViewport();
   renderShell(true);
 
   expect(screen.queryByRole("separator", { name: "Resize Inspector" })).not.toBeInTheDocument();
   expect(Number(screen.getByTestId("studio-surface-panel").style.flexGrow)).toBe(100);
-  expect(Number(screen.getByTestId("studio-inspector").style.flexGrow)).toBe(0);
+  const inspector = screen.getByRole("complementary", { name: "Inspector" });
+  expect(inspector).toHaveClass("absolute", "w-[min(320px,100%)]", "max-w-[320px]");
   fireEvent.click(screen.getByRole("button", { name: "Hide inspector" }));
   expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();

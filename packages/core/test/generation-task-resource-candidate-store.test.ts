@@ -386,6 +386,257 @@ function resourceCandidateInput(
   };
 }
 
+test("generated Moodboard materialization pins every same-Plan generated Research Revision", () => {
+  const control = controlledClock("research-moodboard-dependency");
+  const store = new Store(":memory:", control.clock);
+  try {
+    const project = store.createProject({
+      name: "Research-backed Moodboard generation",
+      mode: "standard",
+    });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const research = store.workspace.createResourceForProject(project.id, {
+      kind: "research",
+      title: "Festival Research",
+      defaultPinPolicy: "follow-head",
+      baseGraphRevision: foundation.graphRevision,
+      expectedSnapshotId: foundation.activeSnapshotId,
+    });
+    const moodboardWorkspace = store.workspace.getWorkspace(project.id)!;
+    const moodboard = store.workspace.createResourceForProject(project.id, {
+      kind: "moodboard",
+      title: "Festival Moodboard",
+      defaultPinPolicy: "follow-head",
+      baseGraphRevision: moodboardWorkspace.graphRevision,
+      expectedSnapshotId: moodboardWorkspace.activeSnapshotId,
+    });
+    const researchBase = store.workspace.createResourceRevisionCandidateForProject(
+      project.id,
+      research.resource.id,
+      {
+        revisionId: "research-moodboard-research-base",
+        parentRevisionId: null,
+        manifestPath: "resource-revisions/research-moodboard/research-base/manifest.json",
+        summary: "Approved Research base",
+        metadata: { phase: "base", kind: "research" },
+        checksum: checksum("research-moodboard:research-base"),
+        provenance: { source: "research-moodboard-dependency-fixture" },
+      },
+    );
+    const researchBaseSnapshot = store.workspace.publishResourceRevisionForProject(
+      project.id,
+      research.resource.id,
+      researchBase.id,
+      {
+        expectedHeadRevisionId: null,
+        expectedSnapshotId: moodboard.snapshot.id,
+        reason: "Publish Research base",
+      },
+    );
+    const moodboardBase = store.workspace.createResourceRevisionCandidateForProject(
+      project.id,
+      moodboard.resource.id,
+      {
+        revisionId: "research-moodboard-moodboard-base",
+        parentRevisionId: null,
+        manifestPath: "resource-revisions/research-moodboard/moodboard-base/manifest.json",
+        summary: "Approved Moodboard base",
+        metadata: { phase: "base", kind: "moodboard" },
+        checksum: checksum("research-moodboard:moodboard-base"),
+        provenance: { source: "research-moodboard-dependency-fixture" },
+      },
+    );
+    store.workspace.publishResourceRevisionForProject(
+      project.id,
+      moodboard.resource.id,
+      moodboardBase.id,
+      {
+        expectedHeadRevisionId: null,
+        expectedSnapshotId: researchBaseSnapshot.id,
+        reason: "Publish Moodboard base",
+      },
+    );
+    const workspace = store.workspace.getWorkspace(project.id)!;
+    const layout = store.workspace.getLayout(project.id);
+    const proposal = store.workspace.createProposal({
+      projectId: project.id,
+      kind: "workspace-generation",
+      baseGraphRevision: workspace.graphRevision,
+      baseSnapshotId: workspace.activeSnapshotId,
+      layoutId: layout.layoutId,
+      baseLayoutChecksum: layout.checksum,
+      operations: [],
+      layoutOperations: [],
+      generation: {
+        ...emptyGeneration(),
+        resourceOperations: [
+          {
+            operation: "revise",
+            nodeId: research.node.id,
+            resourceId: research.resource.id,
+            kind: "research",
+            title: research.resource.title,
+            revisionPolicy: { kind: "generate" },
+          },
+          {
+            operation: "revise",
+            nodeId: moodboard.node.id,
+            resourceId: moodboard.resource.id,
+            kind: "moodboard",
+            title: moodboard.resource.title,
+            revisionPolicy: { kind: "generate" },
+          },
+        ],
+      },
+      rationale: "Generate exact Research before the dependent Moodboard",
+      assumptions: [],
+    });
+    const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+    assert.ok(approved.plan);
+    const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+    const researchTask = compiled.tasks.find(
+      (task) => task.kind === "resource" && task.target.id === research.resource.id,
+    );
+    const moodboardTask = compiled.tasks.find(
+      (task) => task.kind === "resource" && task.target.id === moodboard.resource.id,
+    );
+    assert.ok(researchTask);
+    assert.ok(moodboardTask);
+    assert.deepEqual(moodboardTask.dependencyIds, [researchTask.id]);
+    assert.throws(
+      () => store.workspace.observeGenerationTaskMaterializationForProject(
+        project.id,
+        compiled.plan.id,
+        moodboardTask.id,
+      ),
+      /dependencies.*succeeded|not ready/i,
+    );
+
+    const researchObservation = store.workspace.observeGenerationTaskMaterializationForProject(
+      project.id,
+      compiled.plan.id,
+      researchTask.id,
+    );
+    const kernel = store.workspace.getKernelRevision(researchObservation.kernelRevisionId);
+    assert.ok(kernel);
+    const contextPack = store.workspace.persistContextPack({
+      id: "research-moodboard-research-context",
+      workspaceId: workspace.id,
+      graphRevision: workspace.graphRevision,
+      target: { type: "resource", id: research.resource.id },
+      intent: "generate",
+      messageChecksum: checksum("research-moodboard:research-message"),
+      items: [
+        {
+          ref: { kind: "kernel", id: kernel.id, revisionId: kernel.id },
+          resolvedKind: "kernel-revision",
+          kernelRevisionId: kernel.id,
+          checksum: kernel.checksum,
+          reason: "design-kernel",
+          trustLevel: "system",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+        {
+          ref: {
+            kind: "resource",
+            id: research.resource.id,
+            resourceKind: "research",
+            revisionId: researchBase.id,
+          },
+          resolvedKind: "resource-revision",
+          resourceRevisionId: researchBase.id,
+          checksum: researchBase.checksum,
+          reason: "target-base",
+          trustLevel: "trusted",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+      ],
+      omissions: [],
+      tokenEstimate: 2,
+      manifestPath: "context-packs/research-moodboard-research.json",
+      hash: checksum("research-moodboard:research-context"),
+    });
+    const researchAttempt = store.workspace.createGenerationTaskAttemptForProject(
+      project.id,
+      compiled.plan.id,
+      {
+        ...researchObservation,
+        contextPackId: contextPack.id,
+        sourceCommitHash: null,
+        sourceTreeHash: null,
+        retryContextPolicy: "same-context",
+        executionMode: "full",
+      },
+    );
+    const researchClaim = store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: researchTask.id,
+      attempt: researchAttempt.attempt,
+      ownerId: "research-moodboard-worker",
+      now: 100_000,
+      leaseMs: 30_000,
+    });
+    assert.ok(researchClaim);
+    control.set(100_001);
+    const generatedResearchRevisionId = "research-moodboard-generated-research";
+    resourceCandidateApi(store).stageGenerationTaskCandidateForProject(
+      project.id,
+      compiled.plan.id,
+      {
+        lease: researchClaim.lease,
+        candidate: {
+          kind: "resource",
+          resourceId: research.resource.id,
+          revision: {
+            revisionId: generatedResearchRevisionId,
+            parentRevisionId: researchAttempt.baseRevisionId,
+            manifestPath: "resource-revisions/research-moodboard/generated-research/manifest.json",
+            summary: "Generated decision-grade Research",
+            metadata: { adapter: "research", phase: "generated" },
+            checksum: checksum("research-moodboard:generated-research"),
+            provenance: { source: "resource-generation-adapter", adapter: "research" },
+            createdByRunId: null,
+          },
+        },
+        evidence: {
+          adapterChecks: [{ id: "schema", status: "passed" }],
+          quality: { status: "passed", score: 0.98 },
+        },
+      },
+    );
+    const published = resourceCandidateApi(store).publishGenerationTaskCandidateForProject(
+      project.id,
+      compiled.plan.id,
+      { lease: researchClaim.lease },
+    );
+    assert.equal(published.status, "succeeded");
+
+    const moodboardObservation = store.workspace.observeGenerationTaskMaterializationForProject(
+      project.id,
+      compiled.plan.id,
+      moodboardTask.id,
+    );
+    assert.deepEqual(moodboardObservation.dependencyOutputs, [{
+      taskId: researchTask.id,
+      resultRevisionId: null,
+      resultResourceRevisionId: generatedResearchRevisionId,
+      resultSnapshotId: published.snapshot?.id ?? null,
+    }]);
+    assert.deepEqual(moodboardObservation.resourcePins, [{
+      resourceId: research.resource.id,
+      revisionId: generatedResearchRevisionId,
+      sourceTaskId: researchTask.id,
+    }]);
+  } finally {
+    store.close();
+  }
+});
+
 function expectedAttemptProvenance(
   fixture: ResourceCandidateFixture,
 ): Record<string, unknown> {

@@ -28,7 +28,7 @@ export function canvasEdgeTheme({
     ? "var(--destructive)"
     : active
       ? "var(--foreground)"
-      : "var(--muted-foreground)";
+      : "var(--foreground-2)";
   return {
     halo: {
       stroke: "var(--dezin-canvas-plane, var(--background))",
@@ -41,13 +41,13 @@ export function canvasEdgeTheme({
     },
     path: {
       stroke: foreground,
-      strokeWidth: active ? (prototype ? 1.75 : 1.55) : (prototype ? 1.1 : 1.1),
+      strokeWidth: active ? (prototype ? 1.75 : 1.55) : (prototype ? 1.35 : 1.2),
       strokeDasharray: !prototype && supporting ? "2 5" : undefined,
       strokeLinecap: "round",
       strokeLinejoin: "round",
       opacity: prototype
-        ? active || broken ? 0.94 : 0.6
-        : active ? 0.84 : 0.5,
+        ? active || broken ? 0.94 : 0.74
+        : active ? 0.84 : 0.62,
       vectorEffect: "non-scaling-stroke",
     },
   };

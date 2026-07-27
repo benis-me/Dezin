@@ -14,6 +14,12 @@ export function artifactTaskReviewBrief(payload: ArtifactGenerationTaskPayloadV2
     instructions
       ? `Artifact-specific requirements: ${instructions}`
       : `Artifact-specific responsibility: produce the requested ${kind} named "${target.name}".`,
+    ...(kind === "component"
+      ? [
+          "Component master review: Review the component master as the actual reusable component across all required states and all required visual states from the frozen target instructions.",
+          "Fail the Artifact if a documentation page, spec sheet, anatomy explainer, implementation notes, or component gallery replaces the actual component master.",
+        ]
+      : []),
     "Scope boundary: Do not require this Artifact to render sibling Pages, Components, or the full Workspace matrix. Cross-Artifact structure and completeness are evaluated by the Workspace Plan.",
     `Workspace proposal rationale (background context only): ${payload.brief.proposalRationale}`,
   ].join("\n");

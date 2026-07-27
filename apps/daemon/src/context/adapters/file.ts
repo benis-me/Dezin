@@ -4,6 +4,7 @@ import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, rmd
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import {
+  MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES,
   MAX_RESOURCE_MANIFEST_BYTES,
   MAX_RESOURCE_PAYLOAD_BYTES,
   RESOURCE_REVISION_PAYLOAD_PROTOCOL,
@@ -558,23 +559,32 @@ export async function snapshotBytes(input: ResourceSnapshotInput, bytes: Uint8Ar
   }
   const canonicalMimeType = normalizedMime(mimeType);
   const textual = canonicalMimeType.startsWith("text/") || canonicalMimeType === "application/json";
-  if (textual && bytes.byteLength > MAX_TEXT_PAYLOAD_BYTES) {
-    throw new ContextIntegrityError("Text Resource snapshot exceeds the 8 MiB verifier limit");
+  const textPayloadByteLimit = input.kind === "moodboard" && canonicalMimeType === "application/json"
+    ? MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES
+    : MAX_TEXT_PAYLOAD_BYTES;
+  if (textual && bytes.byteLength > textPayloadByteLimit) {
+    throw new ContextIntegrityError(
+      input.kind === "moodboard" && canonicalMimeType === "application/json"
+        ? "Moodboard Resource bundle exceeds the 48 MiB verifier limit"
+        : "Text Resource snapshot exceeds the 8 MiB verifier limit",
+    );
   }
   let decodedText: string | undefined;
   if (textual) {
+    let text: string;
     try {
-      decodedText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       throw new ContextIntegrityError("Text Resource snapshot must contain valid UTF-8");
     }
     if (canonicalMimeType === "application/json") {
       try {
-        JSON.parse(decodedText);
+        JSON.parse(text);
       } catch {
         throw new ContextIntegrityError("JSON Resource snapshot must contain valid JSON");
       }
     }
+    if (bytes.byteLength <= MAX_CONTEXT_TEXT_BYTES) decodedText = text;
   }
   const sealed = await sealResourceRevisionPayload({
     storageRoot: input.snapshotRoot,
@@ -584,7 +594,7 @@ export async function snapshotBytes(input: ResourceSnapshotInput, bytes: Uint8Ar
     mimeType: canonicalMimeType,
     bytes,
   });
-  const content = decodedText !== undefined && bytes.byteLength <= MAX_CONTEXT_TEXT_BYTES
+  const content = decodedText !== undefined
     ? decodedText
     : stableStringify({
       manifestPath: sealed.manifestPath,

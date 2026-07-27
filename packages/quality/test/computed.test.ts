@@ -55,6 +55,24 @@ test("flags near-invisible body text as a P0 contrast defect", () => {
   assert.equal(lc!.severity, "P0", "below ~2:1 is effectively unreadable → P0");
 });
 
+test("low-contrast repair feedback includes the exact computed foreground and background", () => {
+  const findings = detectComputedFindings([
+    el({
+      selector: "span.program-chip[data-tone=\"danger\"]",
+      style: {
+        color: "rgb(119, 119, 119)",
+        effectiveBg: "rgb(255, 255, 255)",
+        fontSizePx: 16,
+      },
+    }),
+  ]);
+  const contrast = findings.find((finding) => finding.id === "low-contrast");
+  assert.ok(contrast);
+  assert.match(contrast.message, /foreground rgb\(119, 119, 119\)/);
+  assert.match(contrast.message, /background rgb\(255, 255, 255\)/);
+  assert.match(contrast.fix, /span\.program-chip\[data-tone="danger"\]/);
+});
+
 test("passes strong body contrast", () => {
   const findings = detectComputedFindings([
     el({ style: { color: "rgb(17, 17, 17)", effectiveBg: "rgb(255, 255, 255)", fontSizePx: 16 } }),
@@ -163,6 +181,21 @@ test("flags a paragraph running wider than ~80ch", () => {
 test("does not flag a comfortably measured paragraph", () => {
   const findings = detectComputedFindings([
     el({ selector: "p", text: "x".repeat(200), rect: { x: 0, y: 0, width: 560, height: 40 }, style: { fontSizePx: 16 } }),
+  ]);
+  assert.equal(findings.some((f) => f.id === "line-length"), false);
+});
+
+test("does not treat a wide aggregate page container as one running-text line", () => {
+  const findings = detectComputedFindings([
+    el({
+      selector: "#root",
+      tag: "div",
+      text: "x".repeat(600),
+      rect: { x: 0, y: 0, width: 1440, height: 900 },
+      style: { fontSizePx: 16 },
+      directTextLength: 0,
+      childElementCount: 12,
+    } as Partial<ComputedElement>),
   ]);
   assert.equal(findings.some((f) => f.id === "line-length"), false);
 });

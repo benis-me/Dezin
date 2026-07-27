@@ -107,10 +107,11 @@ test("keeps Design System above the composer and Agent selection beside send", (
   const composerRouting = container.querySelector("[data-workspace-agent-routing]");
   const agentPicker = screen.getByRole("button", { name: "Agent and model" });
   const designSystemPicker = screen.getByRole("button", { name: "Design system" });
+  const contextRail = screen.getByRole("list", { name: "Selected Agent Context" });
   const attach = screen.getByRole("button", { name: "Add files and context" });
   const submit = screen.getByRole("button", { name: "Create proposal" });
   expect(composerShell).not.toBeNull();
-  expect(composerShell).toContainElement(screen.getByRole("list", { name: "Selected Agent Context" }));
+  expect(composerShell).not.toContainElement(contextRail);
   expect(composerShell).toContainElement(attach);
   expect(composerShell).not.toContainElement(designSystemPicker);
   expect(composerShell).toContainElement(agentPicker);
@@ -125,8 +126,12 @@ test("keeps Design System above the composer and Agent selection beside send", (
   expect(composerRouting).toBeNull();
   expect(designSystemControls).toContainElement(designSystemPicker);
   expect(designSystemControls).toHaveClass("mb-1.5");
+  expect(contextRail).toHaveClass("mb-1.5", "border-b-0", "pb-0");
   expect(
     designSystemControls!.compareDocumentPosition(composerShell!) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    contextRail.compareDocumentPosition(composerShell!) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
 });
 
@@ -151,7 +156,7 @@ test("renders user and assistant turns with the shared Dezin message hierarchy a
           role: "assistant",
           content: "## Proposal\n- Preserve the rhythm",
           createdAt: 2,
-          state: "proposal",
+          state: "queued",
         },
       ]}
     />,
@@ -168,7 +173,107 @@ test("renders user and assistant turns with the shared Dezin message hierarchy a
   expect(assistantMessage).not.toHaveClass("border", "bg-card");
   expect(within(assistantMessage as HTMLElement).getByRole("heading", { name: "Proposal" })).toBeInTheDocument();
   expect(within(assistantMessage as HTMLElement).getByRole("listitem")).toHaveTextContent("Preserve the rhythm");
-  expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).toHaveTextContent("proposal");
+  expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).toHaveTextContent("queued");
+});
+
+test("keeps a long Workspace brief compact until the reader expands it", async () => {
+  const user = userEvent.setup();
+  const brief = Array.from(
+    { length: 14 },
+    (_, index) => `Direction ${index + 1}: preserve a distinct, designer-readable decision.`,
+  ).join("\n");
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[{
+        id: "long-user-brief",
+        turnId: "turn-long-user-brief",
+        role: "user",
+        content: brief,
+        createdAt: 1,
+        state: "submitted",
+      }]}
+    />,
+  );
+
+  const body = container.querySelector('[data-agent-message-body="user"]');
+  expect(body).toHaveClass("max-h-56", "overflow-hidden");
+  const expand = screen.getByRole("button", { name: "Show full brief" });
+  expect(expand).toHaveAttribute("aria-expanded", "false");
+
+  await user.click(expand);
+  expect(body).not.toHaveClass("max-h-56", "overflow-hidden");
+  expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+  expect(body).toHaveTextContent("Direction 14");
+});
+
+test("estimates dense CJK briefs by visual width before collapsing them", () => {
+  render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[{
+        id: "dense-cjk-brief",
+        turnId: "turn-dense-cjk-brief",
+        role: "user",
+        content: "继续完善多页面设计、组件关系、研究证据和设计方向。".repeat(10),
+        createdAt: 1,
+        state: "submitted",
+      }]}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: "Show full brief" })).toBeInTheDocument();
+});
+
+test("summarizes the active proposal with a change count and Review action instead of its internal id", async () => {
+  const user = userEvent.setup();
+  const onReview = vi.fn();
+  render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[{
+        id: "assistant-proposal",
+        turnId: "turn-assistant-proposal",
+        role: "assistant",
+        content: "Proposal 2e1b3d46-192e-42e0-8f9a-8e4b1190a3ca is ready for review.",
+        createdAt: 1,
+        state: "proposal",
+      }]}
+      proposalAffordance={{
+        summary: "Create three distinct festival directions with shared components.",
+        changeCount: 9,
+        onOpen: onReview,
+      }}
+    />,
+  );
+
+  expect(screen.getByRole("heading", { name: "Proposal ready" })).toBeInTheDocument();
+  expect(screen.getByText("Create three distinct festival directions with shared components.")).toBeInTheDocument();
+  expect(screen.getByText("9 changes")).toBeInTheDocument();
+  expect(screen.queryByText(/2e1b3d46/)).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Review proposal" }));
+  expect(onReview).toHaveBeenCalledOnce();
+});
+
+test("uses the mature Dezin 44px content-sized composer with a 160px ceiling", () => {
+  render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+    />,
+  );
+  const textarea = screen.getByRole("textbox", { name: "Workspace Agent draft" });
+  expect(textarea).toHaveClass("field-sizing-content", "min-h-[44px]", "max-h-40");
+  expect(textarea).not.toHaveClass("min-h-[72px]");
+  expect(textarea).toHaveAttribute("rows", "1");
 });
 
 test("preserves the reader's history position when a newer Agent turn arrives", () => {
@@ -415,23 +520,34 @@ test("reports an Agent error once through the global toast without a persistent 
   expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
-test("keeps task history in the transcript instead of below the composer", () => {
-  const onStatusClick = vi.fn();
+test("keeps a compact restorable Plan affordance in the transcript without transient activity layout shifts", () => {
+  const onOpenPlan = vi.fn();
   render(
     <WorkspaceAgentPanel
       draft=""
       onDraftChange={() => {}}
       contextLabel="Workspace"
-      status="Recent · Plan 123"
-      onStatusClick={onStatusClick}
+      submissionBlockedPending
+      planAffordance={{
+        label: "Recent build plan",
+        technicalLabel: "Build plan 123",
+        onOpen: onOpenPlan,
+      }}
     />,
   );
 
-  const status = screen.getByRole("status", { name: "Workspace Agent task status" });
-  expect(status.closest("form")).toBeNull();
-  expect(status.closest('[aria-label="Workspace Agent transcript"]')).not.toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
-  expect(onStatusClick).toHaveBeenCalledTimes(1);
+  const affordance = screen.getByRole("button", { name: "Open build plan" });
+  expect(affordance).toHaveTextContent("Recent build plan");
+  expect(affordance).not.toHaveTextContent("123");
+  expect(affordance).toHaveAttribute("title", "Build plan 123");
+  expect(affordance).toHaveClass("h-7", "max-w-full", "rounded-full");
+  expect(affordance.closest("form")).toBeNull();
+  expect(affordance.closest('[aria-label="Workspace Agent transcript"]')).not.toBeNull();
+  expect(screen.queryByRole("status", { name: "Workspace Agent task status" })).not.toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Checking Agent availability…" })).toHaveClass("sr-only");
+
+  fireEvent.click(affordance);
+  expect(onOpenPlan).toHaveBeenCalledTimes(1);
 });
 
 test("keeps the transcript and composer on one uninterrupted surface", () => {

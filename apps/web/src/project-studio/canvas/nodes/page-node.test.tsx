@@ -81,7 +81,10 @@ describe("page node", () => {
     render(<PageNode {...{
       data: {
         ...data,
+        name: "Cinematic Black/Red Home",
         zoomLevel: "overview",
+        overviewDirection: "Cinematic Black/Red",
+        overviewPageRole: "Home",
         revisionId: "revision-home",
         generationState: "running",
       },
@@ -89,11 +92,13 @@ describe("page node", () => {
       isConnectable: true,
     } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
-    expect(screen.getByRole("heading", { name: "Home" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Cinematic Black/Red Home" })).toBeInTheDocument();
+    expect(screen.getByText("Cinematic Black/Red")).toHaveClass("dezin-flow-card__overview-direction");
+    expect(screen.getByText("Home")).toHaveClass("dezin-flow-card__overview-role");
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-artifact-kind", "page");
     expect(screen.getByTestId("artifact-preview")).toHaveAttribute("data-zoom", "overview");
-    expect(screen.getByLabelText("Home status: running")).toHaveClass("dezin-flow-card__overview-meta");
-    expect(screen.getByLabelText("Home status: running")).toHaveTextContent("running");
+    expect(screen.getByLabelText("Cinematic Black/Red Home status: running")).toHaveClass("dezin-flow-card__overview-meta");
+    expect(screen.getByLabelText("Cinematic Black/Red Home status: running")).toHaveTextContent("running");
     expect(screen.queryByText(/rev revision/i)).toBeNull();
   });
 

@@ -22,7 +22,21 @@ import type {
 import {
   snapshotBytes,
 } from "../context/adapters/file.ts";
-import { stableStringify } from "../context/context-types.ts";
+import {
+  stableStringify,
+  type ContextPackRepository,
+} from "../context/context-types.ts";
+import {
+  frozenMoodboardResearchAuthority,
+  MoodboardDirectionAuthorityError,
+} from "../moodboard-direction-authority.ts";
+import {
+  decodeMoodboardResourceBundle,
+  MoodboardResourceBundleError,
+  validateMoodboardDirectionAuthority,
+  validateGeneratedMoodboardResourceLineage,
+  type MoodboardV2LineagePolicy,
+} from "../moodboard-resource-bundle.ts";
 import {
   RESOURCE_REVISION_PAYLOAD_PROTOCOL,
   MAX_RESOURCE_PAYLOAD_BYTES,
@@ -45,6 +59,7 @@ const RECEIPT_FILE = "generation-receipt.json";
 const RECEIPT_PROTOCOL = "dezin.resource-task-payload-receipt.v1" as const;
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024;
 const CHECKSUM = /^[a-f0-9]{64}$/;
+const CONTEXT_PACK_ID = /^context-pack-([a-f0-9]{64})$/;
 const RECEIPT_TEMP_NAME = /^\.generation-receipt-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
 const RECEIPT_SETTLE_TIMEOUT_MS = 2_000;
 const RECEIPT_SETTLE_RETRY_MS = 2;
@@ -74,7 +89,28 @@ export interface OwnedResourceTaskPayloadStagingOptions {
   readonly storageRoot: string;
   readonly references: ResourceTaskPayloadReferenceGuard;
   readonly journal: ResourceTaskPayloadJournalPort;
+  /** Daemon-owned immutable Context Pack manifest repository. Required for v3 Moodboards. */
+  readonly contextPacks?: Pick<ContextPackRepository, "get">;
+  /** Durable Attempt authority used by receipt scans that have no executor scope. */
+  readonly attemptContextAuthority?: MoodboardAttemptContextAuthorityPort;
   readonly now?: () => number;
+  readonly moodboardV2LineagePolicy?: MoodboardV2LineagePolicy;
+}
+
+export interface MoodboardAttemptContextIdentity {
+  readonly contextPackId: string;
+  readonly contextPackHash: string;
+}
+
+export interface MoodboardAttemptContextAuthorityInput
+  extends ResourceTaskPayloadReferenceIdentity {
+  readonly planId: string;
+}
+
+export interface MoodboardAttemptContextAuthorityPort {
+  resolveMoodboardAttemptContext(
+    input: MoodboardAttemptContextAuthorityInput,
+  ): MoodboardAttemptContextIdentity | null;
 }
 
 export interface ResourceTaskPayloadJournalPort {
@@ -119,7 +155,11 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
   readonly #getStaging: ResourceTaskPayloadJournalPort["getResourcePayloadStaging"];
   readonly #classifyStaging: ResourceTaskPayloadJournalPort["classifyResourcePayloadStaging"];
   readonly #completeStaging: ResourceTaskPayloadJournalPort["completeResourcePayloadStaging"];
+  readonly #getContextPack: ContextPackRepository["get"] | null;
+  readonly #resolveAttemptContext:
+    MoodboardAttemptContextAuthorityPort["resolveMoodboardAttemptContext"] | null;
   readonly #now: () => number;
+  readonly #moodboardV2LineagePolicy: MoodboardV2LineagePolicy;
 
   constructor(options: OwnedResourceTaskPayloadStagingOptions) {
     if (typeof options.storageRoot !== "string" || options.storageRoot.length === 0) {
@@ -154,7 +194,39 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
     this.#getStaging = journal.getResourcePayloadStaging.bind(journal);
     this.#classifyStaging = journal.classifyResourcePayloadStaging.bind(journal);
     this.#completeStaging = journal.completeResourcePayloadStaging.bind(journal);
+    const getContextPack = options.contextPacks?.get;
+    if (options.contextPacks !== undefined && typeof getContextPack !== "function") {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        "Owned Resource payload Context Pack authority port is invalid",
+      );
+    }
+    this.#getContextPack = getContextPack === undefined
+      ? null
+      : getContextPack.bind(options.contextPacks);
+    const resolveAttemptContext =
+      options.attemptContextAuthority?.resolveMoodboardAttemptContext;
+    if (options.attemptContextAuthority !== undefined
+      && typeof resolveAttemptContext !== "function") {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        "Owned Resource payload Attempt Context authority port is invalid",
+      );
+    }
+    this.#resolveAttemptContext = resolveAttemptContext === undefined
+      ? null
+      : resolveAttemptContext.bind(options.attemptContextAuthority);
     this.#now = options.now ?? Date.now;
+    const moodboardV2LineagePolicy = options.moodboardV2LineagePolicy
+      ?? "require-production-lineage";
+    if (moodboardV2LineagePolicy !== "require-production-lineage"
+      && moodboardV2LineagePolicy !== "allow-legacy-v2") {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        "Owned Resource payload Moodboard v2 lineage policy is invalid",
+      );
+    }
+    this.#moodboardV2LineagePolicy = moodboardV2LineagePolicy;
   }
 
   async find(scope: ResourceTaskPayloadScope): Promise<ResourceTaskPayloadReceipt | null> {
@@ -171,6 +243,14 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
       const raw = parseReceipt(bytes);
       const receipt = validateResourceTaskPayloadReceipt(raw, scope);
       await verifyResourceRevisionPayload(root, payloadDescriptor(receipt), { signal: scope.signal });
+      await verifyMoodboardReceiptPayload(
+        root,
+        receipt,
+        exactScopeContextPack(scope),
+        scope.signal,
+        this.#moodboardV2LineagePolicy,
+        this.#getContextPack,
+      );
       const journal = this.#getStaging(cleanupIdentity(receipt));
       if (journal === null) {
         throw new ResourceTaskPayloadError(
@@ -208,6 +288,11 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
 
   async stage(input: ResourceTaskPayloadStageInput): Promise<ResourceTaskPayloadReceipt> {
     checkAbort(input.signal);
+    await verifyMoodboardStagePayload(
+      input,
+      this.#moodboardV2LineagePolicy,
+      this.#getContextPack,
+    );
     const planned = plannedPayload(input);
     let journal: ResourcePayloadStagingJournal | null = null;
     let exactJournal = false;
@@ -237,6 +322,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
           "Owned Resource payload journal was not classified before storage",
         );
       }
+      const payloadBytes = new Uint8Array(input.bytes);
       const snapshot = await snapshotBytes({
         workspaceId: input.workspaceId,
         resourceId: input.resourceId,
@@ -250,7 +336,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
           finalUrl: `dezin://generation/${encodeURIComponent(input.taskId)}/${input.attempt}`,
           status: 200,
           mimeType: input.mimeType,
-          bytes: new Uint8Array(input.bytes),
+          bytes: payloadBytes,
         },
         provenance: {
           kind: "generation-task-resource-payload",
@@ -260,7 +346,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
           adapter: { ...input.adapter },
         },
         createdAt,
-      }, new Uint8Array(input.bytes), input.mimeType);
+      }, payloadBytes, input.mimeType);
       if (snapshot.manifestPath !== journal.manifestPath
         || snapshot.checksum !== journal.manifestChecksum
         || snapshot.payloadChecksum !== journal.payloadChecksum
@@ -396,7 +482,29 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
               "Scanned Resource payload receipt does not match its owned path",
             );
           }
+          const journal = this.#getStaging(cleanupIdentity(receipt));
+          if (journal === null) {
+            throw new ResourceTaskPayloadError(
+              "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+              "Scanned Resource payload receipt has no exact durable staging journal",
+            );
+          }
+          assertJournalReceipt(journal, receipt, bytes);
+          const expectedContextPack = receipt.adapter.kind === "moodboard"
+            ? this.#resolveAttemptContext?.({
+                ...journalIdentity(journal),
+                planId: journal.planId,
+              }) ?? null
+            : null;
           await verifyResourceRevisionPayload(root, payloadDescriptor(receipt), { signal: input.signal });
+          await verifyMoodboardReceiptPayload(
+            root,
+            receipt,
+            expectedContextPack,
+            input.signal,
+            this.#moodboardV2LineagePolicy,
+            this.#getContextPack,
+          );
           receipts.push({ relativePath, receipt });
         } catch (error) {
           if (input.signal.aborted) throw abortReason(input.signal);
@@ -422,6 +530,200 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
       );
     }
   }
+}
+
+async function verifyMoodboardStagePayload(
+  input: ResourceTaskPayloadStageInput,
+  v2LineagePolicy: MoodboardV2LineagePolicy,
+  getContextPack: ContextPackRepository["get"] | null,
+): Promise<void> {
+  if (input.adapter.kind !== "moodboard") return;
+  if (input.mimeType !== "application/json") {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_STAGE_FAILED",
+      "Generated Moodboard payload must use application/json",
+    );
+  }
+  try {
+    const bundle = await decodeMoodboardResourceBundle(input.bytes, { signal: input.signal });
+    validateGeneratedMoodboardResourceLineage(bundle, input, {
+      contextPackId: input.contextPackId,
+      contextPackHash: input.contextPackHash,
+    }, v2LineagePolicy);
+    if (bundle.version === 3) {
+      validateMoodboardDirectionAuthority(
+        bundle,
+        resolveMoodboardResearchAuthority({
+          workspaceId: input.workspaceId,
+          contextPackId: input.contextPackId,
+          contextPackHash: input.contextPackHash,
+          getContextPack,
+          failureCode: "RESOURCE_PAYLOAD_STAGE_FAILED",
+        }),
+      );
+    }
+  } catch (error) {
+    if (input.signal.aborted) throw abortReason(input.signal);
+    if (error instanceof MoodboardResourceBundleError) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        `Generated Moodboard payload is invalid: ${error.message}`,
+        error,
+      );
+    }
+    if (error instanceof MoodboardDirectionAuthorityError) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        `Generated Moodboard Research authority is invalid: ${error.message}`,
+        error,
+      );
+    }
+    throw error;
+  }
+}
+
+async function verifyMoodboardReceiptPayload(
+  root: string,
+  receipt: ResourceTaskPayloadReceipt,
+  expectedContextPack: MoodboardAttemptContextIdentity | null,
+  signal: AbortSignal,
+  v2LineagePolicy: MoodboardV2LineagePolicy,
+  getContextPack: ContextPackRepository["get"] | null,
+): Promise<void> {
+  if (receipt.adapter.kind !== "moodboard") return;
+  if (receipt.mimeType !== "application/json") {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Moodboard receipt must use application/json",
+    );
+  }
+  const payloadPath = ownedPath(
+    root,
+    posix.join(posix.dirname(receipt.manifestPath), "payload.bin"),
+    "Generated Moodboard payload bytes",
+  );
+  const bytes = await readOwnedFile(root, payloadPath, receipt.byteSize, false);
+  if (bytes === null
+    || bytes.byteLength !== receipt.byteSize
+    || sha256(bytes) !== receipt.payloadChecksum) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Moodboard payload bytes diverge from their receipt",
+    );
+  }
+  try {
+    const bundle = await decodeMoodboardResourceBundle(bytes, { signal });
+    validateGeneratedMoodboardResourceLineage(
+      bundle,
+      receipt,
+      expectedContextPack,
+      v2LineagePolicy,
+    );
+    if (bundle.version === 3) {
+      if (expectedContextPack === null) {
+        throw new ResourceTaskPayloadError(
+          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+          "Generated Moodboard receipt has no durable Attempt Context Pack authority",
+        );
+      }
+      validateMoodboardDirectionAuthority(
+        bundle,
+        resolveMoodboardResearchAuthority({
+          workspaceId: receipt.workspaceId,
+          ...expectedContextPack,
+          getContextPack,
+          failureCode: "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        }),
+      );
+    }
+  } catch (error) {
+    if (signal.aborted) throw abortReason(signal);
+    if (error instanceof MoodboardResourceBundleError) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        `Generated Moodboard receipt payload is invalid: ${error.message}`,
+        error,
+      );
+    }
+    if (error instanceof MoodboardDirectionAuthorityError) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        `Generated Moodboard receipt Research authority is invalid: ${error.message}`,
+        error,
+      );
+    }
+    throw error;
+  }
+}
+
+function exactScopeContextPack(
+  scope: ResourceTaskPayloadScope,
+): MoodboardAttemptContextIdentity | null {
+  if (scope.adapter.kind !== "moodboard") return null;
+  const hasId = typeof scope.contextPackId === "string";
+  const hasHash = typeof scope.contextPackHash === "string";
+  if (!hasId && !hasHash) return null;
+  if (!hasId || !hasHash) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Moodboard replay scope has an incomplete Attempt Context Pack identity",
+    );
+  }
+  const match = CONTEXT_PACK_ID.exec(scope.contextPackId!);
+  if (match === null || !CHECKSUM.test(scope.contextPackHash!)
+    || match[1] !== scope.contextPackHash) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Moodboard replay scope has an invalid Attempt Context Pack identity",
+    );
+  }
+  return {
+    contextPackId: scope.contextPackId!,
+    contextPackHash: scope.contextPackHash!,
+  };
+}
+
+function resolveMoodboardResearchAuthority(input: {
+  readonly workspaceId: string;
+  readonly contextPackId: string;
+  readonly contextPackHash: string;
+  readonly getContextPack: ContextPackRepository["get"] | null;
+  readonly failureCode: "RESOURCE_PAYLOAD_STAGE_FAILED" | "RESOURCE_PAYLOAD_RECEIPT_INVALID";
+}) {
+  const match = CONTEXT_PACK_ID.exec(input.contextPackId);
+  if (match === null || !CHECKSUM.test(input.contextPackHash)
+    || match[1] !== input.contextPackHash) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Moodboard Research direction authority has an invalid Attempt Context Pack identity",
+    );
+  }
+  if (input.getContextPack === null) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Moodboard Research direction authority repository is unavailable",
+    );
+  }
+  let contextPack;
+  try {
+    contextPack = input.getContextPack(input.workspaceId, input.contextPackId);
+  } catch (error) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Moodboard Research direction authority could not load the frozen Attempt Context Pack",
+      error,
+    );
+  }
+  if (contextPack === null
+    || contextPack.id !== input.contextPackId
+    || contextPack.workspaceId !== input.workspaceId
+    || contextPack.hash !== input.contextPackHash) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Moodboard Research direction authority does not match the frozen Attempt Context Pack",
+    );
+  }
+  return frozenMoodboardResearchAuthority(contextPack);
 }
 
 interface PlannedResourcePayload {

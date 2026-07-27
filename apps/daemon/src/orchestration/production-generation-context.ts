@@ -8,6 +8,7 @@ import type {
   ArtifactRevisionResourcePin,
   Project,
   ProjectWorkspace,
+  ResearchRevisionDirectionView,
   Resource,
   ResourceRevision,
   Settings,
@@ -63,6 +64,7 @@ import {
   verifyResourceRevisionPayload,
 } from "../resource-revision-payload.ts";
 import {
+  listResearchRevisionDirections,
   ResearchResourceRevisionError,
   researchRevisionContextPackId,
   selectResearchRevisionDirection,
@@ -186,6 +188,7 @@ export interface FrozenArtifactExecutionProfile {
   } | null;
   readonly researchDirection: {
     readonly directionId: string;
+    readonly directionIds?: readonly string[];
     readonly revision: string;
     readonly checksum: string;
     readonly content: string;
@@ -249,6 +252,7 @@ export interface FreezeArtifactExecutionProfileInput {
   } | null;
   readonly researchDirection: {
     readonly directionId: string;
+    readonly directionIds?: readonly string[];
     readonly content: string;
     readonly resourceId: string;
     readonly revisionId: string;
@@ -562,24 +566,42 @@ function artifactAgentCredentialSemantic(
   FrozenArtifactExecutionProfile["agent"],
   "credentialProviderId" | "baseUrl" | "organization" | "credentialRequired"
 > {
-  if (providerId === "codebuddy") {
+  if (providerId === "codebuddy" || providerId === "codex") {
     return {
-      credentialProviderId: "codebuddy",
+      credentialProviderId: resourceCredentialProviderId(providerId),
       baseUrl: "",
       organization: "",
       credentialRequired: false,
     };
   }
   const usesAnthropicEndpoint = providerId === "claude";
-  const usesOpenAiEndpoint = providerId === "codex";
   const credentialRequired = Boolean(settings.apiKey.trim() || settings.apiKeyConfigured);
-  const baseUrl = usesAnthropicEndpoint || usesOpenAiEndpoint ? settings.apiBaseUrl.trim() : "";
+  const baseUrl = usesAnthropicEndpoint ? settings.apiBaseUrl.trim() : "";
   return {
     credentialProviderId: resourceCredentialProviderId(providerId),
     baseUrl,
-    organization: usesOpenAiEndpoint && (baseUrl || credentialRequired)
-      ? settings.aiProviderOrganization.trim()
-      : "",
+    organization: "",
+    credentialRequired,
+  };
+}
+
+function legacyArtifactCodexCredentialSemantic(
+  settings: Settings,
+): Pick<
+  FrozenArtifactExecutionProfile["agent"],
+  "credentialProviderId" | "baseUrl" | "organization" | "credentialRequired"
+> {
+  const baseUrl = settings.apiBaseUrl.trim();
+  const selectedProfile = parseProviderProfiles(settings.aiProviderProfiles)[settings.aiProviderId.trim()];
+  const credentialRequired = Boolean(
+    settings.apiKey.trim()
+      || settings.apiKeyConfigured
+      || selectedProfile?.apiKeyConfigured,
+  );
+  return {
+    credentialProviderId: resourceCredentialProviderId("codex"),
+    baseUrl,
+    organization: baseUrl || credentialRequired ? settings.aiProviderOrganization.trim() : "",
     credentialRequired,
   };
 }
@@ -693,7 +715,7 @@ export function freezeResourceExecutionProfile(
   const command = input.settings.agentCommand.trim() || "claude";
   const providerId = providerIdentity(command);
   const credentialProviderId = resourceCredentialProviderId(providerId);
-  const hostAuthenticated = providerId === "codebuddy";
+  const hostAuthenticated = providerId === "codebuddy" || providerId === "codex";
   const agentBaseUrl = hostAuthenticated ? "" : credentialFreeAgentBaseUrl(input.settings.apiBaseUrl);
   const agentCredentialRequired = hostAuthenticated ? false : resourceCredentialConfigured(input.settings);
   const body = {
@@ -1056,14 +1078,44 @@ function validateArtifactAgent(value: unknown, settings: Settings): FrozenArtifa
     organization: record.organization,
     credentialRequired: record.credentialRequired,
   };
-  if (agent.credentialProviderId !== expected.credentialProviderId
-    || agent.baseUrl !== expected.baseUrl
-    || agent.organization !== expected.organization) {
+  const matchesCurrentSemantic = agent.credentialProviderId === expected.credentialProviderId
+    && agent.baseUrl === expected.baseUrl
+    && agent.organization === expected.organization
+    && (actor.providerId !== "codex" && actor.providerId !== "codebuddy"
+      ? true
+      : agent.credentialRequired === expected.credentialRequired);
+  const legacyCodex = actor.providerId === "codex"
+    ? legacyArtifactCodexCredentialSemantic(settings)
+    : null;
+  const matchesLegacyCodexSemantic = legacyCodex !== null
+    && agent.credentialProviderId === legacyCodex.credentialProviderId
+    && agent.baseUrl === legacyCodex.baseUrl
+    && agent.organization === legacyCodex.organization
+    && agent.credentialRequired === legacyCodex.credentialRequired;
+  if (!matchesCurrentSemantic && !matchesLegacyCodexSemantic) {
     throw new ContextIntegrityError(
       "Artifact execution Agent credential semantic does not match frozen settings",
     );
   }
   return agent;
+}
+
+function matchesLegacyArtifactV4ReviewerSemantic(
+  settings: Settings,
+  agent: FrozenArtifactExecutionProfile["agent"],
+  reviewer: FrozenActor,
+): boolean {
+  if (settings.visualQaAgentCommand.trim() !== "" || settings.visualQaModel.trim() !== ""
+    || agent.command !== "codex" || agent.providerId !== "codex"
+    || reviewer.command !== "claude" || reviewer.providerId !== "claude"
+    || reviewer.model !== null) {
+    return false;
+  }
+  const legacyAgent = legacyArtifactCodexCredentialSemantic(settings);
+  return agent.credentialProviderId === legacyAgent.credentialProviderId
+    && agent.baseUrl === legacyAgent.baseUrl
+    && agent.organization === legacyAgent.organization
+    && agent.credentialRequired === legacyAgent.credentialRequired;
 }
 
 function validateArtifactExecutionProfile(
@@ -1185,10 +1237,12 @@ function validateArtifactExecutionProfile(
   }
   const researchDirection = profile.researchDirection === null ? null : (() => {
     const value = plainRecord(profile.researchDirection, "Artifact execution Research direction");
-    exactKeys(value, [
+    const fields = [
       "directionId", "revision", "checksum", "content", "resourceId", "revisionId", "revisionChecksum",
       "payloadChecksum",
-    ], "Artifact execution Research direction");
+      ...(value.directionIds === undefined ? [] : ["directionIds"]),
+    ];
+    exactKeys(value, fields, "Artifact execution Research direction");
     const content = nonEmptyString(value.content, "Artifact execution Research direction content");
     const checksum = checksumBytes(content);
     if (value.revision !== checksum || value.checksum !== checksum
@@ -1196,8 +1250,27 @@ function validateArtifactExecutionProfile(
       || typeof value.payloadChecksum !== "string" || !SHA256.test(value.payloadChecksum)) {
       throw new ContextIntegrityError("Artifact execution Research direction checksum is invalid");
     }
+    const directionId = nonEmptyString(
+      value.directionId,
+      "Artifact execution Research direction id",
+    );
+    let directionIds: readonly string[] | undefined;
+    if (value.directionIds !== undefined) {
+      if (!Array.isArray(value.directionIds) || value.directionIds.length < 2
+        || value.directionIds.length > 16) {
+        throw new ContextIntegrityError("Artifact execution Research direction set is invalid");
+      }
+      const exactDirectionIds = value.directionIds.map((candidate, index) =>
+        nonEmptyString(candidate, `Artifact execution Research direction set id ${index}`));
+      if (new Set(exactDirectionIds).size !== exactDirectionIds.length
+        || exactDirectionIds[0] !== directionId) {
+        throw new ContextIntegrityError("Artifact execution Research direction set is invalid");
+      }
+      directionIds = Object.freeze(exactDirectionIds);
+    }
     return {
-      directionId: nonEmptyString(value.directionId, "Artifact execution Research direction id"),
+      directionId,
+      ...(directionIds === undefined ? {} : { directionIds }),
       revision: checksum,
       checksum,
       content,
@@ -1240,8 +1313,19 @@ function validateArtifactExecutionProfile(
     : nonEmptyString(qualityRecord.expectedSharinganRequestedUrl, "Artifact execution Sharingan URL");
   const exactReviewerCommand = reviewerAgentCommand(settings, agent.command);
   const exactReviewerModel = reviewerModel(settings, agent.model ?? undefined, agent.command) ?? null;
-  if (reviewer.command !== exactReviewerCommand || reviewer.model !== exactReviewerModel
-    || reviewer.providerId !== providerIdentity(reviewer.command)) {
+  const matchesCurrentReviewer = reviewer.command === exactReviewerCommand
+    && reviewer.model === exactReviewerModel
+    && reviewer.providerId === providerIdentity(reviewer.command);
+  // Artifact execution profile v4 originally froze Claude/null for a Codex Task
+  // when both visual-QA selectors were blank. Accept only that exact historical
+  // tuple together with its exact legacy Codex credential semantic. The profile
+  // checksum is still verified below, and current/legacy hybrid profiles fail.
+  const matchesLegacyReviewer = matchesLegacyArtifactV4ReviewerSemantic(
+    settings,
+    agent,
+    reviewer,
+  );
+  if (!matchesCurrentReviewer && !matchesLegacyReviewer) {
     throw new ContextIntegrityError("Artifact execution reviewer does not match frozen quality settings");
   }
   if ((hasExactSharinganCapture && expectedSharinganRequestedUrl === null)
@@ -1340,15 +1424,27 @@ export function hydrateArtifactExecutionSettings(
 ): Settings {
   const exact = validateArtifactExecutionProfile(profile);
   const frozen = exact.settings.value;
+  const hostAuthenticated = exact.agent.providerId === "codebuddy"
+    || exact.agent.providerId === "codex";
+  if (hostAuthenticated) {
+    return {
+      ...structuredClone(frozen),
+      apiBaseUrl: "",
+      apiKey: "",
+      apiKeyConfigured: false,
+      aiProviderOrganization: "",
+      visualQaEnabled: exact.quality.visualQaEnabled,
+      visualQaAgentCommand: exact.quality.reviewer.command,
+      visualQaModel: exact.quality.reviewer.model ?? "",
+    };
+  }
   const liveCommand = liveSettings.agentCommand.trim() || "claude";
   const sameProvider = providerIdentity(liveCommand) === exact.agent.providerId;
   const liveCredential = artifactAgentCredentialSemantic(liveSettings, exact.agent.providerId);
   const sameEndpoint = exact.agent.baseUrl === liveCredential.baseUrl;
   const sameOrganization = exact.agent.organization === liveCredential.organization;
   const credentialMatches = sameProvider && sameEndpoint && sameOrganization;
-  const apiKey = exact.agent.providerId === "codebuddy"
-    ? ""
-    : credentialMatches ? liveSettings.apiKey.trim() : "";
+  const apiKey = credentialMatches ? liveSettings.apiKey.trim() : "";
   if (exact.agent.credentialRequired && !apiKey) {
     throw new ContextIntegrityError(
       "Current credential for the frozen Artifact Agent provider, endpoint, and organization is unavailable",
@@ -1358,6 +1454,8 @@ export function hydrateArtifactExecutionSettings(
     ...structuredClone(frozen),
     apiKey,
     visualQaEnabled: exact.quality.visualQaEnabled,
+    visualQaAgentCommand: exact.quality.reviewer.command,
+    visualQaModel: exact.quality.reviewer.model ?? "",
   };
 }
 
@@ -1412,8 +1510,14 @@ export function hydrateResourceAgentExecution(
   if (!implementation || implementation.id !== exact.agent.providerId) {
     throw new ContextIntegrityError("Frozen Resource Agent implementation is unavailable or incompatible");
   }
-  if (exact.agent.providerId === "codebuddy") {
-    return Object.freeze({ ...exact.agent, apiKey: "" });
+  if (exact.agent.providerId === "codebuddy" || exact.agent.providerId === "codex") {
+    return Object.freeze({
+      ...exact.agent,
+      baseUrl: "",
+      organization: "",
+      credentialRequired: false,
+      apiKey: "",
+    });
   }
   const liveCommand = liveSettings.agentCommand.trim() || "claude";
   const liveProviderId = providerIdentity(liveCommand);
@@ -2772,6 +2876,7 @@ interface ImmutableResearchDirectionSelection {
   readonly resourceId: string;
   readonly revisionId: string;
   readonly directionId: string;
+  readonly directionIds?: readonly string[];
 }
 
 function immutableResearchDirectionSelection(
@@ -2787,9 +2892,40 @@ function immutableResearchDirectionSelection(
   );
   exactKeys(selection, [
     "protocol", "version", "resourceId", "revisionId", "directionId",
+    ...(selection.directionIds === undefined ? [] : ["directionIds"]),
   ], "Artifact execution Research direction selection");
   if (selection.protocol !== "dezin.research-direction-selection.v1" || selection.version !== 1) {
     throw new ContextIntegrityError("Artifact execution Research direction selection protocol is invalid");
+  }
+  const directionId = nonEmptyString(
+    selection.directionId,
+    "Artifact execution Research direction selection direction id",
+  );
+  let directionIds: readonly string[] | undefined;
+  if (selection.directionIds !== undefined) {
+    if (!Array.isArray(selection.directionIds)
+      || selection.directionIds.length < 2 || selection.directionIds.length > 16) {
+      throw new ContextIntegrityError(
+        "Artifact execution Research direction selection direction ids must contain between 2 and 16 entries",
+      );
+    }
+    const exactDirectionIds = selection.directionIds.map((candidate, index) => (
+      nonEmptyString(
+        candidate,
+        `Artifact execution Research direction selection direction ids[${index}]`,
+      )
+    ));
+    if (new Set(exactDirectionIds).size !== exactDirectionIds.length) {
+      throw new ContextIntegrityError(
+        "Artifact execution Research direction selection direction ids must be unique",
+      );
+    }
+    if (exactDirectionIds[0] !== directionId) {
+      throw new ContextIntegrityError(
+        "Artifact execution Research direction selection first direction id must equal directionId",
+      );
+    }
+    directionIds = Object.freeze(exactDirectionIds);
   }
   return {
     protocol: selection.protocol,
@@ -2802,11 +2938,56 @@ function immutableResearchDirectionSelection(
       selection.revisionId,
       "Artifact execution Research direction selection Revision id",
     ),
-    directionId: nonEmptyString(
-      selection.directionId,
-      "Artifact execution Research direction selection direction id",
-    ),
+    directionId,
+    ...(directionIds === undefined ? {} : { directionIds }),
   };
+}
+
+function immutableArtifactDirectionInstructions(
+  request: GenerationTaskContextRequest,
+): string {
+  const payload = plainRecord(request.task.payload, "Artifact execution Task payload");
+  const plan = plainRecord(payload.artifactPlan, "Artifact execution plan");
+  if (typeof plan.instructions === "string" && plan.instructions.trim().length > 0) {
+    return nonEmptyString(plan.instructions, "Artifact execution plan instructions");
+  }
+  const brief = plainRecord(payload.brief, "Artifact execution brief");
+  const target = plainRecord(
+    brief.targetInstructions,
+    "Artifact execution target instructions",
+  );
+  return nonEmptyString(
+    target.instructions,
+    "Artifact execution target direction instructions",
+  );
+}
+
+function immutableArtifactDirectionKind(
+  request: GenerationTaskContextRequest,
+): "component" | "page" {
+  if (request.task.kind !== "component" && request.task.kind !== "page") {
+    throw new ContextIntegrityError(
+      "Artifact execution generated Research direction contract requires an Artifact Task",
+    );
+  }
+  return request.task.kind;
+}
+
+function generatedResearchDirectionMatches(
+  directions: readonly ResearchRevisionDirectionView[],
+  instructions: string,
+  artifactKind: GenerationTaskContextRequest["task"]["kind"],
+): readonly ResearchRevisionDirectionView[] {
+  const allDirections = /\ball\s+(?:exact\s+)?(?:generated\s+)?(?:research\s+)?directions?\b/i
+    .test(instructions);
+  const exactCardinality = directions.length === 3
+    && /\b(?:three|3)\s+(?:exact\s+)?(?:generated\s+)?(?:research\s+)?directions?\b/i
+      .test(instructions);
+  if (allDirections || exactCardinality) return directions;
+  const exactMatches = directions.filter((direction) =>
+    instructions.includes(direction.id) && instructions.includes(direction.title));
+  if (exactMatches.length > 0) return exactMatches;
+  return artifactKind === "component" ? directions : [];
 }
 
 async function frozenResearchDirection(input: {
@@ -2817,20 +2998,46 @@ async function frozenResearchDirection(input: {
   signal: AbortSignal;
 }): Promise<FreezeArtifactExecutionProfileInput["researchDirection"]> {
   checkAbort(input.signal);
-  const selection = immutableResearchDirectionSelection(input.request);
-  if (selection === null) {
-    const unselectedResearchRefs = input.request.observation.resourcePins.flatMap((pin) => {
-      const resource = input.store.workspace.getResourceForProject(input.request.projectId, pin.resourceId);
-      return resource?.workspaceId === input.request.task.workspaceId && resource.kind === "research"
-        ? [`research:${pin.resourceId}@${pin.revisionId}:direction-selection`]
-        : [];
-    }).sort(compareBinary);
-    if (unselectedResearchRefs.length === 0) return null;
+  const explicitSelection = immutableResearchDirectionSelection(input.request);
+  const researchPins = input.request.observation.resourcePins.flatMap((pin) => {
+    const resource = input.store.workspace.getResourceForProject(input.request.projectId, pin.resourceId);
+    return resource?.workspaceId === input.request.task.workspaceId && resource.kind === "research"
+      ? [{ pin, resource }]
+      : [];
+  });
+  if (researchPins.length === 0) return null;
+  const automaticPin = explicitSelection === null
+    && researchPins.length === 1
+    && researchPins[0]!.pin.sourceTaskId !== null
+      ? researchPins[0]!
+      : null;
+  if (explicitSelection === null && automaticPin === null) {
     throw new BlockedContextError(
-      unselectedResearchRefs,
-      "Artifact generation is blocked because an explicit immutable Research direction selection is required; the selection must be captured in the approved immutable Plan before this Artifact can run",
+      researchPins.map(({ pin }) =>
+        `research:${pin.resourceId}@${pin.revisionId}:direction-selection`).sort(compareBinary),
+      "Artifact generation is blocked because an explicit immutable Research direction selection is required for every Research Revision not generated by this same Plan",
     );
   }
+  const selection = explicitSelection ?? {
+    protocol: "dezin.research-direction-selection.v1" as const,
+    version: 1 as const,
+    resourceId: automaticPin!.pin.resourceId,
+    revisionId: automaticPin!.pin.revisionId,
+    directionId: "",
+  };
+  const automaticInstructions = automaticPin === null
+    ? null
+    : immutableArtifactDirectionInstructions(input.request);
+  const automaticArtifactKind = automaticPin === null
+    ? null
+    : immutableArtifactDirectionKind(input.request);
+  const automaticContract = automaticPin === null ? null : {
+    artifactKind: automaticArtifactKind!,
+    instructions: automaticInstructions!,
+    resourceId: automaticPin.pin.resourceId,
+    revisionId: automaticPin.pin.revisionId,
+    sourceTaskId: automaticPin.pin.sourceTaskId,
+  };
   const pinned = input.request.observation.resourcePins.flatMap((pin) => {
     if (pin.resourceId !== selection.resourceId || pin.revisionId !== selection.revisionId) return [];
     const resource = input.store.workspace.getResourceForProject(input.request.projectId, pin.resourceId);
@@ -2871,6 +3078,8 @@ async function frozenResearchDirection(input: {
   const materializationRoot = await mkdtemp(join(input.dataDir, ".artifact-execution-profile-"));
   const destination = join(materializationRoot, "research.json");
   let content: string;
+  let directionId: string;
+  let directionIds: readonly string[] | undefined;
   try {
     await verifyResourceRevisionPayload(input.dataDir, descriptor, {
       destination,
@@ -2881,20 +3090,53 @@ async function frozenResearchDirection(input: {
     const contextPack = contextPackId === null
       ? null
       : input.contextPacks.get(input.request.task.workspaceId, contextPackId);
-    const direction = selectResearchRevisionDirection({
+    const validation = {
       bytes: await readFile(destination),
-      directionId: selection.directionId,
       workspaceId: input.request.task.workspaceId,
       resourceId: exact.resource.id,
       parentRevisionId: exact.revision.parentRevisionId,
       revisionMetadata: exact.revision.metadata,
       revisionProvenance: exact.revision.provenance,
       contextPack,
-    });
-    content = stableStringify(direction);
+    };
+    if (automaticPin === null) {
+      const selectedDirections = (selection.directionIds ?? [selection.directionId]).map(
+        (selectedDirectionId) => selectResearchRevisionDirection({
+          ...validation,
+          directionId: selectedDirectionId,
+        }),
+      );
+      directionId = selectedDirections[0]!.id;
+      if (selection.directionIds === undefined) {
+        content = stableStringify(selectedDirections[0]!);
+      } else {
+        directionIds = Object.freeze(selectedDirections.map((direction) => direction.id));
+        content = stableStringify(selectedDirections);
+      }
+    } else {
+      const directions = listResearchRevisionDirections(validation);
+      const matched = generatedResearchDirectionMatches(
+        directions,
+        automaticInstructions!,
+        automaticArtifactKind!,
+      );
+      if (matched.length === 0) {
+        throw new BlockedContextError(
+          [`research:${exact.resource.id}@${exact.revision.id}:direction-instruction-match`],
+          "Artifact generation is blocked because Research direction selection has no exact match in the immutable Artifact instructions and those instructions do not request all directions",
+        );
+      }
+      directionId = matched[0]!.id;
+      if (matched.length === 1) {
+        content = stableStringify(matched[0]!);
+      } else {
+        directionIds = Object.freeze(matched.map((direction) => direction.id));
+        content = stableStringify(matched);
+      }
+    }
   } catch (error) {
     if (input.signal.aborted) throw abortReason(input.signal);
-    if (error instanceof ContextIntegrityError) throw error;
+    if (error instanceof ContextIntegrityError || error instanceof BlockedContextError) throw error;
     if (error instanceof ResearchResourceRevisionError) {
       throw new ContextIntegrityError(`Artifact execution Research Revision is invalid: ${error.message}`);
     }
@@ -2903,11 +3145,31 @@ async function frozenResearchDirection(input: {
     await rm(materializationRoot, { recursive: true, force: true }).catch(() => {});
   }
   checkAbort(input.signal);
-  if (!isDeepStrictEqual(immutableResearchDirectionSelection(input.request), selection)) {
-    throw new ContextIntegrityError("Artifact execution Research direction selection changed during materialization");
+  if (automaticContract === null) {
+    if (!isDeepStrictEqual(immutableResearchDirectionSelection(input.request), selection)) {
+      throw new ContextIntegrityError("Artifact execution Research direction selection changed during materialization");
+    }
+  } else {
+    const currentPin = input.request.observation.resourcePins.find((pin) =>
+      pin.resourceId === automaticContract.resourceId
+      && pin.revisionId === automaticContract.revisionId);
+    const currentContract = currentPin === undefined ? null : {
+      artifactKind: immutableArtifactDirectionKind(input.request),
+      instructions: immutableArtifactDirectionInstructions(input.request),
+      resourceId: currentPin.resourceId,
+      revisionId: currentPin.revisionId,
+      sourceTaskId: currentPin.sourceTaskId,
+    };
+    if (!isDeepStrictEqual(currentContract, automaticContract)
+      || immutableResearchDirectionSelection(input.request) !== null) {
+      throw new ContextIntegrityError(
+        "Artifact execution generated Research direction contract changed during materialization",
+      );
+    }
   }
   return {
-    directionId: selection.directionId,
+    directionId,
+    ...(directionIds === undefined ? {} : { directionIds }),
     content,
     resourceId: exact.resource.id,
     revisionId: exact.revision.id,
@@ -3066,6 +3328,7 @@ export function createProductionArtifactExecutionProfileLoader(
       designRegistry: promptRegistry,
       imageGenerationEnabled,
       hasExactSharinganCapture,
+      visualDirectionContract: direction?.content,
     });
     const frozenSkill = hasExactSharinganCapture || promptResult.skill === null ? null : {
       id: promptResult.skill.id,

@@ -231,12 +231,12 @@ export function ArtifactVersions({
       openedHistoryIdentityRef.current = null;
       return;
     }
-    const identity = `${projectId}:${artifactId}`;
+    const identity = `${projectId}:${artifactId}:${headRevisionId ?? ""}`;
     if (openedHistoryIdentityRef.current === identity) return;
     openedHistoryIdentityRef.current = identity;
     setHistory({ status: "idle", items: [], nextCursor: null, error: null });
     void loadPage();
-  }, [artifactId, loadPage, open, projectId]);
+  }, [artifactId, headRevisionId, loadPage, open, projectId]);
 
   useEffect(() => {
     if (!open) return;
@@ -262,20 +262,24 @@ export function ArtifactVersions({
   const selectedRevisions = useMemo(() => selectedIds
     .map((id) => history.items.find((revision) => revision.id === id))
     .filter((revision): revision is ArtifactRevision => revision !== undefined), [history.items, selectedIds]);
-  const missingSelectionIds = initialMode === "compare"
-    ? selectedIds.filter((id) => !history.items.some((revision) => revision.id === id))
-    : [];
-  const missingSelectionKey = missingSelectionIds.join("\u0000");
+  const requiredRevisionIds = initialMode === "compare"
+    ? selectedIds
+    : pinnedRevisionId === null
+      ? []
+      : [pinnedRevisionId];
+  const missingRevisionIds = requiredRevisionIds
+    .filter((id) => !history.items.some((revision) => revision.id === id));
+  const missingRevisionKey = missingRevisionIds.join("\u0000");
 
   useEffect(() => {
-    if (!open || initialMode !== "compare" || missingSelectionIds.length === 0
+    if (!open || missingRevisionIds.length === 0
       || history.status === "idle" || history.status === "loading") return;
     const requestId = ++selectionRequestIdRef.current;
     const identity = artifactIdentityRef.current;
     let disposed = false;
     setSelectionHydrating(true);
     setSelectionError(null);
-    void Promise.allSettled(missingSelectionIds.map(async (revisionId) => {
+    void Promise.allSettled(missingRevisionIds.map(async (revisionId) => {
       const candidate = await api.getArtifactRevision(projectId, artifactId, revisionId);
       if (candidate.id !== revisionId || candidate.artifactId !== artifactId) {
         throw new Error("Saved Revision identity did not match the requested Artifact.");
@@ -297,7 +301,7 @@ export function ArtifactVersions({
     };
   // The canonical key prevents a page response from restarting the same exact-ID hydration.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, artifactId, history.status, initialMode, missingSelectionKey, open, projectId]);
+  }, [api, artifactId, history.status, initialMode, missingRevisionKey, open, projectId]);
 
   const toggleSelection = (revisionId: string): void => {
     setSelectedIds((current) => {
@@ -432,7 +436,11 @@ export function ArtifactVersions({
                   const forking = forkingRevisionId === revision.id;
                   const actionPending = action?.revisionId === revision.id;
                   return (
-                    <li key={revision.id} data-selected={selected || undefined}>
+                    <li
+                      key={revision.id}
+                      data-selected={selected || undefined}
+                      title={`Revision ${revision.sequence} · ${revision.id}`}
+                    >
                       <div className="artifact-version-row">
                         {initialMode === "compare" ? (
                           <label className="artifact-version-row__select">
@@ -457,7 +465,6 @@ export function ArtifactVersions({
                           <div className="artifact-version-row__meta">
                             <span><GitBranch aria-hidden size={11} />{track?.name ?? "Unknown track"}</span>
                             <span><Clock3 aria-hidden size={11} />{new Date(revision.createdAt).toLocaleString()}</span>
-                            <code title={revision.id}>{revision.id.slice(0, 12)}</code>
                           </div>
                         </div>
                         <div

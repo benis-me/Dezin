@@ -20,6 +20,7 @@ import {
   ArtifactRunPreparationError,
   DefaultArtifactRunPreparation,
 } from "../src/orchestration/artifact-run-preparation.ts";
+import { validateGenerationTaskPayload } from "../src/orchestration/generation-task-contracts.ts";
 import {
   createSharinganCaptureBundleFence,
   type SharinganCaptureRevisionMaterializerPort,
@@ -283,6 +284,56 @@ test("Default preparation binds the exact Context Pack and Git base into prompts
   }
 });
 
+test("Default preparation tells a Component Task to build the component master instead of a documentation page", async () => {
+  const repo = repository();
+  const componentClaim = claim(repo) as GenerationTaskAttemptClaim & {
+    task: GenerationTaskAttemptClaim["task"] & {
+      payload: {
+        artifactPlan: Record<string, unknown>;
+        brief: { targetInstructions: Record<string, unknown> };
+      };
+    };
+  };
+  (componentClaim.task as { kind: string }).kind = "component";
+  componentClaim.task.payload.artifactPlan.kind = "component";
+  componentClaim.task.payload.artifactPlan.name = "KITE Program Card";
+  componentClaim.task.payload.artifactPlan.instructions =
+    "Render the complete reusable film card with real poster imagery and direction states.";
+  componentClaim.task.payload.brief.targetInstructions.kind = "component";
+  componentClaim.task.payload.brief.targetInstructions.name = "KITE Program Card";
+  componentClaim.task.payload.brief.targetInstructions.instructions =
+    "Render the complete reusable film card with real poster imagery and direction states.";
+  const preparation = new DefaultArtifactRunPreparation({
+    contextPacks: { get: () => contextPack() },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
+    createRunner: () => runner,
+    createQualityEvaluator: () => ({
+      async evaluate() {
+        throw new Error("not used");
+      },
+    }),
+    baseSystemPrompt: () => "You are Dezin's senior design Agent.",
+    sharinganCaptures: captureMaterializer(),
+  });
+
+  const result = await preparation.prepare(componentClaim, new AbortController().signal);
+  try {
+    assert.match(
+      result.initialMessage,
+      /component master.*actual reusable component.*required visual states/i,
+    );
+    assert.match(
+      result.initialMessage,
+      /do not build.*documentation|spec sheet|anatomy explainer|implementation notes/i,
+    );
+  } finally {
+    await result.transaction.dispose();
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
 test("Default preparation confines generated source to the Artifact's canonical source root", async () => {
   const repo = repository();
   const exactClaim = claim(repo);
@@ -489,6 +540,96 @@ test("a Sharingan Context Pack fails closed when exact Revision materialization 
     );
     assert.equal(runnerCreated, false);
   } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("Artifact preparation requires exact prototype markers without synthesizing navigation", async () => {
+  const repo = repository();
+  const exactClaim = claim(repo) as GenerationTaskAttemptClaim & {
+    task: GenerationTaskAttemptClaim["task"] & {
+      payload: {
+        artifactPlan: Record<string, unknown>;
+      };
+    };
+  };
+  exactClaim.task.payload.artifactPlan.prototypeRequirements = {
+    outgoing: [
+      {
+        edgeId: "edge-click",
+        sourceMarkerId: "marker-click",
+        trigger: "click",
+      },
+      {
+        edgeId: "edge-submit",
+        sourceMarkerId: "marker-submit",
+        trigger: "submit",
+      },
+    ],
+    incoming: [{
+      edgeId: "edge-incoming",
+      sourceArtifactId: "artifact-source",
+      sourceMarkerId: "marker-incoming",
+      targetState: "review-ready",
+    }],
+  };
+  const invalidTargetState = structuredClone(exactClaim.task) as typeof exactClaim.task;
+  const invalidTargetRequirements = invalidTargetState.payload.artifactPlan.prototypeRequirements as {
+    incoming: Array<{ targetState: string }>;
+  };
+  invalidTargetRequirements.incoming[0]!.targetState = " ";
+  assert.throws(
+    () => validateGenerationTaskPayload(invalidTargetState),
+    /target state/i,
+    "the executor boundary must validate target-state semantics instead of trusting stored Task JSON",
+  );
+  const oversizedMarker = structuredClone(exactClaim.task) as typeof exactClaim.task;
+  const oversizedRequirements = oversizedMarker.payload.artifactPlan.prototypeRequirements as {
+    outgoing: Array<{ sourceMarkerId: string }>;
+  };
+  oversizedRequirements.outgoing[0]!.sourceMarkerId = "m".repeat(257);
+  assert.throws(
+    () => validateGenerationTaskPayload(oversizedMarker),
+    /source marker.*256 bytes/i,
+    "the executor boundary must retain the v2 marker bound enforced by the Proposal codec",
+  );
+  const preparation = new DefaultArtifactRunPreparation({
+    contextPacks: {
+      get: () => contextPack({
+        items: [],
+        tokenEstimate: 0,
+      }),
+    },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
+    createRunner: () => runner,
+    createQualityEvaluator: () => ({ async evaluate() { throw new Error("unused"); } }),
+    baseSystemPrompt: () => "base",
+  });
+
+  const result = await preparation.prepare(exactClaim, new AbortController().signal);
+  try {
+    assert.match(
+      result.initialMessage,
+      /data-dezin-node-id="marker-click".*exactly once.*real interactive DOM element/is,
+    );
+    assert.match(
+      result.initialMessage,
+      /data-dezin-node-id="marker-submit".*real submit control.*real form/is,
+    );
+    assert.doesNotMatch(result.initialMessage, /data-dezin-prototype-marker=/i);
+    assert.match(result.initialMessage, /target state "review-ready".*real renderable state/is);
+    assert.match(
+      result.initialMessage,
+      /must not invent.*href|must not invent.*router|must not synthesize.*navigation/is,
+    );
+    assert.match(
+      result.initialMessage,
+      /do not add.*onClick|do not add.*submit handler|must not synthesize.*binding/is,
+    );
+  } finally {
+    await result.transaction.dispose();
     rmSync(repo.root, { recursive: true, force: true });
   }
 });

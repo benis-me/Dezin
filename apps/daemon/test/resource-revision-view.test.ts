@@ -4,12 +4,19 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createCanvas } from "@napi-rs/canvas";
 
 import { Store, type ResourceKind } from "../../../packages/core/src/index.ts";
-import { snapshotBytes } from "../src/context/adapters/file.ts";
+import { sealResourceRevisionPayload, snapshotBytes } from "../src/context/adapters/file.ts";
 import { encodeSharinganCaptureResourceBundle } from "../src/orchestration/sharingan-capture-resource-bundle.ts";
-import { readResourceRevisionView, ResourceRevisionViewError } from "../src/resource-revision-view.ts";
 import {
+  readResourceRevisionEmbeddedAsset,
+  readResourceRevisionView,
+  ResourceRevisionViewError,
+} from "../src/resource-revision-view.ts";
+import {
+  MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES,
+  RESOURCE_REVISION_PAYLOAD_PROTOCOL,
   ResourceRevisionPayloadError,
   verifyBoundedResourcePayloadBytes,
 } from "../src/resource-revision-payload.ts";
@@ -18,6 +25,7 @@ import {
   createResearchRevisionFixture,
   persistResearchRevisionFixtureContextPack,
 } from "./support/research-resource-fixture.ts";
+import { stableStringify } from "../src/context/context-types.ts";
 
 async function fixture(t: test.TestContext) {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-resource-view-"));
@@ -110,6 +118,104 @@ async function addRevision(
   return { resource: created.resource, revision, snapshot };
 }
 
+async function addSealedRevisionWithoutAdapterValidation(
+  f: Awaited<ReturnType<typeof fixture>>,
+  input: {
+    kind: ResourceKind;
+    revisionId: string;
+    bytes: Uint8Array;
+    mimeType: string;
+  },
+) {
+  const current = f.store.workspace.getWorkspace(f.project.id)!;
+  const created = f.store.workspace.createResourceForProject(f.project.id, {
+    kind: input.kind,
+    title: `${input.kind} raw sealed view`,
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: current.graphRevision,
+    expectedSnapshotId: current.activeSnapshotId,
+  });
+  const sealed = await sealResourceRevisionPayload({
+    storageRoot: f.dataDir,
+    workspaceId: f.workspace.id,
+    resourceId: created.resource.id,
+    revisionId: input.revisionId,
+    mimeType: input.mimeType,
+    bytes: input.bytes,
+  });
+  const revision = f.store.workspace.createResourceRevisionCandidateForProject(
+    f.project.id,
+    created.resource.id,
+    {
+      revisionId: input.revisionId,
+      parentRevisionId: null,
+      manifestPath: sealed.manifestPath,
+      summary: `Raw sealed ${input.kind}`,
+      metadata: {
+        mimeType: sealed.mimeType,
+        byteLength: sealed.byteSize,
+        payloadChecksum: sealed.payloadChecksum,
+      },
+      checksum: sealed.manifestChecksum,
+      provenance: {
+        protocol: RESOURCE_REVISION_PAYLOAD_PROTOCOL,
+        manifestPath: sealed.manifestPath,
+        payloadChecksum: sealed.payloadChecksum,
+      },
+    },
+  );
+  return { resource: created.resource, revision };
+}
+
+async function deterministicPng(size: number): Promise<Buffer> {
+  const canvas = createCanvas(size, size);
+  const context = canvas.getContext("2d");
+  const image = context.createImageData(size, size);
+  let value = 0x12345678;
+  for (let index = 0; index < image.data.length; index += 4) {
+    value = (Math.imul(value, 1_664_525) + 1_013_904_223) >>> 0;
+    image.data[index] = value & 0xff;
+    image.data[index + 1] = (value >>> 8) & 0xff;
+    image.data[index + 2] = (value >>> 16) & 0xff;
+    image.data[index + 3] = 0xff;
+  }
+  context.putImageData(image, 0, 0);
+  return canvas.encode("png");
+}
+
+function moodboardBundle(images: readonly Buffer[]) {
+  const assets = images.map((image, index) => {
+    const id = `asset-${index + 1}`;
+    return {
+      id,
+      metadata: {
+        kind: "image",
+        fileName: `reference-${index + 1}.png`,
+        mimeType: "image/png",
+      },
+      byteLength: image.byteLength,
+      checksum: createHash("sha256").update(image).digest("hex"),
+      bytesBase64: image.toString("base64"),
+    };
+  });
+  return {
+    format: "dezin-moodboard-resource-bundle",
+    version: 2,
+    board: { id: "board-large", name: "Large image direction", coverAssetId: assets[0]?.id ?? null },
+    nodes: assets.map((asset, index) => ({
+      id: `image-${index + 1}`,
+      type: "image",
+      x: index * 340,
+      y: 0,
+      width: 320,
+      height: 180,
+      data: { assetId: asset.id, label: `Reference ${index + 1}` },
+    })),
+    messages: [],
+    assets,
+  };
+}
+
 test("exact file Revision view verifies immutable bytes and projects a bounded text preview", async (t) => {
   const f = await fixture(t);
   const exact = await addRevision(f, {
@@ -175,6 +281,41 @@ test("invalid UTF-8 and oversized text payloads fail as controlled 422 boundarie
   );
 });
 
+test("Viewer and embedded Asset readback reject an oversized Moodboard bundle at their own 48 MiB decode boundary", async (t) => {
+  const f = await fixture(t);
+  const exact = await addSealedRevisionWithoutAdapterValidation(f, {
+    kind: "moodboard",
+    revisionId: "revision-oversized-moodboard-view",
+    bytes: Buffer.alloc(MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES + 1, 0x20),
+    mimeType: "application/json",
+  });
+  const expectedBoundary = (error: unknown) => error instanceof ResourceRevisionViewError
+    && error.status === 422
+    && /Moodboard.*48 MiB.*decode/i.test(error.message);
+
+  await assert.rejects(
+    readResourceRevisionView({
+      store: f.store,
+      dataDir: f.dataDir,
+      projectId: f.project.id,
+      resourceId: exact.resource.id,
+      revisionId: exact.revision.id,
+    }),
+    expectedBoundary,
+  );
+  await assert.rejects(
+    readResourceRevisionEmbeddedAsset({
+      store: f.store,
+      dataDir: f.dataDir,
+      projectId: f.project.id,
+      resourceId: exact.resource.id,
+      revisionId: exact.revision.id,
+      assetId: "asset-1",
+    }),
+    expectedBoundary,
+  );
+});
+
 test("exact Moodboard Revision view projects frozen nodes and checksum-bound image capabilities", async (t) => {
   const f = await fixture(t);
   const image = Buffer.from(
@@ -216,7 +357,12 @@ test("exact Moodboard Revision view projects frozen nodes and checksum-bound ima
   });
   assert.equal(view.kind, "moodboard");
   if (view.kind !== "moodboard") assert.fail("expected Moodboard view");
-  assert.deepEqual(view.content.board, { id: "board-1", name: "Quiet utility", coverAssetId: "asset-1" });
+  assert.deepEqual(view.content.board, {
+    id: "board-1",
+    name: "Quiet utility",
+    coverAssetId: "asset-1",
+    directionContract: null,
+  });
   assert.equal(view.content.nodes[0]?.text, "Measured hierarchy");
   assert.deepEqual(
     view.content.nodes.map(({ x, y, width, height }) => ({ x, y, width, height })),
@@ -230,6 +376,202 @@ test("exact Moodboard Revision view projects frozen nodes and checksum-bound ima
   assert.match(view.content.assets[0]?.url ?? "", /embedded-assets\/asset-1$/);
   assert.equal(view.content.nodesTruncated, false);
   assert.equal(view.content.assetsTruncated, false);
+});
+
+test("v3 Moodboard Revision view exposes checksum-bound Asset to Research-direction assignments", async (t) => {
+  const f = await fixture(t);
+  const image = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const assetChecksum = createHash("sha256").update(image).digest("hex");
+  const directionBody = {
+    resourceId: "research-source",
+    revisionId: "research-revision",
+    id: "direction-field-notes",
+    title: "Field Notes",
+    thesis: "Turn field evidence into a tactile editorial archive.",
+    visualLanguage: ["warm paper", "precise ink annotation"],
+    interactionPrinciples: ["reveal provenance in reading order"],
+    risks: ["nostalgia obscures evidence"],
+  };
+  const direction = {
+    ...directionBody,
+    checksum: createHash("sha256").update(stableStringify(directionBody)).digest("hex"),
+  };
+  const contractBody = {
+    protocol: "dezin.moodboard-direction-contract.v1",
+    contextPackId: "context-pack-direction-bound",
+    directions: [direction],
+  };
+  const directionContract = {
+    ...contractBody,
+    checksum: createHash("sha256").update(stableStringify(contractBody)).digest("hex"),
+  };
+  const bundle = {
+    format: "dezin-moodboard-resource-bundle",
+    version: 3,
+    board: {
+      id: "board-direction-bound",
+      name: "Direction-bound board",
+      coverAssetId: "asset-direction-bound",
+      directionContract,
+    },
+    nodes: [],
+    messages: [],
+    assets: [{
+      id: "asset-direction-bound",
+      metadata: {
+        kind: "image",
+        fileName: "direction.png",
+        mimeType: "image/png",
+        width: 1,
+        height: 1,
+        directionId: direction.id,
+        directionTitle: direction.title,
+        directionChecksum: direction.checksum,
+      },
+      byteLength: image.byteLength,
+      checksum: assetChecksum,
+      bytesBase64: image.toString("base64"),
+    }],
+  };
+  const exact = await addRevision(f, {
+    kind: "moodboard",
+    resourceId: "resource-direction-bound-moodboard",
+    revisionId: "revision-direction-bound-moodboard",
+    bytes: Buffer.from(`${JSON.stringify(bundle)}\n`, "utf8"),
+    mimeType: "application/json",
+  });
+
+  const view = await readResourceRevisionView({
+    store: f.store,
+    dataDir: f.dataDir,
+    projectId: f.project.id,
+    resourceId: exact.resource.id,
+    revisionId: exact.revision.id,
+  });
+
+  assert.equal(view.kind, "moodboard");
+  if (view.kind !== "moodboard") assert.fail("expected Moodboard view");
+  const content = view.content as typeof view.content & {
+    board: typeof view.content.board & {
+      directionContract: {
+        protocol: string;
+        contextPackId: string;
+        checksum: string;
+        directions: Array<{
+          resourceId: string;
+          revisionId: string;
+          id: string;
+          title: string;
+          checksum: string;
+          assetId: string;
+        }>;
+      } | null;
+    };
+    assets: Array<typeof view.content.assets[number] & {
+      directionId: string | null;
+      directionTitle: string | null;
+      directionChecksum: string | null;
+    }>;
+  };
+  assert.deepEqual(content.board.directionContract, {
+    protocol: directionContract.protocol,
+    contextPackId: directionContract.contextPackId,
+    checksum: directionContract.checksum,
+    directions: [{
+      resourceId: direction.resourceId,
+      revisionId: direction.revisionId,
+      id: direction.id,
+      title: direction.title,
+      checksum: direction.checksum,
+      assetId: "asset-direction-bound",
+    }],
+  });
+  assert.deepEqual(
+    content.assets.map((asset) => ({
+      id: asset.id,
+      directionId: asset.directionId,
+      directionTitle: asset.directionTitle,
+      directionChecksum: asset.directionChecksum,
+    })),
+    [{
+      id: "asset-direction-bound",
+      directionId: direction.id,
+      directionTitle: direction.title,
+      directionChecksum: direction.checksum,
+    }],
+  );
+});
+
+test("Moodboard Viewer accepts one generator-sized embedded image above the former 6 MiB Asset cap", async (t) => {
+  const f = await fixture(t);
+  const image = await deterministicPng(1_400);
+  assert.ok(image.byteLength > 6 * 1024 * 1024);
+  assert.ok(image.byteLength <= 8 * 1024 * 1024);
+  const bundle = moodboardBundle([image]);
+  const exact = await addRevision(f, {
+    kind: "moodboard",
+    resourceId: "resource-large-moodboard-asset",
+    revisionId: "revision-large-moodboard-asset",
+    bytes: Buffer.from(`${JSON.stringify(bundle)}\n`, "utf8"),
+    mimeType: "application/json",
+  });
+
+  const view = await readResourceRevisionView({
+    store: f.store,
+    dataDir: f.dataDir,
+    projectId: f.project.id,
+    resourceId: exact.resource.id,
+    revisionId: exact.revision.id,
+  });
+
+  assert.equal(view.kind, "moodboard");
+  if (view.kind !== "moodboard") assert.fail("expected Moodboard view");
+  assert.equal(view.content.assets[0]?.byteLength, image.byteLength);
+  assert.match(view.content.assets[0]?.url ?? "", /embedded-assets\/asset-1$/);
+  const embedded = await readResourceRevisionEmbeddedAsset({
+    store: f.store,
+    dataDir: f.dataDir,
+    projectId: f.project.id,
+    resourceId: exact.resource.id,
+    revisionId: exact.revision.id,
+    assetId: "asset-1",
+  });
+  assert.equal(embedded.bytes.byteLength, image.byteLength);
+  assert.equal(embedded.checksum, createHash("sha256").update(image).digest("hex"));
+});
+
+test("Moodboard Viewer accepts multiple generator images whose aggregate bytes exceed the former 6 MiB cap", async (t) => {
+  const f = await fixture(t);
+  const image = await deterministicPng(1_024);
+  const images = [image, image, image];
+  assert.ok(image.byteLength < 6 * 1024 * 1024);
+  assert.ok(images.reduce((total, item) => total + item.byteLength, 0) > 6 * 1024 * 1024);
+  const bundle = moodboardBundle(images);
+  const exact = await addRevision(f, {
+    kind: "moodboard",
+    resourceId: "resource-multi-image-moodboard",
+    revisionId: "revision-multi-image-moodboard",
+    bytes: Buffer.from(`${JSON.stringify(bundle)}\n`, "utf8"),
+    mimeType: "application/json",
+  });
+
+  const view = await readResourceRevisionView({
+    store: f.store,
+    dataDir: f.dataDir,
+    projectId: f.project.id,
+    resourceId: exact.resource.id,
+    revisionId: exact.revision.id,
+  });
+
+  assert.equal(view.kind, "moodboard");
+  if (view.kind !== "moodboard") assert.fail("expected Moodboard view");
+  assert.equal(view.content.totalAssetCount, 3);
+  assert.equal(view.content.assets.length, 3);
+  assert.equal(view.content.assetsTruncated, false);
+  assert.ok(view.content.assets.every((asset) => asset.url !== null));
 });
 
 test("exact Effect Revision view exposes a declarative fixture without evaluating frozen code", async (t) => {

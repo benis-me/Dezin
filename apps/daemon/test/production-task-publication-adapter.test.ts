@@ -87,6 +87,7 @@ function store(
       return {} as never;
     },
     completeGenerationTaskValidationForProject() { return {} as never; },
+    completeGenerationTaskPrototypeFinalizationForProject() { return {} as never; },
     publishGenerationPlanCheckpointForProject() { return {} as never; },
     finishGenerationTaskAttemptForProject() { return {} as never; },
     getGenerationTaskAttemptForProject() { return null; },

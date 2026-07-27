@@ -7,11 +7,18 @@ import {
   type ResourceRevisionSnapshot,
 } from "../context-types.ts";
 import { resolveSnapshot, snapshotBytes } from "./file.ts";
+import {
+  MAX_MOODBOARD_EMBEDDED_ASSET_BYTES,
+  MAX_MOODBOARD_EMBEDDED_ASSET_TOTAL_BYTES,
+} from "../../resource-revision-payload.ts";
+import {
+  MoodboardResourceBundleError,
+  validateMoodboardEmbeddedAssetBytes,
+} from "../../moodboard-resource-bundle.ts";
 
 const MAX_MOODBOARD_ASSETS = 1_024;
 const MAX_MOODBOARD_NODES = 100_000;
 const MAX_MOODBOARD_MESSAGES = 100_000;
-const MAX_MOODBOARD_RAW_ASSET_BYTES = 6 * 1024 * 1024;
 const MAX_MOODBOARD_CONTEXT_BYTES = 512 * 1024;
 
 function binaryCompare(left: string, right: string): number {
@@ -52,6 +59,33 @@ function selectedFields(
   return selected;
 }
 
+function selectedMoodboardBoard(value: unknown): Record<string, unknown> {
+  const selected = selectedFields(
+    value,
+    ["id", "name", "coverAssetId", "createdAt", "updatedAt"],
+    1_024,
+  );
+  if (!value || typeof value !== "object" || Array.isArray(value)) return selected;
+  const directionContract = (value as Record<string, unknown>).directionContract;
+  if (!directionContract || typeof directionContract !== "object" || Array.isArray(directionContract)) {
+    return selected;
+  }
+  const contract = directionContract as Record<string, unknown>;
+  if (!Array.isArray(contract.directions)) return selected;
+  return {
+    ...selected,
+    directionContract: {
+      ...selectedFields(contract, ["protocol", "contextPackId", "checksum"], 1_024),
+      directions: contract.directions.slice(0, MAX_MOODBOARD_ASSETS).map((direction) =>
+        selectedFields(
+          direction,
+          ["resourceId", "revisionId", "id", "title", "checksum"],
+          1_024,
+        )),
+    },
+  };
+}
+
 function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapshot): string {
   let parsed: unknown;
   try {
@@ -61,7 +95,7 @@ function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapsho
   }
   const bundle = plainRecord(parsed, "Moodboard Resource bundle");
   if (bundle.format !== "dezin-moodboard-resource-bundle"
-    || (bundle.version !== 1 && bundle.version !== 2)
+    || (bundle.version !== 1 && bundle.version !== 2 && bundle.version !== 3)
     || !Array.isArray(bundle.nodes) || !Array.isArray(bundle.messages) || !Array.isArray(bundle.assets)) {
     throw new ContextIntegrityError("Moodboard Resource bundle format is invalid");
   }
@@ -97,7 +131,7 @@ function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapsho
   const summary = stableStringify({
     format: bundle.format,
     version: bundle.version,
-    board: selectedFields(bundle.board, ["id", "name", "coverAssetId", "createdAt", "updatedAt"], 1_024),
+    board: selectedMoodboardBoard(bundle.board),
     nodeCount: bundle.nodes.length,
     nodeTypeCounts,
     recentMessages: bundle.messages.slice(-32).map((message) => selectedFields(
@@ -109,7 +143,17 @@ function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapsho
       ...selectedFields(asset, ["id", "byteLength", "checksum"], 512),
       metadata: selectedFields(
         asset.metadata,
-        ["fileName", "mimeType", "kind", "source", "width", "height"],
+        [
+          "fileName",
+          "mimeType",
+          "kind",
+          "source",
+          "width",
+          "height",
+          "directionId",
+          "directionTitle",
+          "directionChecksum",
+        ],
         512,
       ),
     })),
@@ -129,7 +173,7 @@ function moodboardContextBody(payload: Buffer, revision: ResourceRevisionSnapsho
     return stableStringify({
       format: bundle.format,
       version: bundle.version,
-      board: selectedFields(bundle.board, ["id", "name", "coverAssetId"], 1_024),
+      board: selectedMoodboardBoard(bundle.board),
       nodeCount: bundle.nodes.length,
       messageCount: bundle.messages.length,
       assetCount: assets.length,
@@ -159,32 +203,56 @@ export const moodboardResourceAdapter: ResourceContextAdapter = {
     }
     const ids = new Set<string>();
     let rawAssetBytes = 0;
-    const assets = [...input.source.assets]
-      .sort((left, right) => binaryCompare(left.id, right.id))
-      .map((asset) => {
-        if (!asset.id || ids.has(asset.id)) {
-          throw new ContextIntegrityError("Moodboard Resource bundle contains a missing or duplicate Asset identity");
-        }
-        assertIdentifier(asset.id, "Moodboard Asset ID");
-        if (!(asset.bytes instanceof Uint8Array)) {
-          throw new ContextIntegrityError(`Moodboard Asset ${asset.id} is missing its exact owned bytes`);
-        }
-        if (!asset.metadata || typeof asset.metadata !== "object" || Array.isArray(asset.metadata)) {
-          throw new ContextIntegrityError(`Moodboard Asset ${asset.id} metadata is invalid`);
-        }
-        rawAssetBytes += asset.bytes.byteLength;
-        if (rawAssetBytes > MAX_MOODBOARD_RAW_ASSET_BYTES) {
-          throw new ContextIntegrityError("Moodboard Resource Asset bytes exceed the bundle limit");
-        }
-        ids.add(asset.id);
-        return {
+    const assets: Array<{
+      id: string;
+      metadata: Record<string, unknown>;
+      byteLength: number;
+      checksum: string;
+      bytesBase64: string;
+    }> = [];
+    for (const asset of [...input.source.assets].sort((left, right) => binaryCompare(left.id, right.id))) {
+      if (!asset.id || ids.has(asset.id)) {
+        throw new ContextIntegrityError("Moodboard Resource bundle contains a missing or duplicate Asset identity");
+      }
+      assertIdentifier(asset.id, "Moodboard Asset ID");
+      if (!(asset.bytes instanceof Uint8Array)) {
+        throw new ContextIntegrityError(`Moodboard Asset ${asset.id} is missing its exact owned bytes`);
+      }
+      if (!asset.metadata || typeof asset.metadata !== "object" || Array.isArray(asset.metadata)) {
+        throw new ContextIntegrityError(`Moodboard Asset ${asset.id} metadata is invalid`);
+      }
+      if (asset.bytes.byteLength > MAX_MOODBOARD_EMBEDDED_ASSET_BYTES) {
+        throw new ContextIntegrityError(`Moodboard Asset ${asset.id} exceeds its byte limit`);
+      }
+      const mimeType = asset.metadata.mimeType;
+      if (typeof mimeType !== "string") {
+        throw new ContextIntegrityError(`Moodboard Asset ${asset.id} metadata is invalid`);
+      }
+      try {
+        await validateMoodboardEmbeddedAssetBytes({
           id: asset.id,
-          metadata: structuredClone(asset.metadata),
-          byteLength: asset.bytes.byteLength,
-          checksum: checksumBytes(asset.bytes),
-          bytesBase64: Buffer.from(asset.bytes).toString("base64"),
-        };
+          bytes: asset.bytes,
+          mimeType,
+        });
+      } catch (error) {
+        if (error instanceof MoodboardResourceBundleError) {
+          throw new ContextIntegrityError(error.message);
+        }
+        throw error;
+      }
+      rawAssetBytes += asset.bytes.byteLength;
+      if (rawAssetBytes > MAX_MOODBOARD_EMBEDDED_ASSET_TOTAL_BYTES) {
+        throw new ContextIntegrityError("Moodboard Resource Asset bytes exceed the bundle limit");
+      }
+      ids.add(asset.id);
+      assets.push({
+        id: asset.id,
+        metadata: structuredClone(asset.metadata),
+        byteLength: asset.bytes.byteLength,
+        checksum: checksumBytes(asset.bytes),
+        bytesBase64: Buffer.from(asset.bytes).toString("base64"),
       });
+    }
     const bundle = {
       format: "dezin-moodboard-resource-bundle",
       version: 1,

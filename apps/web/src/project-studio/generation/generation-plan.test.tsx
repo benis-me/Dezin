@@ -236,6 +236,34 @@ test("GenerationPlanPanel gives the target its own row beneath task kind and sta
   expect(target.parentElement).toContainElement(screen.getByText("Preparing"));
 });
 
+test("GenerationPlanPanel keeps task titles and metadata at inspector reading size", () => {
+  const style = document.createElement("style");
+  style.textContent = readFileSync(
+    `${process.cwd()}/src/project-studio/generation/generation-plan.css`,
+    "utf8",
+  );
+  document.head.append(style);
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({ tasks: [task("task-10", "page", "materialization-pending")], dependencies: [] })}
+      connection="live"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  try {
+    expect(getComputedStyle(screen.getByText("Page", { selector: "strong" })).fontSize).toBe("14px");
+    expect(getComputedStyle(screen.getByText("Not started · 0 dependencies")).fontSize).toBe("12px");
+  } finally {
+    style.remove();
+  }
+});
+
 test("GenerationPlanPanel keeps narrow task rows and the footer dimensionally stable", () => {
   const css = readFileSync(
     `${process.cwd()}/src/project-studio/generation/generation-plan.css`,
@@ -329,6 +357,50 @@ test("GenerationPlanPanel never exposes absolute local paths from legacy Task fa
 
   expect(screen.getByText("codebuddy returned an error result")).toBeInTheDocument();
   expect(screen.queryByText(/private-user|\/Users\//)).not.toBeInTheDocument();
+});
+
+test("GenerationPlanPanel keeps dependency failures on the owning Task instead of repeating them on every blocked row", () => {
+  const failure = "Moodboard Asset drifted into an airline operations dashboard instead of the approved film-festival direction.";
+  const moodboard = task("task-1", "resource", "failed", {
+    target: { type: "resource", workspaceId: "workspace-1", id: "resource-moodboard" },
+    failureClass: "qa",
+    error: { message: failure },
+  });
+  const blocked = [
+    task("task-2", "component", "blocked", {
+      blockedByTaskId: moodboard.id,
+      blockedReason: failure,
+    }),
+    task("task-3", "page", "blocked", {
+      blockedByTaskId: moodboard.id,
+      blockedReason: failure,
+    }),
+  ];
+
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan("failed")]}
+      detail={{
+        plan: plan("failed"),
+        tasks: [moodboard, ...blocked],
+        dependencies: [],
+        currentAttempts: [],
+      }}
+      connection="settled"
+      busyAction={null}
+      targetLabels={{
+        artifacts: new Map(),
+        resources: new Map([["resource-moodboard", "KITE Visual Directions Moodboard"]]),
+      }}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+    />,
+  );
+
+  expect(screen.getAllByText(failure)).toHaveLength(1);
+  expect(screen.getAllByText("Blocked by KITE Visual Directions Moodboard")).toHaveLength(2);
 });
 
 test("GenerationPlanPanel resolves owned Resource and Artifact names while preserving Workspace and stable fallbacks", () => {

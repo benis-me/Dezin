@@ -1,5 +1,9 @@
 import puppeteer from "puppeteer-core";
-import { findChrome } from "./capture-cover.ts";
+import {
+  applyArtifactThumbnailFrame,
+  findChrome,
+  type ArtifactRenderFrameCommand,
+} from "./capture-cover.ts";
 import { captureFullPageScreenshot } from "./full-page-capture.ts";
 
 export interface Viewport { width: number; height: number; label: string }
@@ -58,8 +62,23 @@ export interface RenderMap {
   elements: RenderMapElement[];
 }
 
+export interface PrototypeMarkerRuntimeObservation {
+  tagName: string;
+  role: string | null;
+  action: "button" | "link" | "input-control" | "semantic-control" | "summary"
+    | "form" | "submit-control";
+  visible: true;
+}
+
+export const PROTOTYPE_MARKER_PROBE_TIMEOUT_MS = 5_000;
+
 type Browser = Awaited<ReturnType<typeof puppeteer.launch>>;
 type Page = Awaited<ReturnType<Browser["newPage"]>>;
+
+function sharinganAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return new DOMException("Sharingan session aborted", "AbortError");
+}
 
 /** Chrome launch options with the automation tells removed: no `--enable-automation`, and the
  *  AutomationControlled blink feature disabled. Pure so the flags can be asserted without launching. */
@@ -112,11 +131,20 @@ export class SharinganSession {
   private page: Page;
   private origin: string;
   private lastNavigation: { requestedUrl: string; status: number; finalUrl: string } | null = null;
+  private lifetimeSignal: AbortSignal | null = null;
+  private closeOnAbort: (() => void) | null = null;
+  private closePromise: Promise<void> | null = null;
 
-  private constructor(browser: Browser, page: Page, origin: string) {
+  private constructor(browser: Browser, page: Page, origin: string, signal?: AbortSignal) {
     this.browser = browser;
     this.page = page;
     this.origin = origin;
+    if (signal) {
+      this.lifetimeSignal = signal;
+      this.closeOnAbort = () => { void this.close(); };
+      if (signal.aborted) this.closeOnAbort();
+      else signal.addEventListener("abort", this.closeOnAbort, { once: true });
+    }
   }
 
   static async open(url: string, opts: { userDataDir?: string; headless?: boolean; signal?: AbortSignal } = {}): Promise<SharinganSession> {
@@ -124,6 +152,7 @@ export class SharinganSession {
     const executablePath = findChrome();
     if (!executablePath) throw new Error("Chrome not found (required for Sharingan capture)");
     let browser: Browser | undefined;
+    let session: SharinganSession | undefined;
     const closeOnAbort = (): void => { void browser?.close().catch(() => {}); };
     opts.signal?.addEventListener("abort", closeOnAbort, { once: true });
     try {
@@ -140,12 +169,13 @@ export class SharinganSession {
       // hang settle()'s in-page waits (their timers never fire) and wedge the whole capture.
       page.on("dialog", (d) => void d.dismiss().catch(() => {}));
       const origin = new URL(url).origin;
-      const session = new SharinganSession(browser, page, origin);
+      session = new SharinganSession(browser, page, origin, opts.signal);
       await session.navigate(url);
       opts.signal?.throwIfAborted();
       return session;
     } catch (error) {
-      await browser?.close().catch(() => {});
+      if (session) await session.close();
+      else await browser?.close().catch(() => {});
       throw error;
     } finally {
       opts.signal?.removeEventListener("abort", closeOnAbort);
@@ -244,6 +274,200 @@ export class SharinganSession {
   }
 
   async setViewport(v: Viewport): Promise<void> { await this.page.setViewport({ width: v.width, height: v.height, deviceScaleFactor: 1 }); }
+
+  async applyRenderFrame(
+    targetUrl: string,
+    frame: ArtifactRenderFrameCommand,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await applyArtifactThumbnailFrame(this.page, targetUrl, frame, signal);
+  }
+
+  async probePrototypeMarker(
+    designNodeId: string,
+    trigger: "click" | "submit",
+    receiptNonce: string,
+    signal: AbortSignal,
+    timeoutMs = PROTOTYPE_MARKER_PROBE_TIMEOUT_MS,
+  ): Promise<PrototypeMarkerRuntimeObservation> {
+    if (!/^[0-9a-f]{64}$/.test(receiptNonce)) {
+      throw new Error("Prototype marker runtime receipt nonce is invalid");
+    }
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) {
+      throw new Error("Prototype marker runtime probe timeout is invalid");
+    }
+    signal.throwIfAborted();
+    const result = await this.awaitPageOperation(this.page.evaluate((input: {
+      designNodeId: string;
+      trigger: "click" | "submit";
+      receiptNonce: string;
+    }) => {
+      const win = globalThis as any;
+      const doc = win.document;
+      const markerAttributes = [
+        "data-design-node-id",
+        "data-dezin-id",
+        "data-dezin-node-id",
+      ];
+      const identityMatches = Array.from(doc.querySelectorAll(markerAttributes
+        .map((attribute) => `[${attribute}]`)
+        .join(",")))
+        .filter((candidate: any) => markerAttributes.some(
+          (attribute) => candidate.getAttribute(attribute) === input.designNodeId,
+        ));
+      const matches = Array.from(doc.querySelectorAll("[data-dezin-node-id]"))
+        .filter((candidate: any) => candidate.getAttribute("data-dezin-node-id") === input.designNodeId);
+      if (matches.length !== 1) {
+        return { ok: false as const, reason: matches.length === 0 ? "not-found" : "ambiguous" };
+      }
+      if (identityMatches.length !== 1 || identityMatches[0] !== matches[0]) {
+        return { ok: false as const, reason: "ambiguous" };
+      }
+      const element = matches[0] as any;
+      const hiddenByTree = (candidate: any): boolean => {
+        for (let current = candidate; current; current = current.parentElement) {
+          const style = win.getComputedStyle(current);
+          if (current.hidden === true || current.inert === true
+            || style.display === "none" || style.visibility === "hidden"
+            || style.visibility === "collapse" || Number(style.opacity) <= 0) return true;
+        }
+        return false;
+      };
+      const rect = element.getBoundingClientRect();
+      const style = win.getComputedStyle(element);
+      if (!element.isConnected || hiddenByTree(element)
+        || element.getClientRects().length === 0 || rect.width <= 0 || rect.height <= 0
+        || style.pointerEvents === "none") {
+        return { ok: false as const, reason: "not-visible" };
+      }
+      const viewportWidth = Number(win.innerWidth || doc.documentElement?.clientWidth || 0);
+      const viewportHeight = Number(win.innerHeight || doc.documentElement?.clientHeight || 0);
+      const visibleRect = {
+        left: Math.max(0, rect.left),
+        top: Math.max(0, rect.top),
+        right: Math.min(viewportWidth, rect.right),
+        bottom: Math.min(viewportHeight, rect.bottom),
+      };
+      const clips = (value: unknown): boolean => (
+        value === "auto" || value === "clip" || value === "hidden" || value === "scroll"
+      );
+      for (let current = element.parentElement; current; current = current.parentElement) {
+        const currentStyle = win.getComputedStyle(current);
+        if (!clips(currentStyle.overflowX) && !clips(currentStyle.overflowY)) continue;
+        const currentRect = current.getBoundingClientRect();
+        if (clips(currentStyle.overflowX)) {
+          visibleRect.left = Math.max(visibleRect.left, currentRect.left);
+          visibleRect.right = Math.min(visibleRect.right, currentRect.right);
+        }
+        if (clips(currentStyle.overflowY)) {
+          visibleRect.top = Math.max(visibleRect.top, currentRect.top);
+          visibleRect.bottom = Math.min(visibleRect.bottom, currentRect.bottom);
+        }
+      }
+      if (!Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight)
+        || viewportWidth <= 0 || viewportHeight <= 0
+        || visibleRect.right <= visibleRect.left || visibleRect.bottom <= visibleRect.top) {
+        return { ok: false as const, reason: "not-visible" };
+      }
+      const insetX = Math.min(1, (visibleRect.right - visibleRect.left) / 2);
+      const insetY = Math.min(1, (visibleRect.bottom - visibleRect.top) / 2);
+      const centerX = (visibleRect.left + visibleRect.right) / 2;
+      const centerY = (visibleRect.top + visibleRect.bottom) / 2;
+      const hitPoints = [
+        [centerX, centerY],
+        [visibleRect.left + insetX, visibleRect.top + insetY],
+        [visibleRect.right - insetX, visibleRect.top + insetY],
+        [visibleRect.left + insetX, visibleRect.bottom - insetY],
+        [visibleRect.right - insetX, visibleRect.bottom - insetY],
+      ];
+      const canReceivePointer = hitPoints.some(([x, y]) => {
+        const top = typeof doc.elementsFromPoint === "function"
+          ? doc.elementsFromPoint(x, y)[0]
+          : doc.elementFromPoint?.(x, y);
+        return top === element || (top && typeof element.contains === "function" && element.contains(top));
+      });
+      if (!canReceivePointer) return { ok: false as const, reason: "not-visible" };
+      const tagName = String(element.tagName || "").toLowerCase();
+      const roleValue = element.getAttribute("role");
+      const role = typeof roleValue === "string" && roleValue.trim().length > 0
+        ? roleValue.trim().toLowerCase()
+        : null;
+      const disabled = element.disabled === true
+        || (typeof element.matches === "function" && element.matches(":disabled"))
+        || element.getAttribute("aria-disabled")?.toLowerCase() === "true";
+      if (disabled) return { ok: false as const, reason: "disabled" };
+      let action: PrototypeMarkerRuntimeObservation["action"] | null = null;
+      if (input.trigger === "submit") {
+        if (tagName === "form") action = "form";
+        else {
+          const type = String(element.type || "").toLowerCase();
+          const submitControl = (tagName === "button" && (type === "" || type === "submit"))
+            || (tagName === "input" && (type === "submit" || type === "image"));
+          if (submitControl && element.form) action = "submit-control";
+        }
+      } else if (tagName === "button") action = "button";
+      else if ((tagName === "a" || tagName === "area") && element.hasAttribute("href")) action = "link";
+      else if (tagName === "input" || tagName === "select" || tagName === "textarea") action = "input-control";
+      else if (tagName === "summary") action = "summary";
+      else if (role !== null && [
+        "button", "link", "menuitem", "option", "tab", "switch", "checkbox", "radio",
+      ].includes(role) && Number(element.tabIndex) >= 0) action = "semantic-control";
+      if (action === null) return { ok: false as const, reason: "trigger-incompatible" };
+      return {
+        ok: true as const,
+        receiptNonce: input.receiptNonce,
+        observation: { tagName, role, action, visible: true as const },
+      };
+    }, {
+      designNodeId,
+      trigger,
+      receiptNonce,
+    }), signal, timeoutMs, "Prototype marker runtime probe");
+    if (!result.ok) {
+      throw new Error(`Prototype marker runtime probe failed: ${result.reason}`);
+    }
+    if (result.receiptNonce !== receiptNonce) {
+      throw new Error("Prototype marker runtime receipt nonce was not acknowledged");
+    }
+    return result.observation;
+  }
+
+  private awaitPageOperation<T>(
+    operation: Promise<T>,
+    signal: AbortSignal,
+    timeoutMs: number,
+    label: string,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback();
+      };
+      const onAbort = (): void => {
+        void this.close();
+        finish(() => reject(sharinganAbortReason(signal)));
+      };
+      const timer = setTimeout(() => {
+        const timeout = new Error(`${label} timed out after ${timeoutMs}ms`);
+        timeout.name = "TimeoutError";
+        void this.close();
+        finish(() => reject(timeout));
+      }, timeoutMs);
+      signal.addEventListener("abort", onAbort, { once: true });
+      operation.then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error)),
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
 
   async screenshot(opts: { fullPage?: boolean } = {}): Promise<Buffer> {
     const shot = opts.fullPage
@@ -526,7 +750,17 @@ export class SharinganSession {
 
   async bringToFront(): Promise<void> { await this.page.bringToFront().catch(() => {}); }
 
-  async close(): Promise<void> { await this.browser.close().catch(() => {}); }
+  async close(): Promise<void> {
+    if (this.closePromise === null) {
+      if (this.lifetimeSignal && this.closeOnAbort) {
+        this.lifetimeSignal.removeEventListener("abort", this.closeOnAbort);
+      }
+      this.closeOnAbort = null;
+      this.lifetimeSignal = null;
+      this.closePromise = this.browser.close().catch(() => {});
+    }
+    await this.closePromise;
+  }
 }
 
 export const SHARINGAN_PAGE_BUDGET = 6;

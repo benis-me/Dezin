@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App.tsx";
 import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
+import { ApiError } from "../lib/api.ts";
 import type {
   ArtifactRevision,
   GenerationPlanDetail,
@@ -268,7 +269,7 @@ test("Canvas and Artifact routes preserve only their own scope-keyed Agent draft
   act(() => navigate("/projects/p-1/artifacts/artifact-p-1"));
 
   expect(await screen.findByRole("region", { name: "Artifact editor" })).toBeInTheDocument();
-  expect(screen.getByText("artifact-p-1")).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/projects/p-1/artifacts/artifact-p-1");
   expect(screen.queryByRole("region", { name: "Project canvas" })).not.toBeInTheDocument();
   expect(screen.getByTestId("project-studio-shell")).toBe(shell);
   expect(screen.getByRole("complementary", { name: "Artifact Agent" })).toBeInTheDocument();
@@ -287,15 +288,19 @@ test("Canvas and Artifact routes preserve only their own scope-keyed Agent draft
   });
 
   act(() => navigate("/projects/p-1/artifacts/artifact-p-1-b"));
-  expect(await screen.findByText("artifact-p-1-b")).toBeInTheDocument();
-  expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveValue("");
+  await waitFor(() => {
+    expect(window.location.pathname).toBe("/projects/p-1/artifacts/artifact-p-1-b");
+    expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveValue("");
+  });
   expect(screen.getByTestId("project-studio-shell")).toBe(shell);
   expect(getProject).toHaveBeenCalledTimes(1);
   expect(getWorkspace).toHaveBeenCalledTimes(1);
 
   act(() => navigate("/projects/p-1/artifacts/artifact-p-1"));
-  expect(await screen.findByText("artifact-p-1")).toBeInTheDocument();
-  expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveValue("Refine the first artifact");
+  await waitFor(() => {
+    expect(window.location.pathname).toBe("/projects/p-1/artifacts/artifact-p-1");
+    expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveValue("Refine the first artifact");
+  });
 
   act(() => navigate("/projects/p-1/canvas"));
   expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
@@ -404,8 +409,21 @@ test("Workspace canvas restores its latest live Workspace Agent Plan after re-en
   );
 
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
-  expect(screen.getByLabelText("Workspace Agent task status")).toHaveTextContent(active.plan.id);
+  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Workspace Agent task status")).not.toBeInTheDocument();
   expect(getLatestWorkspaceAgentPlanId).toHaveBeenCalledWith("p-1", expect.any(AbortSignal));
+
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  const restorePlan = screen.getByRole("button", { name: "Open build plan" });
+  expect(restorePlan).toHaveTextContent("Recent build plan");
+  expect(restorePlan).not.toHaveTextContent(active.plan.id);
+  expect(restorePlan).toHaveAttribute("title", `Build plan ${active.plan.id}`);
+  expect(screen.queryByLabelText("Workspace Agent task status")).not.toBeInTheDocument();
+
+  fireEvent.click(restorePlan);
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
 });
 
 test("background Plan results reconcile published Revisions even when the Build plan Inspector is not mounted", async () => {
@@ -486,10 +504,12 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
   );
 
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
-  expect(screen.getByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
-  const canvasNode = container.querySelector<HTMLElement>('[data-id="node-p-1"]');
-  expect(canvasNode).not.toBeNull();
-  expect(within(canvasNode!).getByText("failed")).toBeInTheDocument();
+  expect(await screen.findByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
+  await waitFor(() => {
+    expect(container.querySelector<HTMLElement>('[data-id="node-p-1"]')).not.toBeNull();
+  });
+  const canvasNode = container.querySelector<HTMLElement>('[data-id="node-p-1"]')!;
+  expect(await within(canvasNode).findByText("failed")).toBeInTheDocument();
   expect(parentObservationCalls).toBe(1);
 
   fireEvent.click(screen.getByRole("button", { name: "Retry Page with the same context" }));
@@ -499,7 +519,7 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
     failed.tasks[0]!.id,
     "same-context",
   ));
-  await waitFor(() => expect(within(canvasNode!).getByText("queued")).toBeInTheDocument());
+  await waitFor(() => expect(within(canvasNode).getByText("queued")).toBeInTheDocument());
   await waitFor(() => expect(parentObservationCalls).toBeGreaterThan(1));
 });
 
@@ -528,7 +548,9 @@ test("Artifact route restores the newest durable scoped Plan without displacing 
 
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
   const openPlan = await screen.findByRole("button", { name: "Open build plan" });
-  expect(screen.getByLabelText("Artifact Agent task status")).toHaveTextContent(exact.plan.id);
+  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).not.toHaveTextContent(exact.plan.id);
+  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
   await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(3));
   fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
@@ -586,8 +608,11 @@ test("Artifact route retries scoped Plan discovery after a transient lookup fail
 
   await waitFor(() => expect(getLatestScopedArtifactPlanId).toHaveBeenCalledTimes(2), { timeout: 1_500 });
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
-  expect(screen.getByLabelText("Artifact Agent task status")).toHaveTextContent(exact.plan.id);
-  fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+  const openPlan = screen.getByRole("button", { name: "Open build plan" });
+  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).not.toHaveTextContent(exact.plan.id);
+  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
+  fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 });
 
@@ -620,8 +645,11 @@ test("Artifact route discovers a scoped Plan created by another viewer after the
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
   await waitFor(() => expect(getLatestScopedArtifactPlanId).toHaveBeenCalledTimes(2), { timeout: 3_000 });
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
-  expect(screen.getByLabelText("Artifact Agent task status")).toHaveTextContent(exact.plan.id);
-  fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+  const openPlan = screen.getByRole("button", { name: "Open build plan" });
+  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).not.toHaveTextContent(exact.plan.id);
+  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
+  fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 });
 
@@ -743,7 +771,7 @@ test("revision routes stay pinned to the URL identity and ignore an older same-p
     return value!;
   });
   expect(stage).toBeInTheDocument();
-  expect(screen.getByText("Pinned Revision · read-only")).toBeInTheDocument();
+  expect(screen.getByLabelText("Page design. Revision 2. Pinned Revision · read-only.")).toBeInTheDocument();
   expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(1);
   expect(acquirePreviewTargetLease.mock.calls[0]?.[1].revisionId).toBe("revision-2");
 
@@ -812,7 +840,7 @@ test("candidate Review routes resolve the exact Generation Attempt instead of a 
     attempt: 2,
   }, expect.any(AbortSignal));
   expect(getArtifactRevision).not.toHaveBeenCalled();
-  expect(screen.getByText("Read-only preview")).toBeInTheDocument();
+  expect(screen.getByLabelText("Page design. No revision. Read-only preview.")).toBeInTheDocument();
   expect(screen.getByRole("status", { name: "Artifact Agent task status" })).toHaveTextContent(
     "read-only while reviewing a Generation candidate",
   );
@@ -960,6 +988,39 @@ test("a failed Studio load can retry without remounting the route", async () => 
   expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
   expect(getProject).toHaveBeenCalledTimes(2);
   expect(getWorkspace).toHaveBeenCalledTimes(2);
+});
+
+test("a transient gateway failure recovers without replacing the Studio with an error screen", async () => {
+  vi.useFakeTimers();
+  try {
+    let attempt = 0;
+    const getProject = vi.fn(async (id: string) => {
+      attempt += 1;
+      if (attempt === 1) throw new ApiError(502, "HTTP 502");
+      return project(id);
+    });
+    const getWorkspace = vi.fn(async (id: string) => readyWorkspace(id));
+    render(
+      <ApiProvider client={makeFakeApi({ getProject, getWorkspace })}>
+        <App />
+      </ApiProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("status", { name: "Loading project canvas" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(screen.getByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+    expect(getProject).toHaveBeenCalledTimes(2);
+    expect(getWorkspace).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("the Settings overlay does not unmount a project Studio or lose its Agent draft", async () => {

@@ -2,6 +2,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
 import {
+  ApiError,
   createApiClient,
   type PreviewTarget,
   type PreviewTargetLease,
@@ -107,6 +108,63 @@ test("resolves current before acquiring a lease for that exact immutable revisio
 
   expect(await screen.findByText("revision-1:lease-revision-1")).toBeInTheDocument();
   expect(calls).toEqual(["resolve:artifact-current", "acquire:revision-1"]);
+});
+
+test("recovers from a transient preview gateway failure without requiring a manual retry", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
+  const current = resolved("artifact-1", "revision-1");
+  const resolvePreviewTarget = vi.fn(async () => current);
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, target: ResolvedPreviewTarget) => {
+    if (acquirePreviewTargetLease.mock.calls.length === 1) {
+      throw new ApiError(502, "HTTP 502");
+    }
+    return lease(target);
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({ resolvePreviewTarget, acquirePreviewTargetLease })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "loading");
+  expect(screen.queryByText("HTTP 502")).not.toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+  expect(screen.getByText("revision-1:lease-revision-1")).toBeInTheDocument();
+  expect(resolvePreviewTarget).toHaveBeenCalledTimes(2);
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(2);
+});
+
+test("surfaces a repeated preview gateway failure after the bounded recovery budget", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
+  const current = resolved("artifact-1", "revision-1");
+  const resolvePreviewTarget = vi.fn(async () => current);
+  const acquirePreviewTargetLease = vi.fn(async () => {
+    throw new ApiError(502, "HTTP 502");
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({ resolvePreviewTarget, acquirePreviewTargetLease })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+  expect(screen.getByText("HTTP 502")).toBeInTheDocument();
+  expect(resolvePreviewTarget).toHaveBeenCalledTimes(4);
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(4);
 });
 
 test("releases a stale acquired lease and never lets an older target replace the active preview", async () => {
@@ -219,6 +277,119 @@ test("renews an owned target lease and releases it on project change", async () 
   expect(screen.getByText("revision-2:lease-revision-2")).toBeInTheDocument();
 });
 
+test("reacquires the immutable preview after a transient lease-renewal gateway failure", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
+  const current = resolved("artifact-1", "revision-1");
+  const resolvePreviewTarget = vi.fn(async () => current);
+  const releasePreviewTargetLease = vi.fn(async () => {});
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, target: ResolvedPreviewTarget) => ({
+    ...lease(target, `lease-${acquirePreviewTargetLease.mock.calls.length}`),
+    expiresAt: Date.now() + 60_000,
+  }));
+  const renewPreviewTargetLease = vi.fn(async () => {
+    throw new ApiError(502, "HTTP 502");
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget,
+      acquirePreviewTargetLease,
+      renewPreviewTargetLease,
+      releasePreviewTargetLease,
+    })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(screen.getByText("revision-1:lease-1")).toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "loading");
+  expect(screen.queryByText("HTTP 502")).not.toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(screen.getByText("revision-1:lease-2")).toBeInTheDocument();
+  expect(resolvePreviewTarget).toHaveBeenCalledTimes(2);
+  expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-1");
+});
+
+test("re-resolves the exact preview target when renewal reports an expired lease as 404", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
+  const target: PreviewTarget = {
+    kind: "artifact-current",
+    projectId: "project-1",
+    artifactId: "artifact-1",
+    trackId: "track-1",
+  };
+  const current = resolved("artifact-1", "revision-1");
+  const resolvePreviewTarget = vi.fn(async (_projectId: string, _target: PreviewTarget) => current);
+  const releasePreviewTargetLease = vi.fn(async () => {});
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, value: ResolvedPreviewTarget) => ({
+    ...lease(value, `lease-${acquirePreviewTargetLease.mock.calls.length}`),
+    expiresAt: Date.now() + 60_000,
+  }));
+  const renewPreviewTargetLease = vi.fn(async () => {
+    throw new ApiError(404, "preview lease not found");
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget,
+      acquirePreviewTargetLease,
+      renewPreviewTargetLease,
+      releasePreviewTargetLease,
+    })}>
+      <PreviewProbe projectId="project-1" target={target} />
+    </ApiProvider>,
+  );
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(screen.getByText("revision-1:lease-1")).toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "loading");
+  expect(screen.queryByText("preview lease not found")).not.toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(screen.getByText("revision-1:lease-2")).toBeInTheDocument();
+  expect(resolvePreviewTarget.mock.calls.map(([projectId, requested]) => [projectId, requested])).toEqual([
+    ["project-1", target],
+    ["project-1", target],
+  ]);
+  expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-1");
+});
+
+test("keeps an initial preview-target 404 terminal instead of treating it as an expired owned lease", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
+  const current = resolved("artifact-1", "revision-1");
+  const resolvePreviewTarget = vi.fn(async () => current);
+  const acquirePreviewTargetLease = vi.fn(async () => {
+    throw new ApiError(404, "preview target not found");
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({ resolvePreviewTarget, acquirePreviewTargetLease })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(screen.getByText("preview target not found")).toBeInTheDocument();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(screen.getByText("preview target not found")).toBeInTheDocument();
+  expect(resolvePreviewTarget).toHaveBeenCalledTimes(1);
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(1);
+});
+
 test("fails closed when renewal rotates the bridge capability", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
@@ -254,11 +425,15 @@ test("fails closed when renewal rotates the bridge capability", async () => {
   expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-revision-1");
 });
 
-test("expires an owned target lease even when renewal never settles", async () => {
+test("reacquires an immutable preview when renewal does not settle before lease expiry", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-07-14T00:00:00Z"));
   const current = resolved("artifact-1", "revision-1");
   const releasePreviewTargetLease = vi.fn(async () => {});
+  const acquirePreviewTargetLease = vi.fn(async (_projectId: string, target: ResolvedPreviewTarget) => ({
+    ...lease(target, `lease-${acquirePreviewTargetLease.mock.calls.length}`),
+    expiresAt: Date.now() + (acquirePreviewTargetLease.mock.calls.length === 1 ? 100 : 60_000),
+  }));
   let renewalSignal: AbortSignal | undefined;
   const renewPreviewTargetLease = vi.fn((_leaseId: string, signal?: AbortSignal) => {
     renewalSignal = signal;
@@ -266,10 +441,7 @@ test("expires an owned target lease even when renewal never settles", async () =
   });
   const api = makeFakeApi({
     resolvePreviewTarget: async () => current,
-    acquirePreviewTargetLease: async (_projectId, target) => ({
-      ...lease(target),
-      expiresAt: Date.now() + 100,
-    }),
+    acquirePreviewTargetLease,
     renewPreviewTargetLease,
     releasePreviewTargetLease,
   });
@@ -285,12 +457,16 @@ test("expires an owned target lease even when renewal never settles", async () =
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "ready");
 
-  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
 
-  expect(renewPreviewTargetLease).toHaveBeenCalledWith("lease-revision-1", expect.any(AbortSignal));
-  expect(screen.getByText("Preview lease expired before renewal completed.")).toBeInTheDocument();
-  expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-revision-1");
+  expect(renewPreviewTargetLease).toHaveBeenCalledWith("lease-1", expect.any(AbortSignal));
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "loading");
+  expect(screen.queryByText("Preview lease expired before renewal completed.")).not.toBeInTheDocument();
+  expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-1");
   expect(renewalSignal?.aborted).toBe(true);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(screen.getByText("revision-1:lease-2")).toBeInTheDocument();
 });
 
 test("rejects an acquired lease whose explicit nonce does not match its URL fragment", async () => {

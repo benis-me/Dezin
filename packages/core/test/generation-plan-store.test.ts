@@ -344,6 +344,7 @@ test("an exact Research direction selection survives restart inside the immutabl
     resourceId: research.resource.id,
     revisionId: revision.id,
     directionId: "quiet-editorial",
+    directionIds: ["quiet-editorial", "expressive-editorial"],
   };
   const proposal = store.workspace.createProposal({
     projectId: project.id,

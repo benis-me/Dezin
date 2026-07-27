@@ -1639,7 +1639,6 @@ WHEN NEW.status = 'succeeded' AND OLD.status IS NOT 'succeeded' AND NOT EXISTS (
             AND mapping.revision_id = NEW.result_resource_revision_id
         )) OR
       (NEW.target_type = 'workspace' AND NEW.kind = 'prototype-validation'
-        AND NEW.result_snapshot_id = attempt.expected_snapshot_id
         AND EXISTS (
           SELECT 1 FROM generation_task_validation_results validation
           WHERE validation.task_id = NEW.id AND validation.plan_id = NEW.plan_id
@@ -1647,6 +1646,26 @@ WHEN NEW.status = 'succeeded' AND OLD.status IS NOT 'succeeded' AND NOT EXISTS (
             AND validation.attempt = NEW.current_attempt
             AND validation.snapshot_id = NEW.result_snapshot_id
             AND validation.created_at = NEW.finished_at
+            AND (
+              (
+                NEW.result_snapshot_id = attempt.expected_snapshot_id
+                AND json_extract(validation.evidence_json, '$.protocol')
+                  = 'dezin-prototype-validation-v1'
+              )
+              OR
+              (
+                NEW.result_snapshot_id = workspace.active_snapshot_id
+                AND json_extract(validation.evidence_json, '$.protocol')
+                  = 'dezin-prototype-finalization-v2'
+                AND EXISTS (
+                  SELECT 1 FROM workspace_snapshots final_snapshot
+                  WHERE final_snapshot.id = NEW.result_snapshot_id
+                    AND final_snapshot.workspace_id = NEW.workspace_id
+                    AND final_snapshot.parent_snapshot_id = attempt.expected_snapshot_id
+                    AND final_snapshot.graph_revision = validation.graph_revision
+                )
+              )
+            )
         )) OR
       (NEW.target_type = 'workspace' AND NEW.kind IN ('checkpoint','propagation-publish')
         AND workspace.active_snapshot_id = NEW.result_snapshot_id
@@ -2579,8 +2598,27 @@ WHEN NEW.status = 'succeeded' AND OLD.status IS NOT 'succeeded' AND NOT (
             WHERE validation.task_id = NEW.task_id AND validation.plan_id = NEW.plan_id
               AND validation.workspace_id = NEW.workspace_id
               AND validation.attempt = NEW.attempt
-              AND validation.snapshot_id = NEW.expected_snapshot_id
               AND validation.created_at = NEW.finished_at
+              AND (
+                (
+                  validation.snapshot_id = NEW.expected_snapshot_id
+                  AND json_extract(validation.evidence_json, '$.protocol')
+                    = 'dezin-prototype-validation-v1'
+                )
+                OR
+                (
+                  validation.snapshot_id = workspace.active_snapshot_id
+                  AND json_extract(validation.evidence_json, '$.protocol')
+                    = 'dezin-prototype-finalization-v2'
+                  AND EXISTS (
+                    SELECT 1 FROM workspace_snapshots final_snapshot
+                    WHERE final_snapshot.id = validation.snapshot_id
+                      AND final_snapshot.workspace_id = NEW.workspace_id
+                      AND final_snapshot.parent_snapshot_id = NEW.expected_snapshot_id
+                      AND final_snapshot.graph_revision = validation.graph_revision
+                  )
+                )
+              )
           )) OR
         (task.target_type = 'workspace' AND task.kind IN ('checkpoint','propagation-publish')
           AND workspace.active_snapshot_id IS NOT NEW.expected_snapshot_id
@@ -2614,7 +2652,10 @@ WHEN typeof(NEW.created_at) <> 'integer'
   OR json_type(NEW.artifact_revision_ids_json) <> 'array'
   OR json_type(NEW.resource_revision_ids_json) <> 'array'
   OR json_type(NEW.evidence_json) <> 'object'
-  OR json_extract(NEW.evidence_json, '$.protocol') IS NOT 'dezin-prototype-validation-v1'
+  OR json_extract(NEW.evidence_json, '$.protocol') NOT IN (
+    'dezin-prototype-validation-v1',
+    'dezin-prototype-finalization-v2'
+  )
   OR NOT EXISTS (
     SELECT 1
     FROM generation_task_attempts attempt
@@ -2627,6 +2668,9 @@ WHEN typeof(NEW.created_at) <> 'integer'
     JOIN workspace_snapshots snapshot
       ON snapshot.id = attempt.expected_snapshot_id
      AND snapshot.workspace_id = attempt.workspace_id
+    JOIN workspace_snapshots result_snapshot
+      ON result_snapshot.id = NEW.snapshot_id
+     AND result_snapshot.workspace_id = attempt.workspace_id
     WHERE attempt.task_id = NEW.task_id
       AND attempt.plan_id = NEW.plan_id
       AND attempt.workspace_id = NEW.workspace_id
@@ -2655,12 +2699,32 @@ WHEN typeof(NEW.created_at) <> 'integer'
         json_extract(task.resource_limits_json, '$.maxOutputBytes')
       )
       AND plan.status = 'running'
-      AND NEW.snapshot_id = attempt.expected_snapshot_id
-      AND NEW.graph_revision = snapshot.graph_revision
       AND snapshot.kernel_revision_id = attempt.kernel_revision_id
-      AND json_extract(NEW.evidence_json, '$.snapshot.id') = snapshot.id
-      AND json_extract(NEW.evidence_json, '$.snapshot.graphRevision') = snapshot.graph_revision
-      AND json_extract(NEW.evidence_json, '$.snapshot.kernelRevisionId') = snapshot.kernel_revision_id
+      AND (
+        (
+          json_extract(NEW.evidence_json, '$.protocol') = 'dezin-prototype-validation-v1'
+          AND NEW.snapshot_id = attempt.expected_snapshot_id
+          AND NEW.graph_revision = snapshot.graph_revision
+          AND json_extract(NEW.evidence_json, '$.snapshot.id') = snapshot.id
+          AND json_extract(NEW.evidence_json, '$.snapshot.graphRevision') = snapshot.graph_revision
+          AND json_extract(NEW.evidence_json, '$.snapshot.kernelRevisionId') = snapshot.kernel_revision_id
+        )
+        OR
+        (
+          json_extract(NEW.evidence_json, '$.protocol') = 'dezin-prototype-finalization-v2'
+          AND result_snapshot.id <> snapshot.id
+          AND result_snapshot.parent_snapshot_id = snapshot.id
+          AND result_snapshot.graph_revision = snapshot.graph_revision + 1
+          AND result_snapshot.kernel_revision_id = snapshot.kernel_revision_id
+          AND NEW.graph_revision = result_snapshot.graph_revision
+          AND json_extract(NEW.evidence_json, '$.baseSnapshot.id') = snapshot.id
+          AND json_extract(NEW.evidence_json, '$.baseSnapshot.graphRevision') = snapshot.graph_revision
+          AND json_extract(NEW.evidence_json, '$.baseSnapshot.kernelRevisionId') = snapshot.kernel_revision_id
+          AND json_extract(NEW.evidence_json, '$.snapshot.id') = result_snapshot.id
+          AND json_extract(NEW.evidence_json, '$.snapshot.graphRevision') = result_snapshot.graph_revision
+          AND json_extract(NEW.evidence_json, '$.snapshot.kernelRevisionId') = result_snapshot.kernel_revision_id
+        )
+      )
       AND json_array_length(NEW.artifact_revision_ids_json) = (
         SELECT COUNT(*) FROM generation_task_attempt_dependency_outputs output
         WHERE output.task_id = attempt.task_id

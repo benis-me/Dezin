@@ -798,8 +798,10 @@ test("exact Resource Revision view and paged history use strict browser decoders
     },
     content: { fileName: "brief.txt", previewKind: "text", text: "Exact bytes", textTruncated: false },
   };
-  expect(decodeResourceRevisionView(view)).toEqual(view);
-  expect(() => decodeResourceRevisionView({ ...view, unexpected: true })).toThrow(/unsupported field unexpected/);
+  await expect(decodeResourceRevisionView(view)).resolves.toEqual(view);
+  await expect(decodeResourceRevisionView({ ...view, unexpected: true })).rejects.toThrow(
+    /unsupported field unexpected/,
+  );
   const externalView = {
     ...view,
     kind: "external-reference",
@@ -813,11 +815,11 @@ test("exact Resource Revision view and paged history use strict browser decoders
       textTruncated: false,
     },
   };
-  expect(decodeResourceRevisionView(externalView)).toEqual(externalView);
-  expect(() => decodeResourceRevisionView({
+  await expect(decodeResourceRevisionView(externalView)).resolves.toEqual(externalView);
+  await expect(decodeResourceRevisionView({
     ...externalView,
     content: { ...externalView.content, sourceUrl: "https://example.test?access_token=secret" },
-  })).toThrow(/canonical credential-free/);
+  })).rejects.toThrow(/canonical credential-free/);
   expect(decodeResourceRevisionHistoryPage({ items: [revision], nextCursor: "opaque-cursor" })).toEqual({
     items: [revision],
     nextCursor: "opaque-cursor",
@@ -843,6 +845,107 @@ test("exact Resource Revision view and paged history use strict browser decoders
     "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/history?limit=20&cursor=opaque%20cursor",
     undefined,
   );
+});
+
+test("Moodboard Revision codec preserves v3 Asset-to-direction audit fields and rejects substituted assignments", async () => {
+  const directionChecksum = "b".repeat(64);
+  const directionContract = {
+    protocol: "dezin.moodboard-direction-contract.v1",
+    contextPackId: "context-pack-direction-bound",
+    checksum: "c".repeat(64),
+    directions: [{
+      resourceId: "research-1",
+      revisionId: "research-revision-1",
+      id: "direction-field-notes",
+      title: "Field Notes",
+      checksum: directionChecksum,
+      assetId: "asset-1",
+    }],
+  };
+  const view = {
+    protocol: "dezin.resource-revision-view.v1",
+    kind: "moodboard",
+    resource: {
+      id: "resource-moodboard",
+      workspaceId: "workspace-1",
+      kind: "moodboard",
+      title: "Direction-bound Moodboard",
+      headRevisionId: "revision-moodboard",
+      defaultPinPolicy: "follow-head",
+      archivedAt: null,
+      createdAt: 1,
+      updatedAt: 2,
+    },
+    revision: {
+      id: "revision-moodboard",
+      workspaceId: "workspace-1",
+      resourceId: "resource-moodboard",
+      sequence: 1,
+      parentRevisionId: null,
+      summary: "Frozen direction-bound Moodboard",
+      checksum: "d".repeat(64),
+      createdAt: 2,
+    },
+    observed: { headRevisionId: "revision-moodboard", snapshotId: "snapshot-1" },
+    payload: {
+      mimeType: "application/json",
+      byteLength: 1_024,
+      checksum: "e".repeat(64),
+      previewKind: "text",
+      url: null,
+      downloadUrl: "/api/projects/project-1/resources/resource-moodboard/revisions/revision-moodboard/payload",
+    },
+    content: {
+      board: {
+        id: "board-1",
+        name: "Direction-bound Moodboard",
+        coverAssetId: "asset-1",
+        directionContract,
+      },
+      nodes: [],
+      assets: [{
+        id: "asset-1",
+        kind: "image",
+        fileName: "field-notes.png",
+        mimeType: "image/png",
+        width: 768,
+        height: 512,
+        byteLength: 128,
+        checksum: "f".repeat(64),
+        url: "/api/projects/project-1/resources/resource-moodboard/revisions/revision-moodboard/embedded-assets/asset-1",
+        downloadUrl: "/api/projects/project-1/resources/resource-moodboard/revisions/revision-moodboard/embedded-assets/asset-1?download=1",
+        directionId: "direction-field-notes",
+        directionTitle: "Field Notes",
+        directionChecksum,
+      }],
+      totalNodeCount: 0,
+      totalAssetCount: 1,
+      nodesTruncated: false,
+      assetsTruncated: false,
+    },
+  } as const;
+
+  await expect(decodeResourceRevisionView(view)).resolves.toEqual(view);
+  await expect(decodeResourceRevisionView({
+    ...view,
+    content: {
+      ...view.content,
+      assets: [{
+        ...view.content.assets[0],
+        directionId: "direction-substituted",
+      }],
+    },
+  })).rejects.toThrow(/direction assignment is invalid/);
+  await expect(decodeResourceRevisionView({
+    ...view,
+    content: {
+      ...view.content,
+      assets: [{
+        ...view.content.assets[0],
+        directionChecksum: null,
+      }],
+    },
+  })).rejects.toThrow(/direction assignment is incomplete/);
 });
 
 test("exact Resource media bytes are fetched with daemon authentication and never a token query", async () => {

@@ -265,7 +265,7 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: -0.005em;
@@ -295,7 +295,7 @@
 
 .dezin-generation-plan__task-meta {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 

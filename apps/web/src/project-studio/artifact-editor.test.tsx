@@ -21,6 +21,7 @@ import type {
   ResolvedPreviewTarget,
   ScopedAgentTurnReceipt,
   WorkspaceArtifact,
+  WorkspaceDesignNodeLocator,
 } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -596,10 +597,16 @@ test("an Artifact without a Head Revision renders a not-generated state without 
 });
 
 async function dispatchSelection(
-  locator = { designNodeId: "hero-title", sourcePath: "src/Hero.tsx", selector: "[data-design-node-id='hero-title']" },
+  locator: WorkspaceDesignNodeLocator = {
+    designNodeId: "hero-title",
+    sourcePath: "src/Hero.tsx",
+    selector: "[data-design-node-id='hero-title']",
+  },
   previewTitle = "Storefront home preview",
   text = "Objects for a considered home",
   textComplete = true,
+  tag = "h1",
+  messageFields: Record<string, unknown> = {},
 ): Promise<string> {
   const frame = screen.getByTitle<HTMLIFrameElement>(previewTitle);
   const bridge = await connectPreviewBridge(frame);
@@ -622,11 +629,12 @@ async function dispatchSelection(
   await sendPreviewBridgeMessage(bridge, {
     type: "element-selected",
     locator,
-    tag: "h1",
+    tag,
     ...(textComplete ? { text } : {}),
     textPreview: text.replace(/\s+/g, " ").trim().slice(0, 160),
     textComplete,
     rect: { x: 96, y: 120, w: 640, h: 72 },
+    ...messageFields,
   });
   return frameAttemptId as string;
 }
@@ -841,12 +849,36 @@ test("sizes compact header actions from the editor surface instead of the outer 
   expect(css).toMatch(/\.artifact-editor\s*\{[^}]*container:\s*artifact-editor\s*\/\s*inline-size;/s);
 
   const start = css.indexOf("@container artifact-editor (max-width: 900px)");
-  const end = css.indexOf("@media (max-width: 640px)", start);
+  const end = css.indexOf("@container artifact-editor (max-width: 620px)", start);
   const compactDesktopRules = css.slice(start, end);
 
   expect(compactDesktopRules).not.toMatch(/\.artifact-header__controls\s*\{[^}]*overflow-x:\s*auto/s);
   expect(compactDesktopRules).toMatch(/\.artifact-header__controls\s*\{[^}]*overflow:\s*hidden/s);
-  expect(compactDesktopRules).toMatch(/\.artifact-action__label\s*\{[^}]*display:\s*none/s);
+  expect(compactDesktopRules).toMatch(
+    /\.artifact-action--return\s+\.artifact-action__label\s*\{[^}]*display:\s*none/s,
+  );
+  expect(compactDesktopRules).not.toMatch(
+    /\.artifact-action--primary\s+\.artifact-action__label\s*\{[^}]*display:\s*none/s,
+  );
+});
+
+test("keeps Frame, Zoom, and Present direct while moving Versions and Compare into More on a constrained Studio surface", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/artifact/artifact-editor.css`, "utf8");
+  expect(css).toMatch(/--artifact-bar-height:\s*56px/);
+
+  const start = css.indexOf("@container artifact-editor (max-width: 1080px)");
+  const end = css.indexOf("@container artifact-editor (max-width: 900px)", start);
+  const constrainedRules = css.slice(start, end);
+  const wideRules = css.slice(0, start);
+
+  expect(start).toBeGreaterThan(-1);
+  expect(wideRules).toMatch(/\.artifact-header\s+\.artifact-more\s*\{[^}]*display:\s*none/s);
+  expect(wideRules).not.toMatch(/\.artifact-action--secondary\s*\{[^}]*display:\s*none/s);
+  expect(constrainedRules).toMatch(/\.artifact-action--secondary\s*\{[^}]*display:\s*none/s);
+  expect(constrainedRules).toMatch(/\.artifact-header\s+\.artifact-more\s*\{[^}]*display:\s*flex/s);
+  expect(constrainedRules).not.toMatch(/\.artifact-tool-group--desktop\s*\{[^}]*display:\s*none/s);
+  expect(constrainedRules).not.toMatch(/\.artifact-frame-select\s*\{[^}]*display:\s*none/s);
+  expect(constrainedRules).not.toMatch(/\.artifact-action--primary\s*\{[^}]*display:\s*none/s);
 });
 
 test("keeps priority artifact controls visible and moves secondary tools into More at 420px", () => {
@@ -1218,6 +1250,47 @@ test("activating the picker from Inspector moves keyboard focus into the preview
   expect(frame).toHaveFocus();
 });
 
+test("keeps the Artifact UUID out of the primary header path while retaining it as title metadata", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  const header = document.querySelector<HTMLElement>(".artifact-header");
+  expect(header).not.toBeNull();
+  expect(within(header!).queryByText(artifact.id)).not.toBeInTheDocument();
+  expect(within(header!).getByTitle(`Storefront home · Artifact ${artifact.id}`)).toBeInTheDocument();
+});
+
+test("uses the shared two-line Studio header hierarchy with compact Revision and checkout badges", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  const header = document.querySelector<HTMLElement>(".artifact-header");
+  expect(header).not.toBeNull();
+  expect(header).toHaveClass("h-14", "min-h-14");
+  expect(within(header!).getByText("Page design")).toBeInTheDocument();
+  expect(within(header!).getByText("Revision 4")).toHaveAttribute("data-tone", "neutral");
+  expect(within(header!).getByText("Current")).toHaveAttribute("data-tone", "active");
+  expect(within(header!).queryByText("Current Head")).not.toBeInTheDocument();
+});
+
 test("renders a focused design-tool editor in the persistent Studio and bridges selected element Context", async () => {
   render(
     <ApiProvider client={editorApi()}>
@@ -1263,6 +1336,334 @@ test("renders a focused design-tool editor in the persistent Studio and bridges 
   expect(screen.getByRole("button", { name: "Select an element in the preview" })).toBeInTheDocument();
 });
 
+test("a locator-only selection uses one designer-readable name across Inspector, Agent Context, and preview status", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  const internalLocator = "selector:div#root > main:nth-of-type(1) > img:nth-of-type(1)";
+  await dispatchSelection(
+    {
+      designNodeId: internalLocator,
+      selector: "div#root > main:nth-of-type(1) > img:nth-of-type(1)",
+    },
+    "Storefront home preview",
+    "",
+    true,
+    "img",
+  );
+
+  expect(await screen.findByText("Image", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+  expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Image");
+  expect(document.querySelector(".artifact-stage__status")).toHaveTextContent("Selected · Image");
+  expect(screen.getByLabelText("Selected Agent Context")).not.toHaveTextContent(internalLocator);
+  expect(document.querySelector(".artifact-stage__status")).not.toHaveTextContent(internalLocator);
+});
+
+test("labels a stable marked ancestor from the actual clicked descendant without changing its locator", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  const aggregate = "Desktop frame Poster-first film discovery Schedule Checkout";
+  await dispatchSelection(
+    {
+      designNodeId: "hero-banner",
+      sourcePath: "src/HeroBanner.tsx",
+      selector: "[data-design-node-id='hero-banner']",
+    },
+    "Storefront home preview",
+    aggregate,
+    true,
+    "article",
+    {
+      attrs: { ariaLabel: "", screenLabel: "" },
+      displayTarget: {
+        tag: "h1",
+        textPreview: "Poster-first film discovery",
+        attrs: { ariaLabel: "", screenLabel: "" },
+      },
+    },
+  );
+
+  const cardTitle = await screen.findByText("Poster-first film discovery", {
+    selector: ".artifact-selection-card__title strong",
+  });
+  expect(cardTitle).toBeInTheDocument();
+  expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Poster-first film discovery");
+  expect(document.querySelector(".artifact-stage__status")).toHaveTextContent(
+    "Selected · Poster-first film discovery",
+  );
+  expect(screen.getByLabelText("Selected Agent Context")).not.toHaveTextContent(aggregate);
+  expect(screen.getByText("Technical locator").closest("details")).toHaveTextContent("Technical locator");
+});
+
+test("prefers explicit labels and uses structural semantics instead of container text", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  await dispatchSelection(
+    {
+      designNodeId: "hero-banner",
+      sourcePath: "src/HeroBanner.tsx",
+      selector: "[data-design-node-id='hero-banner']",
+    },
+    "Storefront home preview",
+    "Desktop frame Poster-first film discovery Schedule Checkout",
+    true,
+    "article",
+    {
+      attrs: { ariaLabel: "", screenLabel: "Hero Banner" },
+      displayTarget: {
+        tag: "h1",
+        textPreview: "Poster-first film discovery",
+        attrs: { ariaLabel: "Festival hero heading", screenLabel: "" },
+      },
+    },
+  );
+  expect(await screen.findByText("Hero Banner", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+
+  await sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
+    type: "element-selected",
+    locator: {
+      designNodeId: "programme-panel",
+      sourcePath: "src/Programme.tsx",
+      selector: "[data-design-node-id='programme-panel']",
+    },
+    tag: "article",
+    text: "Friday programme Opening gala Director conversation Closing night",
+    textPreview: "Friday programme Opening gala Director conversation Closing night",
+    textComplete: true,
+    attrs: { ariaLabel: "", screenLabel: "" },
+    displayTarget: {
+      tag: "article",
+      textPreview: "Friday programme Opening gala Director conversation Closing night",
+      attrs: { ariaLabel: "", screenLabel: "" },
+    },
+    rect: { x: 48, y: 120, w: 720, h: 480 },
+  });
+
+  expect(await screen.findByText("Article", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+  expect(screen.getByLabelText("Selected Agent Context")).not.toHaveTextContent(
+    "Friday programme Opening gala Director conversation Closing night",
+  );
+});
+
+test("keeps short interactive text but never promotes UUID-like target text into the designer label", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  await dispatchSelection(
+    {
+      designNodeId: "buy-tickets",
+      sourcePath: "src/Hero.tsx",
+      selector: "[data-design-node-id='buy-tickets']",
+    },
+    "Storefront home preview",
+    "Buy tickets",
+    true,
+    "button",
+    {
+      displayTarget: {
+        tag: "button",
+        textPreview: "Buy tickets",
+        attrs: { ariaLabel: "", screenLabel: "" },
+      },
+    },
+  );
+  expect(await screen.findByText("Buy tickets", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+
+  const uuid = "5393216f-013b-413d-94ab-f2eb3f3e2eaf";
+  await sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
+    type: "element-selected",
+    locator: {
+      designNodeId: "technical-heading",
+      selector: "[data-design-node-id='technical-heading']",
+    },
+    tag: "h2",
+    text: uuid,
+    textPreview: uuid,
+    textComplete: true,
+    displayTarget: {
+      tag: "h2",
+      textPreview: uuid,
+      attrs: { ariaLabel: "", screenLabel: "" },
+    },
+    rect: { x: 48, y: 120, w: 420, h: 64 },
+  });
+
+  expect(await screen.findByText("Heading", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+  expect(screen.getByLabelText("Selected Agent Context")).not.toHaveTextContent(uuid);
+});
+
+test("technical selection identity stays folded by default and can be copied on demand", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async (_value: string) => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  await dispatchSelection();
+
+  const disclosure = (await screen.findByText("Technical locator")).closest("details");
+  expect(disclosure).not.toBeNull();
+  expect(disclosure).not.toHaveAttribute("open");
+
+  await user.click(within(disclosure!).getByText("Technical locator"));
+  await user.click(within(disclosure!).getByRole("button", { name: "Copy technical locator" }));
+
+  expect(writeText).toHaveBeenCalledTimes(1);
+  expect(writeText.mock.calls[0]?.[0]).toContain("hero-title");
+  expect(writeText.mock.calls[0]?.[0]).toContain("src/Hero.tsx");
+  expect(writeText.mock.calls[0]?.[0]).toContain("[data-design-node-id='hero-title']");
+});
+
+test("folds the technical locator again when a consecutive preview selection replaces the element", async () => {
+  const user = userEvent.setup();
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("Storefront home preview");
+  await dispatchSelection();
+  const firstDisclosure = screen.getByText("Technical locator").closest("details");
+  await user.click(within(firstDisclosure!).getByText("Technical locator"));
+  expect(firstDisclosure).toHaveAttribute("open");
+
+  await sendPreviewBridgeMessage(latestPreviewBridgeHarness(frame), {
+    type: "element-selected",
+    locator: {
+      designNodeId: "buy-tickets",
+      sourcePath: "src/Hero.tsx",
+      selector: "[data-design-node-id='buy-tickets']",
+    },
+    tag: "button",
+    text: "Buy tickets",
+    textPreview: "Buy tickets",
+    textComplete: true,
+    rect: { x: 32, y: 96, w: 120, h: 36 },
+  });
+
+  expect(await screen.findByText("Buy tickets", {
+    selector: ".artifact-selection-card__title strong",
+  })).toBeInTheDocument();
+  const nextDisclosure = screen.getByText("Technical locator").closest("details");
+  expect(nextDisclosure).not.toHaveAttribute("open");
+});
+
+test("keeps Artifact source identity folded outside the primary Outline and copyable on demand", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async (_value: string) => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  const sourceRoot = [
+    "workspaces",
+    "7c615c77-7a76-4d52-8a7d-6396b242733d",
+    "artifacts",
+    "f21625b0-7194-4cdb-a928-8859afc2c711",
+  ].join("/");
+
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={{ ...artifact, sourceRoot }}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  const disclosure = screen.getByText("Technical details").closest("details");
+  expect(disclosure).not.toBeNull();
+  expect(disclosure).not.toHaveAttribute("open");
+  expect(screen.getByText("Storefront home", { selector: "dd" })).toBeVisible();
+  expect(within(disclosure!).getByText(sourceRoot)).not.toBeVisible();
+  expect(within(disclosure!).getByText(artifact.id)).not.toBeVisible();
+  expect(within(disclosure!).getByText(artifact.workspaceId)).not.toBeVisible();
+  expect(within(disclosure!).getByText(revision.id)).not.toBeVisible();
+
+  await user.click(within(disclosure!).getByText("Technical details"));
+  expect(within(disclosure!).getByText(sourceRoot)).toBeVisible();
+  await user.click(within(disclosure!).getByRole("button", { name: "Copy Artifact technical details" }));
+
+  expect(writeText).toHaveBeenCalledTimes(1);
+  expect(writeText.mock.calls[0]?.[0]).toContain(sourceRoot);
+  expect(writeText.mock.calls[0]?.[0]).toContain(artifact.id);
+  expect(writeText.mock.calls[0]?.[0]).toContain(artifact.workspaceId);
+  expect(writeText.mock.calls[0]?.[0]).toContain(revision.id);
+});
+
+test("an unproven selection keeps unavailable direct-property controls out of the Inspector", async () => {
+  render(
+    <ApiProvider client={editorApi()}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Storefront home preview");
+  await dispatchSelection({
+    designNodeId: "selector:main > section:nth-of-type(1)",
+    selector: "main > section:nth-of-type(1)",
+  });
+
+  expect(await screen.findByRole("status", { name: "Direct editing unavailable" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Text content" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Accessible label" })).not.toBeInTheDocument();
+});
+
 test("server-proven provenance upgrades a stable marker without delaying Agent Context", async () => {
   let resolveProvenance!: (value: ArtifactElementSelectionManifest) => void;
   const provenance = new Promise<ArtifactElementSelectionManifest>((resolve) => {
@@ -1278,7 +1679,7 @@ test("server-proven provenance upgrades a stable marker without delaying Agent C
   await screen.findByTitle("Storefront home preview");
   await dispatchSelection();
   expect(await screen.findByLabelText("Selected Agent Context")).toHaveTextContent("Objects for a considered home");
-  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 
   act(() => resolveProvenance({
     protocol: "dezin.artifact-element-selection-manifest.v1",
@@ -1359,14 +1760,14 @@ test("server provenance ignores stale and dependency-owned results and keeps fai
   );
   await waitFor(() => expect(resolveArtifactElementProvenance).toHaveBeenCalledTimes(2));
   expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Second selection");
-  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 
   await act(async () => {
     resolveStale(manifest("hero-title"));
     await Promise.resolve();
   });
   expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Second selection");
-  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 
   await dispatchSelection(
     { designNodeId: "failed-title", selector: "[data-design-node-id='failed-title']" } as never,
@@ -1375,7 +1776,7 @@ test("server provenance ignores stale and dependency-owned results and keeps fai
   );
   await waitFor(() => expect(resolveArtifactElementProvenance).toHaveBeenCalledTimes(3));
   expect(screen.getByLabelText("Selected Agent Context")).toHaveTextContent("Failed provenance selection");
-  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 });
 
 test("Artifact Agent queues the active Head with exact element identity and opens the durable Plan", async () => {
@@ -1414,17 +1815,20 @@ test("Artifact Agent queues the active Head with exact element identity and open
     baseRevisionId: revision.id,
     selection: [{ kind: "element", id: "hero-title", revisionId: revision.id }],
   }, expect.any(AbortSignal));
-  expect(await screen.findByRole("status", { name: "Artifact Agent task status" })).toHaveTextContent(
-    "Queued · Plan plan-artifact-agent",
-  );
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "Artifact Agent task status" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
   expect(screen.getByText("Preparing")).toBeInTheDocument();
   expect(screen.queryByText("Complete")).not.toBeInTheDocument();
   expect(draft).toHaveValue("");
 
   fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
   expect(await screen.findByRole("heading", { name: "Inspector" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+  const restorePlan = screen.getByRole("button", { name: "Open build plan" });
+  expect(restorePlan).toHaveTextContent("Queued build plan");
+  expect(restorePlan).not.toHaveTextContent("plan-artifact-agent");
+  expect(restorePlan).toHaveAttribute("title", "Build plan plan-artifact-agent");
+  fireEvent.click(restorePlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 
   view.unmount();
@@ -1528,7 +1932,7 @@ test("enables the preview picker on load and accepts both bridge protocols only 
   expect(screen.getByRole("status", { name: "Direct editing unavailable" })).toHaveTextContent(
     "source-backed stable marker",
   );
-  expect(screen.getByRole("textbox", { name: "Text content" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 
   act(() => {
     window.dispatchEvent(new MessageEvent("message", {
@@ -2510,7 +2914,7 @@ test("clears selected Context when the immutable target changes at the same revi
   await waitFor(() => expect(screen.queryByText("Only the rest-state assembly failed")).not.toBeInTheDocument());
 });
 
-test("historical targets are explicitly read-only and disable every mutation surface", async () => {
+test("historical targets are explicitly read-only and keep unavailable mutation surfaces collapsed", async () => {
   const applyArtifactMutation = vi.fn();
   render(
     <ApiProvider client={editorApi({
@@ -2526,12 +2930,87 @@ test("historical targets are explicitly read-only and disable every mutation sur
 
   expect(await screen.findByRole("status", { name: "Historical preview is read-only" })).toBeInTheDocument();
   const mutationControls = document.querySelectorAll<HTMLElement>("[data-artifact-mutation]");
-  expect(mutationControls.length).toBeGreaterThan(2);
-  for (const control of mutationControls) expect(control).toBeDisabled();
+  expect(mutationControls).toHaveLength(0);
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 
   fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.queryByText("hero-title")).not.toBeInTheDocument();
   expect(applyArtifactMutation).not.toHaveBeenCalled();
+});
+
+test("a pinned Component Revision can select another element without leaving read-only mode", async () => {
+  const componentArtifact: WorkspaceArtifact = {
+    ...artifact,
+    kind: "component",
+    name: "KITE Schedule Row",
+  };
+  const componentRevision: ArtifactRevision = {
+    ...revision,
+    renderSpec: {},
+  };
+  render(
+    <ApiProvider client={editorApi({
+      resolvePreviewTarget: async () => ({
+        ...immutable("artifact-revision"),
+        artifactKind: "component",
+        renderSpec: {},
+      }),
+    })}>
+      <RoutedArtifactEditor
+        artifactValue={componentArtifact}
+        revisionValue={componentRevision}
+        snapshotId="snapshot-1"
+        pinnedRevisionId={componentRevision.id}
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle<HTMLIFrameElement>("KITE Schedule Row preview");
+  await dispatchSelection(
+    {
+      designNodeId: "schedule-title",
+      sourcePath: "src/components/KiteScheduleRow.tsx",
+      selector: "[data-design-node-id='schedule-title']",
+    },
+    "KITE Schedule Row preview",
+    "Friday programme",
+  );
+  expect(await screen.findByText("schedule-title")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Historical preview is read-only" })).toBeInTheDocument();
+
+  const bridge = latestPreviewBridgeHarness(frame);
+  const clearCount = bridge.commands.filter((message) => message.type === "clear").length;
+  const selectModeCount = bridge.commands.filter((message) => message.type === "select-mode").length;
+  fireEvent.click(screen.getByRole("button", { name: "Select another element in the preview" }));
+
+  expect(screen.queryByText("schedule-title")).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(bridge.commands.filter((message) => message.type === "clear").length).toBeGreaterThan(clearCount);
+    expect(bridge.commands.filter((message) => message.type === "select-mode").length).toBeGreaterThan(selectModeCount);
+    expect(latestPreviewBridgeCommand(frame, (message) => message.type === "select-mode")).toEqual(
+      expect.objectContaining({ type: "select-mode", on: true }),
+    );
+  });
+
+  await sendPreviewBridgeMessage(bridge, {
+    type: "element-selected",
+    locator: {
+      designNodeId: "schedule-time",
+      selector: "[data-design-node-id='schedule-time']",
+    },
+    tag: "time",
+    text: "20:30",
+    textPreview: "20:30",
+    textComplete: true,
+    rect: { x: 48, y: 120, w: 96, h: 32 },
+  });
+
+  expect(await screen.findByText("schedule-time")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Select another element in the preview" })).toBeEnabled();
+  for (const control of document.querySelectorAll<HTMLElement>("[data-artifact-mutation]")) {
+    expect(control).toBeDisabled();
+  }
 });
 
 test("loads a pinned Revision outside the workspace overview and returns to Head explicitly", async () => {
@@ -2561,7 +3040,7 @@ test("loads a pinned Revision outside the workspace overview and returns to Head
 
   await screen.findByTitle("Storefront home preview");
   expect(await screen.findByText("Revision 3")).toBeInTheDocument();
-  expect(screen.getByText("Pinned Revision · read-only")).toBeInTheDocument();
+  expect(screen.getByTitle("Pinned Revision · read-only")).toHaveTextContent("Pinned");
   expect(getArtifactRevision).toHaveBeenCalledWith(project.id, artifact.id, pinned.id);
   fireEvent.click(screen.getByRole("button", { name: "Return to Head" }));
   await waitFor(() => expect(window.location.pathname).toBe(`/projects/${project.id}/artifacts/${artifact.id}`));
@@ -2610,6 +3089,11 @@ test("loads immutable Artifact history only when requested and pages older Revis
   expect(within(versionsDialog).getByText(/remain unassessed until validation runs again/i)).toBeInTheDocument();
   expect(within(versionsDialog).getByText("Revision 4")).toBeInTheDocument();
   expect(within(versionsDialog).getByText("Head")).toBeInTheDocument();
+  expect(within(versionsDialog).queryByText(revision.id)).not.toBeInTheDocument();
+  expect(within(versionsDialog).getByRole("listitem")).toHaveAttribute(
+    "title",
+    `Revision ${revision.sequence} · ${revision.id}`,
+  );
   expect(versionsDialog.querySelector(".artifact-versions")).toHaveAttribute("data-history-density", "compact");
   expect(within(versionsDialog).getByRole("list", {
     name: "Saved revision history, 1 revision",
@@ -2630,6 +3114,69 @@ test("loads immutable Artifact history only when requested and pages older Revis
     { limit: 20, cursor: "older-page" },
   ));
   expect(await screen.findByText("Revision 3")).toBeInTheDocument();
+});
+
+test("refreshes an open Versions list when the current Head advances", async () => {
+  const nextHead = {
+    ...revision,
+    id: "revision-head-advanced",
+    sequence: 5,
+    parentRevisionId: revision.id,
+    sourceCommitHash: "commit-head-advanced",
+    sourceTreeHash: "tree-head-advanced",
+    createdAt: revision.createdAt + 1,
+  };
+  let published = false;
+  const listArtifactRevisionHistory = vi.fn(async () => ({
+    items: published ? [nextHead, revision] : [revision],
+    nextCursor: null,
+  }));
+  const resolvePreviewTarget = vi.fn(async (_projectId: string, target: PreviewTarget) => {
+    const current = published ? nextHead : revision;
+    return {
+      ...immutable(target.kind),
+      targetKey: `${target.kind}:${current.id}`,
+      revisionId: current.id,
+      sourceCommitHash: current.sourceCommitHash,
+      sourceTreeHash: current.sourceTreeHash,
+      assemblyHash: `assembly:${current.id}`,
+    };
+  });
+  const client = editorApi({ listArtifactRevisionHistory, resolvePreviewTarget });
+  const view = render(
+    <ApiProvider client={client}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-before-head-advance"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Storefront home preview");
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  const versions = await screen.findByRole("dialog", { name: "Artifact versions" });
+  await waitFor(() => expect(listArtifactRevisionHistory).toHaveBeenCalledTimes(1));
+  expect(within(versions).getByText("Revision 4")).toBeInTheDocument();
+
+  published = true;
+  view.rerender(
+    <ApiProvider client={client}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={nextHead}
+        snapshotId="snapshot-after-head-advance"
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(listArtifactRevisionHistory).toHaveBeenCalledTimes(2));
+  const currentHead = within(versions).getByTitle(`Revision ${nextHead.sequence} · ${nextHead.id}`);
+  expect(within(currentHead).getByText("Head")).toBeInTheDocument();
+  expect(within(versions).getByRole("list", {
+    name: "Saved revision history, 2 revisions",
+  })).toBeInTheDocument();
 });
 
 test("marks long Artifact history as a bounded keyboard-scrollable region", async () => {
@@ -2728,6 +3275,57 @@ test("hydrates a deeply paged pinned Revision by identity before comparing it wi
 
   fireEvent.click(compare);
   expect(await screen.findByRole("dialog", { name: "Compare versions" })).toBeInTheDocument();
+});
+
+test("hydrates a deeply paged pinned Revision by identity in Versions mode", async () => {
+  const pinned = {
+    ...revision,
+    id: "revision-deep-pinned-versions",
+    sequence: 1,
+    parentRevisionId: null,
+    sourceCommitHash: "commit-deep-pinned-versions",
+    sourceTreeHash: "tree-deep-pinned-versions",
+    createdAt: 1,
+  };
+  const getArtifactRevision = vi.fn(async () => pinned);
+  const listArtifactRevisionHistory = vi.fn(async () => ({
+    items: [revision],
+    nextCursor: "twenty-older-revisions",
+  }));
+  const resolvePreviewTarget = vi.fn(async (_projectId: string, target: PreviewTarget) => {
+    const targetRevision = target.kind === "artifact-revision" && target.revisionId === pinned.id ? pinned : revision;
+    return {
+      ...immutable(target.kind),
+      targetKey: `${target.kind}:${targetRevision.id}`,
+      revisionId: targetRevision.id,
+      sourceCommitHash: targetRevision.sourceCommitHash,
+      sourceTreeHash: targetRevision.sourceTreeHash,
+      assemblyHash: `assembly:${targetRevision.id}`,
+    };
+  });
+  render(
+    <ApiProvider client={editorApi({
+      getArtifactRevision,
+      listArtifactRevisionHistory,
+      resolvePreviewTarget,
+    })}>
+      <RoutedArtifactEditor
+        artifactValue={artifact}
+        revisionValue={revision}
+        snapshotId="snapshot-1"
+        pinnedRevisionId={pinned.id}
+        onArtifactPublished={() => {}}
+      />
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Storefront home preview");
+
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  const versions = await screen.findByRole("dialog", { name: "Artifact versions" });
+  expect(await within(versions).findByText("Revision 1")).toBeInTheDocument();
+  expect(within(versions).getByText("Pinned")).toBeInTheDocument();
+  expect(listArtifactRevisionHistory).toHaveBeenCalledTimes(1);
+  expect(getArtifactRevision).toHaveBeenCalledWith(project.id, artifact.id, pinned.id);
 });
 
 test("restores and forks saved history when the active Track has no Head", async () => {

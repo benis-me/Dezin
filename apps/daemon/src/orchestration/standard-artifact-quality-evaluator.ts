@@ -30,6 +30,7 @@ import {
   producedDesignReview,
   reviewerAgentCommand,
   reviewerModel,
+  standardRepairPolicy,
   standardRepairableDefects,
   standardRunPassed,
 } from "../run-policy.ts";
@@ -698,6 +699,7 @@ function repairFindings(
  */
 export class ProductionStandardArtifactQualityEvaluator
 implements StandardArtifactQualityEvaluatorPort {
+  readonly maxRepairRounds: number;
   private readonly infrastructure: ArtifactRunInfrastructureInput;
   private readonly projectId: string;
   private readonly settings: Settings;
@@ -756,6 +758,14 @@ implements StandardArtifactQualityEvaluatorPort {
     this.qualityIgnores = structuredClone(options.qualityIgnores ?? []);
     this.dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
     this.sharingan = sharinganReference !== null;
+    const repairPolicy = standardRepairPolicy(this.settings, this.sharingan);
+    const taskRepairCeiling = options.infrastructure.claim.task.resourceLimits?.maxRepairRounds;
+    const repairCeiling = Number.isSafeInteger(taskRepairCeiling) && Number(taskRepairCeiling) >= 0
+      ? Number(taskRepairCeiling)
+      : repairPolicy.maxRounds;
+    this.maxRepairRounds = repairPolicy.enabled
+      ? Math.min(repairPolicy.maxRounds, repairCeiling)
+      : 0;
     this.sourceAuthority = sharinganReference === null ? null : {
       resourceId: sharinganReference.resourceId,
       revisionId: sharinganReference.revisionId,
@@ -855,6 +865,7 @@ implements StandardArtifactQualityEvaluatorPort {
             settings: visualSettings,
             agentCommand: reviewerAgentCommand(visualSettings, this.agentCommand),
             model: reviewerModel(visualSettings, this.model, this.agentCommand),
+            remoteRetryMode: "caller-owned",
             provider: providerFamily(getProvider(this.agentCommand)?.id, this.model),
             brief: artifactTaskReviewBrief(this.payload),
             directionSpec: this.directionSpec,

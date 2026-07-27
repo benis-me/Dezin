@@ -76,6 +76,7 @@ function input(
     },
     capabilityDescriptors: [{ id: "browser", kind: "browser", required: true }],
     taskTimeoutMs: 25 * 60_000,
+    maxRepairRounds: 0,
     maxOutputBytes: 8 * 1024 * 1024,
     signal: new AbortController().signal,
   };

@@ -65,7 +65,10 @@ function createFlatSelectionFixture(options: {
     const dependencyRoot = join(repository, "node_modules", "fixture-package");
     mkdirSync(dependencyRoot, { recursive: true });
     for (let index = 0; index < generatedDependencyFiles; index += 1) {
-      writeFileSync(join(dependencyRoot, `generated-${index}.js`), `export default ${index};\n`, "utf8");
+      // This test exercises tree-entry accounting, not unique Git blobs. Reuse
+      // one blob so cleanup does not race thousands of loose-object removals on
+      // Linux CI after the Git tree has already proved the >4,096-file case.
+      writeFileSync(join(dependencyRoot, `generated-${index}.js`), "export default null;\n", "utf8");
     }
   }
   if (options.canonicalRootExists && !options.canonicalSource) {

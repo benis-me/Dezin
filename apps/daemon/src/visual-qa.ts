@@ -39,6 +39,12 @@ export interface VisualQaInput {
   screenshotPath?: string;
   agentCommand?: string;
   model?: string;
+  /**
+   * Transport retry ownership for the reviewer turn. Durable Generation
+   * Attempts set caller-owned; standalone/review-only callers omit this and
+   * retain the bounded transport-owned default.
+   */
+  remoteRetryMode?: SafeStructuredAgentRequest["remoteRetryMode"];
   /** Model family ("gpt"|"gemini"|"claude"|"other") that GENERATED the artifact — for provider-fingerprint rules. */
   provider?: string;
   brief?: string;
@@ -120,11 +126,20 @@ const LANDMARK_TAGS = new Set(["header", "nav", "main", "aside", "footer", "form
 function toCriticElements(elements: GeometryElement[]): CriticElement[] {
   const out: CriticElement[] = [];
   const seen = new Set<string>();
-  for (const el of elements) {
-    if (el.rect.width < 8 || el.rect.height < 8) continue;
+  // Reserve the front of the bounded critic map for the exact painted leaves
+  // that deterministic QA can prove are obstruction candidates. Otherwise a
+  // complex page's first 45 text nodes can crowd out the line/dot selector the
+  // repair turn actually needs.
+  const prioritized = [
+    ...elements.filter(isPaintedObstructionCandidate).slice(0, 12),
+    ...elements,
+  ];
+  for (const el of prioritized) {
+    const paintedObstruction = isPaintedObstructionCandidate(el);
+    if ((el.rect.width < 8 || el.rect.height < 8) && !paintedObstruction) continue;
     const identifiable =
       el.selector.startsWith("#") || el.selector.startsWith("[data-dezin-id") || INTERACTIVE_TAGS.has(el.tag) || LANDMARK_TAGS.has(el.tag);
-    if (!identifiable && el.text.trim().length === 0) continue;
+    if (!identifiable && el.text.trim().length === 0 && !paintedObstruction) continue;
     if (seen.has(el.selector)) continue;
     seen.add(el.selector);
     out.push({
@@ -165,6 +180,13 @@ export interface GeometryElement {
   tag: string;
   text: string;
   rect: Rect;
+  /**
+   * Browser-measured line boxes for this element's own text nodes. Unlike the
+   * element rect, these boxes describe what is actually painted and therefore
+   * let deterministic QA distinguish real text collisions from normal nested
+   * container overlap.
+   */
+  textRects?: Rect[];
   position: string;
   overflowX: string;
   overflowY: string;
@@ -190,6 +212,8 @@ export function toComputedElements(elements: GeometryElement[]): QualityComputed
       text: el.text,
       rect: { x: el.rect.left, y: el.rect.top, width: el.rect.width, height: el.rect.height },
       style: el.style ?? {},
+      directTextLength: el.directTextLength,
+      childElementCount: el.childElementCount,
     });
     // Bound the work: the detector is O(elements); a pathological page can't blow it up.
     if (out.length >= 400) break;
@@ -363,6 +387,11 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     },
   };
   const envelope = untrustedVisualReviewEnvelope(evidence);
+  const reviewsAssignedPageArtifact = /^Review only the assigned page Artifact "[^"\n]{1,200}"\.$/m
+    .test(input.brief?.trim() ?? "");
+  const pageArtifactContract = reviewsAssignedPageArtifact
+    ? 'Assigned Page contract: the rendered result must be the named product Page itself. If the pixels primarily show a design-process board, spec sheet, anatomy explainer, implementation notes, reviewer deck, or documentation about the design instead of the named product Page, report one page-wide kind "contract" severity P1 finding. Such an explainer is a substitute for the Page, not a valid Page implementation.'
+    : undefined;
   const findingInstructions = responsiveSharinganReview
     ? [
         "Sharingan responsive-extrapolation mode: this Frame is not the source-aligned capture; its viewport and/or state differs, so the captured source image is intentionally not supplied and source-viewport x/y coordinates are not a parity contract.",
@@ -383,6 +412,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
       ]
     : [
         "Report findings in three clearly separated kinds — do not conflate them:",
+        ...(pageArtifactContract ? [pageArtifactContract] : []),
         '- kind "defect" (severity P0/P1): an OBJECTIVE breakage you can PROVE from the pixels themselves. It must be one of: (1) overlap that makes something illegible or unusable; (2) text or a control sliced through its glyphs or bounds by a container edge; (3) an element the layout clearly means to show in the initial view (the primary action, the latest message, the composer) pushed off-screen or unreachable; (4) content wider than the viewport (horizontal overflow); (5) text unreadable from contrast or size; (6) a runtime/console error, broken image, or leaked placeholder (undefined, lorem, "no artifact"); (7) a copy bug in the text itself (duplicated, concatenated, or template tokens). Before filing a defect, apply this test: could a correct, deliberate implementation produce this exact screenshot? If yes, it is NOT a defect — at most an advisory improvement. Describe the visible breakage, never a cause you are inferring — do NOT file scroll position, mount behaviour, or "should be pinned to bottom": you cannot verify runtime scroll state from one static frame. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
         '- kind "contract" (severity P1): a directly visible contradiction of an EXPLICIT user brief requirement, must-have, must-avoid, or the CHOSEN DIRECTION. Quote the concrete contract in the message and name the visible contradiction. This is not a place for inferred intent or subjective taste: if the requirement was not explicit, classify it as an advisory improvement instead.',
         '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, positioning and scroll polish, affordance discoverability, and overall craft. These are ADVISORY and may include subjective taste; the user decides whether to take them. Be specific, never vague taste talk.',
@@ -411,6 +441,138 @@ function titleCase(value: string): string {
 function rectSnippet(el: GeometryElement): string {
   const r = el.rect;
   return `${el.selector} (${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)})`;
+}
+
+const MAX_TEXT_RECTS_FOR_OVERLAP_QA = 4_096;
+const MIN_TEXT_OVERLAP_WIDTH_PX = 8;
+const MIN_TEXT_OVERLAP_HEIGHT_PX = 6;
+const MIN_TEXT_OVERLAP_AREA_PX = 96;
+const MAX_PAINTED_OBSTRUCTION_CANDIDATES = 256;
+const MAX_PAINTED_OBSTRUCTION_SPAN_PX = 4_096;
+
+function colorHasVisibleAlpha(value: string | undefined): boolean {
+  if (!value || value === "transparent") return false;
+  const match = /rgba?\(([^)]+)\)/i.exec(value);
+  if (!match) return true;
+  const parts = (match[1] ?? "").split(/[\s,/]+/).filter(Boolean).map(Number);
+  const alpha = parts.length >= 4 ? parts[3] : 1;
+  return Number.isFinite(alpha) && (alpha ?? 1) > 0.02;
+}
+
+/**
+ * Conservative set of non-text painted leaves that can physically obstruct a
+ * glyph run: rules/spines, small dots, and similar bounded decoration. Large
+ * surfaces are intentionally excluded because their normal role is to sit
+ * behind content.
+ */
+function isPaintedObstructionCandidate(element: GeometryElement): boolean {
+  if ((element.directTextLength ?? 0) > 0 || (element.childElementCount ?? 0) > 0) return false;
+  const { width, height } = element.rect;
+  if (![width, height].every(Number.isFinite) || width <= 0 || height <= 0
+    || width > MAX_PAINTED_OBSTRUCTION_SPAN_PX || height > MAX_PAINTED_OBSTRUCTION_SPAN_PX) {
+    return false;
+  }
+  const painted = colorHasVisibleAlpha(element.style?.backgroundColor)
+    || Boolean(element.style?.backgroundImage && element.style.backgroundImage !== "none")
+    || (element.style?.borderMaxPx ?? 0) > 0;
+  if (!painted) return false;
+  const thinRule = (width <= 8 && height >= 6) || (height <= 8 && width >= 6);
+  const compactMarker = width <= 24 && height <= 24;
+  return thinRule || compactMarker;
+}
+
+function substantialPaintedTextOverlap(
+  elements: GeometryElement[],
+): { painted: GeometryElement; text: GeometryElement } | undefined {
+  const textRects: Array<{ element: GeometryElement; rect: Rect }> = [];
+  const painted: GeometryElement[] = [];
+  for (const element of elements) {
+    if (isPaintedObstructionCandidate(element)) {
+      if (painted.length < MAX_PAINTED_OBSTRUCTION_CANDIDATES) painted.push(element);
+      continue;
+    }
+    if ((element.directTextLength ?? 0) < 1 || !element.text.trim()) continue;
+    for (const rect of element.textRects ?? []) {
+      if (![rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height].every(Number.isFinite)
+        || rect.width < MIN_TEXT_OVERLAP_WIDTH_PX
+        || rect.height < MIN_TEXT_OVERLAP_HEIGHT_PX) continue;
+      textRects.push({ element, rect });
+      if (textRects.length >= MAX_TEXT_RECTS_FOR_OVERLAP_QA) break;
+    }
+    if (textRects.length >= MAX_TEXT_RECTS_FOR_OVERLAP_QA) break;
+  }
+  for (const obstruction of painted) {
+    const candidate = obstruction.rect;
+    for (const text of textRects) {
+      const overlapWidth = Math.min(candidate.right, text.rect.right)
+        - Math.max(candidate.left, text.rect.left);
+      const overlapHeight = Math.min(candidate.bottom, text.rect.bottom)
+        - Math.max(candidate.top, text.rect.top);
+      if (overlapWidth <= 0 || overlapHeight <= 0) continue;
+      const verticalRule = candidate.width <= 8 && candidate.height > 8
+        && overlapHeight >= MIN_TEXT_OVERLAP_HEIGHT_PX;
+      const horizontalRule = candidate.height <= 8 && candidate.width > 8
+        && overlapWidth >= MIN_TEXT_OVERLAP_WIDTH_PX;
+      const compactMarker = candidate.width <= 24 && candidate.height <= 24
+        && overlapWidth >= 3 && overlapHeight >= 3 && overlapWidth * overlapHeight >= 24;
+      if (verticalRule || horizontalRule || compactMarker) {
+        return { painted: obstruction, text: text.element };
+      }
+    }
+  }
+  return undefined;
+}
+
+function substantialTextOverlap(
+  elements: GeometryElement[],
+): { first: GeometryElement; second: GeometryElement } | undefined {
+  const painted: Array<{ element: GeometryElement; elementIndex: number; rect: Rect }> = [];
+  for (const [elementIndex, element] of elements.entries()) {
+    if ((element.directTextLength ?? 0) < 1 || !element.text.trim()) continue;
+    for (const rect of element.textRects ?? []) {
+      if (![rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
+        .every(Number.isFinite)
+        || rect.width < MIN_TEXT_OVERLAP_WIDTH_PX
+        || rect.height < MIN_TEXT_OVERLAP_HEIGHT_PX) {
+        continue;
+      }
+      const lineHeight = element.style?.lineHeightPx;
+      const measuredRect = typeof lineHeight === "number"
+        && Number.isFinite(lineHeight)
+        && lineHeight >= MIN_TEXT_OVERLAP_HEIGHT_PX
+        && lineHeight < rect.height
+        ? {
+            ...rect,
+            top: rect.top + (rect.height - lineHeight) / 2,
+            bottom: rect.bottom - (rect.height - lineHeight) / 2,
+            height: lineHeight,
+          }
+        : rect;
+      painted.push({ element, elementIndex, rect: measuredRect });
+      if (painted.length >= MAX_TEXT_RECTS_FOR_OVERLAP_QA) break;
+    }
+    if (painted.length >= MAX_TEXT_RECTS_FOR_OVERLAP_QA) break;
+  }
+  painted.sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left);
+  for (let firstIndex = 0; firstIndex < painted.length; firstIndex += 1) {
+    const first = painted[firstIndex]!;
+    for (let secondIndex = firstIndex + 1; secondIndex < painted.length; secondIndex += 1) {
+      const second = painted[secondIndex]!;
+      if (second.rect.top >= first.rect.bottom - MIN_TEXT_OVERLAP_HEIGHT_PX) break;
+      if (first.elementIndex === second.elementIndex) continue;
+      const overlapWidth = Math.min(first.rect.right, second.rect.right)
+        - Math.max(first.rect.left, second.rect.left);
+      const overlapHeight = Math.min(first.rect.bottom, second.rect.bottom)
+        - Math.max(first.rect.top, second.rect.top);
+      if (overlapWidth < MIN_TEXT_OVERLAP_WIDTH_PX
+        || overlapHeight < MIN_TEXT_OVERLAP_HEIGHT_PX
+        || overlapWidth * overlapHeight < MIN_TEXT_OVERLAP_AREA_PX) {
+        continue;
+      }
+      return { first: first.element, second: second.element };
+    }
+  }
+  return undefined;
 }
 
 export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, options: { strictTextLayout?: boolean; sharinganSource?: SourceRenderMap | null } = {}): QualityFinding[] {
@@ -473,6 +635,9 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, 
 
   const clippedText = snapshot.elements.find((el) => {
     if (!el.text.trim()) return false;
+    // Canonical visually-hidden accessibility copy is intentionally clipped
+    // into a 1×1 box. It has no painted text to repair.
+    if (el.rect.width <= 1.5 && el.rect.height <= 1.5) return false;
     if ((el.directTextLength ?? el.text.trim().length) < 2 && (el.childElementCount ?? 0) > 0) return false;
     if (isSourceEquivalentTextClip(el, snapshot, options.sharinganSource)) return false;
     const clipsX = (el.overflowX === "hidden" || el.overflowX === "clip") && el.scrollWidth > el.clientWidth + 2;
@@ -486,6 +651,30 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, 
       message: `${titleCase(label)} text appears clipped in ${clippedText.selector}.`,
       fix: "Allow wrapping, increase the container height, or remove fixed dimensions that hide text.",
       snippet: rectSnippet(clippedText),
+    });
+  }
+
+  const textOverlap = substantialTextOverlap(snapshot.elements);
+  if (textOverlap) {
+    findings.push({
+      severity: "P1",
+      id: "visual-text-overlap",
+      message: `${titleCase(label)} has overlapping text between ${textOverlap.first.selector} and ${textOverlap.second.selector}, making the content illegible.`,
+      fix: "Separate the colliding grid/flex tracks or stack them at this width; keep enough intrinsic width for every text run before allowing adjacent columns to grow.",
+      selector: textOverlap.second.selector,
+      snippet: `${rectSnippet(textOverlap.first)} overlaps ${rectSnippet(textOverlap.second)}`,
+    });
+  }
+
+  const paintedTextOverlap = substantialPaintedTextOverlap(snapshot.elements);
+  if (paintedTextOverlap) {
+    findings.push({
+      severity: "P1",
+      id: "visual-painted-text-overlap",
+      message: `${titleCase(label)} painted element ${paintedTextOverlap.painted.selector} crosses the text in ${paintedTextOverlap.text.selector}, obstructing legibility.`,
+      fix: "Move the decorative rule/marker outside the text line boxes, or reserve a dedicated layout track so painted chrome never crosses copy.",
+      selector: paintedTextOverlap.painted.selector,
+      snippet: `${rectSnippet(paintedTextOverlap.painted)} crosses ${rectSnippet(paintedTextOverlap.text)}`,
     });
   }
 
@@ -726,6 +915,31 @@ function decodePng(path: string): DecodedPng | null {
   return decoded
     ? { ...decoded, width: decoded.identity.width, height: decoded.identity.height }
     : null;
+}
+
+function uniformScreenshotFinding(path: string, label: string): QualityFinding | undefined {
+  const image = readDecodedPngEvidenceFile(path);
+  if (!image) return undefined;
+  const firstOffset = 1;
+  const first = Array.from(
+    image.scanlines.subarray(firstOffset, firstOffset + image.channels),
+  );
+  if (first.length !== image.channels) return undefined;
+  for (let row = 0; row < image.identity.height; row += 1) {
+    const rowStart = row * image.scanlineStride + 1;
+    const rowEnd = rowStart + image.identity.width * image.channels;
+    for (let offset = rowStart; offset < rowEnd; offset += image.channels) {
+      for (let channel = 0; channel < image.channels; channel += 1) {
+        if (image.scanlines[offset + channel] !== first[channel]) return undefined;
+      }
+    }
+  }
+  return {
+    severity: "P0",
+    id: "visual-uniform-screenshot",
+    message: `${titleCase(label)} capture is pixel-uniform and therefore visually blank despite mounted DOM content.`,
+    fix: "Restore a visible first paint (foreground, media, and surfaces) before another critic or repair-review round is attempted.",
+  };
 }
 
 function pngPathHasIdentity(path: string, expected: PngEvidenceIdentity): boolean {
@@ -1297,7 +1511,24 @@ async function collectGeometry(
           if (dezinId) return `[data-dezin-id="${dezinId.replace(/"/g, '\\"')}"]`;
           const cls = Array.from<string>(el.classList).slice(0, 2);
           const suffix = cls.length ? `.${cls.map(escapeCss).join(".")}` : "";
-          return `${el.tagName.toLowerCase()}${suffix}`;
+          // State variants often override the base class later in the cascade.
+          // Preserve a bounded set of semantic state attributes so a repair turn
+          // targets the exact failing rule instead of repeatedly editing only
+          // the base selector (for example `.chip` vs `.chip[data-tone=danger]`).
+          const stateSuffix = [
+            "data-state",
+            "data-tone",
+            "data-variant",
+            "aria-current",
+            "aria-selected",
+            "aria-pressed",
+          ].flatMap((name) => {
+            const value = el.getAttribute(name);
+            return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value)
+              ? [`[${name}="${value}"]`]
+              : [];
+          }).join("");
+          return `${el.tagName.toLowerCase()}${suffix}${stateSuffix}`;
         };
         // The nearest OPAQUE painted backdrop behind an element, by walking ancestors. Returns null
         // (→ contrast skipped, no false positive) if a background-image/gradient is hit first or no
@@ -1319,23 +1550,72 @@ async function collectGeometry(
           }
           return null;
         };
-        const elements = Array.from<any>(doc.body.querySelectorAll("*"))
+        const hasPaintedVisibility = (start: any, ownStyles: any): boolean => {
+          try {
+            if (typeof start.checkVisibility === "function"
+              && !start.checkVisibility({
+                checkOpacity: true,
+                checkVisibilityCSS: true,
+                opacityProperty: true,
+                visibilityProperty: true,
+              })) {
+              return false;
+            }
+          } catch {
+            // Older Chromium builds may expose checkVisibility without the
+            // current option shape. The bounded computed-style walk below is
+            // the compatibility authority for the properties QA depends on.
+          }
+          let node = start;
+          let guard = 0;
+          while (node && guard < 40) {
+            const styles = node === start ? ownStyles : win.getComputedStyle(node);
+            if (styles.display === "none"
+              || styles.visibility === "hidden"
+              || styles.visibility === "collapse"
+              || parseFloat(styles.opacity) === 0) {
+              return false;
+            }
+            node = node.parentElement;
+            guard += 1;
+          }
+          return true;
+        };
+        const elements: any[] = Array.from<any>(doc.body.querySelectorAll("*"))
           .map((el: any) => {
             const styles = win.getComputedStyle(el);
             const rect = el.getBoundingClientRect();
-            if (styles.display === "none" || styles.visibility === "hidden" || rect.width <= 0 || rect.height <= 0) return null;
+            if (styles.display === "none" || styles.visibility === "hidden"
+              || rect.width <= 0 || rect.height <= 0
+              || !hasPaintedVisibility(el, styles)) return null;
             const borderMaxPx = Math.max(
               parseFloat(styles.borderTopWidth) || 0,
               parseFloat(styles.borderRightWidth) || 0,
               parseFloat(styles.borderBottomWidth) || 0,
               parseFloat(styles.borderLeftWidth) || 0,
             );
-            const directText = Array.from<any>(el.childNodes)
-              .filter((node: any) => node.nodeType === 3)
+            const directTextNodes = Array.from<any>(el.childNodes)
+              .filter((node: any) => node.nodeType === 3
+                && (node.textContent ?? "").replace(/\s+/g, " ").trim().length > 0);
+            const directText = directTextNodes
               .map((node: any) => node.textContent ?? "")
               .join(" ")
               .replace(/\s+/g, " ")
               .trim();
+            const textRects = directTextNodes.flatMap((node: any) => {
+              const range = doc.createRange();
+              range.selectNodeContents(node);
+              return Array.from<any>(range.getClientRects())
+                .filter((textRect: any) => textRect.width > 0 && textRect.height > 0)
+                .map((textRect: any) => ({
+                  left: textRect.left,
+                  top: textRect.top,
+                  right: textRect.right,
+                  bottom: textRect.bottom,
+                  width: textRect.width,
+                  height: textRect.height,
+                }));
+            });
             return {
               selector: selectorFor(el),
               tag: el.tagName.toLowerCase(),
@@ -1348,6 +1628,7 @@ async function collectGeometry(
                 width: rect.width,
                 height: rect.height,
               },
+              textRects: textRects.length > 0 ? textRects : undefined,
               position: styles.position,
               overflowX: styles.overflowX,
               overflowY: styles.overflowY,
@@ -1389,6 +1670,119 @@ async function collectGeometry(
             };
           })
           .filter(Boolean);
+        // Pseudo-elements are not DOM nodes and therefore do not appear in
+        // querySelectorAll(), yet timelines and decorative rails frequently
+        // paint them above text. Capture a bounded, conservative subset whose
+        // absolute/fixed geometry can be resolved without layout guessing.
+        const pxValue = (value: string): number | undefined => {
+          const match = /^(-?\d*\.?\d+)px$/.exec((value ?? "").trim());
+          if (!match) return undefined;
+          const parsed = Number(match[1]);
+          return Number.isFinite(parsed) ? parsed : undefined;
+        };
+        const cssColorHasPaint = (value: string): boolean => {
+          if (!value || value === "transparent") return false;
+          const match = /rgba?\(([^)]+)\)/i.exec(value);
+          if (!match) return true;
+          const parts = (match[1] ?? "").split(/[\s,/]+/).filter(Boolean).map(Number);
+          const alpha = parts.length >= 4 ? parts[3] : 1;
+          return Number.isFinite(alpha) && (alpha ?? 1) > 0.02;
+        };
+        let capturedPseudoCount = 0;
+        for (const host of Array.from<any>(doc.body.querySelectorAll("*")).slice(0, 2_000)) {
+          if (capturedPseudoCount >= 256) break;
+          const hostStyles = win.getComputedStyle(host);
+          if (!hasPaintedVisibility(host, hostStyles)) continue;
+          for (const pseudo of ["::before", "::after"]) {
+            if (capturedPseudoCount >= 256) break;
+            const pseudoStyles = win.getComputedStyle(host, pseudo);
+            if (!pseudoStyles
+              || pseudoStyles.content === "none"
+              || pseudoStyles.display === "none"
+              || pseudoStyles.visibility === "hidden"
+              || parseFloat(pseudoStyles.opacity) === 0
+              || (pseudoStyles.position !== "absolute" && pseudoStyles.position !== "fixed")) {
+              continue;
+            }
+            const borderTop = parseFloat(pseudoStyles.borderTopWidth) || 0;
+            const borderRight = parseFloat(pseudoStyles.borderRightWidth) || 0;
+            const borderBottom = parseFloat(pseudoStyles.borderBottomWidth) || 0;
+            const borderLeft = parseFloat(pseudoStyles.borderLeftWidth) || 0;
+            const borderMaxPx = Math.max(borderTop, borderRight, borderBottom, borderLeft);
+            const hasPaint = cssColorHasPaint(pseudoStyles.backgroundColor)
+              || (pseudoStyles.backgroundImage && pseudoStyles.backgroundImage !== "none")
+              || borderMaxPx > 0;
+            if (!hasPaint) continue;
+
+            const hostRect = host.getBoundingClientRect();
+            const offsetRect = host.offsetParent?.getBoundingClientRect?.();
+            const base = pseudoStyles.position === "fixed"
+              ? { left: 0, top: 0, right: win.innerWidth, bottom: win.innerHeight, width: win.innerWidth, height: win.innerHeight }
+              : hostStyles.position !== "static"
+                ? hostRect
+                : offsetRect ?? hostRect;
+            const leftOffset = pxValue(pseudoStyles.left);
+            const rightOffset = pxValue(pseudoStyles.right);
+            const topOffset = pxValue(pseudoStyles.top);
+            const bottomOffset = pxValue(pseudoStyles.bottom);
+            let width = pxValue(pseudoStyles.width);
+            let height = pxValue(pseudoStyles.height);
+            if (width === undefined && leftOffset !== undefined && rightOffset !== undefined) {
+              width = Math.max(0, base.width - leftOffset - rightOffset);
+            }
+            if (height === undefined && topOffset !== undefined && bottomOffset !== undefined) {
+              height = Math.max(0, base.height - topOffset - bottomOffset);
+            }
+            if (width === undefined || height === undefined) continue;
+            const borderBoxWidth = pseudoStyles.boxSizing === "border-box"
+              ? width
+              : width + borderLeft + borderRight;
+            const borderBoxHeight = pseudoStyles.boxSizing === "border-box"
+              ? height
+              : height + borderTop + borderBottom;
+            const left = leftOffset !== undefined
+              ? base.left + leftOffset
+              : rightOffset !== undefined
+                ? base.right - rightOffset - borderBoxWidth
+                : undefined;
+            const top = topOffset !== undefined
+              ? base.top + topOffset
+              : bottomOffset !== undefined
+                ? base.bottom - bottomOffset - borderBoxHeight
+                : undefined;
+            if (left === undefined || top === undefined
+              || ![left, top, borderBoxWidth, borderBoxHeight].every(Number.isFinite)
+              || borderBoxWidth <= 0 || borderBoxHeight <= 0) continue;
+            elements.push({
+              selector: `${selectorFor(host)}${pseudo}`,
+              tag: pseudo,
+              text: "",
+              rect: {
+                left,
+                top,
+                right: left + borderBoxWidth,
+                bottom: top + borderBoxHeight,
+                width: borderBoxWidth,
+                height: borderBoxHeight,
+              },
+              position: pseudoStyles.position,
+              overflowX: pseudoStyles.overflowX,
+              overflowY: pseudoStyles.overflowY,
+              scrollWidth: borderBoxWidth,
+              scrollHeight: borderBoxHeight,
+              clientWidth: borderBoxWidth,
+              clientHeight: borderBoxHeight,
+              directTextLength: 0,
+              childElementCount: 0,
+              style: {
+                backgroundColor: pseudoStyles.backgroundColor,
+                backgroundImage: pseudoStyles.backgroundImage,
+                borderMaxPx,
+              },
+            });
+            capturedPseudoCount += 1;
+          }
+        }
         const root = doc.documentElement;
         const body = doc.body;
         const opaqueBg = (c: string): boolean => {
@@ -1487,6 +1881,7 @@ async function collectGeometry(
         }
         let capturedPath: string | undefined;
         let capturedIdentity: PngEvidenceIdentity | undefined;
+        const currentCaptureFindings: QualityFinding[] = [];
         if (screenshotPath && (viewport.primary || viewport.frame)) {
           capturedPath = viewport.frame && viewport.frameIndex !== undefined
             ? frameScreenshotPath(screenshotPath, viewport.frame, viewport.frameIndex, viewport.primary)
@@ -1501,14 +1896,26 @@ async function collectGeometry(
             throw new Error(`Visual QA capture for ${viewport.label} is not one complete bounded PNG`);
           }
           capturedIdentity = inspectedCapture.identity;
+          const uniform = uniformScreenshotFinding(capturedPath, viewport.label);
+          if (uniform) currentCaptureFindings.push(uniform);
         }
+        const scopedCaptureFindings = viewport.frame
+          ? currentCaptureFindings.map((finding) => frameScopedFinding(finding, viewport.frame!.id))
+          : viewport.label === "source"
+            ? currentCaptureFindings.map((finding) => ({
+                ...finding,
+                id: `${finding.id}@source`,
+                message: `[Source capture] ${finding.message}`,
+              }))
+            : currentCaptureFindings;
+        all.push(...scopedCaptureFindings);
         checkAbort(signal);
         if (viewport.primary) {
           primaryConsoleMessages = viewportConsoleMessages.slice();
           primaryCaptureIdentity = capturedIdentity;
         }
         const runtimeMessages = viewportConsoleMessages.filter(isRuntimeConsoleMessage);
-        const geometryFailed = currentGeometryFindings.some((finding) =>
+        const geometryFailed = [...currentGeometryFindings, ...currentCaptureFindings].some((finding) =>
           finding.severity === "P0" || finding.severity === "P1");
         if (!viewport.frame && runtimeMessages.length > 0) {
           const runtimeScope = viewport.label === "source" ? "source" : viewport.label;
@@ -1750,6 +2157,7 @@ export async function reviewScreenshotWithAgent(
     const request: SafeStructuredAgentRequest = {
       command,
       model: input.model || input.settings.model || undefined,
+      remoteRetryMode: input.remoteRetryMode,
       systemPrompt: SAFE_VISUAL_REVIEW_SYSTEM_PROMPT,
       message: agentReviewPrompt(input, screenshotPath),
       cwd: scratchDir,
@@ -1891,7 +2299,9 @@ export async function auditVisualArtifactReport(
       }) => frame),
     };
   }
-  if (input.runtimeOnly) {
+  const uniformCaptureFailed = geometry.findings.some((finding) =>
+    finding.severity === "P0" && finding.id.startsWith("visual-uniform-screenshot"));
+  if (input.runtimeOnly || uniformCaptureFailed) {
     return {
       findings: geometry.findings,
       sourceCapture: geometry.sourceCapture,

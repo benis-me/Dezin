@@ -31,6 +31,12 @@ export interface StandardArtifactQualityResult {
 }
 
 export interface StandardArtifactQualityEvaluatorPort {
+  /**
+   * Frozen effective repair policy for this Attempt. Production evaluators
+   * derive it from the frozen settings and clamp it to the compiled Task cap.
+   * Older/custom adapters may omit it and retain the Task ceiling.
+   */
+  readonly maxRepairRounds?: number;
   evaluate(input: {
     candidate: StandardArtifactCandidateIdentity;
     dir: string;

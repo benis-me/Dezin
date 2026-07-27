@@ -39,6 +39,8 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   resourcePreview?: ResourceNodeRevisionPreview | null;
   revisionId: string | null;
   zoomLevel: SemanticZoomLevel;
+  overviewDirection?: string | null;
+  overviewPageRole?: string | null;
   incomingCount: number;
   outgoingCount: number;
   qualityState: "passed" | "needs-attention" | "failed" | "unassessed" | "not-applicable";
@@ -80,6 +82,11 @@ export interface WorkspaceGraphView {
   edgeFilter: WorkspaceEdgeFilter;
   projectId?: string;
   artifactRevisionIds?: Readonly<Record<string, string | null>>;
+  artifactRevisionQualityStates?: Readonly<Record<string, {
+    revisionId: string;
+    qualityState: "passed" | "needs-attention" | "failed" | "unassessed";
+    qualityScore: number | null;
+  }>>;
   resourceRevisionStates?: Readonly<Record<string, {
     revisionId: string;
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
@@ -102,7 +109,7 @@ export interface WorkspaceFlowModel {
 }
 
 export function semanticZoomLevel(zoom: number): SemanticZoomLevel {
-  if (zoom < 0.5) return "overview";
+  if (zoom < 0.6) return "overview";
   if (zoom < 0.8) return "compact";
   return "full";
 }
@@ -245,12 +252,16 @@ function adaptGraphNode(
   layoutObject: WorkspaceLayoutObject,
   byId: Map<string, WorkspaceLayoutObject>,
   counts: ReadonlyMap<string, NodeRelationCount>,
+  pageOverviewIdentities: ReadonlyMap<string, { direction: string | null; role: string }>,
   view: WorkspaceGraphView,
 ): WorkspaceFlowNode {
   const resourceState = node.kind === "resource" ? view.resourceRevisionStates?.[node.resourceId] : undefined;
   const revisionId = node.kind === "resource"
     ? resourceState?.revisionId ?? null
     : view.artifactRevisionIds?.[node.artifactId] ?? null;
+  const activeRevisionQuality = node.kind === "resource"
+    ? undefined
+    : view.artifactRevisionQualityStates?.[node.artifactId];
   const generation = node.kind === "resource"
     ? view.resourceGenerationStates?.[node.resourceId]
     : view.artifactGenerationStates?.[node.artifactId];
@@ -259,7 +270,15 @@ function adaptGraphNode(
     : null;
   const awaitingSelection = node.kind === "resource"
     && view.awaitingSelectionResourceIds?.has(node.resourceId);
-  const quality = node.kind === "resource" ? null : node.quality ?? null;
+  const quality = node.kind === "resource"
+    ? null
+    : activeRevisionQuality?.revisionId === revisionId
+      ? {
+          state: activeRevisionQuality.qualityState,
+          score: activeRevisionQuality.qualityScore,
+        }
+      : node.quality ?? null;
+  const overviewIdentity = node.kind === "page" ? pageOverviewIdentities.get(node.id) : undefined;
   const size = WORKSPACE_NODE_SIZES[node.kind];
   return {
     id: node.id,
@@ -283,6 +302,8 @@ function adaptGraphNode(
       resourcePreview,
       revisionId,
       zoomLevel: semanticZoomLevel(view.zoom),
+      overviewDirection: overviewIdentity?.direction ?? null,
+      overviewPageRole: overviewIdentity?.role ?? (node.kind === "page" ? node.name : null),
       incomingCount: counts.get(node.id)?.incoming ?? 0,
       outgoingCount: counts.get(node.id)?.outgoing ?? 0,
       qualityState: node.kind === "resource" ? "not-applicable" : quality?.state ?? "unassessed",
@@ -299,6 +320,38 @@ function adaptGraphNode(
       minimumGroupHeight: 0,
     },
   };
+}
+
+function pageOverviewIdentityMap(
+  nodes: readonly WorkspaceNode[],
+): ReadonlyMap<string, { direction: string | null; role: string }> {
+  const pages = nodes
+    .filter((node) => node.kind === "page")
+    .map((node) => ({
+      node,
+      tokens: node.name.trim().split(/\s+/).filter(Boolean),
+    }));
+  const prefixCounts = new Map<string, number>();
+  for (const { tokens } of pages) {
+    for (let length = 1; length < tokens.length; length += 1) {
+      const key = tokens.slice(0, length).join(" ").toLocaleLowerCase();
+      prefixCounts.set(key, (prefixCounts.get(key) ?? 0) + 1);
+    }
+  }
+  return new Map(pages.map(({ node, tokens }) => {
+    let sharedPrefixLength = 0;
+    for (let length = 1; length < tokens.length; length += 1) {
+      const key = tokens.slice(0, length).join(" ").toLocaleLowerCase();
+      if ((prefixCounts.get(key) ?? 0) >= 2) sharedPrefixLength = length;
+    }
+    return [node.id, sharedPrefixLength > 0 ? {
+      direction: tokens.slice(0, sharedPrefixLength).join(" "),
+      role: tokens.slice(sharedPrefixLength).join(" "),
+    } : {
+      direction: null,
+      role: node.name,
+    }];
+  }));
 }
 
 function edgePassesFilter(edge: WorkspaceEdge, view: WorkspaceGraphView): boolean {
@@ -359,7 +412,7 @@ function adaptEdge(
         ? "var(--foreground)"
         : status === "broken"
           ? "var(--destructive)"
-          : "var(--muted-foreground)",
+          : "var(--foreground-2)",
     },
     data: {
       kind: edge.kind,
@@ -381,10 +434,11 @@ export function workspaceGraphToFlow(
   const counts = edgeCounts(graph);
   const graphNodes = new Map(graph.nodes.map((node) => [node.id, node]));
   const nodeNames = new Map(graph.nodes.map((node) => [node.id, node.name]));
+  const pageOverviewIdentities = pageOverviewIdentityMap(graph.nodes);
   const groups = sortedGroups(layout).map((group) => adaptGroup(group, byId, graphNodes, view));
   const nodes = graph.nodes.flatMap((node) => {
     const object = byId.get(node.id);
-    return object ? [adaptGraphNode(node, object, byId, counts, view)] : [];
+    return object ? [adaptGraphNode(node, object, byId, counts, pageOverviewIdentities, view)] : [];
   });
   const hiddenNodeIds = new Set([...groups, ...nodes].filter((node) => node.hidden).map((node) => node.id));
   const visibleEdges = graph.edges.filter((edge) => edgePassesFilter(edge, view));

@@ -62,6 +62,8 @@ export interface ArtifactRunPreparation {
   readonly sourceTreeHash: string;
   readonly systemPrompt: string;
   readonly initialMessage: string;
+  /** Frozen effective policy, already clamped to the immutable Task ceiling. */
+  readonly maxRepairRounds?: number;
   readonly history?: readonly Readonly<{ role: TurnRole; content: string }>[];
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   /** Present only when an exact pinned Sharingan Capture Revision was materialized. */
@@ -285,6 +287,7 @@ function validatePreparation(
   env: NodeJS.ProcessEnv | undefined;
   systemPrompt: string;
   initialMessage: string;
+  maxRepairRounds: number;
   sharinganCapture: SharinganCaptureBundleFence | undefined;
 } {
   if (!preparation || typeof preparation !== "object" || Array.isArray(preparation)
@@ -378,6 +381,17 @@ function validatePreparation(
   if (!SAFE_OWNER_ID.test(projectId)) {
     throw new ArtifactRunExecutorError("invalid-preparation", "Artifact run Project owner is invalid");
   }
+  const maxRepairRounds = preparation.maxRepairRounds
+    ?? claim.task.resourceLimits.maxRepairRounds;
+  if (!Number.isSafeInteger(maxRepairRounds)
+    || maxRepairRounds < 0
+    || maxRepairRounds > claim.task.resourceLimits.maxRepairRounds
+    || maxRepairRounds + 1 > claim.task.resourceLimits.maxAgentTurns) {
+    throw new ArtifactRunExecutorError(
+      "invalid-preparation",
+      "Artifact run repair policy exceeds the immutable Task budget",
+    );
+  }
 
   return {
     projectId,
@@ -385,6 +399,7 @@ function validatePreparation(
     env: cloneEnv(preparation.env),
     systemPrompt: requireString(preparation.systemPrompt, "Artifact run system prompt"),
     initialMessage: requireString(preparation.initialMessage, "Artifact run initial message"),
+    maxRepairRounds,
     sharinganCapture,
   };
 }
@@ -440,6 +455,9 @@ function fenceEvaluator(
 ): StandardArtifactQualityEvaluatorPort {
   if (fence === undefined) return evaluator;
   return Object.freeze({
+    ...(evaluator.maxRepairRounds === undefined
+      ? {}
+      : { maxRepairRounds: evaluator.maxRepairRounds }),
     async evaluate(input: Parameters<StandardArtifactQualityEvaluatorPort["evaluate"]>[0]) {
       await verifySharinganCapture(fence, signal, "before quality evaluation");
       try {
@@ -731,7 +749,7 @@ export class ArtifactRunExecutor implements ArtifactGenerationTaskLeafExecutor {
         history: canonical.history,
         env: canonical.env,
         signal,
-        maxRepairRounds: claim.task.resourceLimits.maxRepairRounds,
+        maxRepairRounds: canonical.maxRepairRounds,
         maxTurns: claim.task.resourceLimits.maxAgentTurns,
         commitMessage: (round) => (
           `Dezin ${claim.task.kind} ${claim.task.id} attempt ${claim.attempt.attempt} round ${round}`

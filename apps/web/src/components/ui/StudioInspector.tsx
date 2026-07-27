@@ -94,7 +94,7 @@ export function StudioFactRow({
         "min-w-0 gap-2 py-2 first:pt-0 last:pb-0",
         stacked
           ? "grid"
-          : "grid grid-cols-[minmax(72px,0.65fr)_minmax(0,1fr)] items-baseline",
+          : "grid grid-cols-[104px_minmax(0,1fr)] items-baseline",
         className,
       )}
       {...props}
@@ -102,8 +102,8 @@ export function StudioFactRow({
       <dt className="min-w-0 text-xs leading-[1.4] text-muted-foreground">{label}</dt>
       <dd
         className={cn(
-          "m-0 min-w-0 break-words text-xs leading-[1.45] text-foreground",
-          metadata && "text-[11px] leading-4 text-foreground-2",
+          "m-0 min-w-0 break-words text-[13px] leading-[1.45] text-foreground",
+          metadata && "text-xs leading-[1.45] text-foreground-2",
           mono && "font-mono",
           valueClassName,
         )}

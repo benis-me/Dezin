@@ -8,6 +8,7 @@ import {
   type GenerationTaskCapacityClass,
   type GenerationTaskFailureClass,
   type GenerationTaskKind,
+  type GenerationTaskPrototypeMarkerProof,
 } from "../../../../packages/core/src/index.ts";
 import { validateGenerationTaskArtifactQualityGate } from "../../../../packages/core/src/generation-task-quality.ts";
 import {
@@ -43,7 +44,7 @@ export interface ResourcePreparedCandidate {
   evidence: Record<string, unknown>;
 }
 
-export interface PrototypeValidationResult {
+export interface PrototypeSnapshotValidationResult {
   kind: "snapshot-validation";
   taskId: string;
   workspaceId: string;
@@ -53,6 +54,21 @@ export interface PrototypeValidationResult {
   resourceRevisionIds: string[];
   evidence: Record<string, unknown>;
 }
+
+export interface PrototypeFinalizationResult {
+  kind: "prototype-finalization";
+  taskId: string;
+  workspaceId: string;
+  baseSnapshotId: string;
+  baseGraphRevision: number;
+  artifactRevisionIds: string[];
+  resourceRevisionIds: string[];
+  markerProofs: GenerationTaskPrototypeMarkerProof[];
+}
+
+export type PrototypeValidationResult =
+  | PrototypeSnapshotValidationResult
+  | PrototypeFinalizationResult;
 
 export type PreparedGenerationTaskResult =
   | ArtifactPreparedCandidate
@@ -523,6 +539,59 @@ function validatePreparedResult(
   }
   contract(task.kind === "prototype-validation",
     "Only prototype validation may return a Snapshot validation result");
+  const expectedArtifactRevisionIds = claim.attempt.dependencyOutputs
+    .flatMap((output) => output.resultRevisionId === null ? [] : [output.resultRevisionId])
+    .sort();
+  const expectedResourceRevisionIds = claim.attempt.dependencyOutputs
+    .flatMap((output) => output.resultResourceRevisionId === null ? [] : [output.resultResourceRevisionId])
+    .sort();
+  if (task.payload.version === 2) {
+    const finalization = exactObject(result, [
+      "kind",
+      "taskId",
+      "workspaceId",
+      "baseSnapshotId",
+      "baseGraphRevision",
+      "artifactRevisionIds",
+      "resourceRevisionIds",
+      "markerProofs",
+    ], "Prototype finalization result");
+    contract(finalization.kind === "prototype-finalization",
+      "Prototype finalization returned the wrong prepared result kind");
+    contract(finalization.taskId === task.id && finalization.workspaceId === task.workspaceId,
+      "prepared result identity does not match its Task");
+    contract(finalization.baseSnapshotId === claim.attempt.expectedSnapshotId,
+      "Prototype finalization result does not match its immutable base Snapshot");
+    contract(Number.isSafeInteger(finalization.baseGraphRevision)
+      && Number(finalization.baseGraphRevision) >= 0,
+    "Prototype finalization graph revision must be a non-negative safe integer");
+    const artifactRevisionIds = canonicalStringArray(
+      finalization.artifactRevisionIds,
+      "Prototype finalization Artifact Revision ids",
+    );
+    const resourceRevisionIds = canonicalStringArray(
+      finalization.resourceRevisionIds,
+      "Prototype finalization Resource Revision ids",
+    );
+    contract(isDeepStrictEqual(artifactRevisionIds, expectedArtifactRevisionIds),
+      "Prototype finalization Artifact Revision set is not exact");
+    contract(isDeepStrictEqual(resourceRevisionIds, expectedResourceRevisionIds),
+      "Prototype finalization Resource Revision set is not exact");
+    const markerProofs = canonicalPrototypeMarkerProofs(finalization.markerProofs);
+    const normalized: PrototypeFinalizationResult = {
+      kind: "prototype-finalization",
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      baseSnapshotId: claim.attempt.expectedSnapshotId,
+      baseGraphRevision: Number(finalization.baseGraphRevision),
+      artifactRevisionIds,
+      resourceRevisionIds,
+      markerProofs,
+    };
+    contract(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= outputBudget,
+      "Prototype finalization result exceeds its Task output budget");
+    return normalized;
+  }
   const validation = exactObject(result, [
     "kind",
     "taskId",
@@ -545,12 +614,6 @@ function validatePreparedResult(
     "Prototype validation Artifact Revision ids");
   const resourceRevisionIds = canonicalStringArray(validation.resourceRevisionIds,
     "Prototype validation Resource Revision ids");
-  const expectedArtifactRevisionIds = claim.attempt.dependencyOutputs
-    .flatMap((output) => output.resultRevisionId === null ? [] : [output.resultRevisionId])
-    .sort();
-  const expectedResourceRevisionIds = claim.attempt.dependencyOutputs
-    .flatMap((output) => output.resultResourceRevisionId === null ? [] : [output.resultResourceRevisionId])
-    .sort();
   contract(isDeepStrictEqual(artifactRevisionIds, expectedArtifactRevisionIds),
     "Prototype validation Artifact Revision set is not exact");
   contract(isDeepStrictEqual(resourceRevisionIds, expectedResourceRevisionIds),
@@ -572,6 +635,105 @@ function validatePreparedResult(
   contract(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= outputBudget,
     "Prototype validation result exceeds its Task output budget");
   return normalized;
+}
+
+function canonicalPrototypeMarkerProofs(value: unknown): GenerationTaskPrototypeMarkerProof[] {
+  const normalized = canonicalJsonValue(
+    value,
+    "Prototype finalization marker proofs",
+    { ancestors: new WeakSet<object>(), nodes: 0 },
+  );
+  contract(Array.isArray(normalized), "Prototype finalization marker proofs must be an array");
+  return normalized.map((entry, index) => {
+    const proof = exactObject(entry, [
+      "protocol",
+      "workspaceId",
+      "artifactId",
+      "artifactRevisionId",
+      "assemblyHash",
+      "designNodeId",
+      "sourceArtifactId",
+      "sourceArtifactRevisionId",
+      "sourceCommitHash",
+      "sourceTreeHash",
+      "sourcePath",
+      "selectionManifestHash",
+      "runtimeProof",
+    ], `Prototype finalization marker proof[${index}]`);
+    contract(proof.protocol === "dezin.artifact-element-selection-manifest.v1",
+      `Prototype finalization marker proof[${index}] protocol is unsupported`);
+    for (const field of [
+      "workspaceId",
+      "artifactId",
+      "artifactRevisionId",
+      "assemblyHash",
+      "designNodeId",
+      "sourceArtifactId",
+      "sourceArtifactRevisionId",
+      "sourceCommitHash",
+      "sourceTreeHash",
+      "sourcePath",
+      "selectionManifestHash",
+    ] as const) {
+      contract(typeof proof[field] === "string" && proof[field].length > 0,
+        `Prototype finalization marker proof[${index}].${field} must be a non-empty string`);
+    }
+    const runtime = exactObject(proof.runtimeProof, [
+      "protocol",
+      "runtimeIdentityHash",
+      "workspaceId",
+      "artifactId",
+      "artifactRevisionId",
+      "assemblyHash",
+      "designNodeId",
+      "trigger",
+      "sourceTreeHash",
+      "dependencyLockHash",
+      "receiptNonce",
+      "frames",
+      "receiptHash",
+    ], `Prototype finalization marker proof[${index}] runtime proof`);
+    contract(runtime.protocol === "dezin.artifact-prototype-runtime-proof.v1"
+      && (runtime.trigger === "click" || runtime.trigger === "submit"),
+    `Prototype finalization marker proof[${index}] runtime proof is unsupported`);
+    for (const field of [
+      "runtimeIdentityHash",
+      "workspaceId",
+      "artifactId",
+      "artifactRevisionId",
+      "assemblyHash",
+      "designNodeId",
+      "sourceTreeHash",
+      "dependencyLockHash",
+      "receiptNonce",
+      "receiptHash",
+    ] as const) {
+      contract(typeof runtime[field] === "string" && runtime[field].length > 0,
+        `Prototype finalization marker proof[${index}] runtimeProof.${field} must be a non-empty string`);
+    }
+    contract(Array.isArray(runtime.frames),
+      `Prototype finalization marker proof[${index}] runtimeProof.frames must be an array`);
+    runtime.frames.forEach((value, frameIndex) => {
+      const frame = exactObject(value, [
+        "frameId",
+        "width",
+        "height",
+        "tagName",
+        "role",
+        "action",
+        "visible",
+      ], `Prototype finalization marker proof[${index}] runtime Frame[${frameIndex}]`);
+      contract(typeof frame.frameId === "string" && frame.frameId.length > 0
+        && Number.isSafeInteger(frame.width) && Number(frame.width) > 0
+        && Number.isSafeInteger(frame.height) && Number(frame.height) > 0
+        && typeof frame.tagName === "string" && frame.tagName.length > 0
+        && (frame.role === null || (typeof frame.role === "string" && frame.role.length > 0))
+        && typeof frame.action === "string" && frame.action.length > 0
+        && frame.visible === true,
+      `Prototype finalization marker proof[${index}] runtime Frame[${frameIndex}] is invalid`);
+    });
+    return proof as unknown as GenerationTaskPrototypeMarkerProof;
+  });
 }
 
 function canonicalStringArray(value: unknown, label: string): string[] {

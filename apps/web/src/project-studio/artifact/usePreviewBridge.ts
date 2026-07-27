@@ -24,7 +24,12 @@ interface PreviewSelectionMessage {
   textComplete?: boolean;
   rect?: { x: number; y: number; w: number; h: number };
   instanceId?: string;
-  attrs?: { id?: string; screenLabel?: string };
+  attrs?: { id?: string; ariaLabel?: string; screenLabel?: string };
+  displayTarget?: {
+    tag?: string;
+    textPreview?: string;
+    attrs?: { ariaLabel?: string; screenLabel?: string };
+  };
 }
 
 type NormalizedPreviewMessage =
@@ -35,6 +40,7 @@ type NormalizedPreviewMessage =
       tag: string | null;
       text: string | null;
       textPreview: string | null;
+      displayLabel: string;
       textMutationCapable: boolean;
       textMutationUnavailableReason: string | null;
       rect: ArtifactElementContext["rect"];
@@ -266,6 +272,80 @@ function pickerTextPreview(message: Partial<PreviewSelectionMessage>, exactText:
   return compact.length > 0 ? compact : null;
 }
 
+const SELECTION_KIND_LABELS: Readonly<Record<string, string>> = {
+  a: "Link",
+  article: "Article",
+  audio: "Audio",
+  button: "Button",
+  canvas: "Canvas",
+  div: "Container",
+  footer: "Footer",
+  form: "Form",
+  header: "Header",
+  img: "Image",
+  input: "Input",
+  label: "Label",
+  li: "List item",
+  main: "Main content",
+  nav: "Navigation",
+  ol: "List",
+  p: "Text",
+  section: "Section",
+  select: "Select",
+  span: "Text",
+  svg: "Graphic",
+  textarea: "Text field",
+  ul: "List",
+  video: "Video",
+};
+
+const STRUCTURAL_SELECTION_TAGS = new Set([
+  "article",
+  "div",
+  "footer",
+  "form",
+  "header",
+  "main",
+  "nav",
+  "ol",
+  "section",
+  "ul",
+]);
+const UUID_IN_SELECTION_LABEL = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const SELECTOR_IN_SELECTION_LABEL = /(?:^selector\s*:|\[(?:data-|aria-)[^\]]+\]|:(?:nth|first|last|only)-(?:child|of-type)\()/i;
+
+function selectionKindLabel(tag: string | null): string {
+  if (tag === null) return "Element";
+  if (/^h[1-6]$/.test(tag)) return "Heading";
+  return SELECTION_KIND_LABELS[tag]
+    ?? `${tag.charAt(0).toUpperCase()}${tag.slice(1).toLowerCase()}`;
+}
+
+function readableSelectionLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length === 0 || compact.length > 96
+    || UUID_IN_SELECTION_LABEL.test(compact) || SELECTOR_IN_SELECTION_LABEL.test(compact)) return undefined;
+  return compact;
+}
+
+function designerSelectionLabel(
+  message: Partial<PreviewSelectionMessage>,
+  tag: string | null,
+  textPreview: string | null,
+): string {
+  const displayTag = trimmed(message.displayTarget?.tag, 64)?.toLowerCase() ?? tag;
+  const screenLabel = readableSelectionLabel(message.attrs?.screenLabel)
+    ?? readableSelectionLabel(message.displayTarget?.attrs?.screenLabel);
+  const accessibleLabel = readableSelectionLabel(message.attrs?.ariaLabel)
+    ?? readableSelectionLabel(message.displayTarget?.attrs?.ariaLabel);
+  const visibleText = readableSelectionLabel(message.displayTarget?.textPreview ?? textPreview);
+  const semanticLabel = selectionKindLabel(displayTag);
+  return screenLabel ?? accessibleLabel
+    ?? (displayTag !== null && STRUCTURAL_SELECTION_TAGS.has(displayTag) ? semanticLabel : visibleText)
+    ?? semanticLabel;
+}
+
 function frameRejectionMessage(message: PreviewChannelMessage): string {
   const reason = trimmed(message.reason, 64);
   if (reason !== undefined && FRAME_REJECTION_MESSAGES[reason] !== undefined) {
@@ -332,13 +412,15 @@ function messageData(value: unknown): NormalizedPreviewMessage | null {
   if (normalizedLocator === null) return null;
   const text = exactPickerText(message);
   const textPreview = pickerTextPreview(message, text);
+  const tag = trimmed(message.tag, 64)?.toLowerCase() ?? null;
   const textMutationCapable = normalizedLocator.mutationCapable && text !== null;
   return {
     type: "selected",
     locator: normalizedLocator.locator,
-    tag: trimmed(message.tag, 64)?.toLowerCase() ?? null,
+    tag,
     text,
     textPreview,
+    displayLabel: designerSelectionLabel(message, tag, textPreview),
     rect: normalizeRect(message.rect),
     instanceId: trimmed(message.instanceId) ?? null,
     mutationCapable: normalizedLocator.mutationCapable,
@@ -538,7 +620,7 @@ export function usePreviewBridge({
       targetKey: previewIdentity.targetKey,
       assemblyHash: previewIdentity.assemblyHash,
       frameId: frame?.id ?? "unknown",
-      label: data.textPreview ?? data.locator.designNodeId,
+      label: data.displayLabel,
       locator: data.locator,
       tag: data.tag,
       text: data.text,

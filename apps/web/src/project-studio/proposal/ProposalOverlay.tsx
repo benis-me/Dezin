@@ -297,10 +297,10 @@ export function createProposalOverlayModel(
     const target = removedTarget ?? (overlayDomainNodeIds.has(sourceEdge.target)
       ? proposalOverlayId(proposalId, "node", sourceEdge.target)
       : sourceEdge.target);
-    const sourceHandle = !removedSource && directOverlayDomainNodeIds.has(sourceEdge.source)
+    const sourceHandle = directOverlayDomainNodeIds.has(sourceEdge.source)
       ? "proposal-source"
       : sourceEdge.sourceHandle;
-    const targetHandle = !removedTarget && directOverlayDomainNodeIds.has(sourceEdge.target)
+    const targetHandle = directOverlayDomainNodeIds.has(sourceEdge.target)
       ? "proposal-target"
       : sourceEdge.targetHandle;
     return [{

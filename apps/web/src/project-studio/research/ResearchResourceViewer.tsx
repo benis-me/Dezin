@@ -614,7 +614,13 @@ export function ResearchResourceViewer({
             <div className="dezin-research-viewer__handoff-selection">
               <span>Selected direction</span>
               <strong>{selectedDirection?.title ?? "Choose a direction"}</strong>
-              {selectedDirection ? <small>{view.resource.id} · Revision {view.revision.sequence} · {selectedDirection.id}</small> : null}
+              {selectedDirection ? (
+                <small
+                  title={`Resource ${view.resource.id} · Revision ${view.revision.id} · Direction ${selectedDirection.id}`}
+                >
+                  Immutable Revision {view.revision.sequence}
+                </small>
+              ) : null}
             </div>
             {targetArtifacts.length > 0 ? (
               <div className="dezin-research-viewer__target">

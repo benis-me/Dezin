@@ -982,6 +982,52 @@ test("reviewer infrastructure failure is typed as provider while genuine design 
   );
 });
 
+test("a deterministic text collision blocks publication and remains repairable even if the critic only offered advisory feedback", async () => {
+  const infra = infrastructure();
+  const collision = {
+    severity: "P1" as const,
+    id: `visual-text-overlap@${FRAME.id}`,
+    message: `[Frame ${FRAME.id}] Text overlaps between .schedule-row__time and .schedule-row__title.`,
+    fix: "Separate the colliding grid tracks at this width.",
+    selector: ".schedule-row__title",
+  };
+  const advisory = {
+    severity: "P2" as const,
+    id: `visual-improve-1@${FRAME.id}`,
+    message: `[Frame ${FRAME.id}] The title column would benefit from more width.`,
+    fix: "Widen the title column.",
+    selector: ".schedule-row__title",
+  };
+  const deps = dependencies({
+    async visualQa(input) {
+      return visualReport(input, [collision, advisory, reviewedFinding()]);
+    },
+  });
+  const evaluator = new ProductionStandardArtifactQualityEvaluator({
+    infrastructure: infra,
+    projectId: "project-1",
+    settings,
+    dataDir: "/data",
+    agentCommand: "claude",
+    dependencies: deps.value,
+  });
+
+  const result = await evaluator.evaluate({
+    candidate: CANDIDATE,
+    dir: infra.worktreeDir,
+    round: 2,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.quality.state, "failed");
+  assert.equal((result.evidence.visualReview as { status: string }).status, "failed");
+  assert.deepEqual(
+    result.repairFindings.map((finding) => finding.id),
+    [collision.id, advisory.id],
+  );
+});
+
 test("the immutable QA profile may make a P2 contract blocking and repairable", async () => {
   const infra = infrastructure({ blockingSeverities: ["P0", "P1", "P2"] });
   const improvement = {

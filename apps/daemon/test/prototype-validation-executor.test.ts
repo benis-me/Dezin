@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   normalizeGenerationTaskIntent,
+  generationTaskPrototypeRuntimeReceiptNonce,
   type ArtifactRevisionRecord,
   type GenerationTask,
   type GenerationTaskAttemptClaim,
+  type GenerationTaskPrototypeMarkerProof,
   type ResourceRevision,
   type WorkspaceSnapshotRecord,
 } from "../../../packages/core/src/index.ts";
@@ -187,6 +190,31 @@ function claimFixture(): GenerationTaskAttemptClaim {
   };
 }
 
+function v2ClaimFixture(): GenerationTaskAttemptClaim {
+  const claim = claimFixture();
+  const payload = {
+    version: 2,
+    prototypeIntents: [{
+      edgeId: PROTOTYPE_INTENT.edgeId,
+      sourceArtifactId: PROTOTYPE_INTENT.sourceArtifactId,
+      targetArtifactId: PROTOTYPE_INTENT.targetArtifactId,
+      trigger: PROTOTYPE_INTENT.trigger,
+      sourceMarkerId: "prototype-marker-home-details",
+      targetState: PROTOTYPE_INTENT.targetState,
+      transition: structuredClone(PROTOTYPE_INTENT.transition),
+    }],
+    responsiveFrames: structuredClone(FRAMES),
+    artifactIds: ["page-details", "page-home"],
+  };
+  claim.task.payload = structuredClone(payload);
+  claim.attempt.payload = structuredClone(payload);
+  const snapshot = snapshotFixture();
+  const edge = snapshot.graph.edges[0]!;
+  assert.equal(edge.kind, "prototype");
+  edge.prototype = { status: "planned" };
+  return { ...claim, __snapshot: snapshot } as GenerationTaskAttemptClaim;
+}
+
 function artifactRevision(
   artifactId: "page-home" | "page-details",
   revisionId: "revision-home" | "revision-details",
@@ -226,6 +254,77 @@ function resourceRevision(): ResourceRevision {
     provenance: { planId: PLAN_ID, taskId: "task-brand" },
     createdByRunId: null,
     createdAt: 19_000,
+  };
+}
+
+function markerProof(input: {
+  workspaceId: string;
+  artifactId: string;
+  revisionId: string;
+  sourceMarkerId: string;
+  trigger: "click" | "submit";
+}) {
+  const manifest = {
+    protocol: "dezin.artifact-element-selection-manifest.v1" as const,
+    workspaceId: input.workspaceId,
+    artifactId: input.artifactId,
+    artifactRevisionId: input.revisionId,
+    assemblyHash: "d".repeat(64),
+    designNodeId: input.sourceMarkerId,
+    sourceArtifactId: input.artifactId,
+    sourceArtifactRevisionId: input.revisionId,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    sourcePath: "src/pages/Home.tsx",
+  };
+  const canonical = Object.fromEntries(Object.entries(manifest).sort(([left], [right]) => (
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+  )));
+  const dependencyLockHash = "e".repeat(64);
+  const runtimeIdentityHash = createHash("sha256").update(JSON.stringify({
+    protocol: "dezin.artifact-preview-runtime-identity.v1",
+    workspaceId: input.workspaceId,
+    artifactId: input.artifactId,
+    artifactRevisionId: input.revisionId,
+    assemblyHash: manifest.assemblyHash,
+    sourceTreeHash: manifest.sourceTreeHash,
+    dependencyLockHash,
+  })).digest("hex");
+  const runtime = {
+    protocol: "dezin.artifact-prototype-runtime-proof.v1" as const,
+    runtimeIdentityHash,
+    workspaceId: input.workspaceId,
+    artifactId: input.artifactId,
+    artifactRevisionId: input.revisionId,
+    assemblyHash: manifest.assemblyHash,
+    designNodeId: input.sourceMarkerId,
+    trigger: input.trigger,
+    sourceTreeHash: manifest.sourceTreeHash,
+    dependencyLockHash,
+    receiptNonce: generationTaskPrototypeRuntimeReceiptNonce(
+      TASK_ID,
+      1,
+      PROTOTYPE_INTENT.edgeId,
+      input.sourceMarkerId,
+    ),
+    frames: [
+      { frameId: "desktop", width: 1_440, height: 900 },
+      { frameId: "mobile", width: 390, height: 844 },
+    ].map((frame) => ({
+      ...frame,
+      tagName: input.trigger === "submit" ? "form" : "button",
+      role: null,
+      action: input.trigger === "submit" ? "form" as const : "button" as const,
+      visible: true as const,
+    })),
+  };
+  return {
+    ...manifest,
+    selectionManifestHash: createHash("sha256").update(JSON.stringify(canonical)).digest("hex"),
+    runtimeProof: {
+      ...runtime,
+      receiptHash: createHash("sha256").update(JSON.stringify(runtime)).digest("hex"),
+    },
   };
 }
 
@@ -309,6 +408,17 @@ function harness(overrides: {
   artifacts?: Map<string, ArtifactRevisionRecord>;
   resources?: Map<string, ResourceRevision>;
   onReadSnapshot?: (signal: AbortSignal) => void;
+  onResolveMarker?: (
+    input: {
+      workspaceId: string;
+      artifactId: string;
+      revisionId: string;
+      sourceMarkerId: string;
+      trigger: "click" | "submit";
+      receiptNonce: string;
+    },
+    signal: AbortSignal,
+  ) => GenerationTaskPrototypeMarkerProof | Promise<GenerationTaskPrototypeMarkerProof>;
 } = {}) {
   const snapshot = overrides.snapshot === undefined ? snapshotFixture() : overrides.snapshot;
   const artifacts = overrides.artifacts ?? new Map([
@@ -332,6 +442,12 @@ function harness(overrides: {
     readResourceRevision(workspaceId, revisionId) {
       reads.push(`resource:${workspaceId}:${revisionId}`);
       return resources.get(revisionId) ?? null;
+    },
+    async resolveArtifactMarkers(inputs, signal) {
+      return await Promise.all(inputs.map(async (input) => {
+        reads.push(`marker:${input.artifactId}:${input.revisionId}:${input.sourceMarkerId}`);
+        return await (overrides.onResolveMarker?.(input, signal) ?? markerProof(input));
+      }));
     },
   };
   return { executor: new PrototypeValidationExecutor({ store }), reads };
@@ -418,12 +534,74 @@ test("PrototypeValidationExecutor resolves one immutable Snapshot into strict de
   });
 });
 
+test("PrototypeValidationExecutor v2 proves every marker against its exact dependency Revision", async () => {
+  const claim = v2ClaimFixture();
+  const snapshot = (claim as GenerationTaskAttemptClaim & {
+    __snapshot: WorkspaceSnapshotRecord;
+  }).__snapshot;
+  delete (claim as GenerationTaskAttemptClaim & { __snapshot?: WorkspaceSnapshotRecord }).__snapshot;
+  const { executor, reads } = harness({ snapshot });
+
+  const result = await executor.execute(claim, new AbortController().signal);
+
+  assert.deepEqual(reads, [
+    `snapshot:${WORKSPACE_ID}:${SNAPSHOT_ID}`,
+    `artifact:${WORKSPACE_ID}:revision-details`,
+    `artifact:${WORKSPACE_ID}:revision-home`,
+    `resource:${WORKSPACE_ID}:resource-revision-brand`,
+    "marker:page-home:revision-home:prototype-marker-home-details",
+  ]);
+  assert.deepEqual(result, {
+    kind: "prototype-finalization",
+    taskId: TASK_ID,
+    workspaceId: WORKSPACE_ID,
+    baseSnapshotId: SNAPSHOT_ID,
+    baseGraphRevision: 7,
+    artifactRevisionIds: ["revision-details", "revision-home"],
+    resourceRevisionIds: ["resource-revision-brand"],
+    markerProofs: [markerProof({
+      workspaceId: WORKSPACE_ID,
+      artifactId: "page-home",
+      revisionId: "revision-home",
+      sourceMarkerId: "prototype-marker-home-details",
+      trigger: "click",
+    })],
+  });
+});
+
+test("PrototypeValidationExecutor v2 fails closed when the exact preview runtime cannot prove a marker", async () => {
+  const claim = v2ClaimFixture();
+  const snapshot = (claim as GenerationTaskAttemptClaim & {
+    __snapshot: WorkspaceSnapshotRecord;
+  }).__snapshot;
+  delete (claim as GenerationTaskAttemptClaim & { __snapshot?: WorkspaceSnapshotRecord }).__snapshot;
+  const { executor } = harness({
+    snapshot,
+    onResolveMarker() {
+      throw new Error("immutable preview runtime unavailable");
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof PrototypeValidationError);
+      assert.equal(error.failureClass, "qa");
+      assert.match(error.message, /exact immutable preview runtimes/i);
+      assert.equal(error.details.reason, "Error");
+      assert.deepEqual(error.details.edgeIds, [PROTOTYPE_INTENT.edgeId]);
+      return true;
+    },
+  );
+});
+
 test("PrototypeValidationExecutor detaches evidence from its read-only claim and Store inputs", async () => {
   const claim = claimFixture();
   const snapshot = snapshotFixture();
   const { executor } = harness({ snapshot });
 
   const result = await executor.execute(claim, new AbortController().signal);
+  assert.equal(result.kind, "snapshot-validation");
   const evidence = structuredClone(result.evidence);
   const payload = claim.task.payload as {
     prototypeIntents: Array<{ transition: { durationMs: number } }>;
@@ -508,8 +686,9 @@ for (const { name, mutate } of [
   {
     name: "a missing immutable responsive Frame",
     mutate(snapshot: WorkspaceSnapshotRecord, artifacts: Map<string, ArtifactRevisionRecord>) {
-      const source = artifacts.get("revision-home")!;
-      source.renderSpec = { frames: structuredClone(FRAMES).slice(0, 1) };
+      for (const revision of artifacts.values()) {
+        revision.renderSpec = { frames: structuredClone(FRAMES).slice(1) };
+      }
     },
   },
 ] as const) {

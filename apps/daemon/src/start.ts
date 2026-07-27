@@ -19,6 +19,7 @@ import { shutdownDaemon } from "./daemon-shutdown.ts";
 import { watchElectronParent } from "./electron-parent-lifecycle.ts";
 import { createProductionGenerationBootstrap } from "./orchestration/production-generation-bootstrap.ts";
 import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snapshot.ts";
+import { createProductionPublicAddressResolver } from "./production-public-address-resolver.ts";
 import { createProductionSafeBoundedExternalFetcher } from "./production-safe-external-fetch.ts";
 import { projectDir } from "./serve-static.ts";
 
@@ -109,7 +110,12 @@ async function main(): Promise<void> {
   // One network boundary is shared by direct Resource imports and generated
   // Research. Both paths therefore use identical DNS pinning, redirect
   // revalidation, deadline, and response-size enforcement.
-  const resourceExternalFetch = createProductionSafeBoundedExternalFetcher();
+  const resourceExternalFetch = createProductionSafeBoundedExternalFetcher({
+    // Surge and similar TUN proxies deliberately return RFC 2544 Fake-IP
+    // answers. Replace only that exact signal through bounded DoH, then keep
+    // the normal public-only and per-hop pinned-address boundary.
+    resolveAddresses: createProductionPublicAddressResolver(),
+  });
   const repositoryDirForWorkspace = (workspaceId: string): string => {
     for (const project of store.listProjects()) {
       if (store.workspace.getWorkspace(project.id)?.id === workspaceId) {
@@ -215,9 +221,14 @@ async function main(): Promise<void> {
     });
   } catch (error) {
     // A failed Electron-owned startup must release its IPC disconnect listener
-    // before the top-level catch sets exitCode, otherwise the live channel keeps
-    // the failed daemon around until the desktop supervisor times out.
+    // and the IPC channel itself before the top-level catch sets exitCode.
+    // Removing the listener alone leaves Node's channel referenced on Linux,
+    // keeping the failed daemon around until the desktop supervisor times out.
     stopWatchingElectronParent();
+    if (process.env.DEZIN_ELECTRON === "1" && process.connected
+      && typeof process.disconnect === "function") {
+      process.disconnect();
+    }
     await generationRecovery.stop();
     await rollbackStartup();
     if (shuttingDown) return;

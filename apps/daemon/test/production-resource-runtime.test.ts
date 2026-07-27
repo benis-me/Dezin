@@ -17,7 +17,12 @@ import {
   ContextPackStore,
   createWorkspaceContextPackRepository,
 } from "../src/context/context-pack-store.ts";
-import { checksumBytes, estimateContextTokens, stableStringify } from "../src/context/context-types.ts";
+import {
+  checksumBytes,
+  estimateContextTokens,
+  stableStringify,
+  type ContextPack,
+} from "../src/context/context-types.ts";
 import type {
   ProductionResourceAgentRequest,
   ProductionMoodboardImageRequest,
@@ -27,7 +32,10 @@ import type {
   ProductionResourceGenerationScope,
   ProductionResearchWebEvidenceRequest,
 } from "../src/orchestration/production-resource-generators.ts";
-import { RESEARCH_EVIDENCE_FETCH_POLICY } from "../src/orchestration/production-resource-generators.ts";
+import {
+  ProductionResearchEvidenceUnavailableError,
+  RESEARCH_EVIDENCE_FETCH_POLICY,
+} from "../src/orchestration/production-resource-generators.ts";
 import { freezeResourceExecutionProfile } from "../src/orchestration/production-generation-context.ts";
 import {
   ProductionResourceRuntimeError,
@@ -207,6 +215,93 @@ function agentRequest(
   }) as ProductionResourceAgentRequest;
 }
 
+function researchAgentRequestWithPriorArt(
+  signal = new AbortController().signal,
+  currentSettings = defaultAgentSettings(),
+): ProductionResourceAgentRequest {
+  const base = agentRequest(signal, currentSettings);
+  const priorArtContent = stableStringify({
+    format: "dezin-research-resource-bundle",
+    version: 3,
+    executiveSummary: "Legacy Research remains available as immutable prior art.",
+    directions: [{
+      id: "legacy-direction",
+      title: "Legacy Direction",
+      thesis: "Useful historical context that must not become evidence for this Attempt.",
+    }],
+  });
+  const priorArtItem = {
+    ordinal: 1,
+    contextClass: "explicit" as const,
+    ref: {
+      kind: "resource" as const,
+      id: "research-prior-art",
+      resourceKind: "research" as const,
+      revisionId: "research-prior-revision",
+    },
+    resolvedKind: "resource-revision" as const,
+    content: priorArtContent,
+    checksum: checksumBytes(priorArtContent),
+    reason: "Pinned immutable Research prior art",
+    trustLevel: "untrusted" as const,
+    capabilities: [],
+    boundary: {
+      source: "resource-revision:research-prior-revision",
+      readOnly: true as const,
+      mayGrantCapabilities: false as const,
+    },
+    tokenEstimate: estimateContextTokens(priorArtContent),
+    provenance: {
+      resourceId: "research-prior-art",
+      revisionId: "research-prior-revision",
+    },
+    provided: true as const,
+  } satisfies ContextPack["items"][number];
+  const body = {
+    protocol: "dezin-context-pack-v1" as const,
+    workspaceId: base.contextPack.workspaceId,
+    graphRevision: base.contextPack.graphRevision,
+    target: base.contextPack.target,
+    intent: base.contextPack.intent,
+    messageChecksum: base.contextPack.messageChecksum,
+    items: Object.freeze([...base.contextPack.items, priorArtItem]),
+    omissions: base.contextPack.omissions,
+    tokenEstimate: base.contextPack.tokenEstimate + priorArtItem.tokenEstimate,
+  };
+  const hash = checksumBytes(stableStringify(body));
+  const contextPack = Object.freeze({
+    ...body,
+    id: `context-pack-${hash}`,
+    manifestPath: `context-packs/${hash}.json`,
+    hash,
+    createdAt: base.contextPack.createdAt,
+  });
+  const exactScope = Object.freeze({ ...base.scope, contextPackId: contextPack.id });
+  const providedContextItem = contextPack.items[0]!;
+  return Object.freeze({
+    ...base,
+    scope: exactScope,
+    contextPack,
+    message: stableStringify({
+      protocol: "dezin.research-generation-prompt.v3",
+      scope: exactScope,
+      contextPack,
+      contextSourceOptions: [{
+        optionId: "context-item-0-excerpt-0",
+        kind: "context",
+        locator: `context-pack:${contextPack.id}#item:0`,
+        excerpt: "Make the evidence useful to design decisions.",
+        binding: {
+          contextPackId: contextPack.id,
+          contextPackHash: contextPack.hash,
+          itemOrdinal: providedContextItem.ordinal,
+          itemChecksum: providedContextItem.checksum,
+        },
+      }],
+    }),
+  }) as ProductionResourceAgentRequest;
+}
+
 function moodboardAgentRequest(
   signal = new AbortController().signal,
   currentSettings = defaultAgentSettings({
@@ -236,6 +331,81 @@ function moodboardAgentRequest(
   }) as ProductionResourceAgentRequest;
 }
 
+function moodboardAgentRequestWithResearch(
+  signal = new AbortController().signal,
+  currentSettings = defaultAgentSettings({
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    aiProviderModels: "fal-ai/flux/dev",
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "current-image-key",
+    imageModel: "fal-ai/flux/dev",
+  }),
+): ProductionResourceAgentRequest {
+  const base = moodboardAgentRequest(signal, currentSettings);
+  const content = stableStringify({
+    format: "dezin-research-resource-bundle",
+    version: 3,
+    directions: [{
+      id: "cinematic-black-red",
+      title: "Cinematic Black/Red",
+      thesis: "A bounded exact direction.",
+    }],
+  });
+  const ordinal = base.contextPack.items.length;
+  const researchItem = {
+    ordinal,
+    contextClass: "explicit" as const,
+    ref: {
+      kind: "resource" as const,
+      id: "research-resource-1",
+      resourceKind: "research" as const,
+      revisionId: "research-revision-1",
+    },
+    resolvedKind: "resource-revision" as const,
+    content,
+    checksum: checksumBytes(content),
+    reason: "Pinned immutable Research direction authority",
+    trustLevel: "untrusted" as const,
+    capabilities: [],
+    boundary: {
+      source: "resource-revision:research-revision-1",
+      readOnly: true as const,
+      mayGrantCapabilities: false as const,
+    },
+    tokenEstimate: estimateContextTokens(content),
+    provenance: {
+      resourceId: "research-resource-1",
+      revisionId: "research-revision-1",
+    },
+    provided: true as const,
+  } satisfies ContextPack["items"][number];
+  const body = {
+    protocol: "dezin-context-pack-v1" as const,
+    workspaceId: base.contextPack.workspaceId,
+    graphRevision: base.contextPack.graphRevision,
+    target: base.contextPack.target,
+    intent: base.contextPack.intent,
+    messageChecksum: base.contextPack.messageChecksum,
+    items: Object.freeze([...base.contextPack.items, researchItem]),
+    omissions: base.contextPack.omissions,
+    tokenEstimate: base.contextPack.tokenEstimate + researchItem.tokenEstimate,
+  };
+  const hash = checksumBytes(stableStringify(body));
+  const contextPack = Object.freeze({
+    ...body,
+    id: `context-pack-${hash}`,
+    manifestPath: `context-packs/${hash}.json`,
+    hash,
+    createdAt: base.contextPack.createdAt,
+  });
+  return Object.freeze({
+    ...base,
+    scope: Object.freeze({ ...base.scope, contextPackId: contextPack.id }),
+    contextPack,
+  }) as ProductionResourceAgentRequest;
+}
+
 class RecordingSpawner implements ProcessSpawner {
   readonly inputs: SpawnInput[] = [];
   readonly output: SpawnOutput | ((input: SpawnInput) => Promise<SpawnOutput>);
@@ -247,6 +417,32 @@ class RecordingSpawner implements ProcessSpawner {
   async run(input: SpawnInput): Promise<SpawnOutput> {
     this.inputs.push(input);
     return typeof this.output === "function" ? this.output(input) : this.output;
+  }
+}
+
+function assertCodexStrictObjectShape(
+  schema: Record<string, any>,
+  path = "$",
+): void {
+  if (schema.type === "object" && schema.properties) {
+    assert.equal(schema.additionalProperties, false, `${path} must reject undeclared properties`);
+    assert.deepEqual(
+      schema.required,
+      Object.keys(schema.properties),
+      `${path} must require every declared property for Codex strict structured output`,
+    );
+    for (const [key, child] of Object.entries(schema.properties)) {
+      assertCodexStrictObjectShape(child as Record<string, any>, `${path}.properties.${key}`);
+    }
+  }
+  if (schema.items && !Array.isArray(schema.items)) {
+    assertCodexStrictObjectShape(schema.items as Record<string, any>, `${path}.items`);
+  }
+  for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+    const branches = schema[keyword];
+    if (!Array.isArray(branches)) continue;
+    branches.forEach((branch, index) =>
+      assertCodexStrictObjectShape(branch as Record<string, any>, `${path}.${keyword}[${index}]`));
   }
 }
 
@@ -350,6 +546,61 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
   });
 });
 
+test("production Resource Agent accepts one decision-grade repair inside the frozen Research v3 envelope", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings({
+      agentCommand: "claude",
+      model: "sonnet",
+    });
+    const output = {
+      protocol: "dezin.research-generation.v3",
+      executiveSummary: "Repaired evidence summary",
+    };
+    const spawner = new RecordingSpawner({
+      stdout: JSON.stringify(output),
+      stderr: "",
+      exitCode: 0,
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      createSpawner: () => spawner,
+    });
+    const baseRequest = agentRequest(new AbortController().signal, store.getSettings());
+    const request = Object.freeze({
+      ...baseRequest,
+      message: JSON.stringify({
+        protocol: "dezin.research-generation-prompt.v3",
+        mode: "decision-grade-repair",
+        repair: {
+          protocol: "dezin.research-decision-grade-repair.v1",
+          attempt: 1,
+          rejectionAudit: {},
+          candidateBundle: {},
+        },
+      }),
+    }) as ProductionResourceAgentRequest;
+
+    const result = await ports.agent.generateStructured(request);
+
+    assert.equal(result.protocol, "dezin.resource-agent-result.v1");
+    assert.equal(spawner.inputs.length, 1, "the real request validator must admit the repair before transport");
+    const taskMarker = `IMMUTABLE_TASK_JSON_UTF8_BYTES=${Buffer.byteLength(request.message, "utf8")}\n`;
+    const taskStart = spawner.inputs[0]!.stdin.indexOf(taskMarker);
+    assert.notEqual(taskStart, -1);
+    const transportedEnvelope = JSON.parse(
+      spawner.inputs[0]!.stdin.slice(taskStart + taskMarker.length),
+    ) as Record<string, any>;
+    assert.equal(transportedEnvelope.protocol, "dezin.research-generation-prompt.v3");
+    assert.equal(transportedEnvelope.mode, "decision-grade-repair");
+    assert.equal(
+      transportedEnvelope.repair.protocol,
+      "dezin.research-decision-grade-repair.v1",
+    );
+  });
+});
+
 test("production Resource reviewer timeout configuration stays finite and bounded", async () => {
   await withStore(async ({ root, store }) => {
     for (const reviewTimeoutMs of [0, Number.POSITIVE_INFINITY, 90_000.5, 5 * 60_000 + 1]) {
@@ -405,11 +656,16 @@ test("production Codex Resource Agent constrains Resource output before normaliz
     });
     const researchRequest = agentRequest(new AbortController().signal, store.getSettings());
     const moodboardRequest = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+    const pinnedMoodboardRequest = moodboardAgentRequestWithResearch(
+      new AbortController().signal,
+      store.getSettings(),
+    );
 
     await ports.agent.generateStructured(researchRequest);
     await ports.agent.generateStructured(moodboardRequest);
+    await ports.agent.generateStructured(pinnedMoodboardRequest);
 
-    assert.equal(spawner.inputs.length, 2);
+    assert.equal(spawner.inputs.length, 3);
     const researchArgs = spawner.inputs[0]!.args;
     const webSearchFeatureIndex = researchArgs.indexOf("--enable");
     assert.notEqual(webSearchFeatureIndex, -1);
@@ -419,9 +675,15 @@ test("production Codex Resource Agent constrains Resource output before normaliz
       false,
       "Moodboard generation must remain a no-tools structured turn",
     );
-    assert.equal(schemas.length, 2);
+    assert.equal(
+      spawner.inputs[2]!.args.includes("standalone_web_search"),
+      false,
+      "Research-bound Moodboard generation must remain a no-tools structured turn",
+    );
+    assert.equal(schemas.length, 3);
     const research = schemas[0]!;
     const moodboard = schemas[1]!;
+    const pinnedMoodboard = schemas[2]!;
     assert.deepEqual(research.required, [
       "protocol",
       "executiveSummary",
@@ -473,7 +735,96 @@ test("production Codex Resource Agent constrains Resource output before normaliz
     assert.equal(moodboard.properties.avoid.minItems, 2);
     assert.equal(moodboard.properties.references.minItems, 2);
     assert.equal(moodboard.properties.assetSpecs.minItems, 1);
+    assert.equal(
+      Object.hasOwn(moodboard.properties.assetSpecs.items.properties, "directionId"),
+      false,
+      "standalone Moodboards must omit the Research-only direction field",
+    );
+    assert.deepEqual(
+      pinnedMoodboard.properties.assetSpecs.items.properties.directionId,
+      { type: "string", minLength: 1, maxLength: 512 },
+    );
+    assert.ok(pinnedMoodboard.properties.assetSpecs.items.required.includes("directionId"));
+    assertCodexStrictObjectShape(research);
+    assertCodexStrictObjectShape(moodboard);
+    assertCodexStrictObjectShape(pinnedMoodboard);
     assert.ok(Buffer.byteLength(JSON.stringify(moodboard), "utf8") < 64 * 1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(pinnedMoodboard), "utf8") < 64 * 1024);
+  });
+});
+
+test("production Codex Research schema keeps prior Research as prompt context but never as current evidence", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      aiProviderId: "openai",
+    });
+    const request = researchAgentRequestWithPriorArt(
+      new AbortController().signal,
+      store.getSettings(),
+    );
+    let schema: Record<string, any> | undefined;
+    let transportedEnvelope: Record<string, any> | undefined;
+    const spawner = new RecordingSpawner(async (input) => {
+      const schemaArgumentIndex = input.args.indexOf("--output-schema");
+      assert.notEqual(schemaArgumentIndex, -1);
+      schema = JSON.parse(
+        await readFile(input.args[schemaArgumentIndex + 1]!, "utf8"),
+      ) as Record<string, any>;
+      const taskMarker = `IMMUTABLE_TASK_JSON_UTF8_BYTES=${Buffer.byteLength(request.message, "utf8")}\n`;
+      const taskStart = input.stdin.indexOf(taskMarker);
+      assert.notEqual(taskStart, -1);
+      transportedEnvelope = JSON.parse(
+        input.stdin.slice(taskStart + taskMarker.length),
+      ) as Record<string, any>;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-resource-prior-art" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-resource-prior-art", type: "agent_message", text: "{}" },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      createSpawner: () => spawner,
+      resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+      structuredAgentPlatform: "darwin",
+      resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    });
+
+    await ports.agent.generateStructured(request);
+
+    const sourceBranches = schema!.properties.sources.items.anyOf as Array<Record<string, any>>;
+    assert.ok(
+      sourceBranches.some((branch) => branch.properties?.binding?.properties?.itemOrdinal?.enum?.[0] === 0),
+      "ordinary provided Context remains available as current-attempt evidence",
+    );
+    assert.equal(
+      sourceBranches.some((branch) => branch.properties?.binding?.properties?.itemOrdinal?.enum?.[0] === 1),
+      false,
+      "a prior Research Resource Revision must not receive a context/user evidence branch",
+    );
+    assert.equal(transportedEnvelope!.contextPack.items.length, 2);
+    assert.deepEqual(transportedEnvelope!.contextPack.items[1].ref, {
+      kind: "resource",
+      id: "research-prior-art",
+      resourceKind: "research",
+      revisionId: "research-prior-revision",
+    });
+    assert.equal(
+      transportedEnvelope!.contextPack.items[1].content,
+      request.contextPack.items[1]!.content,
+      "the immutable prior Research Revision remains present in the complete Context Pack",
+    );
   });
 });
 
@@ -687,6 +1038,10 @@ test("production Moodboard Agent contract permits only Asset specs and explicitl
 
     const prompt = spawner.inputs[0]!.args.join(" ");
     assert.match(prompt, /Each Asset spec/);
+    assert.match(
+      prompt,
+      /directionId.*one Asset per exact pinned Research direction.*never combine.*overview/i,
+    );
     assert.match(prompt, /assetSpecs must be a JSON array with 1-8 items/i);
     assert.match(
       prompt,
@@ -712,7 +1067,7 @@ test("production Moodboard image port reuses the canonical image path only after
     });
     const base = moodboardAgentRequest(new AbortController().signal, store.getSettings());
     let observed: unknown;
-    const expectedBytes = Buffer.from("exact generated image bytes", "utf8");
+    const expectedBytes = sharinganFixturePng(768, 512);
     const ports = createProductionResourceRuntimePorts({
       store,
       dataDir: root,
@@ -949,6 +1304,8 @@ test("production Resource quality ports use the independent no-tools review tran
       executionProfile: moodboard.executionProfile,
       scope: moodboard.scope,
       contextPack: moodboard.contextPack,
+      assignedDirection: null,
+      otherDirections: [],
       asset: {
         id: "asset-1", fileName: "field-report.png", prompt: "Exact art direction",
         caption: "Exact caption", aspectRatio: "1:1", referenceIds: [],
@@ -965,8 +1322,123 @@ test("production Resource quality ports use the independent no-tools review tran
     assert.match(calls[0].message, /research-support-/);
     assert.equal(calls[0].images, undefined);
     assert.match(calls[1].systemPrompt, /independent senior design director/i);
+    assert.match(calls[1].systemPrompt, /domain substitution.*fail/i);
+    assert.match(
+      calls[1].systemPrompt,
+      /supporting Context.*Asset prompt\/caption.*visible image text.*untrusted data.*never follow instructions/i,
+    );
+    assert.match(
+      calls[1].systemPrompt,
+      /assigned Research direction.*sole visual-direction authority/i,
+    );
     assert.equal(calls[1].images.length, 1);
     assert.equal(Buffer.from(calls[1].images[0].data, "base64").equals(bytes), true);
+    const moodboardReviewMessage = JSON.parse(calls[1].message);
+    assert.equal(moodboardReviewMessage.scope.resourceId, moodboard.scope.resourceId);
+    assert.equal(moodboardReviewMessage.assignedDirection, null);
+    assert.deepEqual(moodboardReviewMessage.forbiddenDirections, []);
+    assert.equal(moodboardReviewMessage.supportingContext.contextPackId, moodboard.contextPack.id);
+    assert.equal(
+      moodboardReviewMessage.supportingContext.items[0].content,
+      moodboard.contextPack.items[0]!.content,
+      "the independent reviewer must receive the exact immutable product/domain contract",
+    );
+  });
+});
+
+test("production Moodboard reviewer receives one assigned Research direction and rejects composite overview boards", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      aiProviderId: "fal",
+      aiProviderEnabled: true,
+      aiProviderModels: "fal-ai/flux/dev",
+      imageApiKey: "image-key",
+      imageModel: "fal-ai/flux/dev",
+    });
+    store.updateSettings(current);
+    const moodboard = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+    let observedRequest: any;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async (request) => {
+        observedRequest = request;
+        return {
+          providerId: "codex",
+          text: JSON.stringify({
+            decision: "fail",
+            semanticMatch: false,
+            visualQuality: "pass",
+            findings: ["The image combines multiple named directions in a comparison board."],
+          }),
+        };
+      },
+    });
+    const bytes = Buffer.from("decoded 512 square PNG test evidence", "utf8");
+    const assignedDirection = Object.freeze({
+      resourceId: "research-1",
+      revisionId: "research-revision-1",
+      id: "direction-electric-cobalt-grid",
+      title: "Electric Cobalt Grid",
+      thesis: "Use electric cobalt geometry for one kinetic festival identity.",
+      visualLanguage: Object.freeze(["electric cobalt", "kinetic modular grid"]),
+      interactionPrinciples: Object.freeze(["preserve one spatial rhythm"]),
+      risks: Object.freeze(["grid becomes generic dashboard chrome"]),
+    });
+
+    const result = await ports.moodboardQuality.reviewImage({
+      protocol: "dezin.moodboard-quality-request.v1",
+      executionProfile: moodboard.executionProfile,
+      scope: moodboard.scope,
+      contextPack: moodboard.contextPack,
+      assignedDirection,
+      otherDirections: [
+        { id: "direction-cinematic-black-red", title: "Cinematic Black / Red" },
+        { id: "direction-warm-paper-ink", title: "Warm Paper / Ink" },
+      ],
+      asset: {
+        id: "asset-electric",
+        directionId: assignedDirection.id,
+        fileName: "electric-cobalt-grid.png",
+        prompt: "One electric cobalt festival composition.",
+        caption: "Electric Cobalt Grid.",
+        aspectRatio: "1:1",
+        referenceIds: [],
+      },
+      image: {
+        mimeType: "image/png",
+        width: 512,
+        height: 512,
+        checksum: sha256(bytes),
+        bytes,
+      },
+      callTimeoutMs: 30_000,
+      signal: moodboard.signal,
+    });
+
+    assert.equal(result.semanticMatch, false);
+    assert.match(
+      observedRequest.systemPrompt,
+      /assigned Research direction.*sole visual-direction authority/i,
+    );
+    assert.match(
+      observedRequest.systemPrompt,
+      /multiple visual directions.*side-by-side.*triptych.*overview.*specification.*fail/i,
+    );
+    const message = JSON.parse(observedRequest.message);
+    assert.deepEqual(message.assignedDirection, assignedDirection);
+    assert.deepEqual(message.forbiddenDirections, [
+      { id: "direction-cinematic-black-red", title: "Cinematic Black / Red" },
+      { id: "direction-warm-paper-ink", title: "Warm Paper / Ink" },
+    ]);
+    assert.equal(message.supportingContext.contextPackId, moodboard.contextPack.id);
+    assert.equal(
+      message.supportingContext.items[0].content,
+      moodboard.contextPack.items[0]!.content,
+    );
+    assert.equal(message.contextPack, undefined);
   });
 });
 
@@ -1011,6 +1483,8 @@ test("production Moodboard reviewer preserves frozen Codex identity, confinement
       executionProfile: moodboard.executionProfile,
       scope: moodboard.scope,
       contextPack: moodboard.contextPack,
+      assignedDirection: null,
+      otherDirections: [],
       asset: {
         id: "asset-1",
         fileName: "field-report.png",
@@ -1031,9 +1505,11 @@ test("production Moodboard reviewer preserves frozen Codex identity, confinement
     });
 
     assert.equal(quality.decision, "pass");
+    assert.deepEqual(quality.reviewer, { id: "codex", model: "gpt-5.4-mini" });
     assert.equal(observedRequest.command, "codex");
     assert.equal(observedRequest.model, "gpt-5.4-mini");
     assert.equal(observedRequest.timeoutMs, 30_000);
+    assert.equal(observedRequest.remoteRetryMode, "transport-owned");
     assert.equal(observedRequest.images.length, 1);
     assert.equal(observedOptions.resolveRegisteredExecutable("codex"), TEST_CODEX_EXECUTABLE);
     assert.equal(observedOptions.platform, "darwin");
@@ -1283,6 +1759,8 @@ test("production Codex image reviewer constrains the native JSONL terminal messa
       executionProfile: moodboard.executionProfile,
       scope: moodboard.scope,
       contextPack: moodboard.contextPack,
+      assignedDirection: null,
+      otherDirections: [],
       asset: {
         id: "asset-1",
         fileName: "field-report.png",
@@ -1367,6 +1845,69 @@ test("production Codex image reviewer rejects a non-compliant native JSONL termi
         executionProfile: moodboard.executionProfile,
         scope: moodboard.scope,
         contextPack: moodboard.contextPack,
+        assignedDirection: null,
+        otherDirections: [],
+        asset: {
+          id: "asset-1",
+          fileName: "field-report.png",
+          prompt: "Exact art direction",
+          caption: "Exact caption",
+          aspectRatio: "1:1",
+          referenceIds: [],
+        },
+        image: {
+          mimeType: "image/png",
+          width: 512,
+          height: 512,
+          checksum: sha256(bytes),
+          bytes,
+        },
+        callTimeoutMs: 30_000,
+        signal: moodboard.signal,
+      }),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "MOODBOARD_QUALITY_REVIEW_FAILED"
+        && error.failureClass === "agent-transport",
+    );
+  });
+});
+
+test("production Moodboard reviewer rejects ill-formed UTF-16 findings at the transport boundary", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      aiProviderId: "fal",
+      aiProviderEnabled: true,
+      aiProviderModels: "fal-ai/flux/dev",
+      imageApiKey: "image-key",
+      imageModel: "fal-ai/flux/dev",
+    });
+    store.updateSettings(current);
+    const moodboard = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async () => ({
+        providerId: "codex",
+        text: JSON.stringify({
+          decision: "fail",
+          semanticMatch: false,
+          visualQuality: "pass",
+          findings: [`Malformed reviewer finding ${"\udc00"}`],
+        }),
+      }),
+    });
+    const bytes = sharinganFixturePng(512, 512);
+
+    await assert.rejects(
+      () => ports.moodboardQuality.reviewImage({
+        protocol: "dezin.moodboard-quality-request.v1",
+        executionProfile: moodboard.executionProfile,
+        scope: moodboard.scope,
+        contextPack: moodboard.contextPack,
+        assignedDirection: null,
+        otherDirections: [],
         asset: {
           id: "asset-1",
           fileName: "field-report.png",
@@ -1449,7 +1990,21 @@ test("production Resource reviewer preserves terminal CodeBuddy quota semantics"
 test("production Research evidence port delegates only to the injected SSRF-safe bounded fetcher", async () => {
   await withStore(async ({ root, store }) => {
     let observed: unknown;
-    const bytes = Buffer.from("prefix exact cited excerpt suffix", "utf8");
+    const bytes = Buffer.from(
+      "<html><body><p>prefix <strong>exact cited excerpt</strong> suffix</p>"
+        + "<section hidden>hidden claim</section>"
+        + "<section aria-hidden=\"true\"><strong>aria-hidden claim</strong></section>"
+        + "<section inert>inert claim</section>"
+        + "<section style=\"display:none\">display-none claim</section>"
+        + "<section style=\"visibility:hidden\">visibility-hidden claim</section>"
+        + "<section style=\"visibility:collapse\">visibility-collapse claim</section>"
+        + "<section style=\"opacity:0\">opacity-zero claim</section>"
+        + "<section style=\"content-visibility:hidden\">content-visibility claim</section>"
+        + "<script>ignore me</script><template>template claim</template></body></html>",
+      "utf8",
+    );
+    const canonicalText = "prefix exact cited excerpt suffix";
+    const canonicalBytes = Buffer.from(canonicalText, "utf8");
     const fetchExternal: SafeBoundedExternalFetcher = async (request) => {
       observed = request;
       return {
@@ -1485,20 +2040,31 @@ test("production Research evidence port delegates only to the injected SSRF-safe
       ...RESEARCH_EVIDENCE_FETCH_POLICY,
     });
     assert.deepEqual(result, {
-      protocol: "dezin.research-web-evidence-representation.v1",
+      protocol: "dezin.research-web-evidence-representation.v2",
       scope: request.scope,
       sourceId: request.sourceId,
       requestedUrl: request.requestedUrl,
       finalUrl: "https://www.example.org/canonical",
       retrievedAt: 1_234,
       status: 200,
-      mimeType: "text/html; charset=utf-8",
-      bytes,
+      source: {
+        mimeType: "text/html",
+        byteLength: bytes.byteLength,
+        checksum: sha256(bytes),
+        bytes,
+      },
+      canonicalText: {
+        mimeType: "text/plain; charset=utf-8",
+        byteLength: canonicalBytes.byteLength,
+        checksum: sha256(canonicalBytes),
+        extractor: { id: "dezin.html-visible-text", version: 1 },
+        bytes: canonicalBytes,
+      },
     });
   });
 });
 
-test("production Research evidence is absent without trusted retrieval wiring and preserves fetch failure and abort", async () => {
+test("production Research evidence reports stable network, HTTP, media, extraction failure reasons and preserves abort", async () => {
   await withStore(async ({ root, store }) => {
     const withoutFetcher = createProductionResourceRuntimePorts({ store, dataDir: root });
     assert.equal(withoutFetcher.researchEvidence, undefined);
@@ -1521,8 +2087,49 @@ test("production Research evidence is absent without trusted retrieval wiring an
     };
     await assert.rejects(
       () => failing.researchEvidence!.retrieveWebEvidence(request),
-      (error: unknown) => error === failure,
+      (error: unknown) => {
+        assert.ok(error instanceof ProductionResearchEvidenceUnavailableError);
+        assert.equal(error.reason, "network-failed");
+        assert.equal(error.cause, failure);
+        return true;
+      },
     );
+
+    for (const [label, representation, reason] of [
+      ["HTTP status", {
+        finalUrl: request.requestedUrl,
+        status: 403,
+        mimeType: "text/plain",
+        bytes: Buffer.from("Forbidden"),
+      }, "http-status"],
+      ["unsupported media", {
+        finalUrl: request.requestedUrl,
+        status: 200,
+        mimeType: "application/octet-stream",
+        bytes: Buffer.from([1, 2, 3]),
+      }, "unsupported-media-type"],
+      ["content extraction", {
+        finalUrl: request.requestedUrl,
+        status: 200,
+        mimeType: "application/pdf",
+        bytes: Buffer.from("not a PDF"),
+      }, "content-extraction-failed"],
+    ] as const) {
+      const unavailable = createProductionResourceRuntimePorts({
+        store,
+        dataDir: root,
+        researchExternalFetch: async () => representation,
+        now: () => 10,
+      });
+      await assert.rejects(
+        () => unavailable.researchEvidence!.retrieveWebEvidence(request),
+        (error: unknown) => {
+          assert.ok(error instanceof ProductionResearchEvidenceUnavailableError, label);
+          assert.equal(error.reason, reason, label);
+          return true;
+        },
+      );
+    }
 
     const controller = new AbortController();
     const reason = new Error("stop bounded evidence retrieval");
@@ -1540,6 +2147,46 @@ test("production Research evidence is absent without trusted retrieval wiring an
     });
     controller.abort(reason);
     await assert.rejects(execution, (error: unknown) => error === reason);
+  });
+});
+
+test("production Research evidence degrades empty HTTP bodies to stable unavailable reasons", async () => {
+  await withStore(async ({ root, store }) => {
+    const request: ProductionResearchWebEvidenceRequest = {
+      protocol: "dezin.research-web-evidence-request.v1",
+      scope: scope("research"),
+      sourceId: "source-web-empty",
+      requestedUrl: "https://www.example.org/empty",
+      excerpt: "exact cited excerpt",
+      maxBytes: RESEARCH_EVIDENCE_FETCH_POLICY.maxBytes,
+      signal: new AbortController().signal,
+    };
+
+    for (const [label, status, reason] of [
+      ["empty error response", 503, "http-status"],
+      ["empty successful response", 200, "content-extraction-failed"],
+    ] as const) {
+      const ports = createProductionResourceRuntimePorts({
+        store,
+        dataDir: root,
+        researchExternalFetch: async () => ({
+          finalUrl: request.requestedUrl,
+          status,
+          mimeType: "text/plain",
+          bytes: Buffer.alloc(0),
+        }),
+        now: () => 12,
+      });
+
+      await assert.rejects(
+        () => ports.researchEvidence!.retrieveWebEvidence(request),
+        (error: unknown) => {
+          assert.ok(error instanceof ProductionResearchEvidenceUnavailableError, label);
+          assert.equal(error.reason, reason, label);
+          return true;
+        },
+      );
+    }
   });
 });
 

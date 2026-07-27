@@ -21,15 +21,25 @@ import {
 } from "./resource-task-payload-recovery.ts";
 import { OwnedResourceTaskPayloadStaging } from "./resource-task-payload-staging.ts";
 import {
+  createStoreBackedMoodboardAttemptContextAuthority,
+  type MoodboardAttemptContextWorkspaceStore,
+} from "./moodboard-attempt-context-authority.ts";
+import {
   GenerationTaskEvidenceLifecycle,
   type GenerationTaskEvidenceLifecycleStorePort,
 } from "./generation-task-evidence-lifecycle.ts";
 import type { GenerationPlanRecoveryDeps } from "./recovery.ts";
+import {
+  createWorkspaceContextPackRepository,
+  type WorkspaceContextPackPersistencePort,
+} from "../context/context-pack-store.ts";
 
 export type ProductionGenerationWorkspaceStore =
   ArtifactCandidateRefRecoveryAdapterOptions["store"]
   & ResourcePayloadCleanupStorePort
   & GenerationTaskEvidenceLifecycleStorePort
+  & WorkspaceContextPackPersistencePort
+  & MoodboardAttemptContextWorkspaceStore
   & Pick<GenerationPlanRecoveryDeps["store"], "recoverExpiredGenerationTaskAttempts">
   & {
     listGenerationPlans(projectId: string): readonly {
@@ -44,6 +54,7 @@ export interface ProductionGenerationProjectCatalog {
 }
 
 export interface ProductionGenerationRecoveryCompositionOptions {
+  readonly projectCatalog: ProductionGenerationProjectCatalog;
   readonly workspaceStore: ProductionGenerationWorkspaceStore;
   readonly dataDir: string;
   readonly repositoryDirForWorkspace: (workspaceId: string) => string | Promise<string>;
@@ -80,10 +91,18 @@ function recoveryAdapters(options: ProductionGenerationRecoveryCompositionOption
   const references = new WorkspaceStoreResourceTaskPayloadReferenceGuard({
     store: options.workspaceStore,
   });
+  const contextPacks = createWorkspaceContextPackRepository(options.workspaceStore, {
+    manifestRoot: options.dataDir,
+  });
   const staging = new OwnedResourceTaskPayloadStaging({
     storageRoot: options.dataDir,
     references,
     journal: references,
+    contextPacks,
+    attemptContextAuthority: createStoreBackedMoodboardAttemptContextAuthority({
+      projectCatalog: options.projectCatalog,
+      workspaceStore: options.workspaceStore,
+    }),
   });
   const evidenceRecovery = new GenerationTaskEvidenceLifecycle({
     dataDir: options.dataDir,

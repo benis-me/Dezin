@@ -125,6 +125,21 @@ describe("prototype edge", () => {
     expect(screen.getByTestId("prototype-halo").style.stroke).toBe("var(--dezin-canvas-plane, var(--background))");
     expect(screen.getByTestId("prototype-halo").style.vectorEffect).toBe("non-scaling-stroke");
     expect(screen.getByTestId("prototype-path").style.vectorEffect).toBe("non-scaling-stroke");
+    expect(screen.getByTestId("prototype-path").style.stroke).toBe("var(--foreground-2)");
+    expect(screen.getByTestId("prototype-path").style.strokeWidth).toBe("1.35");
+    expect(screen.getByTestId("prototype-path").style.opacity).toBe("0.74");
+  });
+
+  test("keeps idle labels quiet even at full zoom and reveals them for interaction", () => {
+    const fullProps = {
+      ...baseProps,
+      data: { ...baseProps.data, zoomLevel: "full" },
+    } as unknown as EdgeProps<WorkspaceFlowEdge>;
+    const { rerender } = render(<PrototypeEdge {...fullProps} />);
+    expect(screen.queryByText("to Search")).toBeNull();
+
+    rerender(<PrototypeEdge {...{ ...fullProps, selected: true }} />);
+    expect(screen.getByText("to Search")).toBeInTheDocument();
   });
 
   test("uses a semantic direction mark instead of a decorative status dot", () => {

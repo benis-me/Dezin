@@ -21,6 +21,7 @@ import type {
 } from "../../../packages/agent/src/index.ts";
 import { Store } from "../../../packages/core/src/index.ts";
 import { composeWorkspaceAgentConversation } from "../../../packages/core/src/workspace-agent-conversation.ts";
+import { sealResourceRevisionPayload } from "../src/context/adapters/file.ts";
 import { BlockedContextError } from "../src/context/context-types.ts";
 import { createWorkspaceContextPackRepository } from "../src/context/context-pack-store.ts";
 import { createProductionScopedAgentTaskQueue } from "../src/orchestration/production-scoped-agent-task-queue.ts";
@@ -138,7 +139,18 @@ test("production Workspace Agent resolves immutable context in a scratch directo
   t.after(() => store.close());
   const project = store.createProject({ name: "Workspace Agent production", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  const response = plannerResponse({ rationale: `Detailed proposal ${"x".repeat(3_000)}` });
+  const response = JSON.stringify({
+    pages: [{
+      existingNodeId: null,
+      name: "Checkout",
+      instructions: "Design the complete checkout journey with order review, payment, validation, success states, and production-ready responsive composition.",
+    }],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: `Keep the workspace coherent while adding the requested direction. ${"x".repeat(3_000)}`,
+    assumptions: ["The current design kernel remains authoritative."],
+  });
   assert.ok(Buffer.byteLength(response, "utf8") > 2_000);
   const spawner = new RecordingSpawner({ stdout: response, stderr: "", exitCode: 0 });
   const spawnerOptions: NodeSpawnerOptions[] = [];
@@ -186,10 +198,13 @@ test("production Workspace Agent resolves immutable context in a scratch directo
   assert.equal(existsSync(spawned.cwd), false, "planner scratch directory is removed after the turn");
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
-  assert.match(spawned.args[spawned.args.indexOf("--system-prompt") + 1] ?? "", /proposal-only/i);
   assert.match(
     spawned.args[spawned.args.indexOf("--system-prompt") + 1] ?? "",
-    /researchDirectionSelection.*explicitly selected.*existing immutable Research Revision/i,
+    /compact semantic workspace intent/i,
+  );
+  assert.match(
+    spawned.args[spawned.args.indexOf("--system-prompt") + 1] ?? "",
+    /Research must always use `generate`.*cannot carry an exact immutable direction selection/is,
   );
   assert.match(spawned.stdin, /dezin\.workspace-agent-request\.v1/);
   assert.doesNotMatch(spawned.stdin, new RegExp(join(root, "projects", project.id)));
@@ -208,6 +223,495 @@ test("production Workspace Agent resolves immutable context in a scratch directo
     inheritEnvironment: false,
   }]);
   assert.equal(spawner.inputs.length, 1, "an exact retry replays before Context and planner work");
+});
+
+test("production Workspace Agent bounds a realistic multi-Artifact planning target without dropping exact Research or Moodboard Revisions", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-context-budget-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE multi-direction Workspace", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const directions = [
+    { title: "Cinematic Black/Red", id: "cinematic-black-red" },
+    { title: "Warm Paper/Ink", id: "warm-paper-ink" },
+    { title: "Electric Cobalt Grid", id: "electric-cobalt-grid" },
+  ] as const;
+  const pageNames = ["Home", "Film", "Schedule", "Checkout"] as const;
+  const artifacts = [
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `kite-page-${index + 1}`,
+      nodeId: `kite-page-node-${index + 1}`,
+      trackId: `kite-page-track-${index + 1}`,
+      kind: "page" as const,
+      name: `${directions[Math.floor(index / pageNames.length)]!.title} — ${pageNames[index % pageNames.length]}`,
+    })),
+    ...Array.from({ length: 7 }, (_, index) => ({
+      id: `kite-component-${index + 1}`,
+      nodeId: `kite-component-node-${index + 1}`,
+      trackId: `kite-component-track-${index + 1}`,
+      kind: "component" as const,
+      name: `KITE Component ${index + 1}`,
+    })),
+  ];
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: artifacts.map((artifact, index) => ({
+      id: `add-kite-artifact-${index + 1}`,
+      type: "add-node" as const,
+      node: {
+        id: artifact.nodeId,
+        kind: artifact.kind,
+        name: artifact.name,
+        artifactId: artifact.id,
+        createIdentity: { initialTrackId: artifact.trackId },
+      },
+    })),
+  });
+  let expectedSnapshotId = graph.snapshot.id;
+  for (const [index, artifact] of artifacts.slice(0, 8).entries()) {
+    const revision = store.workspace.createArtifactRevision({
+      artifactId: artifact.id,
+      trackId: artifact.trackId,
+      parentRevisionId: null,
+      sourceCommitHash: "a".repeat(40),
+      sourceTreeHash: "b".repeat(40),
+      kernelRevisionId: foundation.activeKernelRevisionId,
+      renderSpec: {
+        protocol: "dezin.render-spec.v1",
+        frames: [
+          { id: "desktop-state", name: "Desktop", width: 1_440, height: 900, initialState: "default" },
+          { id: "mobile-state", name: "Mobile", width: 390, height: 844, initialState: "menu-open" },
+        ],
+      },
+      quality: {
+        state: "passed",
+        score: 96 - index,
+        findings: [{
+          severity: "info",
+          code: "BULKY-QUALITY-MARKER",
+          message: `BULKY-QUALITY-MARKER-${index}-${"q".repeat(2_400)}`,
+        }],
+      },
+      contextPackHash: null,
+      dependencies: [],
+      resourcePins: [],
+    });
+    expectedSnapshotId = store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId,
+    }).id;
+  }
+
+  const createPinnedResource = async (input: {
+    kind: "research" | "moodboard";
+    title: string;
+    revisionId: string;
+    payload: Uint8Array;
+  }) => {
+    const current = store.workspace.ensureWorkspaceRecord(project.id);
+    const created = store.workspace.createResourceForProject(project.id, {
+      kind: input.kind,
+      title: input.title,
+      defaultPinPolicy: "pin-current",
+      baseGraphRevision: current.graphRevision,
+      expectedSnapshotId: current.activeSnapshotId,
+    });
+    const sealed = await sealResourceRevisionPayload({
+      storageRoot: root,
+      workspaceId: created.resource.workspaceId,
+      resourceId: created.resource.id,
+      revisionId: input.revisionId,
+      mimeType: "application/json",
+      bytes: input.payload,
+    });
+    const revision = store.workspace.createResourceRevisionCandidateForProject(
+      project.id,
+      created.resource.id,
+      {
+        revisionId: input.revisionId,
+        parentRevisionId: null,
+        manifestPath: sealed.manifestPath,
+        summary: `${input.title} immutable evidence`,
+        metadata: { mimeType: sealed.mimeType },
+        checksum: sealed.manifestChecksum,
+        provenance: { source: "context-budget-regression" },
+      },
+    );
+    store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: `Seed exact immutable ${input.kind}`,
+    });
+    return { resource: created.resource, revision };
+  };
+  const research = await createPinnedResource({
+    kind: "research",
+    title: "KITE Research",
+    revisionId: "kite-research-context-budget-revision",
+    payload: Buffer.from(JSON.stringify({
+      format: "dezin-research-resource",
+      marker: "EXACT-RESEARCH-CONTEXT-MARKER",
+      evidence: "r".repeat(24_000),
+    }), "utf8"),
+  });
+  const moodboard = await createPinnedResource({
+    kind: "moodboard",
+    title: "KITE Moodboard",
+    revisionId: "kite-moodboard-context-budget-revision",
+    payload: Buffer.from(JSON.stringify({
+      format: "dezin-moodboard-resource-bundle",
+      version: 3,
+      board: { id: "kite-board", name: "KITE Directions" },
+      nodes: [{
+        id: "kite-direction-node",
+        type: "direction",
+        marker: "EXACT-MOODBOARD-CONTEXT-MARKER",
+        description: "m".repeat(34_000),
+      }],
+      messages: [],
+      assets: [],
+    }), "utf8"),
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const spawner = new RecordingSpawner({
+    stdout: codexPlannerResponse({
+      pages: artifacts.slice(0, 12).map((artifact, index) => {
+        const directionIndex = Math.floor(index / pageNames.length);
+        const direction = directions[directionIndex]!;
+        return {
+          existingNodeId: artifact.nodeId,
+          operation: "generate" as const,
+          requestSlotId: `direction-${directionIndex + 1}-page-${(index % pageNames.length) + 1}`,
+          name: artifact.name,
+          instructions: `Revise this exact KITE Page in place using Research direction id ${direction.id}.`,
+          verificationStates: ["default"],
+        };
+      }),
+      components: artifacts.slice(12).map((artifact) => ({
+        existingNodeId: artifact.nodeId,
+        operation: "generate" as const,
+        name: artifact.name,
+        instructions: "Keep this shared component coherent across Research directions cinematic-black-red, warm-paper-ink, and electric-cobalt-grid.",
+        verificationStates: ["default", "hover", "focus"],
+      })),
+      resources: [],
+      relations: [],
+      rationale: "Preserve the exact current KITE Workspace.",
+      assumptions: [],
+    }),
+    stderr: "",
+    exitCode: 0,
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000050",
+    message: [
+      "Revise only the current 19 active Artifact nodes in place using the pinned Research Revision and pinned Moodboard Revision.",
+      "EXACT MATRIX: exactly 12 current Pages, four per direction: Cinematic Black/Red (cinematic-black-red), Warm Paper/Ink (warm-paper-ink), Electric Cobalt Grid (electric-cobalt-grid); each direction has Home, Film, Schedule, Checkout.",
+      "Keep all 7 current shared Components coherent across all three exact Research directions.",
+    ].join("\n"),
+    explicitContext: [{
+      kind: "resource",
+      id: research.resource.id,
+      resourceKind: "research",
+      revisionId: research.revision.id,
+    }, {
+      kind: "resource",
+      id: moodboard.resource.id,
+      resourceKind: "moodboard",
+      revisionId: moodboard.revision.id,
+    }],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(spawner.inputs.length, 1);
+  const plannerInput = spawner.inputs[0]!.stdin;
+  assert.match(plannerInput, /EXACT-RESEARCH-CONTEXT-MARKER/);
+  assert.match(plannerInput, /EXACT-MOODBOARD-CONTEXT-MARKER/);
+  assert.doesNotMatch(plannerInput, /BULKY-QUALITY-MARKER/);
+  assert.match(plannerInput, /"frameCount":2/);
+  assert.match(plannerInput, /"findingCount":1/);
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.equal(result.proposal.generation.artifactPlans.length, 19);
+  assert.deepEqual(
+    result.proposal.generation.resourceOperations.map((operation) => ({
+      resourceId: operation.resourceId,
+      kind: operation.kind,
+      operation: operation.operation,
+      revisionPolicy: operation.revisionPolicy,
+    })),
+    [{
+      resourceId: research.resource.id,
+      kind: "research",
+      operation: "reuse",
+      revisionPolicy: { kind: "exact", resourceRevisionId: research.revision.id },
+    }, {
+      resourceId: moodboard.resource.id,
+      kind: "moodboard",
+      operation: "reuse",
+      revisionPolicy: { kind: "exact", resourceRevisionId: moodboard.revision.id },
+    }],
+  );
+  const resourceDependencies = result.proposal.generation.dependencyPlans
+    .filter((dependency) => dependency.kind === "resource");
+  assert.equal(resourceDependencies.length, 19 * 2);
+  for (const artifactPlan of result.proposal.generation.artifactPlans) {
+    assert.deepEqual(
+      resourceDependencies
+        .filter((dependency) => dependency.ownerArtifactId === artifactPlan.artifactId)
+        .map((dependency) => dependency.resourceId),
+      [research.resource.id, moodboard.resource.id],
+    );
+  }
+  for (const [index, pagePlan] of result.proposal.generation.artifactPlans.slice(0, 12).entries()) {
+    const direction = directions[Math.floor(index / pageNames.length)]!;
+    assert.deepEqual(pagePlan.researchDirectionSelection, {
+      protocol: "dezin.research-direction-selection.v1",
+      version: 1,
+      resourceId: research.resource.id,
+      revisionId: research.revision.id,
+      directionId: direction.id,
+    });
+  }
+  for (const componentPlan of result.proposal.generation.artifactPlans.slice(12)) {
+    assert.deepEqual(componentPlan.researchDirectionSelection, {
+      protocol: "dezin.research-direction-selection.v1",
+      version: 1,
+      resourceId: research.resource.id,
+      revisionId: research.revision.id,
+      directionId: directions[0].id,
+      directionIds: directions.map(({ id }) => id),
+    });
+  }
+});
+
+test("production Workspace Agent keeps non-matrix exact Research directions scoped to each Artifact", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-artifact-directions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Artifact-scoped Research directions", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "research",
+    title: "Exact product directions",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const revisionId = "artifact-direction-scope-revision";
+  const sealed = await sealResourceRevisionPayload({
+    storageRoot: root,
+    workspaceId: created.resource.workspaceId,
+    resourceId: created.resource.id,
+    revisionId,
+    mimeType: "application/json",
+    bytes: Buffer.from(JSON.stringify({
+      format: "dezin-research-resource",
+      directions: [
+        { id: "alpha", title: "Alpha" },
+        { id: "beta", title: "Beta" },
+      ],
+    }), "utf8"),
+  });
+  const revision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    created.resource.id,
+    {
+      revisionId,
+      parentRevisionId: null,
+      manifestPath: sealed.manifestPath,
+      summary: "Two exact immutable design directions",
+      metadata: { mimeType: sealed.mimeType },
+      checksum: sealed.manifestChecksum,
+      provenance: { source: "artifact-direction-scope-regression" },
+    },
+  );
+  store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "Seed exact Artifact-scoped Research directions",
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const plannerBodies: Record<string, unknown>[] = [{
+    pages: [{
+      existingNodeId: null,
+      operation: "generate",
+      name: "Alpha Home",
+      instructions: "Generate Alpha Home using Research direction id alpha.",
+      verificationStates: ["default"],
+    }, {
+      existingNodeId: null,
+      operation: "generate",
+      name: "Beta Home",
+      instructions: "Generate Beta Home using Research direction id beta.",
+      verificationStates: ["default"],
+    }],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Keep each Page bound to its own exact immutable direction.",
+    assumptions: [],
+  }, {
+    pages: [{
+      existingNodeId: null,
+      operation: "generate",
+      name: "Global Alpha Home",
+      instructions: "Generate the complete first Page without changing the turn-wide visual direction.",
+      verificationStates: ["default"],
+    }, {
+      existingNodeId: null,
+      operation: "generate",
+      name: "Global Alpha Detail",
+      instructions: "Generate the complete second Page without changing the turn-wide visual direction.",
+      verificationStates: ["default"],
+    }],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Apply the one unambiguous turn-wide Research direction.",
+    assumptions: [],
+  }, {
+    pages: [{
+      existingNodeId: null,
+      operation: "generate",
+      name: "Ambiguous Home",
+      instructions: "Generate the complete first Page.",
+      verificationStates: ["default"],
+    }, {
+      existingNodeId: null,
+      operation: "generate",
+      name: "Ambiguous Detail",
+      instructions: "Generate the complete second Page.",
+      verificationStates: ["default"],
+    }],
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "The turn does not assign its two directions to individual Artifacts.",
+    assumptions: [],
+  }];
+  const spawner = new RecordingSpawner(async () => {
+    const body = plannerBodies.shift();
+    assert.ok(body, "each Workspace turn must have one deterministic Planner response");
+    return {
+      stdout: codexPlannerResponse(body),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000052",
+    message: [
+      "Create Alpha Home using Research direction id alpha.",
+      "Create Beta Home using Research direction id beta.",
+    ].join("\n"),
+    explicitContext: [{
+      kind: "resource",
+      id: created.resource.id,
+      resourceKind: "research",
+      revisionId: revision.id,
+    }],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(
+    result.proposal.generation.artifactPlans.map((plan) => ({
+      name: plan.name,
+      selection: plan.researchDirectionSelection,
+    })),
+    [{
+      name: "Alpha Home",
+      selection: {
+        protocol: "dezin.research-direction-selection.v1",
+        version: 1,
+        resourceId: created.resource.id,
+        revisionId: revision.id,
+        directionId: "alpha",
+      },
+    }, {
+      name: "Beta Home",
+      selection: {
+        protocol: "dezin.research-direction-selection.v1",
+        version: 1,
+        resourceId: created.resource.id,
+        revisionId: revision.id,
+        directionId: "beta",
+      },
+    }],
+  );
+
+  const singleFallback = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000054",
+    message: "Create two Pages using the one turn-wide Research direction id alpha.",
+    explicitContext: [{
+      kind: "resource",
+      id: created.resource.id,
+      resourceKind: "research",
+      revisionId: revision.id,
+    }],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+  assert.equal(singleFallback.kind, "proposal");
+  assert.equal(singleFallback.proposal.generation.kind, "workspace-generation");
+  if (singleFallback.proposal.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(
+    singleFallback.proposal.generation.artifactPlans.map((plan) => (
+      plan.researchDirectionSelection?.directionId
+    )),
+    ["alpha", "alpha"],
+  );
+
+  await assert.rejects(orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000055",
+    message: [
+      "Create Ambiguous Home using Research direction id alpha.",
+      "Create Ambiguous Detail using Research direction id beta.",
+    ].join("\n"),
+    explicitContext: [{
+      kind: "resource",
+      id: created.resource.id,
+      resourceKind: "research",
+      revisionId: revision.id,
+    }],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal), /must preserve an exact Research direction id/i);
 });
 
 test("production Workspace Agent uses the frozen CodeBuddy model despite mutable global Agent settings", async (t) => {
@@ -424,10 +928,22 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
   const codeBuddyGeneration = result.proposal.generation.kind === "workspace-generation"
     ? result.proposal.generation
     : null;
+  const researchDependencies = codeBuddyGeneration?.dependencyPlans.filter(
+    (dependency) => dependency.kind === "resource",
+  ) ?? [];
+  assert.equal(
+    researchDependencies.length,
+    codeBuddyGeneration?.artifactPlans.length,
+    "every generated Artifact consumes the generated Research Revision before execution",
+  );
+  assert.equal(
+    new Set(researchDependencies.map((dependency) => dependency.resourceId)).size,
+    1,
+    "the exact generated Research identity is frozen across every Artifact Task",
+  );
   assert.deepEqual(
-    codeBuddyGeneration?.dependencyPlans.filter((dependency) => dependency.kind === "resource"),
-    [],
-    "Research generated in this Plan is not consumed by Artifact Tasks",
+    new Set(researchDependencies.map((dependency) => dependency.ownerArtifactId)),
+    new Set(codeBuddyGeneration?.artifactPlans.map((plan) => plan.artifactId)),
   );
   const componentDependencies = codeBuddyGeneration?.dependencyPlans.filter(
     (dependency) => dependency.kind === "component-instance",
@@ -1492,6 +2008,8 @@ test("production Workspace Agent generates the first Revision into an exact empt
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner({
       stdout: codexPlannerResponse({
         pages: [],
@@ -1539,6 +2057,201 @@ test("production Workspace Agent generates the first Revision into an exact empt
   assert.ok(approved.plan);
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
   assert.equal(compiled.tasks.filter((task) => task.target.type === "resource").length, 1);
+});
+
+test("Codex semantic planning compiles explicit visual states into Artifact-scoped desktop and mobile QA Frames", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-state-frames-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent state Frames", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  let observedSchema: Record<string, unknown> | null = null;
+  let observedSystemPrompt = "";
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchema = JSON.parse(
+        readFileSync(input.args[schemaIndex + 1]!, "utf8"),
+      ) as Record<string, unknown>;
+      observedSystemPrompt = input.stdin;
+      return {
+        stdout: codexPlannerResponse({
+          pages: [{
+            existingNodeId: null,
+            operation: "generate",
+            name: "KITE Checkout",
+            instructions: "Design a complete ticket checkout with populated, validation, processing, and error behavior.",
+            verificationStates: ["validation-error", "payment-processing"],
+          }],
+          components: [{
+            existingNodeId: null,
+            operation: "generate",
+            name: "KITE Direction Switcher",
+            instructions: "Switch visibly between the exact cinematic, paper, and cobalt visual directions.",
+            verificationStates: [
+              "cinematic-black-red",
+              "warm-paper-ink",
+              "electric-cobalt-grid",
+            ],
+          }],
+          resources: [],
+          relations: [],
+          rationale: "Prove every explicitly required non-default visual state.",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000048",
+    message: "Generate Checkout and its shared direction switcher with all named visual states verified.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  const generation = result.proposal.generation;
+  const checkout = generation.artifactPlans.find((plan) => plan.name === "KITE Checkout");
+  const switcher = generation.artifactPlans.find((plan) => plan.name === "KITE Direction Switcher");
+  assert.ok(checkout);
+  assert.ok(switcher);
+  const framesById = new Map(generation.responsiveFrames.map((frame) => [frame.id, frame]));
+  const statesFor = (frameIds: readonly string[]) => frameIds.flatMap((id) => {
+    const state = framesById.get(id)?.initialState;
+    return state === undefined ? [] : [state];
+  });
+  assert.deepEqual(
+    new Set(statesFor(checkout.responsiveFrameIds)),
+    new Set(["validation-error", "payment-processing"]),
+  );
+  assert.deepEqual(
+    new Set(statesFor(switcher.responsiveFrameIds)),
+    new Set(["cinematic-black-red", "warm-paper-ink", "electric-cobalt-grid"]),
+  );
+  for (const state of [
+    "validation-error",
+    "payment-processing",
+    "cinematic-black-red",
+    "warm-paper-ink",
+    "electric-cobalt-grid",
+  ]) {
+    const stateFrames = generation.responsiveFrames.filter((frame) => frame.initialState === state);
+    assert.equal(stateFrames.some((frame) => frame.width >= 1_280 && frame.height >= 720), true);
+    assert.equal(
+      stateFrames.some((frame) => frame.width >= 320 && frame.width <= 480 && frame.height >= 640),
+      true,
+    );
+  }
+
+  assert.ok(observedSchema);
+  const exactObservedSchema = observedSchema as unknown as Record<string, unknown>;
+  const schemaProperties = exactObservedSchema.properties as Record<string, unknown>;
+  const pageItem = ((schemaProperties.pages as Record<string, unknown>).items) as Record<string, unknown>;
+  const pageProperties = pageItem.properties as Record<string, Record<string, unknown>>;
+  assert.ok((pageItem.required as string[]).includes("verificationStates"));
+  assert.equal(pageProperties.verificationStates!.maxItems, 6);
+  assert.equal(Object.hasOwn(pageProperties.verificationStates!, "uniqueItems"), false);
+  assert.match(observedSystemPrompt, /verificationStates.*non-default.*visibl/i);
+  assert.match(observedSystemPrompt, /server.*desktop.*mobile.*QA Frames/i);
+  assert.match(observedSystemPrompt, /every generated Component.*uses.*Do not leave.*orphaned/is);
+});
+
+test("Codex semantic planning makes generated Research and Moodboard outputs hard dependencies of generated Artifacts", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-resource-dependencies-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent Resource dependencies", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse({
+        pages: [{
+          existingNodeId: null,
+          operation: "generate",
+          name: "KITE Home",
+          instructions: "Use the exact generated film-festival evidence and direction imagery in the final Home design.",
+        }],
+        components: [],
+        resources: [
+          {
+            existingNodeId: null,
+            operation: "generate",
+            kind: "research",
+            title: "KITE Research",
+            instructions: "Produce decision-grade film-festival evidence for the planned visual direction.",
+          },
+          {
+            existingNodeId: null,
+            operation: "generate",
+            kind: "moodboard",
+            title: "KITE Moodboard",
+            instructions: "Produce the exact imagery, palette, texture, and composition reference for KITE Home.",
+          },
+        ],
+        relations: [],
+        rationale: "Generate source truth before the Artifact consumes it.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000049",
+    message: "Generate the Research and Moodboard first, then use their immutable outputs in KITE Home.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  const generation = result.proposal.generation;
+  const page = generation.artifactPlans.find((plan) => plan.name === "KITE Home");
+  assert.ok(page);
+  const resourceIds = new Set(generation.resourceOperations.map((operation) => operation.resourceId));
+  assert.deepEqual(
+    new Set(generation.dependencyPlans.flatMap((dependency) => (
+      dependency.kind === "resource" && dependency.ownerArtifactId === page.artifactId
+        ? [dependency.resourceId]
+        : []
+    ))),
+    resourceIds,
+  );
+
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  const pageTask = compiled.tasks.find((task) => task.kind === "page");
+  assert.ok(pageTask);
+  const resourceTaskIds = new Set(
+    compiled.tasks.filter((task) => task.kind === "resource").map((task) => task.id),
+  );
+  assert.deepEqual(new Set(pageTask.dependencyIds.filter((id) => resourceTaskIds.has(id))), resourceTaskIds);
 });
 
 test("production Workspace Agent rejects existing Research reuse without an exact direction selection", async (t) => {
@@ -1708,45 +2421,17 @@ test("production Workspace Agent preserves Kernel QA and raises weak Artifact pl
   });
   const workspace = store.workspace.getWorkspace(project.id)!;
   const spawner = new RecordingSpawner({
-    stdout: plannerResponse({
-      operations: [{
-        id: "add-checkout-page",
-        type: "add-node",
-        node: {
-          id: "checkout-page-node",
-          kind: "page",
-          name: "Checkout",
-          artifactId: "checkout-page",
-          createIdentity: { initialTrackId: "checkout-track" },
-        },
+    stdout: JSON.stringify({
+      pages: [{
+        existingNodeId: null,
+        name: "Checkout",
+        instructions: "Design the complete checkout journey with order review, payment, validation, and success states.",
       }],
-      generation: {
-        kind: "workspace-generation",
-        resourceOperations: [],
-        artifactPlans: [{
-          operation: "create",
-          nodeId: "checkout-page-node",
-          artifactId: "checkout-page",
-          kind: "page",
-          name: "Checkout",
-          instructions: "Design the complete checkout journey with order review, payment, validation, and success states.",
-          trackId: "checkout-track",
-          baseRevisionId: null,
-          dependsOnArtifactIds: [],
-          capabilityIds: [],
-          responsiveFrameIds: ["thumbnail"],
-        }],
-        dependencyPlans: [],
-        prototypeIntents: [],
-        capabilities: [],
-        responsiveFrames: [{ id: "thumbnail", name: "Thumbnail", width: 100, height: 100 }],
-        qualityProfile: {
-          requiredFrameIds: [],
-          blockingSeverities: [],
-          requireRuntimeChecks: false,
-          requireVisualReview: false,
-        },
-      },
+      components: [],
+      resources: [],
+      relations: [],
+      rationale: "Add a production-ready checkout journey.",
+      assumptions: [],
     }),
     stderr: "",
     exitCode: 0,
@@ -1777,7 +2462,7 @@ test("production Workspace Agent preserves Kernel QA and raises weak Artifact pl
     height: 1000,
   });
   assert.deepEqual(result.proposal.generation.qualityProfile, {
-    requiredFrameIds: ["wide", "thumbnail", "desktop", "mobile"],
+    requiredFrameIds: ["wide", "mobile"],
     blockingSeverities: ["P0", "P1", "P2"],
     requireRuntimeChecks: true,
     requireVisualReview: true,
@@ -1792,11 +2477,11 @@ test("production Workspace Agent preserves Kernel QA and raises weak Artifact pl
   );
   assert.match(
     spawner.inputs[0]?.args[spawner.inputs[0]!.args.indexOf("--system-prompt") + 1] ?? "",
-    /production desktop\/mobile QA floor.*Design Kernel/i,
+    /server deterministically compiles.*responsive QA/i,
   );
   assert.match(
     spawner.inputs[0]?.args[spawner.inputs[0]!.args.indexOf("--system-prompt") + 1] ?? "",
-    /every Artifact plan.*instructions.*purpose.*content.*states.*composition/i,
+    /Every Page and Component.*instructions.*purpose.*content.*states.*composition/i,
   );
 });
 
@@ -1808,44 +2493,16 @@ test("production Workspace Agent rejects name-only Artifact plans that cannot pr
   const project = store.createProject({ name: "Workspace Agent missing brief", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   const spawner = new RecordingSpawner({
-    stdout: plannerResponse({
-      operations: [{
-        id: "add-home-page",
-        type: "add-node",
-        node: {
-          id: "home-page-node",
-          kind: "page",
-          name: "Home",
-          artifactId: "home-page",
-          createIdentity: { initialTrackId: "home-track" },
-        },
+    stdout: JSON.stringify({
+      pages: [{
+        existingNodeId: null,
+        name: "Home",
       }],
-      generation: {
-        kind: "workspace-generation",
-        resourceOperations: [],
-        artifactPlans: [{
-          operation: "create",
-          nodeId: "home-page-node",
-          artifactId: "home-page",
-          kind: "page",
-          name: "Home",
-          trackId: "home-track",
-          baseRevisionId: null,
-          dependsOnArtifactIds: [],
-          capabilityIds: [],
-          responsiveFrameIds: ["desktop"],
-        }],
-        dependencyPlans: [],
-        prototypeIntents: [],
-        capabilities: [],
-        responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }],
-        qualityProfile: {
-          requiredFrameIds: ["desktop"],
-          blockingSeverities: ["P0", "P1"],
-          requireRuntimeChecks: true,
-          requireVisualReview: true,
-        },
-      },
+      components: [],
+      resources: [],
+      relations: [],
+      rationale: "Add a complete editorial home page.",
+      assumptions: [],
     }),
     stderr: "",
     exitCode: 0,
@@ -1865,7 +2522,7 @@ test("production Workspace Agent rejects name-only Artifact plans that cannot pr
     message: "Create a complete editorial home page.",
     explicitContext: [],
     graphRevision: workspace.graphRevision,
-  }, new AbortController().signal), /Artifact .*instructions.*purpose.*content.*states.*composition/i);
+  }, new AbortController().signal), /instructions/i);
   assert.deepEqual(store.workspace.listProposals(project.id), []);
 });
 
@@ -1898,7 +2555,7 @@ test("production Workspace Agent rejects forbidden direct mutations without pers
     message: "Archive this node without review.",
     explicitContext: [],
     graphRevision: workspace.graphRevision,
-  }, new AbortController().signal), /archive|forbidden|proposal-only/i);
+  }, new AbortController().signal), /archive|forbidden|proposal-only|unsupported field operations/i);
   assert.deepEqual(store.workspace.listProposals(project.id), []);
 });
 
@@ -2365,8 +3022,10 @@ test("production Workspace Agent constrains Codex semantic identity to current g
     spawned.stdin,
     /"id":"existing-page-node","kind":"page","name":"Existing Page"/,
   );
-  assert.equal(spawned.env?.OPENAI_API_KEY, "selected-openai-key");
-  assert.equal(spawned.env?.OPENAI_BASE_URL, "https://provider.example.test");
+  assert.equal(spawned.env?.OPENAI_API_KEY, undefined);
+  assert.equal(spawned.env?.OPENAI_BASE_URL, undefined);
+  assert.equal(Object.hasOwn(spawned.env ?? {}, "OPENAI_API_KEY"), false);
+  assert.equal(Object.hasOwn(spawned.env ?? {}, "OPENAI_BASE_URL"), false);
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
   const schemaProperties = observedPlannerSchema?.properties as Record<string, unknown> | undefined;
@@ -2411,6 +3070,297 @@ test("production Workspace Agent constrains Codex semantic identity to current g
     [{ kind: "page", name: "Checkout" }],
   );
   assert.equal(store.workspace.listProposals(project.id).length, 1);
+});
+
+test("production Workspace Agent bounds a 44-Component target while preserving every semantic node identity", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-large-identity-map-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Large component library", mode: "standard" });
+  const initial = store.workspace.ensureWorkspaceRecord(project.id);
+  const components = Array.from({ length: 44 }, (_, index) => {
+    const suffix = (index + 1).toString(16).padStart(12, "0");
+    return {
+      nodeId: `10000000-0000-4000-8000-${suffix}`,
+      artifactId: `20000000-0000-4000-8000-${suffix}`,
+      trackId: `30000000-0000-4000-8000-${suffix}`,
+      name: `Component ${String(index + 1).padStart(2, "0")} — shared product pattern`,
+    };
+  });
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: initial.graphRevision,
+    expectedSnapshotId: initial.activeSnapshotId,
+    commands: components.map((component, index) => ({
+      id: `add-large-component-${index + 1}`,
+      type: "add-node" as const,
+      node: {
+        id: component.nodeId,
+        kind: "component" as const,
+        name: component.name,
+        artifactId: component.artifactId,
+        createIdentity: { initialTrackId: component.trackId },
+      },
+    })),
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const selected = components.at(-1)!;
+  let targetContent = "";
+  let requestNodeIdentities: unknown;
+  let componentIdentityEnum: unknown;
+  const spawner = new RecordingSpawner(async (input) => {
+    const targetMatch = /<dezin-context[^>]*class="target"[^>]*>\n([^\n]+)\n<\/dezin-context>/.exec(
+      input.stdin,
+    );
+    assert.ok(targetMatch, "the immutable target Context must reach the Planner");
+    targetContent = targetMatch[1]!;
+    const requestLine = input.stdin.split("\n").find((line) => (
+      line.includes('"protocol":"dezin.workspace-agent-request.v1"')
+    ));
+    assert.ok(requestLine, "the Planner request identity map must reach the Planner");
+    requestNodeIdentities = (JSON.parse(requestLine) as {
+      currentWorkspaceNodes?: unknown;
+    }).currentWorkspaceNodes;
+    const schemaArgumentIndex = input.args.indexOf("--output-schema");
+    assert.notEqual(schemaArgumentIndex, -1);
+    const schema = JSON.parse(
+      readFileSync(input.args[schemaArgumentIndex + 1]!, "utf8"),
+    ) as Record<string, unknown>;
+    const properties = schema.properties as Record<string, unknown>;
+    const componentItems = (properties.components as Record<string, unknown>).items as Record<string, unknown>;
+    const componentProperties = componentItems.properties as Record<string, unknown>;
+    componentIdentityEnum = (componentProperties.existingNodeId as Record<string, unknown>).enum;
+    return {
+      stdout: codexPlannerResponse({
+        pages: [],
+        components: [{
+          existingNodeId: selected.nodeId,
+          operation: "generate",
+          name: selected.name,
+          instructions: "Refine this exact shared Component with complete interaction, focus, loading, empty, and error states.",
+          verificationStates: ["focus", "loading", "error"],
+        }],
+        resources: [],
+        relations: [],
+        rationale: "Revise the exact selected Component without creating a duplicate identity.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000051",
+    message: `Refine ${selected.name} in place.`,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(spawner.inputs.length, 1, "a valid large Workspace must reach the Planner");
+  assert.ok(Buffer.byteLength(targetContent, "utf8") <= 24 * 1024);
+  const target = JSON.parse(targetContent) as {
+    detailLevel?: string;
+    currentWorkspaceNodes?: unknown;
+    identityIndex?: {
+      source?: string;
+      nodeCount?: number;
+    };
+  };
+  assert.equal(target.detailLevel, "semantic-index-reference");
+  assert.equal(target.currentWorkspaceNodes, undefined);
+  assert.deepEqual(target.identityIndex, {
+    source: "dezin.workspace-agent-request.v1.currentWorkspaceNodes",
+    nodeCount: components.length,
+  });
+  assert.deepEqual(
+    requestNodeIdentities,
+    components.map((component) => ({
+      id: component.nodeId,
+      kind: "component",
+      name: component.name,
+      activeRevisionId: null,
+    })).sort((left, right) => left.id.localeCompare(right.id)),
+  );
+  assert.deepEqual(componentIdentityEnum, [
+    null,
+    ...components.map((component) => component.nodeId).sort(),
+  ]);
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.equal(result.proposal.generation.artifactPlans[0]?.artifactId, selected.artifactId);
+});
+
+test("production Workspace Agent indexes all 150 Component identities without blocking exact in-place revision", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-large-node-index-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Large exact Component index", mode: "standard" });
+  const initial = store.workspace.ensureWorkspaceRecord(project.id);
+  const components = Array.from({ length: 150 }, (_, index) => {
+    const suffix = (index + 1).toString(16).padStart(12, "0");
+    return {
+      nodeId: `10000000-0000-4000-8000-${suffix}`,
+      artifactId: `20000000-0000-4000-8000-${suffix}`,
+      trackId: `30000000-0000-4000-8000-${suffix}`,
+      name: `Component ${String(index + 1).padStart(3, "0")} — shared responsive product pattern with exact identity`,
+    };
+  });
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: initial.graphRevision,
+    expectedSnapshotId: initial.activeSnapshotId,
+    commands: components.map((component, index) => ({
+      id: `add-indexed-component-${index + 1}`,
+      type: "add-node" as const,
+      node: {
+        id: component.nodeId,
+        kind: "component" as const,
+        name: component.name,
+        artifactId: component.artifactId,
+        createIdentity: { initialTrackId: component.trackId },
+      },
+    })),
+  });
+  const selected = components.at(-1)!;
+  const selectedBaseRevision = store.workspace.createArtifactRevision({
+    artifactId: selected.artifactId,
+    trackId: selected.trackId,
+    parentRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    kernelRevisionId: initial.activeKernelRevisionId,
+    renderSpec: {},
+    quality: {},
+    contextPackHash: null,
+    dependencies: [],
+    resourcePins: [],
+  });
+  store.workspace.publishArtifactRevision(selectedBaseRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  let targetContent = "";
+  let requestNodeIdentities: unknown;
+  let componentIdentityEnum: unknown;
+  const spawner = new RecordingSpawner(async (input) => {
+    const targetMatch = /<dezin-context[^>]*class="target"[^>]*>\n([^\n]+)\n<\/dezin-context>/.exec(
+      input.stdin,
+    );
+    assert.ok(targetMatch, "the bounded target anchor must reach the Planner");
+    targetContent = targetMatch[1]!;
+    const requestLine = input.stdin.split("\n").find((line) => (
+      line.includes('"protocol":"dezin.workspace-agent-request.v1"')
+    ));
+    assert.ok(requestLine, "the Planner request identity map must reach the Planner");
+    const requestPayload = JSON.parse(requestLine) as {
+      currentWorkspaceNodes?: unknown;
+    };
+    requestNodeIdentities = requestPayload.currentWorkspaceNodes;
+    const schemaArgumentIndex = input.args.indexOf("--output-schema");
+    assert.notEqual(schemaArgumentIndex, -1);
+    const schema = JSON.parse(
+      readFileSync(input.args[schemaArgumentIndex + 1]!, "utf8"),
+    ) as Record<string, unknown>;
+    const properties = schema.properties as Record<string, unknown>;
+    const componentItems = (properties.components as Record<string, unknown>).items as Record<string, unknown>;
+    const componentProperties = componentItems.properties as Record<string, unknown>;
+    componentIdentityEnum = (componentProperties.existingNodeId as Record<string, unknown>).enum;
+    return {
+      stdout: codexPlannerResponse({
+        pages: [],
+        components: [{
+          existingNodeId: selected.nodeId,
+          operation: "generate",
+          name: selected.name,
+          instructions: "Revise this exact shared Component in place with responsive, focus, loading, empty, and error states.",
+          verificationStates: ["focus", "loading", "error"],
+        }],
+        resources: [],
+        relations: [],
+        rationale: "Revise only the exact selected Component without duplicating its identity.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000053",
+    message: `Revise ${selected.name} in place.`,
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(spawner.inputs.length, 1, "a valid 150-node Workspace must reach the Planner");
+  assert.ok(Buffer.byteLength(targetContent, "utf8") <= 24 * 1024);
+  const target = JSON.parse(targetContent) as {
+    detailLevel?: string;
+    currentWorkspaceNodes?: unknown;
+    identityIndex?: {
+      source?: string;
+      nodeCount?: number;
+    };
+  };
+  assert.equal(target.detailLevel, "semantic-index-reference");
+  assert.equal(target.currentWorkspaceNodes, undefined);
+  assert.deepEqual(target.identityIndex, {
+    source: "dezin.workspace-agent-request.v1.currentWorkspaceNodes",
+    nodeCount: components.length,
+  });
+  assert.deepEqual(
+    requestNodeIdentities,
+    components.map((component) => ({
+      id: component.nodeId,
+      kind: "component",
+      name: component.name,
+      activeRevisionId: component.nodeId === selected.nodeId ? selectedBaseRevision.id : null,
+    })).sort((left, right) => left.id.localeCompare(right.id)),
+  );
+  assert.deepEqual(componentIdentityEnum, [
+    null,
+    ...components.map((component) => component.nodeId).sort(),
+  ]);
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(
+    result.proposal.generation.artifactPlans.map((plan) => ({
+      artifactId: plan.artifactId,
+      operation: plan.operation,
+      baseRevisionId: plan.baseRevisionId,
+    })),
+    [{
+      artifactId: selected.artifactId,
+      operation: "revise",
+      baseRevisionId: selectedBaseRevision.id,
+    }],
+  );
 });
 
 test("production Workspace Agent rejects a compressed Codex response for an explicit Page matrix", async (t) => {
@@ -2466,6 +3416,8 @@ test("production Workspace Agent rejects a compressed Codex response for an expl
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner({
       stdout: codexPlannerResponse(compressedIntent),
       stderr: "",
@@ -2485,6 +3437,350 @@ test("production Workspace Agent rejects a compressed Codex response for an expl
   assert.deepEqual(store.workspace.listProposals(project.id), []);
 });
 
+test("production Workspace Agent freezes a numbered direction matrix used by acceptance briefs", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-numbered-matrix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE numbered matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const cells = [
+    ["direction-1-page-1", "Cinematic Black/Red", "Home"],
+    ["direction-1-page-2", "Cinematic Black/Red", "Film"],
+    ["direction-1-page-3", "Cinematic Black/Red", "Schedule"],
+    ["direction-1-page-4", "Cinematic Black/Red", "Checkout"],
+    ["direction-2-page-1", "Warm Paper/Ink", "Home"],
+    ["direction-2-page-2", "Warm Paper/Ink", "Film"],
+    ["direction-2-page-3", "Warm Paper/Ink", "Schedule"],
+    ["direction-2-page-4", "Warm Paper/Ink", "Checkout"],
+    ["direction-3-page-1", "Electric Cobalt Grid", "Home"],
+    ["direction-3-page-2", "Electric Cobalt Grid", "Film"],
+    ["direction-3-page-3", "Electric Cobalt Grid", "Schedule"],
+    ["direction-3-page-4", "Electric Cobalt Grid", "Checkout"],
+  ] as const;
+  const observedTimeouts: number[] = [];
+  const observedSchemas: Record<string, unknown>[] = [];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      observedTimeouts.push(input.timeoutMs ?? 0);
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      return {
+        stdout: codexPlannerResponse({
+          pages: cells.map(([requestSlotId, direction, page]) => ({
+            existingNodeId: null,
+            operation: "generate",
+            requestSlotId,
+            name: `${direction} — ${page}`,
+            instructions: `Design the complete ${direction} ${page} festival experience.`,
+            verificationStates: [],
+          })),
+          components: [],
+          resources: [],
+          relations: [],
+          rationale: "Preserve the exact numbered acceptance matrix.",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000050",
+    message: [
+      "Keep exactly 12 Pages and revise every current Page in place.",
+      "",
+      "EXACT DIRECTIONS AND PAGE MATRIX",
+      "1. Cinematic Black/Red — id cinematic-black-red — Pages Home, Film, Schedule, Checkout.",
+      "2. Warm Paper/Ink — id warm-paper-ink — Pages Home, Film, Schedule, Checkout.",
+      "3. Electric Cobalt Grid — id electric-cobalt-grid — Pages Home, Film, Schedule, Checkout.",
+      "The three directions must be unmistakably different while sharing the same information architecture.",
+    ].join("\n"),
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  assert.equal(
+    result.proposal.generation.kind === "workspace-generation"
+      ? result.proposal.generation.artifactPlans.length
+      : 0,
+    12,
+  );
+  assert.deepEqual(observedTimeouts, [12 * 60 * 1_000]);
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  assert.equal(pagesSchema.minItems, 12);
+  assert.equal(pagesSchema.maxItems, 12);
+});
+
+test("production Workspace Agent freezes a total-plus-per-direction matrix used by in-place acceptance briefs", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-inline-matrix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE inline matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const cells = [
+    ["direction-1-page-1", "Cinematic Black/Red", "Home"],
+    ["direction-1-page-2", "Cinematic Black/Red", "Film"],
+    ["direction-1-page-3", "Cinematic Black/Red", "Schedule"],
+    ["direction-1-page-4", "Cinematic Black/Red", "Checkout"],
+    ["direction-2-page-1", "Warm Paper/Ink", "Home"],
+    ["direction-2-page-2", "Warm Paper/Ink", "Film"],
+    ["direction-2-page-3", "Warm Paper/Ink", "Schedule"],
+    ["direction-2-page-4", "Warm Paper/Ink", "Checkout"],
+    ["direction-3-page-1", "Electric Cobalt Grid", "Home"],
+    ["direction-3-page-2", "Electric Cobalt Grid", "Film"],
+    ["direction-3-page-3", "Electric Cobalt Grid", "Schedule"],
+    ["direction-3-page-4", "Electric Cobalt Grid", "Checkout"],
+  ] as const;
+  const observedTimeouts: number[] = [];
+  const observedSchemas: Record<string, unknown>[] = [];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      observedTimeouts.push(input.timeoutMs ?? 0);
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      return {
+        stdout: codexPlannerResponse({
+          pages: cells.map(([requestSlotId, direction, page]) => ({
+            existingNodeId: null,
+            operation: "generate",
+            requestSlotId,
+            name: `${direction} — ${page}`,
+            instructions: `Design the complete ${direction} ${page} festival experience.`,
+            verificationStates: [],
+          })),
+          components: [],
+          resources: [],
+          relations: [],
+          rationale: "Preserve the exact inline acceptance matrix.",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000063",
+    message: [
+      "Revise only the current 19 active Artifact nodes in place.",
+      "EXACT MATRIX: exactly 12 current Pages, four per direction: Cinematic Black/Red (cinematic-black-red), Warm Paper/Ink (warm-paper-ink), Electric Cobalt Grid (electric-cobalt-grid); each direction has Home, Film, Schedule, Checkout.",
+    ].join("\n"),
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  assert.equal(
+    result.proposal.generation.kind === "workspace-generation"
+      ? result.proposal.generation.artifactPlans.length
+      : 0,
+    12,
+  );
+  assert.deepEqual(observedTimeouts, [12 * 60 * 1_000]);
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  assert.equal(pagesSchema.minItems, 12);
+  assert.equal(pagesSchema.maxItems, 12);
+});
+
+test("production Workspace Agent freezes exact uses relations instead of keeping stale base extras", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-exact-uses-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE exact uses", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const mutation = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [{
+      id: "add-warm-home",
+      type: "add-node",
+      node: {
+        id: "warm-home-node",
+        kind: "page",
+        name: "Warm Paper/Ink Home",
+        artifactId: "warm-home-artifact",
+        createIdentity: { initialTrackId: "warm-home-track" },
+      },
+    }, {
+      id: "add-ticket-selector",
+      type: "add-node",
+      node: {
+        id: "ticket-selector-node",
+        kind: "component",
+        name: "KITE Ticket Selector",
+        artifactId: "ticket-selector-artifact",
+        createIdentity: { initialTrackId: "ticket-selector-track" },
+      },
+    }],
+  });
+  const home = store.workspace.getArtifact("warm-home-artifact");
+  const ticket = store.workspace.getArtifact("ticket-selector-artifact");
+  assert.ok(home && ticket);
+  const ticketRevision = store.workspace.createArtifactRevision({
+    artifactId: ticket.id,
+    trackId: "ticket-selector-track",
+    parentRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    kernelRevisionId: foundation.activeKernelRevisionId,
+    renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+    quality: { state: "passed", score: 100, findings: [] },
+    contextPackHash: null,
+    dependencies: [],
+    resourcePins: [],
+  });
+  const componentSnapshot = store.workspace.publishArtifactRevision(ticketRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: mutation.snapshot.id,
+  });
+  const homeRevision = store.workspace.createArtifactRevision({
+    artifactId: home.id,
+    trackId: "warm-home-track",
+    parentRevisionId: null,
+    sourceCommitHash: "c".repeat(40),
+    sourceTreeHash: "d".repeat(40),
+    kernelRevisionId: foundation.activeKernelRevisionId,
+    renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+    quality: { state: "passed", score: 100, findings: [] },
+    contextPackHash: null,
+    dependencies: [{
+      instanceId: "stale-home-ticket-instance",
+      componentArtifactId: ticket.id,
+      componentRevisionId: ticketRevision.id,
+      createInstanceIdentity: true,
+      sourceLocator: { designNodeId: "stale-home-ticket-slot" },
+      overrides: {},
+      status: "linked",
+    }],
+    resourcePins: [],
+  });
+  store.workspace.publishArtifactRevision(homeRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentSnapshot.id,
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const pageNames = ["Home", "Film", "Schedule", "Checkout"] as const;
+  const componentNames = [
+    "KITE Shared Shell",
+    "KITE Hero Banner",
+    "KITE Program Card",
+    "KITE Ticket Selector",
+  ] as const;
+  const relations = [
+    ...pageNames.map((page) => ({
+      source: `Warm Paper/Ink ${page}`,
+      target: "KITE Shared Shell",
+      kind: "uses" as const,
+    })),
+    {
+      source: "Warm Paper/Ink Home",
+      target: "KITE Hero Banner",
+      kind: "uses" as const,
+    },
+    ...pageNames.map((page) => ({
+      source: `Warm Paper/Ink ${page}`,
+      target: "KITE Program Card",
+      kind: "uses" as const,
+    })),
+  ];
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse({
+        pages: pageNames.map((page, index) => ({
+          existingNodeId: page === "Home" ? "warm-home-node" : null,
+          operation: "generate",
+          requestSlotId: `direction-1-page-${index + 1}`,
+          name: `Warm Paper/Ink ${page}`,
+          instructions: `Design the complete Warm Paper/Ink ${page} festival experience.`,
+          verificationStates: [],
+        })),
+        components: componentNames.map((name) => ({
+          existingNodeId: name === "KITE Ticket Selector" ? "ticket-selector-node" : null,
+          operation: "generate",
+          name,
+          instructions: `Design the complete reusable ${name} product UI.`,
+          verificationStates: [],
+        })),
+        resources: [],
+        relations,
+        rationale: "Preserve the exact requested uses contract.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000051",
+    message: [
+      "EXACT DIRECTIONS AND PAGE MATRIX",
+      "1. Warm Paper/Ink — id warm-paper-ink — Pages Home, Film, Schedule, Checkout.",
+      "Create exact uses relations: every Page uses Shared Shell; each Home uses Hero Banner and Program Card; each Film uses Program Card; each Schedule uses Program Card; each Checkout uses Program Card. Do not invent component substitutes.",
+    ].join("\n"),
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  const names = new Map(result.proposal.generation.artifactPlans.map((plan) => [plan.artifactId, plan.name]));
+  const dependencies = result.proposal.generation.dependencyPlans
+    .filter((dependency) => dependency.kind === "component-instance")
+    .map((dependency) => ({
+      owner: names.get(dependency.ownerArtifactId),
+      component: names.get(dependency.componentArtifactId),
+    }));
+  assert.equal(dependencies.length, 9);
+  assert.equal(
+    dependencies.some((dependency) => (
+      dependency.owner === "Warm Paper/Ink Home"
+      && dependency.component === "KITE Ticket Selector"
+    )),
+    false,
+  );
+});
+
 test("production Workspace Agent does not inherit a prior Page matrix for an independent current request", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-independent-intent-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -2502,6 +3798,8 @@ test("production Workspace Agent does not inherit a prior Page matrix for an ind
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner(async (input) => {
       observedPlannerInput = input.stdin;
       const schemaIndex = input.args.indexOf("--output-schema");
@@ -2583,6 +3881,8 @@ test("production Workspace Agent rejects duplicate coverage inside a full-size e
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner({
       stdout: codexPlannerResponse({
         pages: slotIds.map((requestSlotId, index) => ({
@@ -2613,6 +3913,104 @@ test("production Workspace Agent rejects duplicate coverage inside a full-size e
     graphRevision: workspace.graphRevision,
   }, new AbortController().signal), /explicit Page matrix requestSlotId direction-1-page-1 is duplicated/i);
   assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("production Workspace Agent deterministically binds explicit matrix cells to exact current Pages", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-matrix-existing-pages-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "KITE existing matrix", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const cells = [
+    ["direction-1-page-1", "Cinematic Black/Red", "Home"],
+    ["direction-1-page-2", "Cinematic Black/Red", "Film"],
+    ["direction-1-page-3", "Cinematic Black/Red", "Schedule"],
+    ["direction-1-page-4", "Cinematic Black/Red", "Checkout"],
+    ["direction-2-page-1", "Warm Paper/Ink", "Home"],
+    ["direction-2-page-2", "Warm Paper/Ink", "Film"],
+    ["direction-2-page-3", "Warm Paper/Ink", "Schedule"],
+    ["direction-2-page-4", "Warm Paper/Ink", "Checkout"],
+    ["direction-3-page-1", "Electric Cobalt Grid", "Home"],
+    ["direction-3-page-2", "Electric Cobalt Grid", "Film"],
+    ["direction-3-page-3", "Electric Cobalt Grid", "Schedule"],
+    ["direction-3-page-4", "Electric Cobalt Grid", "Checkout"],
+  ] as const;
+  const nodeIdByName = new Map<string, string>();
+  const current = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: cells.map(([, direction, page], index) => {
+      const name = `${direction} ${page}`;
+      const nodeId = `existing-kite-matrix-page-node-${index + 1}`;
+      nodeIdByName.set(name, nodeId);
+      return {
+        id: `add-existing-kite-matrix-page-${index + 1}`,
+        type: "add-node" as const,
+        node: {
+          id: nodeId,
+          kind: "page" as const,
+          name,
+          artifactId: `existing-kite-matrix-page-artifact-${index + 1}`,
+          createIdentity: { initialTrackId: `existing-kite-matrix-page-track-${index + 1}` },
+        },
+      };
+    }),
+  });
+  const duplicatedModelNodeId = nodeIdByName.get("Warm Paper/Ink Schedule")!;
+  const response = {
+    pages: cells.map(([requestSlotId, direction, page]) => ({
+      existingNodeId: duplicatedModelNodeId,
+      operation: "generate",
+      requestSlotId,
+      name: `${direction} ${page}`,
+      instructions: `Design the complete ${direction} ${page} festival experience.`,
+      verificationStates: [],
+    })),
+    components: [],
+    resources: [],
+    relations: [],
+    rationale: "Revise the exact current KITE Page matrix in place.",
+    assumptions: [],
+  };
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse(response),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000049",
+    message: [
+      "Revise the current KITE workspace in place.",
+      "Keep exactly 3 distinct visual directions: Cinematic Black/Red, Warm Paper/Ink, and Electric Cobalt Grid.",
+      "Each direction must contain exactly 4 independent Pages named Home, Film, Schedule, and Checkout, for exactly 12 Pages total.",
+    ].join(" "),
+    explicitContext: [],
+    graphRevision: current.graph.revision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.equal(
+    result.proposal.operations.some((operation) => operation.type === "add-node"),
+    false,
+  );
+  assert.deepEqual(
+    new Map(result.proposal.generation.artifactPlans.map((plan) => [plan.name, plan.nodeId])),
+    nodeIdByName,
+  );
 });
 
 test("production Workspace Agent preserves every explicit Page matrix cell as an independent Codex plan", async (t) => {
@@ -2690,6 +4088,8 @@ test("production Workspace Agent preserves every explicit Page matrix cell as an
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner(async (input) => {
       observedTimeouts.push(input.timeoutMs ?? 0);
       const schemaIndex = input.args.indexOf("--output-schema");
@@ -2727,7 +4127,7 @@ test("production Workspace Agent preserves every explicit Page matrix cell as an
     assert.match(plan.instructions ?? "", new RegExp(`Page: ${page}`));
   }
   assert.equal(observedSchemas.length, 1);
-  assert.deepEqual(observedTimeouts, [6 * 60 * 1_000]);
+  assert.deepEqual(observedTimeouts, [12 * 60 * 1_000]);
   assert.deepEqual(
     result.proposal.operations
       .filter((operation) => operation.type === "archive-node")
@@ -2787,6 +4187,8 @@ test("production Workspace Agent freezes a Chinese direction-by-Page request as 
     store,
     dataDir: root,
     resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
     createSpawner: () => new RecordingSpawner(async (input) => {
       const schemaIndex = input.args.indexOf("--output-schema");
       observedSchemas.push(
@@ -3162,4 +4564,607 @@ test("production Workspace Agent cancellation leaves no Proposal or planner scra
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
   assert.equal(existsSync(scratch), false);
+});
+
+test("semantic prototype relations retain planned edge ids and compile server-owned v2 marker requirements", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-prototype-v2-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent prototype v2", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const existing = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [
+      {
+        id: "add-home-node",
+        type: "add-node",
+        node: {
+          id: "home-node",
+          kind: "page",
+          name: "Home",
+          artifactId: "home-artifact",
+          createIdentity: { initialTrackId: "home-track" },
+        },
+      },
+      {
+        id: "add-checkout-node",
+        type: "add-node",
+        node: {
+          id: "checkout-node",
+          kind: "page",
+          name: "Checkout",
+          artifactId: "checkout-artifact",
+          createIdentity: { initialTrackId: "checkout-track" },
+        },
+      },
+      {
+        id: "add-receipt-node",
+        type: "add-node",
+        node: {
+          id: "receipt-node",
+          kind: "page",
+          name: "Receipt",
+          artifactId: "receipt-artifact",
+          createIdentity: { initialTrackId: "receipt-track" },
+        },
+      },
+      {
+        id: "add-gallery-node",
+        type: "add-node",
+        node: {
+          id: "gallery-node",
+          kind: "page",
+          name: "Gallery",
+          artifactId: "gallery-artifact",
+          createIdentity: { initialTrackId: "gallery-track" },
+        },
+      },
+      {
+        id: "add-home-checkout-edge",
+        type: "add-edge",
+        edge: {
+          id: "home-checkout-edge",
+          workspaceId: foundation.id,
+          kind: "prototype",
+          sourceNodeId: "home-node",
+          targetNodeId: "checkout-node",
+        },
+      },
+      {
+        id: "add-checkout-receipt-edge",
+        type: "add-edge",
+        edge: {
+          id: "checkout-receipt-edge",
+          workspaceId: foundation.id,
+          kind: "prototype",
+          sourceNodeId: "checkout-node",
+          targetNodeId: "receipt-node",
+        },
+      },
+    ],
+  });
+  const semanticIntent = {
+    pages: [
+      {
+        existingNodeId: "home-node",
+        operation: "generate",
+        name: "Home",
+        instructions: "A complete festival Home page with a real primary ticket action and responsive hierarchy.",
+        verificationStates: [],
+      },
+      {
+        existingNodeId: "checkout-node",
+        operation: "generate",
+        name: "Checkout",
+        instructions: "A complete Checkout page with order review, a real form, validation, and payment states.",
+        verificationStates: ["review"],
+      },
+      {
+        existingNodeId: "receipt-node",
+        operation: "generate",
+        name: "Receipt",
+        instructions: "A complete Receipt page with confirmed order details, next steps, and a success state.",
+        verificationStates: ["success"],
+      },
+      {
+        existingNodeId: "gallery-node",
+        operation: "generate",
+        name: "Gallery",
+        instructions: "A standalone festival Gallery page with editorial media and no prototype relationship.",
+        verificationStates: [],
+      },
+    ],
+    components: [],
+    resources: [],
+    relations: [
+      {
+        source: "Checkout",
+        target: "Receipt",
+        kind: "prototype",
+        trigger: "submit",
+        targetState: "success",
+        transition: { type: "fade", durationMs: 180 },
+      },
+      {
+        source: "Home",
+        target: "Checkout",
+        kind: "prototype",
+        trigger: "click",
+        targetState: "review",
+      },
+    ],
+    rationale: "Retain the reviewed page flow while regenerating every page with provable interaction anchors.",
+    assumptions: [],
+  };
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse(semanticIntent),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: foundation.id, workspaceId: foundation.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000091",
+    message: "Regenerate the four Pages and preserve the exact Home to Checkout to Receipt prototype flow.",
+    explicitContext: [],
+    graphRevision: existing.graph.revision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  if (result.kind !== "proposal" || result.proposal.generation.kind !== "workspace-generation") return;
+  const generation = result.proposal.generation as typeof result.proposal.generation & {
+    version?: number;
+    prototypeIntents: Array<Record<string, unknown>>;
+    artifactPlans: Array<typeof result.proposal.generation.artifactPlans[number] & {
+      prototypeRequirements?: {
+        outgoing: Array<Record<string, unknown>>;
+        incoming: Array<Record<string, unknown>>;
+      };
+    }>;
+  };
+  assert.equal(generation.version, 2);
+  assert.equal(
+    result.proposal.operations.filter((operation) => operation.type === "add-edge").length,
+    0,
+    "retained planned edges must keep their exact durable identities",
+  );
+  assert.deepEqual(
+    generation.prototypeIntents.map((intent) => intent.edgeId),
+    ["checkout-receipt-edge", "home-checkout-edge"],
+    "v2 intents are canonicalized by retained edge id instead of Agent response order",
+  );
+  assert.ok(generation.prototypeIntents.every((intent) => (
+    Object.keys(intent).every((key) => [
+      "edgeId",
+      "sourceArtifactId",
+      "targetArtifactId",
+      "trigger",
+      "sourceMarkerId",
+      "targetState",
+      "transition",
+    ].includes(key))
+    && UUID_PATTERN.test(String(intent.sourceMarkerId))
+  )));
+  assert.equal(
+    new Set(generation.prototypeIntents.map((intent) => intent.sourceMarkerId)).size,
+    generation.prototypeIntents.length,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(generation.prototypeIntents),
+    /sourceLocator|sourceRevisionId|revisionId|commit|treeHash|selector|xpath/i,
+  );
+  const requirementsByArtifact = new Map(generation.artifactPlans.map((plan) => [
+    plan.artifactId,
+    plan.prototypeRequirements,
+  ]));
+  assert.deepEqual(
+    requirementsByArtifact.get("home-artifact")?.outgoing.map((entry) => entry.edgeId),
+    ["home-checkout-edge"],
+  );
+  assert.deepEqual(
+    requirementsByArtifact.get("checkout-artifact"),
+    {
+      outgoing: [{
+        edgeId: "checkout-receipt-edge",
+        sourceMarkerId: generation.prototypeIntents[0]!.sourceMarkerId,
+        trigger: "submit",
+      }],
+      incoming: [{
+        edgeId: "home-checkout-edge",
+        sourceArtifactId: "home-artifact",
+        sourceMarkerId: generation.prototypeIntents[1]!.sourceMarkerId,
+        targetState: "review",
+      }],
+    },
+  );
+  assert.deepEqual(
+    requirementsByArtifact.get("receipt-artifact")?.incoming.map((entry) => ({
+      edgeId: entry.edgeId,
+      targetState: entry.targetState,
+    })),
+    [{ edgeId: "checkout-receipt-edge", targetState: "success" }],
+  );
+  assert.equal(requirementsByArtifact.get("gallery-artifact"), undefined);
+
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  const validation = compiled.tasks.find((task) => task.kind === "prototype-validation");
+  assert.ok(validation);
+  assert.equal(validation.payload.version, 2);
+  assert.deepEqual(validation.payload.prototypeIntents, generation.prototypeIntents);
+  const artifactTaskIds = new Set(
+    compiled.tasks
+      .filter((task) => task.kind === "page")
+      .map((task) => task.id),
+  );
+  assert.equal(
+    validation.dependencyIds.filter((taskId) => artifactTaskIds.has(taskId)).length,
+    generation.artifactPlans.length,
+    "v2 finalization receives the exact generated Revision output for every source and target Page",
+  );
+});
+
+type PrototypeStatusFixture =
+  | { status: "planned" }
+  | {
+      status: "interactive";
+      binding: {
+        sourceArtifactId: string;
+        sourceRevisionId: string;
+        sourceLocator: { designNodeId: string };
+        trigger: "click";
+        targetArtifactId: string;
+      };
+    }
+  | {
+      status: "broken";
+      brokenReason: string;
+      binding?: {
+        sourceArtifactId: string;
+        sourceRevisionId: string;
+        sourceLocator: { designNodeId: string };
+        trigger: "click";
+        targetArtifactId: string;
+      };
+    };
+
+function seedRetainedPrototypePair(
+  store: Store,
+  projectId: string,
+  workspace: ReturnType<Store["workspace"]["ensureWorkspaceRecord"]>,
+) {
+  return store.workspace.applyGraphCommands(projectId, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [
+      {
+        id: "add-source-node",
+        type: "add-node",
+        node: {
+          id: "source-node",
+          kind: "page",
+          name: "Source",
+          artifactId: "source-artifact",
+          createIdentity: { initialTrackId: "source-track" },
+        },
+      },
+      {
+        id: "add-target-node",
+        type: "add-node",
+        node: {
+          id: "target-node",
+          kind: "page",
+          name: "Target",
+          artifactId: "target-artifact",
+          createIdentity: { initialTrackId: "target-track" },
+        },
+      },
+      {
+        id: "add-retained-edge",
+        type: "add-edge",
+        edge: {
+          id: "retained-prototype-edge",
+          workspaceId: workspace.id,
+          sourceNodeId: "source-node",
+          targetNodeId: "target-node",
+          kind: "prototype",
+        },
+      },
+    ],
+  });
+}
+
+function retainedPrototypeSemanticIntent(includeRelation = true) {
+  return {
+    pages: [
+      {
+        existingNodeId: "source-node",
+        operation: "generate",
+        name: "Source",
+        instructions: "A complete source Page with a real primary action, responsive hierarchy, and all interaction states.",
+      },
+      {
+        existingNodeId: "target-node",
+        operation: "generate",
+        name: "Target",
+        instructions: "A complete target Page with realistic content, responsive hierarchy, and destination states.",
+      },
+    ],
+    components: [],
+    resources: [],
+    relations: includeRelation
+      ? [{ source: "Source", target: "Target", kind: "prototype", trigger: "click" }]
+      : [],
+    rationale: "Regenerate the retained two-page flow without losing its reviewed graph identity.",
+    assumptions: [],
+  };
+}
+
+function overrideRetainedPrototypeStatus(store: Store, prototype: PrototypeStatusFixture): void {
+  const original = store.workspace.getCompactBundleByProjectId.bind(store.workspace);
+  Object.defineProperty(store.workspace, "getCompactBundleByProjectId", {
+    configurable: true,
+    value(projectId: string) {
+      const bundle = original(projectId);
+      if (bundle === null) return null;
+      const cloned = structuredClone(bundle);
+      for (const graph of [cloned.graph, cloned.activeSnapshot.graph]) {
+        const edge = graph.edges.find((candidate) => candidate.id === "retained-prototype-edge");
+        assert.ok(edge && edge.kind === "prototype");
+        edge.prototype = structuredClone(prototype);
+      }
+      return cloned;
+    },
+  });
+}
+
+test("semantic prototype compilation resets retained interactive and broken edges to planned with the same id", async (t) => {
+  const statuses: PrototypeStatusFixture[] = [
+    {
+      status: "interactive",
+      binding: {
+        sourceArtifactId: "source-artifact",
+        sourceRevisionId: "source-revision",
+        sourceLocator: { designNodeId: "source.action" },
+        trigger: "click",
+        targetArtifactId: "target-artifact",
+      },
+    },
+    {
+      status: "broken",
+      brokenReason: "The source locator no longer resolves.",
+    },
+  ];
+  for (const prototype of statuses) {
+    await t.test(prototype.status, async (subtest) => {
+      const root = mkdtempSync(join(tmpdir(), `dezin-production-workspace-agent-reset-${prototype.status}-`));
+      subtest.after(() => rm(root, { recursive: true, force: true }));
+      const store = new Store(join(root, "store.db"));
+      subtest.after(() => store.close());
+      const project = store.createProject({ name: `Reset ${prototype.status} prototype`, mode: "standard" });
+      const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+      const existing = seedRetainedPrototypePair(store, project.id, workspace);
+      overrideRetainedPrototypeStatus(store, prototype);
+      const orchestrator = createProductionWorkspaceAgentOrchestrator({
+        store,
+        dataDir: root,
+        resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+        structuredAgentPlatform: "darwin",
+        resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+        createSpawner: () => new RecordingSpawner({
+          stdout: codexPlannerResponse(retainedPrototypeSemanticIntent()),
+          stderr: "",
+          exitCode: 0,
+        }),
+      });
+
+      const result = await orchestrator.turn({
+        scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+        intent: "plan",
+        agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+        turnId: prototype.status === "interactive"
+          ? "turn-00000000-0000-4000-8000-000000000092"
+          : "turn-00000000-0000-4000-8000-000000000093",
+        message: "Regenerate both Pages while preserving the reviewed prototype relation.",
+        explicitContext: [],
+        graphRevision: existing.graph.revision,
+      }, new AbortController().signal);
+
+      assert.equal(result.kind, "proposal");
+      if (result.kind !== "proposal") return;
+      assert.deepEqual(
+        result.proposal.operations.flatMap((operation): Array<
+          | { type: "remove-edge"; edgeId: string }
+          | {
+              type: "add-edge";
+              edgeId: string;
+              sourceNodeId: string;
+              targetNodeId: string;
+            }
+        > => {
+          if (operation.type === "remove-edge" && operation.edgeId === "retained-prototype-edge") {
+            return [{ type: operation.type, edgeId: operation.edgeId }];
+          }
+          if (operation.type === "add-edge" && operation.edge.id === "retained-prototype-edge") {
+            return [{
+              type: operation.type,
+              edgeId: operation.edge.id,
+              sourceNodeId: operation.edge.sourceNodeId,
+              targetNodeId: operation.edge.targetNodeId,
+            }];
+          }
+          return [];
+        }),
+        [
+          { type: "remove-edge", edgeId: "retained-prototype-edge" },
+          {
+            type: "add-edge",
+            edgeId: "retained-prototype-edge",
+            sourceNodeId: "source-node",
+            targetNodeId: "target-node",
+          },
+        ],
+      );
+      const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+      assert.ok(approved.plan);
+      assert.equal(
+        store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id).plan.status,
+        "queued",
+      );
+    });
+  }
+});
+
+test("semantic prototype compilation fails closed when a retained generated Page relation is omitted", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-missing-retained-prototype-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Missing retained prototype relation", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const existing = seedRetainedPrototypePair(store, project.id, workspace);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse(retainedPrototypeSemanticIntent(false)),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  await assert.rejects(orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000094",
+    message: "Regenerate both Pages and retain the reviewed prototype flow.",
+    explicitContext: [],
+    graphRevision: existing.graph.revision,
+  }, new AbortController().signal), /retained prototype relation.*missing|missing semantic prototype relation/i);
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("Claude and Codex compile the same semantic prototype contract through the server compiler", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-provider-parity-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const semanticIntent = {
+    pages: [
+      {
+        existingNodeId: null,
+        name: "Home",
+        instructions: "A complete Home Page with a real primary action, responsive hierarchy, and production states.",
+      },
+      {
+        existingNodeId: null,
+        name: "Checkout",
+        instructions: "A complete Checkout Page with order review, a real form, validation, and success states.",
+      },
+    ],
+    components: [],
+    resources: [],
+    relations: [{
+      source: "Home",
+      target: "Checkout",
+      kind: "prototype",
+      trigger: "submit",
+      targetState: "review",
+    }],
+    rationale: "Create one coherent two-page checkout flow.",
+    assumptions: [],
+  };
+  const spawner = new RecordingSpawner(async (input) => ({
+    stdout: input.command === TEST_CLAUDE_EXECUTABLE
+      ? JSON.stringify(semanticIntent)
+      : codexPlannerResponse(semanticIntent),
+    stderr: "",
+    exitCode: 0,
+  }));
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+  const claudeProject = store.createProject({ name: "Claude semantic compiler", mode: "standard" });
+  const claudeWorkspace = store.workspace.ensureWorkspaceRecord(claudeProject.id);
+  const codexProject = store.createProject({ name: "Codex semantic compiler", mode: "standard" });
+  const codexWorkspace = store.workspace.ensureWorkspaceRecord(codexProject.id);
+  const claudeResult = await orchestrator.turn({
+    scope: { type: "workspace", id: claudeWorkspace.id, workspaceId: claudeWorkspace.id },
+    intent: "plan",
+    agent: CLAUDE_AGENT,
+    turnId: "turn-00000000-0000-4000-8000-000000000095",
+    message: "Create a complete Home to Checkout flow.",
+    explicitContext: [],
+    graphRevision: claudeWorkspace.graphRevision,
+  }, new AbortController().signal);
+  const codexResult = await orchestrator.turn({
+    scope: { type: "workspace", id: codexWorkspace.id, workspaceId: codexWorkspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000096",
+    message: "Create a complete Home to Checkout flow.",
+    explicitContext: [],
+    graphRevision: codexWorkspace.graphRevision,
+  }, new AbortController().signal);
+
+  const summarize = (result: typeof claudeResult) => {
+    assert.equal(result.kind, "proposal");
+    if (result.kind !== "proposal" || result.proposal.generation.kind !== "workspace-generation") {
+      throw new Error("Expected a Workspace generation Proposal");
+    }
+    const generation = result.proposal.generation;
+    const plans = new Map(generation.artifactPlans.map((plan) => [plan.artifactId, plan] as const));
+    return {
+      version: generation.version,
+      nodes: result.proposal.operations.flatMap((operation) => (
+        operation.type === "add-node" && operation.node.kind === "page"
+          ? [{ kind: operation.node.kind, name: operation.node.name }]
+          : []
+      )),
+      plans: generation.artifactPlans.map((plan) => ({
+        kind: plan.kind,
+        name: plan.name,
+        instructions: plan.instructions,
+        outgoing: plan.prototypeRequirements?.outgoing.map((requirement) => requirement.trigger) ?? [],
+        incoming: plan.prototypeRequirements?.incoming.map((requirement) => requirement.targetState) ?? [],
+      })),
+      intents: generation.prototypeIntents.map((intent) => ({
+        sourceName: plans.get(intent.sourceArtifactId)?.name,
+        targetName: plans.get(intent.targetArtifactId)?.name,
+        trigger: intent.trigger,
+        targetState: intent.targetState,
+        hasServerMarker: typeof intent.sourceMarkerId === "string" && UUID_PATTERN.test(intent.sourceMarkerId),
+        hasLegacyLocator: intent.sourceLocator !== undefined,
+      })),
+    };
+  };
+  assert.deepEqual(summarize(claudeResult), summarize(codexResult));
+  assert.equal(spawner.inputs.length, 2);
+  for (const input of spawner.inputs) {
+    const systemPromptIndex = input.args.indexOf("--system-prompt");
+    const prompt = systemPromptIndex === -1 ? input.stdin : input.args[systemPromptIndex + 1] ?? "";
+    assert.match(prompt, /compact semantic workspace intent/i);
+  }
 });

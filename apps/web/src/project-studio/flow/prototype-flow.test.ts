@@ -200,7 +200,7 @@ test("broken bindings block with their reason while planned and unbound broken e
   });
   expect(prototypeFlowHealth(session, "page-a").items).toEqual(expect.arrayContaining([
     expect.objectContaining({ edgeId: "edge-planned", status: "planned" }),
-    expect.objectContaining({ edgeId: "edge-broken-unbound", status: "broken", detail: "Missing source locator." }),
+    expect.objectContaining({ edgeId: "edge-broken-unbound", status: "broken", detail: "To Zulu · Missing source locator." }),
   ]));
 });
 
@@ -266,6 +266,39 @@ test("an interactive label cannot hide a target with no exact frozen Revision", 
     status: "broken",
     detail: expect.stringMatching(/no exact Revision/i),
   }));
+});
+
+test("flow health names an unavailable Page from the frozen graph without making it presentable or interactive", () => {
+  const mutable = snapshot();
+  const target = mutable.graph.nodes.find((node) => node.id === "node-z");
+  if (target?.kind !== "page") throw new Error("Page target fixture required");
+  target.name = "Warm Paper/Ink Film";
+  mutable.artifactRevisions["page-z"] = null;
+  const session = createPrototypeFlowSession(mutable, ["node-a"], flowRevisions());
+
+  target.name = "Mutable Head Rename";
+
+  expect(session.pages.map((page) => page.artifactId)).not.toContain("page-z");
+  expect(buildPrototypeModeCommand(session, "page-a").bindings).not.toContainEqual(
+    expect.objectContaining({ locator: expect.objectContaining({ designNodeId: "checkout-form" }) }),
+  );
+  expect(prototypeFlowHealth(session, "page-a").items).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      edgeId: "edge-planned",
+      status: "planned",
+      detail: "To Warm Paper/Ink Film · no binding yet",
+    }),
+    expect.objectContaining({
+      edgeId: "edge-submit",
+      status: "broken",
+      detail: expect.stringMatching(/^To Warm Paper\/Ink Film · .*no exact Revision/i),
+    }),
+    expect.objectContaining({
+      edgeId: "edge-broken",
+      status: "broken",
+      detail: "To Warm Paper/Ink Film · Checkout confirmation is not generated yet.",
+    }),
+  ]));
 });
 
 test("targetState is frozen from the exact target Revision and missing states are not live", () => {

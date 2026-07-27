@@ -14,16 +14,22 @@ export function DesignSystemSelect({
   value,
   onChange,
   defaultId,
+  inherited = false,
+  onUseDefault,
   compact = false,
   catalogStatus = "ready",
+  selectionStatus = "ready",
   onRetry,
 }: {
   systems: DesignSystemCard[];
   value: string;
   onChange: (id: string) => void;
   defaultId?: string;
+  inherited?: boolean;
+  onUseDefault?: () => void;
   compact?: boolean;
   catalogStatus?: "loading" | "ready" | "error";
+  selectionStatus?: "loading" | "ready" | "error";
   onRetry?: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -70,7 +76,20 @@ export function DesignSystemSelect({
   };
 
   const current = systems.find((s) => s.id === value);
-  const label = value === "" ? "None" : (current?.name ?? "Select");
+  const defaultSystem = systems.find((s) => s.id === defaultId);
+  const selectionPending = selectionStatus !== "ready";
+  const label = selectionPending
+    ? "Design system"
+    : inherited
+      ? `Org default${defaultSystem ? ` · ${defaultSystem.name}` : ""}`
+      : value === ""
+        ? "None"
+        : (current?.name ?? "Select");
+  const selectionDescription = selectionStatus === "loading"
+    ? "Design system settings are loading"
+    : selectionStatus === "error"
+      ? "Design system settings are unavailable; retrying"
+      : `Current Design system: ${label}`;
   const ql = q.trim().toLowerCase();
   const filtered = systems.filter(
     (s) =>
@@ -98,7 +117,8 @@ export function DesignSystemSelect({
           <button
             type="button"
             aria-label="Design system"
-            aria-description={`Current Design system: ${label}`}
+            aria-description={selectionDescription}
+            disabled={selectionPending}
             className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
           >
             {value !== "" && current ? (
@@ -113,7 +133,8 @@ export function DesignSystemSelect({
           <button
             type="button"
             aria-label="Design system"
-            aria-description={`Current Design system: ${label}`}
+            aria-description={selectionDescription}
+            disabled={selectionPending}
             className="flex h-11 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-left transition-colors hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:border-border-strong"
           >
             {value !== "" && current ? <DesignSystemMark id={current.id} swatch={current.swatch} /> : null}
@@ -190,8 +211,8 @@ export function DesignSystemSelect({
                 <li key={s.id}>
                   <button
                     type="button"
-                    aria-pressed={s.id === value}
-                    ref={s.id === value ? selectedRef : undefined}
+                    aria-pressed={!inherited && s.id === value}
+                    ref={!inherited && s.id === value ? selectedRef : undefined}
                     onMouseEnter={(e) => showPreview(e, s)}
                     onClick={() => {
                       onChange(s.id);
@@ -205,17 +226,43 @@ export function DesignSystemSelect({
                       <span className="block truncate text-xs text-muted-foreground">{s.category}</span>
                     </span>
                     {s.id === defaultId ? <Badge variant="secondary">Org default</Badge> : null}
-                    {s.id === value ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-foreground" /> : null}
+                    {!inherited && s.id === value
+                      ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-foreground" />
+                      : null}
                   </button>
                 </li>
               ))
             )}
           </ul>
           </ScrollArea>
-          <div className="flex shrink-0 items-center gap-2 border-t border-border/60 px-2">
+          <div className="flex shrink-0 flex-col border-t border-border/60 px-2 py-1">
+            {onUseDefault ? (
+              <button
+                type="button"
+                aria-pressed={inherited}
+                onClick={() => {
+                  onUseDefault();
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2.5 rounded-lg px-1 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-card">
+                  {defaultSystem
+                    ? <DesignSystemMark id={defaultSystem.id} swatch={defaultSystem.swatch} className="size-5" />
+                    : <Shapes size={13} strokeWidth={1.75} />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium text-foreground">Use org default</span>
+                  <span className="block truncate text-xs">
+                    {defaultSystem?.name ?? "Follow the default in Settings"}
+                  </span>
+                </span>
+                {inherited ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-foreground" /> : null}
+              </button>
+            ) : null}
             <button
               type="button"
-              aria-pressed={value === ""}
+              aria-pressed={!inherited && value === ""}
               onClick={() => {
                 onChange("");
                 setOpen(false);
@@ -226,7 +273,9 @@ export function DesignSystemSelect({
                 <Shapes size={13} strokeWidth={1.75} />
               </span>
               No design system
-              {value === "" ? <Check size={14} strokeWidth={2.5} className="ml-auto text-foreground" /> : null}
+              {!inherited && value === ""
+                ? <Check size={14} strokeWidth={2.5} className="ml-auto text-foreground" />
+                : null}
             </button>
           </div>
       </PopoverContent>

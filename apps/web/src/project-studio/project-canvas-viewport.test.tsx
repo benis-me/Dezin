@@ -518,6 +518,41 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
   expect(screen.getByRole("alert")).toHaveTextContent("Fit save failed");
 });
 
+test("Fit workspace keeps the asymmetric padded camera without a second upward translation", async () => {
+  const onViewportChange = vi.fn();
+  const fittedViewport = flowHarness.state.fitViewport;
+  const onSaveLayout = vi.fn(async ([command]: readonly WorkspaceLayoutCommand[]) => ({
+    ...layout,
+    viewport: command?.type === "set-viewport" ? command.viewport : layout.viewport,
+    checksum: "layout-fitted",
+  }));
+  renderCanvas({ onSaveLayout, onViewportChange });
+  await flushCanvasMeasurementFrame();
+
+  fireEvent.click(screen.getByRole("button", { name: "Fit workspace" }));
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(flowHarness.instance.fitView).toHaveBeenCalledWith({
+    padding: {
+      top: 0.18,
+      right: 0.18,
+      bottom: 0.32,
+      left: 0.18,
+    },
+    duration: expect.any(Number),
+  });
+  expect(flowHarness.instance.setViewport).not.toHaveBeenCalled();
+  expect(onSaveLayout).toHaveBeenCalledWith([{
+    type: "set-viewport",
+    viewport: fittedViewport,
+  }]);
+  expect(onViewportChange).toHaveBeenLastCalledWith(fittedViewport);
+});
+
 test.each([
   { label: "both saves succeed", firstFails: false, secondFails: false },
   { label: "the earlier save fails", firstFails: true, secondFails: false },

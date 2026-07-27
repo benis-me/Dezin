@@ -55,7 +55,14 @@ export function PageNode({ data, selected, isConnectable }: NodeProps<WorkspaceF
           <span className="dezin-flow-card__title-mark" data-kind="page" aria-hidden>
             <PanelTop size={11} strokeWidth={1.6} />
           </span>
-          <h3 title={data.name}>{data.name}</h3>
+          <h3 title={data.name} aria-label={data.name}>
+            {overview && data.overviewDirection ? (
+              <>
+                <span className="dezin-flow-card__overview-direction">{data.overviewDirection}</span>
+                <span className="dezin-flow-card__overview-role">{data.overviewPageRole ?? data.name}</span>
+              </>
+            ) : data.name}
+          </h3>
           {full && <ArrowUpRight className="dezin-flow-card__open-mark" size={13} aria-hidden />}
         </div>
         {!overview && (

@@ -154,6 +154,8 @@ export interface ProjectAgentPromptInput {
    * behavior when the value is omitted.
    */
   readonly hasExactSharinganCapture?: boolean;
+  /** Frozen exact Research direction data for this Artifact Task. */
+  readonly visualDirectionContract?: string;
 }
 
 export interface ProjectAgentPromptResult {
@@ -189,11 +191,14 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
   const brief = input.brief.trim();
   const registry = input.designRegistry ?? defaultRegistry();
   const designSystemDisabled = project.designSystemId === NO_DESIGN_SYSTEM_ID;
-  const designSystemId = hasExactSharinganCapture
+  const explicitDesignSystemId = hasExactSharinganCapture || designSystemDisabled
     ? undefined
-    : designSystemDisabled
-      ? undefined
-      : (project.designSystemId ?? settings.defaultDesignSystemId);
+    : project.designSystemId ?? undefined;
+  const fallbackDesignSystemId = hasExactSharinganCapture || designSystemDisabled
+    || explicitDesignSystemId !== undefined
+    ? undefined
+    : settings.defaultDesignSystemId || undefined;
+  const designSystemId = explicitDesignSystemId ?? fallbackDesignSystemId;
   const designSystem = designSystemId
     ? (registry.get(designSystemId) ?? registry.default())
     : null;
@@ -213,7 +218,9 @@ export function buildProjectAgentPrompt(input: ProjectAgentPromptInput): Project
   const baseSystemPrompt = hasExactSharinganCapture
     ? buildSharinganSystemPrompt()
     : composeSystemPrompt({
-        designSystem: designSystem ?? undefined,
+        designSystem: explicitDesignSystemId === undefined ? undefined : designSystem ?? undefined,
+        fallbackDesignSystem: explicitDesignSystemId === undefined ? designSystem ?? undefined : undefined,
+        visualDirectionContract: input.visualDirectionContract,
         skills: catalog.map((candidate) => ({
           id: candidate.id,
           name: candidate.name,

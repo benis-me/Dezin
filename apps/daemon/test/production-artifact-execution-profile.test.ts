@@ -269,7 +269,46 @@ async function artifactResearchValidationFixture(
       }],
     },
   } as unknown as Parameters<typeof loader>[0];
-  return { loader, request };
+  return { loader, request, store };
+}
+
+function samePlanGeneratedResearchRequest(
+  request: Parameters<ReturnType<typeof createProductionArtifactExecutionProfileLoader>>[0],
+  instructions: string,
+  artifact: {
+    kind?: "component" | "page";
+    name?: string;
+  } = {},
+) {
+  const next = structuredClone(request);
+  const kind = artifact.kind ?? "page";
+  const name = artifact.name ?? "Checkout";
+  next.task.kind = kind;
+  const payload = next.task.payload as Record<string, unknown>;
+  const artifactPlan = payload.artifactPlan as Record<string, unknown>;
+  delete artifactPlan.researchDirectionSelection;
+  artifactPlan.kind = kind;
+  artifactPlan.name = name;
+  artifactPlan.instructions = instructions;
+  const brief = payload.brief as Record<string, unknown>;
+  brief.targetInstructions = {
+    operation: "create",
+    kind,
+    name,
+    instructions,
+  };
+  const observation = next.observation as {
+    resourcePins: Array<{
+      resourceId: string;
+      revisionId: string;
+      sourceTaskId: string | null;
+    }>;
+  };
+  observation.resourcePins = observation.resourcePins.map((pin) => ({
+    ...pin,
+    sourceTaskId: "generated-research-task",
+  }));
+  return next;
 }
 
 function profile(overrides: {
@@ -555,9 +594,9 @@ test("Artifact execution profile freezes every output and QA semantic without pe
     providerId: "codex",
     model: "gpt-5.4",
     credentialProviderId: "openai",
-    baseUrl: "https://api.example.test/v1",
-    organization: "org-frozen",
-    credentialRequired: true,
+    baseUrl: "",
+    organization: "",
+    credentialRequired: false,
   });
   assert.doesNotMatch(serialized, /super-secret/);
   assert.equal(frozen.designSystem?.revision, frozen.designSystem?.checksum);
@@ -692,7 +731,7 @@ test("CodeBuddy Artifact binding keeps the frozen model and never injects API cr
   assert.equal(bound.environment.CODEBUDDY_AUTH_TOKEN, undefined);
 });
 
-test("Artifact execution settings retain frozen semantics and hydrate only current credentials", () => {
+test("Codex Artifact execution settings retain frozen semantics and use only host login", () => {
   const frozen = profile({ visualQaSetting: false, effectiveVisualQa: true });
   const live = {
     ...settings(),
@@ -720,7 +759,8 @@ test("Artifact execution settings retain frozen semantics and hydrate only curre
 
   assert.equal(hydrated.agentCommand, "codex");
   assert.equal(hydrated.model, "gpt-5.4");
-  assert.equal(hydrated.apiBaseUrl, "https://api.example.test/v1");
+  assert.equal(hydrated.apiBaseUrl, "");
+  assert.equal(hydrated.aiProviderOrganization, "");
   assert.equal(hydrated.visualQaAgentCommand, "claude");
   assert.equal(hydrated.visualQaModel, "reviewer-frozen");
   assert.equal(
@@ -729,7 +769,7 @@ test("Artifact execution settings retain frozen semantics and hydrate only curre
     "the immutable effective Task QA policy overrides the raw user preference",
   );
   assert.equal(hydrated.customInstructions, "Use restrained motion.");
-  assert.equal(hydrated.apiKey, "fresh-agent-key");
+  assert.equal(hydrated.apiKey, "");
   assert.equal(hydrated.imageApiKey, "", "unrelated image credentials are not admitted to the Artifact process");
   assert.equal(hydrated.videoApiKey, "", "unrelated video credentials are not admitted to the Artifact process");
   assert.doesNotMatch(hydrated.aiProviderProfiles, /fresh-profile-key/);
@@ -738,12 +778,21 @@ test("Artifact execution settings retain frozen semantics and hydrate only curre
 });
 
 test("Artifact execution settings reject cross-provider and endpoint credential substitution", () => {
-  const frozen = profile();
-  const base = { ...settings(), apiKey: "current-secret" };
+  const frozen = profile({
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    agentApiBaseUrl: "https://anthropic.example.test/v1",
+  });
+  const base = {
+    ...settings(),
+    agentCommand: "claude",
+    model: "mutated-model",
+    apiBaseUrl: "https://anthropic.example.test/v1",
+    apiKey: "current-secret",
+  };
   for (const live of [
     { ...base, agentCommand: "gemini" },
     { ...base, apiBaseUrl: "https://drifted.example.test/v1" },
-    { ...base, aiProviderOrganization: "drifted-org" },
     { ...base, apiKey: "" },
   ]) {
     assert.throws(
@@ -765,7 +814,188 @@ test("Artifact execution settings allow credential-free local auth without borro
   assert.equal(frozen.agent.credentialRequired, false);
   assert.equal(hydrated.apiKey, "");
   assert.equal(hydrated.agentCommand, "codex");
-  assert.equal(hydrated.apiBaseUrl, "https://api.example.test/v1");
+  assert.equal(hydrated.apiBaseUrl, "");
+  assert.equal(hydrated.aiProviderOrganization, "");
+});
+
+test("legacy Codex Artifact BYOK profiles hydrate through host login without reviving frozen endpoint semantics", () => {
+  const current = profile();
+  const legacyBodyWithOldChecksum = {
+    ...structuredClone(current),
+    agent: {
+      ...structuredClone(current.agent),
+      baseUrl: current.settings.value.apiBaseUrl,
+      organization: current.settings.value.aiProviderOrganization,
+      credentialRequired: true,
+    },
+  };
+  const { checksum: _oldChecksum, ...legacyBody } = legacyBodyWithOldChecksum;
+  const legacy = {
+    ...legacyBody,
+    checksum: checksumBytes(stableStringify(legacyBody)),
+  } as FrozenArtifactExecutionProfile;
+
+  const hydrated = hydrateArtifactExecutionSettings(legacy, {
+    ...settings(),
+    agentCommand: "codex",
+    apiBaseUrl: "https://another-project-provider.example.test/v1",
+    apiKey: "must-not-enter-codex",
+    aiProviderOrganization: "another-org",
+  });
+
+  assert.equal(hydrated.agentCommand, "codex");
+  assert.equal(hydrated.apiBaseUrl, "");
+  assert.equal(hydrated.aiProviderOrganization, "");
+  assert.equal(hydrated.apiKey, "");
+
+  const substitutedBodyWithOldChecksum = {
+    ...structuredClone(legacy),
+    agent: {
+      ...structuredClone(legacy.agent),
+      baseUrl: "https://substituted-provider.example.test/v1",
+    },
+  };
+  const { checksum: _legacyChecksum, ...substitutedBody } = substitutedBodyWithOldChecksum;
+  const substituted = {
+    ...substitutedBody,
+    checksum: checksumBytes(stableStringify(substitutedBody)),
+  } as FrozenArtifactExecutionProfile;
+  assert.throws(
+    () => hydrateArtifactExecutionSettings(substituted, settings()),
+    /credential semantic does not match frozen settings/i,
+  );
+
+  const tamperedCredentialBodyWithOldChecksum = {
+    ...structuredClone(legacy),
+    agent: {
+      ...structuredClone(legacy.agent),
+      credentialRequired: false,
+    },
+  };
+  const {
+    checksum: _tamperedCredentialChecksum,
+    ...tamperedCredentialBody
+  } = tamperedCredentialBodyWithOldChecksum;
+  const tamperedCredential = {
+    ...tamperedCredentialBody,
+    checksum: checksumBytes(stableStringify(tamperedCredentialBody)),
+  } as FrozenArtifactExecutionProfile;
+  assert.throws(
+    () => hydrateArtifactExecutionSettings(tamperedCredential, settings()),
+    /credential semantic does not match frozen settings/i,
+  );
+});
+
+test("checksum-valid legacy Artifact v4 Context keeps its exact frozen Claude reviewer without admitting hybrid tampering", () => {
+  const current = profile({
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+  });
+  const legacyBodyWithCurrentChecksum = {
+    ...structuredClone(current),
+    agent: {
+      ...structuredClone(current.agent),
+      baseUrl: current.settings.value.apiBaseUrl,
+      organization: current.settings.value.aiProviderOrganization,
+      credentialRequired: true,
+    },
+    quality: {
+      ...structuredClone(current.quality),
+      reviewer: {
+        command: "claude",
+        providerId: "claude",
+        model: null,
+      },
+    },
+  };
+  const { checksum: _currentChecksum, ...legacyBody } = legacyBodyWithCurrentChecksum;
+  const legacy = {
+    ...legacyBody,
+    checksum: checksumBytes(stableStringify(legacyBody)),
+  } as FrozenArtifactExecutionProfile;
+  const ownership = {
+    projectId: PROJECT_ID,
+    workspaceId: WORKSPACE_ID,
+    planId: PLAN_ID,
+    taskId: TASK_ID,
+    targetArtifactId: ARTIFACT_ID,
+  };
+  const live = {
+    ...settings(),
+    visualQaAgentCommand: "codex",
+    visualQaModel: "live-reviewer-must-not-win",
+    apiBaseUrl: "https://live-project-provider.example.test/v1",
+    apiKey: "live-project-key-must-not-enter",
+    aiProviderOrganization: "live-project-org",
+  };
+
+  const required = requireArtifactExecutionProfile(packWithProfile(legacy), ownership);
+  assert.deepEqual(required.quality.reviewer, {
+    command: "claude",
+    providerId: "claude",
+    model: null,
+  });
+  const hydrated = hydrateArtifactExecutionSettings(required, live);
+  assert.equal(hydrated.agentCommand, "codex");
+  assert.equal(hydrated.apiBaseUrl, "");
+  assert.equal(hydrated.aiProviderOrganization, "");
+  assert.equal(hydrated.apiKey, "");
+  assert.equal(hydrated.visualQaAgentCommand, "claude");
+  assert.equal(hydrated.visualQaModel, "");
+
+  const bound = bindArtifactExecutionProfile({
+    contextPack: packWithProfile(legacy),
+    ownership,
+    liveSettings: live,
+  });
+  assert.equal(bound.agentCommand, "codex");
+  assert.equal(bound.environment.OPENAI_API_KEY, undefined);
+  assert.equal(bound.qualitySettings.visualQaAgentCommand, "claude");
+  assert.equal(bound.qualitySettings.visualQaModel, "");
+  assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings, "claude"), {});
+
+  const checksumProfile = (
+    value: Omit<FrozenArtifactExecutionProfile, "checksum">,
+  ): FrozenArtifactExecutionProfile => ({
+    ...value,
+    checksum: checksumBytes(stableStringify(value)),
+  }) as FrozenArtifactExecutionProfile;
+  const tamperedReviewerBody = {
+    ...structuredClone(legacyBody),
+    quality: {
+      ...structuredClone(legacy.quality),
+      reviewer: {
+        command: "claude",
+        providerId: "claude",
+        model: "tampered-reviewer",
+      },
+    },
+  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
+  const hybridCurrentAgentBody = {
+    ...structuredClone(legacyBody),
+    agent: structuredClone(current.agent),
+  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
+  const nonBlankSettingsValue = {
+    ...structuredClone(legacy.settings.value),
+    visualQaModel: "tampered-setting",
+  };
+  const nonBlankSettingsBody = {
+    ...structuredClone(legacyBody),
+    settings: {
+      value: nonBlankSettingsValue,
+      checksum: checksumBytes(stableStringify(nonBlankSettingsValue)),
+    },
+  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
+  for (const candidate of [
+    checksumProfile(tamperedReviewerBody),
+    checksumProfile(hybridCurrentAgentBody),
+    checksumProfile(nonBlankSettingsBody),
+  ]) {
+    assert.throws(
+      () => requireArtifactExecutionProfile(packWithProfile(candidate), ownership),
+      /reviewer does not match frozen quality settings/i,
+    );
+  }
 });
 
 test("Artifact execution canonicalizes a credential-free image provider URL from Settings", () => {
@@ -1033,8 +1263,9 @@ test("Artifact runner, environment, prompt, direction, and reviewer bind one fro
   assert.deepEqual(bound.qualityIgnores, frozen.quality.ignores);
   assert.equal(bound.settings.visualQaAgentCommand, "claude");
   assert.equal(bound.settings.visualQaModel, "reviewer-frozen");
-  assert.equal(bound.environment.OPENAI_API_KEY, "fresh-agent-key");
-  assert.equal(bound.environment.OPENAI_BASE_URL, "https://api.example.test/v1");
+  assert.equal(bound.environment.OPENAI_API_KEY, undefined);
+  assert.equal(bound.environment.OPENAI_BASE_URL, undefined);
+  assert.equal(bound.environment.OPENAI_ORG_ID, undefined);
   assert.equal(bound.environment.DEZIN_DAEMON_TOKEN, undefined);
   assert.equal(Object.hasOwn(bound.environment, "DEZIN_DAEMON_TOKEN"), true);
   assert.equal(bound.imageGeneration.providerId, "openai");
@@ -1081,9 +1312,11 @@ test("production Artifact binding exposes the exact reviewer credential only to 
     liveSettings: live,
   });
 
-  assert.equal(bound.environment.OPENAI_API_KEY, "fresh-builder-key");
+  assert.equal(bound.environment.OPENAI_API_KEY, undefined);
   assert.equal(bound.environment.ANTHROPIC_API_KEY, undefined);
-  assert.equal(bound.settings.apiKey, "fresh-builder-key");
+  assert.equal(bound.settings.apiKey, "");
+  assert.equal(bound.settings.apiBaseUrl, "");
+  assert.equal(bound.settings.aiProviderOrganization, "");
   assert.equal(bound.qualitySettings.apiKey, "");
   assert.equal(bound.qualitySettings.visualQaAgentCommand, "claude");
   assert.equal(bound.qualitySettings.visualQaModel, "reviewer-frozen");
@@ -1132,7 +1365,7 @@ test("production Artifact binding fails reviewer credential resolution when the 
     },
   });
 
-  assert.equal(bound.environment.OPENAI_API_KEY, "fresh-builder-key");
+  assert.equal(bound.environment.OPENAI_API_KEY, undefined);
   assert.equal(bound.environment.ANTHROPIC_API_KEY, undefined);
   assert.equal(
     parseProviderProfiles(bound.qualitySettings.aiProviderProfiles).anthropic?.apiKey,
@@ -1524,6 +1757,258 @@ test("production materialization freezes Project, settings, design, skill, Resea
     0,
     "multi-artifact direction selection never consults the legacy mutable Project repository",
   );
+});
+
+test("same-Plan generated Research freezes one exact direction matched by immutable Artifact instructions", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    'Use the exact Research direction "Quiet confidence" with id "quiet-confidence" for Checkout.',
+  );
+
+  const frozen = await fixture.loader(request, new AbortController().signal);
+  assert.ok(frozen.researchDirection);
+  assert.equal(frozen.researchDirection.directionId, "quiet-confidence");
+  assert.equal(
+    frozen.researchDirection.resourceId,
+    request.observation.resourcePins[0]!.resourceId,
+  );
+  assert.equal(
+    frozen.researchDirection.revisionId,
+    request.observation.resourcePins[0]!.revisionId,
+  );
+  const direction = JSON.parse(frozen.researchDirection.content) as {
+    id: string;
+    title: string;
+  };
+  assert.equal(direction.id, "quiet-confidence");
+  assert.equal(direction.title, "Quiet confidence");
+  assert.equal(Object.isFrozen(frozen), true);
+  assert.equal(Object.isFrozen(frozen.researchDirection), true);
+
+  const repeated = await fixture.loader(
+    structuredClone(request),
+    new AbortController().signal,
+  );
+  assert.equal(repeated.checksum, frozen.checksum);
+  assert.deepEqual(repeated.researchDirection, frozen.researchDirection);
+});
+
+test("exact reused Research selection freezes its ordered immutable direction set for one Artifact", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = structuredClone(fixture.request);
+  const selection = (request.task.payload.artifactPlan as Record<string, any>)
+    .researchDirectionSelection;
+  selection.directionId = "expressive-confirmation";
+  selection.directionIds = ["expressive-confirmation", "quiet-confidence"];
+
+  const frozen = await fixture.loader(request, new AbortController().signal);
+
+  assert.ok(frozen.researchDirection);
+  assert.equal(frozen.researchDirection.directionId, "expressive-confirmation");
+  assert.deepEqual(frozen.researchDirection.directionIds, [
+    "expressive-confirmation",
+    "quiet-confidence",
+  ]);
+  const directions = JSON.parse(frozen.researchDirection.content) as Array<{
+    id: string;
+    title: string;
+  }>;
+  assert.deepEqual(directions.map(({ id, title }) => ({ id, title })), [
+    { id: "expressive-confirmation", title: "Expressive confirmation" },
+    { id: "quiet-confidence", title: "Quiet confidence" },
+  ]);
+  assert.equal(Object.isFrozen(frozen.researchDirection.directionIds), true);
+});
+
+test("exact reused Research selection rejects structurally invalid direction sets", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  for (const [directionIds, pattern] of [
+    [["quiet-confidence", "quiet-confidence"], /direction ids.*unique/i],
+    [["expressive-confirmation", "quiet-confidence"], /first.*directionId/i],
+    [["quiet-confidence"], /between 2 and 16/i],
+  ] as const) {
+    const request = structuredClone(fixture.request);
+    const selection = (request.task.payload.artifactPlan as Record<string, any>)
+      .researchDirectionSelection;
+    selection.directionIds = directionIds;
+    await assert.rejects(
+      async () => fixture.loader(request, new AbortController().signal),
+      pattern,
+    );
+  }
+});
+
+test("exact reused Research selection rejects a set member missing from the immutable Revision", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = structuredClone(fixture.request);
+  const selection = (request.task.payload.artifactPlan as Record<string, any>)
+    .researchDirectionSelection;
+  selection.directionIds = ["quiet-confidence", "missing-direction"];
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    /missing or ambiguous in its pinned Revision/i,
+  );
+});
+
+test("same-Plan generated Research lets direction-agnostic shared KITE Components inherit every immutable direction", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const cases = [
+    {
+      name: "KITE Checkout Form",
+      instructions: "Reusable attendee/payment form for Checkout pages; show contact fields, promo code, totals, payment CTA, and validation-error, payment-processing, and confirmation states. Keep the form real and legible.",
+    },
+    {
+      name: "KITE Schedule Row",
+      instructions: "Reusable schedule row for Schedule pages; show day, film, time, venue, runtime, format, and availability. Support day-filtered and sold-out states with direction-specific styling.",
+    },
+    {
+      name: "KITE Ticket Selector",
+      instructions: "Reusable ticket/pass selector for Film, Schedule, and Checkout pages; show quantities, tiers, selection feedback, and sold-out/validation states. Keep it compact and direction-aware.",
+    },
+  ];
+
+  for (const candidate of cases) {
+    const frozen = await fixture.loader(
+      samePlanGeneratedResearchRequest(fixture.request, candidate.instructions, {
+        kind: "component",
+        name: candidate.name,
+      }),
+      new AbortController().signal,
+    );
+    assert.ok(frozen.researchDirection);
+    assert.deepEqual(frozen.researchDirection.directionIds, [
+      "quiet-confidence",
+      "expressive-confirmation",
+    ], candidate.name);
+    const directions = JSON.parse(frozen.researchDirection.content) as Array<{
+      id: string;
+      title: string;
+    }>;
+    assert.deepEqual(
+      directions.map(({ id, title }) => ({ id, title })),
+      [
+        { id: "quiet-confidence", title: "Quiet confidence" },
+        { id: "expressive-confirmation", title: "Expressive confirmation" },
+      ],
+      candidate.name,
+    );
+  }
+});
+
+test("same-Plan generated Research keeps a direction-specific Component pinned to its one exact immutable direction", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const frozen = await fixture.loader(
+    samePlanGeneratedResearchRequest(
+      fixture.request,
+      'Build this Component only for the exact Research direction "Quiet confidence" with id "quiet-confidence".',
+      { kind: "component", name: "Direction-specific KITE Hero" },
+    ),
+    new AbortController().signal,
+  );
+
+  assert.ok(frozen.researchDirection);
+  assert.equal(frozen.researchDirection.directionId, "quiet-confidence");
+  assert.equal(frozen.researchDirection.directionIds, undefined);
+  const direction = JSON.parse(frozen.researchDirection.content) as {
+    id: string;
+    title: string;
+  };
+  assert.deepEqual(
+    { id: direction.id, title: direction.title },
+    { id: "quiet-confidence", title: "Quiet confidence" },
+  );
+});
+
+test("same-Plan generated Research freezes explicit multi-direction and all-direction contracts as one deterministic set", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const cases = [
+    'Use both exact Research directions: "Quiet confidence" (quiet-confidence) and "Expressive confirmation" (expressive-confirmation).',
+    "Use all directions from the exact generated Research Revision.",
+  ];
+  let expectedContent: string | null = null;
+
+  for (const instructions of cases) {
+    const frozen = await fixture.loader(
+      samePlanGeneratedResearchRequest(fixture.request, instructions),
+      new AbortController().signal,
+    );
+    assert.ok(frozen.researchDirection);
+    const directionSet = frozen.researchDirection as typeof frozen.researchDirection & {
+      directionIds: readonly string[];
+    };
+    assert.deepEqual(directionSet.directionIds, [
+      "quiet-confidence",
+      "expressive-confirmation",
+    ]);
+    const directions = JSON.parse(directionSet.content) as Array<{ id: string; title: string }>;
+    assert.deepEqual(
+      directions.map(({ id, title }) => ({ id, title })),
+      [
+        { id: "quiet-confidence", title: "Quiet confidence" },
+        { id: "expressive-confirmation", title: "Expressive confirmation" },
+      ],
+    );
+    assert.equal(directionSet.content, stableStringify(directions));
+    if (expectedContent === null) expectedContent = directionSet.content;
+    else assert.equal(directionSet.content, expectedContent);
+  }
+});
+
+test("same-Plan generated Research keeps Pages fail-closed for typoed and absent direction matches", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  for (const instructions of [
+    'Use the exact Research direction "Quiet confidence" with typoed id "quiet-confidenc" for Checkout.',
+    "Use a restrained editorial direction for Checkout.",
+  ]) {
+    const request = samePlanGeneratedResearchRequest(
+      fixture.request,
+      instructions,
+      { kind: "page", name: "KITE Checkout" },
+    );
+    await assert.rejects(
+      async () => fixture.loader(request, new AbortController().signal),
+      (error: unknown) => {
+        assert.ok(error instanceof BlockedContextError);
+        assert.match(error.message, /Research direction.*(?:no exact match|does not match)/i);
+        return true;
+      },
+      instructions,
+    );
+  }
+});
+
+test("same-Plan generated Research rechecks the immutable Component inheritance contract after materialization", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    'Build this Artifact for the exact Research direction "Quiet confidence" with id "quiet-confidence".',
+    { kind: "component", name: "KITE Contract Fence" },
+  );
+  const originalRevisionRead = fixture.store.workspace.getResourceRevisionForProject
+    .bind(fixture.store.workspace);
+  Object.defineProperty(fixture.store.workspace, "getResourceRevisionForProject", {
+    configurable: true,
+    value(...args: Parameters<typeof originalRevisionRead>) {
+      request.task.kind = "page";
+      const payload = request.task.payload as Record<string, unknown>;
+      (payload.artifactPlan as Record<string, unknown>).kind = "page";
+      const brief = payload.brief as Record<string, unknown>;
+      (brief.targetInstructions as Record<string, unknown>).kind = "page";
+      return originalRevisionRead(...args);
+    },
+  });
+
+  try {
+    await assert.rejects(
+      async () => fixture.loader(request, new AbortController().signal),
+      /generated Research direction contract changed during materialization/i,
+    );
+  } finally {
+    delete (fixture.store.workspace as unknown as Record<string, unknown>)
+      .getResourceRevisionForProject;
+  }
 });
 
 test("Artifact execution rejects a Research direction that references a missing finding", async (t) => {

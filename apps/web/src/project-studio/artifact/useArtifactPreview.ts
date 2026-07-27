@@ -1,14 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../../lib/api-context.tsx";
-import type {
-  PreviewTarget,
-  PreviewTargetLease,
-  ResolvedPreviewTarget,
+import {
+  ApiError,
+  type PreviewTarget,
+  type PreviewTargetLease,
+  type ResolvedPreviewTarget,
 } from "../../lib/api.ts";
 import { previewBridgeNonceForSrc } from "../../lib/preview-channel.ts";
 
 const RENEW_WINDOW_MS = 15_000;
 const MIN_RENEW_DELAY_MS = 1_000;
+const TRANSIENT_ACQUISITION_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
+const TRANSIENT_GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+function isTransientPreviewTransportError(error: unknown): boolean {
+  if (error instanceof ApiError) return TRANSIENT_GATEWAY_STATUSES.has(error.status);
+  return error instanceof TypeError
+    && /failed to fetch|network error|load failed/i.test(error.message);
+}
 
 export type ArtifactPreviewState =
   | { status: "idle"; resolved: null; lease: null; error: null }
@@ -201,6 +210,7 @@ export function useArtifactPreview({
     let ownedLease: PreviewTargetLease | null = null;
     let renewTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+    let acquisitionRetryTimer: ReturnType<typeof setTimeout> | null = null;
     const acquisitionController = new AbortController();
     let renewController: AbortController | null = null;
     let resolvedTarget: ResolvedPreviewTarget | null = null;
@@ -218,6 +228,21 @@ export function useArtifactPreview({
       if (expiryTimer !== null) clearTimeout(expiryTimer);
       renewTimer = null;
       expiryTimer = null;
+    };
+
+    const reacquireOwnedLease = (lease: PreviewTargetLease): void => {
+      if (!isCurrent() || ownedLease?.leaseId !== lease.leaseId) return;
+      ownedLease = null;
+      clearLeaseTimers();
+      renewController?.abort();
+      renewController = null;
+      release(lease);
+      commit({ status: "loading", resolved: lease.resolved, lease: null, error: null });
+      if (acquisitionRetryTimer !== null) clearTimeout(acquisitionRetryTimer);
+      acquisitionRetryTimer = setTimeout(() => {
+        acquisitionRetryTimer = null;
+        acquire(0);
+      }, TRANSIENT_ACQUISITION_RETRY_DELAYS_MS[0]);
     };
 
     const failOwnedLease = (lease: PreviewTargetLease, error: string): void => {
@@ -239,7 +264,7 @@ export function useArtifactPreview({
         return false;
       }
       expiryTimer = setTimeout(() => {
-        failOwnedLease(lease, "Preview lease expired before renewal completed.");
+        reacquireOwnedLease(lease);
       }, remaining);
       return true;
     };
@@ -278,6 +303,11 @@ export function useArtifactPreview({
           .catch((error: unknown) => {
             if (renewController === controller) renewController = null;
             if (!isCurrent() || ownedLease?.leaseId !== lease.leaseId) return;
+            if (isTransientPreviewTransportError(error)
+              || (error instanceof ApiError && error.status === 404)) {
+              reacquireOwnedLease(lease);
+              return;
+            }
             failOwnedLease(lease, errorMessage(error));
           });
       }, delay);
@@ -296,58 +326,74 @@ export function useArtifactPreview({
         disposed = true;
       };
     }
+    const activeTarget = currentTarget;
+
+    function acquire(retryIndex: number): void {
+      if (!isCurrent()) return;
+      void api.resolvePreviewTarget(projectId, activeTarget, acquisitionController.signal)
+        .then(async (resolved) => {
+          if (!isCurrent()) return;
+          resolvedTarget = resolved;
+          const mismatch = resolutionError(
+            activeTarget,
+            resolved,
+            projectId,
+            expectedArtifactId,
+            expectedRevisionId,
+            expectedWorkspaceId,
+            expectedRenderSpec,
+          );
+          if (mismatch) throw new Error(mismatch);
+          commit({ status: "loading", resolved, lease: null, error: null });
+          const acquired = await api.acquirePreviewTargetLease(projectId, resolved, acquisitionController.signal);
+          if (!isCurrent()) {
+            release(acquired);
+            return;
+          }
+          if (!sameResolvedIdentity(resolved, acquired.resolved)) {
+            release(acquired);
+            throw new Error("Acquired preview identity does not match the resolved target.");
+          }
+          const bridgeError = leaseBridgeError(acquired);
+          if (bridgeError !== null) {
+            release(acquired);
+            throw new Error(bridgeError);
+          }
+          if (!Number.isFinite(acquired.expiresAt) || acquired.expiresAt <= Date.now()) {
+            release(acquired);
+            throw new Error("Acquired preview lease is already expired.");
+          }
+          ownedLease = acquired;
+          commit({ status: "ready", resolved: acquired.resolved, lease: acquired, error: null });
+          scheduleRenewal(acquired);
+        })
+        .catch((error: unknown) => {
+          if (!isCurrent()) return;
+          const delay = TRANSIENT_ACQUISITION_RETRY_DELAYS_MS[retryIndex];
+          if (delay !== undefined && isTransientPreviewTransportError(error)) {
+            commit({ status: "loading", resolved: resolvedTarget, lease: null, error: null });
+            acquisitionRetryTimer = setTimeout(() => {
+              acquisitionRetryTimer = null;
+              acquire(retryIndex + 1);
+            }, delay);
+            return;
+          }
+          commit({
+            status: "error",
+            resolved: resolvedTarget,
+            lease: null,
+            error: errorMessage(error),
+          });
+        });
+    }
 
     commit(LOADING_STATE);
-    void api.resolvePreviewTarget(projectId, currentTarget, acquisitionController.signal)
-      .then(async (resolved) => {
-        if (!isCurrent()) return;
-        resolvedTarget = resolved;
-        const mismatch = resolutionError(
-          currentTarget,
-          resolved,
-          projectId,
-          expectedArtifactId,
-          expectedRevisionId,
-          expectedWorkspaceId,
-          expectedRenderSpec,
-        );
-        if (mismatch) throw new Error(mismatch);
-        commit({ status: "loading", resolved, lease: null, error: null });
-        const acquired = await api.acquirePreviewTargetLease(projectId, resolved, acquisitionController.signal);
-        if (!isCurrent()) {
-          release(acquired);
-          return;
-        }
-        if (!sameResolvedIdentity(resolved, acquired.resolved)) {
-          release(acquired);
-          throw new Error("Acquired preview identity does not match the resolved target.");
-        }
-        const bridgeError = leaseBridgeError(acquired);
-        if (bridgeError !== null) {
-          release(acquired);
-          throw new Error(bridgeError);
-        }
-        if (!Number.isFinite(acquired.expiresAt) || acquired.expiresAt <= Date.now()) {
-          release(acquired);
-          throw new Error("Acquired preview lease is already expired.");
-        }
-        ownedLease = acquired;
-        commit({ status: "ready", resolved: acquired.resolved, lease: acquired, error: null });
-        scheduleRenewal(acquired);
-      })
-      .catch((error: unknown) => {
-        if (!isCurrent()) return;
-        commit({
-          status: "error",
-          resolved: resolvedTarget,
-          lease: null,
-          error: errorMessage(error),
-        });
-      });
+    acquire(0);
 
     return () => {
       disposed = true;
       acquisitionController.abort();
+      if (acquisitionRetryTimer !== null) clearTimeout(acquisitionRetryTimer);
       clearLeaseTimers();
       renewController?.abort();
       renewController = null;

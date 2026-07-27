@@ -206,6 +206,914 @@ test("registry structured transport runs Codex inside outer confinement and extr
   assert.equal(Object.hasOwn(spawned.env ?? {}, "DEZIN_DAEMON_TOKEN"), true);
 });
 
+test("Codex structured transport retries an incomplete transient top-level error and keeps evidence private", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-retry-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "provider-secret-must-not-surface";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-retry" }),
+            JSON.stringify({ type: "turn.started" }),
+            JSON.stringify({ type: "error", message: `HTTP 503 temporarily unavailable ${secret}` }),
+          ].join("\n"),
+          stderr: `private stderr ${secret}`,
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-retry-success" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: '{"ok":true}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: scratch,
+    timeoutMs: 1_000,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codex", text: '{"ok":true}' });
+  assert.doesNotMatch(JSON.stringify(result), /provider-secret|private stderr/);
+});
+
+test("Codex retry classification fails closed on a malformed protocol stream", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-malformed-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "malformed-provider-secret";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-malformed" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({ type: "error", message: `HTTP 503 temporarily unavailable ${secret}` }),
+          "{\"type\":\"item.completed\"",
+        ].join("\n"),
+        stderr: `stale HTTP 502 diagnostic ${secret}`,
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "output-invalid");
+      assert.equal(error.details, undefined);
+      assert.doesNotMatch(error.message, /503|502|malformed-provider-secret/);
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex retry classification does not mask a structurally malformed protocol event", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-malformed-event-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-malformed-event" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({ type: "error", message: "HTTP 503 temporarily unavailable" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: 503 },
+          }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "output-invalid"
+    ),
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex malformed turn.failed terminal fails closed before retry classification", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-malformed-terminal-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-malformed-terminal" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({ type: "error", message: "HTTP 503 temporarily unavailable" }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: 503 },
+          }),
+        ].join("\n"),
+        stderr: "HTTP 503 temporarily unavailable",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "output-invalid"
+      && error.details === undefined
+    ),
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex retry classification rejects malformed data after turn.failed", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-post-terminal-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-post-terminal" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: "HTTP 503 temporarily unavailable" },
+          }),
+          "{\"type\":\"late",
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "output-invalid"
+      && error.details === undefined
+    ),
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex structured transport terminalizes quota 429 without retrying or leaking provider evidence", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-quota-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "sk-live-quota-secret";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-quota" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "error",
+            message: `HTTP 429 insufficient quota ${secret}`,
+          }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: `HTTP 429 insufficient quota ${secret}` },
+          }),
+        ].join("\n"),
+        stderr: `private provider stderr ${secret}`,
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "quota-exhausted");
+      assert.equal(error.message, "Structured Agent provider quota is exhausted");
+      assert.deepEqual(error.details, {
+        reasonCode: "quota-exhausted",
+        httpStatus: 429,
+        retryable: false,
+      });
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error.details)}`,
+        /sk-live|quota-secret|private provider stderr/,
+      );
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex terminalizes explicit account usage exhaustion without an HTTP status", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-usage-limit-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "private-usage-window";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      const message = `You've hit your usage limit. Purchase more credits or try again later. ${secret}`;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-usage-limit" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({ type: "error", message }),
+          JSON.stringify({ type: "turn.failed", error: { message } }),
+        ].join("\n"),
+        stderr: `private provider stderr ${secret}`,
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "quota-exhausted");
+      assert.equal(error.message, "Structured Agent provider quota is exhausted");
+      assert.deepEqual(error.details, {
+        reasonCode: "quota-exhausted",
+        retryable: false,
+      });
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error.details)}`,
+        /private-usage-window|private provider stderr/,
+      );
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex gives authoritative 404 precedence and ignores item diagnostics plus stale stderr", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-404-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "private-404-provider-secret";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-not-found" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "diagnostic-1",
+              type: "error",
+              message: `HTTP 429 insufficient quota diagnostic ${secret}`,
+            },
+          }),
+          JSON.stringify({
+            type: "error",
+            message: `HTTP 503 temporarily unavailable ${secret}`,
+          }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: `HTTP 404 model not found ${secret}` },
+          }),
+        ].join("\n"),
+        stderr: `stale HTTP 502 service unavailable ${secret}`,
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "process-failed");
+      assert.equal(error.message, "Structured Agent remote request failed");
+      assert.deepEqual(error.details, {
+        reasonCode: "request-rejected",
+        httpStatus: 404,
+        retryable: false,
+      });
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error.details)}`,
+        /private-404|insufficient quota|temporarily unavailable|service unavailable/,
+      );
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex terminal turn.failed 404 supersedes a stale top-level quota error", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-terminal-404-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-terminal-404" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "error",
+            message: "HTTP 429 insufficient quota from a recovered request",
+          }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: "HTTP 404 model not found" },
+          }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "process-failed");
+      assert.equal(error.message, "Structured Agent remote request failed");
+      assert.deepEqual(error.details, {
+        reasonCode: "request-rejected",
+        httpStatus: 404,
+        retryable: false,
+      });
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex terminal turn.failed 503 supersedes a stale top-level 404 and retries", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-terminal-503-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-terminal-503" }),
+            JSON.stringify({ type: "turn.started" }),
+            JSON.stringify({
+              type: "error",
+              message: "HTTP 404 from an earlier recovered request",
+            }),
+            JSON.stringify({
+              type: "turn.failed",
+              error: { message: "HTTP 503 temporarily unavailable" },
+            }),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 1,
+        };
+      }
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-terminal-success" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: '{"ok":true}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: scratch,
+    timeoutMs: 1_000,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codex", text: '{"ok":true}' });
+});
+
+test("Codex retries a retryable turn.failed at most three times", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-bounded-retry-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const secret = "bounded-retry-provider-secret";
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: `thread-retry-${attempts}` }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: `HTTP 503 temporarily unavailable ${secret}` },
+          }),
+        ].join("\n"),
+        stderr: `private stderr ${secret}`,
+        exitCode: 0,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "process-failed");
+      assert.equal(error.message, "Structured Agent remote request failed");
+      assert.deepEqual(error.details, {
+        reasonCode: "upstream-unavailable",
+        httpStatus: 503,
+        retryable: true,
+      });
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error.details)}`,
+        /bounded-retry-provider-secret|private stderr/,
+      );
+      return true;
+    },
+  );
+  assert.equal(attempts, 3);
+});
+
+test("Codex yields transient failure after one spawn when the caller owns retries", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-caller-retry-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-caller-retry" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: "HTTP 503 temporarily unavailable" },
+          }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      remoteRetryMode: "caller-owned",
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "process-failed");
+      assert.deepEqual(error.details, {
+        reasonCode: "upstream-unavailable",
+        httpStatus: 503,
+        retryable: true,
+      });
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex does not treat a bare token counter as an HTTP 500 failure", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-counter-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-counter" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "turn.failed",
+            error: { message: "Generation stopped with 500 tokens remaining" },
+          }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      timeoutMs: 1_000,
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "process-failed"
+      && error.details === undefined
+    ),
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Codex keeps an explicit HTTP 503 retryable when the same terminal mentions a bare 404 counter", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-explicit-status-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-explicit-status" }),
+            JSON.stringify({ type: "turn.started" }),
+            JSON.stringify({
+              type: "turn.failed",
+              error: { message: "HTTP 503 temporarily unavailable after counter 404" },
+            }),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 1,
+        };
+      }
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-explicit-status-success" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: '{"ok":true}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: scratch,
+    timeoutMs: 1_000,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codex", text: '{"ok":true}' });
+});
+
+test("Codex uses the last explicit remote status even when diagnostics use different HTTP syntax", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-explicit-status-order-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: "thread-explicit-status-order" }),
+            JSON.stringify({ type: "turn.started" }),
+            JSON.stringify({
+              type: "turn.failed",
+              error: {
+                message: "API Error: 404 from a recovered request; HTTP 503 temporarily unavailable",
+              },
+            }),
+          ].join("\n"),
+          stderr: "",
+          exitCode: 1,
+        };
+      }
+      return {
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-explicit-status-order-success" }),
+          JSON.stringify({ type: "turn.started" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: { id: "message-1", type: "agent_message", text: '{"ok":true}' },
+          }),
+          JSON.stringify({ type: "turn.completed", usage: {} }),
+        ].join("\n"),
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+
+  const result = await runSafeStructuredAgent(request({
+    command: "codex",
+    cwd: scratch,
+    timeoutMs: 1_000,
+  }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodexExecutable() {
+      return TEST_CODEX_EXECUTABLE;
+    },
+    resolveSandboxExecutable() {
+      return "/usr/bin/sandbox-exec";
+    },
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { providerId: "codex", text: '{"ok":true}' });
+});
+
+test("Codex terminalizes HTTP 400, 401, and 403 rejections without retrying or retaining provider details", async (t) => {
+  for (const status of [400, 401, 403] as const) {
+    const scratch = mkdtempSync(join(tmpdir(), `dezin-safe-codex-request-rejected-${status}-`));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    let attempts = 0;
+    const secret = `private-contract-evidence-${status}`;
+    const spawner: ProcessSpawner = {
+      async run(): Promise<SpawnOutput> {
+        attempts += 1;
+        return {
+          stdout: [
+            JSON.stringify({ type: "thread.started", thread_id: `thread-request-rejected-${status}` }),
+            JSON.stringify({ type: "turn.started" }),
+            JSON.stringify({
+              type: "turn.failed",
+              error: { message: `HTTP status ${status} rejected reviewer request ${secret}` },
+            }),
+          ].join("\n"),
+          stderr: `private stderr ${secret}`,
+          exitCode: 1,
+        };
+      },
+    };
+
+    await assert.rejects(
+      () => runSafeStructuredAgent(request({
+        command: "codex",
+        cwd: scratch,
+        remoteRetryMode: "transport-owned",
+        timeoutMs: 1_000,
+      }), {
+        platform: "darwin",
+        createSpawner() {
+          return spawner;
+        },
+        resolveCodexExecutable() {
+          return TEST_CODEX_EXECUTABLE;
+        },
+        resolveSandboxExecutable() {
+          return "/usr/bin/sandbox-exec";
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SafeStructuredAgentError);
+        assert.equal(error.code, "process-failed");
+        assert.equal(error.message, "Structured Agent remote request failed");
+        assert.deepEqual(error.details, {
+          reasonCode: "request-rejected",
+          httpStatus: status,
+          retryable: false,
+        });
+        assert.doesNotMatch(
+          `${error.message}\n${JSON.stringify(error.details)}`,
+          /private-contract-evidence|private stderr|reviewer request/,
+        );
+        return true;
+      },
+    );
+    assert.equal(attempts, 1);
+  }
+});
+
 test("Codex Web Search is an explicit feature-gated structured transport capability", () => {
   const disabled = safeStructuredCodexArgs("gpt-5.4-mini");
   const enabled = safeStructuredCodexArgs("gpt-5.4-mini", undefined, [], true);
@@ -354,7 +1262,15 @@ test("registry structured transport confines a requested Codex final-output sche
     additionalProperties: false,
     required: ["pages"],
     properties: {
-      pages: { type: "array", items: { type: "object" } },
+      pages: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+          required: [],
+        },
+      },
     },
   } as const;
   let observedSchema: unknown;
@@ -400,6 +1316,277 @@ test("registry structured transport confines a requested Codex final-output sche
   });
 
   assert.deepEqual(observedSchema, outputSchema);
+});
+
+test("Codex strict schema preflight rejects a root object without closed properties before materialization or spawn", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-open-root-schema-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let createSpawnerCalls = 0;
+  let runCalls = 0;
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      outputSchema: {
+        type: "object",
+        properties: {
+          pages: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["pages"],
+      },
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        createSpawnerCalls += 1;
+        return {
+          async run(): Promise<SpawnOutput> {
+            runCalls += 1;
+            return {
+              stdout: [
+                JSON.stringify({ type: "thread.started", thread_id: "thread-open-root-schema" }),
+                JSON.stringify({ type: "turn.started" }),
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { id: "message-schema", type: "agent_message", text: '{"pages":[]}' },
+                }),
+                JSON.stringify({ type: "turn.completed", usage: {} }),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+        };
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "output-invalid");
+      assert.match(error.message, /object at \$/);
+      assert.match(error.message, /additionalProperties.*false/i);
+      return true;
+    },
+  );
+
+  assert.equal(createSpawnerCalls, 0);
+  assert.equal(runCalls, 0);
+  assert.throws(
+    () => statSync(join(scratch, "dezin-final-output.schema.json")),
+    (error: unknown) => (
+      error instanceof Error
+      && "code" in error
+      && error.code === "ENOENT"
+    ),
+    "invalid schemas must fail before the confined schema file is written",
+  );
+});
+
+test("Codex strict schema preflight rejects a nested object with open properties before materialization or spawn", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-open-nested-schema-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  let createSpawnerCalls = 0;
+  let runCalls = 0;
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codex",
+      cwd: scratch,
+      outputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          pages: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                id: { type: "string" },
+              },
+              required: ["id"],
+            },
+          },
+        },
+        required: ["pages"],
+      },
+    }), {
+      platform: "darwin",
+      createSpawner() {
+        createSpawnerCalls += 1;
+        return {
+          async run(): Promise<SpawnOutput> {
+            runCalls += 1;
+            return {
+              stdout: [
+                JSON.stringify({ type: "thread.started", thread_id: "thread-open-nested-schema" }),
+                JSON.stringify({ type: "turn.started" }),
+                JSON.stringify({
+                  type: "item.completed",
+                  item: { id: "message-schema", type: "agent_message", text: '{"pages":[]}' },
+                }),
+                JSON.stringify({ type: "turn.completed", usage: {} }),
+              ].join("\n"),
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+        };
+      },
+      resolveCodexExecutable() {
+        return TEST_CODEX_EXECUTABLE;
+      },
+      resolveSandboxExecutable() {
+        return "/usr/bin/sandbox-exec";
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof SafeStructuredAgentError);
+      assert.equal(error.code, "output-invalid");
+      assert.match(error.message, /\$\.properties\.pages\.items/);
+      assert.match(error.message, /additionalProperties.*false/i);
+      return true;
+    },
+  );
+
+  assert.equal(createSpawnerCalls, 0);
+  assert.equal(runCalls, 0);
+  assert.throws(
+    () => statSync(join(scratch, "dezin-final-output.schema.json")),
+    (error: unknown) => (
+      error instanceof Error
+      && "code" in error
+      && error.code === "ENOENT"
+    ),
+    "invalid schemas must fail before the confined schema file is written",
+  );
+});
+
+test("Codex strict schema preflight rejects nested required drift before materialization or spawn", async (t) => {
+  const cases = [
+    {
+      label: "missing",
+      nested: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+        },
+        required: ["id"],
+      },
+      diagnostic: /missing: title/,
+    },
+    {
+      label: "unexpected",
+      nested: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+        },
+        required: ["id", "ghost"],
+      },
+      diagnostic: /unexpected: ghost/,
+    },
+    {
+      label: "duplicate",
+      nested: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+        },
+        required: ["id", "id"],
+      },
+      diagnostic: /duplicate: id/,
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const scratch = mkdtempSync(join(tmpdir(), `dezin-safe-codex-schema-${fixture.label}-`));
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    let createSpawnerCalls = 0;
+    let runCalls = 0;
+
+    await assert.rejects(
+      () => runSafeStructuredAgent(request({
+        command: "codex",
+        cwd: scratch,
+        outputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pages: {
+              type: "array",
+              items: fixture.nested,
+            },
+          },
+          required: ["pages"],
+        },
+      }), {
+        platform: "darwin",
+        createSpawner() {
+          createSpawnerCalls += 1;
+          return {
+            async run(): Promise<SpawnOutput> {
+              runCalls += 1;
+              return {
+                stdout: [
+                  JSON.stringify({ type: "thread.started", thread_id: "thread-invalid-schema" }),
+                  JSON.stringify({ type: "turn.started" }),
+                  JSON.stringify({
+                    type: "item.completed",
+                    item: { id: "message-schema", type: "agent_message", text: '{"pages":[]}' },
+                  }),
+                  JSON.stringify({ type: "turn.completed", usage: {} }),
+                ].join("\n"),
+                stderr: "",
+                exitCode: 0,
+              };
+            },
+          };
+        },
+        resolveCodexExecutable() {
+          return TEST_CODEX_EXECUTABLE;
+        },
+        resolveSandboxExecutable() {
+          return "/usr/bin/sandbox-exec";
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SafeStructuredAgentError);
+        assert.equal(error.code, "output-invalid");
+        assert.match(
+          error.message,
+          /\$\.properties\.pages\.items/,
+          "the diagnostic must identify the invalid nested object schema",
+        );
+        assert.match(error.message, fixture.diagnostic);
+        return true;
+      },
+    );
+
+    assert.equal(createSpawnerCalls, 0);
+    assert.equal(runCalls, 0);
+    assert.throws(
+      () => statSync(join(scratch, "dezin-final-output.schema.json")),
+      (error: unknown) => (
+        error instanceof Error
+        && "code" in error
+        && error.code === "ENOENT"
+      ),
+      "invalid schemas must fail before the confined schema file is written",
+    );
+  }
 });
 
 test("registry structured transport canonicalizes its scratch before Seatbelt and spawn", async (t) => {
@@ -1028,6 +2215,44 @@ test("CodeBuddy structured transport aborts during retry backoff without another
   assert.equal(attempts, 1);
 });
 
+test("CodeBuddy transport-owned retry stops at the shared wall-clock deadline before another spawn", async () => {
+  let attempts = 0;
+  const spawner: ProcessSpawner = {
+    async run(): Promise<SpawnOutput> {
+      attempts += 1;
+      // The fake process deliberately returns after its assigned deadline so
+      // the transport boundary, not the ProcessSpawner double, proves that a
+      // second remote request cannot begin with a fresh timeout budget.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        stdout: "",
+        stderr: "HTTP 503 service unavailable",
+        exitCode: 1,
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => runSafeStructuredAgent(request({
+      command: "codebuddy",
+      remoteRetryMode: "transport-owned",
+      timeoutMs: 5,
+    }), {
+      createSpawner() {
+        return spawner;
+      },
+      resolveCodeBuddyExecutable() {
+        return TEST_CODEBUDDY_EXECUTABLE;
+      },
+    }),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "timed-out"
+    ),
+  );
+  assert.equal(attempts, 1);
+});
+
 test("trusted Claude executable policy rejects a fixed-search symlink to an external fake package", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-untrusted-structured-agent-package-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1288,6 +2513,130 @@ test("safe Codex JSONL parser returns the final completed Agent message", () => 
     parseSafeStructuredCodexJsonl([thread, turn, progress, final, terminal].join("\n")),
     '{"pages":[]}',
   );
+});
+
+test("safe Codex JSONL parser ignores non-terminal completed error diagnostics in a successful turn", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const diagnostic = JSON.stringify({
+    type: "item.completed",
+    item: {
+      id: "diagnostic-1",
+      type: "error",
+      message: "Skill descriptions were shortened to fit the context budget.",
+    },
+  });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: '{"pages":[]}' },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+
+  assert.equal(
+    parseSafeStructuredCodexJsonl([thread, diagnostic, turn, message, terminal].join("\n")),
+    '{"pages":[]}',
+  );
+});
+
+test("safe Codex JSONL parser lets a completed turn supersede a transient top-level stream error", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const transient = JSON.stringify({
+    type: "error",
+    message: "Transient stream interruption; the client recovered.",
+  });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: '{"pages":[]}' },
+  });
+  const terminal = JSON.stringify({ type: "turn.completed", usage: {} });
+
+  assert.equal(
+    parseSafeStructuredCodexJsonl([thread, turn, transient, message, terminal].join("\n")),
+    '{"pages":[]}',
+  );
+});
+
+test("safe Codex JSONL parser requires a complete message turn and keeps turn.failed terminal", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const transient = JSON.stringify({
+    type: "error",
+    message: "HTTP 503 temporarily unavailable",
+  });
+  const message = JSON.stringify({
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: '{"pages":[]}' },
+  });
+  const completed = JSON.stringify({ type: "turn.completed", usage: {} });
+  const failed = JSON.stringify({
+    type: "turn.failed",
+    error: { message: "HTTP 503 temporarily unavailable" },
+  });
+
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, transient, message].join("\n")),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "process-failed"
+    ),
+  );
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, transient, completed].join("\n")),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "process-failed"
+    ),
+  );
+  assert.throws(
+    () => parseSafeStructuredCodexJsonl([thread, turn, failed, message, completed].join("\n")),
+    (error: unknown) => (
+      error instanceof SafeStructuredAgentError
+      && error.code === "output-invalid"
+    ),
+  );
+});
+
+test("safe Codex JSONL parser rejects pre-start and malformed turn.failed terminals", () => {
+  const thread = JSON.stringify({ type: "thread.started", thread_id: "thread-test" });
+  const turn = JSON.stringify({ type: "turn.started" });
+  const malformedTerminals = [
+    JSON.stringify({
+      type: "turn.failed",
+      error: { message: "HTTP 503 temporarily unavailable" },
+    }),
+    [
+      thread,
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: "HTTP 503 temporarily unavailable" },
+      }),
+    ].join("\n"),
+    [
+      thread,
+      turn,
+      JSON.stringify({ type: "turn.failed", error: {} }),
+    ].join("\n"),
+    [
+      thread,
+      turn,
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: `HTTP 503 ${"x".repeat(16 * 1_024)}` },
+      }),
+    ].join("\n"),
+  ];
+
+  for (const stdout of malformedTerminals) {
+    assert.throws(
+      () => parseSafeStructuredCodexJsonl(stdout),
+      (error: unknown) => (
+        error instanceof SafeStructuredAgentError
+        && error.code === "output-invalid"
+        && /malformed failed turn/i.test(error.message)
+      ),
+    );
+  }
 });
 
 test("safe Codex JSONL parser accepts Web Search items only when the request enabled them", () => {

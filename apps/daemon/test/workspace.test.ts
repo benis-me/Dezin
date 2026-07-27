@@ -782,11 +782,51 @@ test("malformed Proposal bodies fail before Standard workspace migration", async
         expectedStatus: 400,
       },
       {
+        name: "proposal-create-historical-prototype-authority",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...createEnvelope,
+          generation: {
+            ...createEnvelope.generation,
+            prototypeIntents: [{
+              edgeId: "legacy-edge",
+              sourceArtifactId: "legacy-source",
+              targetArtifactId: "legacy-target",
+              sourceLocator: { designNodeId: "legacy-cta" },
+              trigger: "click",
+            }],
+          },
+        }),
+        expectedStatus: 400,
+      },
+      {
         name: "proposal-update-unknown-field",
         suffix: "workspace/proposals/missing-proposal",
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...updateEnvelope, unexpected: true }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-update-historical-prototype-authority",
+        suffix: "workspace/proposals/missing-proposal",
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...updateEnvelope,
+          generation: {
+            ...updateEnvelope.generation,
+            prototypeIntents: [{
+              edgeId: "legacy-edge",
+              sourceArtifactId: "legacy-source",
+              targetArtifactId: "legacy-target",
+              sourceLocator: { designNodeId: "legacy-cta" },
+              trigger: "click",
+            }],
+          },
+        }),
         expectedStatus: 400,
       },
       {

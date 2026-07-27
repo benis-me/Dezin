@@ -22,6 +22,8 @@ import type {
   WorkspaceProposal,
 } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
+import { NO_DESIGN_SYSTEM_ID } from "../lib/design-system-selection.ts";
+import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
@@ -474,7 +476,10 @@ beforeEach(() => {
   window.history.pushState({}, "", "/projects/p-1/canvas");
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 test("Agent attachment materialization uses one atomic API instead of exposing an empty Resource", async () => {
   const ready = readyWorkspace("p-1");
@@ -643,9 +648,13 @@ test("a successful scoped submission clears its attachment error and reveals que
   fireEvent.click(screen.getByRole("button", { name: "Queue resource task" }));
 
   await waitFor(() => expect(resourceAgentTurn).toHaveBeenCalledTimes(1));
-  expect(await screen.findByRole("status", { name: "Resource Agent task status" })).toHaveTextContent(
-    "Queued · Plan plan-resource-agent",
-  );
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  const restorePlan = screen.getByRole("button", { name: "Open build plan" });
+  expect(restorePlan).toHaveTextContent("Queued build plan");
+  expect(restorePlan).not.toHaveTextContent("plan-resource-agent");
+  expect(restorePlan).toHaveAttribute("title", "Build plan plan-resource-agent");
   expect(draft).not.toHaveAttribute("aria-invalid");
   expect(draft).not.toHaveAttribute("aria-describedby");
   expect(screen.getAllByRole("alert")).toHaveLength(1);
@@ -683,6 +692,11 @@ test("Workspace Agent submission creates a scoped draft and focuses Proposal rev
   expect(screen.getByRole("textbox", { name: "Proposal rationale" })).toHaveValue(
     "Create a focused checkout flow",
   );
+  expect(screen.getByRole("heading", { name: "Proposal ready" })).toBeInTheDocument();
+  expect(screen.getByText("0 changes")).toBeInTheDocument();
+  expect(screen.getByLabelText("Workspace Agent transcript")).not.toHaveTextContent(proposal.id);
+  fireEvent.click(screen.getByRole("button", { name: "Review proposal" }));
+  expect(screen.getByRole("heading", { name: "Workspace proposal" })).toHaveFocus();
   expect(draft).toHaveValue("");
   expect(getWorkspace).toHaveBeenCalledTimes(1);
 });
@@ -726,6 +740,652 @@ test("Design Workspace preserves the saved ready CodeBuddy Agent and model witho
   await user.click(picker);
   expect(await screen.findByRole("button", { name: /CodeBuddy/ })).toBeEnabled();
   expect(updateSettings).not.toHaveBeenCalled();
+});
+
+test("Design Workspace keeps inherited Settings controls neutral while the Settings read is unresolved", async () => {
+  const ready = readyWorkspace("p-1");
+  const inheritedProject = { ...project("p-1"), designSystemId: null };
+  const getSettings = vi.fn(() => new Promise<never>(() => {}));
+  const updateSettings = vi.fn();
+  const patchProject = vi.fn();
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => inheritedProject,
+      getWorkspace: async () => ready,
+      getSettings,
+      updateSettings,
+      patchProject,
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const agentPicker = screen.getByRole("button", { name: "Agent and model" });
+  const designSystemPicker = screen.getByRole("button", { name: "Design system" });
+  expect(agentPicker).toHaveAccessibleDescription("Current Agent and model: No Agent selected");
+  expect(designSystemPicker).toHaveAccessibleDescription("Design system settings are loading");
+  expect(designSystemPicker).toBeDisabled();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Wait for the authoritative Settings read" },
+  });
+  expect(screen.getByRole("button", { name: "Create proposal" })).toBeDisabled();
+  expect(updateSettings).not.toHaveBeenCalled();
+  expect(patchProject).not.toHaveBeenCalled();
+});
+
+test("Design Workspace recovers its saved Agent and inherited Design System after a transient Settings read failure", async () => {
+  const ready = readyWorkspace("p-1");
+  const inheritedProject = { ...project("p-1"), designSystemId: null };
+  const currentSettings = await makeFakeApi().getSettings();
+  let rejectInitialSettings!: (error: Error) => void;
+  const initialSettings = new Promise<typeof currentSettings>((_resolve, reject) => {
+    rejectInitialSettings = reject;
+  });
+  const getSettings = vi.fn()
+    .mockImplementationOnce(() => initialSettings)
+    .mockResolvedValue({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "modern-minimal",
+    });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => inheritedProject,
+      getWorkspace: async () => ready,
+      getSettings,
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const agentPicker = screen.getByRole("button", { name: "Agent and model" });
+  const designSystemPicker = screen.getByRole("button", { name: "Design system" });
+  vi.useFakeTimers();
+  await act(async () => {
+    rejectInitialSettings(new Error("daemon restarting"));
+    await initialSettings.catch(() => {});
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(agentPicker).toHaveTextContent("Codex");
+  expect(agentPicker).toHaveTextContent("gpt-5.4-mini");
+  expect(designSystemPicker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Modern Minimal");
+});
+
+test("a late Settings read cannot replace a newer Agent and model selection", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveSettings!: (settings: typeof currentSettings) => void;
+  const pendingSettings = new Promise<typeof currentSettings>((resolve) => {
+    resolveSettings = resolve;
+  });
+  const updateSettings = vi.fn(async (patch: Partial<typeof currentSettings>) => ({
+    ...currentSettings,
+    ...patch,
+  }));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+      getWorkspace: async () => ready,
+      getSettings: async () => pendingSettings,
+      updateSettings,
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const picker = screen.getByRole("button", { name: "Agent and model" });
+  await user.click(picker);
+  await user.click(await screen.findByRole("button", { name: /^Codex/ }));
+  await user.click(await screen.findByRole("button", { name: "gpt-5.4-mini" }));
+  await waitFor(() => expect(picker).toHaveTextContent("Codex"));
+  await waitFor(() => expect(picker).toHaveTextContent("gpt-5.4-mini"));
+
+  await act(async () => {
+    resolveSettings({
+      ...currentSettings,
+      agentCommand: "claude",
+      model: "sonnet",
+      defaultDesignSystemId: "modern-minimal",
+    });
+    await pendingSettings;
+  });
+
+  expect(picker).toHaveTextContent("Codex");
+  expect(picker).toHaveTextContent("gpt-5.4-mini");
+});
+
+test("Design Workspace applies Settings dialog updates while its composer stays mounted", async () => {
+  const ready = readyWorkspace("p-1");
+  const inheritedProject = { ...project("p-1"), designSystemId: null };
+  const currentSettings = await makeFakeApi().getSettings();
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => inheritedProject,
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "claude",
+        model: "sonnet",
+        defaultDesignSystemId: "modern-minimal",
+      }),
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "editorial", name: "Editorial", category: "Editorial", summary: "", origin: "built-in" },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const composer = document.querySelector("[data-workspace-agent-composer]");
+  const agentPicker = screen.getByRole("button", { name: "Agent and model" });
+  const designSystemPicker = screen.getByRole("button", { name: "Design system" });
+  await waitFor(() => expect(agentPicker).toHaveTextContent("Claude"));
+  expect(designSystemPicker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Modern Minimal");
+
+  fireEvent.keyDown(window, { key: ",", metaKey: true });
+  expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  expect(document.querySelector("[data-workspace-agent-composer]")).toBe(composer);
+
+  act(() => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "editorial",
+    });
+  });
+
+  await waitFor(() => expect(agentPicker).toHaveTextContent("Codex"));
+  expect(agentPicker).toHaveTextContent("gpt-5.4-mini");
+  expect(designSystemPicker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial");
+  expect(document.querySelector("[data-workspace-agent-composer]")).toBe(composer);
+});
+
+test("a Settings event outranks an older in-flight Settings read for every composer default", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveInitialRead!: (settings: typeof currentSettings) => void;
+  const initialRead = new Promise<typeof currentSettings>((resolve) => {
+    resolveInitialRead = resolve;
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+      getWorkspace: async () => ready,
+      getSettings: async () => initialRead,
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "editorial", name: "Editorial", category: "Editorial", summary: "", origin: "built-in" },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const agentPicker = screen.getByRole("button", { name: "Agent and model" });
+  const designSystemPicker = screen.getByRole("button", { name: "Design system" });
+
+  act(() => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "editorial",
+    });
+  });
+  await waitFor(() => expect(agentPicker).toHaveTextContent("Codex"));
+  expect(agentPicker).toHaveTextContent("gpt-5.4-mini");
+  expect(designSystemPicker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial");
+
+  await act(async () => {
+    resolveInitialRead({
+      ...currentSettings,
+      agentCommand: "claude",
+      model: "sonnet",
+      defaultDesignSystemId: "modern-minimal",
+    });
+    await initialRead;
+  });
+
+  expect(agentPicker).toHaveTextContent("Codex");
+  expect(agentPicker).toHaveTextContent("gpt-5.4-mini");
+  expect(designSystemPicker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial");
+});
+
+test("a Settings event retires an older failed read without starting another retry chain", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let rejectInitialRead!: (error: Error) => void;
+  const initialRead = new Promise<typeof currentSettings>((_resolve, reject) => {
+    rejectInitialRead = reject;
+  });
+  const getSettings = vi.fn()
+    .mockImplementationOnce(() => initialRead)
+    .mockRejectedValue(new Error("stale daemon restart failure"));
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+        getWorkspace: async () => ready,
+        getSettings,
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+        ],
+        listDesignSystems: async () => [
+          { id: "editorial", name: "Editorial", category: "Editorial", summary: "", origin: "built-in" },
+        ],
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  vi.useFakeTimers();
+  await act(async () => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "editorial",
+    });
+    await Promise.resolve();
+    rejectInitialRead(new Error("superseded read failed"));
+    await initialRead.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+
+  expect(getSettings).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex");
+  expect(screen.getByRole("button", { name: "Design system" }))
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial");
+});
+
+test("a Settings event retires a retry timer that an older failed read already scheduled", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let rejectInitialRead!: (error: Error) => void;
+  const initialRead = new Promise<typeof currentSettings>((_resolve, reject) => {
+    rejectInitialRead = reject;
+  });
+  const getSettings = vi.fn()
+    .mockImplementationOnce(() => initialRead)
+    .mockRejectedValue(new Error("superseded retry must not run"));
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+        getWorkspace: async () => ready,
+        getSettings,
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+        ],
+        listDesignSystems: async () => [
+          { id: "editorial", name: "Editorial", category: "Editorial", summary: "", origin: "built-in" },
+        ],
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  vi.useFakeTimers();
+  await act(async () => {
+    rejectInitialRead(new Error("daemon restart began"));
+    await initialRead.catch(() => {});
+  });
+  await act(async () => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "editorial",
+    });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+
+  expect(getSettings).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex");
+  expect(screen.getByRole("button", { name: "Design system" }))
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial");
+});
+
+test("an older Settings event cannot replace a newer local Agent write", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveWrite!: (settings: typeof currentSettings) => void;
+  const pendingWrite = new Promise<typeof currentSettings>((resolve) => {
+    resolveWrite = resolve;
+  });
+  const updateSettings = vi.fn(() => pendingWrite);
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "claude",
+        model: "sonnet",
+        defaultDesignSystemId: "modern-minimal",
+      }),
+      updateSettings,
+      listAgents: async () => [
+        { id: "claude", command: "claude", available: true, version: "1", models: ["sonnet"] },
+        { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+      ],
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const picker = screen.getByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(picker).toHaveTextContent("Claude"));
+  await user.click(picker);
+  await user.click(await screen.findByRole("button", { name: /^Codex/ }));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+  expect(picker).toHaveTextContent("Codex");
+
+  act(() => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "claude",
+      model: "sonnet",
+      defaultDesignSystemId: "modern-minimal",
+    });
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(picker).toHaveTextContent("Codex");
+
+  await act(async () => {
+    resolveWrite({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "",
+      defaultDesignSystemId: "modern-minimal",
+    });
+    await pendingWrite;
+  });
+  await waitFor(() => expect(picker).toHaveTextContent("Codex"));
+
+  act(() => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      agentCommand: "claude",
+      model: "sonnet",
+      defaultDesignSystemId: "modern-minimal",
+    });
+  });
+  await waitFor(() => expect(picker).toHaveTextContent("Claude"));
+  expect(picker).toHaveTextContent("sonnet");
+});
+
+test("persistent Settings read failures toast once and keep recovering without changing composer layout", async () => {
+  const ready = readyWorkspace("p-1");
+  const inheritedProject = { ...project("p-1"), designSystemId: null };
+  const currentSettings = await makeFakeApi().getSettings();
+  let rejectFirstSettings!: (error: Error) => void;
+  const firstSettings = new Promise<typeof currentSettings>((_resolve, reject) => {
+    rejectFirstSettings = reject;
+  });
+  const getSettings = vi.fn()
+    .mockImplementationOnce(() => firstSettings)
+    .mockRejectedValueOnce(new Error("daemon still restarting"))
+    .mockRejectedValueOnce(new Error("daemon still restarting"))
+    .mockRejectedValueOnce(new Error("daemon still restarting"))
+    .mockRejectedValueOnce(new Error("daemon still restarting"))
+    .mockResolvedValue({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "modern-minimal",
+    });
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => inheritedProject,
+        getWorkspace: async () => ready,
+        getSettings,
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+        ],
+        listDesignSystems: async () => [
+          { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        ],
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Recover without moving the composer" },
+  });
+  const composer = screen.getByRole("textbox", { name: "Workspace Agent draft" })
+    .closest("[data-workspace-agent-composer]");
+  expect(composer).not.toBeNull();
+  expect(screen.getByRole("button", { name: "Create proposal" })).toBeDisabled();
+
+  vi.useFakeTimers();
+  await act(async () => {
+    rejectFirstSettings(new Error("daemon restarting"));
+    await firstSettings.catch(() => {});
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(500);
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  const loadError = screen.getByRole("alert");
+  expect(loadError).toHaveTextContent("Couldn't load Agent and Design System settings. Reconnecting…");
+  expect(loadError.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })
+    .closest("[data-workspace-agent-composer]")).toBe(composer);
+  expect(screen.getByRole("button", { name: "Design system" }))
+    .toHaveAccessibleDescription("Design system settings are unavailable; retrying");
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4_000);
+  });
+  expect(getSettings).toHaveBeenCalledTimes(6);
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex");
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("gpt-5.4-mini");
+  expect(screen.getByRole("button", { name: "Design system" }))
+    .toHaveAccessibleDescription("Current Design system: Org default · Modern Minimal");
+  expect(screen.getByRole("button", { name: "Create proposal" })).toBeEnabled();
+});
+
+test("StrictMode remounts share one in-flight Settings read", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const pendingSettings = new Promise<typeof currentSettings>(() => {});
+  const getSettings = vi.fn(() => pendingSettings);
+
+  render(
+    <StrictMode>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+        getWorkspace: async () => ready,
+        getSettings,
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+        ],
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </StrictMode>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  expect(getSettings).toHaveBeenCalledTimes(1);
+});
+
+test("unmounting cancels the Settings retry chain after an in-flight read fails", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let rejectSettings!: (error: Error) => void;
+  const pendingSettings = new Promise<typeof currentSettings>((_resolve, reject) => {
+    rejectSettings = reject;
+  });
+  const getSettings = vi.fn(() => pendingSettings);
+  const view = render(
+    <StrictMode>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+        getWorkspace: async () => ready,
+        getSettings,
+        listAgents: async () => [
+          { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+        ],
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </StrictMode>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  vi.useFakeTimers();
+  view.unmount();
+  await act(async () => {
+    rejectSettings(new Error("daemon stopped after navigation"));
+    await pendingSettings.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(getSettings).toHaveBeenCalledTimes(1);
+});
+
+test("remounting after an abandoned Settings read starts a fresh read", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const abandonedSettings = new Promise<typeof currentSettings>(() => {});
+  const getSettings = vi.fn()
+    .mockImplementationOnce(() => abandonedSettings)
+    .mockResolvedValue({
+      ...currentSettings,
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      defaultDesignSystemId: "modern-minimal",
+    });
+  const api = makeFakeApi({
+    getProject: async () => ({ ...project("p-1"), designSystemId: null }),
+    getWorkspace: async () => ready,
+    getSettings,
+    listAgents: async () => [
+      { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
+    ],
+  });
+  const renderApp = () => render(
+    <ApiProvider client={api}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const firstView = renderApp();
+  await screen.findByRole("region", { name: "Project canvas" });
+  expect(getSettings).toHaveBeenCalledTimes(1);
+
+  vi.useFakeTimers();
+  firstView.unmount();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  vi.useRealTimers();
+
+  renderApp();
+  await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex"));
 });
 
 test("Workspace Agent freezes the selected CodeBuddy Agent and model into its turn request", async () => {
@@ -1009,6 +1669,81 @@ test("Workspace Agent persists changed Agent and Design System context before cr
   expect(workspaceAgentTurn.mock.calls[0]![1].message).toBe("Build a complete music workspace");
 });
 
+test("Workspace Agent shows the inherited Design System default without pinning it and keeps explicit None distinct", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const inheritedProject = { ...project("p-1"), designSystemId: null };
+  const currentSettings = await makeFakeApi().getSettings();
+  const patchProject = vi.fn(async (
+    _projectId: string,
+    patch: Partial<Project>,
+  ): Promise<Project> => ({
+    ...inheritedProject,
+    ...patch,
+  }));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => inheritedProject,
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        defaultDesignSystemId: "modern-minimal",
+      }),
+      listDesignSystems: async () => [
+        { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
+        { id: "editorial", name: "Editorial", category: "Editorial", summary: "", origin: "built-in" },
+      ],
+      patchProject,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  const picker = screen.getByRole("button", { name: "Design system" });
+  await waitFor(() => expect(picker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Modern Minimal"));
+  expect(patchProject).not.toHaveBeenCalled();
+
+  await user.click(picker);
+  const dialog = await screen.findByRole("dialog", { name: "Choose Design system" });
+  expect(within(dialog).getByRole("button", { name: /Use org default/ }))
+    .toHaveAttribute("aria-pressed", "true");
+  expect(within(dialog).getByRole("button", { name: /^Modern Minimal/ }))
+    .toHaveAttribute("aria-pressed", "false");
+  await user.click(within(dialog).getByRole("button", { name: /No design system/ }));
+
+  await waitFor(() => expect(patchProject).toHaveBeenCalledWith("p-1", {
+    designSystemId: NO_DESIGN_SYSTEM_ID,
+  }));
+  await waitFor(() => expect(picker).toHaveAccessibleDescription("Current Design system: None"));
+
+  await user.click(picker);
+  const explicitNoneDialog = await screen.findByRole("dialog", { name: "Choose Design system" });
+  expect(within(explicitNoneDialog).getByRole("button", { name: /Use org default/ }))
+    .toHaveAttribute("aria-pressed", "false");
+  expect(within(explicitNoneDialog).getByRole("button", { name: /No design system/ }))
+    .toHaveAttribute("aria-pressed", "true");
+  await user.click(within(explicitNoneDialog).getByRole("button", { name: /Use org default/ }));
+
+  await waitFor(() => expect(patchProject).toHaveBeenNthCalledWith(2, "p-1", {
+    designSystemId: null,
+  }));
+  await waitFor(() => expect(picker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Modern Minimal"));
+
+  act(() => {
+    publishSettingsUpdated({
+      ...currentSettings,
+      defaultDesignSystemId: "editorial",
+    });
+  });
+  await waitFor(() => expect(picker)
+    .toHaveAccessibleDescription("Current Design system: Org default · Editorial"));
+  expect(patchProject).toHaveBeenCalledTimes(2);
+});
+
 test("Workspace Agent distinguishes Design System loading, failure, and retry from an empty catalog", async () => {
   const user = userEvent.setup();
   const ready = readyWorkspace("p-1");
@@ -1043,7 +1778,7 @@ test("Workspace Agent distinguishes Design System loading, failure, and retry fr
   expect(within(dialog).queryByText("No matches")).not.toBeInTheDocument();
 
   await user.click(within(dialog).getByRole("button", { name: "Retry loading design systems" }));
-  expect(await within(dialog).findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
+  expect(await within(dialog).findByRole("button", { name: /^Modern Minimal/ })).toBeInTheDocument();
   expect(listDesignSystems).toHaveBeenCalledTimes(2);
 });
 
@@ -1194,7 +1929,7 @@ test("Workspace Agent waits for the latest serialized Design System write before
   expect(workspaceAgentTurn).not.toHaveBeenCalled();
 
   await user.click(screen.getByRole("button", { name: "Design system" }));
-  await user.click(await screen.findByRole("button", { name: /Modern Minimal/ }));
+  await user.click(await screen.findByRole("button", { name: /^Modern Minimal/ }));
   expect(patchProject).toHaveBeenCalledTimes(1);
 
   await act(async () => {

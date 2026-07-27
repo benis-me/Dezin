@@ -434,12 +434,16 @@ test("validates the exact versioned Research direction selection and its owned d
     resourceId: "resource-research",
     revisionId: "research-revision-1",
     directionId: "quiet-editorial",
+    directionIds: ["quiet-editorial", "expressive-editorial"],
   };
   validateGenerationTaskPayload(withPayload(component, payload));
 
   for (const [mutate, pattern] of [
     [(value: any) => { value.artifactPlan.researchDirectionSelection.protocol = "dezin.research-direction-selection.v2"; }, /protocol/i],
     [(value: any) => { value.artifactPlan.researchDirectionSelection.directionId = " selected "; }, /canonical/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.directionIds = ["quiet-editorial", "quiet-editorial"]; }, /unique/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.directionIds = ["expressive-editorial", "quiet-editorial"]; }, /first.*directionId/i],
+    [(value: any) => { value.artifactPlan.researchDirectionSelection.directionIds = ["quiet-editorial"]; }, /between 2 and 16/i],
     [(value: any) => { value.artifactPlan.researchDirectionSelection.resourceId = "resource-other"; }, /owned Resource dependency/i],
     [(value: any) => { value.artifactPlan.researchDirectionSelection.extra = true; }, /fields/i],
   ] as const) {

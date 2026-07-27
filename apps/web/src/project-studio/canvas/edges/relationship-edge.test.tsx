@@ -65,18 +65,17 @@ describe("relationship edge", () => {
     expect(screen.getByText("uses")).toBeInTheDocument();
   });
 
-  test("keeps semantic labels visible at full canvas zoom", () => {
+  test("keeps idle semantic labels quiet at full canvas zoom", () => {
     const { container } = render(<RelationshipEdge {...{
       ...baseProps,
       selected: false,
       data: { ...baseProps.data, zoomLevel: "full" },
     } as unknown as EdgeProps<WorkspaceFlowEdge>} />);
 
-    expect(screen.getByText("uses")).toBeInTheDocument();
+    expect(screen.queryByText("uses")).toBeNull();
     expect(screen.getByTestId("relation-halo")).toBeInTheDocument();
     const label = container.querySelector("[data-edge-kind='uses']");
-    expect(label?.querySelector("svg")).not.toBeNull();
-    expect(label?.querySelector("i")).toBeNull();
+    expect(label).toBeNull();
   });
 
   test("keeps the halo and foreground stroke widths stable while the canvas zooms", () => {
@@ -85,7 +84,8 @@ describe("relationship edge", () => {
     expect(screen.getByTestId("relation-halo").style.stroke).toBe("var(--dezin-canvas-plane, var(--background))");
     expect(screen.getByTestId("relation-halo").style.vectorEffect).toBe("non-scaling-stroke");
     expect(screen.getByTestId("relation-path").style.vectorEffect).toBe("non-scaling-stroke");
-    expect(screen.getByTestId("relation-path").style.strokeWidth).toBe("1.1");
-    expect(screen.getByTestId("relation-path").style.opacity).toBe("0.5");
+    expect(screen.getByTestId("relation-path").style.stroke).toBe("var(--foreground-2)");
+    expect(screen.getByTestId("relation-path").style.strokeWidth).toBe("1.2");
+    expect(screen.getByTestId("relation-path").style.opacity).toBe("0.62");
   });
 });

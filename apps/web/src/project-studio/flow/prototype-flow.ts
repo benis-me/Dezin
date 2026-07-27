@@ -41,6 +41,7 @@ export interface PrototypeFlowSession {
   readonly startArtifactId: string;
   readonly startFrameId: string | null;
   readonly pages: readonly FrozenPrototypeFlowPage[];
+  readonly pageNamesByNodeId: Readonly<Record<string, string>>;
   readonly artifactRevisions: Readonly<Record<string, string | null>>;
   readonly prototypeEdges: readonly Readonly<PrototypeWorkspaceEdge>[];
   readonly bindingEdgeIds: Readonly<Record<string, string>>;
@@ -285,6 +286,9 @@ export function createPrototypeFlowSession(
   const artifactRevisions = Object.freeze(Object.fromEntries(
     Object.entries(snapshot.artifactRevisions).map(([artifactId, revisionId]) => [artifactId, revisionId]),
   ));
+  const pageNamesByNodeId = Object.freeze(Object.fromEntries(
+    snapshot.graph.nodes.flatMap((node) => node.kind === "page" ? [[node.id, node.name]] : []),
+  ));
   const bindingEdgeIds: Record<string, string> = {};
   let bindingIndex = 0;
   for (const edge of prototypeEdges) {
@@ -299,6 +303,7 @@ export function createPrototypeFlowSession(
     startArtifactId: startPage.artifactId,
     startFrameId: startFrame?.id ?? null,
     pages: Object.freeze(pages),
+    pageNamesByNodeId,
     artifactRevisions,
     prototypeEdges: Object.freeze(prototypeEdges),
     bindingEdgeIds: Object.freeze(bindingEdgeIds),
@@ -450,12 +455,12 @@ export function prototypeFlowHealth(
   const evaluated = relevant.map((edge) => ({ edge, validation: validateFrozenPrototypeEdge(session, edge) }));
   const overInteractiveLimit = evaluated.filter(({ validation }) => validation.status === "interactive").length > MAX_BINDINGS;
   const items = evaluated.map(({ edge, validation }): PrototypeFlowHealthItem => {
-    const targetName = session.pages.find((page) => page.nodeId === edge.targetNodeId)?.name ?? "Unknown Page";
+    const targetName = session.pageNamesByNodeId[edge.targetNodeId] ?? "Unknown Page";
     if (validation.status === "planned") {
       return { edgeId: edge.id, status: "planned", label: "Planned connection", detail: `To ${targetName} · no binding yet` };
     }
     if (validation.status === "broken") {
-      return { edgeId: edge.id, status: "broken", label: "Broken connection", detail: validation.detail };
+      return { edgeId: edge.id, status: "broken", label: "Broken connection", detail: `To ${targetName} · ${validation.detail}` };
     }
     if (overInteractiveLimit) {
       return {

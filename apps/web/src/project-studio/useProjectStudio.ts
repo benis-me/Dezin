@@ -160,6 +160,7 @@ function sameWorkspaceViewport(
 const CONTEXT_PACK_ID = /^context-pack-[0-9a-f]{64}$/;
 const SCOPED_PLAN_POLL_MS = 2_000;
 const SCOPED_PLAN_RETRY_MS = 250;
+const TRANSIENT_STUDIO_LOAD_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000] as const;
 function canonicalTurnId(): string {
   return `turn-${globalThis.crypto.randomUUID().toLowerCase()}`;
 }
@@ -211,6 +212,11 @@ function isUncertainNetworkFailure(error: unknown): boolean {
   return error instanceof TypeError
     && /^(?:failed to fetch|fetch failed|load failed|networkerror(?: when attempting to fetch resource)?|(?:response )?connection (?:closed|reset|refused)(?:\s+.*)?)$/iu
       .test(error.message.trim());
+}
+
+function isTransientStudioLoadFailure(error: unknown): boolean {
+  return isUncertainNetworkFailure(error)
+    || (error instanceof ApiError && (error.status === 502 || error.status === 503 || error.status === 504));
 }
 
 function resolveLoadState(project: Project, workspace: ProjectWorkspacePayload): ProjectStudioLoadState {
@@ -666,10 +672,67 @@ function renameGeneratedArtifactPlan(
   return changed ? { ...generation, artifactPlans } : generation;
 }
 
+function relevantGeneratedPrototypeEdgeIds(input: {
+  baseGraph: WorkspaceGraph;
+  operations: readonly WorkspaceGraphCommand[];
+  artifactPlans: WorkspaceGenerationPayload["artifactPlans"];
+}): Set<string> {
+  const generatedPageNodeIds = new Set(
+    input.artifactPlans.flatMap((plan) => plan.kind === "page" ? [plan.nodeId] : []),
+  );
+  const prototypeEdges = new Map<string, {
+    id: string;
+    sourceNodeId: string;
+    targetNodeId: string;
+  }>(
+    input.baseGraph.edges.flatMap((edge) => (
+      edge.kind === "prototype"
+        ? [[edge.id, {
+            id: edge.id,
+            sourceNodeId: edge.sourceNodeId,
+            targetNodeId: edge.targetNodeId,
+          }] as const]
+        : []
+    )),
+  );
+  for (const operation of input.operations) {
+    if (operation.type === "add-edge") {
+      if (operation.edge.kind === "prototype") {
+        prototypeEdges.set(operation.edge.id, {
+          id: operation.edge.id,
+          sourceNodeId: operation.edge.sourceNodeId,
+          targetNodeId: operation.edge.targetNodeId,
+        });
+      }
+      continue;
+    }
+    if (operation.type === "remove-edge") {
+      prototypeEdges.delete(operation.edgeId);
+      continue;
+    }
+    if (operation.type === "archive-node") {
+      for (const [edgeId, edge] of prototypeEdges) {
+        if (edge.sourceNodeId === operation.nodeId || edge.targetNodeId === operation.nodeId) {
+          prototypeEdges.delete(edgeId);
+        }
+      }
+    }
+  }
+  return new Set(
+    [...prototypeEdges.values()].flatMap((edge) => (
+      generatedPageNodeIds.has(edge.sourceNodeId) && generatedPageNodeIds.has(edge.targetNodeId)
+        ? [edge.id]
+        : []
+    )),
+  );
+}
+
 function cascadeRevertedGenerationAddition(input: {
   generation: WorkspaceGenerationPayload;
   nodeId: string | null;
   edgeIds: ReadonlySet<string>;
+  baseGraph: WorkspaceGraph;
+  operations: readonly WorkspaceGraphCommand[];
 }): WorkspaceGenerationPayload {
   const removedResourceIds = new Set(input.generation.resourceOperations.flatMap((operation) => (
     input.nodeId !== null && operation.nodeId === input.nodeId ? [operation.resourceId] : []
@@ -683,7 +746,7 @@ function cascadeRevertedGenerationAddition(input: {
 
   const resourceOperations = input.generation.resourceOperations
     .filter((operation) => !removedResourceIds.has(operation.resourceId));
-  const artifactPlans = input.generation.artifactPlans
+  const filteredArtifactPlans = input.generation.artifactPlans
     .filter((plan) => !removedArtifactIds.has(plan.artifactId))
     .map((plan) => {
       const dependsOnArtifactIds = plan.dependsOnArtifactIds
@@ -707,13 +770,49 @@ function cascadeRevertedGenerationAddition(input: {
     && !removedArtifactIds.has(intent.sourceArtifactId)
     && !removedArtifactIds.has(intent.targetArtifactId)
   ));
-  return {
+  const prototypeIntentsByEdgeId = new Map(
+    prototypeIntents.map((intent) => [intent.edgeId, intent] as const),
+  );
+  const artifactPlans = filteredArtifactPlans.map((plan) => {
+    const requirements = plan.prototypeRequirements;
+    if (requirements === undefined) return plan;
+    const outgoing = requirements.outgoing.filter((requirement) => (
+      prototypeIntentsByEdgeId.get(requirement.edgeId)?.sourceArtifactId === plan.artifactId
+    ));
+    const incoming = requirements.incoming.filter((requirement) => (
+      prototypeIntentsByEdgeId.get(requirement.edgeId)?.targetArtifactId === plan.artifactId
+      && !removedArtifactIds.has(requirement.sourceArtifactId)
+    ));
+    if (outgoing.length === requirements.outgoing.length
+      && incoming.length === requirements.incoming.length) return plan;
+    if (outgoing.length === 0 && incoming.length === 0) {
+      const { prototypeRequirements: _removed, ...withoutRequirements } = plan;
+      return withoutRequirements;
+    }
+    return { ...plan, prototypeRequirements: { outgoing, incoming } };
+  });
+  const next: WorkspaceGenerationPayload = {
     ...input.generation,
     resourceOperations,
     artifactPlans,
     dependencyPlans,
     prototypeIntents,
   };
+  if (next.version !== 2 || prototypeIntents.length > 0) return next;
+  const relevantPrototypeEdgeIds = relevantGeneratedPrototypeEdgeIds({
+    baseGraph: input.baseGraph,
+    operations: input.operations,
+    artifactPlans,
+  });
+  if (relevantPrototypeEdgeIds.size > 0) {
+    throw new Error(
+      `Cannot remove the final prototype intent while generated graph edges remain: ${[
+        ...relevantPrototypeEdgeIds,
+      ].sort().join(", ")}`,
+    );
+  }
+  const { version: _removedVersion, ...historical } = next;
+  return historical;
 }
 
 export function useProjectStudio(
@@ -1077,6 +1176,8 @@ export function useProjectStudio(
 
   useEffect(() => {
     let current = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let transientFailures = 0;
     const effectEpoch = projectEpochRef.current;
     proposalValidationRef.current = null;
     if (resetProjectIdRef.current !== projectId) {
@@ -1104,8 +1205,9 @@ export function useProjectStudio(
     commitProposalReview({ status: "loading" });
     setProposalFocus(null);
     setFocusedProposalChangeKey(null);
-    void readProjectStudio(api, projectId)
-      .then(([project, workspace, proposalResult]) => {
+    const loadStudio = async (): Promise<void> => {
+      try {
+        const [project, workspace, proposalResult] = await readProjectStudio(api, projectId);
         if (!current) return;
         const resolved = resolveLoadState(project, workspace);
         commitLoad(resolved);
@@ -1120,15 +1222,25 @@ export function useProjectStudio(
         }
         const active = proposalResult.proposals.find((proposal) => proposal.status === "draft" || proposal.status === "conflicted");
         commitProposalReview(active ? reviewStateForProposal(active, resolved) : { status: "idle" });
-      })
-      .catch((error: unknown) => {
-        if (current) {
-          commitLoad({ status: "error", message: errorMessage(error) });
-          commitProposalReview({ status: "error", message: errorMessage(error) });
+      } catch (error: unknown) {
+        if (!current) return;
+        const delay = TRANSIENT_STUDIO_LOAD_RETRY_DELAYS_MS[transientFailures];
+        if (delay !== undefined && isTransientStudioLoadFailure(error)) {
+          transientFailures += 1;
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            if (current) void loadStudio();
+          }, delay);
+          return;
         }
-      });
+        commitLoad({ status: "error", message: errorMessage(error) });
+        commitProposalReview({ status: "error", message: errorMessage(error) });
+      }
+    };
+    void loadStudio();
     return () => {
       current = false;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
       const activeTurn = activeAgentTurnRef.current;
       if (activeTurn?.projectEpoch === effectEpoch) {
         activeTurn.controller.abort(new DOMException("Agent view closed", "AbortError"));
@@ -1430,7 +1542,7 @@ export function useProjectStudio(
           id: `assistant:${turnId}`,
           turnId,
           role: "assistant",
-          content: `Proposal ${proposal.id} is ready for review.`,
+          content: "Workspace proposal is ready for review.",
           createdAt: Date.now(),
           state: "proposal",
         }),
@@ -1928,15 +2040,18 @@ export function useProjectStudio(
           revertedEdgeIds.add(latestChange.objectId);
         }
       }
+      const operations = proposal.operations.filter((command) => !graphCommandIds.has(command.id));
       const generation = proposal.generation.kind === "workspace-generation"
         ? cascadeRevertedGenerationAddition({
             generation: proposal.generation,
             nodeId: revertedNodeId,
             edgeIds: revertedEdgeIds,
+            baseGraph: proposal.baseGraph,
+            operations,
           })
         : proposal.generation;
       return {
-        operations: proposal.operations.filter((command) => !graphCommandIds.has(command.id)),
+        operations,
         layoutOperations: proposal.layoutOperations.filter((_command, index) => !layoutIndexes.has(index)),
         ...(generation === proposal.generation ? {} : { generation }),
       };

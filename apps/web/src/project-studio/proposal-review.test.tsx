@@ -148,6 +148,7 @@ const emptyGeneration = {
 
 const completeGeneration: WorkspaceGenerationPayload = {
   kind: "workspace-generation",
+  version: 2,
   agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
   resourceOperations: [{
     operation: "reuse",
@@ -188,6 +189,14 @@ const completeGeneration: WorkspaceGenerationPayload = {
         revisionId: "research-revision-1",
         directionId: "direction-editorial",
       },
+      prototypeRequirements: {
+        outgoing: [{
+          edgeId: "edge-checkout-receipt",
+          sourceMarkerId: "marker-checkout-receipt",
+          trigger: "click",
+        }],
+        incoming: [],
+      },
     },
     {
       operation: "create",
@@ -200,6 +209,15 @@ const completeGeneration: WorkspaceGenerationPayload = {
       dependsOnArtifactIds: ["artifact-checkout"],
       capabilityIds: ["capability-browser"],
       responsiveFrameIds: ["desktop"],
+      prototypeRequirements: {
+        outgoing: [],
+        incoming: [{
+          edgeId: "edge-checkout-receipt",
+          sourceArtifactId: "artifact-checkout",
+          sourceMarkerId: "marker-checkout-receipt",
+          targetState: "confirmed",
+        }],
+      },
     },
   ],
   dependencyPlans: [
@@ -228,7 +246,9 @@ const completeGeneration: WorkspaceGenerationPayload = {
     edgeId: "edge-checkout-receipt",
     sourceArtifactId: "artifact-checkout",
     targetArtifactId: "artifact-receipt",
+    sourceMarkerId: "marker-checkout-receipt",
     trigger: "click",
+    targetState: "confirmed",
   }],
   capabilities: [{ id: "capability-browser", kind: "browser", required: true }],
   responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }],
@@ -424,6 +444,46 @@ test("proposal diff collapses rename and archive commands into final node and in
   expect(diff.edgeChanges.every((change) => (
     change.operationRefs.some((ref) => ref.kind === "graph" && ref.commandId === "archive-home")
   ))).toBe(true);
+});
+
+test("proposal overlay routes an incident edge between two removed nodes through proposal handles", () => {
+  const proposal: ProposalDiffProposal = {
+    id: "proposal-archive-flow",
+    baseGraphRevision: 7,
+    baseSnapshotId: "snapshot-7",
+    baseGraph: connectedGraph,
+    baseLayoutChecksum: "layout-7",
+    baseLayout,
+    operations: [
+      { id: "archive-home", type: "archive-node", nodeId: "page-home" },
+      { id: "archive-receipt", type: "archive-node", nodeId: "page-receipt" },
+    ],
+    layoutOperations: [],
+  };
+  const diff = buildProposalDiff(proposal, {
+    graph: connectedGraph,
+    activeSnapshotId: "snapshot-7",
+    layoutChecksum: "layout-7",
+  });
+  const audited = workspaceGraphToFlow(diff.auditedGraph, diff.auditedLayout!, {
+    zoom: 1,
+    edgeFilter: "all",
+  });
+  const proposed = workspaceGraphToFlow(diff.proposedGraph, diff.proposedLayout!, {
+    zoom: 1,
+    edgeFilter: "all",
+  });
+  const overlay = createProposalOverlayModel(diff, audited, proposal.id, proposed, audited);
+  const removedPrototype = overlay.edges.find(
+    (edge) => edge.id === "proposal:proposal-archive-flow:edge:edge-next",
+  );
+
+  expect(removedPrototype).toMatchObject({
+    source: "proposal:proposal-archive-flow:node:page-home",
+    target: "proposal:proposal-archive-flow:node:page-receipt",
+    sourceHandle: "proposal-source",
+    targetHandle: "proposal-target",
+  });
 });
 
 test("proposal diff replays add remove and prototype-binding edge semantics", () => {
@@ -1073,6 +1133,11 @@ test("proposal review panel exposes editable rationale review actions and non-co
   expect(screen.getByRole("region", { name: "Effective quality contract" })).toHaveTextContent(
     "Desktop1440 × 900Mobile390 × 844RuntimeRequiredVisual reviewRequiredBlocks onP0 · P1",
   );
+  const generationTargets = screen.getByRole("region", { name: "Generation targets" });
+  expect(generationTargets).toHaveTextContent("1Page");
+  expect(generationTargets).toHaveTextContent("1 new revision");
+  expect(screen.getByRole("heading", { name: "Build scope" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Structure changes" })).toBeInTheDocument();
 
   const rationale = screen.getByRole("textbox", { name: "Proposal rationale" });
   fireEvent.change(rationale, { target: { value: "Add a complete checkout flow" } });
@@ -1129,6 +1194,7 @@ test("proposal review composes shared controls without panel-level primitive ski
 });
 
 test("proposal review keeps one shared header shell through loading, failure, and completion", () => {
+  const internalPlanId = "bde326eb-2312-4156-ae2c-6fc70aa4da6e";
   const proposal = draftProposal({
     revision: 2,
     status: "approved",
@@ -1161,10 +1227,16 @@ test("proposal review keeps one shared header shell through loading, failure, an
   expect(screen.getByRole("alert")).toHaveTextContent("Proposal service unavailable");
 
   rendered.rerender(
-    <ProposalReviewPanel review={{ status: "approved", proposal, plan: null }} {...props} />,
+    <ProposalReviewPanel
+      review={{ status: "approved", proposal, plan: { id: internalPlanId } as never }}
+      {...props}
+    />,
   );
   expect(rendered.container.querySelector("header.dezin-proposal-review__header")).toBe(header);
   expect(screen.getByRole("heading", { name: "Proposal approved" })).toBeInTheDocument();
+  expect(screen.getByText("Generation is approved and ready to build."))
+    .toHaveAttribute("title", `Build plan ${internalPlanId}`);
+  expect(screen.getByRole("region", { name: "Proposal review" })).not.toHaveTextContent(internalPlanId);
 });
 
 test("Proposal review terminal states explain rejected and superseded outcomes without approval copy", () => {
@@ -1524,10 +1596,10 @@ test("Studio review edits and per-item revert use full Proposal CAS payloads wit
   expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(1);
   expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("data-narrow-reachable", "true");
   fireEvent.click(screen.getByRole("button", { name: "Hide proposal review" }));
-  expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(1);
-  expect(container.querySelector('aside[aria-label="Inspector"]')).not.toHaveAttribute("data-narrow-reachable");
+  expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(0);
   expect(screen.getByRole("button", { name: "Show proposal review" })).toHaveAttribute("aria-expanded", "false");
   fireEvent.click(screen.getByRole("button", { name: "Show proposal review" }));
+  expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(1);
   expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("data-narrow-reachable", "true");
 });
 
@@ -2285,6 +2357,29 @@ test("same-project Canvas to Artifact navigation retains the authoritative Propo
   expect(screen.getByRole("textbox", { name: "Proposal rationale" })).toHaveValue("Reviewed checkout rationale");
   expect(screen.getByText("r2")).toBeInTheDocument();
   expect(listWorkspaceProposals).toHaveBeenCalledTimes(1);
+});
+
+test("an approved Proposal yields the local Inspector on an Artifact route", async () => {
+  window.history.pushState({}, "", "/projects/project-1/artifacts/artifact-home");
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [draftProposal()],
+      approveWorkspaceProposal: async () => approvedResult("generate"),
+    })}>
+      <ProjectStudioScreen
+        projectId="project-1"
+        artifactId="artifact-home"
+        legacyFallback={() => null}
+        onOpenSettings={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
+  expect(await screen.findByRole("heading", { name: "Inspector" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
 });
 
 test("body-persisted approval conflict remains read-only when current workspace refresh fails", async () => {
@@ -3058,6 +3153,163 @@ test("reverting a generated Page addition removes its generation leaf and every 
     resourceId: "resource-research",
   }]);
   expect(generation.prototypeIntents).toEqual([]);
+  expect(generation).not.toHaveProperty("version");
+  expect(generation.artifactPlans.every((plan) => plan.prototypeRequirements === undefined)).toBe(true);
+});
+
+test("reverting a generated prototype edge removes both endpoint requirements and downgrades empty v2 history", async () => {
+  const proposal = completeGenerationProposal();
+  const updateWorkspaceProposal = vi.fn(async (_projectId, _proposalId, input) => completeGenerationProposal({
+    ...proposal,
+    revision: input.expectedProposalRevision + 1,
+    operations: [...input.operations],
+    layoutOperations: [...input.layoutOperations],
+    generation: input.generation,
+    rationale: input.rationale,
+    assumptions: [...input.assumptions],
+    updatedAt: input.expectedProposalRevision + 1,
+  }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [proposal],
+      updateWorkspaceProposal,
+    })}>
+      <RevertProposalObjectProbe objectId="edge-checkout-receipt" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Revert generated object" }));
+
+  await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
+  const input = updateWorkspaceProposal.mock.calls[0]![2];
+  const operations = input.operations as WorkspaceProposal["operations"];
+  const generation = input.generation as WorkspaceGenerationPayload;
+  expect(operations.map((operation) => operation.id))
+    .not.toContain("command-add-checkout-receipt-edge");
+  expect(generation.prototypeIntents).toEqual([]);
+  expect(generation).not.toHaveProperty("version");
+  expect(generation.artifactPlans).toHaveLength(3);
+  expect(generation.artifactPlans.every((plan) => plan.prototypeRequirements === undefined)).toBe(true);
+});
+
+test("reverting one generated prototype edge preserves only the remaining v2 intent and its endpoint requirements", async () => {
+  const generation = structuredClone(completeGeneration);
+  const receipt = generation.artifactPlans.find((plan) => plan.artifactId === "artifact-receipt")!;
+  receipt.prototypeRequirements = {
+    outgoing: [{
+      edgeId: "edge-receipt-success",
+      sourceMarkerId: "marker-receipt-success",
+      trigger: "click",
+    }],
+    incoming: [...(receipt.prototypeRequirements?.incoming ?? [])],
+  };
+  generation.artifactPlans.push({
+    operation: "create",
+    nodeId: "page-success",
+    artifactId: "artifact-success",
+    kind: "page",
+    name: "Success",
+    trackId: "track-success",
+    baseRevisionId: null,
+    dependsOnArtifactIds: [],
+    capabilityIds: ["capability-browser"],
+    responsiveFrameIds: ["desktop"],
+    prototypeRequirements: {
+      outgoing: [],
+      incoming: [{
+        edgeId: "edge-receipt-success",
+        sourceArtifactId: "artifact-receipt",
+        sourceMarkerId: "marker-receipt-success",
+        targetState: "complete",
+      }],
+    },
+  });
+  generation.prototypeIntents.push({
+    edgeId: "edge-receipt-success",
+    sourceArtifactId: "artifact-receipt",
+    targetArtifactId: "artifact-success",
+    sourceMarkerId: "marker-receipt-success",
+    trigger: "click",
+    targetState: "complete",
+  });
+  const base = completeGenerationProposal();
+  const proposal = completeGenerationProposal({
+    generation,
+    operations: [
+      ...base.operations,
+      {
+        id: "command-add-success",
+        type: "add-node",
+        node: {
+          id: "page-success",
+          kind: "page",
+          name: "Success",
+          artifactId: "artifact-success",
+        },
+      },
+      {
+        id: "command-add-receipt-success-edge",
+        type: "add-edge",
+        edge: {
+          id: "edge-receipt-success",
+          workspaceId: "workspace-1",
+          kind: "prototype",
+          sourceNodeId: "page-receipt",
+          targetNodeId: "page-success",
+        },
+      },
+    ],
+  });
+  const updateWorkspaceProposal = vi.fn(async (_projectId, _proposalId, input) => completeGenerationProposal({
+    ...proposal,
+    revision: input.expectedProposalRevision + 1,
+    operations: [...input.operations],
+    layoutOperations: [...input.layoutOperations],
+    generation: input.generation,
+    rationale: input.rationale,
+    assumptions: [...input.assumptions],
+    updatedAt: input.expectedProposalRevision + 1,
+  }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [proposal],
+      updateWorkspaceProposal,
+    })}>
+      <RevertProposalObjectProbe objectId="edge-checkout-receipt" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Revert generated object" }));
+
+  await waitFor(() => expect(updateWorkspaceProposal).toHaveBeenCalledTimes(1));
+  const next = updateWorkspaceProposal.mock.calls[0]![2].generation as WorkspaceGenerationPayload;
+  expect(next.version).toBe(2);
+  expect(next.prototypeIntents.map((intent) => intent.edgeId)).toEqual(["edge-receipt-success"]);
+  expect(next.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout"))
+    .not.toHaveProperty("prototypeRequirements");
+  expect(next.artifactPlans.find((plan) => plan.artifactId === "artifact-receipt")?.prototypeRequirements)
+    .toEqual({
+      outgoing: [{
+        edgeId: "edge-receipt-success",
+        sourceMarkerId: "marker-receipt-success",
+        trigger: "click",
+      }],
+      incoming: [],
+    });
+  expect(next.artifactPlans.find((plan) => plan.artifactId === "artifact-success")?.prototypeRequirements)
+    .toEqual({
+      outgoing: [],
+      incoming: [{
+        edgeId: "edge-receipt-success",
+        sourceArtifactId: "artifact-receipt",
+        sourceMarkerId: "marker-receipt-success",
+        targetState: "complete",
+      }],
+    });
 });
 
 test("reverting a generated Resource addition removes its operation and clears every dependent pin", async () => {
@@ -3096,6 +3348,10 @@ test("reverting a generated Resource addition removes its operation and clears e
   })]);
   expect(generation.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout"))
     .not.toHaveProperty("researchDirectionSelection");
+  expect(generation.version).toBe(2);
+  expect(generation.prototypeIntents).toHaveLength(1);
+  expect(generation.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout"))
+    .toHaveProperty("prototypeRequirements");
 });
 
 test("a duplicate-name approval error can be repaired through the inline node name", async () => {

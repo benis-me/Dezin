@@ -21,6 +21,8 @@ interface ProductionResourceTaskAdapterModule {
     storageRoot: string;
     store: ResourcePayloadCleanupStorePort;
     implementations: Partial<Record<ResourceKind, Generator>>;
+    contextPacks: { get(workspaceId: string, contextPackId: string): null };
+    attemptContextAuthority: { resolveMoodboardAttemptContext(): null };
     now?: () => number;
   }): ResourceTaskExecutor;
 }
@@ -111,6 +113,8 @@ test("production Resource executor factory binds the explicit adapter registry t
   const executor = module.createProductionResourceTaskExecutor({
     storageRoot: "/tmp/dezin-production-resource-staging",
     store: storePort(),
+    contextPacks: { get: () => null },
+    attemptContextAuthority: { resolveMoodboardAttemptContext: () => null },
     implementations: {
       research: async () => output("research"),
     },
@@ -175,6 +179,8 @@ test("production Resource executor rejects accessor-backed durable Store ports w
       storageRoot: "/tmp/dezin-production-resource-hostile-store",
       store: hostileStore as never,
       implementations: { research: async () => output("research") },
+      contextPacks: { get: () => null },
+      attemptContextAuthority: { resolveMoodboardAttemptContext: () => null },
     }),
     (error: unknown) => error instanceof ResourceTaskAdapterError
       && error.code === "RESOURCE_ADAPTER_REGISTRATION_INVALID",

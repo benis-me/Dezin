@@ -17,6 +17,7 @@ function renderToolbar(overrides: Partial<ComponentProps<typeof WorkspaceCanvasT
       canUngroup={false}
       canDeleteGroup={false}
       canDeleteRelationship={false}
+      hasRelationshipSelection={false}
       relationshipDeleteLabel="Delete selected relationship"
       zoom={0.8}
       onToolChange={vi.fn()}
@@ -52,15 +53,20 @@ test("canvas tools expose Dezin tooltips instead of browser title attributes", a
   expect(screen.getByRole("tooltip")).toHaveTextContent("⇧1");
 });
 
-test("selection actions keep fixed toolbar slots while the current context cannot use them", () => {
-  renderToolbar();
+test("selection actions stay out of the toolbar until the canvas context can use them", () => {
+  const { container } = renderToolbar();
 
-  expect(screen.getByRole("group", { name: "Grouping tools" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /Group selection/ })).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByRole("button", { name: /Ungroup selection/ })).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByRole("button", { name: /Delete group/ })).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByRole("button", { name: /Delete selected relationship/ })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.queryByRole("group", { name: "Grouping tools" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Group selection/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Ungroup selection/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Delete group/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Delete selected relationship/ })).toBeNull();
   expect(screen.getByRole("button", { name: "Relationship filter: Prototype flow" })).toBeInTheDocument();
+  expect(
+    [...container.querySelectorAll("[data-canvas-context-slot]")].map((slot) => (
+      slot.getAttribute("data-canvas-context-slot")
+    )),
+  ).toEqual(["group-create", "group-ungroup", "group-delete", "relationship-delete"]);
 });
 
 test("the toolbar enables only the grouping actions that apply to the current selection", async () => {
@@ -70,8 +76,8 @@ test("the toolbar enables only the grouping actions that apply to the current se
 
   const group = screen.getByRole("button", { name: "Group selection" });
   expect(group).toBeEnabled();
-  expect(screen.getByRole("button", { name: /Ungroup selection/ })).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByRole("button", { name: /Delete group/ })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.queryByRole("button", { name: /Ungroup selection/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Delete group/ })).toBeNull();
 
   await user.click(group);
   expect(onGroup).toHaveBeenCalledOnce();
@@ -81,6 +87,7 @@ test("a selected derived relationship stays visible and explains why it cannot b
   const user = userEvent.setup();
   const reason = "Uses relationships are derived and read-only";
   renderToolbar({
+    hasRelationshipSelection: true,
     relationshipDeleteLabel: reason,
     relationshipDeleteDisabledReason: reason,
   });
@@ -97,7 +104,11 @@ test("a selected derived relationship stays visible and explains why it cannot b
 test("an editable selected relationship exposes its delete action", async () => {
   const user = userEvent.setup();
   const onDeleteRelationship = vi.fn();
-  renderToolbar({ canDeleteRelationship: true, onDeleteRelationship });
+  renderToolbar({
+    canDeleteRelationship: true,
+    hasRelationshipSelection: true,
+    onDeleteRelationship,
+  });
 
   const deleteRelationship = screen.getByRole("button", { name: "Delete selected relationship" });
   expect(deleteRelationship).toBeEnabled();

@@ -29,6 +29,14 @@ const CODEBUDDY_PROVIDER_ENVIRONMENT_KEYS = [
   "AZURE_OPENAI_ENDPOINT",
 ] as const;
 
+const CODEX_HOST_LOGIN_ENVIRONMENT_KEYS = [
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_ORG_ID",
+  "AZURE_OPENAI_API_KEY",
+  "AZURE_OPENAI_ENDPOINT",
+] as const;
+
 export function buildAgentEnv(settings: Settings, command: string, daemonToken?: string): NodeJS.ProcessEnv {
   const providerId = getProvider(command)?.id;
   const env: NodeJS.ProcessEnv = {};
@@ -42,9 +50,10 @@ export function buildAgentEnv(settings: Settings, command: string, daemonToken?:
     setIfPresent(env, "ANTHROPIC_API_KEY", settings.apiKey);
     setIfPresent(env, "ANTHROPIC_BASE_URL", settings.apiBaseUrl);
   } else if (providerId === "codex") {
-    setIfPresent(env, "OPENAI_API_KEY", settings.apiKey);
-    setIfPresent(env, "OPENAI_BASE_URL", settings.apiBaseUrl);
-    setIfPresent(env, "OPENAI_ORG_ID", settings.aiProviderOrganization);
+    // Codex is selected as a locally authenticated coding Agent. The project
+    // model-provider settings serve image/reviewer APIs and must not replace
+    // the CLI's host login or leak in from the daemon environment.
+    for (const key of CODEX_HOST_LOGIN_ENVIRONMENT_KEYS) env[key] = undefined;
   } else if (providerId === "gemini") {
     setIfPresent(env, "GEMINI_API_KEY", settings.apiKey);
     setIfPresent(env, "GOOGLE_API_KEY", settings.apiKey);

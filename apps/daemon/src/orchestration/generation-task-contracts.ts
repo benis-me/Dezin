@@ -586,6 +586,63 @@ function validateCapabilityDescriptors(
   }
 }
 
+function validateArtifactPrototypeRequirements(value: unknown, label: string): void {
+  const requirements = exactObject(value, ["outgoing", "incoming"], [], label);
+  const sourceMarkerId = (value: unknown, markerLabel: string): string => {
+    const markerId = canonicalString(value, markerLabel);
+    if (Buffer.byteLength(markerId, "utf8") > 256) {
+      fail(`${markerLabel} cannot exceed 256 bytes`);
+    }
+    return markerId;
+  };
+  const outgoing = denseArray(requirements.outgoing, `${label} outgoing`).map((entry, index) => {
+    const entryLabel = `${label} outgoing[${index}]`;
+    const requirement = exactObject(
+      entry,
+      ["edgeId", "sourceMarkerId", "trigger"],
+      [],
+      entryLabel,
+    );
+    if (requirement.trigger !== "click" && requirement.trigger !== "submit") {
+      fail(`${entryLabel} trigger is unsupported`);
+    }
+    return {
+      edgeId: canonicalString(requirement.edgeId, `${entryLabel} edge id`),
+      sourceMarkerId: sourceMarkerId(requirement.sourceMarkerId, `${entryLabel} source marker id`),
+    };
+  });
+  const incoming = denseArray(requirements.incoming, `${label} incoming`).map((entry, index) => {
+    const entryLabel = `${label} incoming[${index}]`;
+    const requirement = exactObject(
+      entry,
+      ["edgeId", "sourceArtifactId", "sourceMarkerId", "targetState"],
+      [],
+      entryLabel,
+    );
+    return {
+      edgeId: canonicalString(requirement.edgeId, `${entryLabel} edge id`),
+      sourceMarkerId: sourceMarkerId(requirement.sourceMarkerId, `${entryLabel} source marker id`),
+      sourceArtifactId: canonicalString(
+        requirement.sourceArtifactId,
+        `${entryLabel} source Artifact id`,
+      ),
+      targetState: canonicalString(requirement.targetState, `${entryLabel} target state`),
+    };
+  });
+  for (const [entries, entryLabel] of [
+    [outgoing, `${label} outgoing`],
+    [incoming, `${label} incoming`],
+  ] as const) {
+    if (new Set(entries.map((entry) => entry.edgeId)).size !== entries.length) {
+      fail(`${entryLabel} edge ids must be unique`);
+    }
+    const sortedEdgeIds = entries.map((entry) => entry.edgeId).sort(compareBinary);
+    if (entries.some((entry, index) => entry.edgeId !== sortedEdgeIds[index])) {
+      fail(`${entryLabel} must be sorted by edge id`);
+    }
+  }
+}
+
 function validateArtifactPayload(task: GenerationTask): void {
   if (task.target.type !== "artifact") fail(`${task.kind} Task target must be an Artifact`);
   const rawPayload = plainRecord(task.payload, `${task.kind} Task payload`);
@@ -618,7 +675,12 @@ function validateArtifactPayload(task: GenerationTask): void {
     "dependsOnArtifactIds",
     "capabilityIds",
     "responsiveFrameIds",
-  ], ["dispatchContextPackId", "researchDirectionSelection", "instructions"], `${task.kind} Artifact plan`);
+  ], [
+    "dispatchContextPackId",
+    "researchDirectionSelection",
+    "prototypeRequirements",
+    "instructions",
+  ], `${task.kind} Artifact plan`);
   if (plan.operation !== "create" && plan.operation !== "revise") {
     fail(`${task.kind} Artifact plan operation is unsupported`);
   }
@@ -646,7 +708,7 @@ function validateArtifactPayload(task: GenerationTask): void {
   if (plan.researchDirectionSelection !== undefined) {
     const selection = exactObject(plan.researchDirectionSelection, [
       "protocol", "version", "resourceId", "revisionId", "directionId",
-    ], [], `${task.kind} Artifact Research direction selection`);
+    ], ["directionIds"], `${task.kind} Artifact Research direction selection`);
     if (selection.protocol !== "dezin.research-direction-selection.v1" || selection.version !== 1) {
       fail(`${task.kind} Artifact Research direction selection protocol is unsupported`);
     }
@@ -655,7 +717,30 @@ function validateArtifactPayload(task: GenerationTask): void {
       `${task.kind} Artifact Research direction selection Resource id`,
     );
     canonicalString(selection.revisionId, `${task.kind} Artifact Research direction selection Revision id`);
-    canonicalString(selection.directionId, `${task.kind} Artifact Research direction selection direction id`);
+    const directionId = canonicalString(
+      selection.directionId,
+      `${task.kind} Artifact Research direction selection direction id`,
+    );
+    if (selection.directionIds !== undefined) {
+      if (!Array.isArray(selection.directionIds)
+        || selection.directionIds.length < 2 || selection.directionIds.length > 16) {
+        fail(`${task.kind} Artifact Research direction selection direction ids must contain between 2 and 16 entries`);
+      }
+      const directionIds = stringArray(
+        selection.directionIds,
+        `${task.kind} Artifact Research direction selection direction ids`,
+        { unique: true },
+      );
+      if (directionIds[0] !== directionId) {
+        fail(`${task.kind} Artifact Research direction selection first direction id must equal directionId`);
+      }
+    }
+  }
+  if (plan.prototypeRequirements !== undefined) {
+    validateArtifactPrototypeRequirements(
+      plan.prototypeRequirements,
+      `${task.kind} Artifact prototype requirements`,
+    );
   }
   stringArray(plan.dependsOnArtifactIds, `${task.kind} Artifact dependency ids`, { unique: true, sorted: true });
   const capabilityIds = stringArray(plan.capabilityIds, `${task.kind} Artifact capability ids`, {

@@ -3,6 +3,7 @@ import {
   normalizeGenerationTaskIntent,
 } from "./store-codecs.ts";
 import { compareBinary } from "./workspace-codecs.ts";
+import { applyWorkspaceGraphCommands } from "./workspace-graph.ts";
 import type {
   ArtifactGenerationTaskPayloadV2,
   ArtifactQualityProfile,
@@ -21,6 +22,7 @@ import type {
   WorkspaceGenerationCapability,
   WorkspaceGenerationDependencyPlan,
   WorkspaceGenerationPayload,
+  WorkspaceGraph,
   WorkspaceProposal,
 } from "./workspace-types.ts";
 
@@ -79,7 +81,10 @@ const MOODBOARD_RESOURCE_LIMITS: GenerationTaskResourceLimits = {
 const ARTIFACT_LIMITS: GenerationTaskResourceLimits = {
   timeoutMs: 360_000,
   maxAgentTurns: 20,
-  maxRepairRounds: 3,
+  // This is the immutable safety ceiling, not the user's effective policy.
+  // Standard Artifact execution still clamps this through the frozen
+  // auto-improve setting captured for the Attempt.
+  maxRepairRounds: 8,
   maxOutputBytes: 24 * 1024 * 1024,
   capacityClasses: ["agent", "render-qa"],
 };
@@ -113,7 +118,7 @@ export const RESOURCE_GENERATION_DEADLINE_BUDGET = Object.freeze({
 const HOST_LOGIN_ARTIFACT_BASE_TIMEOUT_MS = 30 * 60_000;
 const HOST_LOGIN_ARTIFACT_EXTRA_FRAME_TIMEOUT_MS = 5 * 60_000;
 const HOST_LOGIN_ARTIFACT_MAX_TIMEOUT_MS = 45 * 60_000;
-const MAX_ARTIFACT_VISUAL_QA_FRAMES = 5;
+const MAX_ARTIFACT_VISUAL_QA_FRAMES = 16;
 
 const VALIDATION_LIMITS: GenerationTaskResourceLimits = {
   timeoutMs: 180_000,
@@ -246,6 +251,191 @@ function dependencyKey(dependency: WorkspaceGenerationDependencyPlan): string {
     : JSON.stringify(["component", dependency.ownerArtifactId, dependency.instanceId]);
 }
 
+function validateV2PrototypePlan(
+  generation: WorkspaceGenerationPayload,
+  proposal: WorkspaceProposal,
+): void {
+  if (generation.version !== 2) return;
+  if (generation.prototypeIntents.length === 0) {
+    compileError(
+      "invalid-reference",
+      "Workspace generation payload v2 requires at least one server-owned prototype intent",
+    );
+  }
+  let resultingGraph: WorkspaceGraph;
+  try {
+    resultingGraph = proposal.operations.length === 0
+      ? proposal.baseGraph
+      : applyWorkspaceGraphCommands(proposal.baseGraph, proposal.operations);
+  } catch (error) {
+    compileError(
+      "invalid-reference",
+      `Workspace generation payload v2 cannot resolve its planned prototype graph: ${String(error)}`,
+    );
+  }
+  const nodesById = new Map(resultingGraph.nodes.map((node) => [node.id, node] as const));
+  const generatedPages = new Map(
+    generation.artifactPlans
+      .filter((plan) => plan.kind === "page")
+      .map((plan) => [plan.artifactId, plan] as const),
+  );
+  const expectedEdges = resultingGraph.edges.filter((edge) => {
+    if (edge.kind !== "prototype") return false;
+    const source = nodesById.get(edge.sourceNodeId);
+    const target = nodesById.get(edge.targetNodeId);
+    return source?.kind === "page"
+      && target?.kind === "page"
+      && generatedPages.has(source.artifactId)
+      && generatedPages.has(target.artifactId);
+  });
+  const expectedEdgesById = new Map(expectedEdges.map((edge) => [edge.id, edge] as const));
+  const intentsByEdgeId = new Map(
+    generation.prototypeIntents.map((intent) => [intent.edgeId, intent] as const),
+  );
+  for (const edge of expectedEdges) {
+    if (!intentsByEdgeId.has(edge.id)) {
+      compileError(
+        "invalid-reference",
+        `missing server-owned prototype intent for planned edge ${edge.id}`,
+        { edgeId: edge.id },
+      );
+    }
+  }
+  for (const intent of generation.prototypeIntents) {
+    const edge = expectedEdgesById.get(intent.edgeId);
+    if (edge === undefined) {
+      compileError(
+        "invalid-reference",
+        `foreign or missing planned prototype edge ${intent.edgeId}`,
+        { edgeId: intent.edgeId },
+      );
+    }
+    const source = nodesById.get(edge.sourceNodeId);
+    const target = nodesById.get(edge.targetNodeId);
+    if (source?.kind !== "page" || target?.kind !== "page"
+      || source.artifactId !== intent.sourceArtifactId
+      || target.artifactId !== intent.targetArtifactId) {
+      compileError(
+        "invalid-reference",
+        `prototype intent endpoint drift for planned edge ${intent.edgeId}`,
+        {
+          edgeId: intent.edgeId,
+          sourceArtifactId: intent.sourceArtifactId,
+          targetArtifactId: intent.targetArtifactId,
+        },
+      );
+    }
+    if (intent.sourceMarkerId === undefined || intent.sourceLocator !== undefined) {
+      compileError(
+        "invalid-reference",
+        `prototype intent ${intent.edgeId} must carry only a server-owned source marker`,
+        { edgeId: intent.edgeId },
+      );
+    }
+  }
+  assertUnique(
+    generation.prototypeIntents,
+    (intent) => intent.sourceMarkerId!,
+    "prototype source marker",
+  );
+
+  const outgoingByEdgeId = new Map<string, {
+    ownerArtifactId: string;
+    sourceMarkerId: string;
+    trigger: string;
+  }>();
+  const incomingByEdgeId = new Map<string, {
+    ownerArtifactId: string;
+    sourceArtifactId: string;
+    sourceMarkerId: string;
+    targetState: string;
+  }>();
+  for (const plan of generation.artifactPlans) {
+    const requirements = plan.prototypeRequirements;
+    if (requirements === undefined) continue;
+    assertUnique(
+      requirements.outgoing,
+      (requirement) => requirement.edgeId,
+      `prototype source requirement for ${plan.artifactId}`,
+    );
+    assertUnique(
+      requirements.incoming,
+      (requirement) => requirement.edgeId,
+      `prototype target requirement for ${plan.artifactId}`,
+    );
+    for (const requirement of requirements.outgoing) {
+      if (outgoingByEdgeId.has(requirement.edgeId)) {
+        compileError(
+          "invalid-reference",
+          `duplicate prototype source requirement for edge ${requirement.edgeId}`,
+        );
+      }
+      outgoingByEdgeId.set(requirement.edgeId, {
+        ownerArtifactId: plan.artifactId,
+        sourceMarkerId: requirement.sourceMarkerId,
+        trigger: requirement.trigger,
+      });
+    }
+    for (const requirement of requirements.incoming) {
+      if (incomingByEdgeId.has(requirement.edgeId)) {
+        compileError(
+          "invalid-reference",
+          `duplicate prototype target requirement for edge ${requirement.edgeId}`,
+        );
+      }
+      incomingByEdgeId.set(requirement.edgeId, {
+        ownerArtifactId: plan.artifactId,
+        sourceArtifactId: requirement.sourceArtifactId,
+        sourceMarkerId: requirement.sourceMarkerId,
+        targetState: requirement.targetState,
+      });
+    }
+  }
+  for (const intent of generation.prototypeIntents) {
+    const outgoing = outgoingByEdgeId.get(intent.edgeId);
+    if (outgoing === undefined
+      || outgoing.ownerArtifactId !== intent.sourceArtifactId
+      || outgoing.sourceMarkerId !== intent.sourceMarkerId
+      || outgoing.trigger !== intent.trigger) {
+      compileError(
+        "invalid-reference",
+        `prototype source marker requirement does not match intent ${intent.edgeId}`,
+        { edgeId: intent.edgeId },
+      );
+    }
+    const incoming = incomingByEdgeId.get(intent.edgeId);
+    if (intent.targetState === undefined) {
+      if (incoming !== undefined) {
+        compileError(
+          "invalid-reference",
+          `prototype target requirement is foreign for stateless edge ${intent.edgeId}`,
+          { edgeId: intent.edgeId },
+        );
+      }
+    } else if (incoming === undefined
+      || incoming.ownerArtifactId !== intent.targetArtifactId
+      || incoming.sourceArtifactId !== intent.sourceArtifactId
+      || incoming.sourceMarkerId !== intent.sourceMarkerId
+      || incoming.targetState !== intent.targetState) {
+      compileError(
+        "invalid-reference",
+        `prototype target-state requirement does not match intent ${intent.edgeId}`,
+        { edgeId: intent.edgeId },
+      );
+    }
+  }
+  for (const edgeId of outgoingByEdgeId.keys()) {
+    if (!intentsByEdgeId.has(edgeId)) {
+      compileError("invalid-reference", `foreign prototype source requirement for edge ${edgeId}`);
+    }
+  }
+  for (const edgeId of incomingByEdgeId.keys()) {
+    if (!intentsByEdgeId.has(edgeId)) {
+      compileError("invalid-reference", `foreign prototype target requirement for edge ${edgeId}`);
+    }
+  }
+}
+
 function validateGenerationPayload(
   generation: WorkspaceGenerationPayload,
   proposal: WorkspaceProposal,
@@ -266,6 +456,7 @@ function validateGenerationPayload(
   assertUnique(generation.responsiveFrames, (frame) => frame.id, "responsive Frame id");
   assertUnique(generation.prototypeIntents, (intent) => intent.edgeId, "prototype edge id");
   assertUnique(generation.dependencyPlans, dependencyKey, "dependency identity");
+  validateV2PrototypePlan(generation, proposal);
 
   for (const operation of generation.resourceOperations) {
     if (operation.revisionPolicy.kind === "generate"
@@ -363,7 +554,21 @@ function validateGenerationPayload(
         && dependency.ownerArtifactId === plan.artifactId
         && dependency.resourceId === selection.resourceId
       ));
+      const directionIds = selection.directionIds;
+      const hasValidDirectionSet = directionIds === undefined || (
+        Array.isArray(directionIds)
+        && directionIds.length >= 2
+        && directionIds.length <= 16
+        && directionIds.every((directionId) => (
+          typeof directionId === "string"
+          && directionId.length > 0
+          && directionId === directionId.trim()
+        ))
+        && new Set(directionIds).size === directionIds.length
+        && directionIds[0] === selection.directionId
+      );
       if (selection.protocol !== "dezin.research-direction-selection.v1" || selection.version !== 1
+        || !hasValidDirectionSet
         || selectedOperation?.kind !== "research" || selectedOperation.operation !== "reuse"
         || selectedOperation.revisionPolicy.kind !== "exact"
         || selectedOperation.revisionPolicy.resourceRevisionId !== selection.revisionId
@@ -552,11 +757,18 @@ function taskPayloadForArtifact(
   capabilitiesById: ReadonlyMap<string, WorkspaceGenerationCapability>,
 ): ArtifactGenerationTaskPayloadV2 {
   const frameIds = new Set(plan.responsiveFrameIds);
+  const prototypeRequirements = plan.prototypeRequirements === undefined
+    ? undefined
+    : {
+        outgoing: sorted(plan.prototypeRequirements.outgoing, (requirement) => requirement.edgeId),
+        incoming: sorted(plan.prototypeRequirements.incoming, (requirement) => requirement.edgeId),
+      };
   const artifactPlan = {
     ...plan,
     dependsOnArtifactIds: [...plan.dependsOnArtifactIds].sort(compareBinary),
     capabilityIds: [...plan.capabilityIds].sort(compareBinary),
     responsiveFrameIds: [...plan.responsiveFrameIds].sort(compareBinary),
+    ...(prototypeRequirements === undefined ? {} : { prototypeRequirements }),
   };
   return {
     version: 2,
@@ -676,12 +888,19 @@ export function compileGenerationPlan(input: {
     .filter((capability) => capability.kind === "visual-qa")
     .map((capability) => capability.id)
     .sort(compareBinary);
-  const resourceTasks = generatedResourceOperations(generation).map((operation, ordinal) => {
+  const generatedResourceTaskInputs = generatedResourceOperations(generation).map((operation) => {
     const target: GenerationTaskTarget = {
       type: "resource",
       workspaceId: input.shell.workspaceId,
       id: operation.resourceId,
     };
+    return { operation, target };
+  });
+  const generatedResearchTaskIds = generatedResourceTaskInputs
+    .filter(({ operation }) => operation.kind === "research")
+    .map(({ target }) => stableTaskId(input.shell, "resource", target))
+    .sort(compareBinary);
+  const resourceTasks = generatedResourceTaskInputs.map(({ operation, target }, ordinal) => {
     const payload: ResourceGenerationTaskPayloadV2 = {
       version: 2,
       ...(generation.agent === undefined ? {} : { agent: { ...generation.agent } }),
@@ -708,7 +927,7 @@ export function compileGenerationPlan(input: {
       kind: "resource",
       ordinal,
       target,
-      dependencyIds: [],
+      dependencyIds: operation.kind === "moodboard" ? generatedResearchTaskIds : [],
       payload,
       capabilities: requiredCapabilityIds,
       qaProfile: NO_QA,
@@ -798,7 +1017,7 @@ export function compileGenerationPlan(input: {
     target: workspaceTarget,
     dependencyIds: generatedTasks.map((task) => task.id).sort(compareBinary),
     payload: {
-      version: 1,
+      version: generation.version === 2 ? 2 : 1,
       prototypeIntents: sorted(generation.prototypeIntents, (intent) => intent.edgeId),
       responsiveFrames: sorted(generation.responsiveFrames, (frame) => frame.id),
       artifactIds: artifactPlans.map((plan) => plan.artifactId),

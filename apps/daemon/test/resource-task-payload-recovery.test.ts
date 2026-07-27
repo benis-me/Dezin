@@ -214,6 +214,8 @@ function stageInput(index: number): ResourceTaskPayloadStageInput {
     parentRevisionId: null,
     adapter: { id: "dezin.resource-adapter.asset", version: 1, kind: "asset" },
     maxOutputBytes: 1024 * 1024,
+    contextPackId: `context-pack-${"b".repeat(64)}`,
+    contextPackHash: "b".repeat(64),
     lease: {
       taskId: `task-resource-recovery-${index}`,
       workspaceId: "workspace-resource-recovery",

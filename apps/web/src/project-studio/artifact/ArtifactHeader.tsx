@@ -24,7 +24,11 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  StudioToolbarHeader,
+  StudioDocumentHeader,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioHeaderIdentity,
+  StudioStatusBadge,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -95,28 +99,44 @@ export function ArtifactHeader({
   onReturnToHead: () => void;
 }) {
   const name = artifact?.name ?? "Artifact unavailable";
+  const kindLabel = artifact?.kind === "component" ? "Component master" : "Page design";
+  const revisionLabel = revisionSequence === null ? "No revision" : `Revision ${revisionSequence}`;
+  const checkout = pinnedRevisionId
+    ? { label: "Pinned", title: "Pinned Revision · read-only", tone: "active" as const }
+    : readOnly
+      ? { label: "Read-only", title: "Read-only preview", tone: "neutral" as const }
+      : { label: "Current", title: "Current Head", tone: "active" as const };
   return (
     <TooltipProvider delayDuration={120}>
-      <StudioToolbarHeader draggable className="artifact-header">
-        <div className="artifact-header__identity">
+      <StudioDocumentHeader draggable className="artifact-header">
+        <StudioHeaderIdentity className="artifact-header__identity">
           <HeaderTool label="Back to workspace canvas" onClick={onBack}>
             <ArrowLeft aria-hidden size={15} strokeWidth={1.8} />
           </HeaderTool>
           <span className="artifact-header__rule" aria-hidden />
-          <div className="artifact-header__title">
-            <h1>{name}</h1>
-            <div className="artifact-header__metadata">
-              <span>{artifact?.kind === "component" ? "Component master" : "Page design"}</span>
-              <span aria-hidden>·</span>
-              {artifactId ? <span title={artifactId}>{artifactId.length > 18 ? artifactId.slice(0, 8) : artifactId}</span> : null}
-              {artifactId ? <span aria-hidden>·</span> : null}
-              <span>{revisionSequence === null ? "No revision" : `Revision ${revisionSequence}`}</span>
-              {pinnedRevisionId ? <strong>Pinned Revision · read-only</strong> : readOnly ? <strong>Read-only preview</strong> : <strong>Current Head</strong>}
-            </div>
-          </div>
-        </div>
+          <StudioHeaderCopy
+            className="artifact-header__title"
+            title={(
+              <span title={artifactId ? `${name} · Artifact ${artifactId}` : name}>
+                {name}
+              </span>
+            )}
+            subtitle={(
+              <span
+                className="artifact-header__metadata"
+                aria-label={`${kindLabel}. ${revisionLabel}. ${checkout.title}.`}
+              >
+                <span>{kindLabel}</span>
+                <StudioStatusBadge title={revisionLabel}>{revisionLabel}</StudioStatusBadge>
+                <StudioStatusBadge tone={checkout.tone} title={checkout.title}>
+                  {checkout.label}
+                </StudioStatusBadge>
+              </span>
+            )}
+          />
+        </StudioHeaderIdentity>
 
-        <div className="artifact-header__controls app-no-drag">
+        <StudioHeaderActions className="artifact-header__controls">
           <Select value={activeFrameId} onValueChange={onFrameChange}>
             <SelectTrigger
               size="sm"
@@ -270,8 +290,8 @@ export function ArtifactHeader({
             </TooltipTrigger>
             <TooltipContent className="z-[90]">{presentation ? "Exit present" : "Present"}</TooltipContent>
           </Tooltip>
-        </div>
-      </StudioToolbarHeader>
+        </StudioHeaderActions>
+      </StudioDocumentHeader>
     </TooltipProvider>
   );
 }

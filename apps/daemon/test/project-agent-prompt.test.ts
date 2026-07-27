@@ -51,6 +51,75 @@ test("Generation Plan Artifact prompts retain the legacy design quality contract
   }
 });
 
+test("fallback design systems yield to explicit Artifact, Research, and Moodboard direction contracts", () => {
+  const store = new Store();
+  try {
+    const project = store.createProject({
+      name: "KITE multi-direction workspace",
+      mode: "standard",
+    });
+    const settings = {
+      ...store.getSettings(),
+      defaultDesignSystemId: editorialSystem.id,
+    };
+    const result = buildProjectAgentPrompt({
+      project,
+      settings,
+      brief: [
+        "The Artifact target requires three materially distinct visual directions.",
+        "The pinned Research Revision defines Cinematic Black/Red, Warm Paper/Ink, and Electric Cobalt Grid.",
+        "The pinned Moodboard Revision is the visual contract for those directions.",
+      ].join(" "),
+      designRegistry: new DesignRegistry([editorialSystem]),
+      visualDirectionContract: JSON.stringify({
+        protocol: "dezin.research-direction-set.v1",
+        directions: [
+          { id: "cinematic-black-red", title: "Cinematic Black/Red" },
+          { id: "warm-paper-ink", title: "Warm Paper/Ink" },
+          { id: "electric-cobalt-grid", title: "Electric Cobalt Grid" },
+        ],
+      }),
+    });
+
+    assert.equal(project.designSystemId, null);
+    assert.equal(
+      /This brand is AUTHORITATIVE/i.test(result.systemPrompt),
+      false,
+      "an inherited default must not become mandatory visual authority",
+    );
+    assert.equal(
+      /paste this :root block verbatim/i.test(result.systemPrompt),
+      false,
+      "an inherited default palette must not become a mandatory token contract",
+    );
+    assert.match(result.systemPrompt, /fallback design system/i);
+    assert.match(
+      result.systemPrompt,
+      /Artifact.*Research.*Moodboard.*(?:override|take precedence|win)/i,
+    );
+    assert.match(result.systemPrompt, /Exact immutable visual direction contract/i);
+    assert.match(result.systemPrompt, /cinematic-black-red.*warm-paper-ink.*electric-cobalt-grid/i);
+
+    const fallbackOnly = buildProjectAgentPrompt({
+      project,
+      settings,
+      brief: "Create a complete editorial festival schedule with warm paper surfaces and dense, legible programming.",
+      designRegistry: new DesignRegistry([editorialSystem]),
+    });
+    assert.doesNotMatch(
+      fallbackOnly.systemPrompt,
+      /## Exact immutable visual direction contract/i,
+      "ordinary generation must not pretend that an immutable Research direction was selected",
+    );
+    assert.match(
+      fallbackOnly.systemPrompt,
+      /brief's explicit bg \/ fg \/ accent \/ font decisions, using fallback tokens only where it is silent/i,
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("Sharingan Artifact prompts exclude unrelated brand styling and keep reconstruction rules", () => {
   const store = new Store();
   try {

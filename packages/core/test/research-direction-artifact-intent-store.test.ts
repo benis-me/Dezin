@@ -420,12 +420,12 @@ test("Research selection reuses an existing informs edge without duplicating it"
   fixture.store.close();
 });
 
-test("an Artifact cannot consume Research generated in the same Plan", () => {
+test("an Artifact consumes same-Plan generated Research through its exact Task dependency", () => {
   const fixture = seed();
-  const invalid = structuredClone(fixture.proposal);
-  if (invalid.generation.kind !== "workspace-generation") assert.fail("expected Workspace generation fixture");
-  invalid.operations = [];
-  invalid.generation.resourceOperations = [{
+  const proposal = structuredClone(fixture.proposal);
+  if (proposal.generation.kind !== "workspace-generation") assert.fail("expected Workspace generation fixture");
+  proposal.operations = [];
+  proposal.generation.resourceOperations = [{
     operation: "revise",
     nodeId: fixture.research.node.id,
     resourceId: fixture.research.resource.id,
@@ -433,17 +433,34 @@ test("an Artifact cannot consume Research generated in the same Plan", () => {
     title: fixture.research.resource.title,
     revisionPolicy: { kind: "generate" },
   }];
-  delete invalid.generation.artifactPlans[0]!.researchDirectionSelection;
-  const draft = fixture.store.workspace.createProposal(invalid);
-
-  assert.throws(
-    () => fixture.store.workspace.approveProposalForProject(fixture.project.id, draft.id, "generate"),
-    (error: unknown) => error instanceof WorkspaceProposalValidationError
-      && /cannot consume Research generated in the same Plan/.test(error.message),
+  delete proposal.generation.artifactPlans[0]!.researchDirectionSelection;
+  const draft = fixture.store.workspace.createProposal(proposal);
+  const approved = fixture.store.workspace.approveProposalForProject(
+    fixture.project.id,
+    draft.id,
+    "generate",
   );
-  assert.equal(fixture.store.workspace.getProposalForProject(fixture.project.id, draft.id)?.status, "draft");
-  assert.equal(Number((fixture.store.db.prepare(
-    "SELECT COUNT(*) AS count FROM generation_plans WHERE proposal_id = ?",
-  ).get(draft.id) as { count: number }).count), 0);
+  assert.ok(approved.plan);
+  const compiled = fixture.store.workspace.compileApprovedGenerationPlanForProject(
+    fixture.project.id,
+    approved.plan.id,
+  );
+  const researchTask = compiled.tasks.find(
+    (task) => task.target.type === "resource" && task.target.id === fixture.research.resource.id,
+  );
+  const artifactTask = compiled.tasks.find(
+    (task) => task.target.type === "artifact" && task.target.id === "checkout-page",
+  );
+  assert.ok(researchTask);
+  assert.ok(artifactTask);
+  assert.deepEqual(artifactTask.dependencyIds, [researchTask.id]);
+  assert.equal(
+    (artifactTask.payload.artifactPlan as Record<string, unknown>).researchDirectionSelection,
+    undefined,
+  );
+  assert.equal(
+    fixture.store.workspace.getProposalForProject(fixture.project.id, draft.id)?.status,
+    "approved",
+  );
   fixture.store.close();
 });

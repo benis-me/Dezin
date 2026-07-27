@@ -27,6 +27,9 @@ import { ProductionSharinganCaptureRevisionMaterializer } from "./sharingan-capt
 import {
   createProductionWorkspaceAgentOrchestrator,
 } from "./production-workspace-agent.ts";
+import {
+  createStoreBackedMoodboardAttemptContextAuthority,
+} from "./moodboard-attempt-context-authority.ts";
 import type { ProductionAgentOrchestrator } from "./production-agent-orchestrator.ts";
 import { createProductionScopedAgentTaskQueue } from "./production-scoped-agent-task-queue.ts";
 
@@ -99,6 +102,11 @@ export function createProductionGenerationBootstrap(
     storageRoot: options.dataDir,
     store: options.store.workspace,
     implementations: resourceImplementations,
+    contextPacks,
+    attemptContextAuthority: createStoreBackedMoodboardAttemptContextAuthority({
+      projectCatalog: options.store,
+      workspaceStore: options.store.workspace,
+    }),
   });
   const sharinganCaptures = new ProductionSharinganCaptureRevisionMaterializer({
     source: createProductionSharinganCaptureRevisionBundleSource({

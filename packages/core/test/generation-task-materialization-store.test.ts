@@ -293,6 +293,7 @@ test("prototype-connected Pages stay independently schedulable while observing t
       layoutOperations: [],
       generation: {
         ...emptyGeneration(),
+        version: 2,
         artifactPlans: [
           {
             operation: "revise",
@@ -305,6 +306,15 @@ test("prototype-connected Pages stay independently schedulable while observing t
             dependsOnArtifactIds: [],
             capabilityIds: [],
             responsiveFrameIds: ["desktop"],
+            prototypeRequirements: {
+              outgoing: [],
+              incoming: [{
+                edgeId: "prototype-page-edge",
+                sourceArtifactId: "prototype-page-b",
+                sourceMarkerId: "prototype-page-b-to-a",
+                targetState: "default",
+              }],
+            },
           },
           {
             operation: "revise",
@@ -317,13 +327,23 @@ test("prototype-connected Pages stay independently schedulable while observing t
             dependsOnArtifactIds: [],
             capabilityIds: [],
             responsiveFrameIds: ["desktop"],
+            prototypeRequirements: {
+              outgoing: [{
+                edgeId: "prototype-page-edge",
+                sourceMarkerId: "prototype-page-b-to-a",
+                trigger: "click",
+              }],
+              incoming: [],
+            },
           },
         ],
         prototypeIntents: [{
           edgeId: "prototype-page-edge",
           sourceArtifactId: "prototype-page-b",
           targetArtifactId: "prototype-page-a",
+          sourceMarkerId: "prototype-page-b-to-a",
           trigger: "click",
+          targetState: "default",
         }],
       },
       rationale: "Keep connected Pages in one frozen design-context sequence",

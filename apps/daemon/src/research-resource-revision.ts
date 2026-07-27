@@ -20,11 +20,13 @@ import {
   resolveResourceRevisionPayloadDescriptor,
   verifyResourceRevisionPayload,
 } from "./resource-revision-payload.ts";
+import { isCanonicalResearchHttpUrl } from "./research-canonical-url.ts";
+import { countCanonicalResearchEvidenceComponents } from "./research-evidence-identity.ts";
 
 const MAX_RESEARCH_VIEW_BYTES = 8 * 1024 * 1024;
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const SENSITIVE_URL_KEY = /(?:^|[-_.])(token|secret|password|passwd|api[-_]?key|authorization|auth|credential|signature|session|jwt)(?:$|[-_.])/i;
+const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
 export class ResearchResourceRevisionError extends Error {
   constructor(message: string) {
@@ -93,15 +95,7 @@ function safeInteger(value: unknown, label: string, minimum = 0, maximum = Numbe
 
 function canonicalHttpUrl(value: unknown, label: string): string {
   const raw = text(value, label, 16_384);
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return fail(`${label} must be a canonical HTTP(S) URL`);
-  }
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    || parsed.username || parsed.password || parsed.hash || parsed.href !== raw
-    || [...parsed.searchParams.keys()].some((key) => SENSITIVE_URL_KEY.test(key))) {
+  if (!isCanonicalResearchHttpUrl(raw)) {
     return fail(`${label} must be a canonical credential-free HTTP(S) URL`);
   }
   return raw;
@@ -134,6 +128,18 @@ function evidenceStatus(value: unknown, label: string): ResearchEvidenceStatus {
   return value;
 }
 
+function researchExtractorMatchesMimeType(extractorId: string, mimeType: string): boolean {
+  if (!MIME_TYPE.test(mimeType)) return false;
+  if (extractorId === "dezin.html-visible-text") {
+    return mimeType === "text/html" || mimeType === "application/xhtml+xml";
+  }
+  if (extractorId === "dezin.pdf-text") return mimeType === "application/pdf";
+  return extractorId === "dezin.utf8-text"
+    && (mimeType.startsWith("text/")
+      || mimeType === "application/json" || mimeType.endsWith("+json")
+      || mimeType === "application/xml" || mimeType.endsWith("+xml"));
+}
+
 function confidence(value: unknown, label: string): "high" | "medium" | "low" {
   if (value !== "high" && value !== "medium" && value !== "low") return fail(`${label} is invalid`);
   return value;
@@ -141,6 +147,341 @@ function confidence(value: unknown, label: string): "high" | "medium" | "low" {
 
 function sameMembers(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((item) => right.includes(item));
+}
+
+interface DecodedResearchRepairProvenance {
+  protocol: "dezin.research-direction-only-repair.v1";
+  firstCandidateAudit: {
+    protocol: "dezin.research-direction-only-first-candidate-audit.v1";
+    findingIds: string[];
+    evidenceFindingIds: string[];
+    hypothesisFindingIds: string[];
+    directionIds: string[];
+    directionMappings: Array<{
+      directionId: string;
+      findingIds: string[];
+    }>;
+    changedDirectionOriginalFindingIds: string[];
+  };
+  firstCandidateChecksum: string;
+  gateBlockers: string[];
+  changedDirectionId: string;
+  selectedEvidenceFindingIds: string[];
+  revalidatedEvidenceFindingIds: string[];
+  droppedFindingIds: string[];
+}
+
+interface DecodedResearchRepairAuthority {
+  firstCandidateAudit: unknown;
+  firstCandidateChecksum: string;
+}
+
+function decodeResearchRepairAuthority(value: unknown): DecodedResearchRepairAuthority {
+  const authority = exactRecord(value, [
+    "protocol",
+    "firstCandidateAudit",
+    "firstCandidateChecksum",
+  ], "Research immutable payload repair authority");
+  if (authority.protocol !== "dezin.research-direction-only-repair-authority.v1") {
+    return fail("Research immutable payload repair authority protocol is unsupported");
+  }
+  return {
+    firstCandidateAudit: authority.firstCandidateAudit,
+    firstCandidateChecksum: sha256(
+      authority.firstCandidateChecksum,
+      "Research immutable payload repair authority checksum",
+    ),
+  };
+}
+
+function decodeResearchRepairProvenance(
+  value: unknown,
+  authority: DecodedResearchRepairAuthority | null,
+): DecodedResearchRepairProvenance {
+  const repair = exactRecord(value, [
+    "protocol",
+    "firstCandidateAudit",
+    "firstCandidateChecksum",
+    "gateBlockers",
+    "changedDirectionId",
+    "selectedEvidenceFindingIds",
+    "revalidatedEvidenceFindingIds",
+    "droppedFindingIds",
+  ], "Research direction-only repair provenance");
+  if (repair.protocol !== "dezin.research-direction-only-repair.v1") {
+    return fail("Research direction-only repair provenance protocol is unsupported");
+  }
+  const firstCandidateAudit = exactRecord(repair.firstCandidateAudit, [
+    "protocol",
+    "findingIds",
+    "evidenceFindingIds",
+    "hypothesisFindingIds",
+    "directionIds",
+    "directionMappings",
+    "changedDirectionOriginalFindingIds",
+  ], "Research direction-only repair first candidate audit");
+  if (firstCandidateAudit.protocol !== "dezin.research-direction-only-first-candidate-audit.v1") {
+    return fail("Research direction-only repair first candidate audit protocol is unsupported");
+  }
+  const decodedFirstCandidateAudit = {
+    protocol: "dezin.research-direction-only-first-candidate-audit.v1" as const,
+    findingIds: stringArray(
+      firstCandidateAudit.findingIds,
+      "Research direction-only repair first candidate finding ids",
+      3,
+      256,
+    ),
+    evidenceFindingIds: stringArray(
+      firstCandidateAudit.evidenceFindingIds,
+      "Research direction-only repair first candidate evidence finding ids",
+      1,
+      256,
+    ),
+    hypothesisFindingIds: stringArray(
+      firstCandidateAudit.hypothesisFindingIds,
+      "Research direction-only repair first candidate hypothesis finding ids",
+      0,
+      256,
+    ),
+    directionIds: stringArray(
+      firstCandidateAudit.directionIds,
+      "Research direction-only repair first candidate direction ids",
+      2,
+      16,
+    ),
+    directionMappings: array(
+      firstCandidateAudit.directionMappings,
+      "Research direction-only repair first candidate direction mappings",
+      2,
+      16,
+    ).map((value, index) => {
+      const mapping = exactRecord(
+        value,
+        ["directionId", "findingIds"],
+        `Research direction-only repair first candidate direction mapping ${index}`,
+      );
+      return {
+        directionId: identifier(
+          mapping.directionId,
+          `Research direction-only repair first candidate direction mapping ${index} id`,
+        ),
+        findingIds: stringArray(
+          mapping.findingIds,
+          `Research direction-only repair first candidate direction mapping ${index} finding ids`,
+          1,
+          64,
+        ),
+      };
+    }),
+    changedDirectionOriginalFindingIds: stringArray(
+      firstCandidateAudit.changedDirectionOriginalFindingIds,
+      "Research direction-only repair first candidate changed direction finding ids",
+      1,
+      64,
+    ),
+  };
+  const firstCandidateChecksum = sha256(
+    repair.firstCandidateChecksum,
+    "Research direction-only repair first candidate checksum",
+  );
+  const expectedFirstCandidateChecksum = createHash("sha256")
+    .update(stableStringify(decodedFirstCandidateAudit))
+    .digest("hex");
+  if (firstCandidateChecksum !== expectedFirstCandidateChecksum) {
+    return fail("Research direction-only repair first candidate audit checksum is invalid");
+  }
+  if (authority === null
+    || authority.firstCandidateChecksum !== firstCandidateChecksum
+    || stableStringify(authority.firstCandidateAudit) !== stableStringify(decodedFirstCandidateAudit)) {
+    return fail("Research repair provenance is not anchored by the immutable payload repair authority");
+  }
+  const gateBlockers = stringArray(
+    repair.gateBlockers,
+    "Research direction-only repair gate blockers",
+    1,
+    16,
+  );
+  if (gateBlockers.length !== 1 || gateBlockers[0] !== "insufficient-evidence-directions") {
+    return fail("Research direction-only repair provenance blocker is invalid");
+  }
+  const changedDirectionId = identifier(
+    repair.changedDirectionId,
+    "Research direction-only repair changed direction id",
+  );
+  const selectedEvidenceFindingIds = stringArray(
+    repair.selectedEvidenceFindingIds,
+    "Research direction-only repair selected finding ids",
+    2,
+    32,
+  );
+  const revalidatedEvidenceFindingIds = stringArray(
+    repair.revalidatedEvidenceFindingIds,
+    "Research direction-only repair revalidated finding ids",
+    0,
+    32,
+  );
+  const droppedFindingIds = stringArray(
+    repair.droppedFindingIds,
+    "Research direction-only repair dropped finding ids",
+    0,
+    32,
+  );
+  const revalidated = new Set(revalidatedEvidenceFindingIds);
+  const dropped = new Set(droppedFindingIds);
+  const firstCandidateFindingIds = new Set(decodedFirstCandidateAudit.findingIds);
+  const firstCandidateEvidenceIds = new Set(decodedFirstCandidateAudit.evidenceFindingIds);
+  const firstCandidateHypothesisIds = new Set(decodedFirstCandidateAudit.hypothesisFindingIds);
+  if (decodedFirstCandidateAudit.evidenceFindingIds.some((id) => firstCandidateHypothesisIds.has(id))
+    || decodedFirstCandidateAudit.findingIds.some(
+      (id) => !firstCandidateEvidenceIds.has(id) && !firstCandidateHypothesisIds.has(id),
+    )
+    || [...firstCandidateEvidenceIds, ...firstCandidateHypothesisIds].length
+      !== decodedFirstCandidateAudit.findingIds.length
+    || decodedFirstCandidateAudit.directionMappings.length
+      !== decodedFirstCandidateAudit.directionIds.length
+    || decodedFirstCandidateAudit.directionMappings.some(
+      (mapping, index) => mapping.directionId !== decodedFirstCandidateAudit.directionIds[index]
+        || mapping.findingIds.some((id) => !firstCandidateFindingIds.has(id)),
+    )
+    || decodedFirstCandidateAudit.changedDirectionOriginalFindingIds.some(
+      (id) => !firstCandidateFindingIds.has(id),
+    )
+    || !decodedFirstCandidateAudit.directionIds.includes(changedDirectionId)) {
+    return fail("Research direction-only repair first candidate audit partition is invalid");
+  }
+  if (selectedEvidenceFindingIds.some((id) => !firstCandidateEvidenceIds.has(id))) {
+    return fail("Research direction-only repair selected finding is not sealed first-pass evidence");
+  }
+  const changedDirectionMapping = decodedFirstCandidateAudit.directionMappings.find(
+    (mapping) => mapping.directionId === changedDirectionId,
+  );
+  if (!changedDirectionMapping
+    || changedDirectionMapping.findingIds.length
+      !== decodedFirstCandidateAudit.changedDirectionOriginalFindingIds.length
+    || changedDirectionMapping.findingIds.some(
+      (id, index) => id !== decodedFirstCandidateAudit.changedDirectionOriginalFindingIds[index],
+    )) {
+    return fail("Research direction-only repair changed mapping is not bound to the first candidate audit");
+  }
+  if (selectedEvidenceFindingIds.length
+      === decodedFirstCandidateAudit.changedDirectionOriginalFindingIds.length
+    && selectedEvidenceFindingIds.every(
+      (id, index) => id === decodedFirstCandidateAudit.changedDirectionOriginalFindingIds[index],
+    )) {
+    return fail("Research direction-only repair did not change the sealed first-pass direction mapping");
+  }
+  if (revalidatedEvidenceFindingIds.some((id) => dropped.has(id))
+    || selectedEvidenceFindingIds.some((id) => !revalidated.has(id) && !dropped.has(id))
+    || revalidatedEvidenceFindingIds.some((id) => !selectedEvidenceFindingIds.includes(id))
+    || droppedFindingIds.some((id) => !selectedEvidenceFindingIds.includes(id))
+    || selectedEvidenceFindingIds.filter((id) => revalidated.has(id))
+      .some((id, index) => id !== revalidatedEvidenceFindingIds[index])
+    || selectedEvidenceFindingIds.filter((id) => dropped.has(id))
+      .some((id, index) => id !== droppedFindingIds[index])) {
+    return fail("Research direction-only repair provenance finding partition is invalid");
+  }
+  return {
+    protocol: "dezin.research-direction-only-repair.v1",
+    firstCandidateAudit: decodedFirstCandidateAudit,
+    firstCandidateChecksum,
+    gateBlockers,
+    changedDirectionId,
+    selectedEvidenceFindingIds,
+    revalidatedEvidenceFindingIds,
+    droppedFindingIds,
+  };
+}
+
+function validateResearchRepairAgainstImmutableRevision(input: {
+  repair: DecodedResearchRepairProvenance;
+  findings: readonly ResearchRevisionFindingView[];
+  directions: readonly ResearchRevisionDirectionView[];
+  qualityState: ResearchRevisionQualityState;
+}): void {
+  const { repair } = input;
+  const finalFindingIds = input.findings.map((finding) => finding.id);
+  const finalDirectionIds = input.directions.map((direction) => direction.id);
+  if (repair.firstCandidateAudit.findingIds.length !== finalFindingIds.length
+    || repair.firstCandidateAudit.findingIds.some((id, index) => id !== finalFindingIds[index])
+    || repair.firstCandidateAudit.directionIds.length !== finalDirectionIds.length
+    || repair.firstCandidateAudit.directionIds.some((id, index) => id !== finalDirectionIds[index])) {
+    return fail("Research direction-only repair audit does not bind the immutable finding and direction ids");
+  }
+  const findingById = new Map(input.findings.map((finding) => [finding.id, finding]));
+  if (repair.selectedEvidenceFindingIds.some((id) => !findingById.has(id))) {
+    return fail("Research direction-only repair provenance contains a ghost immutable finding id");
+  }
+  if (repair.firstCandidateAudit.hypothesisFindingIds.some(
+    (id) => findingById.get(id)?.evidenceStatus !== "hypothesis",
+  )) {
+    return fail("Research direction-only repair hypothesis promotion reached final evidence");
+  }
+  if (repair.revalidatedEvidenceFindingIds.some(
+    (id) => findingById.get(id)?.evidenceStatus !== "evidence",
+  )) {
+    return fail("Research direction-only repair revalidated finding is not final evidence");
+  }
+  if (repair.droppedFindingIds.some(
+    (id) => findingById.get(id)?.evidenceStatus !== "hypothesis",
+  )) {
+    return fail("Research direction-only repair dropped finding is not a final hypothesis");
+  }
+  const changedDirection = input.directions.find(
+    (direction) => direction.id === repair.changedDirectionId,
+  );
+  if (!changedDirection) {
+    return fail("Research direction-only repair provenance does not match the immutable direction");
+  }
+  const originalMappingByDirectionId = new Map(
+    repair.firstCandidateAudit.directionMappings.map(
+      (mapping) => [mapping.directionId, mapping.findingIds] as const,
+    ),
+  );
+  for (const direction of input.directions) {
+    if (direction.id === repair.changedDirectionId) continue;
+    const originalFindingIds = originalMappingByDirectionId.get(direction.id);
+    if (!originalFindingIds
+      || originalFindingIds.length !== direction.findingIds.length
+      || originalFindingIds.some((id, index) => id !== direction.findingIds[index])) {
+      return fail("Research direction-only repair changed more than one immutable direction mapping");
+    }
+  }
+  if (input.qualityState === "grounded") {
+    if (repair.revalidatedEvidenceFindingIds.length < 2) {
+      return fail("Research grounded repair requires at least two revalidated evidence findings");
+    }
+    if (changedDirection.evidenceStatus !== "evidence"
+      || changedDirection.findingIds.length !== repair.revalidatedEvidenceFindingIds.length
+      || changedDirection.findingIds.some(
+        (id, index) => id !== repair.revalidatedEvidenceFindingIds[index],
+      )
+      || changedDirection.evidenceFindingIds.length !== repair.revalidatedEvidenceFindingIds.length
+      || changedDirection.evidenceFindingIds.some(
+        (id, index) => id !== repair.revalidatedEvidenceFindingIds[index],
+      )
+      || changedDirection.hypothesisFindingIds.length !== 0) {
+      return fail("Research grounded repair provenance does not match the immutable direction");
+    }
+    return;
+  }
+  if (repair.revalidatedEvidenceFindingIds.length >= 2) {
+    return fail("Research needs-review repair cannot discard a grounded revalidation outcome");
+  }
+  if (changedDirection.evidenceStatus !== "hypothesis"
+    || changedDirection.findingIds.length !== repair.selectedEvidenceFindingIds.length
+    || changedDirection.findingIds.some(
+      (id, index) => id !== repair.selectedEvidenceFindingIds[index],
+    )
+    || changedDirection.evidenceFindingIds.length !== repair.revalidatedEvidenceFindingIds.length
+    || changedDirection.evidenceFindingIds.some(
+      (id, index) => id !== repair.revalidatedEvidenceFindingIds[index],
+    )
+    || changedDirection.hypothesisFindingIds.length !== repair.droppedFindingIds.length
+    || changedDirection.hypothesisFindingIds.some(
+      (id, index) => id !== repair.droppedFindingIds[index],
+    )) {
+    return fail("Research needs-review repair provenance does not match the immutable direction");
+  }
 }
 
 function parseResearchJson(bytes: Buffer): unknown {
@@ -180,6 +521,8 @@ interface DecodedResearchReceipt {
   sourceId: string;
   sourceKind: "context" | "web" | "user";
   verification: "verified" | "unverified";
+  canonicalUrl: string | null;
+  canonicalTextChecksum: string | null;
   excerpt: { text: string; utf8Start: number | null; utf8End: number | null };
 }
 
@@ -306,7 +649,10 @@ function decodeReceipts(
     const source = sourceById.get(sourceId);
     if (!source || sourceIds.has(sourceId)) return fail(`Research evidence receipt ${index} source identity is invalid`);
     sourceIds.add(sourceId);
-    if (base.protocol !== "dezin.research-evidence-receipt.v1"
+    const receiptProtocol = base.protocol;
+    if ((receiptProtocol !== "dezin.research-evidence-receipt.v1"
+        && receiptProtocol !== "dezin.research-evidence-receipt.v2")
+      || (receiptProtocol === "dezin.research-evidence-receipt.v2" && source.view.kind !== "web")
       || base.sourceKind !== source.view.kind
       || (base.verification !== "verified" && base.verification !== "unverified")
       || base.verification !== source.view.verification) {
@@ -314,27 +660,92 @@ function decodeReceipts(
     }
     let item: Record<string, unknown>;
     let excerpt: DecodedResearchReceipt["excerpt"];
+    let canonicalUrl: string | null = null;
+    let canonicalTextChecksum: string | null = null;
+    let canonicalTextByteLength: number | null = null;
     if (source.view.kind === "web" && base.verification === "verified") {
-      item = exactRecord(base, [
-        "protocol", "sourceId", "sourceKind", "verification", "requestedUrl", "canonicalUrl", "retrievedAt",
-        "status", "mimeType", "contentChecksum", "excerpt", "id", "checksum",
-      ], `Research evidence receipt ${index}`);
+      item = receiptProtocol === "dezin.research-evidence-receipt.v2"
+        ? exactRecord(base, [
+            "protocol", "sourceId", "sourceKind", "verification", "requestedUrl", "canonicalUrl", "retrievedAt",
+            "status", "source", "canonicalText", "excerpt", "id", "checksum",
+          ], `Research evidence receipt ${index}`)
+        : exactRecord(base, [
+            "protocol", "sourceId", "sourceKind", "verification", "requestedUrl", "canonicalUrl", "retrievedAt",
+            "status", "mimeType", "contentChecksum", "excerpt", "id", "checksum",
+          ], `Research evidence receipt ${index}`);
       if (canonicalHttpUrl(item.requestedUrl, `Research evidence receipt ${index} requested URL`) !== source.view.locator) {
         return fail(`Research evidence receipt ${index} requested URL is inconsistent`);
       }
-      canonicalHttpUrl(item.canonicalUrl, `Research evidence receipt ${index} canonical URL`);
+      canonicalUrl = canonicalHttpUrl(item.canonicalUrl, `Research evidence receipt ${index} canonical URL`);
       safeInteger(item.retrievedAt, `Research evidence receipt ${index} retrieved at`);
       safeInteger(item.status, `Research evidence receipt ${index} status`, 200, 299);
-      text(item.mimeType, `Research evidence receipt ${index} MIME type`, 127);
-      sha256(item.contentChecksum, `Research evidence receipt ${index} content checksum`);
+      if (receiptProtocol === "dezin.research-evidence-receipt.v2") {
+        const sourceIdentity = exactRecord(
+          item.source,
+          ["mimeType", "byteLength", "checksum"],
+          `Research evidence receipt ${index} source identity`,
+        );
+        const canonicalText = exactRecord(
+          item.canonicalText,
+          ["mimeType", "byteLength", "checksum", "extractor"],
+          `Research evidence receipt ${index} canonical text`,
+        );
+        const extractor = exactRecord(
+          canonicalText.extractor,
+          ["id", "version"],
+          `Research evidence receipt ${index} canonical text extractor`,
+        );
+        const sourceMimeType = text(
+          sourceIdentity.mimeType,
+          `Research evidence receipt ${index} source MIME type`,
+          127,
+        );
+        safeInteger(sourceIdentity.byteLength, `Research evidence receipt ${index} source bytes`, 1, 4 * 1024 * 1024);
+        sha256(sourceIdentity.checksum, `Research evidence receipt ${index} source checksum`);
+        if (canonicalText.mimeType !== "text/plain; charset=utf-8") {
+          return fail(`Research evidence receipt ${index} canonical text MIME type is invalid`);
+        }
+        canonicalTextByteLength = safeInteger(
+          canonicalText.byteLength,
+          `Research evidence receipt ${index} canonical text bytes`,
+          1,
+          512 * 1024,
+        );
+        canonicalTextChecksum = sha256(
+          canonicalText.checksum,
+          `Research evidence receipt ${index} canonical text checksum`,
+        );
+        if (typeof extractor.id !== "string"
+          || !researchExtractorMatchesMimeType(extractor.id, sourceMimeType)
+          || extractor.version !== 1) {
+          return fail(`Research evidence receipt ${index} canonical text extractor is invalid`);
+        }
+      } else {
+        text(item.mimeType, `Research evidence receipt ${index} MIME type`, 127);
+        canonicalTextChecksum = sha256(
+          item.contentChecksum,
+          `Research evidence receipt ${index} content checksum`,
+        );
+      }
       const location = locatedExcerpt(item.excerpt, `Research evidence receipt ${index} excerpt`);
+      if (canonicalTextByteLength !== null && location.utf8End > canonicalTextByteLength) {
+        return fail(`Research evidence receipt ${index} excerpt exceeds canonical text`);
+      }
       excerpt = { ...location };
     } else if (source.view.kind === "web") {
       item = exactRecord(base, [
         "protocol", "sourceId", "sourceKind", "verification", "requestedUrl", "reason", "excerpt", "id", "checksum",
       ], `Research evidence receipt ${index}`);
       if (canonicalHttpUrl(item.requestedUrl, `Research evidence receipt ${index} requested URL`) !== source.view.locator
-        || (item.reason !== "retriever-unavailable" && item.reason !== "retrieval-failed")) {
+        || (item.reason !== "retriever-unavailable"
+          && !(receiptProtocol === "dezin.research-evidence-receipt.v1"
+            && item.reason === "retrieval-failed")
+          && item.reason !== "network-failed"
+          && item.reason !== "http-status"
+          && item.reason !== "unsupported-media-type"
+          && item.reason !== "content-extraction-failed"
+          && item.reason !== "excerpt-mismatch"
+          && item.reason !== "representation-invalid")) {
         return fail(`Research evidence receipt ${index} unverified evidence is inconsistent`);
       }
       const rawExcerpt = exactRecord(item.excerpt, ["text"], `Research evidence receipt ${index} excerpt`);
@@ -389,6 +800,8 @@ function decodeReceipts(
       sourceId,
       sourceKind: source.view.kind,
       verification: source.view.verification,
+      canonicalUrl,
+      canonicalTextChecksum,
       excerpt,
     };
   });
@@ -423,7 +836,8 @@ function decodeSupportReceipts(
     const sourceId = identifier(item.sourceId, `Research support receipt ${index} source id`);
     const sourceReceiptId = identifier(item.sourceReceiptId, `Research support receipt ${index} source receipt id`);
     const sourceReceipt = receiptById.get(sourceReceiptId);
-    if (!sourceReceipt || sourceReceipt.sourceId !== sourceId || sourceReceipt.verification !== verification) {
+    if (!sourceReceipt || sourceReceipt.sourceId !== sourceId
+      || (verification === "verified" && sourceReceipt.verification !== "verified")) {
       return fail(`Research support receipt ${index} source receipt is inconsistent`);
     }
     let quote: DecodedResearchSupportReceipt["quote"];
@@ -535,8 +949,7 @@ function decodeFindings(
     if (!sameVerifier(findingVerifier, expectedVerifier)
       || groundedSupportReceiptIds.some((receiptId) => !verifiedSupportReceiptIds.includes(receiptId))
       || (status === "evidence" && (findingVerifier === null
-        || findingSupportReceipts.some((receipt) => receipt.verification !== "verified")
-        || !sameMembers(groundedSupportReceiptIds, supportReceiptIds)))
+        || groundedSupportReceiptIds.length === 0))
       || (status === "hypothesis" && findingConfidence !== "low")) {
       return fail(`Research finding ${id} quality evidence is inconsistent`);
     }
@@ -730,7 +1143,11 @@ function decodeResearchProvenance(input: {
   contextPack: ResearchBundleContextPack;
   receipts: readonly DecodedResearchReceipt[];
   supportReceipts: readonly DecodedResearchSupportReceipt[];
-}): { id: string; model?: string } | null {
+  repairAuthority: DecodedResearchRepairAuthority | null;
+}): {
+  verifier: { id: string; model?: string } | null;
+  repair: DecodedResearchRepairProvenance | null;
+} {
   const outer = record(input.provenance, "Research Revision provenance");
   const adapter = exactRecord(outer.adapter, ["id", "version", "kind"], "Research adapter provenance identity");
   if (outer.kind !== "generation-task-resource"
@@ -742,7 +1159,7 @@ function decodeResearchProvenance(input: {
   const production = exactRecord(outer.adapterProvenance, [
     "protocol", "taskId", "attempt", "inputHash", "contextPackId", "contextPackHash", "generatorId",
     "researchEvidence",
-  ], "Research production provenance", ["model"]);
+  ], "Research production provenance", ["model", "researchRepair"]);
   if (production.protocol !== "dezin.production-resource-generation.v1"
     || production.taskId !== input.scope.taskId || production.attempt !== input.scope.attempt
     || production.inputHash !== input.scope.inputHash || production.contextPackId !== input.contextPack.id
@@ -773,33 +1190,116 @@ function decodeResearchProvenance(input: {
   safeInteger(evidence.unverifiedSourceCount, "Research provenance unverified source count");
   safeInteger(evidence.evidenceFindingCount, "Research provenance evidence finding count");
   safeInteger(evidence.hypothesisFindingCount, "Research provenance hypothesis finding count");
-  return verifier(evidence.groundednessVerifier, "Research provenance groundedness verifier");
+  const repair = production.researchRepair === undefined
+    ? null
+    : decodeResearchRepairProvenance(production.researchRepair, input.repairAuthority);
+  if ((repair === null) !== (input.repairAuthority === null)) {
+    return fail("Research immutable payload repair authority does not match repair provenance");
+  }
+  return {
+    verifier: verifier(evidence.groundednessVerifier, "Research provenance groundedness verifier"),
+    repair,
+  };
 }
 
 function requiredMetadataCount(value: unknown, label: string, expected: number): void {
   if (safeInteger(value, label) !== expected) return fail(`${label} does not match the immutable payload`);
 }
 
+function decisionGradeVerifiedWebSourceCount(
+  receipts: readonly DecodedResearchReceipt[],
+  selectedSourceIds: ReadonlySet<string>,
+): number {
+  const identities: Array<{
+    canonicalUrl: string;
+    canonicalTextChecksum: string;
+  }> = [];
+  for (const receipt of receipts) {
+    if (receipt.sourceKind !== "web" || receipt.verification !== "verified"
+      || !selectedSourceIds.has(receipt.sourceId)
+      || receipt.canonicalUrl === null || receipt.canonicalTextChecksum === null) {
+      continue;
+    }
+    identities.push({
+      canonicalUrl: receipt.canonicalUrl,
+      canonicalTextChecksum: receipt.canonicalTextChecksum,
+    });
+  }
+  return countCanonicalResearchEvidenceComponents(identities);
+}
+
 function validateResearchMetadata(input: {
   metadata: Record<string, unknown>;
   sources: readonly ResearchRevisionSourceView[];
+  receipts: readonly DecodedResearchReceipt[];
   supportReceipts: readonly DecodedResearchSupportReceipt[];
   findings: readonly ResearchRevisionFindingView[];
   designPrinciples: readonly ResearchRevisionPrincipleView[];
   directions: readonly ResearchRevisionDirectionView[];
   verifier: { id: string; model?: string } | null;
+  bundleVersion: 3 | 4;
 }): ResearchRevisionQualityState {
   const adapter = exactRecord(input.metadata.adapter, [
     "format", "version", "qualityState", "requiresHypothesisConfirmation", "groundednessVerifierAvailable",
     "sourceCount", "verifiedSourceCount", "unverifiedSourceCount", "supportReceiptCount", "findingCount",
     "evidenceFindingCount", "hypothesisFindingCount", "principleCount", "directionCount", "evidenceDirectionCount",
     "hypothesisDirectionCount",
-  ], "Research Revision adapter metadata");
+  ], "Research Revision adapter metadata", ["decisionGradeGate"]);
   const evidenceFindingCount = input.findings.filter((finding) => finding.evidenceStatus === "evidence").length;
   const evidenceDirectionCount = input.directions.filter((direction) => direction.evidenceStatus === "evidence").length;
   const verifiedSourceCount = input.sources.filter((source) => source.verification === "verified").length;
-  const expectedQuality: ResearchRevisionQualityState = evidenceDirectionCount > 0 ? "grounded" : "needs-review";
-  if (adapter.format !== "dezin-research-resource-bundle" || adapter.version !== 3
+  const requiresDecisionGradeGate = input.receipts.some((receipt) =>
+    receipt.sourceKind === "web"
+      && receipt.raw.protocol === "dezin.research-evidence-receipt.v2");
+  if (requiresDecisionGradeGate && adapter.decisionGradeGate === undefined) {
+    return fail("Research decision-grade gate is required for Web v2 evidence");
+  }
+  let expectedQuality: ResearchRevisionQualityState = evidenceDirectionCount > 0 ? "grounded" : "needs-review";
+  if (adapter.decisionGradeGate !== undefined) {
+    const gate = exactRecord(adapter.decisionGradeGate, [
+      "protocol", "criteria", "observed", "accepted", "blockers",
+    ], "Research decision-grade gate");
+    const criteria = exactRecord(gate.criteria, [
+      "minimumVerifiedWebSourceCount", "minimumEvidenceFindingCount", "minimumEvidenceDirectionCount",
+      "requiresGroundednessVerifier",
+    ], "Research decision-grade gate criteria");
+    const observed = exactRecord(gate.observed, [
+      "verifiedWebSourceCount", "evidenceFindingCount", "evidenceDirectionCount", "groundednessVerifierAvailable",
+    ], "Research decision-grade gate observation");
+    const decisionGradeSupportReceiptIds = new Set(input.findings
+      .filter((finding) => finding.evidenceStatus === "evidence")
+      .flatMap((finding) => finding.groundedness.supportReceiptIds));
+    const decisionGradeSourceIds = new Set(input.supportReceipts
+      .filter((receipt) => decisionGradeSupportReceiptIds.has(receipt.id))
+      .map((receipt) => receipt.sourceId));
+    const verifiedWebSourceCount = decisionGradeVerifiedWebSourceCount(
+      input.receipts,
+      decisionGradeSourceIds,
+    );
+    const expectedBlockers = [
+      ...(input.verifier === null ? ["groundedness-verifier-unavailable"] : []),
+      ...(verifiedWebSourceCount < 2 ? ["insufficient-verified-web-sources"] : []),
+      ...(evidenceFindingCount < 2 ? ["insufficient-evidence-findings"] : []),
+      ...(evidenceDirectionCount < 1 ? ["insufficient-evidence-directions"] : []),
+    ];
+    const blockers = stringArray(gate.blockers, "Research decision-grade gate blockers", 0, 4);
+    if (gate.protocol !== "dezin.research-decision-grade-gate.v1"
+      || criteria.minimumVerifiedWebSourceCount !== 2
+      || criteria.minimumEvidenceFindingCount !== 2
+      || criteria.minimumEvidenceDirectionCount !== 1
+      || criteria.requiresGroundednessVerifier !== true
+      || observed.verifiedWebSourceCount !== verifiedWebSourceCount
+      || observed.evidenceFindingCount !== evidenceFindingCount
+      || observed.evidenceDirectionCount !== evidenceDirectionCount
+      || observed.groundednessVerifierAvailable !== (input.verifier !== null)
+      || gate.accepted !== (expectedBlockers.length === 0)
+      || blockers.length !== new Set(blockers).size
+      || blockers.some((blocker, index) => blocker !== expectedBlockers[index])) {
+      return fail("Research decision-grade gate is inconsistent");
+    }
+    expectedQuality = expectedBlockers.length === 0 ? "grounded" : "needs-review";
+  }
+  if (adapter.format !== "dezin-research-resource-bundle" || adapter.version !== input.bundleVersion
     || adapter.qualityState !== expectedQuality
     || typeof adapter.requiresHypothesisConfirmation !== "boolean"
     || adapter.requiresHypothesisConfirmation !== (evidenceDirectionCount !== input.directions.length)
@@ -938,13 +1438,24 @@ function decodeResearchBundle(
     return fail("Research Revision payload exceeds the Viewer bound");
   }
   const parsed = parseResearchJson(input.bytes);
-  const bundle = exactRecord(parsed, [
-    "format", "version", "scope", "contextPack", "brief", "executiveSummary", "sources", "receipts",
-    "supportReceipts", "findings", "designPrinciples", "directions", "openQuestions",
-  ], "Research Revision payload");
-  if (bundle.format !== "dezin-research-resource-bundle" || bundle.version !== 3) {
+  const envelope = record(parsed, "Research Revision payload");
+  if (envelope.format !== "dezin-research-resource-bundle"
+    || (envelope.version !== 3 && envelope.version !== 4)) {
     return fail("Research Revision payload protocol is unsupported");
   }
+  const bundleVersion: 3 | 4 = envelope.version;
+  const baseFields = [
+    "format", "version", "scope", "contextPack", "brief", "executiveSummary", "sources", "receipts",
+    "supportReceipts", "findings", "designPrinciples", "directions", "openQuestions",
+  ];
+  const bundle = exactRecord(
+    parsed,
+    bundleVersion === 4 ? [...baseFields, "repairAuthority"] : baseFields,
+    "Research Revision payload",
+  );
+  const repairAuthority = bundleVersion === 4
+    ? decodeResearchRepairAuthority(bundle.repairAuthority)
+    : null;
   const scope = decodeBundleScope(bundle.scope, input);
   const contextPack = decodeBundleContextPack(bundle.contextPack, scope, input.contextPack);
   validateResearchBrief(bundle.brief, scope);
@@ -952,13 +1463,15 @@ function decodeResearchBundle(
   const sources = decodedSources.map((source) => source.view);
   const receipts = decodeReceipts(bundle.receipts, decodedSources, contextPack, input.contextPack!);
   const supportReceipts = decodeSupportReceipts(bundle.supportReceipts, receipts);
-  const groundednessVerifier = decodeResearchProvenance({
+  const decodedProvenance = decodeResearchProvenance({
     provenance: input.revisionProvenance,
     scope,
     contextPack,
     receipts,
     supportReceipts,
+    repairAuthority,
   });
+  const groundednessVerifier = decodedProvenance.verifier;
   const findings = decodeFindings(
     bundle.findings,
     new Map(sources.map((source) => [source.id, source])),
@@ -973,12 +1486,22 @@ function decodeResearchBundle(
   const qualityState = validateResearchMetadata({
     metadata: input.revisionMetadata,
     sources,
+    receipts,
     supportReceipts,
     findings,
     designPrinciples,
     directions,
     verifier: groundednessVerifier,
+    bundleVersion,
   });
+  if (decodedProvenance.repair !== null) {
+    validateResearchRepairAgainstImmutableRevision({
+      repair: decodedProvenance.repair,
+      findings,
+      directions,
+      qualityState,
+    });
+  }
   const productionProvenance = record(input.revisionProvenance.adapterProvenance, "Research production provenance");
   const provenance = exactRecord(
     productionProvenance.researchEvidence,
@@ -1013,6 +1536,14 @@ function decodeResearchBundle(
  * Validates the complete canonical Research v3 payload, metadata, provenance,
  * receipts, findings, and evidence partitions before exposing one direction.
  */
+export function listResearchRevisionDirections(
+  input: ResearchRevisionPayloadValidationInput,
+): readonly ResearchRevisionDirectionView[] {
+  const content = decodeResearchBundle(input);
+  return Object.freeze(content.directions.map((direction) =>
+    Object.freeze(structuredClone(direction))));
+}
+
 export function selectResearchRevisionDirection(
   input: ResearchRevisionDirectionSelectionInput,
 ): ResearchRevisionDirectionView {
@@ -1027,8 +1558,7 @@ export function selectResearchRevisionDirection(
     return selectLegacyResearchRevisionDirection(input, envelope);
   }
   const directionId = identifier(input.directionId, "Research direction selection id");
-  const content = decodeResearchBundle(input);
-  const matches = content.directions.filter((direction) => direction.id === directionId);
+  const matches = listResearchRevisionDirections(input).filter((direction) => direction.id === directionId);
   if (matches.length !== 1) {
     return fail("Chosen Research direction is missing or ambiguous in its pinned Revision");
   }

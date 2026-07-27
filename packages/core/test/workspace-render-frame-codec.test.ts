@@ -199,6 +199,78 @@ test("new executable Workspace Proposal mutations require a frozen Agent selecti
   );
 });
 
+test("Workspace generation preserves Artifact-scoped state frames without forcing them onto unrelated Artifacts", () => {
+  const normalized = normalizeCreateWorkspaceProposalInput({
+    projectId: "project-1",
+    kind: "workspace-generation",
+    baseGraphRevision: 0,
+    baseSnapshotId: "snapshot-1",
+    layoutId: "default",
+    baseLayoutChecksum: "layout-checksum-1",
+    operations: [],
+    layoutOperations: [],
+    generation: {
+      ...generation(frame()),
+      responsiveFrames: [
+        frame(),
+        frame({
+          id: "checkout-error-desktop",
+          name: "Checkout error · Desktop",
+          initialState: "validation-error",
+        }),
+      ],
+      qualityProfile: {
+        requiredFrameIds: ["desktop"],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+      artifactPlans: [
+        {
+          operation: "create" as const,
+          nodeId: "node-checkout",
+          artifactId: "artifact-checkout",
+          kind: "page" as const,
+          name: "Checkout",
+          trackId: "track-checkout",
+          baseRevisionId: null,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: ["desktop", "checkout-error-desktop"],
+        },
+        {
+          operation: "create" as const,
+          nodeId: "node-home",
+          artifactId: "artifact-home",
+          kind: "page" as const,
+          name: "Home",
+          trackId: "track-home",
+          baseRevisionId: null,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: ["desktop"],
+        },
+      ],
+    },
+    rationale: "Prove the Checkout error state without multiplying Home QA.",
+    assumptions: [],
+  });
+
+  assert.equal(normalized.generation.kind, "workspace-generation");
+  if (normalized.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(normalized.generation.qualityProfile.requiredFrameIds, ["desktop", "mobile"]);
+  assert.deepEqual(
+    normalized.generation.artifactPlans.find((plan) => plan.artifactId === "artifact-checkout")
+      ?.responsiveFrameIds,
+    ["desktop", "mobile", "checkout-error-desktop"],
+  );
+  assert.deepEqual(
+    normalized.generation.artifactPlans.find((plan) => plan.artifactId === "artifact-home")
+      ?.responsiveFrameIds,
+    ["desktop", "mobile"],
+  );
+});
+
 test("Workspace generation Agent persistence preserves bounded provider and command identities independently", () => {
   assert.deepEqual(
     normalizeWorkspaceGenerationAgentSelection({

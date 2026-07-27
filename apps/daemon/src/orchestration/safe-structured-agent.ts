@@ -27,6 +27,7 @@ const MAX_SYSTEM_PROMPT_BYTES = 64 * 1024;
 const MAX_MESSAGE_BYTES = 512 * 1024;
 const MAX_OUTPUT_SCHEMA_BYTES = 64 * 1024;
 const MAX_STDIN_BYTES = 16 * 1024 * 1024;
+const MAX_CODEX_DIAGNOSTIC_BYTES = 16 * 1024;
 const OUTPUT_SCHEMA_FILENAME = "dezin-final-output.schema.json";
 const IMAGE_EVIDENCE_FILENAME_PREFIX = "dezin-image-evidence";
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -61,6 +62,7 @@ export type SafeStructuredAgentErrorCode =
 export type SafeStructuredAgentFailureReasonCode =
   | "quota-exhausted"
   | "rate-limited"
+  | "request-rejected"
   | "upstream-unavailable";
 
 export interface SafeStructuredAgentFailureDetails {
@@ -90,6 +92,11 @@ export class SafeStructuredAgentError extends Error {
 export interface SafeStructuredAgentRequest {
   readonly command: string;
   readonly model?: string;
+  /**
+   * Primary task executors set caller-owned when their durable scheduler is the
+   * sole retry owner. Review-only callers retain the bounded transport default.
+   */
+  readonly remoteRetryMode?: "transport-owned" | "caller-owned";
   /** Codex-only JSON Schema for the terminal Agent message. */
   readonly outputSchema?: Readonly<Record<string, unknown>>;
   /** Codex-only, read-only Web Search capability for this exact structured turn. */
@@ -677,6 +684,181 @@ function plainRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+const CODEX_SCHEMA_MAP_KEYWORDS = [
+  "$defs",
+  "definitions",
+  "properties",
+  "patternProperties",
+  "dependentSchemas",
+] as const;
+const CODEX_SCHEMA_ARRAY_KEYWORDS = [
+  "allOf",
+  "anyOf",
+  "oneOf",
+  "prefixItems",
+] as const;
+const CODEX_SCHEMA_SINGLE_KEYWORDS = [
+  "additionalProperties",
+  "unevaluatedProperties",
+  "propertyNames",
+  "contains",
+  "not",
+  "if",
+  "then",
+  "else",
+  "unevaluatedItems",
+  "contentSchema",
+] as const;
+
+function codexSchemaPathProperty(path: string, property: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(property)
+    ? `${path}.${property}`
+    : `${path}[${JSON.stringify(property)}]`;
+}
+
+function codexSchemaDiagnosticProperties(properties: readonly string[]): string {
+  const maximum = 8;
+  const values = properties.slice(0, maximum).map((property) => (
+    /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(property)
+      ? property
+      : JSON.stringify(property.length <= 80 ? property : `${property.slice(0, 77)}...`)
+  ));
+  return `${values.join(", ")}${properties.length > maximum ? `, +${properties.length - maximum} more` : ""}`;
+}
+
+function validateCodexStrictObjectSchema(
+  schema: Record<string, unknown>,
+  path: string,
+): void {
+  const type = schema.type;
+  const isObjectSchema = type === "object"
+    || (Array.isArray(type) && type.includes("object"))
+    || Object.hasOwn(schema, "properties");
+  if (!isObjectSchema) return;
+  if (schema.additionalProperties !== false) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Codex final-output schema object at ${path} must set additionalProperties to false`,
+    );
+  }
+
+  const rawProperties = schema.properties;
+  const properties = rawProperties === undefined ? undefined : plainRecord(rawProperties);
+  if (rawProperties !== undefined && properties === undefined) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Codex final-output schema object at ${path} has a non-object properties declaration`,
+    );
+  }
+  const propertyNames = properties === undefined ? [] : Object.keys(properties);
+  const rawRequired = schema.required;
+  if (rawRequired === undefined && propertyNames.length === 0) return;
+  if (!Array.isArray(rawRequired) || rawRequired.some((value) => typeof value !== "string")) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Codex final-output schema object at ${path} must declare required as an array of property names`,
+    );
+  }
+
+  const requiredNames = rawRequired as string[];
+  const requiredSet = new Set(requiredNames);
+  const missing = propertyNames.filter((property) => !requiredSet.has(property));
+  const unexpected = [...requiredSet].filter((property) => !Object.hasOwn(properties ?? {}, property));
+  const duplicate = [...new Set(requiredNames.filter(
+    (property, index) => requiredNames.indexOf(property) !== index,
+  ))];
+  if (missing.length === 0 && unexpected.length === 0 && duplicate.length === 0) return;
+
+  const diagnostic = [
+    ...(missing.length === 0 ? [] : [`missing: ${codexSchemaDiagnosticProperties(missing)}`]),
+    ...(unexpected.length === 0 ? [] : [`unexpected: ${codexSchemaDiagnosticProperties(unexpected)}`]),
+    ...(duplicate.length === 0 ? [] : [`duplicate: ${codexSchemaDiagnosticProperties(duplicate)}`]),
+  ].join("; ");
+  throw new SafeStructuredAgentError(
+    "output-invalid",
+    `Codex final-output schema object at ${path} must list every property exactly once in required (${diagnostic})`,
+  );
+}
+
+function validateCodexStrictSchemaNode(
+  value: unknown,
+  path: string,
+  ancestors: Set<object>,
+): void {
+  if (typeof value === "boolean") return;
+  const schema = plainRecord(value);
+  if (schema === undefined) return;
+  if (ancestors.has(schema)) {
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      `Codex final-output schema contains a recursive in-memory reference at ${path}`,
+    );
+  }
+
+  ancestors.add(schema);
+  try {
+    validateCodexStrictObjectSchema(schema, path);
+    for (const keyword of CODEX_SCHEMA_MAP_KEYWORDS) {
+      const entries = plainRecord(schema[keyword]);
+      if (entries === undefined) continue;
+      for (const [name, child] of Object.entries(entries)) {
+        validateCodexStrictSchemaNode(
+          child,
+          codexSchemaPathProperty(`${path}.${keyword}`, name),
+          ancestors,
+        );
+      }
+    }
+    for (const keyword of CODEX_SCHEMA_ARRAY_KEYWORDS) {
+      const children = schema[keyword];
+      if (!Array.isArray(children)) continue;
+      children.forEach((child, index) => {
+        validateCodexStrictSchemaNode(child, `${path}.${keyword}[${index}]`, ancestors);
+      });
+    }
+    const items = schema.items;
+    if (Array.isArray(items)) {
+      items.forEach((child, index) => {
+        validateCodexStrictSchemaNode(child, `${path}.items[${index}]`, ancestors);
+      });
+    } else if (items !== undefined) {
+      validateCodexStrictSchemaNode(items, `${path}.items`, ancestors);
+    }
+    const dependencies = plainRecord(schema.dependencies);
+    if (dependencies !== undefined) {
+      for (const [name, child] of Object.entries(dependencies)) {
+        if (Array.isArray(child)) continue;
+        validateCodexStrictSchemaNode(
+          child,
+          codexSchemaPathProperty(`${path}.dependencies`, name),
+          ancestors,
+        );
+      }
+    }
+    for (const keyword of CODEX_SCHEMA_SINGLE_KEYWORDS) {
+      const child = schema[keyword];
+      if (child !== undefined) {
+        validateCodexStrictSchemaNode(child, `${path}.${keyword}`, ancestors);
+      }
+    }
+  } finally {
+    ancestors.delete(schema);
+  }
+}
+
+function validateCodexStrictOutputSchema(schema: Record<string, unknown>): void {
+  try {
+    validateCodexStrictSchemaNode(schema, "$", new Set());
+  } catch (error) {
+    if (error instanceof SafeStructuredAgentError) throw error;
+    throw new SafeStructuredAgentError(
+      "output-invalid",
+      "Codex final-output schema could not be validated locally",
+      error,
+    );
+  }
+}
+
 /**
  * Multimodal Claude input requires stream-json output. Treat that transport as
  * a protocol, not as model text: exactly one successful terminal result owns
@@ -766,6 +948,8 @@ export function parseSafeStructuredCodexJsonl(
   let threadStarted = false;
   let turnStarted = false;
   let terminalSeen = false;
+  let failedTerminalSeen = false;
+  let topLevelErrorSeen = false;
   let message: string | undefined;
   for (const [index, rawLine] of stdout.split("\n").entries()) {
     const line = rawLine.trim();
@@ -816,7 +1000,31 @@ export function parseSafeStructuredCodexJsonl(
     if (event.type === "item.started" || event.type === "item.updated"
       || event.type === "item.completed") {
       const item = plainRecord(event.item);
-      if (!turnStarted || !item || typeof item.type !== "string") {
+      if (!item || typeof item.type !== "string") {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          `Codex structured stream ${event.type} event is malformed`,
+        );
+      }
+      if (item.type === "error") {
+        if (!threadStarted
+          || event.type !== "item.completed"
+          || typeof item.message !== "string"
+          || item.message.length === 0
+          || item.message.includes("\0")
+          || Buffer.byteLength(item.message, "utf8") > MAX_CODEX_DIAGNOSTIC_BYTES) {
+          throw new SafeStructuredAgentError(
+            "output-invalid",
+            "Codex structured stream contains a malformed completed error diagnostic",
+          );
+        }
+        // Codex uses completed `error` items for bounded, non-terminal client
+        // diagnostics (for example, a skill-context budget warning), including
+        // diagnostics emitted before `turn.started`. The turn outcome remains
+        // authoritative and the diagnostic content is never surfaced.
+        continue;
+      }
+      if (!turnStarted) {
         throw new SafeStructuredAgentError(
           "output-invalid",
           `Codex structured stream ${event.type} event is malformed`,
@@ -852,6 +1060,12 @@ export function parseSafeStructuredCodexJsonl(
     }
     if (event.type === "turn.completed") {
       if (!threadStarted || !turnStarted || message === undefined) {
+        if (topLevelErrorSeen && threadStarted && turnStarted) {
+          throw new SafeStructuredAgentError(
+            "process-failed",
+            "Codex structured stream reported an unsuccessful turn",
+          );
+        }
         throw new SafeStructuredAgentError(
           "output-invalid",
           "Codex structured stream has an incomplete terminal turn",
@@ -860,18 +1074,51 @@ export function parseSafeStructuredCodexJsonl(
       terminalSeen = true;
       continue;
     }
-    if (event.type === "turn.failed" || event.type === "error") {
-      throw new SafeStructuredAgentError(
-        "process-failed",
-        "Codex structured stream reported an unsuccessful turn",
-      );
+    if (event.type === "error") {
+      if (!threadStarted
+        || !turnStarted
+        || typeof event.message !== "string"
+        || event.message.length === 0
+        || event.message.includes("\0")
+        || Buffer.byteLength(event.message, "utf8") > MAX_CODEX_DIAGNOSTIC_BYTES) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Codex structured stream contains a malformed top-level error",
+        );
+      }
+      topLevelErrorSeen = true;
+      continue;
+    }
+    if (event.type === "turn.failed") {
+      const error = plainRecord(event.error);
+      if (!threadStarted || !turnStarted || !error || !boundedCodexDiagnostic(error.message)) {
+        throw new SafeStructuredAgentError(
+          "output-invalid",
+          "Codex structured stream has a malformed failed turn",
+        );
+      }
+      failedTerminalSeen = true;
+      terminalSeen = true;
+      continue;
     }
     throw new SafeStructuredAgentError(
       "output-invalid",
       `Codex structured stream contains unsupported event ${event.type}`,
     );
   }
+  if (failedTerminalSeen) {
+    throw new SafeStructuredAgentError(
+      "process-failed",
+      "Codex structured stream reported an unsuccessful turn",
+    );
+  }
   if (!terminalSeen || message === undefined) {
+    if (topLevelErrorSeen) {
+      throw new SafeStructuredAgentError(
+        "process-failed",
+        "Codex structured stream reported an unsuccessful turn",
+      );
+    }
     throw new SafeStructuredAgentError(
       "output-invalid",
       "Codex structured stream has no completed terminal turn",
@@ -1078,53 +1325,125 @@ function materializeCodexImageEvidence(
 }
 
 const UPSTREAM_UNAVAILABLE_PATTERN =
-  /\b(?:500|502|503|504)\b|internal server error|service unavailable|temporarily unavailable|overloaded/i;
+  /internal server error|service unavailable|temporarily unavailable|overloaded/i;
 const NON_RETRYABLE_REMOTE_FAILURE_PATTERN =
-  /\b(?:400|401|402|403|404|405|406|407|408|409|410|411|412|413|414|415|416|417|418|421|422|423|424|425|426|428|431|451)\b|bad request|unauthorized|forbidden|not found|unprocessable/i;
+  /bad request|invalid[_ -]?request|unauthorized|forbidden|not found|unprocessable|invalid.{0,32}(?:schema|parameter)|(?:schema|parameter).{0,32}(?:invalid|unsupported)|unsupported.{0,32}(?:feature|model|parameter|schema|tool)|does not support|not supported/i;
 const QUOTA_EXHAUSTED_PATTERN =
-  /(?:当前)?无可用\s*token\s*额度|token\s*额度(?:已)?(?:耗尽|用尽|不足)|insufficient quota|quota (?:is )?(?:exhausted|depleted)|(?:token|account|usage).{0,32}quota.{0,32}(?:exhausted|depleted|unavailable)/i;
+  /(?:当前)?无可用\s*token\s*额度|token\s*额度(?:已)?(?:耗尽|用尽|不足)|insufficient quota|quota (?:is )?(?:exhausted|depleted)|(?:token|account|usage).{0,32}quota.{0,32}(?:exhausted|depleted|unavailable)|(?:hit|reached|exceeded)(?:\s+\w+){0,3}\s+usage limit|usage limit.{0,80}(?:purchase more credits|try again)/i;
 const RATE_LIMITED_PATTERN =
-  /\b429\b|too many requests|rate[ -]?limit(?:ed|ing)?/i;
+  /too many requests|rate[ -]?limit(?:ed|ing)?/i;
 
-function remoteHttpStatus(evidence: readonly string[]): number | undefined {
+function explicitRemoteHttpStatuses(evidence: readonly string[]): readonly number[] {
+  const statuses: number[] = [];
   for (const value of evidence) {
-    const match = /\b(429|500|502|503|504)\b/.exec(value);
-    if (match) return Number(match[1]);
+    const located: Array<{ index: number; status: number }> = [];
+    const patterns = [
+      /\bhttp(?:\/[0-9.]+)?(?:\s+status(?:[_ -]?code)?\s*[:=]?)?\s+([1-5][0-9]{2})\b/gi,
+      /\b(?:response\s+)?status(?:[_ -]?code)?\s*[:=]?\s*([1-5][0-9]{2})\b/gi,
+      /\b(?:api|remote|request|response|upstream)\s+(?:error|failed)(?:\s+with)?\s*[:=]?\s*([1-5][0-9]{2})\b/gi,
+    ];
+    for (const pattern of patterns) {
+      for (const match of value.matchAll(pattern)) {
+        located.push({ index: match.index, status: Number(match[1]) });
+      }
+    }
+    located.sort((left, right) => left.index - right.index);
+    statuses.push(...located.map((item) => item.status));
   }
-  return undefined;
+  return Object.freeze(statuses);
 }
 
 function classifyRemoteFailureEvidence(
   evidence: readonly string[],
 ): SafeStructuredAgentFailureDetails | null {
-  const httpStatus = remoteHttpStatus(evidence);
-  const hasRateLimitStatus = evidence.some((value) => /\b429\b/.test(value));
+  const statuses = explicitRemoteHttpStatuses(evidence);
+  const httpStatus = statuses.at(-1);
   const joined = evidence.join("\n");
-  if (hasRateLimitStatus && QUOTA_EXHAUSTED_PATTERN.test(joined)) {
+  if ((statuses.includes(429) || httpStatus === undefined) && QUOTA_EXHAUSTED_PATTERN.test(joined)) {
     return Object.freeze({
       reasonCode: "quota-exhausted",
-      httpStatus: 429,
+      ...(statuses.includes(429) ? { httpStatus: 429 } : {}),
       retryable: false,
     });
   }
-  if (hasRateLimitStatus || RATE_LIMITED_PATTERN.test(joined)) {
+  if (httpStatus === 429 || (httpStatus === undefined && RATE_LIMITED_PATTERN.test(joined))) {
     return Object.freeze({
       reasonCode: "rate-limited",
-      ...(hasRateLimitStatus ? { httpStatus: 429 } : httpStatus === undefined ? {} : { httpStatus }),
+      ...(httpStatus === undefined ? {} : { httpStatus }),
       retryable: true,
     });
   }
-  if (UPSTREAM_UNAVAILABLE_PATTERN.test(joined)) {
+  if ((httpStatus !== undefined && httpStatus >= 500)
+    || (httpStatus === undefined && UPSTREAM_UNAVAILABLE_PATTERN.test(joined))) {
     return Object.freeze({
       reasonCode: "upstream-unavailable",
       ...(httpStatus === undefined ? {} : { httpStatus }),
       retryable: true,
     });
   }
+  if ((httpStatus !== undefined && httpStatus >= 400)
+    || (httpStatus === undefined && NON_RETRYABLE_REMOTE_FAILURE_PATTERN.test(joined))) {
+    return Object.freeze({
+      reasonCode: "request-rejected",
+      ...(httpStatus === undefined ? {} : { httpStatus }),
+      retryable: false,
+    });
+  }
   return null;
 }
 
-function classifyRemoteFailure(
+function classifyFailureEvidenceWithTerminalPrecedence(
+  evidence: readonly string[],
+): SafeStructuredAgentFailureDetails | null {
+  return classifyRemoteFailureEvidence(evidence);
+}
+
+function boundedCodexDiagnostic(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && !value.includes("\0")
+    && Buffer.byteLength(value, "utf8") <= MAX_CODEX_DIAGNOSTIC_BYTES;
+}
+
+function classifyCodexRemoteFailure(
+  stdout: string,
+  allowWebSearch: boolean,
+): SafeStructuredAgentFailureDetails | null {
+  try {
+    parseSafeStructuredCodexJsonl(stdout, { allowWebSearch });
+    return null;
+  } catch (error) {
+    if (!(error instanceof SafeStructuredAgentError) || error.code !== "process-failed") {
+      return null;
+    }
+  }
+  const evidence: string[] = [];
+  for (const rawLine of stdout.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    const event = plainRecord(decoded);
+    if (!event || typeof event.type !== "string") return null;
+    if (event.type === "error") {
+      if (boundedCodexDiagnostic(event.message)) evidence.push(event.message);
+      continue;
+    }
+    if (event.type === "turn.failed") {
+      const error = plainRecord(event.error);
+      return boundedCodexDiagnostic(error?.message)
+        ? classifyFailureEvidenceWithTerminalPrecedence([error.message])
+        : null;
+    }
+  }
+  return classifyFailureEvidenceWithTerminalPrecedence(evidence);
+}
+
+function classifyClaudeCompatibleRemoteFailure(
   stdout: string,
   stderr: string | undefined,
 ): SafeStructuredAgentFailureDetails | null {
@@ -1155,17 +1474,22 @@ function classifyRemoteFailure(
     ...(Array.isArray(terminal.errors) ? terminal.errors : []),
     terminal.result,
   ]).filter((value): value is string => typeof value === "string");
-  const classified = classifyRemoteFailureEvidence(evidence);
-  if (classified?.reasonCode === "quota-exhausted") return classified;
-  if (evidence.some((value) => (
-    NON_RETRYABLE_REMOTE_FAILURE_PATTERN.test(value)
-  ))) return null;
-  if (failedTerminals.length > 0) return classified;
+  if (failedTerminals.length > 0) {
+    return classifyFailureEvidenceWithTerminalPrecedence(evidence);
+  }
   const diagnosticEvidence = [diagnosticLines.join("\n"), stderr ?? ""];
-  const diagnosticClassification = classifyRemoteFailureEvidence(diagnosticEvidence);
-  if (diagnosticClassification?.reasonCode === "quota-exhausted") return diagnosticClassification;
-  if (diagnosticEvidence.some((value) => NON_RETRYABLE_REMOTE_FAILURE_PATTERN.test(value))) return null;
-  return diagnosticClassification;
+  return classifyFailureEvidenceWithTerminalPrecedence(diagnosticEvidence);
+}
+
+function classifyRemoteFailure(
+  providerId: string,
+  stdout: string,
+  stderr: string | undefined,
+  allowWebSearch: boolean,
+): SafeStructuredAgentFailureDetails | null {
+  return providerId === "codex"
+    ? classifyCodexRemoteFailure(stdout, allowWebSearch)
+    : classifyClaudeCompatibleRemoteFailure(stdout, stderr);
 }
 
 function remoteFailureError(details: SafeStructuredAgentFailureDetails): SafeStructuredAgentError {
@@ -1188,7 +1512,7 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Structured Agent turn aborted", "AbortError");
 }
 
-async function waitForCodeBuddyRetry(
+async function waitForRemoteRetry(
   signal: AbortSignal,
   deadlineMs: number,
   attempt: number,
@@ -1244,6 +1568,11 @@ export async function runSafeStructuredAgent(
   if (request.allowWebSearch !== undefined && typeof request.allowWebSearch !== "boolean") {
     throw new SafeStructuredAgentError("output-invalid", "Structured Agent Web Search capability flag is invalid");
   }
+  if (request.remoteRetryMode !== undefined
+    && request.remoteRetryMode !== "transport-owned"
+    && request.remoteRetryMode !== "caller-owned") {
+    throw new SafeStructuredAgentError("output-invalid", "Structured Agent remote retry ownership is invalid");
+  }
   if (request.allowWebSearch !== undefined && providerId !== "codex") {
     throw new SafeStructuredAgentError(
       "provider-unavailable",
@@ -1276,6 +1605,16 @@ export async function runSafeStructuredAgent(
       `${provider.label} structured planning does not support a final-output schema`,
     );
   }
+  if (request.outputSchema !== undefined) {
+    const outputSchema = plainRecord(request.outputSchema);
+    if (outputSchema === undefined) {
+      throw new SafeStructuredAgentError(
+        "output-invalid",
+        "Codex final-output schema must be a plain JSON object",
+      );
+    }
+    validateCodexStrictOutputSchema(outputSchema);
+  }
   let structuredCwd = request.cwd;
   if (providerId !== "claude" && providerId !== "codebuddy") {
     structuredCwd = exactEmptyStructuredScratch(request.cwd);
@@ -1285,12 +1624,6 @@ export async function runSafeStructuredAgent(
     : [];
   let outputSchemaPath: string | undefined;
   if (request.outputSchema !== undefined) {
-    if (!plainRecord(request.outputSchema)) {
-      throw new SafeStructuredAgentError(
-        "output-invalid",
-        "Codex final-output schema must be a plain JSON object",
-      );
-    }
     let serializedSchema: string | undefined;
     try {
       serializedSchema = JSON.stringify(request.outputSchema);
@@ -1387,7 +1720,10 @@ export async function runSafeStructuredAgent(
     killDelayMs: 500,
     inheritEnvironment: false,
   });
-  const attempts = providerId === "codebuddy" ? 3 : 1;
+  const attempts = (providerId === "codebuddy" || providerId === "codex")
+      && request.remoteRetryMode !== "caller-owned"
+    ? 3
+    : 1;
   const deadlineMs = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const attemptTimeoutMs = attempt === 0 ? timeoutMs : deadlineMs - Date.now();
@@ -1417,10 +1753,15 @@ export async function runSafeStructuredAgent(
       throw new SafeStructuredAgentError("process-failed", "Structured Agent process failed", error);
     }
     if (request.signal.aborted) throw abortReason(request.signal);
-    const remoteFailure = classifyRemoteFailure(result.stdout, result.stderr);
+    const remoteFailure = classifyRemoteFailure(
+      providerId,
+      result.stdout,
+      result.stderr,
+      request.allowWebSearch === true,
+    );
     if (!Number.isSafeInteger(result.exitCode) || result.exitCode !== 0) {
       if (attempt + 1 < attempts && remoteFailure?.retryable === true) {
-        await waitForCodeBuddyRetry(request.signal, deadlineMs, attempt);
+        await waitForRemoteRetry(request.signal, deadlineMs, attempt);
         continue;
       }
       if (remoteFailure !== null) throw remoteFailureError(remoteFailure);
@@ -1449,7 +1790,7 @@ export async function runSafeStructuredAgent(
     } catch (error) {
       if (request.signal.aborted) throw abortReason(request.signal);
       if (attempt + 1 < attempts && remoteFailure?.retryable === true) {
-        await waitForCodeBuddyRetry(request.signal, deadlineMs, attempt);
+        await waitForRemoteRetry(request.signal, deadlineMs, attempt);
         continue;
       }
       if (remoteFailure !== null) throw remoteFailureError(remoteFailure);

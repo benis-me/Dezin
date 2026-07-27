@@ -401,7 +401,7 @@ test("production Generation bootstrap shares the complete real leaf graph with r
   );
 });
 
-test("same-Plan generated Research cannot become an Artifact input before human direction selection", async (t) => {
+test("same-Plan generated Research may become an Artifact input whose immutable instructions select directions after publication", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dezin-research-selection-gate-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
@@ -442,28 +442,25 @@ test("same-Plan generated Research cannot become an Artifact input before human 
     rationale: "Attempt to consume generated Research before a human selects one immutable direction",
     assumptions: [],
   });
-  const before = {
-    workspace: store.workspace.getWorkspace(project.id),
-    graph: store.workspace.getGraph(project.id),
-    snapshots: store.workspace.listSnapshots(project.id),
-    artifacts: store.workspace.listArtifacts(project.id),
-    resources: store.workspace.listResources(project.id),
-  };
-
-  assert.throws(
-    () => store.workspace.approveProposalForProject(project.id, proposal.id, "generate"),
-    /cannot consume Research generated in the same Plan; publish the Research Revision, choose one exact direction, then approve a successor Artifact Plan/,
+  const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(
+    project.id,
+    approved.plan.id,
   );
-
-  assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
-  assert.deepEqual(store.workspace.getWorkspace(project.id), before.workspace);
-  assert.deepEqual(store.workspace.getGraph(project.id), before.graph);
-  assert.deepEqual(store.workspace.listSnapshots(project.id), before.snapshots);
-  assert.deepEqual(store.workspace.listArtifacts(project.id), before.artifacts);
-  assert.deepEqual(store.workspace.listResources(project.id), before.resources);
-  assert.deepEqual(store.workspace.listGenerationPlans(project.id), []);
-  assert.equal(Number((store.db.prepare("SELECT COUNT(*) AS count FROM generation_tasks")
-    .get() as { count: number }).count), 0);
+  const researchTask = compiled.tasks.find((task) =>
+    task.kind === "resource" && task.target.id === "checkout-research");
+  const artifactTask = compiled.tasks.find((task) =>
+    task.kind === "page" && task.target.id === "checkout-page");
+  assert.ok(researchTask);
+  assert.ok(artifactTask);
+  assert.equal(
+    (artifactTask.payload.artifactPlan as Record<string, unknown>).researchDirectionSelection,
+    undefined,
+  );
+  assert.ok(compiled.dependencies.some((dependency) =>
+    dependency.taskId === artifactTask.id
+    && dependency.dependencyTaskId === researchTask.id));
 });
 
 test("production bootstrap lets a new selected Plan claim an empty Page shell from one exact existing Research Revision", async (t) => {

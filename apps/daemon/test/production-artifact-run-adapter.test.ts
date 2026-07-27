@@ -8,6 +8,7 @@ import test from "node:test";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type {
   GenerationTaskAttemptClaim,
+  QualityFinding,
   Settings,
 } from "../../../packages/core/src/index.ts";
 import type { ContextPack } from "../src/context/context-types.ts";
@@ -94,7 +95,10 @@ function contextPack(): ContextPack {
   };
 }
 
-function claim(source: { commitHash: string; treeHash: string }): GenerationTaskAttemptClaim {
+function claim(
+  source: { commitHash: string; treeHash: string },
+  limits: { maxAgentTurns?: number; maxRepairRounds?: number } = {},
+): GenerationTaskAttemptClaim {
   const payload = {
     version: 2,
     artifactPlan: {
@@ -149,8 +153,8 @@ function claim(source: { commitHash: string; treeHash: string }): GenerationTask
       },
       resourceLimits: {
         timeoutMs: 60_000,
-        maxAgentTurns: 1,
-        maxRepairRounds: 0,
+        maxAgentTurns: limits.maxAgentTurns ?? 1,
+        maxRepairRounds: limits.maxRepairRounds ?? 0,
         maxOutputBytes: 1024 * 1024,
         capacityClasses: ["agent", "render-qa"],
       },
@@ -225,9 +229,14 @@ const settings = {
   model: "fixture-model",
   visualQaAgentCommand: "",
   visualQaModel: "",
+  autoImproveEnabled: true,
+  autoImproveMaxRounds: 8,
 } as Settings;
 
-function qualityDependencies(calls: string[]): ProductionStandardArtifactQualityEvaluatorDependencies {
+function qualityDependencies(
+  calls: string[],
+  lintFindings: QualityFinding[] = [],
+): ProductionStandardArtifactQualityEvaluatorDependencies {
   return {
     async inspectCandidate(input) {
       calls.push("inspect-candidate");
@@ -247,7 +256,7 @@ function qualityDependencies(calls: string[]): ProductionStandardArtifactQuality
       calls.push("lint-surface");
       return "export const page = true;";
     },
-    lint() { return []; },
+    lint() { return structuredClone(lintFindings); },
     async visualQa(input) {
       calls.push("visual-runtime");
       assert.equal(input.runtimeOnly, true);
@@ -337,6 +346,127 @@ test("production Artifact factory runs the exact isolated Standard leaf through 
     true,
     "Attempt ref must retain the exact candidate after disposable worktree cleanup",
   );
+});
+
+test("production Artifact repair rounds use the frozen setting below the compiled hard ceiling", async (t) => {
+  const module = await productionModule();
+  assert.equal(typeof module.createProductionArtifactRunExecutor, "function");
+  if (typeof module.createProductionArtifactRunExecutor !== "function") return;
+  const repo = repository();
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-production-artifact-repair-policy-"));
+  t.after(() => {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  let turn = 0;
+  const blockingContrast: QualityFinding = {
+    severity: "P1",
+    id: "low-contrast",
+    message: "Text is below the WCAG AA floor.",
+    fix: "Darken the text.",
+    selector: ".program-chip[data-tone=\"danger\"]",
+  };
+  const executor = module.createProductionArtifactRunExecutor({
+    contextPacks: { get: () => contextPack() },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => "workspaces/raw-workspace-1/artifacts/raw-artifact-home",
+    agent: {
+      createRunner() {
+        return {
+          id: "production-agent-repair-policy",
+          async runTurn(input) {
+            turn += 1;
+            writeFileSync(
+              join(input.projectDir, "index.html"),
+              `<main data-design-node-id="hero">Repair candidate ${turn}</main>\n`,
+            );
+            return { text: `candidate ${turn}`, artifactHtml: "" };
+          },
+        };
+      },
+    },
+    quality: () => ({
+      settings: {
+        ...settings,
+        autoImproveEnabled: true,
+        autoImproveMaxRounds: 2,
+      },
+      dataDir,
+      agentCommand: "codex",
+      dependencies: qualityDependencies([], [blockingContrast]),
+    }),
+    baseSystemPrompt: () => "You are Dezin's production design Agent.",
+  });
+
+  const result = await executor.execute(
+    claim(repo, { maxAgentTurns: 9, maxRepairRounds: 8 }),
+    new AbortController().signal,
+  );
+  const evidence = result.evidence as { versions?: unknown[] };
+  assert.equal(evidence.versions?.length, 3,
+    "one initial candidate plus exactly two frozen auto-improvement rounds must be evaluated");
+  assert.equal(turn, 3);
+});
+
+test("production Artifact repair rounds stop after the first candidate when frozen auto-improve is disabled", async (t) => {
+  const module = await productionModule();
+  assert.equal(typeof module.createProductionArtifactRunExecutor, "function");
+  if (typeof module.createProductionArtifactRunExecutor !== "function") return;
+  const repo = repository();
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-production-artifact-repair-disabled-"));
+  t.after(() => {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  let turn = 0;
+  const blockingContrast: QualityFinding = {
+    severity: "P1",
+    id: "low-contrast",
+    message: "Text is below the WCAG AA floor.",
+    fix: "Darken the text.",
+    selector: ".program-chip[data-tone=\"danger\"]",
+  };
+  const executor = module.createProductionArtifactRunExecutor({
+    contextPacks: { get: () => contextPack() },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => "workspaces/raw-workspace-1/artifacts/raw-artifact-home",
+    agent: {
+      createRunner() {
+        return {
+          id: "production-agent-repair-disabled",
+          async runTurn(input) {
+            turn += 1;
+            writeFileSync(
+              join(input.projectDir, "index.html"),
+              `<main data-design-node-id="hero">Candidate ${turn}</main>\n`,
+            );
+            return { text: `candidate ${turn}`, artifactHtml: "" };
+          },
+        };
+      },
+    },
+    quality: () => ({
+      settings: {
+        ...settings,
+        autoImproveEnabled: false,
+        autoImproveMaxRounds: 8,
+      },
+      dataDir,
+      agentCommand: "codex",
+      dependencies: qualityDependencies([], [blockingContrast]),
+    }),
+    baseSystemPrompt: () => "You are Dezin's production design Agent.",
+  });
+
+  const result = await executor.execute(
+    claim(repo, { maxAgentTurns: 9, maxRepairRounds: 8 }),
+    new AbortController().signal,
+  );
+  const evidence = result.evidence as { versions?: unknown[] };
+  assert.equal(evidence.versions?.length, 1);
+  assert.equal(turn, 1);
 });
 
 test("production Artifact factory fails closed when the Agent adapter is unavailable", async () => {

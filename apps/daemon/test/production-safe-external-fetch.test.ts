@@ -62,6 +62,7 @@ test("production external fetch rejects private and mixed DNS answers before ope
       { address: "10.0.0.8", family: 4 as const },
     ],
     [{ address: "::1", family: 6 as const }],
+    [{ address: "2001:100::1", family: 6 as const }],
   ]) {
     let requests = 0;
     const fetchExternal = createProductionSafeBoundedExternalFetcher({

@@ -139,6 +139,10 @@ export interface ComputedElement {
   text: string;
   rect: ComputedRect;
   style: ComputedStyle;
+  /** Characters owned by this element's direct text nodes, excluding descendant copy. */
+  directTextLength?: number;
+  /** Direct element-child count, used to distinguish aggregate wrappers from running text. */
+  childElementCount?: number;
 }
 
 /** Optional context that tightens some checks (design-system drift, provider tells). */
@@ -197,8 +201,8 @@ function checkLowContrast(el: ComputedElement): Finding[] {
     {
       severity,
       id: "low-contrast",
-      message: `Text in ${el.selector} has ~${ratio.toFixed(1)}:1 contrast against its background — below the WCAG AA ${required}:1 floor.`,
-      fix: `Darken the text or lighten the surface to reach at least ${required}:1 (bind the design system's foreground / muted tokens).`,
+      message: `Text in ${el.selector} has ${ratio.toFixed(2)}:1 contrast (foreground ${el.style.color}; background ${el.style.effectiveBg}) — below the WCAG AA ${required}:1 floor.`,
+      fix: `Adjust the computed rule for ${el.selector}: darken its text or lighten its surface to reach at least ${required}:1 (bind the design system's foreground / muted tokens).`,
       selector: el.selector,
     },
   ];
@@ -269,6 +273,11 @@ function checkSkippedHeading(elements: ComputedElement[]): Finding[] {
 /** line-length — running text set wider than the reading-measure ceiling. */
 function checkLineLength(el: ComputedElement): Finding[] {
   if (!isTextBearing(el) || el.text.trim().length < 80) return [];
+  // `textContent` on a page/root wrapper aggregates every descendant. Its box
+  // is not a line measure, so treating it as one paragraph creates noisy
+  // 100–200ch findings that send repair rounds after the wrong selector.
+  if ((el.directTextLength ?? el.text.trim().length) === 0
+    && (el.childElementCount ?? 0) > 0) return [];
   if (/^h[1-6]$/.test(el.tag)) return []; // headings legitimately span wide
   const fs = el.style.fontSizePx;
   if (fs === undefined || fs > 24) return [];

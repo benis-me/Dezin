@@ -303,12 +303,37 @@ function systemPrompt(
   ].join("\n\n");
 }
 
+function prototypeRequirementMessages(payload: ArtifactGenerationTaskPayloadV2): string[] {
+  const requirements = payload.artifactPlan.prototypeRequirements;
+  if (requirements === undefined) return [];
+  return [
+    ...requirements.outgoing.map((requirement) => (
+      requirement.trigger === "submit"
+        ? `Prototype source marker contract for edge ${requirement.edgeId}: place the literal attribute data-dezin-node-id="${requirement.sourceMarkerId}" exactly once on a real interactive DOM element. Because the trigger is submit, it must be a real submit control inside a real form (<form>) path; a static container, hidden element, comment, data object, or decorative mock does not satisfy the contract.`
+        : `Prototype source marker contract for edge ${requirement.edgeId}: place the literal attribute data-dezin-node-id="${requirement.sourceMarkerId}" exactly once on a real interactive DOM element that already represents the intended click action; a static container, hidden element, comment, data object, or decorative mock does not satisfy the contract.`
+    )),
+    ...requirements.incoming.map((requirement) => (
+      `Prototype target-state contract for edge ${requirement.edgeId}: implement target state "${requirement.targetState}" as a real renderable state of this Artifact. Do not add the source marker ${requirement.sourceMarkerId} to the target; it belongs only to source Artifact ${requirement.sourceArtifactId}.`
+    )),
+    ...(requirements.outgoing.length === 0 ? [] : [
+      "Prototype authority boundary: you must not invent an href, router transition, route, navigation target, or runtime binding to satisfy a marker. Do not add an onClick or submit handler solely for this contract, and you must not synthesize a prototype binding. The daemon will prove the marker against the immutable Revision and bind the reviewed edge later.",
+    ]),
+  ];
+}
+
 function initialMessage(
   claim: GenerationTaskAttemptClaim,
   payload: ArtifactGenerationTaskPayloadV2,
 ): string {
   return [
     `Generate the approved ${claim.task.kind} Artifact now. Stay faithful to the frozen rationale and target instructions; do not broaden the Task.`,
+    ...(claim.task.kind === "component"
+      ? [
+          "Component master contract: Build the component master as the actual reusable component, including all required states across approved Frames and all required visual states from the frozen target instructions.",
+          "Do not build a documentation page, spec sheet, anatomy explainer, implementation notes, or component gallery in place of the component master.",
+        ]
+      : []),
+    ...prototypeRequirementMessages(payload),
     JSON.stringify({
       protocol: "dezin.artifact-task-prompt.v1",
       taskId: claim.task.id,
@@ -571,6 +596,9 @@ export class DefaultArtifactRunPreparation implements ArtifactRunPreparationPort
         sourceTreeHash: attempt.sourceTreeHash,
         systemPrompt: systemPrompt(basePrompt, pack, captureReference),
         initialMessage: initialMessage(claim, payload),
+        ...(evaluator.maxRepairRounds === undefined
+          ? {}
+          : { maxRepairRounds: evaluator.maxRepairRounds }),
         history: [],
         env,
         ...(captureFence === undefined ? {} : { sharinganCapture: captureFence }),

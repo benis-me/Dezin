@@ -289,6 +289,30 @@ export function ProposalReviewPanel({
     && proposal.generation.artifactPlans.length > 0
     ? proposal.generation
     : null;
+  const workspaceGeneration = proposal?.generation.kind === "workspace-generation"
+    ? proposal.generation
+    : null;
+  const generatedResources = workspaceGeneration?.resourceOperations.filter(
+    (operation) => operation.operation !== "reuse",
+  ) ?? [];
+  const generationTargetCounts = workspaceGeneration === null ? [] : [
+    {
+      label: "Page",
+      count: workspaceGeneration.artifactPlans.filter((plan) => plan.kind === "page").length,
+    },
+    {
+      label: "Component",
+      count: workspaceGeneration.artifactPlans.filter((plan) => plan.kind === "component").length,
+    },
+    { label: "Resource", count: generatedResources.length },
+  ].filter(({ count }) => count > 0);
+  const generationTargetCount = generationTargetCounts.reduce((sum, target) => sum + target.count, 0);
+  const newRevisionCount = workspaceGeneration === null ? 0
+    : workspaceGeneration.artifactPlans.filter((plan) => plan.operation === "create").length
+      + generatedResources.filter((operation) => operation.operation === "create").length;
+  const revisedRevisionCount = workspaceGeneration === null ? 0
+    : workspaceGeneration.artifactPlans.filter((plan) => plan.operation === "revise").length
+      + generatedResources.filter((operation) => operation.operation === "revise").length;
 
   useEffect(() => {
     const nextProposalId = proposal?.id ?? null;
@@ -348,6 +372,7 @@ export function ProposalReviewPanel({
         <StudioHeaderCopy
           title="Workspace proposal"
           subtitle="Review queue"
+          titleId="workspace-proposal-review-title"
           headingLevel={2}
           headingRef={headingRef}
           headingTabIndex={-1}
@@ -391,20 +416,31 @@ export function ProposalReviewPanel({
       ? {
           label: "Proposal approved",
           message: review.plan
-            ? `Generation plan ${review.plan.id} is approved for compilation.`
+            ? "Generation is approved and ready to build."
             : "Workspace structure was applied.",
+          technicalTitle: review.plan ? `Build plan ${review.plan.id}` : undefined,
           Icon: Check,
         }
       : review.status === "rejected"
-        ? { label: "Proposal rejected", message: "No workspace changes were applied.", Icon: X }
-        : { label: "Proposal superseded", message: "A newer proposal replaced this review.", Icon: GitCompareArrows };
+        ? {
+            label: "Proposal rejected",
+            message: "No workspace changes were applied.",
+            technicalTitle: undefined,
+            Icon: X,
+          }
+        : {
+            label: "Proposal superseded",
+            message: "A newer proposal replaced this review.",
+            technicalTitle: undefined,
+            Icon: GitCompareArrows,
+          };
     return (
       <section className="dezin-proposal-review" role="region" aria-label="Proposal review">
         {header}
         <div className="dezin-proposal-review__result" data-result-state={review.status} role="status" aria-live="polite">
           <result.Icon size={16} aria-hidden />
           <h2>{result.label}</h2>
-          <p>{result.message}</p>
+          <p title={result.technicalTitle}>{result.message}</p>
           <Button type="button" variant="outline" size="sm" onClick={onClose}>
             {review.status === "approved" && review.plan ? "View build plan" : "Close review"}
           </Button>
@@ -566,9 +602,38 @@ export function ProposalReviewPanel({
         </StudioInspectorSection>
       ) : null}
 
+      {generationTargetCount > 0 ? (
+        <StudioInspectorSection
+          className="dezin-proposal-review__scope"
+          aria-label="Generation targets"
+          heading="Build scope"
+          actions={<StudioStatusBadge>{generationTargetCount}</StudioStatusBadge>}
+          contentClassName="dezin-proposal-review__scope-content"
+        >
+          <div className="dezin-proposal-review__scope-kinds" aria-label="Generation target counts">
+            {generationTargetCounts.map(({ label, count }) => (
+              <span key={label}>
+                <strong>{count}</strong>
+                <small>{label}{count === 1 ? "" : "s"}</small>
+              </span>
+            ))}
+          </div>
+          <p>
+            {[
+              newRevisionCount > 0
+                ? `${newRevisionCount} new revision${newRevisionCount === 1 ? "" : "s"}`
+                : null,
+              revisedRevisionCount > 0
+                ? `${revisedRevisionCount} updated revision${revisedRevisionCount === 1 ? "" : "s"}`
+                : null,
+            ].filter(Boolean).join(" · ")}
+          </p>
+        </StudioInspectorSection>
+      ) : null}
+
       <StudioInspectorSection
         className="dezin-proposal-review__changes"
-        heading="Proposed changes"
+        heading="Structure changes"
         actions={<StudioStatusBadge>{reviewItems.length}</StudioStatusBadge>}
         contentClassName="dezin-proposal-review__changes-content"
       >

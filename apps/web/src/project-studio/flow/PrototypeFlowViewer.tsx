@@ -30,6 +30,7 @@ import {
 } from "../../components/ui/index.ts";
 import { buildPreviewFrameCommand, PREVIEW_FRAME_ACK_TIMEOUT_MS } from "../artifact/usePreviewBridge.ts";
 import { useArtifactPreview } from "../artifact/useArtifactPreview.ts";
+import { selectFrozenPrototypeRenderFrame } from "../../../../../packages/core/src/prototype-relation.ts";
 import {
   buildPrototypeModeCommand,
   parsePrototypeActivation,
@@ -548,10 +549,21 @@ function PrototypeFlowViewerSession({
   const currentFrame = currentLocation.frameId === null
     ? null
     : currentPage.frames?.find((frame) => frame.id === currentLocation.frameId) ?? null;
-  const health = useMemo(
+  const pageHealth = useMemo(
     () => prototypeFlowHealth(session, currentLocation.artifactId),
     [currentLocation.artifactId, session],
   );
+  const snapshotHealth = useMemo(() => {
+    const sourceArtifactIds = new Set(session.prototypeEndpoints.map((endpoint) => endpoint.artifactId));
+    return [...sourceArtifactIds].reduce((totals, artifactId) => {
+      const health = prototypeFlowHealth(session, artifactId);
+      return {
+        interactive: totals.interactive + health.interactive,
+        planned: totals.planned + health.planned,
+        broken: totals.broken + health.broken,
+      };
+    }, { interactive: 0, planned: 0, broken: 0 });
+  }, [session]);
   const commandError = useMemo(() => {
     try {
       buildPrototypeModeCommand(session, currentLocation.artifactId);
@@ -807,9 +819,10 @@ function PrototypeFlowViewerSession({
               disabled={pending !== null}
               onValueChange={(artifactId) => {
                 const targetPage = session.pages.find((page) => page.artifactId === artifactId);
-                const targetFrame = targetPage?.frames?.find((frame) => frame.id === currentFrame?.id)
-                  ?? targetPage?.frames?.[0]
-                  ?? null;
+                const targetFrame = selectFrozenPrototypeRenderFrame(targetPage?.frames ?? null, {
+                  currentFrame,
+                  targetState: null,
+                });
                 const location = { artifactId, stateKey: null, frameId: targetFrame?.id ?? null };
                 beginNavigation({
                   location,
@@ -929,16 +942,21 @@ function PrototypeFlowViewerSession({
           <summary>
             <div>
               <h2>Flow health</h2>
-              <p>{health.interactive} live · {health.planned} planned · {health.broken} broken</p>
+              <p>Snapshot · {snapshotHealth.interactive} live · {snapshotHealth.planned} planned · {snapshotHealth.broken} broken</p>
             </div>
-            <span data-state={health.broken > 0 ? "attention" : health.planned > 0 ? "planned" : "healthy"} />
+            <span data-state={snapshotHealth.broken > 0 ? "attention" : snapshotHealth.planned > 0 ? "planned" : "healthy"} />
           </summary>
           <div className="prototype-flow-viewer__health-content">
-            {health.items.length === 0 ? (
+            <div className="prototype-flow-viewer__page-health" aria-label="Current Page flow health">
+              <span>Current Page</span>
+              <strong>{currentPage.name}</strong>
+              <p>{pageHealth.interactive} live · {pageHealth.planned} planned · {pageHealth.broken} broken</p>
+            </div>
+            {pageHealth.items.length === 0 ? (
               <p className="prototype-flow-viewer__empty-health">No outgoing flow connections from this Page.</p>
             ) : (
               <ol>
-                {health.items.map((item) => (
+                {pageHealth.items.map((item) => (
                   <li key={item.edgeId} data-status={item.status}>
                     <span aria-hidden />
                     <div>

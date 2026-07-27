@@ -4,7 +4,9 @@ import test from "node:test";
 
 import {
   GenerationTaskLeaseFenceError,
+  normalizeGenerationTaskIntent,
   Store,
+  type GenerationTask,
   type GenerationTaskAttempt,
   type GenerationTaskAttemptClaim,
   type GenerationTaskAttemptLease,
@@ -200,6 +202,173 @@ function createClaimedPageFixture(label: string) {
   };
 }
 
+function createClaimedResourceFixture(
+  label: string,
+  kind: "research" | "moodboard",
+) {
+  const control = controlledClock(`task-failure-resource-${kind}-${label}`);
+  const store = new Store(":memory:", control.clock);
+  const project = store.createProject({ name: `${kind} task failure ${label}`, mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind,
+    title: `${kind} ${label}`,
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const baseRevision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    created.resource.id,
+    {
+      revisionId: `${kind}-failure-base-${label}`,
+      parentRevisionId: null,
+      manifestPath: `resource-revisions/${kind}-failure-${label}/base/manifest.json`,
+      summary: `Initial ${kind} ${label}`,
+      metadata: { phase: "base", label },
+      checksum: checksum(`${kind}-failure-base-${label}`),
+      provenance: { source: "generation-task-failure-store-test" },
+    },
+  );
+  const baseSnapshot = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    created.resource.id,
+    baseRevision.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: `Publish ${kind} failure fixture ${label}`,
+    },
+  );
+  const workspace = store.workspace.getWorkspace(project.id)!;
+  const layout = store.workspace.getLayout(project.id);
+  const proposal = store.workspace.createProposal({
+    projectId: project.id,
+    kind: "workspace-generation",
+    baseGraphRevision: workspace.graphRevision,
+    baseSnapshotId: workspace.activeSnapshotId,
+    layoutId: layout.layoutId,
+    baseLayoutChecksum: layout.checksum,
+    operations: [],
+    layoutOperations: [],
+    generation: {
+      ...emptyGeneration(),
+      resourceOperations: [{
+        operation: "revise",
+        nodeId: created.node.id,
+        resourceId: created.resource.id,
+        kind,
+        title: created.resource.title,
+        revisionPolicy: { kind: "generate" },
+      }],
+    },
+    rationale: `Exercise terminal ${kind} quality rejection ${label}`,
+    assumptions: [],
+  });
+  const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  const task = compiled.tasks.find((candidate) => candidate.kind === "resource");
+  const validation = compiled.tasks.find((candidate) => candidate.kind === "prototype-validation");
+  const checkpoint = compiled.tasks.find((candidate) => candidate.kind === "checkpoint");
+  assert.ok(task);
+  assert.ok(validation);
+  assert.ok(checkpoint);
+  assert.deepEqual(task.payload.adapter, {
+    id: `dezin.resource-adapter.${kind}`,
+    version: 1,
+    kind,
+  });
+  assert.deepEqual(validation.dependencyIds, [task.id]);
+  assert.deepEqual(checkpoint.dependencyIds, [validation.id]);
+
+  const observation = store.workspace.observeGenerationTaskMaterializationForProject(
+    project.id,
+    compiled.plan.id,
+    task.id,
+  );
+  assert.equal(observation.baseRevisionId, baseRevision.id);
+  assert.equal(observation.expectedSnapshotId, baseSnapshot.id);
+  const kernel = store.workspace.getKernelRevision(observation.kernelRevisionId);
+  assert.ok(kernel);
+  const contextPack = store.workspace.persistContextPack({
+    id: `${kind}-failure-context-${label}`,
+    workspaceId: workspace.id,
+    graphRevision: workspace.graphRevision,
+    target: { type: "resource", id: created.resource.id },
+    intent: "generate",
+    messageChecksum: checksum(`${kind}-failure-message-${label}`),
+    items: [
+      {
+        ref: { kind: "kernel", id: kernel.id, revisionId: kernel.id },
+        resolvedKind: "kernel-revision",
+        kernelRevisionId: kernel.id,
+        checksum: kernel.checksum,
+        reason: "design-kernel",
+        trustLevel: "system",
+        boundary: {},
+        tokenEstimate: 1,
+        provenance: {},
+        provided: true,
+      },
+      {
+        ref: {
+          kind: "resource",
+          id: created.resource.id,
+          resourceKind: kind,
+          revisionId: baseRevision.id,
+        },
+        resolvedKind: "resource-revision",
+        resourceRevisionId: baseRevision.id,
+        checksum: baseRevision.checksum,
+        reason: "target-base",
+        trustLevel: "trusted",
+        boundary: {},
+        tokenEstimate: 1,
+        provenance: {},
+        provided: true,
+      },
+    ],
+    omissions: [],
+    tokenEstimate: 2,
+    manifestPath: `context-packs/${kind}-failure-${label}.json`,
+    hash: checksum(`${kind}-failure-context-${label}`),
+  });
+  const attempt = store.workspace.createGenerationTaskAttemptForProject(
+    project.id,
+    compiled.plan.id,
+    {
+      ...observation,
+      contextPackId: contextPack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
+      retryContextPolicy: "same-context",
+      executionMode: "full",
+    },
+  );
+  const claim = store.workspace.tryClaimGenerationTaskAttempt({
+    taskId: task.id,
+    attempt: attempt.attempt,
+    ownerId: `${kind}-failure-worker-${label}`,
+    now: 100_000,
+    leaseMs: 30_000,
+  });
+  assert.ok(claim);
+  control.set(100_001);
+  return {
+    control,
+    store,
+    project,
+    workspace,
+    plan: compiled.plan,
+    task,
+    validation,
+    checkpoint,
+    attempt,
+    claim,
+  };
+}
+
 function failureInput(
   claim: GenerationTaskAttemptClaim,
   failureClass: GenerationTaskFailureClass,
@@ -263,7 +432,47 @@ function taskRow(store: Store, taskId: string) {
   return { ...row };
 }
 
-function attemptFor(store: Store, fixture: ReturnType<typeof createClaimedPageFixture>, attempt: number) {
+function replaceGenerationTaskPayloadBypassingImmutableGuard(
+  store: Store,
+  task: GenerationTask,
+  payload: Record<string, unknown>,
+): void {
+  const intent = normalizeGenerationTaskIntent({
+    id: task.id,
+    ordinal: task.ordinal,
+    workspaceId: task.workspaceId,
+    planId: task.planId,
+    kind: task.kind,
+    target: task.target,
+    dependencyIds: task.dependencyIds,
+    payload,
+    capabilities: task.capabilities,
+    qaProfile: task.qaProfile,
+    resourceLimits: task.resourceLimits,
+  });
+  store.db.exec("DROP TRIGGER generation_task_intent_update_immutable");
+  const updated = store.db.prepare(
+    `UPDATE generation_tasks
+     SET payload_json = ?, intent_hash = ?, idempotency_key = ?
+     WHERE id = ?`,
+  ).run(
+    JSON.stringify(intent.payload),
+    intent.intentHash,
+    intent.idempotencyKey,
+    task.id,
+  );
+  assert.equal(Number(updated.changes), 1);
+}
+
+function attemptFor(
+  store: Store,
+  fixture: {
+    project: { id: string };
+    plan: { id: string };
+    task: { id: string };
+  },
+  attempt: number,
+) {
   const value = store.workspace.getGenerationTaskAttemptForProject(
     fixture.project.id,
     fixture.plan.id,
@@ -450,6 +659,306 @@ test("retryable provider failures append exact successors with 1s, 4s, and 16s b
       assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
       assert.equal(fixture.store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id).status, "failed");
     }
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a quality-gate QA failure gets one bounded same-input retry before blocking descendants", () => {
+  const fixture = createClaimedPageFixture("quality-gate-retry");
+  const validationStatusBeforeRetry = taskRow(fixture.store, fixture.validation.id).status;
+  const checkpointStatusBeforeRetry = taskRow(fixture.store, fixture.checkpoint.id).status;
+  const error = {
+    name: "GenerationTaskQualityGateError",
+    code: "generation-task-quality-gate",
+    message: "Artifact quality contains an active blocking P1 contrast finding",
+  };
+  try {
+    const first = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+    assert.equal(first.status, "retry-wait");
+    assert.equal(first.nextEligibleAt, 101_001);
+    assert.equal(first.successorAttempt?.attempt, 2);
+    assert.equal(first.successorAttempt?.attemptOrigin, "same-input-retry");
+    assert.equal(first.successorAttempt?.automaticRetryIndex, 1);
+    assert.deepEqual(retryInput(first.successorAttempt!), retryInput(fixture.attempt));
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "retry-wait");
+    assert.equal(taskRow(fixture.store, fixture.validation.id).status, validationStatusBeforeRetry);
+    assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, checkpointStatusBeforeRetry);
+
+    fixture.control.set(101_001);
+    const retryClaim = claimAttempt(fixture, first.successorAttempt!, 101_001);
+    fixture.control.set(101_002);
+    const terminal = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(retryClaim, "qa", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.successorAttempt, null);
+    assert.equal(terminal.nextEligibleAt, null);
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "failed");
+    assert.equal(taskRow(fixture.store, fixture.validation.id).status, "blocked");
+    assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
+    const events = fixture.store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    );
+    const retryEvents = events.filter(
+      (event) => event.type === "task-retry-wait" && event.taskId === fixture.task.id,
+    );
+    const failedEvents = events.filter(
+      (event) => event.type === "task-failed" && event.taskId === fixture.task.id,
+    );
+    assert.equal(retryEvents.length, 1);
+    assert.equal(retryEvents[0]?.payload.failureClass, "qa");
+    assert.equal(failedEvents.length, 1);
+    assert.equal(failedEvents[0]?.payload.retryExhausted, true);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a final Research quality-gate rejection terminalizes its first Attempt without a Core successor", () => {
+  const fixture = createClaimedResourceFixture("decision-grade-terminal", "research");
+  const error = {
+    name: "GenerationTaskQualityGateError",
+    code: "generation-task-quality-gate",
+    message: "Research decision-grade gate rejected this candidate: insufficient-verified-web-sources",
+    details: {
+      protocol: "dezin.research-decision-grade-rejection.v1",
+      criteria: {
+        minimumVerifiedWebSourceCount: 2,
+        minimumEvidenceFindingCount: 2,
+        minimumEvidenceDirectionCount: 1,
+        requiresGroundednessVerifier: true,
+      },
+      observed: {
+        verifiedWebSourceCount: 1,
+        evidenceFindingCount: 2,
+        evidenceDirectionCount: 1,
+        groundednessVerifierAvailable: true,
+      },
+      blockers: ["insufficient-verified-web-sources"],
+    },
+  };
+  try {
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+    assert.equal(attemptFor(fixture.store, fixture, fixture.attempt.attempt).status, "failed");
+    assert.equal(
+      Number((fixture.store.db.prepare(
+        "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+      ).get(fixture.task.id) as { count: number }).count),
+      1,
+    );
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "failed");
+    assert.equal(taskRow(fixture.store, fixture.validation.id).status, "blocked");
+    assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
+    assert.equal(
+      fixture.store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id).status,
+      "failed",
+    );
+    const events = fixture.store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    );
+    assert.equal(events.filter(
+      (event) => event.type === "task-retry-wait" && event.taskId === fixture.task.id,
+    ).length, 0);
+    const failed = events.filter(
+      (event) => event.type === "task-failed" && event.taskId === fixture.task.id,
+    );
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0]?.payload.retryExhausted, false);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("an exact current Moodboard adapter keeps the bounded non-Research quality-gate retry", () => {
+  const fixture = createClaimedResourceFixture("quality-gate-retry", "moodboard");
+  const error = {
+    name: "GenerationTaskQualityGateError",
+    code: "generation-task-quality-gate",
+    message: "Moodboard quality contains an active blocking finding",
+  };
+  try {
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "retry-wait");
+    assert.equal(result.nextEligibleAt, 101_001);
+    assert.equal(result.successorAttempt?.attempt, 2);
+    assert.equal(result.successorAttempt?.attemptOrigin, "same-input-retry");
+    assert.equal(result.successorAttempt?.automaticRetryIndex, 1);
+    assert.deepEqual(retryInput(result.successorAttempt!), retryInput(fixture.attempt));
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "retry-wait");
+    assert.notEqual(taskRow(fixture.store, fixture.validation.id).status, "blocked");
+    assert.notEqual(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
+    const events = fixture.store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    );
+    assert.equal(events.filter(
+      (event) => event.type === "task-retry-wait" && event.taskId === fixture.task.id,
+    ).length, 1);
+    assert.equal(events.filter(
+      (event) => event.type === "task-failed" && event.taskId === fixture.task.id,
+    ).length, 0);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a Research Task cannot gain a quality-gate retry by forging a non-Research adapter identity", () => {
+  const fixture = createClaimedResourceFixture("forged-adapter", "research");
+  try {
+    const forgedPayload = structuredClone(fixture.task.payload);
+    assert.equal(forgedPayload.version, 2);
+    forgedPayload.adapter = {
+      id: "dezin.resource-adapter.moodboard",
+      version: 1,
+      kind: "moodboard",
+    };
+    forgedPayload.operation = {
+      ...(forgedPayload.operation as Record<string, unknown>),
+      kind: "moodboard",
+    };
+    const brief = forgedPayload.brief as Record<string, unknown>;
+    forgedPayload.brief = {
+      ...brief,
+      targetInstructions: {
+        ...(brief.targetInstructions as Record<string, unknown>),
+        kind: "moodboard",
+      },
+    };
+    replaceGenerationTaskPayloadBypassingImmutableGuard(
+      fixture.store,
+      fixture.task,
+      forgedPayload,
+    );
+
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", {
+        name: "GenerationTaskQualityGateError",
+        code: "generation-task-quality-gate",
+        message: "Final Resource quality rejection",
+      }),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+    assert.equal(
+      Number((fixture.store.db.prepare(
+        "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+      ).get(fixture.task.id) as { count: number }).count),
+      1,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a legacy Resource payload fails closed instead of receiving a quality-gate retry", () => {
+  const fixture = createClaimedResourceFixture("legacy-payload", "moodboard");
+  try {
+    const legacyPayload = structuredClone(fixture.task.payload);
+    delete legacyPayload.agent;
+    replaceGenerationTaskPayloadBypassingImmutableGuard(
+      fixture.store,
+      fixture.task,
+      legacyPayload,
+    );
+
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", {
+        name: "GenerationTaskQualityGateError",
+        code: "generation-task-quality-gate",
+        message: "Legacy Resource quality rejection",
+      }),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+    assert.equal(
+      Number((fixture.store.db.prepare(
+        "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+      ).get(fixture.task.id) as { count: number }).count),
+      1,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a Research Task still receives the bounded infrastructure-transient retry", () => {
+  const fixture = createClaimedResourceFixture("provider-transient", "research");
+  const error = { code: "provider-temporary", source: "research-agent" };
+  try {
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "provider", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "retry-wait");
+    assert.equal(result.nextEligibleAt, 101_001);
+    assert.equal(result.successorAttempt?.attempt, 2);
+    assert.equal(result.successorAttempt?.attemptOrigin, "same-input-retry");
+    assert.equal(result.successorAttempt?.automaticRetryIndex, 1);
+    assert.deepEqual(retryInput(result.successorAttempt!), retryInput(fixture.attempt));
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "retry-wait");
   } finally {
     fixture.store.close();
   }

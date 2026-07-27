@@ -607,10 +607,32 @@ export interface MoodboardRevisionAssetView {
   checksum: string;
   url: string | null;
   downloadUrl: string;
+  directionId?: string | null;
+  directionTitle?: string | null;
+  directionChecksum?: string | null;
+}
+
+export interface MoodboardDirectionContractView {
+  protocol: "dezin.moodboard-direction-contract.v1";
+  contextPackId: string;
+  checksum: string;
+  directions: Array<{
+    resourceId: string;
+    revisionId: string;
+    id: string;
+    title: string;
+    checksum: string;
+    assetId: string;
+  }>;
 }
 
 export interface MoodboardResourceRevisionContentView {
-  board: { id: string; name: string; coverAssetId: string | null };
+  board: {
+    id: string;
+    name: string;
+    coverAssetId: string | null;
+    directionContract?: MoodboardDirectionContractView | null;
+  };
   nodes: MoodboardRevisionNodeView[];
   assets: MoodboardRevisionAssetView[];
   totalNodeCount: number;
@@ -834,6 +856,25 @@ export interface WorkspaceResearchDirectionSelection {
   resourceId: string;
   revisionId: string;
   directionId: string;
+  directionIds?: string[];
+}
+
+export interface WorkspaceGenerationPrototypeSourceRequirement {
+  edgeId: string;
+  sourceMarkerId: string;
+  trigger: WorkspacePrototypeBinding["trigger"];
+}
+
+export interface WorkspaceGenerationPrototypeTargetRequirement {
+  edgeId: string;
+  sourceArtifactId: string;
+  sourceMarkerId: string;
+  targetState: string;
+}
+
+export interface WorkspaceGenerationArtifactPrototypeRequirements {
+  outgoing: WorkspaceGenerationPrototypeSourceRequirement[];
+  incoming: WorkspaceGenerationPrototypeTargetRequirement[];
 }
 
 export interface WorkspaceGenerationArtifactPlan {
@@ -849,6 +890,7 @@ export interface WorkspaceGenerationArtifactPlan {
   capabilityIds: string[];
   responsiveFrameIds: string[];
   researchDirectionSelection?: WorkspaceResearchDirectionSelection;
+  prototypeRequirements?: WorkspaceGenerationArtifactPrototypeRequirements;
 }
 
 export type WorkspaceGenerationDependencyPlan =
@@ -871,6 +913,7 @@ export interface WorkspaceGenerationPrototypeIntent {
   sourceArtifactId: string;
   targetArtifactId: string;
   sourceLocator?: WorkspaceDesignNodeLocator;
+  sourceMarkerId?: string;
   trigger: WorkspacePrototypeBinding["trigger"];
   targetState?: string;
   transition?: WorkspacePrototypeBinding["transition"];
@@ -907,6 +950,7 @@ export interface WorkspaceArtifactQualityProfile {
 
 export interface WorkspaceGenerationPayload {
   kind: "workspace-generation";
+  version?: 2;
   /** Optional only for historical persisted Proposals; new executable mutations require it. */
   agent?: WorkspaceGenerationAgentSelection;
   resourceOperations: WorkspaceGenerationResourceOperation[];
@@ -1947,7 +1991,7 @@ export function decodeArtifactElementSelectionManifest(value: unknown): Artifact
   };
 }
 
-const RESOURCE_KINDS = [
+export const RESOURCE_KINDS = [
   "research",
   "moodboard",
   "sharingan-capture",
@@ -2270,8 +2314,7 @@ export function decodeResearchResourceRevision(value: unknown): ResearchResource
       || finding.groundedness.verified !== evidence
       || !sameResearchVerifier(finding.groundedness.verifier, expectedVerifier)
       || (evidence && (finding.groundedness.verifier === null
-        || expectedUnverified.length > 0
-        || !sameStringMembers(finding.groundedness.supportReceiptIds, finding.supportReceiptIds)))
+        || finding.groundedness.supportReceiptIds.length === 0))
       || (!evidence && finding.confidence !== "low")) {
       throw new TypeError(`Research finding ${index} evidence projection is inconsistent`);
     }
@@ -2292,7 +2335,7 @@ export function decodeResearchResourceRevision(value: unknown): ResearchResource
   const qualityState = codecEnum(input.qualityState, ["grounded", "needs-review"] as const, "Research qualityState");
   if (codecInteger(input.evidenceDirectionCount, "Research evidenceDirectionCount") !== evidenceDirectionCount
     || codecInteger(input.hypothesisDirectionCount, "Research hypothesisDirectionCount") !== hypothesisDirectionCount
-    || qualityState !== (evidenceDirectionCount > 0 ? "grounded" : "needs-review")) {
+    || (qualityState === "grounded" && evidenceDirectionCount === 0)) {
     throw new TypeError("Research quality projection is inconsistent");
   }
   const resource = decodeResource(input.resource);
@@ -2422,66 +2465,11 @@ function decodeResourceRevisionPayloadView(value: unknown): ResourceRevisionPayl
   };
 }
 
-function decodeMoodboardContent(value: unknown): MoodboardResourceRevisionContentView {
-  const input = codecExactRecord(value, [
-    "board", "nodes", "assets", "totalNodeCount", "totalAssetCount", "nodesTruncated", "assetsTruncated",
-  ], "Moodboard Revision content");
-  const board = codecExactRecord(input.board, ["id", "name", "coverAssetId"], "Moodboard Revision board");
-  const nodes = codecArray(input.nodes, "Moodboard Revision nodes", 256).map((raw, index): MoodboardRevisionNodeView => {
-    const node = codecExactRecord(raw, [
-      "id", "type", "label", "text", "x", "y", "width", "height", "assetId",
-    ], `Moodboard Revision node ${index}`);
-    return {
-      id: codecString(node.id, `Moodboard Revision node ${index} id`),
-      type: codecString(node.type, `Moodboard Revision node ${index} type`),
-      label: typeof node.label === "string" ? node.label : (() => { throw new TypeError(`Moodboard Revision node ${index} label must be a string`); })(),
-      text: typeof node.text === "string" ? node.text : (() => { throw new TypeError(`Moodboard Revision node ${index} text must be a string`); })(),
-      x: codecFiniteNullable(node.x, `Moodboard Revision node ${index} x`),
-      y: codecFiniteNullable(node.y, `Moodboard Revision node ${index} y`),
-      width: codecFiniteNullable(node.width, `Moodboard Revision node ${index} width`),
-      height: codecFiniteNullable(node.height, `Moodboard Revision node ${index} height`),
-      assetId: codecNullableString(node.assetId, `Moodboard Revision node ${index} assetId`),
-    };
-  });
-  const assets = codecArray(input.assets, "Moodboard Revision Assets", 128).map((raw, index): MoodboardRevisionAssetView => {
-    const asset = codecExactRecord(raw, [
-      "id", "kind", "fileName", "mimeType", "width", "height", "byteLength", "checksum", "url", "downloadUrl",
-    ], `Moodboard Revision Asset ${index}`);
-    return {
-      id: codecString(asset.id, `Moodboard Revision Asset ${index} id`),
-      kind: codecString(asset.kind, `Moodboard Revision Asset ${index} kind`),
-      fileName: codecString(asset.fileName, `Moodboard Revision Asset ${index} fileName`),
-      mimeType: codecString(asset.mimeType, `Moodboard Revision Asset ${index} MIME`),
-      width: codecFiniteNullable(asset.width, `Moodboard Revision Asset ${index} width`),
-      height: codecFiniteNullable(asset.height, `Moodboard Revision Asset ${index} height`),
-      byteLength: codecInteger(asset.byteLength, `Moodboard Revision Asset ${index} byteLength`),
-      checksum: codecSha256(asset.checksum, `Moodboard Revision Asset ${index} checksum`),
-      url: asset.url === null ? null : codecApiPath(asset.url, `Moodboard Revision Asset ${index} URL`),
-      downloadUrl: codecApiPath(asset.downloadUrl, `Moodboard Revision Asset ${index} download URL`),
-    };
-  });
-  const totalNodeCount = codecInteger(input.totalNodeCount, "Moodboard Revision totalNodeCount");
-  const totalAssetCount = codecInteger(input.totalAssetCount, "Moodboard Revision totalAssetCount");
-  const nodesTruncated = codecBoolean(input.nodesTruncated, "Moodboard Revision nodesTruncated");
-  const assetsTruncated = codecBoolean(input.assetsTruncated, "Moodboard Revision assetsTruncated");
-  if (totalNodeCount < nodes.length || totalAssetCount < assets.length
-    || nodesTruncated !== (totalNodeCount > nodes.length)
-    || assetsTruncated !== (totalAssetCount > assets.length)) {
-    throw new TypeError("Moodboard Revision projection counts are inconsistent");
-  }
-  return {
-    board: {
-      id: codecString(board.id, "Moodboard Revision board id"),
-      name: codecString(board.name, "Moodboard Revision board name"),
-      coverAssetId: codecNullableString(board.coverAssetId, "Moodboard Revision board coverAssetId"),
-    },
-    nodes,
-    assets,
-    totalNodeCount,
-    totalAssetCount,
-    nodesTruncated,
-    assetsTruncated,
-  };
+async function decodeMoodboardContent(value: unknown): Promise<MoodboardResourceRevisionContentView> {
+  const { decodeMoodboardResourceRevisionContent } = await import(
+    "./moodboard-resource-revision-codec.ts"
+  );
+  return decodeMoodboardResourceRevisionContent(value);
 }
 
 function decodeSharinganContent(value: unknown): SharinganCaptureResourceRevisionContentView {
@@ -2641,7 +2629,7 @@ function decodeEffectContent(value: unknown): EffectResourceRevisionContentView 
   };
 }
 
-export function decodeResourceRevisionView(value: unknown): ResourceRevisionView {
+export async function decodeResourceRevisionView(value: unknown): Promise<ResourceRevisionView> {
   const input = codecExactRecord(
     value,
     ["protocol", "kind", "resource", "revision", "observed", "payload", "content"],
@@ -2665,7 +2653,7 @@ export function decodeResourceRevisionView(value: unknown): ResourceRevisionView
     observed,
     payload,
   };
-  if (kind === "moodboard") return { ...common, kind, content: decodeMoodboardContent(input.content) };
+  if (kind === "moodboard") return { ...common, kind, content: await decodeMoodboardContent(input.content) };
   if (kind === "sharingan-capture") return { ...common, kind, content: decodeSharinganContent(input.content) };
   if (kind === "effect") return { ...common, kind, content: decodeEffectContent(input.content) };
   if (kind === "file") {
@@ -3606,8 +3594,12 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
-  async function jsonDecoded<T>(path: string, decode: (value: unknown) => T, init?: RequestInit): Promise<T> {
-    return decode(await json<unknown>(path, init));
+  async function jsonDecoded<T>(
+    path: string,
+    decode: (value: unknown) => T | Promise<T>,
+    init?: RequestInit,
+  ): Promise<T> {
+    return await decode(await json<unknown>(path, init));
   }
 
   async function blob(path: string, init?: RequestInit): Promise<Blob> {

@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+
 import type {
   GenerationTask,
+  GenerationTaskPrototypeMarkerProof,
   GenerationTaskSourceVisualEvidenceAuthority,
   Resource,
   ResourceRevision,
@@ -8,6 +11,11 @@ import type {
 } from "../../../../packages/core/src/index.ts";
 import type { DesignRegistry } from "../../../../packages/design/src/index.ts";
 import type { RuntimeSupervisor } from "../runtime-supervisor.ts";
+import { SharinganSession } from "../sharingan-browser.ts";
+import {
+  acquirePreviewTargetLease,
+  resolvePreviewTarget,
+} from "../preview-target.ts";
 import { GenerationPlanEventBroker } from "./generation-plan-events.ts";
 import type { GenerationPlanRuntimeControl } from "./generation-plan-control.ts";
 import {
@@ -27,6 +35,7 @@ import {
 } from "./generation-runtime-composition.ts";
 import type { GenerationRuntime } from "./generation-runtime.ts";
 import { GitArtifactSourceBaseResolver } from "./git-source-base-resolver.ts";
+import { resolveArtifactElementSelectionProvenance } from "./artifact-element-selection-provenance.ts";
 import { createProductionGenerationTaskContextResolver } from "./production-generation-context.ts";
 import { createProductionGenerationTaskPublication } from "./production-task-publication-adapter.ts";
 import {
@@ -68,6 +77,69 @@ function checkAbort(signal: AbortSignal): void {
 
 function compareBinary(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+type ProductionPrototypeRuntimeSession = Pick<
+  SharinganSession,
+  "applyRenderFrame" | "close" | "probePrototypeMarker" | "setViewport" | "settle"
+>;
+
+/**
+ * Owns the exact preview browser + lease pair as one resource scope. Abort,
+ * deadline, probe, and close failures all converge through the same cleanup.
+ */
+export async function withProductionPrototypeMarkerRuntimeSession<T>(input: {
+  lease: { url: string; release(): Promise<void> };
+  signal: AbortSignal;
+  run(session: ProductionPrototypeRuntimeSession): Promise<T>;
+  openSession?: (
+    url: string,
+    options: { headless: boolean; signal: AbortSignal },
+  ) => Promise<ProductionPrototypeRuntimeSession>;
+}): Promise<T> {
+  checkAbort(input.signal);
+  let session: ProductionPrototypeRuntimeSession | null = null;
+  let result: T | undefined;
+  let primaryFailure: unknown;
+  let failed = false;
+  try {
+    session = await (input.openSession ?? SharinganSession.open)(
+      input.lease.url,
+      { headless: true, signal: input.signal },
+    );
+    result = await input.run(session);
+  } catch (error) {
+    failed = true;
+    primaryFailure = error;
+  }
+  const cleanup = await Promise.allSettled([
+    Promise.resolve().then(async () => { if (session) await session.close(); }),
+    Promise.resolve().then(() => input.lease.release()),
+  ]);
+  const cleanupFailures = cleanup.flatMap((outcome) =>
+    outcome.status === "rejected" ? [outcome.reason] : []);
+  if (failed) {
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [primaryFailure, ...cleanupFailures],
+        "Prototype marker runtime failed and its browser or preview lease cleanup also failed",
+        { cause: primaryFailure },
+      );
+    }
+    throw primaryFailure;
+  }
+  if (cleanupFailures.length === 1) throw cleanupFailures[0];
+  if (cleanupFailures.length > 1) {
+    throw new AggregateError(
+      cleanupFailures,
+      "Prototype marker browser and preview lease cleanup failed",
+    );
+  }
+  return result as T;
 }
 
 class ProductionGenerationOwnership {
@@ -164,9 +236,182 @@ class WorkspaceGenerationRebaseReconciler implements GenerationTaskRebaseReconci
   }
 }
 
+export async function resolveProductionPrototypeMarkers(input: {
+  store: Store;
+  dataDir: string;
+  projectId: string;
+  markers: Array<{
+    workspaceId: string;
+    artifactId: string;
+    revisionId: string;
+    sourceMarkerId: string;
+    trigger: "click" | "submit";
+    receiptNonce: string;
+  }>;
+  signal: AbortSignal;
+}): Promise<GenerationTaskPrototypeMarkerProof[]> {
+  checkAbort(input.signal);
+  if (input.markers.some((marker) => !/^[0-9a-f]{64}$/.test(marker.receiptNonce))) {
+    throw new Error("Prototype marker runtime receipt nonce is invalid");
+  }
+  const selections = new Array<Awaited<ReturnType<typeof resolveArtifactElementSelectionProvenance>>>(
+    input.markers.length,
+  );
+  for (const [index, marker] of input.markers.entries()) {
+    selections[index] = await resolveArtifactElementSelectionProvenance({
+      store: input.store,
+      dataDir: input.dataDir,
+      projectId: input.projectId,
+      workspaceId: marker.workspaceId,
+      artifactId: marker.artifactId,
+      revisionId: marker.revisionId,
+      designNodeId: marker.sourceMarkerId,
+      signal: input.signal,
+    });
+  }
+  const groups = new Map<string, number[]>();
+  input.markers.forEach((marker, index) => {
+    const key = `${marker.workspaceId}\0${marker.artifactId}\0${marker.revisionId}`;
+    groups.set(key, [...(groups.get(key) ?? []), index]);
+  });
+  const results = new Array<GenerationTaskPrototypeMarkerProof>(input.markers.length);
+  for (const indexes of groups.values()) {
+    checkAbort(input.signal);
+    const firstIndex = indexes[0]!;
+    const first = input.markers[firstIndex]!;
+    const resolved = await resolvePreviewTarget({
+      store: input.store,
+      dataDir: input.dataDir,
+    }, {
+      kind: "artifact-revision",
+      projectId: input.projectId,
+      revisionId: first.revisionId,
+    });
+    if (resolved.workspaceId !== first.workspaceId
+      || resolved.artifactId !== first.artifactId
+      || resolved.revisionId !== first.revisionId
+      || indexes.some((index) => selections[index]!.assemblyHash !== resolved.assemblyHash
+        || selections[index]!.sourceTreeHash !== resolved.sourceTreeHash)) {
+      throw new Error("Prototype marker immutable preview identity diverges from its source proof");
+    }
+    const rawFrames = resolved.renderSpec.frames;
+    if (!Array.isArray(rawFrames) || rawFrames.length === 0) {
+      throw new Error("Prototype marker immutable preview has no exact responsive Frames");
+    }
+    const frames = rawFrames.map((value, index) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`Prototype marker immutable preview Frame ${index} is invalid`);
+      }
+      const frame = value as Record<string, unknown>;
+      if (typeof frame.id !== "string" || frame.id.length === 0
+        || !Number.isSafeInteger(frame.width) || Number(frame.width) <= 0
+        || !Number.isSafeInteger(frame.height) || Number(frame.height) <= 0
+        || (Object.hasOwn(frame, "initialState")
+          && (typeof frame.initialState !== "string" || frame.initialState.length === 0))
+        || (Object.hasOwn(frame, "background")
+          && (typeof frame.background !== "string" || frame.background.length === 0))) {
+        throw new Error(`Prototype marker immutable preview Frame ${index} is invalid`);
+      }
+      return {
+        frameId: frame.id,
+        width: Number(frame.width),
+        height: Number(frame.height),
+        ...(typeof frame.initialState === "string" ? { initialState: frame.initialState } : {}),
+        ...(Object.hasOwn(frame, "fixture") ? { fixture: structuredClone(frame.fixture) } : {}),
+        ...(typeof frame.background === "string" ? { background: frame.background } : {}),
+      };
+    }).sort((left, right) => compareBinary(left.frameId, right.frameId));
+    if (new Set(frames.map((frame) => frame.frameId)).size !== frames.length) {
+      throw new Error("Prototype marker immutable preview Frames are ambiguous");
+    }
+    const observations = new Map<number, GenerationTaskPrototypeMarkerProof["runtimeProof"]["frames"]>(
+      indexes.map((index) => [index, []]),
+    );
+    const lease = await acquirePreviewTargetLease({
+      store: input.store,
+      dataDir: input.dataDir,
+    }, resolved, input.signal);
+    await withProductionPrototypeMarkerRuntimeSession({
+      lease,
+      signal: input.signal,
+      run: async (session) => {
+        for (const frame of frames) {
+          checkAbort(input.signal);
+          await session.setViewport({ width: frame.width, height: frame.height, label: frame.frameId });
+          const frameAttemptId = sha256(JSON.stringify([
+            "dezin-prototype-runtime-frame-attempt-v1",
+            frame.frameId,
+            ...indexes.map((index) => input.markers[index]!.receiptNonce).sort(compareBinary),
+          ]));
+          await session.applyRenderFrame(lease.url, {
+            frameId: frame.frameId,
+            frameAttemptId,
+            ...(frame.initialState === undefined ? {} : { initialState: frame.initialState }),
+            ...(Object.hasOwn(frame, "fixture") ? { fixture: frame.fixture } : {}),
+            ...(frame.background === undefined ? {} : { background: frame.background }),
+          }, input.signal);
+          await session.settle();
+          for (const index of indexes) {
+            const marker = input.markers[index]!;
+            const observation = await session.probePrototypeMarker(
+              marker.sourceMarkerId,
+              marker.trigger,
+              marker.receiptNonce,
+              input.signal,
+            );
+            observations.get(index)!.push({
+              frameId: frame.frameId,
+              width: frame.width,
+              height: frame.height,
+              ...observation,
+            });
+          }
+        }
+      },
+    });
+    for (const index of indexes) {
+      const marker = input.markers[index]!;
+      const selection = selections[index]!;
+      const dependencyLockHash = resolved.dependencyLockHash;
+      const runtimeIdentityHash = sha256(JSON.stringify({
+        protocol: "dezin.artifact-preview-runtime-identity.v1",
+        workspaceId: marker.workspaceId,
+        artifactId: marker.artifactId,
+        artifactRevisionId: marker.revisionId,
+        assemblyHash: selection.assemblyHash,
+        sourceTreeHash: selection.sourceTreeHash,
+        dependencyLockHash,
+      }));
+      const runtimeProof = {
+        protocol: "dezin.artifact-prototype-runtime-proof.v1" as const,
+        runtimeIdentityHash,
+        workspaceId: marker.workspaceId,
+        artifactId: marker.artifactId,
+        artifactRevisionId: marker.revisionId,
+        assemblyHash: selection.assemblyHash,
+        designNodeId: marker.sourceMarkerId,
+        trigger: marker.trigger,
+        sourceTreeHash: selection.sourceTreeHash,
+        dependencyLockHash,
+        receiptNonce: marker.receiptNonce,
+        frames: observations.get(index)!,
+      };
+      results[index] = {
+        ...selection,
+        runtimeProof: {
+          ...runtimeProof,
+          receiptHash: sha256(JSON.stringify(runtimeProof)),
+        },
+      };
+    }
+  }
+  return results;
+}
+
 function prototypeValidationStore(
   store: Store,
   ownership: ProductionGenerationOwnership,
+  dataDir: string,
 ): PrototypeValidationStorePort {
   return {
     readSnapshot(workspaceId, snapshotId, signal): WorkspaceSnapshotRecord | null {
@@ -183,6 +428,21 @@ function prototypeValidationStore(
       checkAbort(signal);
       ownership.projectIdForWorkspace(workspaceId);
       return store.workspace.getResourceRevisionForWorkspace(workspaceId, revisionId);
+    },
+    resolveArtifactMarkers(inputs, signal) {
+      checkAbort(signal);
+      if (inputs.length === 0) return [];
+      const projectId = ownership.projectIdForWorkspace(inputs[0]!.workspaceId);
+      if (inputs.some((input) => ownership.projectIdForWorkspace(input.workspaceId) !== projectId)) {
+        throw new Error("Prototype marker batch spans multiple Projects");
+      }
+      return resolveProductionPrototypeMarkers({
+        store,
+        dataDir,
+        projectId,
+        markers: inputs,
+        signal,
+      });
     },
   };
 }
@@ -280,7 +540,7 @@ export function createProductionGenerationSystem(
     artifacts: options.artifacts,
     resources: options.resources,
     prototypeValidation: new PrototypeValidationExecutor({
-      store: prototypeValidationStore(options.store, ownership),
+      store: prototypeValidationStore(options.store, ownership, options.dataDir),
     }),
     publication,
     reportError: options.onError,

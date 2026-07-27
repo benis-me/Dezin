@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
+  ArtifactRevision,
   Project,
   ProjectWorkspacePayload,
   Resource,
@@ -43,6 +44,14 @@ type ResourceRevisionStateBuilder = (
   revisionId: string;
   resourceKind: Resource["kind"];
   qualityState: "grounded" | "needs-review" | null;
+}>>;
+type ArtifactRevisionQualityStateBuilder = (
+  activeRevisionIds: Readonly<Record<string, string>>,
+  revisions: readonly ArtifactRevision[],
+) => Readonly<Record<string, {
+  revisionId: string;
+  qualityState: "passed" | "needs-attention" | "failed" | "unassessed";
+  qualityScore: number | null;
 }>>;
 
 function project(): Project {
@@ -199,6 +208,60 @@ test("Resource revision state indexing reads each Revision identity once instead
 
   expect(Object.keys(states)).toHaveLength(resources.length);
   expect(identityReads).toBe(revisions.length);
+});
+
+test("Artifact revision quality state is bound to the exact active Revision identity", () => {
+  const build = (ProjectStudioScreenModule as unknown as {
+    buildArtifactRevisionQualityStates?: ArtifactRevisionQualityStateBuilder;
+  }).buildArtifactRevisionQualityStates;
+  expect(build).toBeTypeOf("function");
+
+  const revisions: ArtifactRevision[] = [
+    {
+      id: "revision-stale",
+      workspaceId: "workspace-1",
+      artifactId: "artifact-1",
+      trackId: "track-1",
+      sequence: 1,
+      parentRevisionId: null,
+      sourceCommitHash: "a".repeat(40),
+      sourceTreeHash: "b".repeat(40),
+      artifactRoot: "artifacts/home",
+      kernelRevisionId: "kernel-1",
+      renderSpec: {},
+      quality: { state: "passed", score: 100, findings: [] },
+      contextPackHash: null,
+      producedByRunId: null,
+      legacyRunId: null,
+      createdAt: 1,
+    },
+    {
+      id: "revision-active",
+      workspaceId: "workspace-1",
+      artifactId: "artifact-1",
+      trackId: "track-1",
+      sequence: 2,
+      parentRevisionId: "revision-stale",
+      sourceCommitHash: "c".repeat(40),
+      sourceTreeHash: "d".repeat(40),
+      artifactRoot: "artifacts/home",
+      kernelRevisionId: "kernel-1",
+      renderSpec: {},
+      quality: { state: "needs-attention", score: 79, findings: [] },
+      contextPackHash: null,
+      producedByRunId: null,
+      legacyRunId: null,
+      createdAt: 2,
+    },
+  ];
+
+  expect(build!({ "artifact-1": "revision-active" }, revisions)).toEqual({
+    "artifact-1": {
+      revisionId: "revision-active",
+      qualityState: "needs-attention",
+      qualityScore: 79,
+    },
+  });
 });
 
 test("typing an Agent draft does not rebuild the Canvas graph model", async () => {

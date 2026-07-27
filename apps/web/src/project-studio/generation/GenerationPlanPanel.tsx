@@ -173,7 +173,17 @@ function publicFailureMessage(value: string): string {
   });
 }
 
-function taskMessage(task: GenerationTask): string | null {
+function taskMessage(
+  task: GenerationTask,
+  tasksById: ReadonlyMap<string, GenerationTask>,
+  targetLabels?: GenerationPlanTargetLabels,
+): string | null {
+  if (task.status === "blocked" && task.blockedByTaskId !== null) {
+    const blocker = tasksById.get(task.blockedByTaskId);
+    return blocker === undefined
+      ? "Blocked by an upstream task"
+      : `Blocked by ${targetLabel(blocker, targetLabels)}`;
+  }
   const message = task.error?.message;
   if (typeof message === "string" && message.trim().length > 0) {
     return publicFailureMessage(message.trim());
@@ -334,6 +344,7 @@ export function GenerationPlanPanel({
   showHeader?: boolean;
 }) {
   const complete = detail.tasks.filter((task) => task.status === "succeeded").length;
+  const tasksById = new Map(detail.tasks.map((task) => [task.id, task]));
   const failureMessage = planMessage(detail.plan);
   const connectionLabel = connection === "live"
     ? "Live updates"
@@ -402,7 +413,7 @@ export function GenerationPlanPanel({
             const selectionDestinations = researchSelectionDestinations(projectId, task);
             const awaitingDirectionSelection = selectionDestinations.length > 0;
             const state = awaitingDirectionSelection ? "active" : displayState(task.status);
-            const message = taskMessage(task);
+            const message = taskMessage(task, tasksById, targetLabels);
             const artifactDestination = artifactRevisionDestination(projectId, task, detail);
             const target = targetLabel(task, targetLabels);
             return (

@@ -1,11 +1,16 @@
 import { types as nodeUtilTypes } from "node:util";
 
 import type { ResourceKind } from "../../../../packages/core/src/index.ts";
+import type { ContextPackRepository } from "../context/context-types.ts";
+import type { MoodboardV2LineagePolicy } from "../moodboard-resource-bundle.ts";
 import {
   WorkspaceStoreResourceTaskPayloadReferenceGuard,
   type ResourcePayloadCleanupStorePort,
 } from "./resource-task-payload-recovery.ts";
-import { OwnedResourceTaskPayloadStaging } from "./resource-task-payload-staging.ts";
+import {
+  OwnedResourceTaskPayloadStaging,
+  type MoodboardAttemptContextAuthorityPort,
+} from "./resource-task-payload-staging.ts";
 import {
   ResourceTaskAdapterError,
   ResourceTaskExecutor,
@@ -27,7 +32,10 @@ const RESOURCE_OPTION_FIELDS = Object.freeze([
   "storageRoot",
   "store",
   "implementations",
+  "contextPacks",
+  "attemptContextAuthority",
   "now",
+  "moodboardV2LineagePolicy",
 ] as const);
 
 export type ProductionResourceGenerationImplementation = ResourceGenerationAdapter["generate"];
@@ -41,7 +49,10 @@ export interface ProductionResourceTaskAdapterOptions {
   readonly storageRoot: string;
   readonly store: ResourcePayloadCleanupStorePort;
   readonly implementations: ProductionResourceGenerationImplementations;
+  readonly contextPacks: Pick<ContextPackRepository, "get">;
+  readonly attemptContextAuthority: MoodboardAttemptContextAuthorityPort;
   readonly now?: () => number;
+  readonly moodboardV2LineagePolicy?: MoodboardV2LineagePolicy;
 }
 
 function invalidRegistration(message: string, cause?: unknown): never {
@@ -134,10 +145,19 @@ function resourceOptions(value: unknown): Record<typeof RESOURCE_OPTION_FIELDS[n
     if ((prototype !== Object.prototype && prototype !== null)
       || keys.some((key) => typeof key !== "string"
         || !RESOURCE_OPTION_FIELDS.includes(key as typeof RESOURCE_OPTION_FIELDS[number]))
-      || !["storageRoot", "store", "implementations"].every((field) => keys.includes(field))) {
+      || ![
+        "storageRoot",
+        "store",
+        "implementations",
+        "contextPacks",
+        "attemptContextAuthority",
+      ].every((field) => keys.includes(field))) {
       return invalidRegistration("Production Resource Task adapter options contain invalid fields");
     }
-    const result = { now: undefined } as Record<typeof RESOURCE_OPTION_FIELDS[number], unknown>;
+    const result = {
+      now: undefined,
+      moodboardV2LineagePolicy: undefined,
+    } as Record<typeof RESOURCE_OPTION_FIELDS[number], unknown>;
     for (const key of keys) {
       const descriptor = descriptors[key as string]!;
       if (typeof key !== "string" || !descriptor.enumerable || !("value" in descriptor)) {
@@ -213,7 +233,10 @@ export function createProductionResourceTaskExecutor(
   const configuration = resourceOptions(options);
   if (typeof configuration.storageRoot !== "string" || configuration.storageRoot.length === 0
     || configuration.storageRoot.includes("\0")
-    || (configuration.now !== undefined && typeof configuration.now !== "function")) {
+    || (configuration.now !== undefined && typeof configuration.now !== "function")
+    || (configuration.moodboardV2LineagePolicy !== undefined
+      && configuration.moodboardV2LineagePolicy !== "require-production-lineage"
+      && configuration.moodboardV2LineagePolicy !== "allow-legacy-v2")) {
     return invalidRegistration("Production Resource Task adapter configuration is invalid");
   }
   const store = pinnedStore(configuration.store);
@@ -224,7 +247,12 @@ export function createProductionResourceTaskExecutor(
     storageRoot: configuration.storageRoot,
     references,
     journal: references,
+    contextPacks: configuration.contextPacks as Pick<ContextPackRepository, "get">,
+    attemptContextAuthority:
+      configuration.attemptContextAuthority as MoodboardAttemptContextAuthorityPort,
     now: configuration.now as (() => number) | undefined,
+    moodboardV2LineagePolicy:
+      configuration.moodboardV2LineagePolicy as MoodboardV2LineagePolicy | undefined,
   });
   return new ResourceTaskExecutor({
     adapters: createProductionResourceGenerationAdapterRegistry(

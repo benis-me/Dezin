@@ -295,6 +295,53 @@ test("renders the active Page inside its exact declared Frame viewport instead o
   expect(screen.getByLabelText("Frozen prototype identity")).toHaveTextContent("Frame Desktop · 1280 × 800");
 });
 
+test("manual Page selection preserves the current viewport profile across different Frame ids", async () => {
+  const user = userEvent.setup();
+  const revisions = flowRevisions();
+  const alpha = revisions.find((revision) => revision.id === "revision-a")!;
+  const beta = revisions.find((revision) => revision.id === "revision-b")!;
+  alpha.renderSpec = {
+    thumbnailFrameId: "mobile",
+    frames: [
+      { id: "desktop", name: "Desktop", width: 1280, height: 800 },
+      { id: "mobile", name: "Mobile", width: 390, height: 844 },
+    ],
+  };
+  beta.renderSpec = {
+    frames: [
+      { id: "desktop-beta", name: "Desktop", width: 1440, height: 900 },
+      { id: "mobile-beta", name: "Mobile", width: 393, height: 852 },
+    ],
+  };
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], revisions);
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+        revisions,
+      ),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: `lease-${exact.artifactId}`,
+        url: `http://preview.local/${exact.artifactId}#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  expect((await screen.findByTitle("Alpha flow preview")).closest('[data-prototype-frame-id="mobile"]')).not.toBeNull();
+  await user.click(screen.getByRole("combobox", { name: "Prototype flow start Page" }));
+  await user.click(await screen.findByRole("option", { name: "Beta" }));
+
+  const betaFrame = await screen.findByTitle("Beta flow preview");
+  const viewport = betaFrame.closest<HTMLElement>('[data-prototype-frame-id="mobile-beta"]');
+  expect(viewport).not.toBeNull();
+  expect(viewport).toHaveStyle({ width: "393px", height: "852px" });
+});
+
 test("surfaces an initial bridge-readiness deadline instead of leaving the first Page silently unprepared", async () => {
   vi.useFakeTimers();
   const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], flowRevisions());
@@ -1266,7 +1313,7 @@ test("viewer blocks broken and malformed bridge activations and lists planned fl
   );
 
   expect(await screen.findByText("Planned connection")).toBeInTheDocument();
-  expect(screen.getByText("Missing destination binding.")).toBeInTheDocument();
+  expect(screen.getByText("To Beta · Missing destination binding.")).toBeInTheDocument();
   const frame = screen.getByTitle("Alpha flow preview") as HTMLIFrameElement;
   const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
   fireEvent.load(frame);
@@ -1310,6 +1357,99 @@ test("viewer blocks broken and malformed bridge activations and lists planned fl
   });
   expect(screen.getByTitle("Alpha flow preview")).toBeInTheDocument();
   port.close();
+});
+
+test("viewer names a frozen graph target that has no presentable Revision without offering it as a start Page", async () => {
+  const user = userEvent.setup();
+  const snapshot = flowSnapshot();
+  const target = snapshot.graph.nodes.find((node) => node.id === "node-b");
+  if (target?.kind !== "page") throw new Error("Page target fixture required");
+  target.name = "Warm Paper/Ink Film";
+  snapshot.artifactRevisions["page-b"] = null;
+  const session = createPrototypeFlowSession(snapshot, ["node-a"], flowRevisions());
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, previewTarget) => resolved(
+        previewTarget as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: "lease-page-a-unavailable-target",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("To Warm Paper/Ink Film · no binding yet")).toBeInTheDocument();
+  expect(screen.queryByTitle("Warm Paper/Ink Film flow preview")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("combobox", { name: "Prototype flow start Page" }));
+  expect(screen.queryByRole("option", { name: "Warm Paper/Ink Film" })).not.toBeInTheDocument();
+});
+
+test("viewer distinguishes Snapshot-wide flow health from the current Page in a partial KITE matrix", async () => {
+  const snapshot = flowSnapshot();
+  const workspaceId = snapshot.workspaceId;
+  const directions = [
+    { id: "warm", name: "Warm Paper/Ink" },
+    { id: "electric", name: "Electric Cobalt Grid" },
+    { id: "cinematic", name: "Cinematic Black/Red" },
+  ] as const;
+  const pageKinds = ["Home", "Film", "Schedule", "Checkout"] as const;
+  snapshot.graph.nodes = directions.flatMap((direction) => pageKinds.map((pageKind) => {
+    const artifactId = direction.id === "warm" && pageKind === "Home"
+      ? "page-a"
+      : `page-${direction.id}-${pageKind.toLowerCase()}`;
+    return {
+      id: `node-${direction.id}-${pageKind.toLowerCase()}`,
+      workspaceId,
+      kind: "page" as const,
+      artifactId,
+      name: `${direction.name} ${pageKind}`,
+    };
+  }));
+  snapshot.graph.edges = directions.flatMap((direction) => pageKinds.slice(0, -1).map((pageKind, index) => ({
+    id: `edge-${direction.id}-${pageKind.toLowerCase()}`,
+    workspaceId,
+    sourceNodeId: `node-${direction.id}-${pageKind.toLowerCase()}`,
+    targetNodeId: `node-${direction.id}-${pageKinds[index + 1]!.toLowerCase()}`,
+    kind: "prototype" as const,
+    prototype: { status: "planned" as const },
+  })));
+  snapshot.artifactTracks = Object.fromEntries(snapshot.graph.nodes.map((node) => [
+    node.artifactId,
+    node.artifactId === "page-a" ? "track-a" : null,
+  ]));
+  snapshot.artifactRevisions = Object.fromEntries(snapshot.graph.nodes.map((node) => [
+    node.artifactId,
+    node.artifactId === "page-a" ? "revision-a" : null,
+  ]));
+  const session = createPrototypeFlowSession(snapshot, ["node-warm-home"], flowRevisions());
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, previewTarget) => resolved(
+        previewTarget as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: "lease-kite-partial",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Snapshot · 0 live · 9 planned · 0 broken")).toBeInTheDocument();
+  expect(screen.getByLabelText("Current Page flow health")).toHaveTextContent(
+    "Current PageWarm Paper/Ink Home0 live · 1 planned · 0 broken",
+  );
+  expect(screen.getByText("To Warm Paper/Ink Film · no binding yet")).toBeInTheDocument();
 });
 
 test("viewer rejects a workspace-flow resolution that drifts from the frozen artifact Revision", async () => {
@@ -1460,4 +1600,13 @@ test("flow viewer keeps its toolbar bounded at 320px and disables motion when re
   expect(narrow).toMatch(/select\s*\{[^}]*max-width:/s);
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation:\s*none !important/);
   expect(css).toMatch(/:focus-visible[\s\S]*outline:/);
+});
+
+test("flow viewer keeps Present controls and health copy at the shared Inspector reading floor", () => {
+  const css = readFileSync(`${process.cwd()}/src/project-studio/flow/prototype-flow-viewer.css`, "utf8");
+  expect(css).toMatch(/\.prototype-flow-viewer__page-select\s*\{[^}]*font-size:\s*12px;/s);
+  expect(css).toMatch(/\.prototype-flow-viewer__controls label\s*\{[^}]*font-size:\s*12px;/s);
+  expect(css).toMatch(/\.prototype-flow-viewer__health h2\s*\{[^}]*font-size:\s*13px;/s);
+  expect(css).toMatch(/\.prototype-flow-viewer__health summary p\s*\{[^}]*font-size:\s*12px;/s);
+  expect(css).toMatch(/\.prototype-flow-viewer__health li p\s*\{[^}]*font-size:\s*12px;/s);
 });

@@ -13,6 +13,7 @@ const MAX_CAPTURE_DIMENSION = 32_768;
 const MAX_CAPTURE_PIXELS = 64_000_000;
 const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_RUN_EVIDENCE_BYTES = 1024 * 1024;
+const MAX_QUALITY_GATE_ERROR_DETAILS_BYTES = 16 * 1024;
 
 export interface GenerationTaskArtifactQualityGateInput {
   /** Core supplies false or an exact frozen Sharingan Revision; daemon-only preflight passes null. */
@@ -40,10 +41,14 @@ export type GenerationTaskSourceVisualEvidenceRequirement =
 export class GenerationTaskQualityGateError extends Error {
   readonly failureClass = "qa" as const;
   readonly code = "generation-task-quality-gate" as const;
+  readonly details?: Readonly<Record<string, unknown>>;
 
-  constructor(message: string) {
+  constructor(message: string, details?: unknown) {
     super(message);
     this.name = "GenerationTaskQualityGateError";
+    if (details !== undefined) {
+      this.details = qualityGateErrorDetails(details);
+    }
   }
 }
 
@@ -144,6 +149,20 @@ function record(value: unknown, label: string): Record<string, unknown> {
     fail(`${label} must be an object`);
   }
   return candidate as Record<string, unknown>;
+}
+
+function deepFreezeJson<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreezeJson(nested);
+  return Object.freeze(value);
+}
+
+function qualityGateErrorDetails(value: unknown): Readonly<Record<string, unknown>> {
+  const details = record(value, "Generation Task quality gate error details");
+  if (Buffer.byteLength(JSON.stringify(details), "utf8") > MAX_QUALITY_GATE_ERROR_DETAILS_BYTES) {
+    fail("Generation Task quality gate error details exceed the safe boundary budget");
+  }
+  return deepFreezeJson(details);
 }
 
 function array(value: unknown, label: string): unknown[] {

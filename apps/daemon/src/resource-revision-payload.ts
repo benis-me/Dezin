@@ -19,6 +19,13 @@ import type { Store } from "../../../packages/core/src/index.ts";
 export const RESOURCE_REVISION_PAYLOAD_PROTOCOL = "dezin-resource-revision-payload-v1" as const;
 export const MAX_RESOURCE_MANIFEST_BYTES = 64 * 1024;
 export const MAX_RESOURCE_PAYLOAD_BYTES = 64 * 1024 * 1024;
+export const MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES = 48 * 1024 * 1024;
+export const MAX_MOODBOARD_EMBEDDED_ASSET_BYTES = 8 * 1024 * 1024;
+// Raw image bytes use at most 60% of the outer bundle. Canonical base64 then
+// occupies at most 80%, leaving a bounded 20% for board structure and metadata.
+export const MAX_MOODBOARD_EMBEDDED_ASSET_TOTAL_BYTES = Math.floor(
+  MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES * 3 / 5,
+);
 export const MAX_RENDER_ASSEMBLY_RESOURCE_BYTES = 256 * 1024 * 1024;
 export const MAX_RENDER_ASSEMBLY_RESOURCES = 256;
 
@@ -991,7 +998,11 @@ export async function verifyResourceRevisionPayload(
       || descriptor.mimeType === "image/jpeg"
       || descriptor.mimeType === "image/gif"
       || descriptor.mimeType === "image/webp";
-    if (needsWholeTextPayload && descriptor.byteLength > MAX_TEXT_PAYLOAD_BYTES) {
+    const textPayloadByteLimit = descriptor.resourceKind === "moodboard"
+      && descriptor.mimeType === "application/json"
+      ? MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES
+      : MAX_TEXT_PAYLOAD_BYTES;
+    if (needsWholeTextPayload && descriptor.byteLength > textPayloadByteLimit) {
       throw new ResourceRevisionPayloadError("Text Resource Revision payload exceeds its MIME validation bound");
     }
     const validationBytes = Buffer.allocUnsafe(

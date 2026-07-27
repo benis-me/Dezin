@@ -104,7 +104,10 @@ test("studio inspector primitives preserve a labelled hierarchy and fact semanti
   expect(screen.getByText("Immutable facts")).toHaveClass("text-xs");
   expect(screen.getByText("Resource").tagName).toBe("DT");
   expect(screen.getByText("resource-1").tagName).toBe("DD");
-  expect(screen.getByText("resource-1")).toHaveClass("text-[11px]", "font-mono");
+  expect(screen.getByText("resource-1")).toHaveClass("text-xs", "font-mono");
+  expect(screen.getByText("Current Head")).toHaveClass("text-[13px]");
+  expect(screen.getByText("Viewing").parentElement)
+    .toHaveClass("grid-cols-[104px_minmax(0,1fr)]");
   expect(screen.getByText("Current")).toHaveAttribute("data-tone", "success");
 });
 

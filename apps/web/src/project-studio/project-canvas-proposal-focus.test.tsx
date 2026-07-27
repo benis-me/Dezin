@@ -79,6 +79,7 @@ const layout: WorkspaceLayout = {
 test("an initially offscreen proposal waits for delayed ReactFlow initialization before fit and focus", async () => {
   flowHarness.initialize = null;
   flowHarness.instance.fitView.mockClear();
+  flowHarness.instance.setViewport.mockClear();
   const proposal = {
     id: "proposal-offscreen",
     baseGraphRevision: graph.revision,
@@ -148,6 +149,7 @@ test("an initially offscreen proposal waits for delayed ReactFlow initialization
       position: { x: 5_000, y: 120 },
     })],
   })));
+  expect(flowHarness.instance.setViewport).not.toHaveBeenCalled();
   await waitFor(() => expect(target).toHaveFocus());
 });
 

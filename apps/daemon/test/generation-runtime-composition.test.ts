@@ -14,6 +14,7 @@ import type { GenerationPlanRecoveryDeps } from "../src/orchestration/recovery.t
 
 interface CompositionModule {
   createProductionGenerationRecoveryBarrier(options: {
+    projectCatalog: Pick<Store, "listProjects">;
     workspaceStore: Store["workspace"];
     dataDir: string;
     repositoryDirForWorkspace(workspaceId: string): string | Promise<string>;
@@ -123,6 +124,7 @@ test("production startup recovery barrier binds real durable cleanup without adm
   });
   const phases: string[] = [];
   const barrier = module.createProductionGenerationRecoveryBarrier!({
+    projectCatalog: store,
     workspaceStore: store.workspace,
     dataDir: root,
     repositoryDirForWorkspace: (workspaceId) => join(root, "projects", workspaceId),

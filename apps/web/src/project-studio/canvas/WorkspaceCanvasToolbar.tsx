@@ -153,6 +153,7 @@ export function WorkspaceCanvasToolbar({
   canUngroup,
   canDeleteGroup,
   canDeleteRelationship,
+  hasRelationshipSelection,
   relationshipDeleteLabel,
   relationshipDeleteDisabledReason = "Select a relationship to delete",
   zoom,
@@ -175,6 +176,7 @@ export function WorkspaceCanvasToolbar({
   canUngroup: boolean;
   canDeleteGroup: boolean;
   canDeleteRelationship: boolean;
+  hasRelationshipSelection: boolean;
   relationshipDeleteLabel: string;
   relationshipDeleteDisabledReason?: string;
   zoom: number;
@@ -190,8 +192,69 @@ export function WorkspaceCanvasToolbar({
   onDeleteGroup: () => void;
   onDeleteRelationship: () => void;
 }) {
+  const hasGroupingActions = canGroup || canUngroup || canDeleteGroup;
+  const hasContextActions = hasGroupingActions || hasRelationshipSelection;
   return (
     <TooltipProvider delayDuration={120}>
+      <div className="dezin-canvas-toolbar-frame app-no-drag">
+      <div
+        className="dezin-canvas-toolbar__context"
+        data-active={hasContextActions || undefined}
+        aria-hidden={hasContextActions ? undefined : true}
+      >
+        <div
+          className="dezin-canvas-toolbar__cluster"
+          role={hasGroupingActions ? "group" : undefined}
+          aria-label={hasGroupingActions ? "Grouping tools" : undefined}
+        >
+          <span
+            className="dezin-canvas-toolbar__context-slot"
+            data-canvas-context-slot="group-create"
+          >
+            {canGroup ? (
+              <ToolButton label="Group selection" onClick={onGroup}>
+                <Frame size={14} />
+              </ToolButton>
+            ) : null}
+          </span>
+          <span
+            className="dezin-canvas-toolbar__context-slot"
+            data-canvas-context-slot="group-ungroup"
+          >
+            {canUngroup ? (
+              <ToolButton label="Ungroup selection" onClick={onUngroup}>
+                <ChevronsDownUp size={14} />
+              </ToolButton>
+            ) : null}
+          </span>
+          <span
+            className="dezin-canvas-toolbar__context-slot"
+            data-canvas-context-slot="group-delete"
+          >
+            {canDeleteGroup ? (
+              <ToolButton label="Delete group" onClick={onDeleteGroup}>
+                <Trash2 size={14} />
+              </ToolButton>
+            ) : null}
+          </span>
+        </div>
+        <span
+          className="dezin-canvas-toolbar__context-slot"
+          data-canvas-context-slot="relationship-delete"
+        >
+          {hasRelationshipSelection ? (
+            <ToolButton
+              label={relationshipDeleteLabel}
+              disabled={!canDeleteRelationship}
+              disabledReason={relationshipDeleteDisabledReason}
+              onClick={onDeleteRelationship}
+            >
+              <Trash2 size={14} />
+            </ToolButton>
+          ) : null}
+        </span>
+      </div>
+
       <nav className="dezin-canvas-toolbar app-no-drag" aria-label="Canvas tools">
       <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Navigation tools">
         <Segmented<CanvasTool>
@@ -258,44 +321,7 @@ export function WorkspaceCanvasToolbar({
 
       <span className="dezin-canvas-toolbar__rule" aria-hidden />
 
-      <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Grouping tools">
-        <ToolButton
-          label="Group selection"
-          disabled={!canGroup}
-          disabledReason="Select objects to group"
-          onClick={onGroup}
-        >
-          <Frame size={14} />
-        </ToolButton>
-        <ToolButton
-          label="Ungroup selection"
-          disabled={!canUngroup}
-          disabledReason="Select grouped objects to ungroup"
-          onClick={onUngroup}
-        >
-          <ChevronsDownUp size={14} />
-        </ToolButton>
-        <ToolButton
-          label="Delete group"
-          disabled={!canDeleteGroup}
-          disabledReason="Select one group to delete"
-          onClick={onDeleteGroup}
-        >
-          <Trash2 size={14} />
-        </ToolButton>
-      </div>
-
-      <span className="dezin-canvas-toolbar__rule" aria-hidden />
-
       <div className="dezin-canvas-toolbar__cluster" role="group" aria-label="Relationship tools">
-        <ToolButton
-          label={relationshipDeleteLabel}
-          disabled={!canDeleteRelationship}
-          disabledReason={relationshipDeleteDisabledReason}
-          onClick={onDeleteRelationship}
-        >
-          <Trash2 size={14} />
-        </ToolButton>
         <RelationshipFilterMenu value={edgeFilter} onChange={onEdgeFilterChange} />
       </div>
 
@@ -305,6 +331,7 @@ export function WorkspaceCanvasToolbar({
         {outlineOpen ? <ListTree size={14} /> : <BoxSelect size={14} />}
       </ToolButton>
       </nav>
+      </div>
     </TooltipProvider>
   );
 }

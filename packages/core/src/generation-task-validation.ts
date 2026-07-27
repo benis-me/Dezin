@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
@@ -12,6 +13,7 @@ import type {
 import type { ResourceRevision } from "./workspace-types.ts";
 
 export const GENERATION_TASK_PROTOTYPE_VALIDATION_PROTOCOL = "dezin-prototype-validation-v1";
+export const GENERATION_TASK_PROTOTYPE_FINALIZATION_PROTOCOL = "dezin-prototype-finalization-v2";
 
 export interface GenerationTaskPrototypeValidationResult {
   snapshotId: string;
@@ -44,11 +46,111 @@ export class GenerationTaskPrototypeValidationError extends Error {
   }
 }
 
-interface ValidationPayload {
+interface ValidationPayloadV1 {
   version: 1;
   prototypeIntents: WorkspaceGenerationPrototypeIntent[];
   responsiveFrames: Array<Record<string, unknown> & { id: string }>;
   artifactIds: string[];
+}
+
+interface PrototypeFinalizationIntent {
+  edgeId: string;
+  sourceArtifactId: string;
+  targetArtifactId: string;
+  trigger: "click" | "submit";
+  sourceMarkerId: string;
+  targetState?: string;
+  transition?: WorkspaceGenerationPrototypeIntent["transition"];
+}
+
+interface ValidationPayloadV2 {
+  version: 2;
+  prototypeIntents: PrototypeFinalizationIntent[];
+  responsiveFrames: Array<Record<string, unknown> & { id: string }>;
+  artifactIds: string[];
+}
+
+type ValidationPayload = ValidationPayloadV1 | ValidationPayloadV2;
+
+export interface GenerationTaskPrototypeMarkerProof {
+  protocol: "dezin.artifact-element-selection-manifest.v1";
+  workspaceId: string;
+  artifactId: string;
+  artifactRevisionId: string;
+  assemblyHash: string;
+  designNodeId: string;
+  sourceArtifactId: string;
+  sourceArtifactRevisionId: string;
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  sourcePath: string;
+  selectionManifestHash: string;
+  runtimeProof: {
+    protocol: "dezin.artifact-prototype-runtime-proof.v1";
+    runtimeIdentityHash: string;
+    workspaceId: string;
+    artifactId: string;
+    artifactRevisionId: string;
+    assemblyHash: string;
+    designNodeId: string;
+    trigger: "click" | "submit";
+    sourceTreeHash: string;
+    dependencyLockHash: string;
+    receiptNonce: string;
+    frames: Array<{
+      frameId: string;
+      width: number;
+      height: number;
+      tagName: string;
+      role: string | null;
+      action: "button" | "link" | "input-control" | "semantic-control" | "summary"
+        | "form" | "submit-control";
+      visible: true;
+    }>;
+    receiptHash: string;
+  };
+}
+
+export interface GenerationTaskPrototypeFinalizationRequirement {
+  edgeId: string;
+  sourceArtifactId: string;
+  sourceRevisionId: string;
+  sourceMarkerId: string;
+  targetArtifactId: string;
+  targetRevisionId: string;
+  trigger: "click" | "submit";
+  targetState?: string;
+  transition?: WorkspaceGenerationPrototypeIntent["transition"];
+}
+
+export interface GenerationTaskPrototypeFinalizationPreparation {
+  baseSnapshotId: string;
+  baseGraphRevision: number;
+  artifactRevisionIds: string[];
+  resourceRevisionIds: string[];
+  requirements: GenerationTaskPrototypeFinalizationRequirement[];
+}
+
+export interface GenerationTaskPrototypeFinalizationBinding {
+  edgeId: string;
+  binding: {
+    sourceArtifactId: string;
+    sourceRevisionId: string;
+    sourceLocator: {
+      designNodeId: string;
+    };
+    trigger: "click" | "submit";
+    targetArtifactId: string;
+    targetState?: string;
+    transition?: WorkspaceGenerationPrototypeIntent["transition"];
+  };
+  markerProof: GenerationTaskPrototypeMarkerProof;
+}
+
+export interface BuildGenerationTaskPrototypeFinalizationResultInput
+  extends BuildGenerationTaskPrototypeValidationInput {
+  finalSnapshot: WorkspaceSnapshotRecord;
+  markerProofs: readonly GenerationTaskPrototypeMarkerProof[];
 }
 
 interface ResolvedArtifact {
@@ -119,19 +221,13 @@ function locatorEvidence(value: unknown, label: string): Record<string, unknown>
   };
 }
 
-function prototypeIntent(value: unknown, index: number): WorkspaceGenerationPrototypeIntent {
-  const label = `Prototype validation intent[${index}]`;
-  const intent = exactObject(
-    value,
-    ["edgeId", "sourceArtifactId", "targetArtifactId", "trigger"],
-    ["sourceLocator", "targetState", "transition"],
-    label,
-  );
-  const trigger = intent.trigger;
-  if (trigger !== "click" && trigger !== "submit") invalid(`${label} trigger is unsupported`);
+function prototypeTransition(
+  value: unknown,
+  label: string,
+): WorkspaceGenerationPrototypeIntent["transition"] {
   let transition: WorkspaceGenerationPrototypeIntent["transition"];
-  if (intent.transition !== undefined) {
-    const candidate = exactObject(intent.transition, ["type"], ["durationMs", "easing"], `${label} transition`);
+  if (value !== undefined) {
+    const candidate = exactObject(value, ["type"], ["durationMs", "easing"], `${label} transition`);
     if (candidate.type !== "none" && candidate.type !== "fade" && candidate.type !== "slide") {
       invalid(`${label} transition type is unsupported`);
     }
@@ -147,6 +243,20 @@ function prototypeIntent(value: unknown, index: number): WorkspaceGenerationProt
         : { easing: nonEmptyString(candidate.easing, `${label} transition easing`) }),
     };
   }
+  return transition;
+}
+
+function prototypeIntent(value: unknown, index: number): WorkspaceGenerationPrototypeIntent {
+  const label = `Prototype validation intent[${index}]`;
+  const intent = exactObject(
+    value,
+    ["edgeId", "sourceArtifactId", "targetArtifactId", "trigger"],
+    ["sourceLocator", "targetState", "transition"],
+    label,
+  );
+  const trigger = intent.trigger;
+  if (trigger !== "click" && trigger !== "submit") invalid(`${label} trigger is unsupported`);
+  const transition = prototypeTransition(intent.transition, label);
   return {
     edgeId: nonEmptyString(intent.edgeId, `${label} edge id`),
     sourceArtifactId: nonEmptyString(intent.sourceArtifactId, `${label} source Artifact id`),
@@ -155,6 +265,31 @@ function prototypeIntent(value: unknown, index: number): WorkspaceGenerationProt
       ? {}
       : { sourceLocator: locatorEvidence(intent.sourceLocator, `${label} source locator`) as never }),
     trigger,
+    ...(intent.targetState === undefined
+      ? {}
+      : { targetState: nonEmptyString(intent.targetState, `${label} target state`) }),
+    ...(transition === undefined ? {} : { transition }),
+  };
+}
+
+function prototypeFinalizationIntent(value: unknown, index: number): PrototypeFinalizationIntent {
+  const label = `Prototype finalization intent[${index}]`;
+  const intent = exactObject(
+    value,
+    ["edgeId", "sourceArtifactId", "targetArtifactId", "trigger", "sourceMarkerId"],
+    ["targetState", "transition"],
+    label,
+  );
+  if (intent.trigger !== "click" && intent.trigger !== "submit") {
+    invalid(`${label} trigger is unsupported`);
+  }
+  const transition = prototypeTransition(intent.transition, label);
+  return {
+    edgeId: nonEmptyString(intent.edgeId, `${label} edge id`),
+    sourceArtifactId: nonEmptyString(intent.sourceArtifactId, `${label} source Artifact id`),
+    targetArtifactId: nonEmptyString(intent.targetArtifactId, `${label} target Artifact id`),
+    trigger: intent.trigger,
+    sourceMarkerId: nonEmptyString(intent.sourceMarkerId, `${label} source marker id`),
     ...(intent.targetState === undefined
       ? {}
       : { targetState: nonEmptyString(intent.targetState, `${label} target state`) }),
@@ -181,9 +316,11 @@ function validationPayload(task: GenerationTask, attempt: GenerationTaskAttempt)
     [],
     "Prototype validation Task payload",
   );
-  if (payload.version !== 1) invalid("Prototype validation Task payload version is unsupported");
+  if (payload.version !== 1 && payload.version !== 2) {
+    invalid("Prototype validation Task payload version is unsupported");
+  }
   const intents = denseArray(payload.prototypeIntents, "Prototype validation intents")
-    .map(prototypeIntent);
+    .map(payload.version === 1 ? prototypeIntent : prototypeFinalizationIntent);
   const intentIds = intents.map((intent) => intent.edgeId);
   if (!isDeepStrictEqual(intentIds, exactStringSet(intentIds, "Prototype validation intent ids"))) {
     invalid("Prototype validation intents must be unique and canonically ordered");
@@ -203,7 +340,24 @@ function validationPayload(task: GenerationTask, attempt: GenerationTaskAttempt)
   if (new Set(artifactIds).size !== artifactIds.length) {
     invalid("Prototype validation Artifact ids must be unique");
   }
-  return { version: 1, prototypeIntents: intents, responsiveFrames: frames, artifactIds };
+  if (payload.version === 2) {
+    const markerIds = (intents as PrototypeFinalizationIntent[]).map((intent) => intent.sourceMarkerId);
+    if (new Set(markerIds).size !== markerIds.length) {
+      invalid("Prototype finalization source marker ids must be unique");
+    }
+    return {
+      version: 2,
+      prototypeIntents: intents as PrototypeFinalizationIntent[],
+      responsiveFrames: frames,
+      artifactIds,
+    };
+  }
+  return {
+    version: 1,
+    prototypeIntents: intents as WorkspaceGenerationPrototypeIntent[],
+    responsiveFrames: frames,
+    artifactIds,
+  };
 }
 
 function dependencyEvidence(task: GenerationTask, attempt: GenerationTaskAttempt): {
@@ -291,27 +445,26 @@ function revisionFrames(
 ): { frameIds: string[]; states: Set<string> } {
   const frames = revision.renderSpec.frames;
   if (!Array.isArray(frames)) invalid(`Artifact Revision ${revision.id} has no resolvable RenderSpec Frames`);
+  const plannedById = new Map(plannedFrames.map((frame) => [frame.id, frame]));
   const byId = new Map<string, Record<string, unknown>>();
   const states = new Set<string>();
   frames.forEach((value, index) => {
     const frame = record(value, `Artifact Revision ${revision.id} Frame ${index}`);
     const frameId = nonEmptyString(frame.id, `Artifact Revision ${revision.id} Frame ${index} id`);
     if (byId.has(frameId)) invalid(`Artifact Revision ${revision.id} has duplicate Frame ${frameId}`);
+    const plannedFrame = plannedById.get(frameId);
+    if (plannedFrame === undefined) {
+      invalid(`Artifact Revision ${revision.id} Frame ${frameId} is absent from the immutable validation plan`);
+    }
+    if (!isDeepStrictEqual(frame, plannedFrame)) {
+      invalid(`Artifact Revision ${revision.id} Frame ${frameId} is not the immutable planned Frame`);
+    }
     byId.set(frameId, frame);
     if (frame.initialState !== undefined) {
       states.add(nonEmptyString(frame.initialState, `Artifact Revision ${revision.id} Frame ${frameId} state`));
     }
   });
-  const plannedFrameIds = plannedFrames.map((frame) => frame.id);
-  if (!isDeepStrictEqual([...byId.keys()].sort(compareBinary), [...plannedFrameIds].sort(compareBinary))) {
-    invalid(`Artifact Revision ${revision.id} Frame set diverges from the immutable validation plan`);
-  }
-  for (const plannedFrame of plannedFrames) {
-    if (!isDeepStrictEqual(byId.get(plannedFrame.id), plannedFrame)) {
-      invalid(`Artifact Revision ${revision.id} Frame ${plannedFrame.id} is not the immutable planned Frame`);
-    }
-  }
-  return { frameIds: [...plannedFrameIds].sort(compareBinary), states };
+  return { frameIds: [...byId.keys()].sort(compareBinary), states };
 }
 
 function resolveArtifacts(input: BuildGenerationTaskPrototypeValidationInput, payload: ValidationPayload, ids: string[]) {
@@ -322,6 +475,9 @@ function resolveArtifacts(input: BuildGenerationTaskPrototypeValidationInput, pa
     invalid("Prototype Artifact Revision records do not match the immutable dependency output set");
   }
   const result = new Map<string, ResolvedArtifact>();
+  // Workspace-global neutral Frames may be shared by every Artifact. A set
+  // validates complete coverage without rejecting that intentional overlap.
+  const coveredFrameIds = new Set<string>();
   for (const revision of input.artifactRevisions) {
     if (revision.workspaceId !== input.task.workspaceId
       || revision.kernelRevisionId !== input.attempt.kernelRevisionId
@@ -333,9 +489,13 @@ function resolveArtifacts(input: BuildGenerationTaskPrototypeValidationInput, pa
     if (result.has(revision.artifactId)) {
       invalid(`Prototype dependency outputs contain duplicate Artifact ${revision.artifactId}`);
     }
+    const resolvedFrames = revisionFrames(revision, payload.responsiveFrames);
+    for (const frameId of resolvedFrames.frameIds) {
+      coveredFrameIds.add(frameId);
+    }
     result.set(revision.artifactId, {
       revision,
-      ...revisionFrames(revision, payload.responsiveFrames),
+      ...resolvedFrames,
     });
   }
   if (!isDeepStrictEqual(
@@ -343,6 +503,13 @@ function resolveArtifacts(input: BuildGenerationTaskPrototypeValidationInput, pa
     exactStringSet(payload.artifactIds, "Prototype payload Artifact ids"),
   )) {
     invalid("Prototype Artifact Revision set does not match the immutable payload Artifact set");
+  }
+  const plannedFrameIds = payload.responsiveFrames.map((frame) => frame.id).sort(compareBinary);
+  // Empty approved generations retain a validation/checkpoint chain without
+  // producing Artifact Revisions that could cover their Workspace Frames.
+  if (payload.artifactIds.length > 0
+    && !isDeepStrictEqual([...coveredFrameIds].sort(compareBinary), plannedFrameIds)) {
+    invalid("Prototype Artifact Revision Frame union diverges from the immutable validation plan");
   }
   return result;
 }
@@ -388,7 +555,7 @@ function validateSnapshotAuthority(input: BuildGenerationTaskPrototypeValidation
 
 function prototypeEdgeEvidence(input: {
   snapshot: WorkspaceSnapshotRecord;
-  payload: ValidationPayload;
+  payload: ValidationPayloadV1;
   artifacts: Map<string, ResolvedArtifact>;
 }): Array<Record<string, unknown>> {
   const edgeIds = new Set<string>();
@@ -440,6 +607,475 @@ function prototypeEdgeEvidence(input: {
   }).sort((left, right) => compareBinary(String(left.edgeId), String(right.edgeId)));
 }
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function canonicalFlatRecord(value: Record<string, string>): string {
+  return JSON.stringify(Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => compareBinary(left, right)),
+  ));
+}
+
+function exactHash(value: unknown, label: string, lengths: readonly number[] = [64]): string {
+  const hash = nonEmptyString(value, label);
+  if (!lengths.includes(hash.length) || !/^[0-9a-f]+$/.test(hash)) {
+    invalid(`${label} must be a lowercase hexadecimal hash`);
+  }
+  return hash;
+}
+
+function exactSourcePath(value: unknown, label: string): string {
+  const sourcePath = nonEmptyString(value, label);
+  if (sourcePath.length > 4_096
+    || sourcePath.startsWith("/")
+    || sourcePath.includes("\\")
+    || /[\u0000-\u001f\u007f]/.test(sourcePath)
+    || sourcePath.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    invalid(`${label} must be a canonical Artifact-relative path`);
+  }
+  return sourcePath;
+}
+
+function prototypeRuntimeProof(
+  value: unknown,
+  label: string,
+): GenerationTaskPrototypeMarkerProof["runtimeProof"] {
+  const proof = exactObject(value, [
+    "protocol",
+    "runtimeIdentityHash",
+    "workspaceId",
+    "artifactId",
+    "artifactRevisionId",
+    "assemblyHash",
+    "designNodeId",
+    "trigger",
+    "sourceTreeHash",
+    "dependencyLockHash",
+    "receiptNonce",
+    "frames",
+    "receiptHash",
+  ], [], label);
+  if (proof.protocol !== "dezin.artifact-prototype-runtime-proof.v1") {
+    invalid(`${label} protocol is unsupported`);
+  }
+  if (proof.trigger !== "click" && proof.trigger !== "submit") {
+    invalid(`${label} trigger is invalid`);
+  }
+  const trigger: "click" | "submit" = proof.trigger;
+  const frames = denseArray(proof.frames, `${label} Frames`).map((value, index) => {
+    const frameLabel = `${label} Frame[${index}]`;
+    const frame = exactObject(value, [
+      "frameId",
+      "width",
+      "height",
+      "tagName",
+      "role",
+      "action",
+      "visible",
+    ], [], frameLabel);
+    if (!Number.isSafeInteger(frame.width) || Number(frame.width) <= 0
+      || !Number.isSafeInteger(frame.height) || Number(frame.height) <= 0) {
+      invalid(`${frameLabel} viewport is invalid`);
+    }
+    if (frame.role !== null && (typeof frame.role !== "string" || frame.role.length === 0)) {
+      invalid(`${frameLabel} role is invalid`);
+    }
+    if (frame.action !== "button" && frame.action !== "link" && frame.action !== "input-control"
+      && frame.action !== "semantic-control" && frame.action !== "summary"
+      && frame.action !== "form" && frame.action !== "submit-control") {
+      invalid(`${frameLabel} action is invalid`);
+    }
+    const action: GenerationTaskPrototypeMarkerProof["runtimeProof"]["frames"][number]["action"] =
+      frame.action;
+    if (frame.visible !== true
+      || (trigger === "click" && (action === "form" || action === "submit-control"))
+      || (trigger === "submit" && action !== "form" && action !== "submit-control")) {
+      invalid(`${frameLabel} is not trigger-compatible`);
+    }
+    return {
+      frameId: nonEmptyString(frame.frameId, `${frameLabel} id`),
+      width: Number(frame.width),
+      height: Number(frame.height),
+      tagName: nonEmptyString(frame.tagName, `${frameLabel} tag name`),
+      role: frame.role as string | null,
+      action,
+      visible: true as const,
+    };
+  });
+  const frameIds = frames.map((frame) => frame.frameId);
+  if (new Set(frameIds).size !== frameIds.length
+    || !isDeepStrictEqual(frameIds, [...frameIds].sort(compareBinary))) {
+    invalid(`${label} Frames must be unique and canonically ordered`);
+  }
+  const normalized = {
+    protocol: "dezin.artifact-prototype-runtime-proof.v1" as const,
+    runtimeIdentityHash: exactHash(proof.runtimeIdentityHash, `${label} runtime identity hash`),
+    workspaceId: nonEmptyString(proof.workspaceId, `${label} Workspace id`),
+    artifactId: nonEmptyString(proof.artifactId, `${label} Artifact id`),
+    artifactRevisionId: nonEmptyString(proof.artifactRevisionId, `${label} Artifact Revision id`),
+    assemblyHash: exactHash(proof.assemblyHash, `${label} assembly hash`),
+    designNodeId: nonEmptyString(proof.designNodeId, `${label} design node id`),
+    trigger,
+    sourceTreeHash: exactHash(proof.sourceTreeHash, `${label} source tree hash`, [40, 64]),
+    dependencyLockHash: exactHash(proof.dependencyLockHash, `${label} dependency lock hash`),
+    receiptNonce: exactHash(proof.receiptNonce, `${label} receipt nonce`),
+    frames,
+  };
+  const expectedRuntimeIdentityHash = sha256(JSON.stringify({
+    protocol: "dezin.artifact-preview-runtime-identity.v1",
+    workspaceId: normalized.workspaceId,
+    artifactId: normalized.artifactId,
+    artifactRevisionId: normalized.artifactRevisionId,
+    assemblyHash: normalized.assemblyHash,
+    sourceTreeHash: normalized.sourceTreeHash,
+    dependencyLockHash: normalized.dependencyLockHash,
+  }));
+  const receiptHash = exactHash(proof.receiptHash, `${label} receipt hash`);
+  return {
+    ...normalized,
+    runtimeIdentityHash: expectedRuntimeIdentityHash === normalized.runtimeIdentityHash
+      ? normalized.runtimeIdentityHash
+      : invalid(`${label} runtime identity hash is inconsistent`),
+    receiptHash: receiptHash === sha256(JSON.stringify(normalized))
+      ? receiptHash
+      : invalid(`${label} receipt hash is inconsistent`),
+  };
+}
+
+function prototypeMarkerProof(
+  value: unknown,
+  index: number,
+): GenerationTaskPrototypeMarkerProof {
+  const label = `Prototype marker proof[${index}]`;
+  const proof = exactObject(value, [
+    "protocol",
+    "workspaceId",
+    "artifactId",
+    "artifactRevisionId",
+    "assemblyHash",
+    "designNodeId",
+    "sourceArtifactId",
+    "sourceArtifactRevisionId",
+    "sourceCommitHash",
+    "sourceTreeHash",
+    "sourcePath",
+    "selectionManifestHash",
+    "runtimeProof",
+  ], [], label);
+  if (proof.protocol !== "dezin.artifact-element-selection-manifest.v1") {
+    invalid(`${label} protocol is unsupported`);
+  }
+  const manifest = {
+    protocol: "dezin.artifact-element-selection-manifest.v1" as const,
+    workspaceId: nonEmptyString(proof.workspaceId, `${label} Workspace id`),
+    artifactId: nonEmptyString(proof.artifactId, `${label} Artifact id`),
+    artifactRevisionId: nonEmptyString(proof.artifactRevisionId, `${label} Artifact Revision id`),
+    assemblyHash: exactHash(proof.assemblyHash, `${label} assembly hash`),
+    designNodeId: nonEmptyString(proof.designNodeId, `${label} design node id`),
+    sourceArtifactId: nonEmptyString(proof.sourceArtifactId, `${label} source Artifact id`),
+    sourceArtifactRevisionId: nonEmptyString(
+      proof.sourceArtifactRevisionId,
+      `${label} source Artifact Revision id`,
+    ),
+    sourceCommitHash: exactHash(proof.sourceCommitHash, `${label} source commit hash`, [40, 64]),
+    sourceTreeHash: exactHash(proof.sourceTreeHash, `${label} source tree hash`, [40, 64]),
+    sourcePath: exactSourcePath(proof.sourcePath, `${label} source path`),
+  };
+  const selectionManifestHash = exactHash(
+    proof.selectionManifestHash,
+    `${label} selection manifest hash`,
+  );
+  if (selectionManifestHash !== sha256(canonicalFlatRecord(manifest))) {
+    invalid(`${label} selection manifest hash is inconsistent`);
+  }
+  return {
+    ...manifest,
+    selectionManifestHash,
+    runtimeProof: prototypeRuntimeProof(proof.runtimeProof, `${label} runtime proof`),
+  };
+}
+
+export function generationTaskPrototypeFinalizationCommandId(
+  taskId: string,
+  attempt: number,
+  edgeId: string,
+): string {
+  nonEmptyString(taskId, "Prototype finalization Task id");
+  nonEmptyString(edgeId, "Prototype finalization edge id");
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    invalid("Prototype finalization Attempt must be a positive safe integer");
+  }
+  return `prototype-finalization-${sha256(JSON.stringify([taskId, attempt, edgeId])).slice(0, 32)}`;
+}
+
+export function generationTaskPrototypeRuntimeReceiptNonce(
+  taskId: string,
+  attempt: number,
+  edgeId: string,
+  sourceMarkerId: string,
+): string {
+  nonEmptyString(taskId, "Prototype runtime receipt Task id");
+  nonEmptyString(edgeId, "Prototype runtime receipt edge id");
+  nonEmptyString(sourceMarkerId, "Prototype runtime receipt source marker id");
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    invalid("Prototype runtime receipt Attempt must be a positive safe integer");
+  }
+  return sha256(JSON.stringify([
+    "dezin-prototype-runtime-receipt-nonce-v1",
+    taskId,
+    attempt,
+    edgeId,
+    sourceMarkerId,
+  ]));
+}
+
+export function buildGenerationTaskPrototypeFinalizationPreparation(
+  input: BuildGenerationTaskPrototypeValidationInput,
+): GenerationTaskPrototypeFinalizationPreparation {
+  const payload = validationPayload(input.task, input.attempt);
+  if (payload.version !== 2) invalid("Prototype finalization preparation requires a v2 payload");
+  validateSnapshotAuthority(input);
+  const dependencies = dependencyEvidence(input.task, input.attempt);
+  const artifacts = resolveArtifacts(input, payload, dependencies.artifactRevisionIds);
+  resolveResources(input, dependencies.resourceRevisionIds);
+  const edgeIds = new Set<string>();
+  for (const edge of input.snapshot.graph.edges) {
+    if (edgeIds.has(edge.id)) invalid(`Snapshot graph contains duplicate edge ${edge.id}`);
+    edgeIds.add(edge.id);
+  }
+  const requirements = payload.prototypeIntents.map((intent) => {
+    const edge = input.snapshot.graph.edges.find((candidate) => candidate.id === intent.edgeId);
+    if (!edge || edge.kind !== "prototype" || edge.prototype.status !== "planned") {
+      return invalid(`Prototype edge ${intent.edgeId} is not planned in the immutable base Snapshot`);
+    }
+    const sourceNode = artifactNode(input.snapshot, intent.sourceArtifactId);
+    const targetNode = artifactNode(input.snapshot, intent.targetArtifactId);
+    const source = artifacts.get(intent.sourceArtifactId);
+    const target = artifacts.get(intent.targetArtifactId);
+    if (sourceNode.kind !== "page" || targetNode.kind !== "page"
+      || edge.sourceNodeId !== sourceNode.id || edge.targetNodeId !== targetNode.id
+      || source === undefined || target === undefined) {
+      return invalid(`Prototype edge ${intent.edgeId} source or target is not exactly resolvable`);
+    }
+    if (intent.targetState !== undefined && !target.states.has(intent.targetState)) {
+      return invalid(`Prototype edge ${intent.edgeId} target state ${intent.targetState} is not resolvable`);
+    }
+    return {
+      edgeId: intent.edgeId,
+      sourceArtifactId: intent.sourceArtifactId,
+      sourceRevisionId: source.revision.id,
+      sourceMarkerId: intent.sourceMarkerId,
+      targetArtifactId: intent.targetArtifactId,
+      targetRevisionId: target.revision.id,
+      trigger: intent.trigger,
+      ...(intent.targetState === undefined ? {} : { targetState: intent.targetState }),
+      ...(intent.transition === undefined ? {} : { transition: structuredClone(intent.transition) }),
+    };
+  });
+  return {
+    baseSnapshotId: input.snapshot.id,
+    baseGraphRevision: input.snapshot.graphRevision,
+    artifactRevisionIds: dependencies.artifactRevisionIds,
+    resourceRevisionIds: dependencies.resourceRevisionIds,
+    requirements,
+  };
+}
+
+export function buildGenerationTaskPrototypeFinalizationBindings(
+  input: BuildGenerationTaskPrototypeValidationInput & {
+    markerProofs: readonly GenerationTaskPrototypeMarkerProof[];
+  },
+): {
+  preparation: GenerationTaskPrototypeFinalizationPreparation;
+  bindings: GenerationTaskPrototypeFinalizationBinding[];
+} {
+  const preparation = buildGenerationTaskPrototypeFinalizationPreparation(input);
+  if (input.markerProofs.length !== preparation.requirements.length) {
+    invalid("Prototype marker proof set does not match the immutable intent set");
+  }
+  const artifacts = new Map(input.artifactRevisions.map((revision) => [revision.id, revision]));
+  const bindings = preparation.requirements.map((requirement, index) => {
+    const proof = prototypeMarkerProof(input.markerProofs[index], index);
+    const sourceRevision = artifacts.get(requirement.sourceRevisionId);
+    if (sourceRevision === undefined
+      || proof.workspaceId !== input.task.workspaceId
+      || proof.artifactId !== requirement.sourceArtifactId
+      || proof.artifactRevisionId !== requirement.sourceRevisionId
+      || proof.designNodeId !== requirement.sourceMarkerId
+      || proof.sourceArtifactId !== requirement.sourceArtifactId
+      || proof.sourceArtifactRevisionId !== requirement.sourceRevisionId
+      || proof.sourceCommitHash !== sourceRevision.sourceCommitHash
+      || proof.sourceTreeHash !== sourceRevision.sourceTreeHash
+      || proof.runtimeProof.workspaceId !== proof.workspaceId
+      || proof.runtimeProof.artifactId !== proof.artifactId
+      || proof.runtimeProof.artifactRevisionId !== proof.artifactRevisionId
+      || proof.runtimeProof.assemblyHash !== proof.assemblyHash
+      || proof.runtimeProof.designNodeId !== proof.designNodeId
+      || proof.runtimeProof.trigger !== requirement.trigger
+      || proof.runtimeProof.sourceTreeHash !== proof.sourceTreeHash
+      || proof.runtimeProof.receiptNonce !== generationTaskPrototypeRuntimeReceiptNonce(
+        input.task.id,
+        input.attempt.attempt,
+        requirement.edgeId,
+        requirement.sourceMarkerId,
+      )) {
+      invalid(`Prototype marker proof ${requirement.sourceMarkerId} is not bound to its exact source Revision`);
+    }
+    const expectedRuntimeFrames = denseArray(
+      sourceRevision.renderSpec.frames,
+      `Prototype source Revision ${sourceRevision.id} Frames`,
+    ).map((value, frameIndex) => {
+      const frame = record(value, `Prototype source Revision ${sourceRevision.id} Frame[${frameIndex}]`);
+      if (!Number.isSafeInteger(frame.width) || Number(frame.width) <= 0
+        || !Number.isSafeInteger(frame.height) || Number(frame.height) <= 0) {
+        invalid(`Prototype source Revision ${sourceRevision.id} Frame viewport is invalid`);
+      }
+      return {
+        frameId: nonEmptyString(
+          frame.id,
+          `Prototype source Revision ${sourceRevision.id} Frame[${frameIndex}] id`,
+        ),
+        width: Number(frame.width),
+        height: Number(frame.height),
+      };
+    }).sort((left, right) => compareBinary(left.frameId, right.frameId));
+    if (!isDeepStrictEqual(
+      proof.runtimeProof.frames.map(({ frameId, width, height }) => ({ frameId, width, height })),
+      expectedRuntimeFrames,
+    )) {
+      invalid(`Prototype marker proof ${requirement.sourceMarkerId} does not cover every exact source Frame`);
+    }
+    return {
+      edgeId: requirement.edgeId,
+      binding: {
+        sourceArtifactId: requirement.sourceArtifactId,
+        sourceRevisionId: requirement.sourceRevisionId,
+        sourceLocator: {
+          designNodeId: requirement.sourceMarkerId,
+        },
+        trigger: requirement.trigger,
+        targetArtifactId: requirement.targetArtifactId,
+        ...(requirement.targetState === undefined ? {} : { targetState: requirement.targetState }),
+        ...(requirement.transition === undefined
+          ? {}
+          : { transition: structuredClone(requirement.transition) }),
+      },
+      markerProof: proof,
+    };
+  });
+  return { preparation, bindings };
+}
+
+export function buildGenerationTaskPrototypeFinalizationResult(
+  input: BuildGenerationTaskPrototypeFinalizationResultInput,
+): GenerationTaskPrototypeValidationResult {
+  const payload = validationPayload(input.task, input.attempt);
+  if (payload.version !== 2) invalid("Prototype finalization result requires a v2 payload");
+  const { preparation, bindings } = buildGenerationTaskPrototypeFinalizationBindings(input);
+  const expectedGraphRevision = preparation.baseGraphRevision + 1;
+  if (!Number.isSafeInteger(expectedGraphRevision)
+    || input.finalSnapshot.id === input.snapshot.id
+    || input.finalSnapshot.workspaceId !== input.snapshot.workspaceId
+    || input.finalSnapshot.parentSnapshotId !== input.snapshot.id
+    || input.finalSnapshot.graphRevision !== expectedGraphRevision
+    || input.finalSnapshot.graph.workspaceId !== input.snapshot.graph.workspaceId
+    || input.finalSnapshot.graph.revision !== expectedGraphRevision
+    || input.finalSnapshot.kernelRevisionId !== input.snapshot.kernelRevisionId
+    || !isDeepStrictEqual(input.finalSnapshot.artifactTracks, input.snapshot.artifactTracks)
+    || !isDeepStrictEqual(input.finalSnapshot.artifactRevisions, input.snapshot.artifactRevisions)
+    || !isDeepStrictEqual(input.finalSnapshot.resourceRevisions, input.snapshot.resourceRevisions)) {
+    invalid("Prototype finalization Snapshot authority is inconsistent");
+  }
+  const commandIds = bindings.map((binding) => generationTaskPrototypeFinalizationCommandId(
+    input.task.id,
+    input.attempt.attempt,
+    binding.edgeId,
+  ));
+  if (!isDeepStrictEqual(input.finalSnapshot.provenance, { kind: "graph-command", commandIds })) {
+    invalid("Prototype finalization Snapshot provenance is inconsistent");
+  }
+  const bindingsByEdgeId = new Map(bindings.map((binding) => [binding.edgeId, binding.binding]));
+  const expectedGraph = {
+    ...structuredClone(input.snapshot.graph),
+    revision: expectedGraphRevision,
+    edges: input.snapshot.graph.edges.map((edge) => {
+      const binding = bindingsByEdgeId.get(edge.id);
+      if (binding === undefined) return structuredClone(edge);
+      if (edge.kind !== "prototype" || edge.prototype.status !== "planned") {
+        return invalid(`Prototype edge ${edge.id} changed before finalization`);
+      }
+      return {
+        ...structuredClone(edge),
+        prototype: {
+          status: "interactive" as const,
+          binding: structuredClone(binding),
+        },
+      };
+    }),
+  };
+  if (!isDeepStrictEqual(input.finalSnapshot.graph, expectedGraph)) {
+    invalid("Prototype finalization graph diverges from its immutable bindings");
+  }
+  const dependencies = dependencyEvidence(input.task, input.attempt);
+  const artifacts = resolveArtifacts(input, payload, dependencies.artifactRevisionIds);
+  const resources = resolveResources(input, dependencies.resourceRevisionIds);
+  const requirementsByEdgeId = new Map(preparation.requirements.map((requirement) => [
+    requirement.edgeId,
+    requirement,
+  ]));
+  return {
+    snapshotId: input.finalSnapshot.id,
+    graphRevision: input.finalSnapshot.graphRevision,
+    artifactRevisionIds: dependencies.artifactRevisionIds,
+    resourceRevisionIds: dependencies.resourceRevisionIds,
+    evidence: {
+      protocol: GENERATION_TASK_PROTOTYPE_FINALIZATION_PROTOCOL,
+      baseSnapshot: {
+        id: input.snapshot.id,
+        graphRevision: input.snapshot.graphRevision,
+        kernelRevisionId: input.snapshot.kernelRevisionId,
+      },
+      snapshot: {
+        id: input.finalSnapshot.id,
+        graphRevision: input.finalSnapshot.graphRevision,
+        kernelRevisionId: input.finalSnapshot.kernelRevisionId,
+      },
+      dependencies: dependencies.evidence,
+      artifacts: [...artifacts.values()]
+        .map(({ revision, frameIds }) => ({
+          artifactId: revision.artifactId,
+          revisionId: revision.id,
+          trackId: revision.trackId,
+          frameIds,
+        }))
+        .sort((left, right) => compareBinary(left.artifactId, right.artifactId)),
+      resources: [...resources.values()]
+        .map((revision) => ({ resourceId: revision.resourceId, revisionId: revision.id }))
+        .sort((left, right) => compareBinary(left.resourceId, right.resourceId)),
+      prototypeEdges: bindings.map(({ edgeId, binding, markerProof }) => {
+        const requirement = requirementsByEdgeId.get(edgeId)!;
+        const source = artifacts.get(requirement.sourceArtifactId)!;
+        return {
+          edgeId,
+          sourceArtifactId: binding.sourceArtifactId,
+          sourceRevisionId: binding.sourceRevisionId,
+          sourceMarkerId: binding.sourceLocator.designNodeId,
+          sourceLocator: structuredClone(binding.sourceLocator),
+          markerProof: structuredClone(markerProof),
+          targetArtifactId: binding.targetArtifactId,
+          targetRevisionId: requirement.targetRevisionId,
+          trigger: binding.trigger,
+          targetState: binding.targetState ?? null,
+          transition: binding.transition === undefined ? null : structuredClone(binding.transition),
+          frameIds: source.frameIds,
+        };
+      }),
+      frames: payload.responsiveFrames.map((frame) => structuredClone(frame)),
+    },
+  };
+}
+
 /**
  * Recomputes the complete v1 prototype validation result from immutable Core
  * records. Callers must compare this authoritative value to untrusted executor
@@ -449,6 +1085,9 @@ export function buildGenerationTaskPrototypeValidationResult(
   input: BuildGenerationTaskPrototypeValidationInput,
 ): GenerationTaskPrototypeValidationResult {
   const payload = validationPayload(input.task, input.attempt);
+  if (payload.version !== 1) {
+    invalid("Prototype finalization v2 requires the atomic finalization builder");
+  }
   validateSnapshotAuthority(input);
   const dependencies = dependencyEvidence(input.task, input.attempt);
   const artifacts = resolveArtifacts(input, payload, dependencies.artifactRevisionIds);

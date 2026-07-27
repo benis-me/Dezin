@@ -46,20 +46,20 @@ export function ProjectStudioShell({
   const hideInspectorRef = useRef<HTMLButtonElement>(null);
   const wasNarrowReachableRef = useRef(false);
   const agentPercent = readPanelPercent(PROJECT_STUDIO_AGENT_WIDTH_KEY, 20, 12, 34);
-  const inspectorPercent = readPanelPercent(PROJECT_STUDIO_INSPECTOR_WIDTH_KEY, 24, 18, 38);
+  const inspectorPercent = readPanelPercent(PROJECT_STUDIO_INSPECTOR_WIDTH_KEY, 25, 18, 38);
+  const wideInspectorMounted = wideDesktop && inspectorOpen;
   const wideInspectorActive = wideDesktop && inspectorOpen && !presentation;
   const inspectorLayout = useMemo(
-    () => wideInspectorActive
-      ? twoPanelLayout(
-          PROJECT_STUDIO_SURFACE_PANEL,
-          100 - inspectorPercent,
-          PROJECT_STUDIO_INSPECTOR_PANEL,
-        )
-      : {
-          [PROJECT_STUDIO_SURFACE_PANEL]: 100,
-          [PROJECT_STUDIO_INSPECTOR_PANEL]: 0,
-        },
-    [inspectorPercent, wideInspectorActive],
+    () => (
+      wideInspectorMounted
+        ? twoPanelLayout(
+            PROJECT_STUDIO_SURFACE_PANEL,
+            100 - inspectorPercent,
+            PROJECT_STUDIO_INSPECTOR_PANEL,
+          )
+        : { [PROJECT_STUDIO_SURFACE_PANEL]: 100 }
+    ),
+    [inspectorPercent, wideInspectorMounted],
   );
 
   useEffect(() => {
@@ -97,6 +97,35 @@ export function ProjectStudioShell({
     </aside>
   );
 
+  const inspectorAside = (narrow: boolean) => (
+    <aside
+      id="project-studio-inspector"
+      aria-label={inspectorLabel}
+      inert={presentation ? true : undefined}
+      hidden={presentation}
+      data-narrow-reachable={narrow || undefined}
+      className={narrow
+        ? "absolute inset-y-0 right-0 z-30 h-full min-h-0 w-[min(320px,100%)] max-w-[320px] overflow-hidden border-l border-border bg-background"
+        : "h-full min-h-0 min-w-0 overflow-hidden bg-background"}
+    >
+      {narrow && !narrowInspectorContentOwnsClose ? (
+        <IconButton
+          ref={hideInspectorRef}
+          type="button"
+          className="absolute left-0 top-1/2 z-10 -translate-y-1/2 rounded-l-none border-l-0 bg-background"
+          aria-controls="project-studio-inspector"
+          aria-expanded="true"
+          aria-label={`Hide ${inspectorToggleLabel}`}
+          title={`Hide ${inspectorToggleLabel}`}
+          onClick={() => setNarrowInspectorOpen(false)}
+        >
+          <PanelRightClose aria-hidden className="size-3.5" />
+        </IconButton>
+      ) : null}
+      {inspector}
+    </aside>
+  );
+
   const studioContent = (
     <div
       data-testid="project-studio-content"
@@ -118,12 +147,13 @@ export function ProjectStudioShell({
         </IconButton>
       ) : null}
       <Group
+        key={wideInspectorMounted ? "with-inspector" : "surface-only"}
         id="dezin-project-studio-inspector-layout"
         groupRef={inspectorGroupRef}
         className="h-full min-w-0"
         defaultLayout={inspectorLayout}
-        onLayoutChanged={(layout) => {
-          if (wideInspectorActive) {
+        onLayoutChanged={(layout, meta) => {
+          if (wideInspectorActive && meta.isUserInteraction) {
             savePanelFraction(
               PROJECT_STUDIO_INSPECTOR_WIDTH_KEY,
               layout,
@@ -149,47 +179,20 @@ export function ProjectStudioShell({
             className={RESIZE_SEPARATOR_CLASS}
           />
         ) : null}
-        <Panel
-          id={PROJECT_STUDIO_INSPECTOR_PANEL}
-          minSize={wideDesktop ? "288px" : "0px"}
-          maxSize={wideDesktop ? "480px" : undefined}
-          groupResizeBehavior="preserve-pixel-size"
-          hidden={!inspectorOpen || presentation || (!wideDesktop && !narrowReachable)}
-          className={!wideDesktop && narrowReachable
-            ? "absolute inset-y-0 right-0 z-30 !min-w-0 !w-[min(360px,100%)] !max-w-[360px]"
-            : undefined}
-          style={{ overflow: "hidden" }}
-        >
-          {inspectorOpen ? (
-            <aside
-              id="project-studio-inspector"
-              aria-label={inspectorLabel}
-              inert={presentation ? true : undefined}
-              hidden={presentation}
-              data-narrow-reachable={narrowReachable || undefined}
-              className={`h-full min-h-0 min-w-0 overflow-hidden bg-background ${narrowReachable
-                ? "border-l border-border"
-                : ""}`}
-            >
-              {narrowReachable && !narrowInspectorContentOwnsClose ? (
-                <IconButton
-                  ref={hideInspectorRef}
-                  type="button"
-                  className="absolute left-0 top-1/2 z-10 -translate-y-1/2 rounded-l-none border-l-0 bg-background"
-                  aria-controls="project-studio-inspector"
-                  aria-expanded="true"
-                  aria-label={`Hide ${inspectorToggleLabel}`}
-                  title={`Hide ${inspectorToggleLabel}`}
-                  onClick={() => setNarrowInspectorOpen(false)}
-                >
-                  <PanelRightClose aria-hidden className="size-3.5" />
-                </IconButton>
-              ) : null}
-              {inspector}
-            </aside>
-          ) : null}
-        </Panel>
+        {wideInspectorMounted ? (
+          <Panel
+            id={PROJECT_STUDIO_INSPECTOR_PANEL}
+            minSize="288px"
+            maxSize="400px"
+            groupResizeBehavior="preserve-pixel-size"
+            hidden={presentation}
+            style={{ overflow: "hidden" }}
+          >
+            {inspectorAside(false)}
+          </Panel>
+        ) : null}
       </Group>
+      {narrowInspectorEligible ? inspectorAside(true) : null}
     </div>
   );
 
@@ -217,8 +220,10 @@ export function ProjectStudioShell({
             agentPercent,
             PROJECT_STUDIO_CONTENT_PANEL,
           )}
-          onLayoutChanged={(layout) => {
-            savePanelFraction(PROJECT_STUDIO_AGENT_WIDTH_KEY, layout, PROJECT_STUDIO_AGENT_PANEL);
+          onLayoutChanged={(layout, meta) => {
+            if (meta.isUserInteraction) {
+              savePanelFraction(PROJECT_STUDIO_AGENT_WIDTH_KEY, layout, PROJECT_STUDIO_AGENT_PANEL);
+            }
           }}
           resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
         >

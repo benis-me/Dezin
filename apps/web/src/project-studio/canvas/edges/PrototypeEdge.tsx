@@ -166,8 +166,7 @@ export function PrototypeEdge({
     active: selected || hovered,
     broken,
   });
-  const showLabel = data?.zoomLevel === "full"
-    || (data?.zoomLevel === "compact" && (selected || hovered));
+  const showLabel = broken || selected || hovered;
   return (
     <>
       <g

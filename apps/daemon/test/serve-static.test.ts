@@ -176,6 +176,29 @@ test("picker stays active across consecutive pointer and keyboard selections and
     },
     getBoundingClientRect() { return { left: 10, top: 120, width: 180, height: 40 }; },
   };
+  const markedArticle = {
+    ...target,
+    tagName: "ARTICLE",
+    textContent: "Desktop frame Poster-first film discovery Schedule Checkout",
+    getAttribute(name: string) {
+      return name === "data-design-node-id"
+        ? "hero-banner"
+        : name === "data-dezin-source-path"
+          ? "src/HeroBanner.tsx"
+          : "";
+    },
+    getBoundingClientRect() { return { left: 10, top: 180, width: 720, height: 360 }; },
+  };
+  const descendantHeading = {
+    ...target,
+    tagName: "H1",
+    parentElement: markedArticle,
+    textContent: "Poster-first film discovery",
+    getAttribute(name: string) {
+      return name === "aria-label" ? "Festival hero heading" : "";
+    },
+    getBoundingClientRect() { return { left: 48, top: 220, width: 420, height: 72 }; },
+  };
   const bridge = {
     send(message: Record<string, unknown>) { sent.push(message); },
     listen(listener: (message: Record<string, unknown>) => void) { commandRef.current = listener; },
@@ -259,6 +282,36 @@ test("picker stays active across consecutive pointer and keyboard selections and
     "one select-mode command keeps accepting consecutive pointer picks",
   );
   assert.equal(bodyStyle.cursor, "crosshair", "confirming a pointer pick must keep selection cursor mode active");
+
+  sent.length = 0;
+  assert.deepEqual(click(descendantHeading), { prevented: true, stopped: true });
+  const descendantSelected = sent.find((message) => message.type === "element-selected");
+  assert.deepEqual(JSON.parse(JSON.stringify(descendantSelected)), {
+    source: "dezin",
+    type: "element-selected",
+    locator: {
+      designNodeId: "hero-banner",
+      selector: "[data-design-node-id=\"hero-banner\"]",
+      sourcePath: "src/HeroBanner.tsx",
+    },
+    tag: "article",
+    text: "Desktop frame Poster-first film discovery Schedule Checkout",
+    textPreview: "Desktop frame Poster-first film discovery Schedule Checkout",
+    textComplete: true,
+    rect: { x: 10, y: 180, w: 720, h: 360 },
+    attrs: {
+      ariaLabel: "",
+      screenLabel: "",
+    },
+    displayTarget: {
+      tag: "h1",
+      textPreview: "Poster-first film discovery",
+      attrs: {
+        ariaLabel: "Festival hero heading",
+        screenLabel: "",
+      },
+    },
+  }, "the stable ancestor owns provenance while the actual clicked descendant owns display semantics");
 
   sent.length = 0;
   assert.equal(key("ArrowDown"), true);
@@ -977,6 +1030,67 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
   assert.equal((legacyPick.styles as Record<string, unknown>).fontSize, "16px");
   const directPick = trustedPickMessages[1]!;
   assert.equal((directPick.locator as Record<string, unknown>).designNodeId, "checkout-continue");
+  assert.deepEqual(JSON.parse(JSON.stringify(directPick.displayTarget)), {
+    tag: "button",
+    textPreview: "Continue",
+    attrs: {
+      ariaLabel: "Continue to payment",
+      screenLabel: "",
+    },
+  }, "the private picker exposes the same actual-target display contract as the public picker");
+  assert.deepEqual(JSON.parse(JSON.stringify(directPick.attrs)), {
+    ariaLabel: "Continue to payment",
+    screenLabel: "",
+  });
+
+  const markedArticle = {
+    ...pickerTarget,
+    tagName: "ARTICLE",
+    id: "",
+    className: "hero-banner",
+    parentElement: documentBody,
+    textContent: "Desktop frame Poster-first film discovery Schedule Checkout",
+    getAttribute(name: string) {
+      if (name === "data-design-node-id") return "hero-banner";
+      if (name === "data-dezin-source-path") return "src/HeroBanner.tsx";
+      return "";
+    },
+    getBoundingClientRect() {
+      return { left: 12, top: 120, width: 720, height: 360 };
+    },
+  };
+  const descendantHeading = {
+    ...pickerTarget,
+    tagName: "H1",
+    id: "",
+    className: "hero-title",
+    parentElement: markedArticle,
+    textContent: "Poster-first film discovery",
+    getAttribute(name: string) {
+      return name === "aria-label" ? "Festival hero heading" : "";
+    },
+    getBoundingClientRect() {
+      return { left: 48, top: 164, width: 420, height: 72 };
+    },
+  };
+  const beforeDescendantPick = sent.length;
+  for (const listener of listeners.get("click") ?? []) {
+    listener({ target: descendantHeading, isTrusted: true });
+  }
+  const nestedDirectPick = sent.slice(beforeDescendantPick)
+    .find((message) => message.type === "element-selected");
+  assert.equal(
+    (nestedDirectPick?.locator as Record<string, unknown> | undefined)?.designNodeId,
+    "hero-banner",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(nestedDirectPick?.displayTarget)), {
+    tag: "h1",
+    textPreview: "Poster-first film discovery",
+    attrs: {
+      ariaLabel: "Festival hero heading",
+      screenLabel: "",
+    },
+  });
   const envelope = (bindings: unknown, extra: Record<string, unknown> = {}) => ({
     source: "dezin-parent",
     type: "set-prototype-bindings",

@@ -39,7 +39,10 @@ export interface ProductionExternalFetchHopResult {
 
 export interface ProductionSafeExternalFetchOptions {
   /** Test seam. Production uses the operating system resolver once per hop. */
-  readonly resolveAddresses?: (hostname: string) => Promise<readonly ProductionResolvedAddress[]>;
+  readonly resolveAddresses?: (
+    hostname: string,
+    signal: AbortSignal,
+  ) => Promise<readonly ProductionResolvedAddress[]>;
   /** Test seam. Production performs a no-pool HTTP request with a pinned lookup result. */
   readonly requestHop?: (hop: ProductionExternalFetchHop) => Promise<ProductionExternalFetchHopResult>;
 }
@@ -113,8 +116,11 @@ function ipv6IsPublic(address: string): boolean {
   // Only globally routable unicast is accepted. Known documentation,
   // transition, benchmarking, and special-purpose ranges fail closed.
   if (!Number.isFinite(first) || first < 0x2000 || first > 0x3fff) return false;
-  if (first === 0x2001 && (second <= 0x001f || (second >= 0x0020 && second <= 0x002f)
-    || second === 0x0db8)) return false;
+  // IANA reserves all of 2001::/23 for protocol assignments. Some narrow
+  // exceptions are globally reachable, but this fetch boundary deliberately
+  // rejects the complete parent block instead of maintaining an SSRF-prone
+  // exception list.
+  if (first === 0x2001 && (second <= 0x01ff || second === 0x0db8)) return false;
   if (first === 0x2002) return false;
   if (first === 0x3fff && second < 0x1000) return false;
   return true;
@@ -217,7 +223,10 @@ async function pinAddress(
   if (literalFamily !== 0) {
     return exactResolvedAddress({ address: url.hostname, family: literalFamily });
   }
-  const resolved = await abortable(Promise.resolve().then(() => resolveAddresses(url.hostname)), signal);
+  const resolved = await abortable(
+    Promise.resolve().then(() => resolveAddresses(url.hostname, signal)),
+    signal,
+  );
   if (!Array.isArray(resolved) || resolved.length === 0 || resolved.length > MAX_RESOLVED_ADDRESSES) {
     fail("External fetch DNS result is empty or unbounded");
   }

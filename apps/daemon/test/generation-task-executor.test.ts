@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   GenerationTaskLeaseFenceError,
+  GenerationTaskQualityGateError,
   normalizeGenerationTaskIntent,
   type GenerationTask,
   type GenerationTaskAttempt,
@@ -755,6 +756,43 @@ test("GenerationTaskExecutor records a typed leaf failure exactly once", async (
       name: "GenerationTaskExecutionError",
       message: failure.message,
       details: { findingIds: ["contract-drift"] },
+    },
+  });
+});
+
+test("GenerationTaskExecutor durably serializes a bounded Research decision-grade rejection envelope", async () => {
+  const details = {
+    protocol: "dezin.research-decision-grade-rejection.v1",
+    criteria: {
+      minimumVerifiedWebSourceCount: 2,
+      minimumEvidenceFindingCount: 2,
+      minimumEvidenceDirectionCount: 1,
+      requiresGroundednessVerifier: true,
+    },
+    observed: {
+      verifiedWebSourceCount: 2,
+      evidenceFindingCount: 2,
+      evidenceDirectionCount: 0,
+      groundednessVerifierAvailable: true,
+    },
+    blockers: ["insufficient-evidence-directions"],
+  };
+  const failure = new GenerationTaskQualityGateError(
+    "Research decision-grade gate rejected this candidate: insufficient-evidence-directions",
+    details,
+  );
+  const { calls, executor } = harness({ leafError: failure });
+
+  await executor.execute(claimFixture("resource"), new AbortController().signal);
+
+  assert.deepEqual(calls.map((call) => call.port), ["resource", "finish-failure"]);
+  assert.deepEqual(calls[1]?.values[1], {
+    failureClass: "qa",
+    error: {
+      name: "GenerationTaskQualityGateError",
+      message: failure.message,
+      code: "generation-task-quality-gate",
+      details,
     },
   });
 });

@@ -1349,16 +1349,36 @@ function normalizeResearchDirectionSelection(
   label: string,
 ): WorkspaceGenerationArtifactPlan["researchDirectionSelection"] {
   const input = boundaryRecord(value, label);
-  allowFields(input, ["protocol", "version", "resourceId", "revisionId", "directionId"], label);
+  allowFields(input, [
+    "protocol", "version", "resourceId", "revisionId", "directionId", "directionIds",
+  ], label);
   if (input.protocol !== "dezin.research-direction-selection.v1" || input.version !== 1) {
     throw new WorkspaceStoreCodecError(`${label} protocol is unsupported`);
   }
+  const directionId = canonicalString(input.directionId, `${label} direction id`);
+  const directionIds = input.directionIds === undefined ? undefined : (() => {
+    const values = boundaryArray(input.directionIds, `${label} direction ids`);
+    if (values.length < 2 || values.length > 16) {
+      throw new WorkspaceStoreCodecError(`${label} direction ids must contain between 2 and 16 entries`);
+    }
+    const normalized = values.map((entry, index) => (
+      canonicalString(entry, `${label} direction ids[${index}]`)
+    ));
+    if (new Set(normalized).size !== normalized.length) {
+      throw new WorkspaceStoreCodecError(`${label} direction ids must be unique`);
+    }
+    if (normalized[0] !== directionId) {
+      throw new WorkspaceStoreCodecError(`${label} first direction id must equal directionId`);
+    }
+    return normalized;
+  })();
   return {
     protocol: input.protocol,
     version: input.version,
     resourceId: canonicalString(input.resourceId, `${label} Resource id`),
     revisionId: canonicalString(input.revisionId, `${label} Revision id`),
-    directionId: canonicalString(input.directionId, `${label} direction id`),
+    directionId,
+    ...(directionIds === undefined ? {} : { directionIds }),
   };
 }
 
@@ -1420,13 +1440,71 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
   return { ...reused, operation, revisionPolicy: normalized.revisionPolicy };
 }
 
+function normalizePrototypeMarkerId(value: unknown, label: string): string {
+  const markerId = canonicalString(value, label);
+  if (Buffer.byteLength(markerId, "utf8") > 256) {
+    throw new WorkspaceStoreCodecError(`${label} must be bounded to 256 UTF-8 bytes`);
+  }
+  return markerId;
+}
+
+function normalizeArtifactPrototypeRequirements(
+  value: unknown,
+  label: string,
+): NonNullable<WorkspaceGenerationArtifactPlan["prototypeRequirements"]> {
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["outgoing", "incoming"], label);
+  const outgoing = boundaryArray(input.outgoing, `${label} outgoing`).map((entry, index) => {
+    const entryLabel = `${label} outgoing at index ${index}`;
+    const requirement = boundaryRecord(entry, entryLabel);
+    allowFields(requirement, ["edgeId", "sourceMarkerId", "trigger"], entryLabel);
+    const rawTrigger = requirement.trigger;
+    if (rawTrigger !== "click" && rawTrigger !== "submit") {
+      throw new WorkspaceStoreCodecError(`${entryLabel} trigger is unsupported`);
+    }
+    const trigger: "click" | "submit" = rawTrigger === "submit" ? "submit" : "click";
+    return {
+      edgeId: canonicalString(requirement.edgeId, `${entryLabel} edge id`),
+      sourceMarkerId: normalizePrototypeMarkerId(
+        requirement.sourceMarkerId,
+        `${entryLabel} source marker id`,
+      ),
+      trigger,
+    };
+  }).sort((left, right) => compareBinary(left.edgeId, right.edgeId));
+  const incoming = boundaryArray(input.incoming, `${label} incoming`).map((entry, index) => {
+    const entryLabel = `${label} incoming at index ${index}`;
+    const requirement = boundaryRecord(entry, entryLabel);
+    allowFields(
+      requirement,
+      ["edgeId", "sourceArtifactId", "sourceMarkerId", "targetState"],
+      entryLabel,
+    );
+    return {
+      edgeId: canonicalString(requirement.edgeId, `${entryLabel} edge id`),
+      sourceArtifactId: canonicalString(
+        requirement.sourceArtifactId,
+        `${entryLabel} source Artifact id`,
+      ),
+      sourceMarkerId: normalizePrototypeMarkerId(
+        requirement.sourceMarkerId,
+        `${entryLabel} source marker id`,
+      ),
+      targetState: canonicalString(requirement.targetState, `${entryLabel} target state`),
+    };
+  }).sort((left, right) => compareBinary(left.edgeId, right.edgeId));
+  uniqueBy(outgoing, (requirement) => requirement.edgeId, `${label} outgoing edge`);
+  uniqueBy(incoming, (requirement) => requirement.edgeId, `${label} incoming edge`);
+  return { outgoing, incoming };
+}
+
 function normalizeGenerationArtifactPlan(value: unknown, index: number): WorkspaceGenerationArtifactPlan {
   const label = `Workspace generation Artifact plan at index ${index}`;
   const input = boundaryRecord(value, label);
   allowFields(input, [
     "operation", "nodeId", "artifactId", "kind", "name", "trackId", "baseRevisionId",
     "dependsOnArtifactIds", "capabilityIds", "responsiveFrameIds", "dispatchContextPackId",
-    "researchDirectionSelection", "instructions",
+    "researchDirectionSelection", "prototypeRequirements", "instructions",
   ], label);
   if (input.operation !== "create" && input.operation !== "revise") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
@@ -1458,6 +1536,12 @@ function normalizeGenerationArtifactPlan(value: unknown, index: number): Workspa
       researchDirectionSelection: normalizeResearchDirectionSelection(
         input.researchDirectionSelection,
         `${label} Research direction selection`,
+      ),
+    }),
+    ...(input.prototypeRequirements === undefined ? {} : {
+      prototypeRequirements: normalizeArtifactPrototypeRequirements(
+        input.prototypeRequirements,
+        `${label} prototype requirements`,
       ),
     }),
   };
@@ -1520,17 +1604,44 @@ function normalizePrototypeTransition(value: unknown, label: string): WorkspaceG
   };
 }
 
-function normalizeGenerationPrototypeIntent(value: unknown, index: number): WorkspaceGenerationPrototypeIntent {
+function normalizeGenerationPrototypeIntent(
+  value: unknown,
+  index: number,
+  version: 1 | 2,
+): WorkspaceGenerationPrototypeIntent {
   const label = `Workspace generation prototype intent at index ${index}`;
   const input = boundaryRecord(value, label);
-  allowFields(input, [
-    "edgeId", "sourceArtifactId", "targetArtifactId", "sourceLocator", "trigger", "targetState", "transition",
-  ], label);
+  allowFields(
+    input,
+    version === 1
+      ? [
+          "edgeId",
+          "sourceArtifactId",
+          "targetArtifactId",
+          "sourceLocator",
+          "trigger",
+          "targetState",
+          "transition",
+        ]
+      : [
+          "edgeId",
+          "sourceArtifactId",
+          "targetArtifactId",
+          "sourceMarkerId",
+          "trigger",
+          "targetState",
+          "transition",
+        ],
+    label,
+  );
   if (input.trigger !== "click" && input.trigger !== "submit") {
     throw new WorkspaceStoreCodecError(`${label} trigger is unsupported`);
   }
-  const sourceLocator = Object.hasOwn(input, "sourceLocator")
+  const sourceLocator = version === 1 && Object.hasOwn(input, "sourceLocator")
     ? normalizeDesignNodeLocatorInput(input.sourceLocator, `${label} source locator`)
+    : undefined;
+  const sourceMarkerId = version === 2
+    ? normalizePrototypeMarkerId(input.sourceMarkerId, `${label} source marker id`)
     : undefined;
   const targetState = Object.hasOwn(input, "targetState")
     ? canonicalString(input.targetState, `${label} target state`)
@@ -1543,6 +1654,7 @@ function normalizeGenerationPrototypeIntent(value: unknown, index: number): Work
     sourceArtifactId: canonicalString(input.sourceArtifactId, `${label} source Artifact id`),
     targetArtifactId: canonicalString(input.targetArtifactId, `${label} target Artifact id`),
     ...(sourceLocator === undefined ? {} : { sourceLocator }),
+    ...(sourceMarkerId === undefined ? {} : { sourceMarkerId }),
     trigger: input.trigger,
     ...(targetState === undefined ? {} : { targetState }),
     ...(transition === undefined ? {} : { transition }),
@@ -1566,6 +1678,10 @@ const DEFAULT_GENERATION_QUALITY_FRAMES = Object.freeze([
   Object.freeze({ id: "mobile", name: "Mobile", width: 390, height: 844 }),
 ] satisfies readonly RenderFrameSpec[]);
 
+function isNeutralQualityFrame(frame: RenderFrameSpec): boolean {
+  return frame.initialState === undefined && frame.fixture === undefined;
+}
+
 function uniqueQualityFrameId(preferredId: string, occupiedIds: ReadonlySet<string>): string {
   if (!occupiedIds.has(preferredId)) return preferredId;
   let sequence = 2;
@@ -1576,9 +1692,14 @@ function uniqueQualityFrameId(preferredId: string, occupiedIds: ReadonlySet<stri
 function withRequiredQualityViewports(input: readonly RenderFrameSpec[]): RenderFrameSpec[] {
   const frames = input.map((frame) => ({ ...frame }));
   const occupiedIds = new Set(frames.map((frame) => frame.id));
-  const hasDesktopViewport = frames.some((frame) => frame.width >= 1280 && frame.height >= 720);
+  // A state capture at desktop/mobile dimensions does not replace the neutral
+  // base viewport. Every Artifact needs a base render before its own state
+  // matrix is applied.
+  const baseFrames = frames.filter(isNeutralQualityFrame);
+  const hasDesktopViewport = baseFrames.some((frame) => frame.width >= 1280 && frame.height >= 720);
   const hasMobileViewport = frames.some((frame) => (
-    frame.width >= 320 && frame.width <= 480 && frame.height >= 640
+    isNeutralQualityFrame(frame)
+      && frame.width >= 320 && frame.width <= 480 && frame.height >= 640
   ));
   for (const defaultFrame of DEFAULT_GENERATION_QUALITY_FRAMES) {
     if ((defaultFrame.id === "desktop" && hasDesktopViewport)
@@ -1603,15 +1724,24 @@ function enforceWorkspaceArtifactQualityFloor(input: {
     };
   }
   const responsiveFrames = withRequiredQualityViewports(input.responsiveFrames);
-  const requiredFrameIds = responsiveFrames.map((frame) => frame.id);
+  // Only neutral base viewports are Workspace-global. State Frames remain
+  // explicitly owned by the Artifact plans that requested them.
+  const requiredFrameIds = responsiveFrames
+    .filter(isNeutralQualityFrame)
+    .map((frame) => frame.id);
+  const availableFrameIds = new Set(responsiveFrames.map((frame) => frame.id));
   const blocking = new Set(input.qualityProfile.blockingSeverities);
   blocking.add("P0");
   blocking.add("P1");
+  blocking.add("P2");
   const blockingSeverities = (["P0", "P1", "P2"] as const).filter((severity) => blocking.has(severity));
   return {
     artifactPlans: input.artifactPlans.map((plan) => ({
       ...plan,
-      responsiveFrameIds: [...requiredFrameIds],
+      responsiveFrameIds: [...new Set([
+        ...requiredFrameIds,
+        ...plan.responsiveFrameIds.filter((frameId) => availableFrameIds.has(frameId)),
+      ])],
     })),
     responsiveFrames,
     qualityProfile: {
@@ -1669,12 +1799,16 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
   const label = "Workspace generation payload";
   const input = boundaryRecord(value, label);
   allowFields(input, [
-    "kind", "agent", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
+    "kind", "version", "agent", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
     "capabilities", "responsiveFrames", "qualityProfile",
   ], label);
   if (input.kind !== "workspace-generation") {
     throw new WorkspaceStoreCodecError("Workspace generation payload kind must be workspace-generation");
   }
+  if (input.version !== undefined && input.version !== 2) {
+    throw new WorkspaceStoreCodecError("Workspace generation payload version is unsupported");
+  }
+  const generationVersion = input.version === 2 ? 2 : 1;
   const resourceOperations = boundaryArray(input.resourceOperations, `${label} Resource operations`)
     .map(normalizeGenerationResourceOperation);
   const artifactPlans = boundaryArray(input.artifactPlans, `${label} Artifact plans`)
@@ -1682,7 +1816,7 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
   const dependencyPlans = boundaryArray(input.dependencyPlans, `${label} dependency plans`)
     .map(normalizeGenerationDependencyPlan);
   const prototypeIntents = boundaryArray(input.prototypeIntents, `${label} prototype intents`)
-    .map(normalizeGenerationPrototypeIntent);
+    .map((intent, index) => normalizeGenerationPrototypeIntent(intent, index, generationVersion));
   const capabilities = boundaryArray(input.capabilities, `${label} capabilities`)
     .map(normalizeGenerationCapability);
   uniqueBy(resourceOperations, (operation) => operation.resourceId, "Workspace generation Resource");
@@ -1693,6 +1827,17 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
     "Workspace generation component instance",
   );
   uniqueBy(prototypeIntents, (intent) => intent.edgeId, "Workspace generation prototype edge");
+  if (generationVersion === 2) {
+    uniqueBy(
+      prototypeIntents,
+      (intent) => intent.sourceMarkerId!,
+      "Workspace generation prototype source marker",
+    );
+  } else if (artifactPlans.some((plan) => plan.prototypeRequirements !== undefined)) {
+    throw new WorkspaceStoreCodecError(
+      "historical Workspace generation payloads cannot carry v2 prototype requirements",
+    );
+  }
   uniqueBy(capabilities, (capability) => capability.id, "Workspace generation capability");
   const kernelShape = normalizeKernelPayload({
     tokens: {},
@@ -1711,13 +1856,16 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
   });
   return {
     kind: input.kind,
+    ...(generationVersion === 2 ? { version: 2 as const } : {}),
     ...(input.agent === undefined
       ? {}
       : { agent: normalizeWorkspaceGenerationAgentSelection(input.agent) }),
     resourceOperations,
     artifactPlans: quality.artifactPlans,
     dependencyPlans,
-    prototypeIntents,
+    prototypeIntents: generationVersion === 2
+      ? [...prototypeIntents].sort((left, right) => compareBinary(left.edgeId, right.edgeId))
+      : prototypeIntents,
     capabilities,
     responsiveFrames: quality.responsiveFrames,
     qualityProfile: quality.qualityProfile,
@@ -1783,6 +1931,19 @@ function assertExecutableWorkspaceGenerationAgent(
   }
 }
 
+function assertNewWorkspaceGenerationPrototypeContract(
+  generation: WorkspaceProposalGeneration,
+  label: string,
+): void {
+  if (generation.kind === "workspace-generation"
+    && generation.version !== 2
+    && generation.prototypeIntents.length > 0) {
+    throw new WorkspaceStoreCodecError(
+      `${label} new prototype intents require Workspace generation payload version 2`,
+    );
+  }
+}
+
 export function normalizeCreateWorkspaceProposalInput(value: unknown): CreateWorkspaceProposalInput & { layoutId: string; layoutOperations: WorkspaceLayoutCommand[]; createdByRunId: string | null } {
   const input = boundaryRecord(value, "create Workspace Proposal input");
   allowFields(input, [
@@ -1795,6 +1956,7 @@ export function normalizeCreateWorkspaceProposalInput(value: unknown): CreateWor
   const generation = normalizeWorkspaceProposalGeneration(input.generation);
   if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");
   assertExecutableWorkspaceGenerationAgent(generation, "create Workspace Proposal input");
+  assertNewWorkspaceGenerationPrototypeContract(generation, "create Workspace Proposal input");
   const baseGraphRevision = nonNegativeInteger(input.baseGraphRevision, "Workspace Proposal base graph revision");
   const createdByRunId = Object.hasOwn(input, "createdByRunId")
     ? nullableCanonicalString(input.createdByRunId, "Workspace Proposal creating Run id")
@@ -1824,6 +1986,20 @@ export function normalizeUpdateWorkspaceProposalInput(value: unknown): UpdateWor
   ], "update Workspace Proposal input");
   const generation = normalizeWorkspaceProposalGeneration(input.generation);
   assertExecutableWorkspaceGenerationAgent(generation, "update Workspace Proposal input");
+  assertNewWorkspaceGenerationPrototypeContract(generation, "update Workspace Proposal input");
+  if (generation.kind === "workspace-generation" && generation.artifactPlans.length > 0) {
+    const rawGeneration = boundaryRecord(input.generation, "update Workspace Proposal generation payload");
+    const rawQuality = boundaryRecord(
+      rawGeneration.qualityProfile,
+      "update Workspace Proposal generation quality profile",
+    );
+    if (!Array.isArray(rawQuality.blockingSeverities)
+      || !rawQuality.blockingSeverities.includes("P2")) {
+      throw new WorkspaceStoreCodecError(
+        "Workspace Proposal Artifact quality floor must preserve P2 as a blocking severity",
+      );
+    }
+  }
   return {
     expectedProposalRevision: positiveInteger(input.expectedProposalRevision, "expected Workspace Proposal revision"),
     operations: normalizeProposalGraphCommands(input.operations),

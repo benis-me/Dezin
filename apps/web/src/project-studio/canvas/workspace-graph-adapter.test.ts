@@ -64,10 +64,52 @@ const layout: WorkspaceLayout = {
 };
 
 test("semantic zoom uses the exact overview, compact, and full boundaries", () => {
-  expect(semanticZoomLevel(0.4999)).toBe("overview");
-  expect(semanticZoomLevel(0.5)).toBe("compact");
+  expect(semanticZoomLevel(0.52)).toBe("overview");
+  expect(semanticZoomLevel(0.5999)).toBe("overview");
+  expect(semanticZoomLevel(0.6)).toBe("compact");
   expect(semanticZoomLevel(0.7999)).toBe("compact");
   expect(semanticZoomLevel(0.8)).toBe("full");
+});
+
+test("overview nodes expose repeated visual directions separately from page roles", () => {
+  const directionalGraph: WorkspaceGraph = {
+    workspaceId: "workspace-directions",
+    revision: 1,
+    nodes: [
+      ["cinematic-home", "Cinematic Black/Red Home"],
+      ["cinematic-film", "Cinematic Black/Red Film"],
+      ["paper-home", "Warm Paper/Ink Home"],
+      ["paper-film", "Warm Paper/Ink Film"],
+      ["standalone", "Credits"],
+    ].map(([id, name]) => ({
+      id,
+      workspaceId: "workspace-directions",
+      kind: "page" as const,
+      artifactId: `artifact-${id}`,
+      name,
+    })),
+    edges: [],
+  };
+  const flow = workspaceGraphToFlow(directionalGraph, {
+    workspaceId: directionalGraph.workspaceId,
+    layoutId: "default",
+    objects: [],
+    viewport: { x: 0, y: 0, zoom: 0.4 },
+    checksum: "empty",
+  }, { zoom: 0.4, edgeFilter: "flow" });
+
+  expect(flow.nodes.find((node) => node.id === "cinematic-home")?.data).toMatchObject({
+    overviewDirection: "Cinematic Black/Red",
+    overviewPageRole: "Home",
+  });
+  expect(flow.nodes.find((node) => node.id === "paper-film")?.data).toMatchObject({
+    overviewDirection: "Warm Paper/Ink",
+    overviewPageRole: "Film",
+  });
+  expect(flow.nodes.find((node) => node.id === "standalone")?.data).toMatchObject({
+    overviewDirection: null,
+    overviewPageRole: "Credits",
+  });
 });
 
 test("adapter uses immutable revision thumbnails, parent-relative layout, and stable outer sizes", () => {
@@ -90,6 +132,26 @@ test("adapter uses immutable revision thumbnails, parent-relative layout, and st
   expect(page.data.revisionId).toBe("revision-1");
   expect(overview.nodes.find((node) => node.id === "page-1")?.style).toEqual(page.style);
   expect(overview.nodes.find((node) => node.id === "page-1")?.data.zoomLevel).toBe("overview");
+});
+
+test("adapter shows the active immutable Revision quality before the final Plan checkpoint", () => {
+  const flow = workspaceGraphToFlow(graph, layout, {
+    zoom: 0.8,
+    edgeFilter: "all",
+    artifactRevisionIds: { "artifact-page-1": "revision-1" },
+    artifactRevisionQualityStates: {
+      "artifact-page-1": {
+        revisionId: "revision-1",
+        qualityState: "needs-attention",
+        qualityScore: 79,
+      },
+    },
+  });
+  const page = flow.nodes.find((node) => node.id === "page-1")!;
+
+  expect(page.data.qualityState).toBe("needs-attention");
+  expect(page.data.qualityScore).toBe(79);
+  expect(page.ariaLabel).toContain("quality needs-attention");
 });
 
 test("adapter binds Research quality and awaiting-selection state to the exact active Resource revision", () => {
@@ -625,7 +687,7 @@ test("prototype edges use only side routing handles for forward, vertical, and r
   expect(forward.markerEnd).toMatchObject({
     width: 12,
     height: 12,
-    color: "var(--muted-foreground)",
+    color: "var(--foreground-2)",
   });
 
   const selectedForward = workspaceGraphToFlow(graph, layout, {

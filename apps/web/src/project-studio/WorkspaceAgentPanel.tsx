@@ -1,5 +1,5 @@
-import { ArrowDown, ArrowUp, ChevronLeft, LoaderCircle, MessageSquareText } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronLeft, LoaderCircle, MessageSquareText, PanelRightOpen } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import {
   AgentComposerContextCards,
@@ -31,6 +31,106 @@ const recentErrorToastByDispatcher = new WeakMap<
   ReturnType<typeof useToast>["toast"],
   { signature: string; expiresAt: number }
 >();
+const COLLAPSED_BRIEF_LINE_LIMIT = 12;
+const COLLAPSED_BRIEF_WIDTH_UNIT_LIMIT = 440;
+
+function estimatedBriefWidthUnits(content: string): number {
+  let units = 0;
+  for (const character of content) {
+    units += (character.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+  }
+  return units;
+}
+
+function shouldCollapseBrief(content: string): boolean {
+  return content.split(/\r?\n/).length > COLLAPSED_BRIEF_LINE_LIMIT
+    || estimatedBriefWidthUnits(content) > COLLAPSED_BRIEF_WIDTH_UNIT_LIMIT;
+}
+
+function latestProposalTranscriptEntryId(transcript: readonly AgentTranscriptEntry[]): string | null {
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const entry = transcript[index]!;
+    if (entry.role === "assistant" && entry.state === "proposal") return entry.id;
+  }
+  return null;
+}
+
+type ProposalAffordance = {
+  summary: string;
+  changeCount: number;
+  onOpen: () => void;
+};
+
+function TranscriptMessage({
+  entry,
+  proposalAffordance,
+}: {
+  entry: AgentTranscriptEntry;
+  proposalAffordance?: ProposalAffordance;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+  const collapsible = entry.role === "user" && shouldCollapseBrief(entry.content);
+
+  if (entry.role === "assistant" && entry.state === "proposal" && proposalAffordance) {
+    return (
+      <div
+        data-agent-proposal-summary
+        className="rounded-xl border border-border/70 bg-card px-3 py-2.5"
+      >
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-xs font-medium text-foreground">Proposal ready</h3>
+            <p className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">
+              {proposalAffordance.summary}
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-surface-2 px-2 py-1 text-[11px] text-muted-foreground">
+            {proposalAffordance.changeCount} {proposalAffordance.changeCount === 1 ? "change" : "changes"}
+          </span>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          className="mt-2.5 h-7"
+          onClick={proposalAffordance.onOpen}
+        >
+          Review proposal
+        </Button>
+      </div>
+    );
+  }
+
+  const content = entry.role === "assistant" && entry.state === "proposal"
+    ? "Workspace proposal is ready for review."
+    : entry.content;
+
+  return (
+    <>
+      <div id={contentId} className="contents">
+        <AgentMessageBody
+          role={entry.role}
+          content={content}
+          className={collapsible && !expanded ? "max-h-56 overflow-hidden" : undefined}
+        />
+      </div>
+      {collapsible ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="h-6 px-2 text-[11px] font-normal text-muted-foreground hover:text-foreground"
+          aria-controls={contentId}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show full brief"}
+        </Button>
+      ) : null}
+    </>
+  );
+}
 
 export function WorkspaceAgentPanel({
   projectName,
@@ -50,8 +150,8 @@ export function WorkspaceAgentPanel({
   submitting = false,
   error = null,
   status = null,
-  onStatusClick,
-  statusActionLabel = "Open build plan",
+  planAffordance = null,
+  proposalAffordance,
   submitLabel = "Create proposal",
   submittingLabel = "Creating a reviewable proposal…",
   onAttachFiles,
@@ -71,7 +171,11 @@ export function WorkspaceAgentPanel({
   submissionBlockedPending = false,
   designSystems = [],
   designSystemId = "",
+  designSystemInherited = false,
+  defaultDesignSystemId,
+  designSystemSelectionStatus = "ready",
   onDesignSystemChange,
+  onUseDefaultDesignSystem,
   designSystemCatalogStatus = "ready",
   onRetryDesignSystems,
 }: {
@@ -92,8 +196,12 @@ export function WorkspaceAgentPanel({
   submitting?: boolean;
   error?: string | null;
   status?: string | null;
-  onStatusClick?: () => void;
-  statusActionLabel?: string;
+  planAffordance?: {
+    label: string;
+    technicalLabel?: string;
+    onOpen: () => void;
+  } | null;
+  proposalAffordance?: ProposalAffordance;
   submitLabel?: string;
   submittingLabel?: string;
   onAttachFiles?: (files: File[]) => void | Promise<void>;
@@ -113,7 +221,11 @@ export function WorkspaceAgentPanel({
   submissionBlockedPending?: boolean;
   designSystems?: DesignSystemCard[];
   designSystemId?: string;
+  designSystemInherited?: boolean;
+  defaultDesignSystemId?: string;
+  designSystemSelectionStatus?: "loading" | "ready" | "error";
   onDesignSystemChange?: (id: string) => void;
+  onUseDefaultDesignSystem?: () => void;
   designSystemCatalogStatus?: "loading" | "ready" | "error";
   onRetryDesignSystems?: () => void;
 }) {
@@ -143,6 +255,10 @@ export function WorkspaceAgentPanel({
     && onModelChange !== undefined
     && onRescanAgents !== undefined;
   const hasDesignSystemPicker = onDesignSystemChange !== undefined;
+  const hasTranscriptFooter = status !== null || planAffordance !== null;
+  const latestProposalEntryId = proposalAffordance === undefined
+    ? null
+    : latestProposalTranscriptEntryId(transcript);
 
   const scrollTranscriptToLatest = useCallback((behavior: ScrollBehavior = "auto"): void => {
     const element = transcriptScrollRef.current;
@@ -161,7 +277,7 @@ export function WorkspaceAgentPanel({
 
   const updateTranscriptBottomState = useCallback((): void => {
     const element = transcriptScrollRef.current;
-    if (!element || (transcript.length === 0 && !status)) {
+    if (!element || (transcript.length === 0 && !hasTranscriptFooter)) {
       stickTranscriptBottomRef.current = true;
       setShowScrollToLatest(false);
       return;
@@ -169,7 +285,7 @@ export function WorkspaceAgentPanel({
     const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
     stickTranscriptBottomRef.current = nearBottom;
     setShowScrollToLatest(!nearBottom);
-  }, [status, transcript.length]);
+  }, [hasTranscriptFooter, transcript.length]);
 
   const latestTranscriptEntry = transcript.at(-1);
   const latestTranscriptSignature = latestTranscriptEntry
@@ -177,14 +293,14 @@ export function WorkspaceAgentPanel({
     : "";
 
   useEffect(() => {
-    if (transcript.length === 0 && !status) {
+    if (transcript.length === 0 && !hasTranscriptFooter) {
       stickTranscriptBottomRef.current = true;
       setShowScrollToLatest(false);
       return;
     }
     if (stickTranscriptBottomRef.current) scrollTranscriptToLatest("auto");
     else setShowScrollToLatest(true);
-  }, [latestTranscriptSignature, scrollTranscriptToLatest, status, transcript.length]);
+  }, [hasTranscriptFooter, latestTranscriptSignature, scrollTranscriptToLatest, transcript.length]);
 
   useEffect(() => {
     if (!errorNotification) {
@@ -269,7 +385,10 @@ export function WorkspaceAgentPanel({
                         : "-mx-2 min-w-0 rounded-xl px-2 py-1",
                     )}
                   >
-                    <AgentMessageBody role={entry.role} content={entry.content} />
+                    <TranscriptMessage
+                      entry={entry}
+                      proposalAffordance={entry.id === latestProposalEntryId ? proposalAffordance : undefined}
+                    />
                     <p
                       data-agent-turn-state={entry.id}
                       className={cn(
@@ -284,7 +403,23 @@ export function WorkspaceAgentPanel({
               ))}
             </ol>
           )}
-          {status && activityMessage === null ? (
+          {planAffordance ? (
+            <div className="mt-3 flex">
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                className="h-7 max-w-full rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-normal text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+                aria-label="Open build plan"
+                title={planAffordance.technicalLabel ?? planAffordance.label}
+                onClick={planAffordance.onOpen}
+              >
+                <PanelRightOpen aria-hidden className="size-3 shrink-0" />
+                <span className="min-w-0 truncate">{planAffordance.label}</span>
+              </Button>
+            </div>
+          ) : null}
+          {status ? (
             <div
               role="status"
               aria-label={`${title} task status`}
@@ -292,17 +427,6 @@ export function WorkspaceAgentPanel({
               className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-[11px] leading-4 text-muted-foreground"
             >
               <span className="min-w-0 truncate">{status}</span>
-              {onStatusClick ? (
-                <Button
-                  type="button"
-                  variant="link"
-                  size="xs"
-                  className="h-auto shrink-0 px-0 text-[11px] text-foreground"
-                  onClick={onStatusClick}
-                >
-                  {statusActionLabel}
-                </Button>
-              ) : null}
             </div>
           ) : null}
         </div>
@@ -350,7 +474,11 @@ export function WorkspaceAgentPanel({
               compact
               systems={designSystems}
               value={designSystemId}
+              defaultId={defaultDesignSystemId}
+              inherited={designSystemInherited}
+              selectionStatus={designSystemSelectionStatus}
               onChange={onDesignSystemChange}
+              onUseDefault={onUseDefaultDesignSystem}
               catalogStatus={designSystemCatalogStatus}
               onRetry={onRetryDesignSystems}
             />
@@ -381,17 +509,17 @@ export function WorkspaceAgentPanel({
             attachFiles(event.dataTransfer.files);
           }}
         >
+          <AgentComposerContextCards
+            items={contextItems}
+            onChange={onContextItemsChange}
+            onRemove={onRemoveContextItem}
+            ariaLabel="Selected Agent Context"
+            className="mb-1.5 border-b-0 px-0.5 pb-0"
+          />
           <div className={cn(
             "overflow-hidden rounded-2xl border border-input bg-card transition-[border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
             draggingFiles && "border-ring bg-brand/5 ring-2 ring-ring/20",
           )} data-agent-composer-shell>
-            <AgentComposerContextCards
-              items={contextItems}
-              onChange={onContextItemsChange}
-              onRemove={onRemoveContextItem}
-              ariaLabel="Selected Agent Context"
-              className="border-border/60 px-2.5 pt-2.5"
-            />
             <textarea
               id="workspace-agent-draft"
               aria-label={draftLabel}
@@ -405,9 +533,9 @@ export function WorkspaceAgentPanel({
                 }
               }}
               placeholder={draggingFiles ? "Drop files to attach…" : placeholder}
-              rows={2}
+              rows={1}
               spellCheck
-              className="block max-h-40 min-h-[72px] w-full resize-none bg-transparent px-3 pb-2 pt-2.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground/70"
+              className="field-sizing-content block max-h-40 min-h-[44px] w-full resize-none bg-transparent px-3 pb-2 pt-2.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground/70"
             />
             <div
               data-workspace-agent-actions

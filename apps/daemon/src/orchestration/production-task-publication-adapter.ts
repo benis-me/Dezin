@@ -117,6 +117,9 @@ function pinnedStore(
   const completeGenerationTaskValidationForProject = dataMethod<
     GenerationTaskPublicationStorePort["completeGenerationTaskValidationForProject"]
   >(value, "completeGenerationTaskValidationForProject");
+  const completeGenerationTaskPrototypeFinalizationForProject = dataMethod<
+    GenerationTaskPublicationStorePort["completeGenerationTaskPrototypeFinalizationForProject"]
+  >(value, "completeGenerationTaskPrototypeFinalizationForProject");
   const publishGenerationPlanCheckpointForProject = dataMethod<
     GenerationTaskPublicationStorePort["publishGenerationPlanCheckpointForProject"]
   >(value, "publishGenerationPlanCheckpointForProject");
@@ -129,6 +132,7 @@ function pinnedStore(
   if (getArtifactRevision === null || stageGenerationTaskCandidateForProject === null
     || publishGenerationTaskCandidateForProject === null
     || completeGenerationTaskValidationForProject === null
+    || completeGenerationTaskPrototypeFinalizationForProject === null
     || publishGenerationPlanCheckpointForProject === null
     || finishGenerationTaskAttemptForProject === null
     || getGenerationTaskAttemptForProject === null) return null;
@@ -137,6 +141,7 @@ function pinnedStore(
     stageGenerationTaskCandidateForProject,
     publishGenerationTaskCandidateForProject,
     completeGenerationTaskValidationForProject,
+    completeGenerationTaskPrototypeFinalizationForProject,
     publishGenerationPlanCheckpointForProject,
     finishGenerationTaskAttemptForProject,
     getGenerationTaskAttemptForProject,

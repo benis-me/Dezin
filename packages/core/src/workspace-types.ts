@@ -188,6 +188,24 @@ export interface MoodboardRevisionAssetView {
   checksum: string;
   url: string | null;
   downloadUrl: string;
+  directionId: string | null;
+  directionTitle: string | null;
+  directionChecksum: string | null;
+}
+
+export interface MoodboardDirectionContractView {
+  protocol: "dezin.moodboard-direction-contract.v1";
+  contextPackId: string;
+  checksum: string;
+  directions: Array<{
+    resourceId: string;
+    revisionId: string;
+    id: string;
+    title: string;
+    checksum: string;
+    /** Exact immutable Asset assigned to this direction in contract order. */
+    assetId: string;
+  }>;
 }
 
 export interface MoodboardResourceRevisionContentView {
@@ -195,6 +213,7 @@ export interface MoodboardResourceRevisionContentView {
     id: string;
     name: string;
     coverAssetId: string | null;
+    directionContract: MoodboardDirectionContractView | null;
   };
   nodes: MoodboardRevisionNodeView[];
   assets: MoodboardRevisionAssetView[];
@@ -1070,6 +1089,7 @@ export interface WorkspaceResearchDirectionSelection {
   resourceId: string;
   revisionId: string;
   directionId: string;
+  directionIds?: string[];
 }
 
 export interface WorkspaceGenerationArtifactPlan {
@@ -1089,6 +1109,12 @@ export interface WorkspaceGenerationArtifactPlan {
   dispatchContextPackId?: string;
   /** Exact pre-existing Research Revision direction chosen for this Artifact. */
   researchDirectionSelection?: WorkspaceResearchDirectionSelection;
+  /**
+   * Server-compiled abstract prototype implementation requirements. Present
+   * only on v2 Workspace generation payloads and never carries a Revision or
+   * DOM locator authority.
+   */
+  prototypeRequirements?: WorkspaceGenerationArtifactPrototypeRequirements;
 }
 
 export type WorkspaceGenerationDependencyPlan =
@@ -1114,10 +1140,31 @@ export interface WorkspaceGenerationPrototypeIntent {
   edgeId: string;
   sourceArtifactId: string;
   targetArtifactId: string;
+  /** Legacy v1 locator authority. Forbidden by v2 generation payloads. */
   sourceLocator?: DesignNodeLocator;
+  /** Server-owned abstract source marker. Required by v2 generation payloads. */
+  sourceMarkerId?: string;
   trigger: PrototypeTrigger;
   targetState?: string;
   transition?: PrototypeTransition;
+}
+
+export interface WorkspaceGenerationPrototypeSourceRequirement {
+  edgeId: string;
+  sourceMarkerId: string;
+  trigger: PrototypeTrigger;
+}
+
+export interface WorkspaceGenerationPrototypeTargetRequirement {
+  edgeId: string;
+  sourceArtifactId: string;
+  sourceMarkerId: string;
+  targetState: string;
+}
+
+export interface WorkspaceGenerationArtifactPrototypeRequirements {
+  outgoing: WorkspaceGenerationPrototypeSourceRequirement[];
+  incoming: WorkspaceGenerationPrototypeTargetRequirement[];
 }
 
 export interface WorkspaceGenerationCapability {
@@ -1134,6 +1181,12 @@ export interface WorkspaceGenerationAgentSelection {
 
 export interface WorkspaceGenerationPayload {
   kind: "workspace-generation";
+  /**
+   * Absent means the historical v1 proposal contract. Version 2 carries only
+   * server-owned abstract prototype intents; omission preserves stored v1 JSON
+   * and hashes byte-for-byte.
+   */
+  version?: 2;
   /**
    * Immutable generating Agent selected when the proposal-producing turn was
    * submitted. Optional only so historical stored Proposals remain readable;

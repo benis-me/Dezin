@@ -3,6 +3,7 @@ import { chmod, link, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createCanvas } from "@napi-rs/canvas";
 import {
   BlockedContextError,
   checksumBytes,
@@ -26,7 +27,10 @@ import {
   createResourceAdapterRegistry,
   resourceAdapters,
 } from "../src/context/adapters/index.ts";
-import { removeSealedResourceRevisionPayload } from "../src/context/adapters/file.ts";
+import {
+  removeSealedResourceRevisionPayload,
+  snapshotBytes,
+} from "../src/context/adapters/file.ts";
 
 class MemoryContextPackRepository implements ContextPackRepository {
   readonly packs = new Map<string, ContextPack>();
@@ -58,6 +62,22 @@ class MemoryContextPackRepository implements ContextPackRepository {
   listUsage(_workspaceId: string, contextPackId: string, ordinal: number): readonly ContextPackItemUsage[] {
     return this.usage.filter((entry) => entry.contextPackId === contextPackId && entry.ordinal === ordinal);
   }
+}
+
+async function deterministicMoodboardPng(size: number): Promise<Buffer> {
+  const canvas = createCanvas(size, size);
+  const context = canvas.getContext("2d");
+  const image = context.createImageData(size, size);
+  let value = 0x12345678;
+  for (let index = 0; index < image.data.length; index += 4) {
+    value = (Math.imul(value, 1_664_525) + 1_013_904_223) >>> 0;
+    image.data[index] = value & 0xff;
+    image.data[index + 1] = (value >>> 8) & 0xff;
+    image.data[index + 2] = (value >>> 16) & 0xff;
+    image.data[index + 3] = 0xff;
+  }
+  context.putImageData(image, 0, 0);
+  return canvas.encode("png");
 }
 
 function inlineCandidate(input: {
@@ -750,7 +770,11 @@ test("all base adapters freeze complete owned sources and reject missing Moodboa
   await Promise.all([mkdir(workspaceRoot), mkdir(snapshotRoot)]);
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  const moodboardBytes = new TextEncoder().encode("exact-image-bytes");
+  const moodboardBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const frozenMoodboardBytes = Buffer.from(moodboardBytes);
   const moodboard = await resourceAdapters.require("moodboard").snapshot({
     workspaceId: "workspace-1",
     resourceId: "moodboard-2",
@@ -783,7 +807,7 @@ test("all base adapters freeze complete owned sources and reject missing Moodboa
   assert.equal(moodboardPayload.nodes.length, 1);
   assert.equal(moodboardPayload.messages.length, 1);
   assert.equal(moodboardPayload.assets[0]?.metadata.fileName, "source.png");
-  assert.equal(Buffer.from(moodboardPayload.assets[0]!.bytesBase64, "base64").toString("utf8"), "exact-image-bytes");
+  assert.deepEqual(Buffer.from(moodboardPayload.assets[0]!.bytesBase64, "base64"), frozenMoodboardBytes);
   const moodboardContext = await resourceAdapters.require("moodboard").resolve({
     request,
     contextClass: "explicit",
@@ -794,7 +818,10 @@ test("all base adapters freeze complete owned sources and reject missing Moodboa
   assert.match(moodboardContext[0]?.content ?? "", /Raw utility/);
   assert.match(moodboardContext[0]?.content ?? "", /Use the real crop/);
   assert.match(moodboardContext[0]?.content ?? "", /asset-1/);
-  assert.doesNotMatch(moodboardContext[0]?.content ?? "", /ZXhhY3QtaW1hZ2UtYnl0ZXM=/);
+  assert.equal(
+    (moodboardContext[0]?.content ?? "").includes(frozenMoodboardBytes.toString("base64")),
+    false,
+  );
 
   await assert.rejects(() => resourceAdapters.require("moodboard").snapshot({
     workspaceId: "workspace-1",
@@ -850,6 +877,187 @@ test("all base adapters freeze complete owned sources and reject missing Moodboa
     createdAt: 54,
   });
   assert.deepEqual(await readFile(asset.snapshotPath), Buffer.from([0, 1, 2, 3, 255]));
+});
+
+test("Moodboard v3 direction assignments remain explicit in shared Context", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-context-direction-bound-moodboard-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const image = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const directionChecksum = "d".repeat(64);
+  const payload = Buffer.from(stableStringify({
+    format: "dezin-moodboard-resource-bundle",
+    version: 3,
+    board: {
+      id: "moodboard-direction-bound",
+      name: "Direction-bound Moodboard",
+      coverAssetId: "asset-field-notes",
+      directionContract: {
+        protocol: "dezin.moodboard-direction-contract.v1",
+        contextPackId: "context-pack-direction-bound",
+        checksum: "c".repeat(64),
+        directions: [{
+          resourceId: "research-1",
+          revisionId: "research-revision-1",
+          id: "direction-field-notes",
+          title: "Field Notes",
+          thesis: "Use tactile evidence without mixing directions.",
+          visualLanguage: ["warm paper", "precise ink annotation"],
+          interactionPrinciples: ["reveal provenance in reading order"],
+          risks: ["nostalgia obscures evidence"],
+          checksum: directionChecksum,
+        }],
+      },
+    },
+    nodes: [],
+    messages: [],
+    assets: [{
+      id: "asset-field-notes",
+      metadata: {
+        kind: "image",
+        fileName: "field-notes.png",
+        mimeType: "image/png",
+        directionId: "direction-field-notes",
+        directionTitle: "Field Notes",
+        directionChecksum,
+      },
+      byteLength: image.byteLength,
+      checksum: checksumBytes(image),
+      bytesBase64: image.toString("base64"),
+    }],
+  }), "utf8");
+  const revision = await snapshotBytes({
+    workspaceId: "workspace-1",
+    resourceId: "moodboard-direction-bound",
+    revisionId: "moodboard-direction-bound-revision",
+    kind: "moodboard",
+    workspaceRoot: root,
+    snapshotRoot: root,
+    source: {
+      type: "owned-file",
+      path: "unused",
+      mimeType: "application/json",
+    },
+    provenance: {},
+    createdAt: 58,
+  }, payload, "application/json");
+
+  const context = await resourceAdapters.require("moodboard").resolve({
+    request,
+    contextClass: "explicit",
+    requestedRef: {
+      kind: "resource",
+      id: "moodboard-direction-bound",
+      resourceKind: "moodboard",
+    },
+    revision,
+    storageRoot: root,
+  });
+
+  assert.match(context[0]?.content ?? "", /dezin\.moodboard-direction-contract\.v1/);
+  assert.match(context[0]?.content ?? "", /research-revision-1/);
+  assert.match(context[0]?.content ?? "", /direction-field-notes/);
+  assert.match(context[0]?.content ?? "", new RegExp(directionChecksum));
+  assert.equal((context[0]?.content ?? "").includes(image.toString("base64")), false);
+});
+
+test("Moodboard context snapshots preserve a generator-sized multi-image bundle with explicit per-Asset bounds", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-context-large-moodboard-"));
+  const workspaceRoot = join(root, "workspace");
+  const snapshotRoot = join(root, "data");
+  await Promise.all([mkdir(workspaceRoot), mkdir(snapshotRoot)]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const image = await deterministicMoodboardPng(1_024);
+  const imageBytes = [image, image, image];
+  assert.ok(imageBytes.reduce((total, bytes) => total + bytes.byteLength, 0) > 6 * 1024 * 1024);
+
+  const snapshot = await resourceAdapters.require("moodboard").snapshot({
+    workspaceId: "workspace-1",
+    resourceId: "moodboard-large",
+    revisionId: "moodboard-large-revision",
+    kind: "moodboard",
+    workspaceRoot,
+    snapshotRoot,
+    source: {
+      type: "moodboard-bundle",
+      board: { id: "moodboard-large", name: "Generated multi-image direction" },
+      nodes: [
+        { id: "image-1", type: "image", assetId: "asset-1" },
+        { id: "image-2", type: "image", assetId: "asset-2" },
+        { id: "image-3", type: "image", assetId: "asset-3" },
+      ],
+      messages: [],
+      assets: imageBytes.map((bytes, index) => ({
+        id: `asset-${index + 1}`,
+        metadata: { fileName: `reference-${index + 1}.png`, mimeType: "image/png" },
+        bytes,
+      })),
+    },
+    provenance: { moodboardId: "moodboard-large" },
+    createdAt: 55,
+  });
+
+  assert.ok(snapshot.byteSize > 8 * 1024 * 1024);
+  const payload = JSON.parse(await readFile(snapshot.snapshotPath, "utf8")) as {
+    assets: Array<{ byteLength: number; bytesBase64: string }>;
+  };
+  assert.deepEqual(payload.assets.map((asset) => asset.byteLength), imageBytes.map((bytes) => bytes.byteLength));
+  assert.deepEqual(
+    payload.assets.map((asset) => Buffer.from(asset.bytesBase64, "base64")[0]),
+    [0x89, 0x89, 0x89],
+  );
+
+  await assert.rejects(
+    () => resourceAdapters.require("moodboard").snapshot({
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-oversized-asset",
+      revisionId: "moodboard-oversized-asset-revision",
+      kind: "moodboard",
+      workspaceRoot,
+      snapshotRoot,
+      source: {
+        type: "moodboard-bundle",
+        board: { id: "moodboard-oversized-asset" },
+        nodes: [],
+        messages: [],
+        assets: [{
+          id: "asset-too-large",
+          metadata: { fileName: "too-large.png", mimeType: "image/png" },
+          bytes: Buffer.alloc(8 * 1024 * 1024 + 1),
+        }],
+      },
+      provenance: {},
+      createdAt: 56,
+    }),
+    /Asset asset-too-large exceeds its byte limit/i,
+  );
+
+  await assert.rejects(
+    () => resourceAdapters.require("moodboard").snapshot({
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-invalid-image",
+      revisionId: "moodboard-invalid-image-revision",
+      kind: "moodboard",
+      workspaceRoot,
+      snapshotRoot,
+      source: {
+        type: "moodboard-bundle",
+        board: { id: "moodboard-invalid-image" },
+        nodes: [],
+        messages: [],
+        assets: [{
+          id: "asset-invalid-image",
+          metadata: { fileName: "invalid.png", mimeType: "image/png" },
+          bytes: Buffer.from("not a PNG", "utf8"),
+        }],
+      },
+      provenance: {},
+      createdAt: 57,
+    }),
+    /Asset asset-invalid-image bytes do not match its declared MIME/i,
+  );
 });
 
 test("Context hashes are independent of manifest roots and reject absolute-path provenance", async (t) => {

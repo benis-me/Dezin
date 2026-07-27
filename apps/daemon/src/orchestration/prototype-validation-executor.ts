@@ -1,12 +1,16 @@
 import type {
   ArtifactRevisionRecord,
   GenerationTaskAttemptClaim,
+  GenerationTaskPrototypeMarkerProof,
   ResourceRevision,
   WorkspaceSnapshotRecord,
 } from "../../../../packages/core/src/index.ts";
 import {
+  buildGenerationTaskPrototypeFinalizationBindings,
+  buildGenerationTaskPrototypeFinalizationPreparation,
   buildGenerationTaskPrototypeValidationResult,
   GenerationTaskPrototypeValidationError,
+  generationTaskPrototypeRuntimeReceiptNonce,
   getGenerationTaskPrototypeValidationRevisionIds,
 } from "../../../../packages/core/src/index.ts";
 import {
@@ -34,6 +38,17 @@ export interface PrototypeValidationStorePort {
     revisionId: string,
     signal: AbortSignal,
   ): Awaitable<ResourceRevision | null>;
+  resolveArtifactMarkers(
+    inputs: Array<{
+      workspaceId: string;
+      artifactId: string;
+      revisionId: string;
+      sourceMarkerId: string;
+      trigger: "click" | "submit";
+      receiptNonce: string;
+    }>,
+    signal: AbortSignal,
+  ): Awaitable<GenerationTaskPrototypeMarkerProof[]>;
 }
 
 export interface PrototypeValidationExecutorOptions {
@@ -124,6 +139,64 @@ export class PrototypeValidationExecutor implements PrototypeValidationTaskLeafE
         invalid(`Immutable prototype Resource Revision ${revisionId} is missing`);
       }
       resourceRevisions.push(revision);
+    }
+
+    if (claim.task.payload.version === 2) {
+      const preparation = useCoreValidation(() => (
+        buildGenerationTaskPrototypeFinalizationPreparation({
+          task: claim.task,
+          attempt: claim.attempt,
+          snapshot,
+          artifactRevisions,
+          resourceRevisions,
+        })
+      ));
+      let markerProofs: GenerationTaskPrototypeMarkerProof[];
+      try {
+        markerProofs = await this.store.resolveArtifactMarkers(
+          preparation.requirements.map((requirement) => ({
+            workspaceId: claim.task.workspaceId,
+            artifactId: requirement.sourceArtifactId,
+            revisionId: requirement.sourceRevisionId,
+            sourceMarkerId: requirement.sourceMarkerId,
+            trigger: requirement.trigger,
+            receiptNonce: generationTaskPrototypeRuntimeReceiptNonce(
+              claim.task.id,
+              claim.attempt.attempt,
+              requirement.edgeId,
+              requirement.sourceMarkerId,
+            ),
+          })),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted) throw abortReason(signal);
+        invalid("Prototype markers cannot be proven in their exact immutable preview runtimes", {
+          edgeIds: preparation.requirements.map((requirement) => requirement.edgeId),
+          sourceMarkerIds: preparation.requirements.map((requirement) => requirement.sourceMarkerId),
+          reason: error instanceof Error ? error.name : "unknown",
+        });
+      }
+      checkAbort(signal);
+      const authorized = useCoreValidation(() => buildGenerationTaskPrototypeFinalizationBindings({
+        task: claim.task,
+        attempt: claim.attempt,
+        snapshot,
+        artifactRevisions,
+        resourceRevisions,
+        markerProofs,
+      }));
+      checkAbort(signal);
+      return {
+        kind: "prototype-finalization",
+        taskId: claim.task.id,
+        workspaceId: claim.task.workspaceId,
+        baseSnapshotId: authorized.preparation.baseSnapshotId,
+        baseGraphRevision: authorized.preparation.baseGraphRevision,
+        artifactRevisionIds: authorized.preparation.artifactRevisionIds,
+        resourceRevisionIds: authorized.preparation.resourceRevisionIds,
+        markerProofs: authorized.bindings.map((binding) => binding.markerProof),
+      };
     }
 
     return useCoreValidation(() => {

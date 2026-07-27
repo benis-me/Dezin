@@ -93,6 +93,7 @@ const CANVAS_CONNECTION_LINE_STYLE = {
 } satisfies CSSProperties;
 const NOOP_VIEWPORT_CHANGE = () => {};
 const EMPTY_RESOURCE_REVISION_STATES = {} as const;
+const EMPTY_ARTIFACT_REVISION_QUALITY_STATES = {} as const;
 const EMPTY_GENERATION_TARGET_STATES = {} as const;
 const proposalNodeTypes = { ...workspaceNodeTypes, proposal: ProposalOverlay } satisfies NodeTypes;
 const proposalEdgeTypes = { ...workspaceEdgeTypes, proposal: ProposalOverlayEdge } satisfies EdgeTypes;
@@ -159,6 +160,11 @@ export interface ProjectCanvasProps {
   layout: WorkspaceLayout;
   viewport?: WorkspaceViewport;
   artifactRevisionIds: Readonly<Record<string, string | null>>;
+  artifactRevisionQualityStates?: Readonly<Record<string, {
+    revisionId: string;
+    qualityState: "passed" | "needs-attention" | "failed" | "unassessed";
+    qualityScore: number | null;
+  }>>;
   resourceRevisionStates?: Readonly<Record<string, {
     revisionId: string;
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
@@ -429,6 +435,7 @@ export function ProjectCanvas({
   layout,
   viewport = layout.viewport,
   artifactRevisionIds,
+  artifactRevisionQualityStates = EMPTY_ARTIFACT_REVISION_QUALITY_STATES,
   resourceRevisionStates = EMPTY_RESOURCE_REVISION_STATES,
   artifactGenerationStates = EMPTY_GENERATION_TARGET_STATES,
   resourceGenerationStates = EMPTY_GENERATION_TARGET_STATES,
@@ -828,6 +835,7 @@ export function ProjectCanvas({
       edgeFilter,
       projectId,
       artifactRevisionIds,
+      artifactRevisionQualityStates,
       resourceRevisionStates,
       resourceRevisionPreviews,
       artifactGenerationStates,
@@ -882,6 +890,7 @@ export function ProjectCanvas({
     proposalDiff,
     renameGroup,
     resizeGroup,
+    artifactRevisionQualityStates,
     resourceRevisionStates,
     resourceRevisionPreviews,
     resourceGenerationStates,
@@ -1168,7 +1177,7 @@ export function ProjectCanvas({
       const fitted = instance.getViewport();
       const outlineOffset = keepOutlineOpen ? Math.min(132, surfaceWidth * 0.14) : 0;
       const next = outlineOffset > 0 ? { ...fitted, x: fitted.x + outlineOffset } : fitted;
-      const align = outlineOffset > 0
+      const align = !sameViewport(next, instance.getViewport())
         ? instance.setViewport(next, { duration: reducedMotion() ? 0 : 120 })
         : Promise.resolve(true);
       return align.then(() => {
@@ -1608,6 +1617,7 @@ export function ProjectCanvas({
           canUngroup={canUngroup}
           canDeleteGroup={canDeleteGroup}
           canDeleteRelationship={canDeleteRelationship}
+          hasRelationshipSelection={selectedRelationships.length > 0}
           relationshipDeleteLabel={relationshipDeleteLabel}
           relationshipDeleteDisabledReason={relationshipDeleteDisabledReason}
           onToolChange={setTool}

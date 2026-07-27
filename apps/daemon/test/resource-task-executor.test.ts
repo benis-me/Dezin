@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  GenerationTaskQualityGateError,
   normalizeGenerationTaskIntent,
   type GenerationTask,
   type GenerationTaskAttempt,
@@ -115,7 +116,7 @@ function claimFixture(): GenerationTaskAttemptClaim {
     target: task.target,
     baseRevisionId: "resource-revision-parent",
     expectedSnapshotId: "snapshot-resource-executor",
-    contextPackId: "context-resource-executor",
+    contextPackId: `context-pack-${"c".repeat(64)}`,
     kernelRevisionId: "kernel-resource-executor",
     sourceCommitHash: null,
     sourceTreeHash: null,
@@ -236,6 +237,73 @@ function claimWithOutputBudget(maxOutputBytes: number): GenerationTaskAttemptCla
   };
 }
 
+function researchClaimFixture(): GenerationTaskAttemptClaim {
+  const claim = claimFixture();
+  const payload = structuredClone(claim.task.payload) as Record<string, any>;
+  payload.adapter = {
+    id: "dezin.resource-adapter.research",
+    version: 1,
+    kind: "research",
+  };
+  payload.operation = {
+    ...payload.operation,
+    kind: "research",
+    title: "KITE Research",
+  };
+  payload.brief = {
+    ...payload.brief,
+    targetInstructions: {
+      ...payload.brief.targetInstructions,
+      kind: "research",
+      title: "KITE Research",
+      instructions: [
+        "Use decision-grade verified Web evidence.",
+        "Require at least two independent evidence findings and one evidence-backed design direction.",
+      ].join(" "),
+    },
+  };
+  payload.operation.instructions = payload.brief.targetInstructions.instructions;
+  return {
+    ...claim,
+    task: { ...claim.task, payload },
+    attempt: { ...claim.attempt, payload: structuredClone(payload) },
+  };
+}
+
+function rejectedResearchDecisionGradeMetadata(): Record<string, unknown> {
+  return {
+    format: "dezin-research-resource-bundle",
+    version: 3,
+    qualityState: "needs-review",
+    decisionGradeGate: {
+      protocol: "dezin.research-decision-grade-gate.v1",
+      criteria: {
+        minimumVerifiedWebSourceCount: 2,
+        minimumEvidenceFindingCount: 2,
+        minimumEvidenceDirectionCount: 1,
+        requiresGroundednessVerifier: true,
+      },
+      observed: {
+        verifiedWebSourceCount: 2,
+        evidenceFindingCount: 2,
+        evidenceDirectionCount: 0,
+        groundednessVerifierAvailable: true,
+      },
+      accepted: false,
+      blockers: ["insufficient-evidence-directions"],
+    },
+  };
+}
+
+function acceptedResearchDecisionGradeMetadata(): Record<string, unknown> {
+  const metadata = structuredClone(rejectedResearchDecisionGradeMetadata()) as Record<string, any>;
+  metadata.qualityState = "grounded";
+  metadata.decisionGradeGate.observed.evidenceDirectionCount = 1;
+  metadata.decisionGradeGate.accepted = true;
+  metadata.decisionGradeGate.blockers = [];
+  return metadata;
+}
+
 test("selects the exact frozen adapter while the executor authors durable Resource identity", async () => {
   const claim = claimFixture();
   const adapterInputs: unknown[] = [];
@@ -284,6 +352,11 @@ test("selects the exact frozen adapter while the executor authors durable Resour
     "the adapter receives the exact immutable output budget instead of silently applying a smaller global default",
   );
   assert.equal(
+    (adapterInputs[0] as { maxRepairRounds?: number }).maxRepairRounds,
+    claim.task.resourceLimits.maxRepairRounds,
+    "the adapter receives the exact immutable repair budget instead of inventing an internal retry count",
+  );
+  assert.equal(
     (adapterInputs[0] as {
       brief?: { targetInstructions?: { instructions?: string } };
     }).brief?.targetInstructions?.instructions,
@@ -296,6 +369,8 @@ test("selects the exact frozen adapter while the executor authors durable Resour
     version: 1,
     kind: "asset",
   });
+  assert.equal(stageInputs[0]?.contextPackId, claim.attempt.contextPackId);
+  assert.equal(stageInputs[0]?.contextPackHash, "c".repeat(64));
   assert.match(result.revision.revisionId, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(result.revision.parentRevisionId, claim.attempt.baseRevisionId);
   assert.equal(
@@ -333,6 +408,57 @@ test("selects the exact frozen adapter while the executor authors durable Resour
     false,
     "only the exact executor-owned candidate may authorize receipt reconciliation",
   );
+});
+
+test("accepts alias-free Moodboard reviewer evidence through portable adapter normalization", async () => {
+  const claim = claimFixture();
+  const stageInputs: ResourceTaskPayloadStageInput[] = [];
+  const evidence = {
+    qualityReviews: [{
+      id: "asset-1",
+      checksum: "c".repeat(64),
+      reviewer: { id: "codex", model: "gpt-5.4-mini" },
+      decision: "pass",
+      semanticMatch: true,
+      visualQuality: "pass",
+    }],
+    qualityReviewHistory: [{
+      id: "asset-1",
+      reviewer: { id: "codex", model: "gpt-5.4-mini" },
+      reviews: [{
+        round: 0,
+        reviewer: { id: "codex", model: "gpt-5.4-mini" },
+        promptChecksum: "d".repeat(64),
+        imageChecksum: "c".repeat(64),
+        decision: "pass",
+        semanticMatch: true,
+        visualQuality: "pass",
+        findings: [],
+      }],
+    }],
+  };
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      ...adapterFixture(),
+      async generate() {
+        return outputFixture({ evidence });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) {
+        stageInputs.push(input);
+        return receiptFor(input);
+      },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  const result = await executor.execute(claim, new AbortController().signal);
+
+  assert.equal(stageInputs.length, 1);
+  assert.deepEqual(stageInputs[0]!.evidence, evidence);
+  assert.deepEqual(result.evidence.adapterEvidence, evidence);
 });
 
 test("rejects duplicate adapter identities instead of allowing last-registration wins", () => {
@@ -681,6 +807,169 @@ test("rejects invalid MIME, Unicode, textual bytes, and total output budget befo
   }
 });
 
+test("rejects a Research candidate whose decision-grade gate has no evidence-backed direction", async () => {
+  const claim = researchClaimFixture();
+  const output = outputFixture({
+    mimeType: "application/json",
+    bytes: new TextEncoder().encode(JSON.stringify({ format: "dezin-research-resource-bundle", version: 3 })),
+    metadata: rejectedResearchDecisionGradeMetadata(),
+  });
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() { return output; },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) { staged = true; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim, new AbortController().signal),
+    (error) => {
+      assert.ok(error instanceof GenerationTaskQualityGateError);
+      assert.equal(error.failureClass, "qa");
+      assert.equal(error.code, "generation-task-quality-gate");
+      assert.match(error.message, /insufficient-evidence-directions/i);
+      assert.deepEqual(error.details, {
+        protocol: "dezin.research-decision-grade-rejection.v1",
+        criteria: {
+          minimumVerifiedWebSourceCount: 2,
+          minimumEvidenceFindingCount: 2,
+          minimumEvidenceDirectionCount: 1,
+          requiresGroundednessVerifier: true,
+        },
+        observed: {
+          verifiedWebSourceCount: 2,
+          evidenceFindingCount: 2,
+          evidenceDirectionCount: 0,
+          groundednessVerifierAvailable: true,
+        },
+        blockers: ["insufficient-evidence-directions"],
+      });
+      return true;
+    },
+  );
+  assert.equal(staged, false);
+});
+
+test("rejects malformed Research decision-grade diagnostics before they can become durable details", async () => {
+  const metadata = structuredClone(rejectedResearchDecisionGradeMetadata()) as Record<string, any>;
+  metadata.decisionGradeGate.criteria.minimumEvidenceDirectionCount = 0;
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          mimeType: "application/json",
+          bytes: new TextEncoder().encode(JSON.stringify({
+            format: "dezin-research-resource-bundle",
+            version: 3,
+          })),
+          metadata,
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) { staged = true; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(researchClaimFixture(), new AbortController().signal),
+    (error) => error instanceof ResourceTaskAdapterError
+      && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID",
+  );
+  assert.equal(staged, false);
+});
+
+test("rejects a replayed Research payload whose rejected decision-grade gate was staged before publication", async () => {
+  const claim = researchClaimFixture();
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({
+    format: "dezin-research-resource-bundle",
+    version: 3,
+  }));
+  let replay: ResourceTaskPayloadReceipt | null = null;
+  const setupExecutor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          bytes: payloadBytes,
+          mimeType: "application/json",
+          summary: "KITE Research",
+          metadata: acceptedResearchDecisionGradeMetadata(),
+          provenance: { model: "gpt-5.4-mini" },
+          evidence: { accepted: true },
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) {
+        replay = receiptFor(input);
+        return replay;
+      },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+  await setupExecutor.execute(claim, new AbortController().signal);
+  assert.ok(replay);
+  const stagedReplay = replay as unknown as ResourceTaskPayloadReceipt;
+  replay = {
+    ...stagedReplay,
+    metadata: rejectedResearchDecisionGradeMetadata(),
+    evidence: { accepted: false },
+  };
+
+  let adapterCalls = 0;
+  let stageCalls = 0;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        adapterCalls += 1;
+        return outputFixture();
+      },
+    }]),
+    staging: {
+      async find() { return replay; },
+      async stage(input) { stageCalls += 1; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(claim, new AbortController().signal),
+    (error) => error instanceof GenerationTaskQualityGateError
+      && /insufficient-evidence-directions/i.test(error.message),
+  );
+  assert.equal(adapterCalls, 0);
+  assert.equal(stageCalls, 0);
+});
+
 test("rejects prototype-pollution keys in adapter-authored JSON records", async () => {
   for (const key of ["__proto__", "prototype", "constructor"]) {
     const metadata = Object.create(null) as Record<string, unknown>;
@@ -791,6 +1080,8 @@ test("fails closed on a forged replay receipt without invoking the adapter or de
     parentRevisionId: claim.attempt.baseRevisionId,
     adapter: { id: "dezin.resource-adapter.asset", version: 1, kind: "asset" },
     maxOutputBytes: claim.task.resourceLimits.maxOutputBytes,
+    contextPackId: claim.attempt.contextPackId as string,
+    contextPackHash: (claim.attempt.contextPackId as string).slice("context-pack-".length),
     lease: claim.lease,
     bytes: new TextEncoder().encode("generated hero"),
     mimeType: "text/plain",

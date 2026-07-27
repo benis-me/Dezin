@@ -119,6 +119,7 @@ describe("semantic relation routing handles", () => {
         artifactId: null,
         resourceId: "research-1",
         revisionId: "research-revision-1",
+        zoomLevel: "overview",
         resourceKind: "research",
         resourcePreview: {
           kind: "research",
@@ -132,6 +133,7 @@ describe("semantic relation routing handles", () => {
     } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
     expect(screen.getByRole("group", { name: "Research decision brief preview" })).toBeInTheDocument();
+    expect(screen.getByText("Research")).toHaveClass("dezin-flow-card__kind");
     expect(screen.getByText("Festival audiences need a strong first-glance programming hierarchy.")).toBeInTheDocument();
     expect(screen.getByText("4 findings · 3 directions")).toBeInTheDocument();
   });
@@ -152,6 +154,7 @@ describe("semantic relation routing handles", () => {
             artifactId: null,
             resourceId: "moodboard-1",
             revisionId: "moodboard-revision-1",
+            zoomLevel: "overview",
             resourceKind: "moodboard",
             resourcePreview: {
               kind: "moodboard",
@@ -172,6 +175,7 @@ describe("semantic relation routing handles", () => {
     );
 
     const cover = await screen.findByRole("img", { name: "KITE / Direction A cover" });
+    expect(screen.getByText("Moodboard")).toHaveClass("dezin-flow-card__kind");
     expect(cover).toHaveAttribute("src", "blob:moodboard-cover");
     expect(getResourceRevisionBlob).toHaveBeenCalledWith(
       "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
