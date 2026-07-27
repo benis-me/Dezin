@@ -335,25 +335,40 @@ test("durable Core owns transient Artifact visual-review retries with one Codex 
       artifactQualityDependencies: qualityDependencies,
       now: clock.now,
       leaseMs: 300_000,
-      heartbeatMs: 100_000,
+      // The accelerated clock makes this a 3s real-time lease. Renew it every
+      // second so a coverage-loaded Attempt remains durably owned.
+      heartbeatMs: 1_000,
       pollMs: 1,
       onError: (error) => errors.push(error),
     });
 
     await system.runtime.start();
-    await waitForDurableProgress({
-      description: "terminal four-attempt Artifact visual-review transport chain",
-      read: () => store.workspace.getGenerationPlanDetailForProject(
+    const readProgress = () => ({
+      detail: store.workspace.getGenerationPlanDetailForProject(
         project.id,
         approved.plan!.id,
       ),
-      isSettled: ({ plan }) => (
+      attempts: store.db.prepare(
+        `SELECT attempt, status, heartbeat_at
+           FROM generation_task_attempts
+          WHERE plan_id = ?
+          ORDER BY attempt`,
+      ).all(approved.plan!.id) as Array<{
+        attempt: number;
+        status: string;
+        heartbeat_at: number | null;
+      }>,
+    });
+    await waitForDurableProgress({
+      description: "terminal four-attempt Artifact visual-review transport chain",
+      read: readProgress,
+      isSettled: ({ detail: { plan } }) => (
         plan.status === "succeeded"
         || plan.status === "failed"
         || plan.status === "cancelled"
         || plan.status === "compile-failed"
       ),
-      fingerprint: ({ plan, tasks }) => JSON.stringify({
+      fingerprint: ({ detail: { plan, tasks }, attempts }) => JSON.stringify({
         plan: [plan.status, plan.executionEpoch],
         tasks: tasks.map((task) => [
           task.kind,
@@ -362,9 +377,16 @@ test("durable Core owns transient Artifact visual-review retries with one Codex 
           task.failureClass,
           task.nextEligibleAt,
         ]),
+        attempts: attempts.map((attempt) => [
+          attempt.attempt,
+          attempt.status,
+          attempt.heartbeat_at,
+        ]),
       }),
       idleTimeoutMs: 3_000,
-      hardTimeoutMs: 10_000,
+      // The idle watchdog is the stall detector. Keep a separate generous
+      // total bound for four real Git/evidence Attempts under coverage load.
+      hardTimeoutMs: 30_000,
     });
 
     const detail = store.workspace.getGenerationPlanDetailForProject(

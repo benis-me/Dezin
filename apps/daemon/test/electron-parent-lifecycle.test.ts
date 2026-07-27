@@ -8,6 +8,28 @@ import { join } from "node:path";
 
 import { watchElectronParent } from "../src/electron-parent-lifecycle.ts";
 
+type ChildClose = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+};
+
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return new Promise<T | null>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    timer.unref();
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 test("an Electron-owned daemon shuts down exactly once when its parent IPC disconnects", () => {
   const parent = new EventEmitter() as EventEmitter & {
     connected: boolean;
@@ -111,28 +133,47 @@ test("an Electron-owned daemon releases its IPC watcher when startup fails", asy
     },
   );
   let stderr = "";
+  let observeStartupFailure!: () => void;
+  const startupFailureObserved = new Promise<void>((resolve) => {
+    observeStartupFailure = resolve;
+  });
+  const close = new Promise<ChildClose>((resolve) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk: string) => {
     stderr += chunk;
+    if (stderr.includes("Dezin daemon failed to start")) observeStartupFailure();
   });
 
   try {
-    const exit = await Promise.race([
-      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      }),
-      new Promise<null>((resolve) => {
-        setTimeout(() => resolve(null), 3_000).unref();
-      }),
-    ]);
+    const startupOutcome = await withDeadline(Promise.race([
+      close.then((exit) => ({ kind: "closed", exit }) as const),
+      startupFailureObserved.then(() => ({ kind: "startup-failed" }) as const),
+    ]), 15_000);
+    assert.notEqual(
+      startupOutcome,
+      null,
+      `daemon never reached its intended startup failure; stderr: ${stderr || "<empty>"}`,
+    );
+
+    // Initialization cost is unrelated to the IPC lifecycle assertion. Start
+    // the tight bound only once the intended failure path is observable.
+    let exit = startupOutcome?.kind === "closed"
+      ? startupOutcome.exit
+      : await withDeadline(close, 2_000);
     if (exit === null) {
       child.kill("SIGKILL");
-      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      exit = await close;
     }
 
-    assert.notEqual(exit, null, "startup failure must not stay alive behind the Electron IPC channel");
-    assert.equal(exit?.code, 1);
-    assert.equal(exit?.signal, null);
+    assert.notEqual(
+      exit.signal,
+      "SIGKILL",
+      `startup failure stayed alive behind the Electron IPC channel; stderr: ${stderr || "<empty>"}`,
+    );
+    assert.equal(exit.code, 1);
+    assert.equal(exit.signal, null);
     assert.match(stderr, /Dezin daemon failed to start/);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
