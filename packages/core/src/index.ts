@@ -3,6 +3,12 @@
  */
 
 export { NO_DESIGN_SYSTEM_ID } from "./types.ts";
+export {
+  SHARINGAN_BOOTSTRAP_STATE_PROTOCOL,
+  SharinganBootstrapStateError,
+  normalizeSharinganBootstrapState,
+} from "./sharingan-bootstrap.ts";
+export type { SharinganBootstrapState } from "./sharingan-bootstrap.ts";
 
 export type {
   Project,
@@ -270,6 +276,7 @@ export {
   WorkspacePointerConflictError,
   WorkspaceResourceNotFoundError,
   WorkspaceResourceOwnershipError,
+  ResourceMaterializationConflictError,
   WorkspaceProposalConflictError,
   WorkspaceProposalNotFoundError,
   WorkspaceProposalOwnershipError,
@@ -292,6 +299,7 @@ export {
   normalizeContextPackTarget,
   normalizeCreateResourceForProjectInput,
   normalizeCreatePublishedResourceForProjectInput,
+  resourceMaterializationRequestHash,
   normalizeCreateResourceRevisionCandidateInput,
   normalizePersistContextPackInput,
   normalizeRecordContextPackItemUsageInput,
@@ -306,6 +314,10 @@ export {
   type ResourceRevisionHistoryCursor,
   type ResourceRevisionHistoryPage,
   type ResourceRevisionViewFacts,
+  type ResourceMaterializationRequestFacts,
+  type CommitResourceMaterializationInput,
+  type ResourceMaterializationReceipt,
+  type ResourceMaterializationCommitResult,
   type ArtifactCandidateRefRecoveryAttemptStatus,
   type ArtifactCandidateRefRecoveryCursor,
   type ArtifactCandidateRefRecoveryEntry,

@@ -1,4 +1,5 @@
 import type { Store } from "../../../packages/core/src/index.ts";
+import { existsSync, lstatSync } from "node:fs";
 import { lstat, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PreviewLeaseManager } from "./preview-lease.ts";
@@ -122,10 +123,32 @@ async function removeProjectGenerationEvidence(dataDir: string, projectId: strin
   await rm(target, { recursive: true, force: true });
 }
 
+function assertProjectGenerationEvidenceRemovable(
+  dataDir: string,
+  projectId: string,
+): void {
+  const root = resolve(dataDir, "generation-task-evidence");
+  const target = projectEvidencePath(dataDir, projectId);
+  if (!existsSync(root)) return;
+  const rootStats = lstatSync(root);
+  if (rootStats.isSymbolicLink()) {
+    throw new Error(`Refusing to traverse a symbolic link as the Generation evidence root: ${root}`);
+  }
+  if (!rootStats.isDirectory()) {
+    throw new Error(`Generation evidence root is not a directory: ${root}`);
+  }
+  if (!existsSync(target)) return;
+  const targetStats = lstatSync(target);
+  if (targetStats.isSymbolicLink()) {
+    throw new Error(`Refusing to remove a symbolic link as project Generation evidence: ${target}`);
+  }
+}
+
 export class RuntimeSupervisor {
   private readonly runs = new Map<string, RegisteredRun>();
   private readonly operations = new Map<number, RegisteredOperation>();
   private readonly blockedProjects = new Set<string>();
+  private readonly projectReleaseOwners = new Map<string, symbol>();
   private readonly blockedVariants = new Set<string>();
   private shuttingDown = false;
   private shutdownPromise?: Promise<boolean>;
@@ -274,31 +297,88 @@ export class RuntimeSupervisor {
     this.options.store.deleteVariant(variantId);
   }
 
-  async releaseProject(projectId: string): Promise<void> {
+  async releaseProject(
+    projectId: string,
+    options: {
+      /** Runs after this deletion owns admission, before any live work is cancelled. */
+      afterBlock?: () => void | Promise<void>;
+      beforeDelete?: () => void | Promise<void>;
+      /**
+       * Restore caller-owned pre-commit state before admission is reopened.
+       * If this rollback fails, admission remains closed.
+       */
+      onPrecommitFailure?: (error: unknown) => void | Promise<void>;
+      /** Deterministic crash checkpoint after the atomic DB cascade. */
+      afterDelete?: () => void | Promise<void>;
+    } = {},
+  ): Promise<void> {
     projectEvidencePath(this.options.dataDir, projectId);
+    assertProjectGenerationEvidenceRemovable(this.options.dataDir, projectId);
+    if (this.projectReleaseOwners.has(projectId)) {
+      throw new RuntimeScopeUnavailableError({ projectId });
+    }
+    const releaseOwner = Symbol(projectId);
+    this.projectReleaseOwners.set(projectId, releaseOwner);
     const scope = { projectId };
     this.blockedProjects.add(projectId);
-    this.cancelRuns(scope);
-    this.cancelOperations(scope);
-    await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
-    // A tracked import may create Runs/log paths while unwinding after abort. Re-read ownership
-    // only after every project operation settles so cleanup cannot use a stale pre-import snapshot.
-    const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
-    await this.options.previewLeaseManager?.stopScope({ projectId });
-    await this.options.releaseProjectResources?.({ projectId, runIds });
-    await Promise.all([
-      rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
-      rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
-      rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
-      rm(join(this.options.dataDir, "version-evidence", projectId), { recursive: true, force: true }),
-      removeProjectGenerationEvidence(this.options.dataDir, projectId),
-      rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
-      ...runIds.flatMap((runId) => [
-        rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
-      ]),
-    ]);
-    this.options.store.deleteProject(projectId);
+    let databaseDeleted = false;
+    let preserveAdmissionBlock = false;
+    try {
+      if (options.afterBlock) await options.afterBlock();
+      this.cancelRuns(scope);
+      this.cancelOperations(scope);
+      await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
+      // A tracked import may create Runs/log paths while unwinding after abort. Re-read ownership
+      // only after every project operation settles so cleanup cannot use a stale pre-import snapshot.
+      const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
+      await this.options.previewLeaseManager?.stopScope({ projectId });
+      await this.options.releaseProjectResources?.({ projectId, runIds });
+      // The project is admission-blocked and all owned work has settled here.
+      // This is the only safe point to durably capture cleanup identities before
+      // the final database cascade removes their ownership rows.
+      await options.beforeDelete?.();
+      // The SQLite cascade is the sole destructive commit point. Before it, a
+      // durable cleanup journal can be rolled back because all source paths still
+      // exist. After it, startup recovery owns every deterministic path captured
+      // by that journal, so a crash can only complete deletion, never resurrect a
+      // Project whose source was already removed.
+      this.options.store.deleteProject(projectId);
+      databaseDeleted = true;
+      await options.afterDelete?.();
+      await Promise.all([
+        rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "version-evidence", projectId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "render-assemblies", projectId), { recursive: true, force: true }),
+        removeProjectGenerationEvidence(this.options.dataDir, projectId),
+        rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
+        ...runIds.flatMap((runId) => [
+          rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
+          rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
+        ]),
+      ]);
+    } catch (error) {
+      if (databaseDeleted) {
+        preserveAdmissionBlock = true;
+      } else {
+        try {
+          await options.onPrecommitFailure?.(error);
+        } catch (rollbackError) {
+          preserveAdmissionBlock = true;
+          throw new AggregateError(
+            [error, rollbackError],
+            "Project deletion failed and its pre-commit rollback could not restore admission",
+          );
+        }
+      }
+      throw error;
+    } finally {
+      if (this.projectReleaseOwners.get(projectId) === releaseOwner) {
+        this.projectReleaseOwners.delete(projectId);
+        if (!preserveAdmissionBlock) this.blockedProjects.delete(projectId);
+      }
+    }
   }
 
   cancelAll(): void {

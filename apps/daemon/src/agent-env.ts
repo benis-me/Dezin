@@ -1,5 +1,8 @@
 import type { Settings } from "../../../packages/core/src/index.ts";
-import { getProvider } from "../../../packages/agent/src/index.ts";
+import {
+  CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS,
+  getProvider,
+} from "../../../packages/agent/src/index.ts";
 import {
   parseProviderProfiles,
   providerRuntimeConfig,
@@ -10,24 +13,6 @@ function setIfPresent(env: NodeJS.ProcessEnv, key: string, value: string | undef
   const trimmed = value?.trim();
   if (trimmed) env[key] = trimmed;
 }
-
-const CODEBUDDY_PROVIDER_ENVIRONMENT_KEYS = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "CODEBUDDY_API_KEY",
-  "CODEBUDDY_AUTH_TOKEN",
-  "CODEBUDDY_BASE_URL",
-  "OPENAI_API_KEY",
-  "OPENAI_BASE_URL",
-  "OPENAI_ORG_ID",
-  "GEMINI_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "AZURE_OPENAI_API_KEY",
-  "AZURE_OPENAI_ENDPOINT",
-] as const;
 
 const CODEX_HOST_LOGIN_ENVIRONMENT_KEYS = [
   "OPENAI_API_KEY",
@@ -45,7 +30,7 @@ export function buildAgentEnv(settings: Settings, command: string, daemonToken?:
     // CodeBuddy uses only its official host login. Explicit tombstones override
     // Settings-derived and ambient daemon provider credentials when the child
     // environment is composed.
-    for (const key of CODEBUDDY_PROVIDER_ENVIRONMENT_KEYS) env[key] = undefined;
+    for (const key of CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS) env[key] = undefined;
   } else if (providerId === "claude") {
     setIfPresent(env, "ANTHROPIC_API_KEY", settings.apiKey);
     setIfPresent(env, "ANTHROPIC_BASE_URL", settings.apiBaseUrl);

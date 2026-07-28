@@ -280,6 +280,7 @@ test("releaseProject waits, releases resources, and removes all project-owned st
     join(dataDir, "worktrees", project.id, branch.id, "artifact.txt"),
     join(dataDir, "version-worktrees", project.id, branchRun.id, "artifact.txt"),
     join(dataDir, "version-evidence", project.id, branchRun.id, "visual", "round-0.png"),
+    join(dataDir, "render-assemblies", project.id, "assembly-1", "manifest.json"),
     join(dataDir, "projects", project.id, "index.html"),
   ];
   const retainedPaths = [
@@ -345,6 +346,49 @@ test("releaseProject waits, releases resources, and removes all project-owned st
   assert.ok(retainedPaths.every(existsSync));
   assert.ok(store.getProject(otherProject.id));
   assert.ok(store.getRun(otherRun.id));
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("releaseProject has one deletion owner and reopens admission after pre-commit rollback", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-owner-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Deletion owner" });
+  const blocked = deferred();
+  const release = deferred();
+  let rollbackCalls = 0;
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+
+  const first = supervisor.releaseProject(project.id, {
+    afterBlock() {
+      blocked.resolve();
+      return release.promise;
+    },
+    beforeDelete() {
+      throw new Error("refuse before database commit");
+    },
+    onPrecommitFailure() {
+      rollbackCalls += 1;
+    },
+  });
+  await blocked.promise;
+  assert.throws(
+    () => supervisor.assertAdmission({ projectId: project.id }),
+    RuntimeScopeUnavailableError,
+  );
+  await assert.rejects(
+    supervisor.releaseProject(project.id),
+    RuntimeScopeUnavailableError,
+  );
+
+  release.resolve();
+  await assert.rejects(first, /refuse before database commit/);
+  assert.equal(rollbackCalls, 1);
+  assert.ok(store.getProject(project.id));
+  assert.equal(
+    await supervisor.trackOperation({ projectId: project.id }, () => "admitted"),
+    "admitted",
+  );
   await supervisor.shutdown();
   store.close();
 });
@@ -438,7 +482,7 @@ test("releaseProject propagates Generation evidence cleanup failure and preserve
     /not a directory/i,
   );
 
-  assert.equal(resourcesReleased, true, "resource release keeps the existing pre-delete ordering");
+  assert.equal(resourcesReleased, false, "owned-path preflight rejects before runtime resources are touched");
   assert.ok(store.getProject(project.id), "a failed owned-path deletion must not delete the database project");
   assert.equal(existsSync(evidenceRoot), true, "the invalid path remains available for explicit recovery");
   await supervisor.shutdown();

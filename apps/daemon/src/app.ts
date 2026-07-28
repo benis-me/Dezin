@@ -45,7 +45,7 @@ import {
   stopAllProjectRuntimes,
   type PreviewRuntimeOptions,
 } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, removeSharinganProjectProfiles, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
 import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
@@ -102,6 +102,7 @@ import {
   type ExtensionPairingService,
 } from "./extension-auth.ts";
 import { removeStandardRunTransaction } from "./standard-run-transaction.ts";
+import { recoverResourceMaterializationPayloadIntents } from "./resource-materialization-intent.ts";
 import {
   previewLeaseManager,
   requirePreviewLease,
@@ -173,6 +174,15 @@ import {
   type GenerationPlanEventsPort,
 } from "./orchestration/generation-plan-events.ts";
 import type { ProductionAgentTurnPort } from "./orchestration/production-agent-orchestrator.ts";
+import type { SharinganBootstrapPort } from "./sharingan-bootstrap.ts";
+import {
+  assertProjectResourcePayloadCleanupCompletable,
+  beginProjectResourcePayloadCleanup,
+  completeProjectResourcePayloadCleanup,
+  recoverProjectResourcePayloadCleanups,
+  rollbackProjectResourcePayloadCleanup,
+  type ProjectResourcePayloadCleanupIntent,
+} from "./project-resource-payload-cleanup.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
@@ -269,6 +279,8 @@ export interface AppDeps {
   generationPlanRuntime?: GenerationPlanRuntimeControl;
   /** Workspace/Artifact/Resource Agent dispatcher; production startup supplies the Store-backed composition. */
   workspaceAgent?: ProductionAgentTurnPort;
+  /** Daemon-owned immutable source capture required before a Sharingan Workspace becomes usable. */
+  sharinganBootstrap?: SharinganBootstrapPort;
 }
 
 type Handler = (
@@ -283,6 +295,8 @@ interface Route {
   method: string;
   pattern: string;
   handler: Handler;
+  /** Project DELETE owns the admission transition itself; every other scoped route is leased automatically. */
+  projectAdmission?: "skip";
   publicRead?: boolean;
   extensionScope?: ExtensionScope;
   extensionPairing?: boolean;
@@ -405,19 +419,9 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" 
           { dataDir: deps.dataDir, profileCleanup: "project", deferProfileCleanup: true },
         )),
       ]);
-      await removeSharinganProjectProfiles(projectId, deps.dataDir);
-      const project = deps.store.getProject(projectId);
-      if (project?.mode === "standard") {
-        for (const runId of runIds) {
-          await removeStandardRunTransaction(deps.dataDir, projectId, runId);
-          await removeStandardVersionWorktree(cleanupDeps, projectId, runId);
-        }
-        for (const variant of deps.store.listVariants(projectId)) {
-          if (!isStandardRootVariant(cleanupDeps, projectId, variant.id)) {
-            await removeStandardVariantWorktree(cleanupDeps, projectId, variant.id);
-          }
-        }
-      }
+      // This boundary only quiesces live owners. Durable Project deletion
+      // commits in SQLite before the cleanup journal removes profiles,
+      // worktrees, source, evidence, and other deterministic paths.
     },
     releaseVariantResources: async ({ projectId, variantId, runIds }) => {
       await releaseVariantRuntime(projectId, variantId, runIds);
@@ -1089,26 +1093,64 @@ const routes: Route[] = [
     pattern: "/api/projects",
     handler: async (req, res, _p, deps) => {
       const { store, dataDir } = deps;
-      const body = (await readJsonBody(req)) as Partial<CreateProjectInput>;
+      const body = (await readJsonBody(req)) as Partial<CreateProjectInput> & {
+        initialTurnId?: unknown;
+      };
       if (!isNonEmptyString(body.name)) return sendError(res, 400, "name is required");
       const sharingan = body.sharingan === true;
       if (sharingan && !isHttpUrl(body.sourceUrl)) return sendError(res, 400, "sharingan requires a valid http(s) sourceUrl");
+      if (sharingan && body.initialTurnId !== undefined
+        && (typeof body.initialTurnId !== "string"
+          || !/^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.initialTurnId))) {
+        return sendError(res, 400, "sharingan initialTurnId is invalid");
+      }
+      if (sharingan && !deps.sharinganBootstrap) {
+        return sendJson(res, 503, {
+          error: "Sharingan capture service is unavailable",
+          code: "SHARINGAN_BOOTSTRAP_UNAVAILABLE",
+        });
+      }
       // Sharingan always reconstructs into a Standard project.
       const mode = sharingan || body.mode === "standard" ? "standard" : "prototype";
+      // Persist the browser/exporter contract's canonical requested URL once at
+      // the Project boundary. The state decoder remains tolerant of older
+      // valid non-canonical rows such as https://example.com.
+      const sourceUrl = sharingan ? new URL(body.sourceUrl!.trim()).href : undefined;
       const project = store.createProject({
         name: body.name,
         skillId: body.skillId ?? null,
         designSystemId: sharingan ? null : (body.designSystemId ?? null),
         mode,
         sharingan,
-        sourceUrl: sharingan ? body.sourceUrl : undefined,
+        sourceUrl,
       });
+      if (sharingan) {
+        try {
+          await deps.sharinganBootstrap!.register(
+            project.id,
+            typeof body.initialTurnId === "string" ? body.initialTurnId : null,
+          );
+        } catch (error) {
+          store.deleteProject(project.id);
+          await deps.sharinganBootstrap!.remove(project.id).catch(() => {});
+          throw error;
+        }
+      }
       // Standard projects scaffold a real Vite project + install deps in the background.
       if (mode === "standard") {
         void deps.runtimeSupervisor!
           .trackOperation(
             { projectId: project.id },
-            (signal) => (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id), signal),
+            async (signal) => {
+              await (deps.standardProjectSetup ?? setupStandardProject)(
+                project.id,
+                projectDir(dataDir, project.id),
+                signal,
+              );
+              if (sharingan) {
+                await deps.sharinganBootstrap!.ensure(project.id, signal);
+              }
+            },
           )
           .catch(() => {});
       }
@@ -1303,8 +1345,36 @@ const routes: Route[] = [
   {
     method: "DELETE",
     pattern: "/api/projects/:id",
+    projectAdmission: "skip",
     handler: async (_req, res, { id }, deps) => {
-      await deps.runtimeSupervisor!.releaseProject(id!);
+      if (!deps.store.getProject(id!)) return sendError(res, 404, "project not found");
+      let cleanupIntent: ProjectResourcePayloadCleanupIntent | null = null;
+      await deps.runtimeSupervisor!.releaseProject(id!, {
+        afterBlock: () => deps.sharinganBootstrap?.cancel(id!),
+        beforeDelete() {
+          cleanupIntent = beginProjectResourcePayloadCleanup({
+            store: deps.store,
+            dataDir: deps.dataDir,
+            projectId: id!,
+          });
+          assertProjectResourcePayloadCleanupCompletable(deps.dataDir, cleanupIntent);
+        },
+        onPrecommitFailure() {
+          if (cleanupIntent !== null) {
+            rollbackProjectResourcePayloadCleanup(deps.dataDir, cleanupIntent);
+            cleanupIntent = null;
+          }
+          deps.sharinganBootstrap?.resume(id!);
+        },
+      });
+      if (cleanupIntent === null) {
+        throw new Error("Project payload cleanup was not durably prepared");
+      }
+      completeProjectResourcePayloadCleanup(deps.dataDir, cleanupIntent);
+      // Database ownership is now gone, so Store validation safely replaces
+      // the process-local admission tombstone and the service need not retain
+      // deleted Project ids for the daemon lifetime.
+      deps.sharinganBootstrap?.resume(id!);
       res.writeHead(204);
       res.end();
     },
@@ -1891,6 +1961,8 @@ export function createApp(deps: AppDeps): http.Server {
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
   recoverIncompleteMoodboards(appDeps);
+  recoverResourceMaterializationPayloadIntents(appDeps);
+  recoverProjectResourcePayloadCleanups(appDeps);
   warmAgents(appDeps.agentProber, appDeps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -1913,7 +1985,26 @@ export function createApp(deps: AppDeps): http.Server {
         validateRouteParams(m.params);
         if (route.extensionPairing) requireExtensionPairingRequest(req);
         else requireDaemonRequest(req, { ...appDeps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
-        await route.handler(req, res, m.params, appDeps, extensionPairing);
+        const projectId = route.projectAdmission !== "skip"
+          && (route.pattern.startsWith("/api/projects/:id")
+            || route.pattern.startsWith("/api/sharingan/:id"))
+          ? m.params.id
+          : undefined;
+        if (projectId === undefined) {
+          await route.handler(req, res, m.params, appDeps, extensionPairing);
+        } else {
+          // One outer lease covers every project-scoped handler, including
+          // bootstrap/read routes and async filesystem materializers that do
+          // not own an inner RuntimeSupervisor operation. Deletion closes
+          // admission synchronously, cancels what it can, and waits for this
+          // lease before it snapshots cleanup identities and commits SQLite.
+          const lease = appDeps.runtimeSupervisor!.acquireOperationLease({ projectId });
+          try {
+            await route.handler(req, res, m.params, appDeps, extensionPairing);
+          } finally {
+            lease.release();
+          }
+        }
         return;
       }
       if (matchedPathButNotMethod) {

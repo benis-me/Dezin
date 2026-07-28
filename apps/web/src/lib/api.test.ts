@@ -1035,12 +1035,30 @@ test("Resource client materializes an owned source through one atomic route", as
     expectedSnapshotId: "snapshot-1",
     source: { type: "uploaded-file" as const, uploadedFileId: ".refs/brief.txt" },
     reason: "Attached to scoped Agent Context",
+    idempotencyKey: "home-attachment:.refs/brief.txt",
   };
 
   await expect(api.materializeResource("project /1", input)).resolves.toEqual(result);
   expect(fetchImpl).toHaveBeenCalledWith(
     "http://d/api/projects/project%20%2F1/resources/materialize",
     expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
+  );
+  const projectReferenceInput = {
+    ...input,
+    source: {
+      type: "project-reference" as const,
+      sourceProjectId: "source-project",
+      sourceWorkspaceId: "source-workspace",
+      sourceSnapshotId: "source-snapshot",
+      sourceArtifactId: "source-artifact",
+      sourceArtifactRevisionId: "source-revision",
+    },
+    idempotencyKey: "home-attachment:source-project:source-revision",
+  };
+  await expect(api.materializeResource("project /1", projectReferenceInput)).resolves.toEqual(result);
+  expect(fetchImpl).toHaveBeenLastCalledWith(
+    "http://d/api/projects/project%20%2F1/resources/materialize",
+    expect.objectContaining({ method: "POST", body: JSON.stringify(projectReferenceInput) }),
   );
 });
 

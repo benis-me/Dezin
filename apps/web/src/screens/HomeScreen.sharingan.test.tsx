@@ -5,6 +5,7 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { HomeScreen } from "./HomeScreen.tsx";
+import { validPngFile } from "../test/image-fixtures.ts";
 
 // Desktop build: Sharingan entry is enabled only when native.isElectron is true.
 vi.mock("../lib/native.ts", () => ({
@@ -30,10 +31,10 @@ function renderHome(onNewProject = vi.fn()) {
 }
 
 describe("HomeScreen Sharingan mode", () => {
-  it("double-clicking the heading enters Sharingan mode: URL placeholder shown, Research hidden", () => {
+  it("double-clicking the heading enters Sharingan mode: URL placeholder shown, Research hidden", async () => {
     renderHome();
     expect(screen.queryByPlaceholderText("Paste a URL to clone…")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Design system" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Design system" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
     fireEvent.doubleClick(screen.getByText("Start a design"));
     expect(screen.getByPlaceholderText("Paste a URL to clone…")).toBeInTheDocument();
@@ -57,6 +58,35 @@ describe("HomeScreen Sharingan mode", () => {
       null,
       "standard",
       { sourceUrl: "https://example.com" },
+    );
+  });
+
+  it("keeps attached image context when a Sharingan project is created", async () => {
+    const onNewProject = renderHome();
+    await act(async () => {});
+    fireEvent.doubleClick(screen.getByText("Start a design"));
+    const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+    expect(imageInput).not.toBeNull();
+    fireEvent.change(imageInput!, {
+      target: { files: [validPngFile("direction.png")] },
+    });
+    await screen.findByLabelText("Remove direction.png");
+    fireEvent.change(screen.getByPlaceholderText("Paste a URL to clone…"), {
+      target: { value: "https://example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Design" }));
+
+    expect(onNewProject).toHaveBeenCalledWith(
+      "https://example.com",
+      expect.any(String),
+      null,
+      "standard",
+      { sourceUrl: "https://example.com" },
+      undefined,
+      {
+        images: [{ name: "direction.png", base64: expect.any(String), mimeType: "image/png" }],
+        refs: [],
+      },
     );
   });
 

@@ -5,12 +5,19 @@ import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
+import type { ApiClient } from "./lib/api.ts";
 import {
   setPendingAgent,
+  discardPendingDesignWorkspaceTurn,
   setPendingBrief,
   setPendingDesignWorkspaceTurn,
+  setPendingImages,
+  setPendingRefs,
+  type PendingDesignWorkspaceAttachment,
+  type PendingProjectAttachments,
 } from "./lib/pending-brief.ts";
 import { persistedDesignSystemId } from "./lib/design-system-selection.ts";
+import { slugify } from "./lib/project-ref.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
 const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
@@ -35,6 +42,77 @@ const MoodboardScreen = lazy(() =>
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
+}
+
+function stagedImageName(
+  name: string,
+  index: number,
+  mimeType: "image/png" | "image/jpeg" | undefined,
+): string {
+  const safe = (name.split(/[/\\]/).pop() ?? "image")
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+  const dot = safe.lastIndexOf(".");
+  const suppliedExtension = dot > 0 && safe.length - dot <= 12 ? safe.slice(dot) : "";
+  const extension = mimeType === "image/png"
+    ? ".png"
+    : mimeType === "image/jpeg"
+      ? ".jpg"
+      : suppliedExtension;
+  const stem = (dot > 0 && suppliedExtension ? safe.slice(0, dot) : safe)
+    .replace(/^\.+/, "")
+    .slice(0, 48) || "image";
+  return `home-image-${index + 1}-${stem}${extension}`;
+}
+
+function stagedAttachmentTitle(value: string, fallback: string): string {
+  return value.trim().slice(0, 256) || fallback;
+}
+
+async function stageDesignWorkspaceAttachments(
+  api: Pick<ApiClient, "uploadRef">,
+  projectId: string,
+  attachments: PendingProjectAttachments | undefined,
+  onStaged: (attachments: PendingDesignWorkspaceAttachment[]) => void,
+): Promise<PendingDesignWorkspaceAttachment[]> {
+  const staged: PendingDesignWorkspaceAttachment[] = [];
+  for (const [index, image] of (attachments?.images ?? []).entries()) {
+    const uploaded = await api.uploadRef(
+      projectId,
+      stagedImageName(image.name, index, image.mimeType),
+      image.base64,
+    );
+    staged.push({
+      title: stagedAttachmentTitle(image.name, `Image ${index + 1}`),
+      uploadedFileId: uploaded.path,
+      preview: true,
+    });
+    onStaged([...staged]);
+  }
+  for (const [index, ref] of (attachments?.refs ?? []).entries()) {
+    if (ref.projectReference !== undefined) {
+      staged.push({
+        title: stagedAttachmentTitle(ref.name, `Reference ${index + 1}`),
+        projectReference: ref.projectReference,
+      });
+      onStaged([...staged]);
+      continue;
+    }
+    const uploaded = await api.uploadRef(
+      projectId,
+      `home-reference-${index + 1}-${slugify(ref.name)}.html`,
+      ref.base64,
+    );
+    staged.push({
+      title: stagedAttachmentTitle(ref.name, `Reference ${index + 1}`),
+      uploadedFileId: uploaded.path,
+    });
+    onStaged([...staged]);
+  }
+  return staged;
+}
+
+function pendingWorkspaceTurnId(): string {
+  return `turn-${globalThis.crypto.randomUUID().toLowerCase()}`;
 }
 
 function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (section?: string) => void }) {
@@ -105,8 +183,10 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     default:
       return (
         <HomeScreen
-          onNewProject={async (brief, skillId, designSystemId, mode, sharingan, agentSelection) => {
+          onNewProject={async (brief, skillId, designSystemId, mode, sharingan, agentSelection, attachments) => {
+            let createdProjectId: string | null = null;
             try {
+              const initialTurnId = mode === "standard" ? pendingWorkspaceTurnId() : undefined;
               const project = await api.createProject({
                 name: briefToName(brief),
                 skillId,
@@ -116,15 +196,43 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 mode,
                 sharingan: !!sharingan,
                 sourceUrl: sharingan?.sourceUrl,
+                ...(sharingan && initialTurnId ? { initialTurnId } : {}),
               });
-              if (mode === "standard" && !sharingan) {
-                setPendingDesignWorkspaceTurn({
+              createdProjectId = project.id;
+              if (mode === "standard") {
+                const attachmentCount = (attachments?.images.length ?? 0) + (attachments?.refs.length ?? 0);
+                const pendingTurn = {
                   projectId: project.id,
+                  turnId: initialTurnId!,
                   brief,
                   ...(agentSelection?.agentCommand ? { agentCommand: agentSelection.agentCommand } : {}),
                   ...(agentSelection?.model ? { model: agentSelection.model } : {}),
-                });
+                  attachmentCount,
+                  attachmentsStaged: attachmentCount === 0,
+                  attachments: [] as PendingDesignWorkspaceAttachment[],
+                };
+                if (!setPendingDesignWorkspaceTurn(pendingTurn)) {
+                  throw new Error("Initial project context could not be saved for recovery");
+                }
+                await stageDesignWorkspaceAttachments(
+                  api,
+                  project.id,
+                  attachments,
+                  (currentAttachments) => {
+                    if (!setPendingDesignWorkspaceTurn({
+                      ...pendingTurn,
+                      attachmentsStaged: currentAttachments.length === attachmentCount,
+                      attachments: currentAttachments,
+                    })) {
+                      throw new Error("Initial project attachments could not be saved for recovery");
+                    }
+                  },
+                );
+                setPendingImages([]);
+                setPendingRefs([]);
               } else {
+                setPendingImages(attachments?.images ?? []);
+                setPendingRefs(attachments?.refs ?? []);
                 setPendingBrief(brief);
                 if (agentSelection?.agentCommand) {
                   setPendingAgent(agentSelection.agentCommand, agentSelection.model);
@@ -136,6 +244,15 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 .catch(() => {});
               navigate(`/projects/${project.id}`);
             } catch {
+              if (createdProjectId !== null) {
+                try {
+                  await api.deleteProject(createdProjectId);
+                  discardPendingDesignWorkspaceTurn(createdProjectId);
+                } catch {
+                  // Keep the project-scoped handoff if cleanup fails so the
+                  // incomplete project remains diagnosable and recoverable.
+                }
+              }
               toast("Couldn't create the project.", { variant: "error" });
             }
           }}

@@ -60,14 +60,34 @@ const HOST_LOGIN_ENVIRONMENT_KEYS = [
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ] as const;
 
+export const CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CODEBUDDY_API_KEY",
+  "CODEBUDDY_AUTH_TOKEN",
+  "CODEBUDDY_BASE_URL",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_ORG_ID",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_OPENAI_API_KEY",
+  "AZURE_OPENAI_ENDPOINT",
+] as const;
+
 type JsonRecord = Record<string, unknown>;
 
-function codeBuddyHostLoginEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function codeBuddyHostLoginEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const source = agentSpawnEnv(extra);
   const environment: NodeJS.ProcessEnv = {};
   for (const key of HOST_LOGIN_ENVIRONMENT_KEYS) {
     if (source[key] !== undefined) environment[key] = source[key];
   }
+  for (const key of CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS) environment[key] = undefined;
+  environment.DEZIN_DAEMON_TOKEN = undefined;
   return environment;
 }
 

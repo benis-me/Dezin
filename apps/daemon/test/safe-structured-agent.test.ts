@@ -116,6 +116,58 @@ test("hard no-tools structured transport runs CodeBuddy with the requested model
   assert.ok(!spawned.args.some((argument) => /bypass|danger|yolo/i.test(argument)));
 });
 
+test("CodeBuddy structured transport preserves bounded host-login roots without ambient credentials", async (t) => {
+  const ambient = {
+    PATH: "/tmp/dezin-codebuddy-host-bin",
+    XDG_CONFIG_HOME: "/tmp/dezin-codebuddy-config",
+    XDG_DATA_HOME: "/tmp/dezin-codebuddy-data",
+    XDG_CACHE_HOME: "/tmp/dezin-codebuddy-cache",
+    APPDATA: "C:\\Users\\dezin\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\dezin\\AppData\\Local",
+    OPENAI_API_KEY: "ambient-openai-secret",
+    ANTHROPIC_API_KEY: "ambient-anthropic-secret",
+    CODEBUDDY_API_KEY: "ambient-codebuddy-secret",
+    DEZIN_DAEMON_TOKEN: "ambient-daemon-capability",
+  } satisfies NodeJS.ProcessEnv;
+  const previous = Object.fromEntries(
+    Object.keys(ambient).map((key) => [key, process.env[key]]),
+  ) as NodeJS.ProcessEnv;
+  Object.assign(process.env, ambient);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const spawner = new RecordingSpawner();
+
+  await runSafeStructuredAgent(request({ command: "codebuddy" }), {
+    platform: "darwin",
+    createSpawner() {
+      return spawner;
+    },
+    resolveCodeBuddyExecutable() {
+      return TEST_CODEBUDDY_EXECUTABLE;
+    },
+  });
+
+  const environment = spawner.inputs[0]?.env ?? {};
+  assert.match(environment.PATH ?? "", /dezin-codebuddy-host-bin/);
+  assert.equal(environment.XDG_CONFIG_HOME, ambient.XDG_CONFIG_HOME);
+  assert.equal(environment.XDG_DATA_HOME, ambient.XDG_DATA_HOME);
+  assert.equal(environment.XDG_CACHE_HOME, ambient.XDG_CACHE_HOME);
+  assert.equal(environment.APPDATA, ambient.APPDATA);
+  assert.equal(environment.LOCALAPPDATA, ambient.LOCALAPPDATA);
+  assert.equal(environment.OPENAI_API_KEY, undefined);
+  assert.equal(environment.ANTHROPIC_API_KEY, undefined);
+  assert.equal(environment.CODEBUDDY_API_KEY, undefined);
+  assert.equal(environment.DEZIN_DAEMON_TOKEN, undefined);
+  assert.equal(Object.hasOwn(environment, "OPENAI_API_KEY"), true);
+  assert.equal(Object.hasOwn(environment, "ANTHROPIC_API_KEY"), true);
+  assert.equal(Object.hasOwn(environment, "CODEBUDDY_API_KEY"), true);
+  assert.equal(Object.hasOwn(environment, "DEZIN_DAEMON_TOKEN"), true);
+});
+
 test("registry structured transport runs Codex inside outer confinement and extracts only its terminal JSONL message", async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), "dezin-safe-codex-"));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));

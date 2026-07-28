@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -10,7 +10,10 @@ import {
   X,
 } from "lucide-react";
 import { Button, Dialog, IconButton, Input } from "../../components/ui/index.ts";
-import type { VersionCompareSide } from "../../components/VersionCompare.tsx";
+import {
+  VersionCompare,
+  type VersionCompareSide,
+} from "../../components/VersionCompare.tsx";
 import { useApi } from "../../lib/api-context.tsx";
 import type {
   ArtifactRevision,
@@ -25,10 +28,6 @@ import {
 } from "../../../../../packages/core/src/prototype-relation.ts";
 
 const HISTORY_PAGE_SIZE = 20;
-const VersionCompare = lazy(() => import("../../components/VersionCompare.tsx").then((module) => ({
-  default: module.VersionCompare,
-})));
-
 type HistoryState =
   | { status: "idle"; items: ArtifactRevision[]; nextCursor: string | null; error: null }
   | { status: "loading"; items: ArtifactRevision[]; nextCursor: string | null; error: null }
@@ -128,14 +127,12 @@ function ComparisonPreview({
   };
 
   return (
-    <Suspense fallback={<div role="status" className="artifact-versions__compare-loading">Preparing comparison…</div>}>
-      <VersionCompare
-        open
-        onClose={onClose}
-        a={side(first, comparison.first, comparisonFrames.first)}
-        b={side(second, comparison.second, comparisonFrames.second)}
-      />
-    </Suspense>
+    <VersionCompare
+      open
+      onClose={onClose}
+      a={side(first, comparison.first, comparisonFrames.first)}
+      b={side(second, comparison.second, comparisonFrames.second)}
+    />
   );
 }
 

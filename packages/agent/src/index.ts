@@ -60,6 +60,8 @@ export {
   runCapture,
   augmentedPath,
   agentSpawnEnv,
+  CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS,
+  codeBuddyHostLoginEnvironment,
   dedupModels,
   type AgentProvider,
   type AgentReadiness,

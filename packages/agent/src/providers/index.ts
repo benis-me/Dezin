@@ -18,6 +18,10 @@ import { kimiProvider } from "./kimi.ts";
 import { traeProvider } from "./trae.ts";
 import { piProvider } from "./pi.ts";
 import { hermesProvider } from "./hermes.ts";
+export {
+  CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS,
+  codeBuddyHostLoginEnvironment,
+} from "./codebuddy.ts";
 
 // Order is the display/scan order (claude/codex/gemini lead).
 export const AGENT_PROVIDERS: ReadonlyArray<AgentProvider> = [

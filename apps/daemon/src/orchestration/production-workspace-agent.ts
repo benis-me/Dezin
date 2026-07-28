@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -46,7 +46,10 @@ import {
   type ExplicitContextResolution,
   type ResourceRevisionSnapshot,
 } from "../context/context-types.ts";
-import { resolveResourceRevisionPayloadDescriptor } from "../resource-revision-payload.ts";
+import {
+  resolveResourceRevisionPayloadDescriptor,
+  verifyResourceRevisionPayload,
+} from "../resource-revision-payload.ts";
 import {
   ArtifactElementSelectionProvenanceError,
   resolveArtifactElementSelectionProvenance,
@@ -57,7 +60,11 @@ import {
   type ProductionAgentOrchestrator,
   type ProductionScopedTaskQueuePort,
 } from "./production-agent-orchestrator.ts";
-import { SafeStructuredAgentError, runSafeStructuredAgent } from "./safe-structured-agent.ts";
+import {
+  SafeStructuredAgentError,
+  runSafeStructuredAgent,
+  type SafeStructuredAgentImage,
+} from "./safe-structured-agent.ts";
 
 const MAX_PLANNER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_STATE_CAPTURE_ATTEMPTS = 3;
@@ -71,6 +78,9 @@ const MAX_SEMANTIC_VERIFICATION_STATES = 6;
 const MAX_WORKSPACE_AGENT_TARGET_BYTES = 24 * 1024;
 const MAX_WORKSPACE_AGENT_SUMMARY_FRAMES = 8;
 const MAX_WORKSPACE_AGENT_METADATA_FIELDS = 16;
+const MAX_WORKSPACE_PLANNER_IMAGE_COUNT = 2;
+const MAX_WORKSPACE_PLANNER_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_WORKSPACE_PLANNER_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 const COMPONENT_LIBRARY_GROUP_ID = "dezin-component-library";
 const COMPONENT_LIBRARY_GROUP_LABEL = "Components";
 const COMPONENT_LIBRARY_COLUMNS = 3;
@@ -1125,7 +1135,7 @@ interface ExplicitPinnedResourceRevision {
   readonly nodeId: string;
   readonly resourceId: string;
   readonly revisionId: string;
-  readonly kind: "research" | "moodboard";
+  readonly kind: "research" | "moodboard" | "file" | "sharingan-capture";
   readonly title: string;
 }
 
@@ -2024,7 +2034,10 @@ function explicitPinnedResourceRevisions(input: {
   const revisionByResourceId = new Map<string, string>();
   for (const explicit of input.request.explicitContext) {
     if (explicit.kind !== "resource"
-      || (explicit.resourceKind !== "research" && explicit.resourceKind !== "moodboard")) continue;
+      || (explicit.resourceKind !== "research"
+        && explicit.resourceKind !== "moodboard"
+        && explicit.resourceKind !== "file"
+        && explicit.resourceKind !== "sharingan-capture")) continue;
     const resolved = input.contextPack.items.filter((item) => (
       item.provided
       && item.contextClass === "explicit"
@@ -2382,6 +2395,23 @@ function compileSemanticProposal(
     }
     seenRelations.add(relationKey);
     if (relation.kind === "uses") {
+      if (source.operation === "reuse") {
+        const existingDependency = source.baseRevisionId !== null
+          && target.operation === "reuse"
+          && target.baseRevisionId !== null
+          && input.baseArtifactDependencies.some((dependency) => (
+            dependency.ownerArtifactId === source.artifactId
+            && dependency.revisionId === source.baseRevisionId
+            && dependency.componentArtifactId === target.artifactId
+            && dependency.componentRevisionId === target.baseRevisionId
+          ));
+        if (!existingDependency) {
+          throw new ProductionWorkspacePlannerError(
+            `Workspace semantic uses relation ${relation.source} -> ${relation.target} cannot change a reused Artifact; generate the owner or reuse its exact published Component dependency`,
+          );
+        }
+        continue;
+      }
       const targets = dependencies.get(source.artifactId) ?? new Set<string>();
       targets.add(target.artifactId);
       dependencies.set(source.artifactId, targets);
@@ -2918,7 +2948,10 @@ function compileSemanticProposal(
         };
       }),
       dependencyPlans: [
-        ...componentInstanceDependencies,
+        ...componentInstanceDependencies.filter((dependency) => (
+          typeof dependency.ownerArtifactId === "string"
+          && generatedArtifactIds.has(dependency.ownerArtifactId)
+        )),
         ...compiledArtifacts
           .filter((artifact) => generatedArtifactIds.has(artifact.artifactId))
           .flatMap((artifact) => [...compiledResources, ...input.explicitPinnedResources].map((resource) => ({
@@ -3258,6 +3291,184 @@ function plannerMessage(input: {
   ].filter(Boolean).join("\n\n");
 }
 
+function boundedPlannerImageLabel(resource: Resource, revision: ResourceRevision): string {
+  const identity = `File Resource ${resource.id} Revision ${revision.id}`;
+  let label = `${identity}: ${resource.title}`;
+  while (Buffer.byteLength(label, "utf8") > 256 && label.length > identity.length) {
+    label = label.slice(0, -1);
+  }
+  return label;
+}
+
+function hasExactImageSignature(bytes: Buffer, mediaType: "image/png" | "image/jpeg"): boolean {
+  if (mediaType === "image/png") {
+    return bytes.byteLength >= 8
+      && bytes[0] === 0x89
+      && bytes.subarray(1, 4).toString("ascii") === "PNG"
+      && bytes[4] === 0x0d
+      && bytes[5] === 0x0a
+      && bytes[6] === 0x1a
+      && bytes[7] === 0x0a;
+  }
+  return bytes.byteLength >= 4
+    && bytes[0] === 0xff
+    && bytes[1] === 0xd8
+    && bytes[bytes.byteLength - 2] === 0xff
+    && bytes[bytes.byteLength - 1] === 0xd9;
+}
+
+async function exactPlannerImageEvidence(input: {
+  store: Store;
+  dataDir: string;
+  projectId: string;
+  request: AgentTurnRequest;
+  contextPack: ContextPack;
+  scratch: string;
+  signal: AbortSignal;
+}): Promise<readonly SafeStructuredAgentImage[]> {
+  if (input.contextPack.workspaceId !== input.request.scope.workspaceId
+    || input.contextPack.target.type !== "workspace"
+    || input.contextPack.target.id !== input.request.scope.id
+    || input.contextPack.graphRevision !== input.request.graphRevision
+    || input.contextPack.intent !== input.request.intent) {
+    throw new ContextIntegrityError("Workspace Planner image evidence does not belong to its exact Context Pack");
+  }
+  const explicitFiles = input.request.explicitContext.filter(
+    (ref): ref is Extract<ContextItemRef, { kind: "resource" }> => (
+      ref.kind === "resource" && ref.resourceKind === "file" && ref.revisionId !== undefined
+    ),
+  );
+  const supported: Array<{
+    ref: Extract<ContextItemRef, { kind: "resource" }>;
+    resource: Resource;
+    revision: ResourceRevision;
+    descriptor: ReturnType<typeof resolveResourceRevisionPayloadDescriptor>;
+    mediaType: "image/png" | "image/jpeg";
+  }> = [];
+  for (const ref of explicitFiles) {
+    checkAbort(input.signal);
+    const item = input.contextPack.items.find((candidate) => (
+      candidate.contextClass === "explicit"
+      && candidate.provided
+      && candidate.resolvedKind === "resource-revision"
+      && candidate.ref.kind === "resource"
+      && candidate.ref.id === ref.id
+      && candidate.ref.resourceKind === "file"
+      && candidate.ref.revisionId === ref.revisionId
+    ));
+    if (!item) {
+      throw new BlockedContextError(
+        [ref.id],
+        `Image attachment ${ref.id} is not owned by the exact immutable Context Pack`,
+      );
+    }
+    const resource = input.store.workspace.listResources(input.projectId)
+      .find((candidate) => candidate.id === ref.id);
+    const revision = resource === undefined
+      ? null
+      : input.store.workspace.getResourceRevisionForProject(
+          input.projectId,
+          resource.id,
+          ref.revisionId!,
+        );
+    if (!resource || !revision || resource.kind !== "file"
+      || resource.workspaceId !== input.contextPack.workspaceId
+      || revision.workspaceId !== input.contextPack.workspaceId
+      || revision.resourceId !== resource.id) {
+      throw new BlockedContextError(
+        [ref.id],
+        `Image attachment ${ref.id} is missing or outside its exact Workspace owner`,
+      );
+    }
+    const descriptor = resolveResourceRevisionPayloadDescriptor({
+      store: input.store,
+      dataDir: input.dataDir,
+      workspaceId: input.contextPack.workspaceId,
+      resourceRevisionId: revision.id,
+      expectedResourceId: resource.id,
+    });
+    if (descriptor.resourceKind !== "file"
+      || descriptor.manifestPath !== revision.manifestPath
+      || descriptor.manifestChecksum !== revision.checksum
+      || item.checksum !== revision.checksum
+      || item.provenance.resourceId !== resource.id
+      || item.provenance.resourceRevisionId !== revision.id
+      || item.provenance.resourceKind !== "file"
+      || item.provenance.manifestPath !== descriptor.manifestPath
+      || item.provenance.manifestChecksum !== descriptor.manifestChecksum
+      || item.provenance.payloadChecksum !== descriptor.payloadChecksum) {
+      throw new BlockedContextError(
+        [ref.id],
+        `Image attachment ${ref.id} changed from its exact Context Pack identity`,
+      );
+    }
+    if (descriptor.mimeType !== "image/png" && descriptor.mimeType !== "image/jpeg") {
+      if (descriptor.mimeType.startsWith("image/")) {
+        throw new BlockedContextError(
+          [ref.id],
+          `Image attachment ${ref.id} uses ${descriptor.mimeType}; re-import it as PNG or JPEG`,
+        );
+      }
+      continue;
+    }
+    supported.push({ ref, resource, revision, descriptor, mediaType: descriptor.mimeType });
+  }
+  if (supported.length > MAX_WORKSPACE_PLANNER_IMAGE_COUNT) {
+    throw new BlockedContextError(
+      supported.slice(MAX_WORKSPACE_PLANNER_IMAGE_COUNT).map(({ ref }) => ref.id),
+      `Workspace Planner accepts at most ${MAX_WORKSPACE_PLANNER_IMAGE_COUNT} exact image attachments`,
+    );
+  }
+  let totalBytes = 0;
+  for (const { ref, descriptor } of supported) {
+    if (descriptor.byteLength <= 0 || descriptor.byteLength > MAX_WORKSPACE_PLANNER_IMAGE_BYTES) {
+      throw new BlockedContextError(
+        [ref.id],
+        `Image attachment ${ref.id} exceeds the Workspace Planner byte limit`,
+      );
+    }
+    totalBytes += descriptor.byteLength;
+    if (totalBytes > MAX_WORKSPACE_PLANNER_TOTAL_IMAGE_BYTES) {
+      throw new BlockedContextError(
+        [ref.id],
+        "Workspace Planner image attachments exceed the total byte limit",
+      );
+    }
+  }
+  const images: SafeStructuredAgentImage[] = [];
+  for (const [index, entry] of supported.entries()) {
+    checkAbort(input.signal);
+    const verifiedPath = join(input.scratch, `context-image-${index + 1}.bin`);
+    try {
+      await verifyResourceRevisionPayload(input.dataDir, entry.descriptor, {
+        destination: verifiedPath,
+        signal: input.signal,
+      });
+      const bytes = await readFile(verifiedPath);
+      if (bytes.byteLength !== entry.descriptor.byteLength
+        || checksumBytes(bytes) !== entry.descriptor.payloadChecksum
+        || !hasExactImageSignature(bytes, entry.mediaType)) {
+        throw new ContextIntegrityError("verified image evidence changed before provider transport");
+      }
+      images.push(Object.freeze({
+        label: boundedPlannerImageLabel(entry.resource, entry.revision),
+        mediaType: entry.mediaType,
+        data: bytes.toString("base64"),
+      }));
+    } catch (error) {
+      if (input.signal.aborted) throw abortReason(input.signal);
+      if (error instanceof BlockedContextError) throw error;
+      throw new BlockedContextError(
+        [entry.ref.id],
+        `Image attachment ${entry.ref.id} payload is missing, changed, or invalid`,
+      );
+    } finally {
+      await rm(verifiedPath, { force: true }).catch(() => {});
+    }
+  }
+  return Object.freeze(images);
+}
+
 class ProductionWorkspacePlanner {
   readonly #store: Store;
   readonly #dataDir: string;
@@ -3309,9 +3520,19 @@ class ProductionWorkspacePlanner {
       const settings = this.#store.getSettings();
       const { command, model } = input.request.agent;
       const selectedProviderId = getProvider(command)?.id ?? input.request.agent.providerId;
+      const images = await exactPlannerImageEvidence({
+        store: this.#store,
+        dataDir: this.#dataDir,
+        projectId: input.projectId,
+        request: input.request,
+        contextPack: input.contextPack,
+        scratch,
+        signal,
+      });
       const result = await runSafeStructuredAgent({
         command,
         model: model ?? undefined,
+        images,
         ...(selectedProviderId === "codex"
           ? { outputSchema: semanticPlannerOutputSchema(planningBundle, pageMatrix) }
           : {}),

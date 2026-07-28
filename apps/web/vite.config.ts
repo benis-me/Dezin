@@ -146,6 +146,12 @@ export default defineConfig({
             // repeating its runtime scaffolding across independently lazy screens.
             test: /node_modules[\\/]lucide-react[\\/]/,
             includeDependenciesRecursively: false,
+          }, {
+            name: "simple-icons",
+            // Brand marks are shared by the eager Design System control and lazy
+            // Agent/model picker. Keep their path dictionary out of the Home shell.
+            test: /node_modules[\\/]simple-icons[\\/]/,
+            includeDependenciesRecursively: false,
           }],
         },
       },

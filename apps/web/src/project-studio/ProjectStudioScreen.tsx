@@ -16,7 +16,8 @@ import {
 import { useAgents } from "../lib/agents-context.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import {
-  takePendingDesignWorkspaceTurn,
+  peekPendingDesignWorkspaceTurn,
+  type PendingDesignWorkspaceRecoveryContextItem,
   type PendingDesignWorkspaceTurn,
 } from "../lib/pending-brief.ts";
 import type {
@@ -47,6 +48,7 @@ import {
   presentablePrototypeFlowPages,
   type PrototypeFlowSession,
 } from "./flow/prototype-flow.ts";
+import { PrototypeFlowViewer } from "./flow/PrototypeFlowViewer.tsx";
 import { ProjectStudioShell } from "./ProjectStudioShell.tsx";
 import { ProposalReviewPanel } from "./proposal/ProposalReviewPanel.tsx";
 import { ResearchResourceViewer } from "./research/ResearchResourceViewer.tsx";
@@ -56,10 +58,13 @@ import {
   useResourceEditorController,
 } from "./resource/ResourceEditorSurface.tsx";
 import { useProjectStudio } from "./useProjectStudio.ts";
+import {
+  acknowledgePendingDesignWorkspaceTurn,
+  claimPendingTurnReplacement,
+} from "./pending-turn-supersession.ts";
 import { WorkspaceAgentPanel } from "./WorkspaceAgentPanel.tsx";
 
 const ProjectCanvas = lazy(() => import("./canvas/ProjectCanvas.tsx").then((module) => ({ default: module.ProjectCanvas })));
-const PrototypeFlowViewer = lazy(() => import("./flow/PrototypeFlowViewer.tsx").then((module) => ({ default: module.PrototypeFlowViewer })));
 
 interface LegacyWorkspaceProps {
   projectId: string;
@@ -89,6 +94,7 @@ const EMPTY_CANVAS_RESOURCE_REVISION_STATES: Readonly<Record<string, CanvasResou
 const EMPTY_CANVAS_ARTIFACT_REVISION_QUALITY_STATES: Readonly<Record<string, CanvasArtifactRevisionQualityState>> = {};
 const SETTINGS_LOAD_ERROR_AFTER_FAILURES = 5;
 const SETTINGS_LOAD_ERROR_MESSAGE = "Couldn't load Agent and Design System settings. Reconnecting…";
+
 interface SharedSettingsRead {
   promise: Promise<Settings>;
   consumers: number;
@@ -315,6 +321,14 @@ export function ProjectStudioScreen({
   const designSystemRequestRef = useRef(0);
   const designSystemCatalogRequestRef = useRef(0);
   const initialTurnRef = useRef<PendingDesignWorkspaceTurn | null | undefined>(undefined);
+  const initialTurnAttemptedRef = useRef(false);
+  const initialTurnOperationRef = useRef<object | null>(null);
+  const initialTurnProcessingRef = useRef(false);
+  const initialTurnCleanupFailedRef = useRef<string | null>(null);
+  const activeProjectIdRef = useRef(projectId);
+  activeProjectIdRef.current = projectId;
+  const [initialTurnProcessing, setInitialTurnProcessing] = useState(false);
+  const [initialTurnObservationEpoch, setInitialTurnObservationEpoch] = useState(0);
   const workspaceId = readyWorkspace?.workspace.id ?? null;
   const resourceHeadRevisionId = resourceId === null
     ? null
@@ -400,6 +414,33 @@ export function ProjectStudioScreen({
   const recordAttachmentError = useCallback((scopeKey: string, message: string): void => {
     setAttachmentErrorsByScope((current) => ({ ...current, [scopeKey]: message }));
   }, []);
+  const reconcileCompletedInitialTurn = useCallback((completedTurnId: string): void => {
+    if (acknowledgePendingDesignWorkspaceTurn(projectId, completedTurnId)) {
+      initialTurnCleanupFailedRef.current = null;
+      initialTurnRef.current = null;
+      return;
+    }
+    const latest = peekPendingDesignWorkspaceTurn(projectId);
+    if (latest === null) {
+      initialTurnCleanupFailedRef.current = null;
+      initialTurnRef.current = null;
+      return;
+    }
+    const latestActiveTurnId = latest.supersededByTurnId ?? latest.turnId;
+    initialTurnRef.current = latest;
+    if (latestActiveTurnId !== completedTurnId) {
+      initialTurnCleanupFailedRef.current = null;
+      initialTurnAttemptedRef.current = false;
+      setInitialTurnObservationEpoch((epoch) => epoch + 1);
+      return;
+    }
+    initialTurnCleanupFailedRef.current = completedTurnId;
+    initialTurnAttemptedRef.current = true;
+    recordAttachmentError(
+      "workspace",
+      "The proposal is ready, but its recovery marker couldn't be cleared. Dezin will retry cleanup next time this project opens.",
+    );
+  }, [projectId, recordAttachmentError]);
   const scopedGenerationPlanId = artifactCandidate !== null
     ? artifactCandidate.planId
     : artifactId !== null && artifactRevisionId === null
@@ -673,13 +714,63 @@ export function ProjectStudioScreen({
   useEffect(() => {
     if (load.status !== "ready" || settingsAgent === null || (agentsProvided && agentsLoading)) return;
     if (initialTurnRef.current === undefined) {
-      initialTurnRef.current = takePendingDesignWorkspaceTurn(projectId);
+      initialTurnRef.current = peekPendingDesignWorkspaceTurn(projectId);
     }
     const pendingTurn = initialTurnRef.current;
     if (pendingTurn === null) return;
+    const activePendingTurnId = pendingTurn.supersededByTurnId ?? pendingTurn.turnId;
+    const completedByOutboxReplay = studio.agentTranscript.some((entry) => (
+      entry.turnId === activePendingTurnId
+      && entry.role === "assistant"
+      && entry.state === "proposal"
+    ));
+    if (completedByOutboxReplay) {
+      if (initialTurnCleanupFailedRef.current === activePendingTurnId) return;
+      reconcileCompletedInitialTurn(activePendingTurnId);
+      return;
+    }
+    if (studio.workspaceAgentOutbox?.turnId === activePendingTurnId) {
+      if (studio.workspaceAgentOutbox.delivery.status === "failed"
+        && !initialTurnAttemptedRef.current) {
+        initialTurnAttemptedRef.current = true;
+        if (pendingTurn.supersededByTurnId === undefined) {
+          studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+        }
+      }
+      return;
+    }
+    if (initialTurnAttemptedRef.current) return;
+    if (pendingTurn.supersededByTurnId !== undefined) {
+      initialTurnAttemptedRef.current = true;
+      if (pendingTurn.recoveryRequest !== undefined) {
+        studio.setAgentContextItems(pendingTurn.recoveryRequest.contextItems.map((item) => ({
+          ...item,
+          type: "context-ref" as const,
+        })));
+        studio.setSelectedGraphObjectIds([
+          ...new Set((pendingTurn.recoveryRequest.request.selection ?? [])
+            .filter((selection) => selection.kind === "node")
+            .map((selection) => selection.id)),
+        ]);
+      }
+      studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+      recordAttachmentError(
+        "workspace",
+        "The replacement request was interrupted before delivery. Review this draft, then submit it again.",
+      );
+      return;
+    }
     const agentCommand = pendingTurn.agentCommand ?? studioAgentRef.current;
     const selectedAgent = agents.find((candidate) => candidate.command === agentCommand);
-    if (agentsProvided && (!selectedAgent || !selectedAgent.available)) return;
+    if (agentsProvided && (!selectedAgent || !selectedAgent.available)) {
+      initialTurnAttemptedRef.current = true;
+      studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+      recordAttachmentError(
+        "workspace",
+        `${selectedAgent?.command ?? pendingTurn.agentCommand ?? "The selected Agent"} is unavailable. Choose an available Agent, then submit this draft.`,
+      );
+      return;
+    }
 
     studioAgentRef.current = agentCommand;
     setStudioAgent(agentCommand);
@@ -687,25 +778,136 @@ export function ProjectStudioScreen({
     setAgentSettingsReady(true);
     const guard = contextActionGuardRef.current;
     const epoch = guard.epoch;
+    const operation = {};
+    initialTurnOperationRef.current = operation;
+    initialTurnProcessingRef.current = true;
+    setInitialTurnProcessing(true);
+    const finishOperation = (): void => {
+      if (initialTurnOperationRef.current !== operation) return;
+      initialTurnOperationRef.current = null;
+      initialTurnProcessingRef.current = false;
+      if (guard.mounted) setInitialTurnProcessing(false);
+    };
+    const originalTurnStillActive = (): boolean => {
+      if (activeProjectIdRef.current !== projectId) return false;
+      const durable = peekPendingDesignWorkspaceTurn(projectId);
+      const active = durable !== null
+        && durable.turnId === pendingTurn.turnId
+        && durable.supersededByTurnId === undefined;
+      if (!active) {
+        initialTurnRef.current = durable;
+        initialTurnAttemptedRef.current = false;
+        setInitialTurnObservationEpoch((current) => current + 1);
+      }
+      return active
+        && initialTurnRef.current?.turnId === pendingTurn.turnId
+        && initialTurnRef.current.supersededByTurnId === undefined;
+    };
+    let timerStarted = false;
     const timer = window.setTimeout(() => {
-      if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace") return;
-      initialTurnRef.current = null;
-      void studio.submitWorkspaceAgentPrompt({
-        message: pendingTurn.brief,
-        ...(agentCommand ? { agentCommand } : {}),
-        ...(pendingTurn.model ? { model: pendingTurn.model } : {}),
-      });
+      timerStarted = true;
+      if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+        || !originalTurnStillActive()) {
+        finishOperation();
+        return;
+      }
+      initialTurnAttemptedRef.current = true;
+      void (async () => {
+        try {
+          for (const attachment of pendingTurn.attachments ?? []) {
+            if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+              || !originalTurnStillActive()) return;
+            const source = attachment.projectReference === undefined
+              ? {
+                  type: "uploaded-file" as const,
+                  uploadedFileId: attachment.uploadedFileId!,
+                }
+              : {
+                  type: "project-reference" as const,
+                  ...attachment.projectReference,
+                };
+            const attachmentIdentity = attachment.projectReference === undefined
+              ? attachment.uploadedFileId!
+              : [
+                  attachment.projectReference.sourceProjectId,
+                  attachment.projectReference.sourceArtifactRevisionId,
+                ].join(":");
+            await studio.materializeAgentResourceContext({
+              title: attachment.title,
+              kind: "file",
+              source,
+              idempotencyKey: `home-attachment:${attachmentIdentity}`,
+              ...(attachment.preview && attachment.uploadedFileId
+                ? { previewUrl: api.refUrl(projectId, attachment.uploadedFileId) }
+                : {}),
+            });
+            if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+              || !originalTurnStillActive()) return;
+          }
+          if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+            || !originalTurnStillActive()) return;
+          clearAttachmentError("workspace");
+          if (!pendingTurn.attachmentsStaged) {
+            recordAttachmentError(
+              "workspace",
+              `Initial attachment staging was interrupted (${pendingTurn.attachments?.length ?? 0}/${pendingTurn.attachmentCount}). Reattach the missing references, then submit this draft.`,
+            );
+            studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+            return;
+          }
+          if (!originalTurnStillActive()) return;
+          const queued = await studio.submitWorkspaceAgentPrompt({
+            message: pendingTurn.brief,
+            turnId: pendingTurn.turnId,
+            ...(agentCommand ? { agentCommand } : {}),
+            ...(pendingTurn.model ? { model: pendingTurn.model } : {}),
+            isCurrent: originalTurnStillActive,
+          });
+          if (!queued) {
+            if (originalTurnStillActive()) {
+              studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+            }
+            return;
+          }
+          reconcileCompletedInitialTurn(pendingTurn.turnId);
+        } catch (error) {
+          if (!guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+            || !originalTurnStillActive()) return;
+          const message = error instanceof Error && error.message.trim()
+            ? error.message
+            : "Couldn't attach the initial design context.";
+          recordAttachmentError("workspace", message);
+          studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+        } finally {
+          finishOperation();
+        }
+      })();
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      if (!timerStarted || !guard.mounted || guard.epoch !== epoch || guard.scopeKey !== "workspace"
+        || activeProjectIdRef.current !== projectId) {
+        window.clearTimeout(timer);
+        finishOperation();
+      }
+    };
   }, [
     agents,
     agentsLoading,
     agentsProvided,
     load.status,
+    api,
+    clearAttachmentError,
+    initialTurnObservationEpoch,
     projectId,
+    reconcileCompletedInitialTurn,
+    recordAttachmentError,
     settingsAgent,
+    studio.agentTranscript,
+    studio.materializeAgentResourceContext,
     studio.setWorkspaceAgentDraft,
     studio.submitWorkspaceAgentPrompt,
+    studio.workspaceAgentDraft,
+    studio.workspaceAgentOutbox,
   ]);
 
   useEffect(() => {
@@ -1071,16 +1273,14 @@ export function ProjectStudioScreen({
   const canPresentFlow = presentablePrototypeFlowPages(load.workspace.activeSnapshot).length > 0;
   const main = workspaceScope && prototypeFlowSession !== null
     ? (
-        <Suspense fallback={<ProjectCanvasLoading />}>
-          <PrototypeFlowViewer
-            projectId={projectId}
-            session={prototypeFlowSession}
-            onClose={() => {
-              restorePresentFlowFocusRef.current = true;
-              setPrototypeFlowSession(null);
-            }}
-          />
-        </Suspense>
+        <PrototypeFlowViewer
+          projectId={projectId}
+          session={prototypeFlowSession}
+          onClose={() => {
+            restorePresentFlowFocusRef.current = true;
+            setPrototypeFlowSession(null);
+          }}
+        />
       )
     : workspaceScope
     ? (
@@ -1303,12 +1503,65 @@ export function ProjectStudioScreen({
               : "Describe how this Resource should inform or change the design…"}
           scopeLabel={workspaceScope ? "Workspace" : artifactScope ? artifactKindLabel : resourceKindLabel}
           onSubmit={workspaceScope
-            ? () => afterContextSettings(() => {
+            ? () => afterContextSettings(async () => {
                 clearAttachmentError(scopedInspectorScopeKey);
-                return studio.submitWorkspaceAgentPrompt({
+                if (initialTurnProcessingRef.current) {
+                  recordAttachmentError(
+                    "workspace",
+                    "Initial references are still being attached. Submit after this context is ready.",
+                  );
+                  return;
+                }
+                const pendingTurn = peekPendingDesignWorkspaceTurn(projectId);
+                initialTurnRef.current = pendingTurn;
+                let reservedTurnId: string | undefined;
+                if (pendingTurn !== null) {
+                  initialTurnAttemptedRef.current = true;
+                }
+                const queued = await studio.submitWorkspaceAgentPrompt({
                   agentCommand: studioAgent,
                   model: studioModel || undefined,
+                  ...(pendingTurn === null ? {} : {
+                    reserveTurn: async (facts) => {
+                      const expectedActiveTurnId = pendingTurn.supersededByTurnId ?? pendingTurn.turnId;
+                      const contextItems: PendingDesignWorkspaceRecoveryContextItem[] = facts.contextItems
+                        .map(({ previewUrl: _previewUrl, type: _type, ...item }) => item);
+                      const claim = await claimPendingTurnReplacement({
+                        projectId,
+                        expectedActiveTurnId,
+                        reservation: {
+                          ...facts,
+                          contextItems,
+                        },
+                      });
+                      if (claim.status !== "claimed" && claim.status !== "reused") {
+                        initialTurnRef.current = peekPendingDesignWorkspaceTurn(projectId);
+                        recordAttachmentError(
+                          "workspace",
+                          claim.status === "conflict"
+                            ? "Another window replaced this recovery request. Review the current draft before submitting again."
+                            : "Dezin couldn't durably save this recovery request. Free browser storage, then submit again.",
+                        );
+                        return null;
+                      }
+                      initialTurnRef.current = claim.turn;
+                      reservedTurnId = claim.turnId;
+                      return {
+                        turnId: claim.turnId,
+                        isCurrent: () => {
+                          const current = peekPendingDesignWorkspaceTurn(projectId);
+                          return current !== null
+                            && current.turnId === claim.turn.turnId
+                            && current.supersededByTurnId === claim.turnId
+                            && current.recoveryRequest?.fingerprint === facts.fingerprint;
+                        },
+                      };
+                    },
+                  }),
                 });
+                if (queued) {
+                  if (reservedTurnId !== undefined) reconcileCompletedInitialTurn(reservedTurnId);
+                }
               })
             : artifactAgentAvailable
               ? () => afterContextSettings(() => {
@@ -1371,7 +1624,7 @@ export function ProjectStudioScreen({
             studio.removeAgentContextItem(id);
           }}
           transcript={studio.agentTranscript}
-          attaching={attachingContext}
+          attaching={attachingContext || initialTurnProcessing}
           onAttachFiles={async (files) => {
             const attachmentScopeKey = scopedInspectorScopeKey;
             setAttachingContext(true);

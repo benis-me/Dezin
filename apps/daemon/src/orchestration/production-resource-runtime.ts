@@ -1818,6 +1818,195 @@ function assertSameSnapshot(first: CaptureSnapshot, second: CaptureSnapshot): vo
   }
 }
 
+export interface ExactSharinganProjectCaptureExportRequest {
+  readonly store: Store;
+  readonly dataDir: string;
+  readonly projectId: string;
+  readonly workspaceId: string;
+  readonly resourceId: string;
+  readonly scope: SharinganCaptureBundleScope;
+  readonly maxOutputBytes: number;
+  readonly signal: AbortSignal;
+  readonly afterReadPass?: (pass: 1 | 2) => void | Promise<void>;
+  readonly afterPathFence?: (paths: readonly string[]) => void | Promise<void>;
+  readonly afterManifestDiscovery?: () => void | Promise<void>;
+}
+
+export interface ExactSharinganProjectCaptureExport {
+  readonly exporter: Readonly<{ id: "dezin-sharingan-capture"; version: 1 }>;
+  readonly source: Readonly<{
+    requestedUrl: string;
+    finalUrl: string;
+    capturedAt: number;
+  }>;
+  readonly files: readonly SharinganCaptureBundleFileInput[];
+}
+
+function exactSharinganProjectCaptureOwner(
+  request: ExactSharinganProjectCaptureExportRequest,
+  revalidation = false,
+): Project {
+  const project = request.store.getProject(request.projectId);
+  const workspace = request.store.workspace.getWorkspace(request.projectId);
+  const resource = request.store.workspace.getResourceForProject(
+    request.projectId,
+    request.resourceId,
+  );
+  if (!project || !workspace || workspace.id !== request.workspaceId
+    || project.mode !== "standard" || !project.sharingan || project.archivedAt !== null
+    || typeof project.sourceUrl !== "string" || project.sourceUrl.length === 0
+    || !resource || resource.workspaceId !== workspace.id
+    || resource.kind !== "sharingan-capture" || resource.archivedAt !== null
+    || request.scope.workspaceId !== workspace.id
+    || request.scope.resourceId !== resource.id
+    || request.scope.resourceKind !== "sharingan-capture") {
+    return fail(
+      revalidation
+        ? "SHARINGAN_CAPTURE_REQUEST_OWNERSHIP_INVALID"
+        : "SHARINGAN_CAPTURE_OWNER_INVALID",
+      revalidation
+        ? "Sharingan Capture owner changed during exact export"
+        : "Sharingan Capture owner is not one active Standard Sharingan Project and Resource",
+      "context",
+    );
+  }
+  try {
+    exactHttpUrl(project.sourceUrl, "Sharingan owning Project source URL");
+  } catch (error) {
+    if (!revalidation) throw error;
+    return fail(
+      "SHARINGAN_CAPTURE_REQUEST_OWNERSHIP_INVALID",
+      "Sharingan Capture owner changed during exact export",
+      "context",
+      error,
+    );
+  }
+  return project;
+}
+
+/**
+ * Exact two-pass Sharingan capture reader shared by Resource Tasks and the
+ * daemon-owned first-turn bootstrap. Task-specific lease and Context Pack
+ * authority remains the caller's responsibility.
+ */
+export async function exportExactSharinganProjectCapture(
+  request: ExactSharinganProjectCaptureExportRequest,
+): Promise<ExactSharinganProjectCaptureExport> {
+  if (!request || !Number.isSafeInteger(request.maxOutputBytes)
+    || request.maxOutputBytes < 1 || request.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES
+    || !validSignal(request.signal)) {
+    return fail(
+      "SHARINGAN_CAPTURE_REQUEST_INVALID",
+      "Sharingan Capture project export request is invalid",
+      "adapter",
+    );
+  }
+  checkAbort(request.signal);
+  const project = exactSharinganProjectCaptureOwner(request);
+  const canonicalDataRoot = await canonicalDirectory(request.dataDir);
+  const projectsRoot = join(request.dataDir, "projects");
+  const canonicalProjectsRoot = await canonicalDirectory(projectsRoot, canonicalDataRoot);
+  const rootPath = projectDir(request.dataDir, project.id);
+  const canonicalProjectRoot = await canonicalDirectory(rootPath, canonicalProjectsRoot);
+  const captureRoot = join(rootPath, ".sharingan");
+  await canonicalDirectory(captureRoot, canonicalProjectRoot);
+  const first = await readCaptureSnapshot({
+    projectRoot: rootPath,
+    canonicalProjectRoot,
+    project,
+    maxOutputBytes: request.maxOutputBytes,
+    signal: request.signal,
+    afterPathFence: request.afterPathFence,
+    afterManifestDiscovery: request.afterManifestDiscovery,
+  });
+  await request.afterReadPass?.(1);
+  checkAbort(request.signal);
+  const second = await readCaptureSnapshot({
+    projectRoot: rootPath,
+    canonicalProjectRoot,
+    project,
+    maxOutputBytes: request.maxOutputBytes,
+    signal: request.signal,
+    afterPathFence: request.afterPathFence,
+    afterManifestDiscovery: request.afterManifestDiscovery,
+  });
+  await request.afterReadPass?.(2);
+  checkAbort(request.signal);
+  assertSameSnapshot(first, second);
+
+  const capturedAt = Number(second.files.get(CAPTURE_MANIFEST_PATH)!.identity.mtimeNs / 1_000_000n);
+  if (!Number.isSafeInteger(capturedAt) || capturedAt < 0) {
+    return fail("SHARINGAN_CAPTURE_SOURCE_INVALID", "Sharingan Capture timestamp is invalid", "storage");
+  }
+  const source = Object.freeze({
+    requestedUrl: second.manifest.requestedUrl,
+    finalUrl: second.manifest.finalUrl,
+    capturedAt,
+  });
+  const exporter = Object.freeze({ id: "dezin-sharingan-capture" as const, version: 1 as const });
+  const probeBytes = Buffer.from(immutableProbeCliScript(), "utf8");
+  const files: SharinganCaptureBundleFileInput[] = [
+    ...[...second.files.entries()].map(([path, file]) => ({ path, file })),
+    {
+      path: CAPTURE_PROBE_PATH,
+      file: {
+        bytes: probeBytes,
+        checksum: createHash("sha256").update(probeBytes).digest("hex"),
+      },
+    },
+  ]
+    .sort((left, right) => compareBinary(left.path, right.path))
+    .map(({ path, file }) => Object.freeze({
+      path,
+      bytes: new Uint8Array(file.bytes),
+      checksum: file.checksum,
+    }));
+  try {
+    await validateSharinganCaptureResourceBundleSemantics({
+      source,
+      files,
+      signal: request.signal,
+    });
+    encodeSharinganCaptureResourceBundle({
+      scope: request.scope,
+      source,
+      exporter,
+      files,
+      maxOutputBytes: request.maxOutputBytes,
+    });
+  } catch (error) {
+    if (request.signal.aborted) throw abortReason(request.signal);
+    if (error instanceof SharinganCaptureResourceBundleError
+      && /output budget|exceeds/i.test(error.message)) {
+      return fail(
+        "SHARINGAN_CAPTURE_OUTPUT_BUDGET_EXCEEDED",
+        error.message,
+        "storage",
+        error,
+      );
+    }
+    return fail(
+      "SHARINGAN_CAPTURE_SOURCE_INVALID",
+      "Sharingan Capture exact export failed bundle validation",
+      "context",
+      error,
+    );
+  }
+  const current = exactSharinganProjectCaptureOwner(request, true);
+  if (current.sourceUrl !== project.sourceUrl) {
+    return fail(
+      "SHARINGAN_CAPTURE_REQUEST_OWNERSHIP_INVALID",
+      "Sharingan Capture owning Project changed during exact export",
+      "context",
+    );
+  }
+  return Object.freeze({
+    exporter,
+    source,
+    files: Object.freeze(files),
+  });
+}
+
 class StoreBackedSharinganCaptureExporter implements ProductionSharinganCaptureExportPort {
   readonly #store: Store;
   readonly #dataDir: string;
@@ -1887,96 +2076,25 @@ class StoreBackedSharinganCaptureExporter implements ProductionSharinganCaptureE
       return fail("SHARINGAN_CAPTURE_OWNER_INVALID", "Sharingan Capture Workspace has no unique owning Project", "context");
     }
     const project = owners[0]!;
-    if (project.mode !== "standard" || !project.sharingan || project.archivedAt !== null
-      || typeof project.sourceUrl !== "string" || project.sourceUrl.length === 0) {
-      return fail("SHARINGAN_CAPTURE_OWNER_INVALID", "Sharingan Capture owner is not one active Standard Sharingan Project", "context");
-    }
-    exactHttpUrl(project.sourceUrl, "Sharingan owning Project source URL");
     this.#assertImmutableRequestOwnership(project, request);
-    const canonicalDataRoot = await canonicalDirectory(this.#dataDir);
-    const projectsRoot = join(this.#dataDir, "projects");
-    const canonicalProjectsRoot = await canonicalDirectory(projectsRoot, canonicalDataRoot);
-    const rootPath = projectDir(this.#dataDir, project.id);
-    const canonicalProjectRoot = await canonicalDirectory(rootPath, canonicalProjectsRoot);
-    const captureRoot = join(rootPath, ".sharingan");
-    await canonicalDirectory(captureRoot, canonicalProjectRoot);
-    const first = await readCaptureSnapshot({
-      projectRoot: rootPath,
-      canonicalProjectRoot,
-      project,
+    const exact = await exportExactSharinganProjectCapture({
+      store: this.#store,
+      dataDir: this.#dataDir,
+      projectId: project.id,
+      workspaceId: request.scope.workspaceId,
+      resourceId: request.scope.resourceId,
+      scope: { ...request.scope, resourceKind: "sharingan-capture" },
       maxOutputBytes: request.maxOutputBytes,
       signal: request.signal,
+      afterReadPass: this.#afterReadPass,
       afterPathFence: this.#afterPathFence,
       afterManifestDiscovery: this.#afterManifestDiscovery,
     });
-    await this.#afterReadPass?.(1);
-    checkAbort(request.signal);
-    const second = await readCaptureSnapshot({
-      projectRoot: rootPath,
-      canonicalProjectRoot,
-      project,
-      maxOutputBytes: request.maxOutputBytes,
-      signal: request.signal,
-      afterPathFence: this.#afterPathFence,
-      afterManifestDiscovery: this.#afterManifestDiscovery,
-    });
-    await this.#afterReadPass?.(2);
-    checkAbort(request.signal);
-    assertSameSnapshot(first, second);
-
-    const capturedAt = Number(second.files.get(CAPTURE_MANIFEST_PATH)!.identity.mtimeNs / 1_000_000n);
-    if (!Number.isSafeInteger(capturedAt) || capturedAt < 0) {
-      return fail("SHARINGAN_CAPTURE_SOURCE_INVALID", "Sharingan Capture timestamp is invalid", "storage");
-    }
-    const source = Object.freeze({
-      requestedUrl: second.manifest.requestedUrl,
-      finalUrl: second.manifest.finalUrl,
-      capturedAt,
-    });
-    const exporter = Object.freeze({ id: "dezin-sharingan-capture", version: 1 as const });
-    const probeBytes = Buffer.from(immutableProbeCliScript(), "utf8");
-    const files: SharinganCaptureBundleFileInput[] = [
-      ...[...second.files.entries()].map(([path, file]) => ({ path, file })),
-      { path: CAPTURE_PROBE_PATH, file: { bytes: probeBytes, checksum: createHash("sha256").update(probeBytes).digest("hex") } },
-    ]
-      .sort((left, right) => compareBinary(left.path, right.path))
-      .map(({ path, file }) => Object.freeze({
-        path,
-        bytes: new Uint8Array(file.bytes),
-        checksum: file.checksum,
-      }));
-    try {
-      const exactScope: SharinganCaptureBundleScope = {
-        ...request.scope,
-        resourceKind: "sharingan-capture",
-      };
-      await validateSharinganCaptureResourceBundleSemantics({
-        source,
-        files,
-        signal: request.signal,
-      });
-      encodeSharinganCaptureResourceBundle({
-        scope: exactScope,
-        source,
-        exporter,
-        files,
-        maxOutputBytes: request.maxOutputBytes,
-      });
-    } catch (error) {
-      if (request.signal.aborted) throw abortReason(request.signal);
-      if (error instanceof SharinganCaptureResourceBundleError
-        && /output budget|exceeds/i.test(error.message)) {
-        return fail("SHARINGAN_CAPTURE_OUTPUT_BUDGET_EXCEEDED", error.message, "storage", error);
-      }
-      return fail("SHARINGAN_CAPTURE_SOURCE_INVALID", "Sharingan Capture exact export failed bundle validation", "context", error);
-    }
     this.#assertImmutableRequestOwnership(project, request);
     return Object.freeze({
       protocol: "dezin.sharingan-capture-export.v1",
       scope: request.scope,
-      exporter,
-      source,
-      files: Object.freeze(files),
+      ...exact,
     });
   }
 
@@ -1988,6 +2106,15 @@ class StoreBackedSharinganCaptureExporter implements ProductionSharinganCaptureE
     const contextPack = request.contextPack;
     const now = Date.now();
     try {
+      if (project.mode !== "standard" || project.sharingan !== true
+        || project.archivedAt !== null || typeof project.sourceUrl !== "string"
+        || project.sourceUrl.length === 0) {
+        fail(
+          "SHARINGAN_CAPTURE_OWNER_INVALID",
+          "Sharingan Capture owner is not one active Standard Sharingan Project",
+          "context",
+        );
+      }
       const currentOwners = this.#store.listProjects().filter(
         (candidate) => this.#store.workspace.getWorkspace(candidate.id)?.id === scope.workspaceId,
       );

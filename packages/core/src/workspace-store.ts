@@ -357,6 +357,32 @@ export interface ResourceRevisionViewFacts {
   snapshotId: string;
 }
 
+export interface ResourceMaterializationRequestFacts {
+  kind: ResourceKind;
+  title: string;
+  defaultPinPolicy: ResourcePinPolicy;
+  source: Readonly<Record<string, unknown>>;
+  reason: string;
+}
+
+export interface CommitResourceMaterializationInput {
+  projectId: string;
+  idempotencyKey: string;
+  request: ResourceMaterializationRequestFacts;
+  publication: CreatePublishedResourceForProjectInput;
+}
+
+export interface ResourceMaterializationReceipt {
+  idempotencyKey: string;
+  requestHash: string;
+  result: CreatePublishedResourceForProjectResult;
+}
+
+export interface ResourceMaterializationCommitResult {
+  receipt: ResourceMaterializationReceipt;
+  created: boolean;
+}
+
 export interface ScopedAgentTurnRequestFacts {
   workspaceId: string;
   scopeType: "artifact" | "resource";
@@ -631,6 +657,69 @@ function checksum(value: string): string {
 const CANONICAL_AGENT_TURN_ID = /^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CANONICAL_RESEARCH_SELECTION_REQUEST_ID = /^selection-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CANONICAL_SHA256 = /^[0-9a-f]{64}$/;
+
+interface NormalizedResourceMaterializationIdentity {
+  projectId: string;
+  idempotencyKey: string;
+  request: ResourceMaterializationRequestFacts;
+  requestJson: string;
+  requestHash: string;
+}
+
+function normalizeResourceMaterializationIdentity(
+  projectIdValue: unknown,
+  idempotencyKeyValue: unknown,
+  requestValue: unknown,
+): NormalizedResourceMaterializationIdentity {
+  const projectId = boundaryId(projectIdValue, "Resource materialization Project id");
+  const idempotencyKey = boundaryString(
+    idempotencyKeyValue,
+    "Resource materialization idempotency key",
+    256,
+  );
+  if (idempotencyKey.length === 0 || idempotencyKey.trim() !== idempotencyKey) {
+    throw new WorkspaceStoreCodecError("Resource materialization idempotency key must be canonical");
+  }
+  const input = boundaryObject(requestValue, "Resource materialization request facts", [
+    "kind",
+    "title",
+    "defaultPinPolicy",
+    "source",
+    "reason",
+  ]);
+  const request: ResourceMaterializationRequestFacts = {
+    kind: resourceKind(input.kind, "Resource materialization kind"),
+    title: boundaryText(input.title, "Resource materialization title", 500),
+    defaultPinPolicy: resourcePinPolicy(
+      input.defaultPinPolicy,
+      "Resource materialization default pin policy",
+    ),
+    source: boundaryJsonObject(input.source, "Resource materialization source"),
+    reason: boundaryText(input.reason, "Resource materialization reason", 2_000),
+  };
+  const requestJson = canonicalJsonText(
+    { projectId, ...request },
+    "Resource materialization request identity",
+  );
+  return {
+    projectId,
+    idempotencyKey,
+    request,
+    requestJson,
+    requestHash: checksum(requestJson),
+  };
+}
+
+export function resourceMaterializationRequestHash(
+  projectId: string,
+  request: ResourceMaterializationRequestFacts,
+): string {
+  return normalizeResourceMaterializationIdentity(
+    projectId,
+    "request-hash",
+    request,
+  ).requestHash;
+}
 
 interface NormalizedResearchDirectionArtifactIntentIdentity {
   projectId: string;
@@ -1832,6 +1921,52 @@ function asResource(row: Row): Resource {
   };
 }
 
+function asMaterializedResourceResult(value: unknown): Resource {
+  const input = boundaryObject(value, "Resource materialization stored Resource", [
+    "id",
+    "workspaceId",
+    "kind",
+    "title",
+    "headRevisionId",
+    "defaultPinPolicy",
+    "archivedAt",
+    "createdAt",
+    "updatedAt",
+  ]);
+  if (input.headRevisionId === null) {
+    throw new WorkspaceStoreCodecError("Resource materialization stored Resource must have a Head Revision");
+  }
+  if (input.archivedAt !== null) {
+    throw new WorkspaceStoreCodecError("Resource materialization stored Resource cannot be archived");
+  }
+  return {
+    id: boundaryId(input.id, "Resource materialization stored Resource id"),
+    workspaceId: boundaryId(
+      input.workspaceId,
+      "Resource materialization stored Resource Workspace id",
+    ),
+    kind: resourceKind(input.kind, "Resource materialization stored Resource kind"),
+    title: boundaryText(input.title, "Resource materialization stored Resource title", 500),
+    headRevisionId: boundaryId(
+      input.headRevisionId,
+      "Resource materialization stored Resource Head Revision id",
+    ),
+    defaultPinPolicy: resourcePinPolicy(
+      input.defaultPinPolicy,
+      "Resource materialization stored Resource default pin policy",
+    ),
+    archivedAt: null,
+    createdAt: storedTimestamp(
+      input.createdAt,
+      "Resource materialization stored Resource created_at",
+    ),
+    updatedAt: storedTimestamp(
+      input.updatedAt,
+      "Resource materialization stored Resource updated_at",
+    ),
+  };
+}
+
 function asResourceRevision(row: Row): ResourceRevision {
   const sequence = boundarySafeInteger(row.sequence, "Resource Revision sequence", 1);
   const summary = boundaryText(row.summary, "Resource Revision summary", 32_000);
@@ -2145,6 +2280,20 @@ export class WorkspaceResourceOwnershipError extends Error {
     this.resourceId = resourceId;
     this.expectedProjectId = expectedProjectId;
     this.actualProjectId = actualProjectId;
+  }
+}
+
+export class ResourceMaterializationConflictError extends Error {
+  readonly idempotencyKey: string;
+  readonly expectedRequestHash: string;
+  readonly actualRequestHash: string;
+
+  constructor(idempotencyKey: string, expectedRequestHash: string, actualRequestHash: string) {
+    super(`Resource materialization ${idempotencyKey} was already committed for a different immutable request`);
+    this.name = "ResourceMaterializationConflictError";
+    this.idempotencyKey = idempotencyKey;
+    this.expectedRequestHash = expectedRequestHash;
+    this.actualRequestHash = actualRequestHash;
   }
 }
 
@@ -2905,67 +3054,251 @@ export class WorkspaceStore {
     unsafeInput: CreatePublishedResourceForProjectInput,
   ): CreatePublishedResourceForProjectResult {
     const input = normalizeCreatePublishedResourceForProjectInput(unsafeInput);
+    return this.transactionImmediate(
+      () => this.createPublishedResourceForProjectInTransaction(projectId, input),
+    );
+  }
+
+  getResourceMaterializationReceiptForProject(
+    projectId: string,
+    idempotencyKey: string,
+    request: ResourceMaterializationRequestFacts,
+  ): ResourceMaterializationReceipt | null {
+    const identity = normalizeResourceMaterializationIdentity(projectId, idempotencyKey, request);
+    return this.transactionRead(
+      () => this.readResourceMaterializationReceiptInTransaction(identity),
+    );
+  }
+
+  commitResourceMaterializationForProject(
+    unsafeInput: CommitResourceMaterializationInput,
+  ): ResourceMaterializationCommitResult {
+    const input = boundaryObject(unsafeInput, "Resource materialization commit", [
+      "projectId",
+      "idempotencyKey",
+      "request",
+      "publication",
+    ]);
+    const identity = normalizeResourceMaterializationIdentity(
+      input.projectId,
+      input.idempotencyKey,
+      input.request,
+    );
+    const publication = normalizeCreatePublishedResourceForProjectInput(input.publication);
+    if (
+      publication.kind !== identity.request.kind
+      || publication.title !== identity.request.title
+      || publication.defaultPinPolicy !== identity.request.defaultPinPolicy
+      || publication.reason !== identity.request.reason
+    ) {
+      throw new WorkspaceStoreCodecError(
+        "Resource materialization publication does not match its immutable request facts",
+      );
+    }
     return this.transactionImmediate(() => {
-      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
-      const current = this.getGraph(projectId);
-      if (current.revision !== input.baseGraphRevision) {
-        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
+      const replay = this.readResourceMaterializationReceiptInTransaction(identity);
+      if (replay !== null) return { receipt: replay, created: false };
+      const result = this.createPublishedResourceForProjectInTransaction(
+        identity.projectId,
+        publication,
+      );
+      const resultJson = canonicalJsonText(result, "Resource materialization result");
+      const inserted = this.db.prepare(
+        `INSERT INTO resource_materialization_receipts (
+           workspace_id, idempotency_key, request_hash, request_json, result_json,
+           resource_id, revision_id, node_id, graph_revision, snapshot_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        result.resource.workspaceId,
+        identity.idempotencyKey,
+        identity.requestHash,
+        identity.requestJson,
+        resultJson,
+        result.resource.id,
+        result.revision.id,
+        result.node.id,
+        result.graph.revision,
+        result.snapshot.id,
+        boundarySafeInteger(this.clock.now(), "Resource materialization receipt creation time"),
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError(
+          "Resource materialization receipt was not durably recorded",
+        );
       }
-      const normalized = normalizeWorkspaceGraphMutationInput({
-        baseGraphRevision: input.baseGraphRevision,
-        expectedSnapshotId: input.expectedSnapshotId,
-        commands: [{
-          id: input.commandId,
-          type: "add-node",
-          node: {
-            id: input.nodeId,
-            kind: "resource",
-            name: input.title,
-            resourceId: input.resourceId,
-            createIdentity: {
-              resourceKind: input.kind,
-              defaultPinPolicy: input.defaultPinPolicy,
-            },
-          },
-        }],
-      });
-      const graphResult = this.applyGraphCommandsInTransaction(workspace, current, {
-        expectedSnapshotId: normalized.expectedSnapshotId,
-        commands: normalized.commands,
-        reason: "resource-created-for-publication",
-        provenance: { kind: "graph-command", commandIds: [input.commandId] },
-      });
-      const revision = this.createResourceRevisionInTransaction(
-        projectId,
-        input.resourceId,
-        input.revision,
-        { requireCurrentHead: true },
-      );
-      const snapshot = this.publishResourceRevisionInTransaction(
-        projectId,
-        input.resourceId,
-        revision.id,
-        {
-          expectedHeadRevisionId: null,
-          expectedSnapshotId: graphResult.snapshot.id,
-          reason: input.reason,
-        },
-      );
-      const resource = this.requireResourceForProject(projectId, input.resourceId);
-      const node = graphResult.graph.nodes.find(
-        (candidate): candidate is WorkspaceResourceNode => (
-          candidate.kind === "resource"
-          && candidate.id === input.nodeId
-          && candidate.resourceId === input.resourceId
-        ),
-      );
-      if (!node) throw new WorkspaceGraphValidationError("materialized Resource graph identity is not resolvable");
-      if (resource.headRevisionId !== revision.id
-        || snapshot.resourceRevisions[resource.id] !== revision.id) {
-        throw new WorkspaceGraphValidationError("materialized Resource publication is incoherent");
+      const receipt = this.readResourceMaterializationReceiptInTransaction(identity);
+      if (receipt === null) {
+        throw new WorkspaceStoreCodecError("Resource materialization receipt disappeared");
       }
-      return { resource, node, revision, graph: graphResult.graph, snapshot };
+      return { receipt, created: true };
     });
+  }
+
+  private createPublishedResourceForProjectInTransaction(
+    projectId: string,
+    input: CreatePublishedResourceForProjectInput,
+  ): CreatePublishedResourceForProjectResult {
+    const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+    const current = this.getGraph(projectId);
+    if (current.revision !== input.baseGraphRevision) {
+      throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
+    }
+    const normalized = normalizeWorkspaceGraphMutationInput({
+      baseGraphRevision: input.baseGraphRevision,
+      expectedSnapshotId: input.expectedSnapshotId,
+      commands: [{
+        id: input.commandId,
+        type: "add-node",
+        node: {
+          id: input.nodeId,
+          kind: "resource",
+          name: input.title,
+          resourceId: input.resourceId,
+          createIdentity: {
+            resourceKind: input.kind,
+            defaultPinPolicy: input.defaultPinPolicy,
+          },
+        },
+      }],
+    });
+    const graphResult = this.applyGraphCommandsInTransaction(workspace, current, {
+      expectedSnapshotId: normalized.expectedSnapshotId,
+      commands: normalized.commands,
+      reason: "resource-created-for-publication",
+      provenance: { kind: "graph-command", commandIds: [input.commandId] },
+    });
+    const revision = this.createResourceRevisionInTransaction(
+      projectId,
+      input.resourceId,
+      input.revision,
+      { requireCurrentHead: true },
+    );
+    const snapshot = this.publishResourceRevisionInTransaction(
+      projectId,
+      input.resourceId,
+      revision.id,
+      {
+        expectedHeadRevisionId: null,
+        expectedSnapshotId: graphResult.snapshot.id,
+        reason: input.reason,
+      },
+    );
+    const resource = this.requireResourceForProject(projectId, input.resourceId);
+    const node = graphResult.graph.nodes.find(
+      (candidate): candidate is WorkspaceResourceNode => (
+        candidate.kind === "resource"
+        && candidate.id === input.nodeId
+        && candidate.resourceId === input.resourceId
+      ),
+    );
+    if (!node) {
+      throw new WorkspaceGraphValidationError(
+        "materialized Resource graph identity is not resolvable",
+      );
+    }
+    if (
+      resource.headRevisionId !== revision.id
+      || snapshot.resourceRevisions[resource.id] !== revision.id
+    ) {
+      throw new WorkspaceGraphValidationError("materialized Resource publication is incoherent");
+    }
+    return { resource, node, revision, graph: graphResult.graph, snapshot };
+  }
+
+  private readResourceMaterializationReceiptInTransaction(
+    identity: NormalizedResourceMaterializationIdentity,
+  ): ResourceMaterializationReceipt | null {
+    const workspace = requireWorkspace(this.getWorkspace(identity.projectId), identity.projectId);
+    const row = this.db.prepare(
+      `SELECT request_hash, request_json, result_json, resource_id, revision_id,
+              node_id, graph_revision, snapshot_id
+       FROM resource_materialization_receipts
+       WHERE workspace_id = ? AND idempotency_key = ?`,
+    ).get(workspace.id, identity.idempotencyKey) as {
+      request_hash: string;
+      request_json: string;
+      result_json: string;
+      resource_id: string;
+      revision_id: string;
+      node_id: string;
+      graph_revision: number;
+      snapshot_id: string;
+    } | undefined;
+    if (!row) return null;
+    const storedRequestHash = boundaryChecksum(
+      row.request_hash,
+      "Resource materialization stored request hash",
+    );
+    if (storedRequestHash !== identity.requestHash || row.request_json !== identity.requestJson) {
+      throw new ResourceMaterializationConflictError(
+        identity.idempotencyKey,
+        storedRequestHash,
+        identity.requestHash,
+      );
+    }
+    const stored = storedJsonObject(row.result_json, "Resource materialization stored result");
+    const result = boundaryObject(stored, "Resource materialization stored result", [
+      "resource",
+      "node",
+      "revision",
+      "graph",
+      "snapshot",
+    ]);
+    const resource = asMaterializedResourceResult(result.resource);
+    const resourceId = boundaryId(row.resource_id, "Resource materialization stored Resource id");
+    const revisionId = boundaryId(row.revision_id, "Resource materialization stored Revision id");
+    const nodeId = boundaryId(row.node_id, "Resource materialization stored node id");
+    const graphRevision = boundarySafeInteger(
+      row.graph_revision,
+      "Resource materialization stored graph Revision",
+    );
+    const snapshotId = boundaryId(row.snapshot_id, "Resource materialization stored Snapshot id");
+    const revision = this.requireResourceRevision(revisionId);
+    const graph = this.requireGraphRevision(workspace.id, graphRevision);
+    const snapshot = this.requireSnapshot(workspace.id, snapshotId);
+    const node = graph.nodes.find(
+      (candidate): candidate is WorkspaceResourceNode => (
+        candidate.kind === "resource"
+        && candidate.id === nodeId
+        && candidate.resourceId === resourceId
+      ),
+    );
+    if (
+      !node
+      || resource.id !== resourceId
+      || resource.workspaceId !== workspace.id
+      || resource.kind !== identity.request.kind
+      || resource.title !== identity.request.title
+      || resource.defaultPinPolicy !== identity.request.defaultPinPolicy
+      || resource.headRevisionId !== revisionId
+      || revision.workspaceId !== workspace.id
+      || revision.resourceId !== resourceId
+      || graph.workspaceId !== workspace.id
+      || snapshot.workspaceId !== workspace.id
+      || snapshot.graphRevision !== graphRevision
+      || snapshot.resourceRevisions[resourceId] !== revisionId
+    ) {
+      throw new WorkspaceStoreCodecError(
+        "Resource materialization durable receipt is internally inconsistent",
+      );
+    }
+    const rebuilt: CreatePublishedResourceForProjectResult = {
+      resource,
+      node,
+      revision,
+      graph,
+      snapshot,
+    };
+    if (canonicalJsonText(rebuilt, "Resource materialization rebuilt result") !== row.result_json) {
+      throw new WorkspaceStoreCodecError(
+        "Resource materialization stored result does not match its immutable identities",
+      );
+    }
+    return {
+      idempotencyKey: identity.idempotencyKey,
+      requestHash: storedRequestHash,
+      result: rebuilt,
+    };
   }
 
   updateResourceForProject(

@@ -1,12 +1,11 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput, Tabs } from "./ui/index.ts";
 import { DesignSystemMark } from "./design-system-logos.tsx";
+import DesignSystemPreview from "./DesignSystemPreview.tsx";
 import { navigate } from "../router.tsx";
 import type { DesignSystemCard } from "../lib/api.ts";
-
-const DesignSystemPreview = lazy(() => import("./DesignSystemPreview.tsx"));
 
 /** The "Design system" picker — searchable, with Clear + Create and an on-hover preview. */
 export function DesignSystemSelect({
@@ -282,9 +281,7 @@ export function DesignSystemSelect({
       {open && preview
         ? createPortal(
             <div className="pointer-events-none fixed z-[60]" style={{ top: preview.top, left: preview.left }}>
-              <Suspense fallback={null}>
-                <DesignSystemPreview system={preview.system} />
-              </Suspense>
+              <DesignSystemPreview system={preview.system} />
             </div>,
             document.body,
           )

@@ -13,10 +13,11 @@ import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
-import type { Settings } from "../lib/api.ts";
+import { type Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { takePendingAgent, takePendingImages, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import { ToastProvider } from "../components/Toast.tsx";
+import { VALID_PNG_BASE64, validPngFile } from "../test/image-fixtures.ts";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
@@ -111,7 +112,7 @@ test("HomeScreen distinguishes a pending design-system catalog from an empty sea
     listDesignSystems: () => catalog.promise,
   });
 
-  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: "Design system" }));
 
   expect(screen.getByRole("status")).toHaveTextContent("Loading design systems");
   expect(screen.queryByText(/^No matches$/)).toBeNull();
@@ -131,7 +132,7 @@ test("HomeScreen lets the user retry a failed design-system catalog load", async
     listDesignSystems,
   });
 
-  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByRole("button", { name: "Design system" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load design systems");
 
   await user.click(screen.getByRole("button", { name: "Retry loading design systems" }));
@@ -200,8 +201,19 @@ test("HomeScreen allows a project reference to be the only design input", async 
   await screen.findByLabelText("Remove Reference source");
   await waitFor(() => expect(design).toBeEnabled());
   fireEvent.click(design);
-  expect(onNewProject).toHaveBeenCalledWith("Build on the referenced design.", "frontend-design", "modern-minimal", "prototype");
-  expect(takePendingRefs()).toEqual([{ name: "Reference source", base64: expect.any(String) }]);
+  expect(onNewProject).toHaveBeenCalledWith(
+    "Build on the referenced design.",
+    "frontend-design",
+    "modern-minimal",
+    "prototype",
+    undefined,
+    undefined,
+    {
+      images: [],
+      refs: [{ name: "Reference source", base64: expect.any(String) }],
+    },
+  );
+  expect(takePendingRefs()).toEqual([]);
 });
 
 test("HomeScreen persists the selected agent model as the next default", async () => {
@@ -513,7 +525,7 @@ test("HomeScreen prompt presents dropped image references as rich context withou
     listDesignSystems: async () => DSYS,
   });
 
-  const file = new File(["image"], "reference.png", { type: "image/png" });
+  const file = validPngFile("reference.png");
   fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { types: ["Files"], files: [file] } });
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
@@ -529,8 +541,309 @@ test("HomeScreen prompt presents dropped image references as rich context withou
     "frontend-design",
     "modern-minimal",
     "prototype",
+    undefined,
+    undefined,
+    {
+      images: [{ name: "reference.png", base64: expect.any(String), mimeType: "image/png" }],
+      refs: [],
+    },
   );
-  expect(takePendingImages()).toEqual([{ name: "reference.png", base64: expect.any(String) }]);
+  expect(takePendingImages()).toEqual([]);
+});
+
+test("HomeScreen caps dropped image references at two provider-supported images", async () => {
+  const onNewProject = vi.fn();
+  const readAsDataUrl = vi.spyOn(FileReader.prototype, "readAsDataURL");
+  try {
+    renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+      listSkills: async () => SKILLS,
+      listDesignSystems: async () => DSYS,
+    });
+
+    const files = Array.from({ length: 3 }, (_, index) => validPngFile(`reference-${index}.png`));
+    fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+      dataTransfer: { types: ["Files"], files },
+    });
+
+    const rail = await screen.findByRole("list", { name: "Attached context" });
+    await waitFor(() => expect(within(rail).getAllByRole("listitem")).toHaveLength(2));
+    expect(readAsDataUrl).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You can attach up to 2 PNG or JPEG images. 1 image was not added.",
+    );
+
+    fireEvent.click(screen.getByLabelText("Design"));
+    const attachments = onNewProject.mock.calls[0]?.[6];
+    expect(attachments.images).toHaveLength(2);
+    expect(attachments.refs).toEqual([]);
+  } finally {
+    readAsDataUrl.mockRestore();
+  }
+});
+
+test("HomeScreen caps browser captures without blocking a project reference", async () => {
+  const user = userEvent.setup();
+  const source = project("p-cap-source", "Capacity source");
+  const getFileText = vi.fn(async () => "<main>Reference artifact</main>");
+  renderWithApiToastAndAgents(<HomeScreen />, {
+    listProjects: async () => [source],
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+    getCapture: async () => ({
+      images: Array.from({ length: 3 }, (_, index) => ({
+        name: `capture-${index}.png`,
+        base64: VALID_PNG_BASE64,
+      })),
+      note: "",
+      source: "browser extension",
+    }),
+    getFileText,
+  });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  await waitFor(() => expect(within(rail).getAllByRole("listitem")).toHaveLength(2));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "You can attach up to 2 PNG or JPEG images. 1 image was not added.",
+  );
+
+  const readAsDataUrl = vi.spyOn(FileReader.prototype, "readAsDataURL");
+  try {
+    fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+      dataTransfer: {
+        types: ["Files"],
+        files: [validPngFile("overflow.png")],
+      },
+    });
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    expect(readAsDataUrl).not.toHaveBeenCalled();
+  } finally {
+    readAsDataUrl.mockRestore();
+  }
+
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  await user.hover(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Capacity source" }));
+
+  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+  expect(within(rail).getAllByRole("listitem")).toHaveLength(3);
+  expect(within(rail).getByText("Capacity source")).toBeInTheDocument();
+});
+
+test("HomeScreen reserves image slots before overlapping FileReader work begins", async () => {
+  const readAsDataUrl = vi
+    .spyOn(FileReader.prototype, "readAsDataURL")
+    .mockImplementation(function (_blob: Blob): void {});
+  try {
+    renderWithApiToastAndAgents(<HomeScreen projects={[]} />, {
+      listSkills: async () => SKILLS,
+      listDesignSystems: async () => DSYS,
+    });
+
+    const firstBatch = Array.from(
+      { length: 2 },
+      (_, index) => validPngFile(`first-${index}.png`),
+    );
+    fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+      dataTransfer: { types: ["Files"], files: firstBatch },
+    });
+    await waitFor(() => expect(readAsDataUrl).toHaveBeenCalledTimes(1));
+
+    const overlapping = validPngFile("overlap.png");
+    fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+      dataTransfer: { types: ["Files"], files: [overlapping] },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You can attach up to 2 PNG or JPEG images. 1 image was not added.",
+    );
+    expect(readAsDataUrl).toHaveBeenCalledTimes(1);
+    expect((readAsDataUrl.mock.calls[0]?.[0] as File | undefined)?.name).toBe("first-0.png");
+  } finally {
+    readAsDataUrl.mockRestore();
+  }
+});
+
+test("HomeScreen reserves a project reference before an overlapping duplicate fetch", async () => {
+  const user = userEvent.setup();
+  const first = project("p-reserved-first", "First reserved source");
+  const getFileText = vi.fn(() => new Promise<string>(() => {}));
+  renderWithApiToastAndAgents(<HomeScreen />, {
+    listProjects: async () => [first],
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+    getFileText,
+  });
+
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  await user.hover(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "First reserved source" }));
+  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  await user.hover(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "First reserved source" }));
+
+  expect(getFileText).toHaveBeenCalledTimes(1);
+});
+
+test("HomeScreen waits for an in-flight image read before creating the project", async () => {
+  let pendingReader: FileReader | null = null;
+  const readAsDataUrl = vi
+    .spyOn(FileReader.prototype, "readAsDataURL")
+    .mockImplementation(function (this: FileReader, _blob: Blob): void {
+      pendingReader = this;
+    });
+  const onNewProject = vi.fn();
+  try {
+    renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+      listSkills: async () => SKILLS,
+      listDesignSystems: async () => DSYS,
+    });
+    fireEvent.change(screen.getByLabelText("Describe your design"), {
+      target: { value: "Wait for the visual direction" },
+    });
+    const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+    fireEvent.change(imageInput!, {
+      target: { files: [validPngFile("pending-direction.png")] },
+    });
+
+    await waitFor(() => expect(readAsDataUrl).toHaveBeenCalledTimes(1));
+    const design = screen.getByLabelText("Design");
+    expect(design).toBeDisabled();
+    expect(design).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(design);
+    expect(onNewProject).not.toHaveBeenCalled();
+
+    await act(async () => {
+      Object.defineProperty(pendingReader!, "result", {
+        configurable: true,
+        value: `data:image/png;base64,${VALID_PNG_BASE64}`,
+      });
+      pendingReader!.dispatchEvent(new ProgressEvent("load"));
+      await Promise.resolve();
+    });
+
+    await screen.findByLabelText("Remove pending-direction.png");
+    await waitFor(() => expect(design).toBeEnabled());
+    expect(design).not.toHaveAttribute("aria-busy");
+    fireEvent.click(design);
+
+    await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
+    expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+      images: [{
+        name: "pending-direction.png",
+        base64: VALID_PNG_BASE64,
+        mimeType: "image/png",
+      }],
+      refs: [],
+    });
+  } finally {
+    readAsDataUrl.mockRestore();
+  }
+});
+
+test("HomeScreen starts its create barrier before asynchronous drop traversal finishes", async () => {
+  const droppedImage = validPngFile("nested-direction.png");
+  let resolveEntry!: (file: File) => void;
+  const entryFile = vi.fn((success: (file: File) => void) => {
+    resolveEntry = success;
+  });
+  const onNewProject = vi.fn();
+  renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Wait for the nested drop" },
+  });
+
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+    dataTransfer: {
+      types: ["Files"],
+      files: [],
+      items: [{
+        getAsFile: () => droppedImage,
+        webkitGetAsEntry: () => ({
+          isFile: true,
+          isDirectory: false,
+          name: droppedImage.name,
+          file: entryFile,
+        }),
+      }],
+    },
+  });
+
+  await waitFor(() => expect(entryFile).toHaveBeenCalledTimes(1));
+  const design = screen.getByLabelText("Design");
+  expect(design).toBeDisabled();
+  expect(design).toHaveAttribute("aria-busy", "true");
+  fireEvent.click(design);
+  expect(onNewProject).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveEntry(droppedImage);
+    await Promise.resolve();
+  });
+
+  await screen.findByLabelText("Remove nested-direction.png");
+  await waitFor(() => expect(design).toBeEnabled());
+  expect(design).not.toHaveAttribute("aria-busy");
+  fireEvent.click(design);
+  await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
+  expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+    images: [{
+      name: "nested-direction.png",
+      base64: expect.any(String),
+      mimeType: "image/png",
+    }],
+    refs: [],
+  });
+});
+
+test("HomeScreen waits for an in-flight project reference before creating the project", async () => {
+  const user = userEvent.setup();
+  const source = project("p-pending-reference", "Pending reference");
+  let resolveReference!: (value: string) => void;
+  const getFileText = vi.fn(() => new Promise<string>((resolve) => {
+    resolveReference = resolve;
+  }));
+  const onNewProject = vi.fn();
+  renderWithApiToastAndAgents(<HomeScreen onNewProject={onNewProject} />, {
+    listProjects: async () => [source],
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+    getFileText,
+  });
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Wait for the referenced project" },
+  });
+
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  await user.hover(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Pending reference" }));
+  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+
+  const design = screen.getByLabelText("Design");
+  expect(design).toBeDisabled();
+  expect(design).toHaveAttribute("aria-busy", "true");
+  fireEvent.click(design);
+  expect(onNewProject).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveReference("<main>Pending reference artifact</main>");
+    await Promise.resolve();
+  });
+
+  await screen.findByLabelText("Remove Pending reference");
+  await waitFor(() => expect(design).toBeEnabled());
+  expect(design).not.toHaveAttribute("aria-busy");
+  fireEvent.click(design);
+
+  await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
+  expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+    images: [],
+    refs: [{ name: "Pending reference", base64: expect.any(String) }],
+  });
 });
 
 test("HomeScreen restores prompt focus and its end caret after removing context", async () => {
@@ -539,7 +852,7 @@ test("HomeScreen restores prompt focus and its end caret after removing context"
     listDesignSystems: async () => DSYS,
   });
 
-  const file = new File(["image"], "focus-reference.png", { type: "image/png" });
+  const file = validPngFile("focus-reference.png");
   fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { types: ["Files"], files: [file] } });
 
   const rail = await screen.findByRole("list", { name: "Attached context" });

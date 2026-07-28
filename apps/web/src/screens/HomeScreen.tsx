@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -60,18 +69,36 @@ import sharinganEyeUrl from "../assets/sharingan-eye.png";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 import { native } from "../lib/native.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
-import { setPendingImages, setPendingRefs } from "../lib/pending-brief.ts";
+import {
+  discardPendingDesignWorkspaceTurn,
+  type PendingProjectAttachments,
+  type PendingProjectReferenceIdentity,
+} from "../lib/pending-brief.ts";
 import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
-import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { cn } from "../lib/utils.ts";
 import { beginResourceLoad, idleResource, readyResource, rejectResource, resolveResource } from "../lib/async-resource.ts";
-import type { DesignSystemCard, Project, ProjectMode, Settings, SkillCard } from "../lib/api.ts";
+import {
+  RUN_CONTEXT_MAX_ITEMS,
+  type DesignSystemCard,
+  type Project,
+  type ProjectMode,
+  type ProjectWorkspacePayload,
+  type Settings,
+  type SkillCard,
+} from "../lib/api.ts";
 
 const DEFAULT_SKILL = "frontend-design";
 const DEFAULT_DS = "modern-minimal";
 const HOME_COMPOSER_KEY = "dezin.home.composer";
+const MAX_HOME_IMAGE_ATTACHMENTS = 2;
+const MAX_HOME_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_HOME_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
+const HOME_VISUAL_ATTACHMENT_AGENTS = new Set(["claude", "codebuddy", "codex"]);
+const AgentModelSelect = lazy(() => import("../components/AgentModelSelect.tsx").then((module) => ({
+  default: module.AgentModelSelect,
+})));
 
 interface HomeComposerPrefs {
   skillId?: string;
@@ -80,6 +107,26 @@ interface HomeComposerPrefs {
 }
 
 type HomeContextItem = Extract<AgentComposerContextItem, { type: "local-path" | "text-context" }>;
+type HomeImageMimeType = "image/png" | "image/jpeg";
+type HomeImageAttachment = {
+  name: string;
+  base64: string;
+  preview: string;
+  mimeType: HomeImageMimeType;
+  byteSize: number;
+};
+type HomeProjectReference = {
+  id: string;
+  projectId: string;
+  name: string;
+  base64: string;
+  projectReference?: PendingProjectReferenceIdentity;
+};
+
+interface HomeAttachments {
+  images: HomeImageAttachment[];
+  refs: HomeProjectReference[];
+}
 
 function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
   return paths.map((path) => ({
@@ -93,6 +140,90 @@ function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
 
 function isProjectMode(value: unknown): value is ProjectMode {
   return value === "prototype" || value === "standard";
+}
+
+interface ExactStandardProjectReferenceSelection {
+  identity: PendingProjectReferenceIdentity;
+  artifactName: string;
+  artifactKind: "page" | "component";
+}
+
+function exactStandardProjectReferences(
+  projectId: string,
+  payload: ProjectWorkspacePayload,
+): ExactStandardProjectReferenceSelection[] {
+  if (payload.status !== "ready" || payload.workspace.projectId !== projectId) return [];
+  return [
+    ...payload.artifacts.filter((candidate) => candidate.archivedAt === null && candidate.kind === "page"),
+    ...payload.artifacts.filter((candidate) => candidate.archivedAt === null && candidate.kind !== "page"),
+  ]
+    .filter((candidate) => {
+      const revisionId = payload.activeSnapshot.artifactRevisions[candidate.id] ?? null;
+      return revisionId !== null && payload.revisions.some((revision) => (
+        revision.id === revisionId && revision.artifactId === candidate.id
+      ));
+    })
+    .sort((left, right) => {
+      const kind = Number(left.kind !== "page") - Number(right.kind !== "page");
+      return kind || left.createdAt - right.createdAt || left.id.localeCompare(right.id);
+    })
+    .flatMap((artifact): ExactStandardProjectReferenceSelection[] => {
+      const revisionId = payload.activeSnapshot.artifactRevisions[artifact.id];
+      if (!revisionId) return [];
+      return [{
+        identity: {
+          sourceProjectId: projectId,
+          sourceWorkspaceId: payload.workspace.id,
+          sourceSnapshotId: payload.activeSnapshot.id,
+          sourceArtifactId: artifact.id,
+          sourceArtifactRevisionId: revisionId,
+        },
+        artifactName: artifact.name,
+        artifactKind: artifact.kind,
+      }];
+    });
+}
+
+function exactHomeImageMimeType(file: File): HomeImageMimeType | null {
+  const normalizedType = file.type.trim().toLowerCase();
+  return normalizedType === "image/png" || normalizedType === "image/jpeg"
+    ? normalizedType
+    : null;
+}
+
+function homeVisualAttachmentBlockedReason(command: string): string | null {
+  return command && !HOME_VISUAL_ATTACHMENT_AGENTS.has(command)
+    ? `${command} can't receive visual attachments for Workspace planning. Choose Claude Code, CodeBuddy, or Codex, or remove the images.`
+    : null;
+}
+
+function decodedHomeImage(
+  dataUrl: string,
+  expectedMimeType: HomeImageMimeType,
+): { base64: string; byteSize: number } | null {
+  const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/]*={0,2})$/.exec(dataUrl);
+  if (!match || match[1] !== expectedMimeType) return null;
+  let bytes: string;
+  try {
+    bytes = atob(match[2]!);
+  } catch {
+    return null;
+  }
+  if (bytes.length <= 0 || bytes.length > MAX_HOME_IMAGE_BYTES) return null;
+  const valid = expectedMimeType === "image/png"
+    ? bytes.length >= 8
+      && bytes.charCodeAt(0) === 0x89
+      && bytes.slice(1, 4) === "PNG"
+      && bytes.charCodeAt(4) === 0x0d
+      && bytes.charCodeAt(5) === 0x0a
+      && bytes.charCodeAt(6) === 0x1a
+      && bytes.charCodeAt(7) === 0x0a
+    : bytes.length >= 4
+      && bytes.charCodeAt(0) === 0xff
+      && bytes.charCodeAt(1) === 0xd8
+      && bytes.charCodeAt(bytes.length - 2) === 0xff
+      && bytes.charCodeAt(bytes.length - 1) === 0xd9;
+  return valid ? { base64: match[2]!, byteSize: bytes.length } : null;
 }
 
 function readHomeComposerPrefs(): HomeComposerPrefs {
@@ -241,6 +372,7 @@ export function HomeScreen({
     mode: ProjectMode,
     sharingan?: { sourceUrl: string },
     agentSelection?: { agentCommand: string; model?: string },
+    attachments?: PendingProjectAttachments,
   ) => void | Promise<void>;
   onOpenProject?: (id: string) => void;
 }) {
@@ -290,13 +422,140 @@ export function HomeScreen({
   const [sort, setSort] = useState<"recent" | "name" | "oldest">("recent");
   const [view, setView] = useState<"active" | "archived">("active");
   const [layout, setLayout] = useState<"grid" | "list">("grid");
-  const [images, setImages] = useState<{ name: string; base64: string; preview: string }[]>([]);
-  const [refs, setRefs] = useState<{ id: string; name: string; base64: string }[]>([]);
+  const [homeAttachments, setHomeAttachments] = useState<HomeAttachments>({ images: [], refs: [] });
+  const [standardReferencePicker, setStandardReferencePicker] = useState<{
+    project: Project;
+    selections: ExactStandardProjectReferenceSelection[];
+  } | null>(null);
+  const homeAttachmentsRef = useRef(homeAttachments);
+  const homeAttachmentReservationsRef = useRef(0);
+  const homeImageReservationsRef = useRef(0);
+  const homeImageByteReservationsRef = useRef(0);
+  const homeReferenceReservationsRef = useRef(new Set<string>());
+  const pendingAttachmentOperationsRef = useRef(0);
+  const [pendingAttachmentOperations, setPendingAttachmentOperations] = useState(0);
+  const images = homeAttachments.images;
+  const refs = homeAttachments.refs;
   const [homeContextItems, setHomeContextItems] = useState<HomeContextItem[]>([]);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
+
+  const commitHomeAttachments = useCallback((next: HomeAttachments): void => {
+    homeAttachmentsRef.current = next;
+    setHomeAttachments(next);
+  }, []);
+
+  const reserveHomeAttachmentSlots = useCallback((requested: number): number => {
+    const current = homeAttachmentsRef.current;
+    const available = Math.max(
+      0,
+      RUN_CONTEXT_MAX_ITEMS
+        - current.images.length
+        - current.refs.length
+        - homeAttachmentReservationsRef.current,
+    );
+    const reserved = Math.min(Math.max(0, requested), available);
+    homeAttachmentReservationsRef.current += reserved;
+    return reserved;
+  }, []);
+
+  const releaseHomeAttachmentSlots = useCallback((reserved: number): void => {
+    homeAttachmentReservationsRef.current = Math.max(0, homeAttachmentReservationsRef.current - reserved);
+  }, []);
+
+  const beginAttachmentOperation = useCallback((): (() => void) => {
+    pendingAttachmentOperationsRef.current += 1;
+    setPendingAttachmentOperations(pendingAttachmentOperationsRef.current);
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      pendingAttachmentOperationsRef.current = Math.max(0, pendingAttachmentOperationsRef.current - 1);
+      setPendingAttachmentOperations(pendingAttachmentOperationsRef.current);
+    };
+  }, []);
+
+  const notifyHomeAttachmentLimit = useCallback(
+    (omitted: number): void => {
+      if (omitted <= 0) return;
+      toast(
+        `You can attach up to ${RUN_CONTEXT_MAX_ITEMS} images and project references. ${omitted} ${
+          omitted === 1 ? "item was" : "items were"
+        } not added.`,
+        { variant: "error" },
+      );
+    },
+    [toast],
+  );
+
+  const notifyHomeImageLimit = useCallback(
+    (omitted: number): void => {
+      if (omitted <= 0) return;
+      toast(
+        `You can attach up to ${MAX_HOME_IMAGE_ATTACHMENTS} PNG or JPEG images. ${omitted} ${
+          omitted === 1 ? "image was" : "images were"
+        } not added.`,
+        { variant: "error" },
+      );
+    },
+    [toast],
+  );
+
+  const appendHomeImages = useCallback(
+    (incoming: HomeImageAttachment[], notifyLimit = true): { added: number; omitted: number } => {
+      if (!incoming.length) return { added: 0, omitted: 0 };
+      const current = homeAttachmentsRef.current;
+      const availableItems = Math.max(
+        0,
+        RUN_CONTEXT_MAX_ITEMS
+          - current.images.length
+          - current.refs.length
+          - homeAttachmentReservationsRef.current,
+      );
+      const availableImages = Math.max(
+        0,
+        MAX_HOME_IMAGE_ATTACHMENTS - current.images.length - homeImageReservationsRef.current,
+      );
+      let availableBytes = Math.max(
+        0,
+        MAX_HOME_TOTAL_IMAGE_BYTES
+          - current.images.reduce((total, image) => total + image.byteSize, 0)
+          - homeImageByteReservationsRef.current,
+      );
+      const accepted: HomeImageAttachment[] = [];
+      for (const image of incoming) {
+        if (accepted.length >= Math.min(availableItems, availableImages) || image.byteSize > availableBytes) continue;
+        accepted.push(image);
+        availableBytes -= image.byteSize;
+      }
+      const omitted = incoming.length - accepted.length;
+      if (accepted.length) {
+        commitHomeAttachments({ ...current, images: [...current.images, ...accepted] });
+      }
+      if (notifyLimit) notifyHomeImageLimit(omitted);
+      return { added: accepted.length, omitted };
+    },
+    [commitHomeAttachments, notifyHomeImageLimit],
+  );
+
+  const appendHomeProjectReference = useCallback(
+    (incoming: HomeProjectReference): boolean => {
+      const current = homeAttachmentsRef.current;
+      if (current.refs.some((ref) => ref.id === incoming.id)) return false;
+      if (
+        current.images.length + current.refs.length + homeAttachmentReservationsRef.current
+        >= RUN_CONTEXT_MAX_ITEMS
+      ) {
+        notifyHomeAttachmentLimit(1);
+        return false;
+      }
+      commitHomeAttachments({ ...current, refs: [...current.refs, incoming] });
+      return true;
+    },
+    [commitHomeAttachments, notifyHomeAttachmentLimit],
+  );
 
   const homeDisplayItems = useMemo<AgentComposerContextItem[]>(
     () => [
@@ -307,14 +566,14 @@ export function HomeScreen({
         name: image.name,
         path: image.name,
         previewUrl: image.preview,
-        mimeType: "image/*",
+        mimeType: image.mimeType,
       })),
       ...refs.map((ref) => ({
         id: `project:${ref.id}`,
         type: "project" as const,
         title: ref.name,
         subtitle: "Project",
-        projectId: ref.id,
+        projectId: ref.projectId,
         name: ref.name,
       })),
       ...homeContextItems,
@@ -444,9 +703,31 @@ export function HomeScreen({
         .getCapture()
         .then((cap) => {
           if (!cap.images.length) return;
-          setImages((cur) => [...cur, ...cap.images.map((i) => ({ name: i.name, base64: i.base64, preview: `data:image/png;base64,${i.base64}` }))]);
+          const decoded = cap.images.flatMap((image): HomeImageAttachment[] => {
+            const preview = `data:image/png;base64,${image.base64}`;
+            const verified = decodedHomeImage(preview, "image/png");
+            return verified === null
+              ? []
+              : [{
+                  name: image.name.toLowerCase().endsWith(".png") ? image.name : `${image.name}.png`,
+                  base64: verified.base64,
+                  preview,
+                  mimeType: "image/png",
+                  byteSize: verified.byteSize,
+                }];
+          });
+          const invalid = cap.images.length - decoded.length;
+          if (invalid) {
+            toast(
+              `${invalid} browser ${invalid === 1 ? "capture was" : "captures were"} invalid or exceeded the 8 MiB image limit.`,
+              { variant: "error" },
+            );
+          }
+          const { added } = appendHomeImages(
+            decoded,
+          );
           if (cap.note) setBrief((b) => (b.trim() ? b : cap.note));
-          toast(`Imported ${cap.images.length} reference${cap.images.length === 1 ? "" : "s"} from ${cap.source}.`);
+          if (added) toast(`Imported ${added} reference${added === 1 ? "" : "s"} from ${cap.source}.`);
         })
         .catch(() => {});
     };
@@ -460,7 +741,7 @@ export function HomeScreen({
       window.removeEventListener("focus", pull);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [api, projectsOverride, toast]);
+  }, [api, appendHomeImages, projectsOverride, toast]);
 
   useEffect(() => {
     let alive = true;
@@ -543,17 +824,126 @@ export function HomeScreen({
 
   const addImages = async (files: FileList | File[] | null): Promise<void> => {
     if (!files) return;
-    for (const file of Array.from(files).filter((f) => f.type.startsWith("image/"))) {
+    const visualAttachmentBlockedReason = homeVisualAttachmentBlockedReason(homeAgent);
+    if (visualAttachmentBlockedReason) {
+      toast(visualAttachmentBlockedReason, { variant: "error" });
+      return;
+    }
+    const supplied = Array.from(files);
+    const typed = supplied.flatMap((file): Array<{ file: File; mimeType: HomeImageMimeType }> => {
+      const mimeType = exactHomeImageMimeType(file);
+      return mimeType === null ? [] : [{ file, mimeType }];
+    });
+    const unsupported = supplied.filter((file) => (
+      file.type.startsWith("image/")
+      || /\.(?:png|jpe?g|gif|webp|svg|avif|heic|heif)$/iu.test(file.name)
+    )).length - typed.length;
+    if (unsupported > 0) {
+      toast(
+        `Only PNG and JPEG images are supported. ${unsupported} ${
+          unsupported === 1 ? "file was" : "files were"
+        } not added.`,
+        { variant: "error" },
+      );
+    }
+
+    const current = homeAttachmentsRef.current;
+    const availableImageCount = Math.max(
+      0,
+      MAX_HOME_IMAGE_ATTACHMENTS - current.images.length - homeImageReservationsRef.current,
+    );
+    let availableImageBytes = Math.max(
+      0,
+      MAX_HOME_TOTAL_IMAGE_BYTES
+        - current.images.reduce((total, image) => total + image.byteSize, 0)
+        - homeImageByteReservationsRef.current,
+    );
+    const candidates: Array<{ file: File; mimeType: HomeImageMimeType }> = [];
+    let individualLimitOmissions = 0;
+    let aggregateLimitOmissions = 0;
+    let countLimitOmissions = 0;
+    for (const candidate of typed) {
+      if (candidate.file.size <= 0 || candidate.file.size > MAX_HOME_IMAGE_BYTES) {
+        individualLimitOmissions += 1;
+        continue;
+      }
+      if (candidates.length >= availableImageCount) {
+        countLimitOmissions += 1;
+        continue;
+      }
+      if (candidate.file.size > availableImageBytes) {
+        aggregateLimitOmissions += 1;
+        continue;
+      }
+      candidates.push(candidate);
+      availableImageBytes -= candidate.file.size;
+    }
+    if (individualLimitOmissions > 0) {
+      toast(
+        `Each PNG or JPEG image must be 8 MiB or smaller. ${individualLimitOmissions} ${
+          individualLimitOmissions === 1 ? "image was" : "images were"
+        } not added.`,
+        { variant: "error" },
+      );
+    }
+    if (aggregateLimitOmissions > 0) {
+      toast(
+        `PNG and JPEG attachments can use up to 12 MiB in total. ${aggregateLimitOmissions} ${
+          aggregateLimitOmissions === 1 ? "image was" : "images were"
+        } not added.`,
+        { variant: "error" },
+      );
+    }
+    notifyHomeImageLimit(countLimitOmissions);
+
+    const reserved = reserveHomeAttachmentSlots(candidates.length);
+    const filesToRead = candidates.slice(0, reserved);
+    const omittedByContextLimit = candidates.length - filesToRead.length;
+    const reservedImageBytes = filesToRead.reduce((total, candidate) => total + candidate.file.size, 0);
+    homeImageReservationsRef.current += filesToRead.length;
+    homeImageByteReservationsRef.current += reservedImageBytes;
+    const finishAttachmentOperation = filesToRead.length > 0 ? beginAttachmentOperation() : null;
+    const incoming: HomeImageAttachment[] = [];
+    try {
+      for (const { file, mimeType } of filesToRead) {
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          });
+          const verified = decodedHomeImage(dataUrl, mimeType);
+          if (verified === null) {
+            toast(`${file.name || "That image"} is not a valid ${mimeType === "image/png" ? "PNG" : "JPEG"} image.`, {
+              variant: "error",
+            });
+            continue;
+          }
+          incoming.push({
+            name: file.name || (mimeType === "image/png" ? "image.png" : "image.jpg"),
+            base64: verified.base64,
+            preview: dataUrl,
+            mimeType,
+            byteSize: verified.byteSize,
+          });
+        } catch {
+          toast("Couldn't read that image.", { variant: "error" });
+        }
+      }
+    } finally {
+      releaseHomeAttachmentSlots(reserved);
+      homeImageReservationsRef.current = Math.max(0, homeImageReservationsRef.current - filesToRead.length);
+      homeImageByteReservationsRef.current = Math.max(
+        0,
+        homeImageByteReservationsRef.current - reservedImageBytes,
+      );
       try {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        setImages((cur) => [...cur, { name: file.name, base64: dataUrl.split(",")[1] ?? "", preview: dataUrl }]);
-      } catch {
-        toast("Couldn't read that image.", { variant: "error" });
+        const { omitted: omittedAfterRead } = appendHomeImages(incoming, false);
+        notifyHomeAttachmentLimit(omittedByContextLimit);
+        notifyHomeImageLimit(omittedAfterRead);
+      } finally {
+        finishAttachmentOperation?.();
       }
     }
   };
@@ -572,7 +962,13 @@ export function HomeScreen({
     if (paths.length) {
       setHomeContextItems((current) => upsertContextItems(current, homeContextItemsForPaths(paths)));
     }
-    void filesFromDataTransfer(dataTransfer).then(addImages);
+    const finishAttachmentOperation = beginAttachmentOperation();
+    void filesFromDataTransfer(dataTransfer)
+      .then(addImages)
+      .catch(() => {
+        toast("Couldn't read the dropped context.", { variant: "error" });
+      })
+      .finally(finishAttachmentOperation);
   };
 
   const addHomePaths = (paths: string[]): void => {
@@ -602,10 +998,14 @@ export function HomeScreen({
 
   const removeHomeDisplayItem = (id: string): void => {
     if (id.startsWith("home-image:")) {
-      setImages((current) => current.filter((image, index) => `home-image:${image.name}:${index}` !== id));
+      const current = homeAttachmentsRef.current;
+      const nextImages = current.images.filter((image, index) => `home-image:${image.name}:${index}` !== id);
+      if (nextImages.length !== current.images.length) commitHomeAttachments({ ...current, images: nextImages });
     } else if (id.startsWith("project:")) {
       const projectId = id.slice("project:".length);
-      setRefs((current) => current.filter((ref) => ref.id !== projectId));
+      const current = homeAttachmentsRef.current;
+      const nextRefs = current.refs.filter((ref) => ref.id !== projectId);
+      if (nextRefs.length !== current.refs.length) commitHomeAttachments({ ...current, refs: nextRefs });
     } else {
       setHomeContextItems((current) => current.filter((item) => item.id !== id));
     }
@@ -613,17 +1013,67 @@ export function HomeScreen({
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
-    if (refs.some((r) => r.id === project.id)) return;
+    const current = homeAttachmentsRef.current;
+    if (
+      current.refs.some((ref) => ref.id === project.id)
+      || homeReferenceReservationsRef.current.has(project.id)
+    ) return;
+    const reserved = reserveHomeAttachmentSlots(1);
+    if (!reserved) {
+      notifyHomeAttachmentLimit(1);
+      return;
+    }
+    homeReferenceReservationsRef.current.add(project.id);
+    const finishAttachmentOperation = beginAttachmentOperation();
+    let reservationHeld = true;
     try {
+      if (project.mode === "standard") {
+        const selections = exactStandardProjectReferences(project.id, await api.getWorkspace(project.id));
+        if (selections.length === 0) {
+          toast(
+            "That Standard project has no current immutable Page or Component Revision to reference yet.",
+            { variant: "error" },
+          );
+          return;
+        }
+        setStandardReferencePicker({ project, selections });
+        return;
+      }
       const html = await fetchProjectArtifact(api, project.id);
       if (!html) {
         toast("That project has no design to reference yet.", { variant: "error" });
         return;
       }
-      setRefs((cur) => [...cur, { id: project.id, name: project.name, base64: toBase64(html) }]);
+      const incoming: HomeProjectReference = {
+        id: project.id,
+        projectId: project.id,
+        name: project.name,
+        base64: toBase64(html),
+      };
+      releaseHomeAttachmentSlots(reserved);
+      reservationHeld = false;
+      appendHomeProjectReference(incoming);
     } catch {
       toast("Couldn't reference that project.", { variant: "error" });
+    } finally {
+      if (reservationHeld) releaseHomeAttachmentSlots(reserved);
+      homeReferenceReservationsRef.current.delete(project.id);
+      finishAttachmentOperation();
     }
+  };
+
+  const attachStandardProjectReference = (
+    project: Project,
+    selection: ExactStandardProjectReferenceSelection,
+  ): void => {
+    const attached = appendHomeProjectReference({
+      id: `${project.id}:${selection.identity.sourceArtifactId}`,
+      projectId: project.id,
+      name: `${project.name} / ${selection.artifactName}`,
+      base64: "",
+      projectReference: selection.identity,
+    });
+    if (attached) setStandardReferencePicker(null);
   };
 
   const creatingRef = useRef(false);
@@ -635,18 +1085,46 @@ export function HomeScreen({
     creatingRef.current = true;
     setCreating(true);
     try {
+      const currentAttachments = homeAttachmentsRef.current;
+      const attachments: PendingProjectAttachments | undefined = currentAttachments.images.length || currentAttachments.refs.length
+        ? {
+            images: currentAttachments.images.map(({ name, base64, mimeType }) => ({ name, base64, mimeType })),
+            refs: currentAttachments.refs.map(({ name, base64, projectReference }) => ({
+              name,
+              base64,
+              ...(projectReference === undefined ? {} : { projectReference }),
+            })),
+          }
+        : undefined;
       // Keep the legacy four-argument call when no Agent is selected. A normal Agent-backed
       // creation carries its immutable command/model separately from the Sharingan option.
-      if (sharinganArg) await onNewProject?.(text, skillId, null, projectMode, sharinganArg);
-      else if (homeAgent) {
+      const agentSelection = homeAgent
+        ? { agentCommand: homeAgent, ...(homeModel ? { model: homeModel } : {}) }
+        : undefined;
+      if (sharinganArg && (agentSelection || attachments)) {
+        await onNewProject?.(text, skillId, null, projectMode, sharinganArg, agentSelection, attachments);
+      } else if (sharinganArg) await onNewProject?.(text, skillId, null, projectMode, sharinganArg);
+      else if (agentSelection && attachments) {
         await onNewProject?.(
           text,
           skillId,
           designSystemId,
           projectMode,
           undefined,
-          { agentCommand: homeAgent, ...(homeModel ? { model: homeModel } : {}) },
+          agentSelection,
+          attachments,
         );
+      } else if (agentSelection) {
+        await onNewProject?.(
+          text,
+          skillId,
+          designSystemId,
+          projectMode,
+          undefined,
+          agentSelection,
+        );
+      } else if (attachments) {
+        await onNewProject?.(text, skillId, designSystemId, projectMode, undefined, undefined, attachments);
       } else {
         await onNewProject?.(text, skillId, designSystemId, projectMode);
       }
@@ -657,8 +1135,19 @@ export function HomeScreen({
   };
 
   const submit = () => {
+    if (pendingAttachmentOperationsRef.current > 0) {
+      toast("Wait for attached context to finish loading.", { variant: "error" });
+      return;
+    }
     if (homeAgentBlockedReason) {
       toast(homeAgentBlockedReason, { variant: "error" });
+      return;
+    }
+    const visualAttachmentBlockedReason = images.length
+      ? homeVisualAttachmentBlockedReason(homeAgent)
+      : null;
+    if (visualAttachmentBlockedReason) {
+      toast(visualAttachmentBlockedReason, { variant: "error" });
       return;
     }
     const pathItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "local-path" }> => item.type === "local-path");
@@ -690,8 +1179,6 @@ export function HomeScreen({
       return;
     }
     if (!text) return;
-    if (images.length) setPendingImages(images.map((i) => ({ name: i.name, base64: i.base64 })));
-    if (refs.length) setPendingRefs(refs.map((r) => ({ name: r.name, base64: r.base64 })));
     void startCreate(text, mode);
   };
 
@@ -746,6 +1233,7 @@ export function HomeScreen({
     if (!window.confirm("Delete this project permanently? This can't be undone.")) return;
     try {
       await api.deleteProject(id);
+      discardPendingDesignWorkspaceTurn(id);
       refresh();
     } catch {
       toast("Couldn't delete the project.", { variant: "error" });
@@ -920,7 +1408,7 @@ export function HomeScreen({
               <input
                 ref={imgInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/png,image/jpeg,.png,.jpg,.jpeg"
                 multiple
                 className="hidden"
                 onChange={(e) => {
@@ -1060,18 +1548,21 @@ export function HomeScreen({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <AgentModelSelect
-                    agents={agents}
-                    agent={homeAgent}
-                    model={homeModel}
-                    onAgentChange={changeHomeAgent}
-                    onModelChange={changeHomeModel}
-                    onRescan={rescanAgents}
-                  />
+                  <Suspense fallback={<div aria-hidden className="h-7 w-28 rounded-md bg-surface-2" />}>
+                    <AgentModelSelect
+                      agents={agents}
+                      agent={homeAgent}
+                      model={homeModel}
+                      onAgentChange={changeHomeAgent}
+                      onModelChange={changeHomeModel}
+                      onRescan={rescanAgents}
+                    />
+                  </Suspense>
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={creating || optimizingPrompt || homeAgentBlockedReason !== null || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
+                    disabled={creating || optimizingPrompt || pendingAttachmentOperations > 0 || homeAgentBlockedReason !== null || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
+                    aria-busy={pendingAttachmentOperations > 0 || undefined}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
@@ -1313,6 +1804,46 @@ export function HomeScreen({
         )}
         </div>
       </div>
+
+      <Dialog
+        open={standardReferencePicker !== null}
+        onClose={() => setStandardReferencePicker(null)}
+        label="Choose a versioned design"
+        className="max-w-lg"
+      >
+        <div className="p-5">
+          <h2 className="text-base font-semibold tracking-tight">Choose a versioned design</h2>
+          <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+            Select the exact Page or Component from {standardReferencePicker?.project.name ?? "this project"}.
+            Dezin will pin its current immutable Revision.
+          </p>
+          <ul aria-label="Versioned designs" className="mt-4 grid max-h-80 gap-2 overflow-y-auto">
+            {standardReferencePicker?.selections.map((selection) => (
+              <li key={selection.identity.sourceArtifactId}>
+                <button
+                  type="button"
+                  aria-label={`Reference ${selection.artifactName}`}
+                  onClick={() => attachStandardProjectReference(standardReferencePicker.project, selection)}
+                  className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-3 py-3 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted-foreground">
+                    {selection.artifactKind === "page"
+                      ? <FileText size={16} strokeWidth={1.75} />
+                      : <Boxes size={16} strokeWidth={1.75} />}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-foreground">{selection.artifactName}</span>
+                    <span className="mt-0.5 block text-xs capitalize text-muted-foreground">
+                      {selection.artifactKind} · Current immutable Revision
+                    </span>
+                  </span>
+                  <ArrowRight size={14} className="ml-auto shrink-0 text-muted-foreground" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </Dialog>
 
       <Dialog open={editingId !== null} onClose={() => setEditingId(null)} label="Rename project" className="max-w-md">
         <form

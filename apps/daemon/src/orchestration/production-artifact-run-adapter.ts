@@ -26,6 +26,7 @@ const ARTIFACT_OPTION_FIELDS = Object.freeze([
   "baseSystemPrompt",
   "environment",
   "sharinganCaptures",
+  "resourceReferences",
   "onEvent",
   "reportError",
 ] as const);
@@ -143,6 +144,7 @@ function artifactOptions(value: unknown): Record<typeof ARTIFACT_OPTION_FIELDS[n
     const result = {
       environment: undefined,
       sharinganCaptures: undefined,
+      resourceReferences: undefined,
       onEvent: undefined,
       reportError: undefined,
     } as Record<typeof ARTIFACT_OPTION_FIELDS[number], unknown>;
@@ -167,6 +169,7 @@ function requireConfiguration(
   baseSystemPrompt: ArtifactRunPreparationOptions["baseSystemPrompt"];
   environment: ArtifactRunPreparationOptions["environment"];
   sharinganCaptures: ArtifactRunPreparationOptions["sharinganCaptures"];
+  resourceReferences: ArtifactRunPreparationOptions["resourceReferences"];
   onEvent: ArtifactRunExecutorOptions["onEvent"];
   reportError: ArtifactRunExecutorOptions["reportError"];
   createAgentRunner: ProductionArtifactAgentAdapter["createRunner"];
@@ -222,6 +225,21 @@ function requireConfiguration(
       "build-infrastructure",
     );
   }
+  const resourceReferenceMaterialize = configuration.resourceReferences === undefined
+    ? null
+    : dataMethod<
+      NonNullable<ArtifactRunPreparationOptions["resourceReferences"]>["materializeExactReferences"]
+    >(
+      configuration.resourceReferences,
+      "materializeExactReferences",
+    );
+  if (configuration.resourceReferences !== undefined && resourceReferenceMaterialize === null) {
+    throw new ProductionArtifactRunAdapterError(
+      "PRODUCTION_ARTIFACT_CONFIGURATION_INVALID",
+      "Production Artifact Resource reference materializer is invalid",
+      "build-infrastructure",
+    );
+  }
   const owner = options as unknown as object;
   return {
     contextPacks: Object.freeze({ get: contextPackGet }),
@@ -237,6 +255,9 @@ function requireConfiguration(
     sharinganCaptures: sharinganMaterialize === null
       ? undefined
       : Object.freeze({ materializeExactRevision: sharinganMaterialize }),
+    resourceReferences: resourceReferenceMaterialize === null
+      ? undefined
+      : Object.freeze({ materializeExactReferences: resourceReferenceMaterialize }),
     onEvent: configuration.onEvent === undefined
       ? undefined
       : (configuration.onEvent as NonNullable<ArtifactRunExecutorOptions["onEvent"]>).bind(owner),
@@ -276,6 +297,7 @@ export function createProductionArtifactRunExecutor(
     baseSystemPrompt: configuration.baseSystemPrompt,
     environment: configuration.environment,
     sharinganCaptures: configuration.sharinganCaptures,
+    resourceReferences: configuration.resourceReferences,
     async createRunner(input, signal) {
       let rawRunner: AgentRunner;
       try {

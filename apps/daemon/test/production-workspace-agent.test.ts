@@ -26,6 +26,8 @@ import { BlockedContextError } from "../src/context/context-types.ts";
 import { createWorkspaceContextPackRepository } from "../src/context/context-pack-store.ts";
 import { createProductionScopedAgentTaskQueue } from "../src/orchestration/production-scoped-agent-task-queue.ts";
 import { createProductionWorkspaceAgentOrchestrator } from "../src/orchestration/production-workspace-agent.ts";
+import { createSharinganBootstrapService } from "../src/sharingan-bootstrap.ts";
+import { semanticSharinganCaptureFiles } from "./support/sharingan-capture-fixture.ts";
 
 const WORKSPACE_TURN_ID = "turn-00000000-0000-4000-8000-000000000010";
 const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
@@ -34,6 +36,10 @@ const TEST_CODEX_EXECUTABLE = "/trusted/codex/install/bin/codex";
 const TEST_CURSOR_EXECUTABLE = "/trusted/cursor-agent/install/bin/cursor-agent";
 const TEST_GEMINI_EXECUTABLE = "/trusted/gemini/install/bin/gemini";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const VALID_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 const CLAUDE_AGENT = Object.freeze({
   providerId: "claude",
   command: "claude",
@@ -223,6 +229,196 @@ test("production Workspace Agent resolves immutable context in a scratch directo
     inheritEnvironment: false,
   }]);
   assert.equal(spawner.inputs.length, 1, "an exact retry replays before Context and planner work");
+});
+
+test("production Workspace Planner sends exact verified image Resource bytes and identity through provider-native transport", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-image-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent image evidence", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "file",
+    title: "Exact editorial reference",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  const revisionId = "workspace-image-evidence-revision";
+  const sealed = await sealResourceRevisionPayload({
+    storageRoot: root,
+    workspaceId: created.resource.workspaceId,
+    resourceId: created.resource.id,
+    revisionId,
+    mimeType: "image/png",
+    bytes: VALID_PNG,
+  });
+  const revision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    created.resource.id,
+    {
+      revisionId,
+      parentRevisionId: null,
+      manifestPath: sealed.manifestPath,
+      summary: "Exact immutable image uploaded from Home",
+      metadata: { mimeType: sealed.mimeType },
+      checksum: sealed.manifestChecksum,
+      provenance: { source: "home-standard-handoff" },
+    },
+  );
+  store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "Attach exact Home image evidence",
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const semanticResponse = {
+        pages: [{
+          existingNodeId: null,
+          name: "Reference-led landing",
+          instructions: "Create a complete landing Page using the supplied exact visual reference.",
+        }],
+        components: [],
+        resources: [],
+        relations: [],
+        rationale: "Use the exact immutable visual evidence.",
+        assumptions: [],
+  };
+  let transportedBytes: Buffer | null = null;
+  const spawner = new RecordingSpawner(async (spawned) => {
+    const imageFlag = spawned.args.indexOf("--image");
+    assert.ok(imageFlag >= 0, "Codex must receive provider-native image evidence");
+    transportedBytes = readFileSync(spawned.args[imageFlag + 1]!);
+    return {
+      stdout: codexPlannerResponse(semanticResponse),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => spawner,
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000060",
+    message: "Use the attached visual reference to plan the design.",
+    explicitContext: [{
+      kind: "resource",
+      id: created.resource.id,
+      resourceKind: "file",
+      revisionId: revision.id,
+    }],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(result.proposal.generation.resourceOperations, [{
+    nodeId: created.node.id,
+    resourceId: created.resource.id,
+    kind: "file",
+    title: created.resource.title,
+    operation: "reuse",
+    revisionPolicy: { kind: "exact", resourceRevisionId: revision.id },
+  }]);
+  assert.deepEqual(result.proposal.generation.dependencyPlans, [{
+    kind: "resource",
+    ownerArtifactId: result.proposal.generation.artifactPlans[0]!.artifactId,
+    resourceId: created.resource.id,
+  }]);
+  assert.equal(spawner.inputs.length, 1);
+  const spawned = spawner.inputs[0]!;
+  const label = `File Resource ${created.resource.id} Revision ${revision.id}: ${created.resource.title}`;
+  assert.deepEqual(transportedBytes, VALID_PNG);
+  assert.match(spawned.stdin, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(spawned.stdin, /image\/png/);
+});
+
+test("production Workspace Planner blocks missing or tampered exact image Resource payloads before provider spawn", async (t) => {
+  for (const failure of ["missing", "tampered"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `dezin-production-workspace-agent-image-${failure}-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = new Store(join(root, "store.db"));
+    t.after(() => store.close());
+    const project = store.createProject({ name: `Workspace Agent ${failure} image`, mode: "standard" });
+    const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+    const created = store.workspace.createResourceForProject(project.id, {
+      kind: "file",
+      title: `${failure} image`,
+      defaultPinPolicy: "pin-current",
+      baseGraphRevision: foundation.graphRevision,
+      expectedSnapshotId: foundation.activeSnapshotId,
+    });
+    const revisionId = `workspace-image-${failure}-revision`;
+    const sealed = await sealResourceRevisionPayload({
+      storageRoot: root,
+      workspaceId: created.resource.workspaceId,
+      resourceId: created.resource.id,
+      revisionId,
+      mimeType: "image/png",
+      bytes: VALID_PNG,
+    });
+    const revision = store.workspace.createResourceRevisionCandidateForProject(
+      project.id,
+      created.resource.id,
+      {
+        revisionId,
+        parentRevisionId: null,
+        manifestPath: sealed.manifestPath,
+        summary: "Exact immutable image uploaded from Home",
+        metadata: { mimeType: sealed.mimeType },
+        checksum: sealed.manifestChecksum,
+        provenance: { source: "home-standard-handoff" },
+      },
+    );
+    store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: "Attach exact Home image evidence",
+    });
+    await rm(sealed.payloadPath, { force: true });
+    if (failure === "tampered") writeFileSync(sealed.payloadPath, Buffer.alloc(VALID_PNG.byteLength, 0x41));
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const spawner = new RecordingSpawner({
+      stdout: plannerResponse(),
+      stderr: "",
+      exitCode: 0,
+    });
+    const orchestrator = createProductionWorkspaceAgentOrchestrator({
+      store,
+      dataDir: root,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      createSpawner: () => spawner,
+    });
+
+    await assert.rejects(orchestrator.turn({
+      scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+      intent: "plan",
+      agent: CLAUDE_AGENT,
+      turnId: failure === "missing"
+        ? "turn-00000000-0000-4000-8000-000000000061"
+        : "turn-00000000-0000-4000-8000-000000000062",
+      message: "Use the attached visual reference to plan the design.",
+      explicitContext: [{
+        kind: "resource",
+        id: created.resource.id,
+        resourceKind: "file",
+        revisionId: revision.id,
+      }],
+      graphRevision: workspace.graphRevision,
+    }, new AbortController().signal), /payload|resource revision|missing|changed|invalid/i);
+    assert.equal(spawner.inputs.length, 0, `${failure} image bytes must never reach the provider`);
+  }
 });
 
 test("production Workspace Agent bounds a realistic multi-Artifact planning target without dropping exact Research or Moodboard Revisions", async (t) => {
@@ -1048,7 +1244,6 @@ test("production Workspace Agent claims the exact empty legacy Standard Page she
     resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
     createSpawner: () => new RecordingSpawner({ stdout, stderr: "", exitCode: 0 }),
   });
-
   const result = await orchestrator.turn({
     scope: { type: "workspace", id: migrated.workspace.id, workspaceId: migrated.workspace.id },
     intent: "plan",
@@ -1489,7 +1684,8 @@ test("production Workspace Agent pins an exact existing Component without regene
     expectedHeadRevisionId: null,
     expectedSnapshotId: mutation.snapshot.id,
   });
-  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const currentBundle = store.workspace.getCompactBundleByProjectId(project.id)!;
+  const workspace = currentBundle.workspace;
   const stdout = JSON.stringify({
     type: "result",
     subtype: "success",
@@ -1526,7 +1722,7 @@ test("production Workspace Agent pins an exact existing Component without regene
     turnId: "turn-00000000-0000-4000-8000-000000000021",
     message: "Create Checkout using the exact existing Navigation Component.",
     explicitContext: [],
-    graphRevision: workspace.graphRevision,
+    graphRevision: currentBundle.graph.revision,
   }, new AbortController().signal);
 
   assert.equal(result.kind, "proposal");
@@ -1549,6 +1745,175 @@ test("production Workspace Agent pins an exact existing Component without regene
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
   assert.equal(compiled.tasks.filter((task) => task.kind === "page").length, 1);
   assert.equal(compiled.tasks.filter((task) => task.kind === "component").length, 0);
+
+  const exactReuseStdout = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: JSON.stringify({
+      pages: [{
+        existingNodeId: null,
+        operation: "generate",
+        name: "New Receipt",
+        instructions: "Generate a complete responsive receipt page.",
+      }],
+      components: [{
+        existingNodeId: "existing-navigation-component-node",
+        operation: "reuse",
+        name: "Existing Navigation",
+        instructions: "Reuse the exact published Navigation component.",
+      }],
+      resources: [],
+      relations: [],
+      rationale: "Keep the already published Component exact while adding a separate page.",
+      assumptions: [],
+    }),
+  });
+  const exactReuseOrchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({ stdout: exactReuseStdout, stderr: "", exitCode: 0 }),
+  });
+  const postApprovalBundle = store.workspace.getCompactBundleByProjectId(project.id)!;
+  const exactReuseResult = await exactReuseOrchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+    turnId: "turn-00000000-0000-4000-8000-000000000023",
+    message: "Reuse Navigation unchanged, then add a separate Receipt page.",
+    explicitContext: [],
+    graphRevision: postApprovalBundle.graph.revision,
+  }, new AbortController().signal);
+  assert.equal(exactReuseResult.kind, "proposal");
+  assert.equal(exactReuseResult.proposal.generation.kind, "workspace-generation");
+  if (exactReuseResult.proposal.generation.kind === "workspace-generation") {
+    assert.deepEqual(
+      exactReuseResult.proposal.generation.artifactPlans.map((plan) => plan.name),
+      ["New Receipt"],
+    );
+    assert.deepEqual(exactReuseResult.proposal.generation.dependencyPlans, []);
+  }
+});
+
+test("production Workspace Agent carries the daemon-owned exact Sharingan capture through proposal approval and Task materialization", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-sharingan-capture-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const sourceUrl = "https://example.com/";
+  const project = store.createProject({
+    name: "Workspace Agent exact Sharingan capture",
+    mode: "standard",
+    sharingan: true,
+    sourceUrl,
+  });
+  const bootstrap = createSharinganBootstrapService({
+    store,
+    dataDir: root,
+    capture: {
+      async capture(request) {
+        const finalUrl = new URL("captured", request.sourceUrl).href;
+        return {
+          protocol: "dezin.sharingan-bootstrap-capture.v1",
+          exporter: { id: "dezin-sharingan-capture", version: 1 },
+          source: {
+            requestedUrl: request.sourceUrl,
+            finalUrl,
+            capturedAt: 10,
+          },
+          files: semanticSharinganCaptureFiles({
+            requestedUrl: request.sourceUrl,
+            finalUrl,
+          }),
+        };
+      },
+    },
+  });
+  const turnId = "turn-00000000-0000-4000-8000-000000000024";
+  await bootstrap.register(project.id, turnId);
+  const captured = await bootstrap.ensure(project.id, new AbortController().signal);
+  const bundle = store.workspace.getCompactBundleByProjectId(project.id)!;
+  const captureNode = bundle.graph.nodes.find((node) => (
+    node.kind === "resource" && node.resourceId === captured.resourceId
+  ));
+  assert.ok(captureNode);
+
+  const stdout = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: JSON.stringify({
+      pages: [{
+        existingNodeId: null,
+        operation: "generate",
+        name: "Exact Reconstruction",
+        instructions: "Reconstruct the captured source as a complete, responsive Page with exact visual hierarchy.",
+      }],
+      components: [],
+      resources: [],
+      relations: [],
+      rationale: "Use the daemon-owned immutable Sharingan capture as the exact source of truth.",
+      assumptions: [],
+    }),
+  });
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({ stdout, stderr: "", exitCode: 0 }),
+  });
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: captured.workspaceId, workspaceId: captured.workspaceId },
+    intent: "plan",
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+    turnId,
+    message: "Reconstruct the exact captured source.",
+    explicitContext: [captured.context],
+    graphRevision: captured.readyGraphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.equal(result.proposal.generation.kind, "workspace-generation");
+  if (result.proposal.generation.kind !== "workspace-generation") return;
+  assert.deepEqual(result.proposal.generation.resourceOperations, [{
+    nodeId: captureNode.id,
+    resourceId: captured.resourceId,
+    kind: "sharingan-capture",
+    title: "Source capture",
+    operation: "reuse",
+    revisionPolicy: {
+      kind: "exact",
+      resourceRevisionId: captured.revisionId,
+    },
+  }]);
+  assert.equal(result.proposal.generation.artifactPlans.length, 1);
+  const artifactPlan = result.proposal.generation.artifactPlans[0]!;
+  assert.deepEqual(result.proposal.generation.dependencyPlans, [{
+    kind: "resource",
+    ownerArtifactId: artifactPlan.artifactId,
+    resourceId: captured.resourceId,
+  }]);
+
+  const approved = store.workspace.approveProposalForProject(project.id, result.proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  const pageTask = compiled.tasks.find((task) => (
+    task.kind === "page"
+    && task.target.type === "artifact"
+    && task.target.id === artifactPlan.artifactId
+  ));
+  assert.ok(pageTask);
+  const observation = store.workspace.observeGenerationTaskMaterializationForProject(
+    project.id,
+    approved.plan.id,
+    pageTask.id,
+  );
+  assert.deepEqual(observation.resourcePins, [{
+    resourceId: captured.resourceId,
+    revisionId: captured.revisionId,
+    sourceTaskId: null,
+  }]);
 });
 
 test("production Workspace Agent attaches a reused Moodboard only to generated Artifacts so mixed reuse compiles", async (t) => {
@@ -1696,6 +2061,140 @@ test("production Workspace Agent attaches a reused Moodboard only to generated A
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
   assert.equal(compiled.tasks.filter((task) => task.kind === "page").length, 1);
   assert.equal(compiled.tasks.filter((task) => task.kind === "component").length, 0);
+});
+
+test("production Workspace Agent rejects a generated Component dependency owned by a reused Artifact", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-reused-owner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Workspace Agent reused dependency owner", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const pageMutation = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: [{
+      id: "add-reused-owner-page",
+      type: "add-node",
+      node: {
+        id: "reused-owner-page-node",
+        kind: "page",
+        name: "Existing Checkout",
+        artifactId: "reused-owner-page",
+        createIdentity: { initialTrackId: "reused-owner-page-track" },
+      },
+    }],
+  });
+  const page = store.workspace.getArtifact("reused-owner-page");
+  assert.ok(page);
+  const source = seedArtifactSource({
+    root,
+    projectId: project.id,
+    sourceRoot: page.sourceRoot,
+    designNodeId: "reused-owner-page-root",
+  });
+  const pageRevision = store.workspace.createArtifactRevision({
+    artifactId: page.id,
+    trackId: "reused-owner-page-track",
+    parentRevisionId: null,
+    sourceCommitHash: source.commitHash,
+    sourceTreeHash: source.treeHash,
+    kernelRevisionId: foundation.activeKernelRevisionId,
+    renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+    quality: { state: "passed", score: 100, findings: [] },
+    contextPackHash: null,
+    dependencies: [],
+    resourcePins: [],
+  });
+  store.workspace.publishArtifactRevision(pageRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: pageMutation.snapshot.id,
+  });
+  const afterPage = store.workspace.ensureWorkspaceRecord(project.id);
+  const moodboard = store.workspace.createResourceForProject(project.id, {
+    kind: "moodboard",
+    title: "Existing Visual Direction",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: afterPage.graphRevision,
+    expectedSnapshotId: afterPage.activeSnapshotId,
+  });
+  const moodboardRevision = store.workspace.createResourceRevisionCandidateForProject(
+    project.id,
+    moodboard.resource.id,
+    {
+      revisionId: "reused-owner-moodboard-revision",
+      parentRevisionId: null,
+      manifestPath: "resource-revisions/reused-owner-moodboard-revision/manifest.json",
+      summary: "Published visual direction",
+      metadata: { mimeType: "application/json" },
+      checksum: "c".repeat(64),
+      provenance: { source: "test" },
+    },
+  );
+  store.workspace.publishResourceRevisionForProject(
+    project.id,
+    moodboard.resource.id,
+    moodboardRevision.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: moodboard.snapshot.id,
+      reason: "Seed exact immutable Moodboard",
+    },
+  );
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const moodboardNode = store.workspace.getCompactBundleByProjectId(project.id)?.graph.nodes.find(
+    (node) => node.kind === "resource" && node.resourceId === moodboard.resource.id,
+  );
+  assert.ok(moodboardNode);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveCodeBuddyExecutable: () => TEST_CODEBUDDY_EXECUTABLE,
+    createSpawner: () => new RecordingSpawner({
+      stdout: JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: JSON.stringify({
+          pages: [{
+            existingNodeId: "reused-owner-page-node",
+            operation: "reuse",
+            name: "Existing Checkout",
+            instructions: "Reuse the exact published Checkout without changing its composition.",
+          }],
+          components: [{
+            existingNodeId: null,
+            operation: "generate",
+            name: "New Promo Panel",
+            instructions: "Generate a complete reusable promotional panel with responsive interaction states.",
+          }],
+          resources: [{
+            existingNodeId: moodboardNode.id,
+            operation: "reuse",
+            kind: "moodboard",
+            title: moodboard.resource.title,
+            instructions: "Reuse the exact immutable visual direction.",
+          }],
+          relations: [{ source: "Existing Checkout", target: "New Promo Panel", kind: "uses" }],
+          rationale: "Keep Checkout unchanged while generating the shared panel from the existing direction.",
+          assumptions: [],
+        }),
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  await assert.rejects(orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codebuddy", command: "codebuddy", model: "gpt-5.6-sol" },
+    turnId: "turn-00000000-0000-4000-8000-000000000056",
+    message: "Keep Checkout unchanged and add the new shared Promo Panel using the existing Moodboard.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal), /cannot change a reused Artifact/i);
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
 });
 
 test("production Workspace Agent preserves omitted base Component dependencies when revising an Artifact", async (t) => {

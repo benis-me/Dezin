@@ -16,10 +16,15 @@ import test from "node:test";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { GenerationTaskAttemptClaim } from "../../../packages/core/src/index.ts";
 import type { ContextPack } from "../src/context/context-types.ts";
+import { resourceRevisionMountKey } from "../src/resource-revision-payload.ts";
 import {
   ArtifactRunPreparationError,
   DefaultArtifactRunPreparation,
 } from "../src/orchestration/artifact-run-preparation.ts";
+import type {
+  ArtifactResourceReferenceMaterializerPort,
+  MaterializedArtifactResourceReference,
+} from "../src/orchestration/artifact-resource-reference.ts";
 import { validateGenerationTaskPayload } from "../src/orchestration/generation-task-contracts.ts";
 import {
   createSharinganCaptureBundleFence,
@@ -281,6 +286,250 @@ test("Default preparation binds the exact Context Pack and Git base into prompts
   } finally {
     await result.transaction.dispose();
     rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("Default preparation exposes exact file reference paths to the Artifact runner and fences candidate operations", async () => {
+  const repo = repository();
+  const referenceRoot = `.dezin/references/${resourceRevisionMountKey("file-reference-revision-1")}`;
+  const payloadPath = `${referenceRoot}/payload.png`;
+  const baseClaim = claim(repo);
+  const exactClaim: GenerationTaskAttemptClaim = {
+    ...baseClaim,
+    attempt: {
+      ...baseClaim.attempt,
+      resourcePins: [{
+        ordinal: 0,
+        resourceId: "file-reference-1",
+        revisionId: "file-reference-revision-1",
+        sourceTaskId: null,
+      }],
+    },
+  };
+  const pack = contextPack({
+    items: [{
+      ordinal: 0,
+      contextClass: "explicit",
+      ref: {
+        kind: "resource",
+        id: "file-reference-1",
+        resourceKind: "file",
+        revisionId: "file-reference-revision-1",
+      },
+      resolvedKind: "resource-revision",
+      content: "Exact uploaded image metadata",
+      checksum: "f".repeat(64),
+      reason: "Exact uploaded image",
+      trustLevel: "untrusted",
+      capabilities: [],
+      boundary: {
+        source: "resource-revision:file-reference-revision-1",
+        readOnly: true,
+        mayGrantCapabilities: false,
+      },
+      tokenEstimate: 8,
+      provenance: {
+        resourceId: "file-reference-1",
+        resourceRevisionId: "file-reference-revision-1",
+        resourceKind: "file",
+        manifestChecksum: "f".repeat(64),
+        source: { sourceType: "uploaded-file" },
+      },
+      provided: true,
+    }],
+  });
+  let verifyCalls = 0;
+  let candidateOperations = 0;
+  let disposed = false;
+  const resourceReferences: ArtifactResourceReferenceMaterializerPort = {
+    async materializeExactReferences(input) {
+      assert.equal(input.references.length, 1);
+      assert.equal(input.references[0]!.revisionId, "file-reference-revision-1");
+      return {
+        protocol: "dezin.artifact-resource-reference-fence.v1",
+        worktreeDir: realpathSync(input.worktreeDir),
+        mountPath: ".dezin/references",
+        fingerprint: "9".repeat(64),
+        references: [{
+          resourceId: "file-reference-1",
+          revisionId: "file-reference-revision-1",
+          revisionChecksum: "f".repeat(64),
+          sourceType: "uploaded-file",
+          mimeType: "image/png",
+          payloadPath,
+        }],
+        async verify() { verifyCalls += 1; },
+        async withoutMaterializedReferences(operation) {
+          candidateOperations += 1;
+          return operation();
+        },
+        async dispose() { disposed = true; },
+      };
+    },
+  };
+  const preparation = new DefaultArtifactRunPreparation({
+    contextPacks: { get: () => pack },
+    projectIdForWorkspace: () => "project-1",
+    repositoryDirForWorkspace: () => repo.root,
+    artifactSourceRootForTarget: () => ".",
+    createRunner: (infrastructure) => {
+      assert.equal(infrastructure.resourceReferences?.[0]?.payloadPath, payloadPath);
+      return runner;
+    },
+    createQualityEvaluator: () => ({
+      async evaluate() { throw new Error("not used"); },
+    }),
+    baseSystemPrompt: () => "You are Dezin's senior design Agent.",
+    resourceReferences,
+  });
+  const result = await preparation.prepare(exactClaim, AbortSignal.timeout(5_000));
+  try {
+    assert.match(result.systemPrompt, new RegExp(payloadPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    await result.runner.runTurn({
+      systemPrompt: result.systemPrompt,
+      message: result.initialMessage,
+      projectDir: result.transaction.dir,
+    });
+    await result.transaction.fingerprint(AbortSignal.timeout(5_000));
+    assert.ok(verifyCalls >= 4);
+    assert.equal(candidateOperations, 1);
+  } finally {
+    await result.transaction.dispose();
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+  assert.equal(disposed, true);
+});
+
+test("Default preparation rejects same-count Artifact Resource fences that substitute pins or paths", async (t) => {
+  const revisionId = "file-reference-revision-1";
+  const referenceRoot = `.dezin/references/${resourceRevisionMountKey(revisionId)}`;
+  const exactReference: MaterializedArtifactResourceReference = {
+    resourceId: "file-reference-1",
+    revisionId,
+    revisionChecksum: "f".repeat(64),
+    sourceType: "uploaded-file",
+    mimeType: "image/png",
+    payloadPath: `${referenceRoot}/payload.png`,
+  };
+  const scenarios: ReadonlyArray<{
+    readonly name: string;
+    readonly substitute: (
+      reference: MaterializedArtifactResourceReference,
+    ) => MaterializedArtifactResourceReference;
+  }> = [
+    {
+      name: "resource id",
+      substitute: (reference) => ({ ...reference, resourceId: "foreign-resource" }),
+    },
+    {
+      name: "revision id",
+      substitute: (reference) => ({ ...reference, revisionId: "foreign-revision" }),
+    },
+    {
+      name: "revision checksum",
+      substitute: (reference) => ({ ...reference, revisionChecksum: "a".repeat(64) }),
+    },
+    {
+      name: "source type",
+      substitute: (reference) => ({ ...reference, sourceType: "project-reference" }),
+    },
+    {
+      name: "escaping payload path",
+      substitute: (reference) => ({ ...reference, payloadPath: "../outside.png" }),
+    },
+    {
+      name: "uploaded-file project root",
+      substitute: (reference) => ({ ...reference, projectRoot: `${referenceRoot}/project` }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const repo = repository();
+      const baseClaim = claim(repo);
+      const exactClaim: GenerationTaskAttemptClaim = {
+        ...baseClaim,
+        attempt: {
+          ...baseClaim.attempt,
+          resourcePins: [{
+            ordinal: 0,
+            resourceId: exactReference.resourceId,
+            revisionId: exactReference.revisionId,
+            sourceTaskId: null,
+          }],
+        },
+      };
+      const pack = contextPack({
+        items: [{
+          ordinal: 0,
+          contextClass: "explicit",
+          ref: {
+            kind: "resource",
+            id: exactReference.resourceId,
+            resourceKind: "file",
+            revisionId: exactReference.revisionId,
+          },
+          resolvedKind: "resource-revision",
+          content: "Exact uploaded image metadata",
+          checksum: exactReference.revisionChecksum,
+          reason: "Exact uploaded image",
+          trustLevel: "untrusted",
+          capabilities: [],
+          boundary: {
+            source: `resource-revision:${exactReference.revisionId}`,
+            readOnly: true,
+            mayGrantCapabilities: false,
+          },
+          tokenEstimate: 8,
+          provenance: {
+            resourceId: exactReference.resourceId,
+            resourceRevisionId: exactReference.revisionId,
+            resourceKind: "file",
+            manifestChecksum: exactReference.revisionChecksum,
+            source: { sourceType: exactReference.sourceType },
+          },
+          provided: true,
+        }],
+      });
+      let disposed = false;
+      const resourceReferences: ArtifactResourceReferenceMaterializerPort = {
+        async materializeExactReferences(input) {
+          return {
+            protocol: "dezin.artifact-resource-reference-fence.v1",
+            worktreeDir: realpathSync(input.worktreeDir),
+            mountPath: ".dezin/references",
+            fingerprint: "9".repeat(64),
+            references: [scenario.substitute(exactReference)],
+            async verify() {},
+            async withoutMaterializedReferences(operation) { return operation(); },
+            async dispose() { disposed = true; },
+          };
+        },
+      };
+      const preparation = new DefaultArtifactRunPreparation({
+        contextPacks: { get: () => pack },
+        projectIdForWorkspace: () => "project-1",
+        repositoryDirForWorkspace: () => repo.root,
+        artifactSourceRootForTarget: () => ".",
+        createRunner: () => {
+          throw new Error("Substituted Artifact Resource fence reached the runner");
+        },
+        createQualityEvaluator: () => ({
+          async evaluate() { throw new Error("not used"); },
+        }),
+        baseSystemPrompt: () => "base",
+        resourceReferences,
+      });
+      try {
+        await assert.rejects(
+          preparation.prepare(exactClaim, AbortSignal.timeout(5_000)),
+          /substituted reference fence/,
+        );
+        assert.equal(disposed, true);
+      } finally {
+        rmSync(repo.root, { recursive: true, force: true });
+      }
+    });
   }
 });
 

@@ -5,6 +5,7 @@ import {
   workspaceAgentConversationMode,
 } from "../../../../packages/core/src/workspace-agent-conversation.ts";
 import { useApi } from "../lib/api-context.tsx";
+import { workspaceAgentRequestFingerprint } from "../lib/workspace-agent-request-fingerprint.ts";
 import { ApiError } from "../lib/api.ts";
 import type {
   ApiClient,
@@ -26,6 +27,7 @@ import type {
   WorkspaceLayoutCommand,
   WorkspaceProposal,
   WorkspaceProposalApprovalMode,
+  WorkspaceAgentTurnInput,
   WorkspaceViewport,
 } from "../lib/api.ts";
 import {
@@ -69,6 +71,30 @@ export type ProjectStudioLoadState =
   | { status: "prototype"; project: Project; workspace: UnsupportedProjectWorkspacePayload }
   | { status: "error"; message: string };
 
+export interface WorkspaceAgentTurnReservationFacts {
+  fingerprint: string;
+  request: Omit<WorkspaceAgentTurnInput, "turnId">;
+  /** Exact daemon-owned composer cards serialized into request.explicitContext. */
+  contextItems: Array<Extract<AgentComposerContextItem, { type: "context-ref" }>>;
+}
+
+export interface WorkspaceAgentPromptSubmissionInput {
+  message?: string;
+  agentCommand?: string;
+  model?: string;
+  turnId?: string;
+  /** Rechecked after async Context resolution before a recovery turn may be persisted or sent. */
+  isCurrent?: () => boolean;
+  /**
+   * Persists an exact recovery identity after Context resolution and before the
+   * Agent session outbox/network request. Returning null safely cancels submit.
+   */
+  reserveTurn?: (facts: WorkspaceAgentTurnReservationFacts) => Promise<{
+    turnId: string;
+    isCurrent: () => boolean;
+  } | null>;
+}
+
 interface ViewportOverride {
   projectId: string;
   baseViewport: WorkspaceViewport | null;
@@ -88,20 +114,18 @@ export interface ProjectStudioState {
   setAgentContextItems: (items: Array<Extract<AgentComposerContextItem, { type: "context-ref" }>>) => void;
   removeAgentContextItem: (id: string) => void;
   agentTranscript: AgentTranscriptEntry[];
+  workspaceAgentOutbox: Extract<AgentTurnOutbox, { kind: "workspace" }> | null;
   materializeAgentResourceContext: (input: {
     title: string;
     kind: Exclude<WorkspaceResourceKind, "research" | "sharingan-capture">;
     source: ResourceRevisionOwnedSource;
     previewUrl?: string;
+    idempotencyKey?: string;
   }) => Promise<void>;
   agentTurnSubmitting: boolean;
   workspaceAgentSubmitting: boolean;
   workspaceAgentError: string | null;
-  submitWorkspaceAgentPrompt: (input?: {
-    message?: string;
-    agentCommand?: string;
-    model?: string;
-  }) => Promise<void>;
+  submitWorkspaceAgentPrompt: (input?: WorkspaceAgentPromptSubmissionInput) => Promise<boolean>;
   artifactAgentSubmitting: boolean;
   artifactAgentError: string | null;
   artifactAgentReceipt: ScopedAgentTurnReceipt | null;
@@ -911,12 +935,12 @@ export function useProjectStudio(
     agentSessionCacheRef.current.set(scopeKey, restored);
     return restored;
   };
-  const updateAgentSession = (scopeKey: AgentScopeKey, update: (session: AgentSession) => AgentSession): AgentSession => {
+  const updateAgentSession = (scopeKey: AgentScopeKey, update: (session: AgentSession) => AgentSession): boolean => {
     const next = update(readCachedAgentSession(scopeKey));
     agentSessionCacheRef.current.set(scopeKey, next);
-    writeAgentSession(projectId, scopeKey, next);
+    const persisted = writeAgentSession(projectId, scopeKey, next);
     setAgentSessionRevision((revision) => revision + 1);
-    return next;
+    return persisted;
   };
   const currentAgentSession = readCachedAgentSession(currentAgentScopeKey);
   const workspaceAgentDraft = agentDrafts[currentAgentScopeKey] ?? currentAgentSession.draft;
@@ -941,6 +965,9 @@ export function useProjectStudio(
   const artifactAgentSubmitting = artifactAgentTargetId !== null && activeAgentTurnScope === currentAgentScopeKey;
   const resourceAgentSubmitting = resourceAgentTargetId !== null && activeAgentTurnScope === currentAgentScopeKey;
   const workspaceAgentSession = readCachedAgentSession(WORKSPACE_AGENT_SCOPE);
+  const workspaceAgentOutbox = workspaceAgentSession.outbox?.kind === "workspace"
+    ? workspaceAgentSession.outbox
+    : null;
   const persistedWorkspaceFailure = workspaceAgentSession.outbox?.kind === "workspace"
     && workspaceAgentSession.outbox.delivery.status === "failed"
     && decodeWorkspaceAgentConversation(workspaceAgentSession.outbox.request.message).currentRequest.trim()
@@ -1126,6 +1153,7 @@ export function useProjectStudio(
     kind: Exclude<WorkspaceResourceKind, "research" | "sharingan-capture">;
     source: ResourceRevisionOwnedSource;
     previewUrl?: string;
+    idempotencyKey?: string;
   }): Promise<void> => {
     const scopeKey = currentAgentScopeKey;
     const epoch = projectEpochRef.current;
@@ -1142,6 +1170,7 @@ export function useProjectStudio(
         expectedSnapshotId: ready.workspace.activeSnapshot.id,
         source: input.source,
         reason: "Attached to scoped Agent Context",
+        ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
       });
       if (epoch !== projectEpochRef.current) return;
       const payload = await api.getWorkspace(projectId);
@@ -1414,29 +1443,43 @@ export function useProjectStudio(
 
   const submitWorkspaceAgentPromptInternal = useCallback(async (
     restoredOutbox: Extract<AgentTurnOutbox, { kind: "workspace" }> | null = null,
-    input: { message?: string; agentCommand?: string; model?: string } = {},
-  ): Promise<void> => {
+    input: WorkspaceAgentPromptSubmissionInput = {},
+  ): Promise<boolean> => {
     if (activeAgentTurnRef.current !== null || artifactAgentTargetIdRef.current !== null
-      || resourceAgentTargetIdRef.current !== null) return;
+      || resourceAgentTargetIdRef.current !== null || input.isCurrent?.() === false) return false;
     const scopeKey = WORKSPACE_AGENT_SCOPE;
     const session = readCachedAgentSession(scopeKey);
     const message = (restoredOutbox?.request.message ?? input.message
       ?? agentDrafts[scopeKey] ?? session.draft).trim();
-    if (!message) return;
+    if (!message) return false;
     let ready: ReadyLoadState;
     let requestFacts: Extract<AgentTurnOutbox, { kind: "workspace" }>["request"];
+    let resolvedComposerContextItems: Array<Extract<AgentComposerContextItem, { type: "context-ref" }>> = [];
     try {
       ready = requireReady();
       const selectedContext = restoredOutbox === null
         ? await selectedGraphContextRefs(api, projectId, ready.workspace, selectedGraphObjectIds)
         : [];
+      if (input.isCurrent?.() === false) return false;
+      const composerContextSnapshot = readCachedAgentSession(scopeKey).contextItems.map((item) => ({
+        ...item,
+        ref: { ...item.ref },
+      }));
+      const serializedComposerContext = serializeDaemonOwnedComposerContext(composerContextSnapshot);
+      const unresolvedComposerRefs = new Set(serializedComposerContext.map((ref) => JSON.stringify(ref)));
+      resolvedComposerContextItems = composerContextSnapshot.filter((item) => {
+        const key = JSON.stringify(item.ref);
+        if (!unresolvedComposerRefs.has(key)) return false;
+        unresolvedComposerRefs.delete(key);
+        return true;
+      });
       requestFacts = restoredOutbox?.request ?? {
         turnId: "",
         message,
         ...(input.agentCommand ? { agentCommand: input.agentCommand } : {}),
         ...(input.model ? { model: input.model } : {}),
         explicitContext: mergeContextRefs(
-          serializeDaemonOwnedComposerContext(readCachedAgentSession(scopeKey).contextItems),
+          serializedComposerContext,
           selectedContext,
         ),
         graphRevision: ready.workspace.graph.revision,
@@ -1456,22 +1499,46 @@ export function useProjectStudio(
       }
     } catch (error) {
       setAgentErrors((current) => ({ ...current, [scopeKey]: errorMessage(error) }));
-      return;
+      return false;
     }
     if (activeAgentTurnRef.current !== null || artifactAgentTargetIdRef.current !== null
-      || resourceAgentTargetIdRef.current !== null) return;
-    const fingerprintFacts = {
-      message: requestFacts.message,
-      agentCommand: requestFacts.agentCommand,
-      model: requestFacts.model,
-      explicitContext: requestFacts.explicitContext,
-      graphRevision: requestFacts.graphRevision,
-      selection: requestFacts.selection ?? [],
-    };
-    const fingerprint = restoredOutbox?.fingerprint ?? JSON.stringify(fingerprintFacts);
+      || resourceAgentTargetIdRef.current !== null || input.isCurrent?.() === false) return false;
+    const { turnId: _requestTurnId, ...immutableRequestFacts } = requestFacts;
+    const fingerprint = restoredOutbox?.fingerprint
+      ?? workspaceAgentRequestFingerprint(immutableRequestFacts);
+    let reservedTurn: Awaited<ReturnType<NonNullable<
+      WorkspaceAgentPromptSubmissionInput["reserveTurn"]
+    >>> = null;
+    if (restoredOutbox === null && input.reserveTurn !== undefined) {
+      if (input.turnId !== undefined) {
+        setAgentErrors((current) => ({
+          ...current,
+          [scopeKey]: "A recovery submission cannot provide both a fixed turn and a turn reservation.",
+        }));
+        return false;
+      }
+      try {
+        reservedTurn = await input.reserveTurn({
+          fingerprint,
+          request: immutableRequestFacts,
+          contextItems: resolvedComposerContextItems,
+        });
+      } catch (error) {
+        setAgentErrors((current) => ({ ...current, [scopeKey]: errorMessage(error) }));
+        return false;
+      }
+      if (reservedTurn === null || !/^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        reservedTurn.turnId,
+      ) || reservedTurn.isCurrent() === false) return false;
+    }
+    if (activeAgentTurnRef.current !== null || artifactAgentTargetIdRef.current !== null
+      || resourceAgentTargetIdRef.current !== null || input.isCurrent?.() === false
+      || reservedTurn?.isCurrent() === false) return false;
     const persistedOutbox = readCachedAgentSession(scopeKey).outbox;
     const previousTurn = scopedTurnIdsRef.current.get(scopeKey);
     const turnId = restoredOutbox?.turnId
+      ?? reservedTurn?.turnId
+      ?? input.turnId
       ?? (persistedOutbox?.kind === "workspace" && persistedOutbox.fingerprint === fingerprint
         ? persistedOutbox.turnId
         : previousTurn?.fingerprint === fingerprint ? previousTurn.id : canonicalTurnId());
@@ -1488,7 +1555,7 @@ export function useProjectStudio(
       createdAt: submittedAt,
       delivery: { status: "pending" },
     };
-    updateAgentSession(scopeKey, (current) => ({
+    const outboxPersisted = updateAgentSession(scopeKey, (current) => ({
       ...current,
       outbox,
       transcript: upsertTranscriptEntry(current.transcript, {
@@ -1508,11 +1575,25 @@ export function useProjectStudio(
       delete next[scopeKey];
       return next;
     });
+    let responseReceived = false;
+    let completed = false;
+    let recoverableOutbox = false;
     try {
       const proposal = await api.workspaceAgentTurn(projectId, request, controller.signal);
+      responseReceived = true;
+      if (input.isCurrent?.() === false || reservedTurn?.isCurrent() === false) {
+        scopedTurnIdsRef.current.delete(scopeKey);
+        updateAgentSession(scopeKey, (stored) => ({
+          ...stored,
+          outbox: stored.outbox?.kind === "workspace" && stored.outbox.turnId === turnId
+            ? null
+            : stored.outbox,
+        }));
+        return false;
+      }
       if (epoch !== projectEpochRef.current || artifactAgentTargetIdRef.current !== null
         || resourceAgentTargetIdRef.current !== null
-        || controller.signal.aborted) return;
+        || controller.signal.aborted) return true;
       const current = requireReady();
       if (proposal.workspaceId !== current.workspace.workspace.id
         || proposal.kind !== "workspace-generation"
@@ -1553,12 +1634,15 @@ export function useProjectStudio(
         delete next[scopeKey];
         return next;
       });
+      completed = true;
     } catch (error) {
       if (epoch !== projectEpochRef.current || artifactAgentTargetIdRef.current !== null
         || resourceAgentTargetIdRef.current !== null
-        || controller.signal.aborted || isAbortError(error)) return;
+        || controller.signal.aborted || isAbortError(error)) return responseReceived || outboxPersisted;
       const message = errorMessage(error);
-      if (!isUncertainNetworkFailure(error)) {
+      const uncertain = isUncertainNetworkFailure(error);
+      recoverableOutbox = uncertain && outboxPersisted;
+      if (!uncertain) {
         updateAgentSession(scopeKey, (stored) => ({
           ...stored,
           outbox: stored.outbox?.kind === "workspace" && stored.outbox.turnId === turnId
@@ -1576,10 +1660,11 @@ export function useProjectStudio(
         if (epoch === projectEpochRef.current) setActiveAgentTurnScope(null);
       }
     }
+    return completed || recoverableOutbox;
   }, [agentDrafts, api, commitProposalReview, projectId, replaceProposal, requireReady, selectedGraphObjectIds]);
 
-  const submitWorkspaceAgentPrompt = useCallback(
-    (input: { message?: string; agentCommand?: string; model?: string } = {}): Promise<void> => (
+    const submitWorkspaceAgentPrompt = useCallback(
+    (input: WorkspaceAgentPromptSubmissionInput = {}): Promise<boolean> => (
       submitWorkspaceAgentPromptInternal(null, input)
     ),
     [submitWorkspaceAgentPromptInternal],
@@ -2324,6 +2409,7 @@ export function useProjectStudio(
     setAgentContextItems,
     removeAgentContextItem,
     agentTranscript,
+    workspaceAgentOutbox,
     materializeAgentResourceContext,
     agentTurnSubmitting,
     workspaceAgentSubmitting,

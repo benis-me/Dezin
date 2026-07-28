@@ -87,7 +87,7 @@ test("round-trips a scope-owned draft, immutable context, transcript, outbox, an
     },
   };
 
-  writeAgentSession("project-1", "resource:resource-research", session);
+  expect(writeAgentSession("project-1", "resource:resource-research", session)).toBe(true);
 
   expect(readAgentSession("project-1", "resource:resource-research")).toEqual(session);
   expect(readAgentSession("project-1", "artifact:artifact-checkout")).toEqual(emptyAgentSession());

@@ -551,6 +551,47 @@ WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Workspace Agent turn receipts are immutable'); END;
 `;
 
+const RESOURCE_MATERIALIZATION_RECEIPT_TABLE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS resource_materialization_receipts (
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  idempotency_key TEXT NOT NULL
+    CHECK(length(idempotency_key) >= 1 AND length(idempotency_key) <= 256),
+  request_hash TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  graph_revision INTEGER NOT NULL CHECK(graph_revision >= 0),
+  snapshot_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+    CHECK(typeof(created_at) = 'integer' AND created_at >= 0 AND created_at <= 9007199254740991),
+  FOREIGN KEY(resource_id, workspace_id)
+    REFERENCES resources(id, workspace_id),
+  FOREIGN KEY(revision_id, resource_id, workspace_id)
+    REFERENCES resource_revisions(id, resource_id, workspace_id),
+  FOREIGN KEY(workspace_id, graph_revision)
+    REFERENCES workspace_graph_revisions(workspace_id, revision),
+  FOREIGN KEY(snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id),
+  CHECK(length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(json_valid(request_json) = 1 AND json_type(request_json) = 'object'),
+  CHECK(json_valid(result_json) = 1 AND json_type(result_json) = 'object'),
+  PRIMARY KEY(workspace_id, idempotency_key),
+  UNIQUE(resource_id),
+  UNIQUE(revision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_materialization_receipts_result
+  ON resource_materialization_receipts(resource_id, revision_id, workspace_id);
+CREATE TRIGGER IF NOT EXISTS resource_materialization_receipt_update_immutable
+BEFORE UPDATE ON resource_materialization_receipts
+BEGIN SELECT RAISE(ABORT, 'Resource materialization receipts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS resource_materialization_receipt_delete_history_guard
+BEFORE DELETE ON resource_materialization_receipts
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Resource materialization receipts are immutable'); END;
+`;
+
 const RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS research_direction_artifact_intents (
   workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
@@ -4228,6 +4269,7 @@ ${TASK12_GENERATION_TABLE_SCHEMA}
 ${TASK12_GENERATION_TRIGGER_SCHEMA}
 ${SCOPED_AGENT_TURN_TABLE_SCHEMA}
 ${WORKSPACE_AGENT_TURN_TABLE_SCHEMA}
+${RESOURCE_MATERIALIZATION_RECEIPT_TABLE_SCHEMA}
 ${RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA}
 
 CREATE INDEX IF NOT EXISTS idx_workspace_nodes_workspace ON workspace_nodes(workspace_id);
@@ -5665,6 +5707,7 @@ export function migrateStoreSchema(db: DatabaseSync): void {
   db.exec(TASK12_GENERATION_TRIGGER_SCHEMA);
   db.exec(SCOPED_AGENT_TURN_TABLE_SCHEMA);
   db.exec(WORKSPACE_AGENT_TURN_TABLE_SCHEMA);
+  db.exec(RESOURCE_MATERIALIZATION_RECEIPT_TABLE_SCHEMA);
   db.exec(RESEARCH_DIRECTION_ARTIFACT_INTENT_TABLE_SCHEMA);
   ensureColumn("scoped_agent_turns", "proposal_hash", "proposal_hash TEXT");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_workspace_hash ON context_packs(workspace_id, hash)");

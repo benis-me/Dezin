@@ -22,6 +22,12 @@ import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snap
 import { createProductionPublicAddressResolver } from "./production-public-address-resolver.ts";
 import { createProductionSafeBoundedExternalFetcher } from "./production-safe-external-fetch.ts";
 import { projectDir } from "./serve-static.ts";
+import { resumeStandardProjectSetup } from "./project-runtime.ts";
+import {
+  SharinganBootstrapError,
+  createProductionSharinganBootstrapCapturePort,
+  createSharinganBootstrapService,
+} from "./sharingan-bootstrap.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 // 0 = ephemeral (portless). Set DEZIN_PORT to pin a fixed port.
@@ -91,6 +97,7 @@ async function main(): Promise<void> {
   cleanupPrototypeVersionSnapshotResidue(DATA_DIR);
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
+  const startupController = new AbortController();
   let storeClosed = false;
   const closeStore = (): void => {
     if (storeClosed) return;
@@ -137,6 +144,26 @@ async function main(): Promise<void> {
     },
   });
   const generationRecovery = generationSystem.runtime;
+  const sharinganBootstrap = createSharinganBootstrapService({
+    store,
+    dataDir: DATA_DIR,
+    capture: createProductionSharinganBootstrapCapturePort({
+      store,
+      dataDir: DATA_DIR,
+    }),
+    beforeCapture: (projectId, signal) => resumeStandardProjectSetup(
+      projectId,
+      projectDir(DATA_DIR, projectId),
+      signal,
+    ).catch((error) => {
+      throw new SharinganBootstrapError(
+        "SHARINGAN_BOOTSTRAP_SETUP_FAILED",
+        error instanceof Error ? error.message : "Standard Project setup recovery failed",
+        { cause: error },
+      );
+    }),
+    operationSignal: startupController.signal,
+  });
   const server = createApp({
     store,
     dataDir: DATA_DIR,
@@ -149,10 +176,10 @@ async function main(): Promise<void> {
     generationPlanEvents: generationSystem.events,
     generationPlanRuntime: generationSystem.control,
     workspaceAgent: generationSystem.workspaceAgent,
+    sharinganBootstrap,
   });
 
   let shuttingDown = false;
-  const startupController = new AbortController();
   let stopWatchingElectronParent = (): void => {};
   const shutdown = (signal: string, exitCode = 0): void => {
     if (shuttingDown) return;

@@ -112,6 +112,11 @@ export interface BuildRenderAssemblyOptions {
 }
 
 export interface MaterializedRenderAssembly {
+  /** Stable cache entry that owns the immutable descriptor and full assembled source tree. */
+  assemblyRootDir: string;
+  /** Full assembled source tree, including exact dependent Component roots. */
+  sourceDir: string;
+  /** Exact root Artifact cwd inside sourceDir. */
   artifactDir: string;
   release(): Promise<void>;
 }
@@ -1160,7 +1165,8 @@ const assemblyRemovalFlights = new Map<string, Promise<void>>();
 interface RetainedAssemblyEntry {
   key: string;
   base: string;
-  artifactDir: string;
+  sourceDir: string;
+  artifactDir: string | null;
   verified: boolean;
   refs: number;
   bytes: number;
@@ -1286,7 +1292,8 @@ export function createRenderAssemblyMaterializer(
     const entry: RetainedAssemblyEntry = {
       key,
       base,
-      artifactDir: join(base, "source"),
+      sourceDir: join(base, "source"),
+      artifactDir: null,
       verified: false,
       refs: 0,
       bytes: await directoryBytes(base).catch(() => Number.MAX_SAFE_INTEGER),
@@ -1333,7 +1340,8 @@ export function createRenderAssemblyMaterializer(
             const entry: RetainedAssemblyEntry = {
               key,
               base,
-              artifactDir: join(base, "source"),
+              sourceDir: join(base, "source"),
+              artifactDir: null,
               verified: false,
               refs: 0,
               bytes: await directoryBytes(base).catch(() => Number.MAX_SAFE_INTEGER),
@@ -1374,41 +1382,50 @@ export function createRenderAssemblyMaterializer(
       try {
         await inventoryDataDir(deps);
         entry = entries.get(key);
-        if (!entry || !entry.verified || !existsSync(entry.base)) {
-          const artifactDir = await materializeRenderAssembly(deps, assembly, signal);
-          signal?.throwIfAborted();
-          entry = entries.get(key);
-          let created = false;
-          if (!entry) {
-            entry = {
-              key,
-              base: assemblyBase(deps, assembly),
-              artifactDir,
-              verified: true,
-              refs: 0,
-              bytes: 0,
-              idleSince: now(),
-            };
-            // Publish retention before the first asynchronous size scan so a
-            // concurrent acquire joins this refcount instead of creating an
-            // invisible second entry for the same assembly directory.
-            entries.set(key, entry);
-            created = true;
-          } else {
-            entry.artifactDir = artifactDir;
-            entry.verified = true;
-          }
-          if (created) {
-            entry.bytes = await directoryBytes(entry.base).catch(() => Number.MAX_SAFE_INTEGER);
-          }
+        // Revalidate the immutable manifest and full source fingerprint on every
+        // acquisition. A retained idle entry is only an ownership/LRU record; it
+        // must never turn a previously verified directory into a trusted hot path.
+        const artifactDir = await materializeRenderAssembly(deps, assembly, signal);
+        const sourceDir = await realpath(join(assemblyBase(deps, assembly), "source"));
+        signal?.throwIfAborted();
+        entry = entries.get(key);
+        let created = false;
+        if (!entry) {
+          entry = {
+            key,
+            base: assemblyBase(deps, assembly),
+            sourceDir,
+            artifactDir,
+            verified: true,
+            refs: 0,
+            bytes: 0,
+            idleSince: now(),
+          };
+          // Publish retention before the first asynchronous size scan so a
+          // concurrent acquire joins this refcount instead of creating an
+          // invisible second entry for the same assembly directory.
+          entries.set(key, entry);
+          created = true;
+        } else {
+          entry.sourceDir = sourceDir;
+          entry.artifactDir = artifactDir;
+          entry.verified = true;
+        }
+        if (created) {
+          entry.bytes = await directoryBytes(entry.base).catch(() => Number.MAX_SAFE_INTEGER);
         }
         clearIdleTimer(entry);
         entry.refs += 1;
         entryRefHeld = true;
         await evictOverflow();
         signal?.throwIfAborted();
+        if (entry.artifactDir === null) {
+          throw new RenderAssemblyError("RenderAssembly Artifact root was not verified before lease publication");
+        }
         let released = false;
         return {
+          assemblyRootDir: dirname(entry.sourceDir),
+          sourceDir: entry.sourceDir,
           artifactDir: entry.artifactDir,
           release: async () => {
             if (released) return;

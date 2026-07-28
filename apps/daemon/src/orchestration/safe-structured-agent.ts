@@ -1,5 +1,6 @@
 import {
   AgentOutputLimitError,
+  codeBuddyHostLoginEnvironment,
   getProvider,
   NodeSpawner,
   type AgentProvider,
@@ -537,17 +538,34 @@ function safeStructuredAgentEnvironment(
 ): NodeJS.ProcessEnv {
   const permittedKeys = SAFE_REQUEST_ENVIRONMENT_KEYS[providerId as keyof typeof SAFE_REQUEST_ENVIRONMENT_KEYS]
     ?? new Set<string>();
-  const environment: NodeJS.ProcessEnv = {
-    HOME: homedir(),
-    PATH: safeRegisteredSearchDirectories().join(delimiter),
-    TMPDIR: tmpdir(),
+  const environment: NodeJS.ProcessEnv = {};
+  if (providerId === "codebuddy") {
+    const hostLoginEnvironment = codeBuddyHostLoginEnvironment({
+      TERM: "dumb",
+      NO_COLOR: "1",
+      IMPECCABLE_HOOK_DISABLED: "1",
+      IMPECCABLE_HOOK_QUIET: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    });
+    for (const [key, rawValue] of Object.entries(hostLoginEnvironment)) {
+      if (rawValue === undefined) {
+        environment[key] = undefined;
+        continue;
+      }
+      environment[key] = safeEnvironmentValue(rawValue, `CodeBuddy host-login environment ${key}`);
+    }
+  }
+  Object.assign(environment, {
+    HOME: environment.HOME ?? homedir(),
+    PATH: environment.PATH ?? safeRegisteredSearchDirectories().join(delimiter),
+    TMPDIR: environment.TMPDIR ?? tmpdir(),
     TERM: "dumb",
     NO_COLOR: "1",
     IMPECCABLE_HOOK_DISABLED: "1",
     IMPECCABLE_HOOK_QUIET: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     DEZIN_DAEMON_TOKEN: undefined,
-  };
+  });
   for (const key of SAFE_AMBIENT_ENVIRONMENT_KEYS) {
     const value = safeEnvironmentValue(process.env[key], `Structured Agent ambient ${key}`);
     if (value !== undefined) environment[key] = value;

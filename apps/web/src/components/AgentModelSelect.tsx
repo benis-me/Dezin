@@ -1,11 +1,10 @@
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, CircleAlert } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/index.ts";
 import { AgentLogo, agentLabel } from "./agent-logos.tsx";
+import AgentModelSelectContent from "./AgentModelSelectContent.tsx";
 import type { AgentInfo } from "../lib/api.ts";
 import { agentAvailabilityReason, selectableAgents } from "../lib/agent-availability.ts";
-
-const AgentModelSelectContent = lazy(() => import("./AgentModelSelectContent.tsx"));
 
 /**
  * Combined agent + model picker. The panel mirrors Settings → Provider: a grid of the
@@ -61,20 +60,16 @@ export function AgentModelSelect({
         aria-label="Choose Agent and model"
         className="w-80 max-w-[calc(100vw-16px)] overflow-y-auto p-2"
       >
-        <Suspense
-          fallback={<p className="px-1 py-5 text-center text-xs text-muted-foreground">Loading agents…</p>}
-        >
-          <AgentModelSelectContent
-            agents={selectable}
-            agent={agent}
-            model={model}
-            models={models}
-            onAgentChange={onAgentChange}
-            onModelChange={onModelChange}
-            onRescan={onRescan}
-            agentDisabledReason={agentDisabledReason}
-          />
-        </Suspense>
+        <AgentModelSelectContent
+          agents={selectable}
+          agent={agent}
+          model={model}
+          models={models}
+          onAgentChange={onAgentChange}
+          onModelChange={onModelChange}
+          onRescan={onRescan}
+          agentDisabledReason={agentDisabledReason}
+        />
       </PopoverContent>
     </Popover>
   );

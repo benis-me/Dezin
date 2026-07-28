@@ -10,6 +10,7 @@ import {
   WorkspacePointerConflictError,
   WorkspaceResourceNotFoundError,
   WorkspaceResourceOwnershipError,
+  ResourceMaterializationConflictError,
   WorkspaceProposalConflictError,
   WorkspaceProposalNotFoundError,
   WorkspaceProposalOwnershipError,
@@ -37,6 +38,7 @@ import {
   type CreateResourceForProjectInput,
   type ForkArtifactTrackInput,
   type Resource,
+  type ResourceMaterializationRequestFacts,
   type ResearchDirectionArtifactIntentRequestFacts,
   type ResourcePublicationExpectation,
   type RestoreArtifactRevisionInput,
@@ -81,8 +83,23 @@ import {
   readResearchResourceRevision,
   ResearchResourceRevisionError,
 } from "./research-resource-revision.ts";
+import {
+  ResourceRevisionPayloadError,
+  resolveResourceRevisionPayloadDescriptor,
+  verifyResourceRevisionPayload,
+} from "./resource-revision-payload.ts";
+import {
+  beginResourceMaterializationPayloadIntent,
+  completeResourceMaterializationPayloadIntent,
+  rollbackResourceMaterializationPayloadIntent,
+} from "./resource-materialization-intent.ts";
+import {
+  SharinganBootstrapError,
+  type SharinganBootstrapReady,
+} from "./sharingan-bootstrap.ts";
 
 type ReadyWorkspace = Extract<EnsureStandardProjectWorkspaceResult, { status: "ready" }>;
+const SHARED_BOOTSTRAP_WAIT_SIGNAL = new AbortController().signal;
 
 function requireProject(deps: AppDeps, projectId: string): void {
   if (!deps.store.getProject(projectId)) throw new HttpError(404, "project not found");
@@ -98,12 +115,45 @@ function sendUnsupported(
   });
 }
 
+async function ensureSharinganWorkspaceBootstrap(
+  res: ServerResponse,
+  deps: AppDeps,
+  projectId: string,
+  signal: AbortSignal = SHARED_BOOTSTRAP_WAIT_SIGNAL,
+): Promise<SharinganBootstrapReady | undefined | null> {
+  const project = deps.store.getProject(projectId);
+  if (!project) throw new HttpError(404, "project not found");
+  if (!project.sharingan) return undefined;
+  if (!deps.sharinganBootstrap) {
+    sendJson(res, 503, {
+      error: "Sharingan source capture is not configured",
+      code: "sharingan_bootstrap_unavailable",
+      retryable: true,
+    });
+    return null;
+  }
+  try {
+    return await deps.sharinganBootstrap.ensure(projectId, signal);
+  } catch (error) {
+    if (!(error instanceof SharinganBootstrapError)) throw error;
+    sendJson(res, error.retryable ? 409 : 422, {
+      error: error.message,
+      code: "sharingan_bootstrap_failed",
+      bootstrapCode: error.code,
+      retryable: error.retryable,
+      state: error.state,
+    });
+    return null;
+  }
+}
+
 async function getWorkspaceResult(
   res: ServerResponse,
   deps: AppDeps,
   projectId: string,
 ): Promise<EnsureStandardProjectWorkspaceResult | null> {
   requireProject(deps, projectId);
+  if (await ensureSharinganWorkspaceBootstrap(res, deps, projectId) === null) return null;
   try {
     return await ensureStandardProjectWorkspace(deps, projectId, { readMode: "compact" });
   } catch (error) {
@@ -374,15 +424,28 @@ async function parseCreateResourceBody(req: IncomingMessage): Promise<CreateReso
   }
 }
 
-async function parseMaterializeResourceBody(req: IncomingMessage): Promise<{
+interface MaterializeResourceRequest {
   resource: CreateResourceForProjectInput;
   source: ReturnType<typeof normalizeCreateResourceRevisionRequest>["source"];
   reason: string;
-}> {
+  idempotencyKey: string | null;
+}
+
+async function parseMaterializeResourceBody(req: IncomingMessage): Promise<MaterializeResourceRequest> {
   const body = requestRecord(await readJsonBody(req), "Materialize Resource body");
   rejectUnexpectedRequestFields(body, [
     "kind", "title", "defaultPinPolicy", "baseGraphRevision", "expectedSnapshotId", "source", "reason",
+    "idempotencyKey",
   ], "Materialize Resource body");
+  const idempotencyKey = body.idempotencyKey;
+  if (idempotencyKey !== undefined && (
+    typeof idempotencyKey !== "string"
+    || idempotencyKey.length < 1
+    || idempotencyKey.length > 200
+    || !/^[A-Za-z0-9._:/-]+$/.test(idempotencyKey)
+  )) {
+    throw new HttpError(400, "Materialize Resource idempotency key is invalid");
+  }
   try {
     const resource = normalizeCreateResourceForProjectInput({
       kind: body.kind,
@@ -400,11 +463,50 @@ async function parseMaterializeResourceBody(req: IncomingMessage): Promise<{
       expectedSnapshotId: resource.expectedSnapshotId,
       reason: body.reason,
     });
-    return { resource, source, reason: publication.reason };
+    return {
+      resource,
+      source,
+      reason: publication.reason,
+      idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey : null,
+    };
   } catch (error) {
     if (error instanceof ResourceRevisionSourceInputError) throw new HttpError(400, error.message);
     return invalidRequest(error);
   }
+}
+
+function materializationRequestFacts(input: MaterializeResourceRequest): ResourceMaterializationRequestFacts {
+  return {
+    kind: input.resource.kind,
+    title: input.resource.title,
+    defaultPinPolicy: input.resource.defaultPinPolicy,
+    source: { ...input.source },
+    reason: input.reason,
+  };
+}
+
+async function verifyResourceMaterializationReceiptPayload(
+  deps: Pick<AppDeps, "store" | "dataDir">,
+  result: ReturnType<AppDeps["store"]["workspace"]["createPublishedResourceForProject"]>,
+): Promise<void> {
+  const descriptor = resolveResourceRevisionPayloadDescriptor({
+    store: deps.store,
+    dataDir: deps.dataDir,
+    workspaceId: result.resource.workspaceId,
+    resourceRevisionId: result.revision.id,
+    expectedResourceId: result.resource.id,
+  });
+  if (
+    descriptor.resourceKind !== result.resource.kind
+    || descriptor.resourceRevisionId !== result.revision.id
+    || descriptor.manifestPath !== result.revision.manifestPath
+    || descriptor.manifestChecksum !== result.revision.checksum
+  ) {
+    throw new ResourceRevisionPayloadError(
+      "Resource materialization receipt does not match its immutable payload identity",
+    );
+  }
+  await verifyResourceRevisionPayload(deps.dataDir, descriptor);
 }
 
 async function parseCreateResourceRevisionBody(
@@ -671,6 +773,14 @@ function sendResourceMutationError(
   resourceId?: string,
   revisionId?: string,
 ): boolean {
+  if (error instanceof ResourceMaterializationConflictError) {
+    sendJson(res, 409, {
+      error: error.message,
+      code: "resource_materialization_idempotency_conflict",
+      idempotencyKey: error.idempotencyKey,
+    });
+    return true;
+  }
   if (error instanceof WorkspaceResourceNotFoundError || error instanceof WorkspaceResourceOwnershipError) {
     sendJson(res, 404, { error: "resource not found" });
     return true;
@@ -779,10 +889,44 @@ export async function handleWorkspaceAgentTurn(
   signal: AbortSignal,
 ): Promise<void> {
   const projectId = params.id!;
+  const bootstrap = await ensureSharinganWorkspaceBootstrap(res, deps, projectId, signal);
+  if (bootstrap === null) return;
   const ready = await requireReadyWorkspace(res, deps, projectId);
   if (!ready) return;
   if (!deps.workspaceAgent) throw new HttpError(501, "Workspace Agent is not configured");
-  const request = await parseWorkspaceAgentTurnBody(req, ready);
+  const parsedRequest = await parseWorkspaceAgentTurnBody(req, ready);
+  let request = parsedRequest;
+  if (bootstrap !== undefined) {
+    if (parsedRequest.explicitContext.some((ref) => ref.kind === "resource"
+      && ref.resourceKind === "sharingan-capture")) {
+      sendJson(res, 422, {
+        error: "Sharingan capture Context is daemon-owned and cannot be supplied by the client",
+        code: "workspace_agent_context_blocked",
+      });
+      return;
+    }
+    if (parsedRequest.explicitContext.length >= 64) {
+      sendJson(res, 422, {
+        error: "Workspace Agent Context has no room for the required Sharingan source capture",
+        code: "workspace_agent_context_blocked",
+      });
+      return;
+    }
+    const registeredPreBootstrapFence = parsedRequest.graphRevision !== bootstrap.readyGraphRevision
+      && bootstrap.initialTurn !== null
+      && parsedRequest.turnId === bootstrap.initialTurn.turnId
+      && parsedRequest.graphRevision === bootstrap.initialTurn.graphRevision;
+    request = normalizeAgentTurnRequest({
+      ...parsedRequest,
+      // Rebind the exact registered first request to the immutable bootstrap
+      // fence before replay. If no committed receipt exists, the normal current
+      // graph check below still rejects any later user/canvas drift.
+      graphRevision: registeredPreBootstrapFence
+        ? bootstrap.readyGraphRevision
+        : parsedRequest.graphRevision,
+      explicitContext: [...parsedRequest.explicitContext, bootstrap.context],
+    });
+  }
   try {
     // A committed Workspace turn owns its historical graph anchor. Replay it
     // before the current graph fence so response loss remains recoverable even
@@ -1096,6 +1240,28 @@ export async function handleMaterializeResource(
   const input = await parseMaterializeResourceBody(req);
   const ready = await requireReadyWorkspace(res, deps, projectId);
   if (!ready) return;
+  const requestFacts = materializationRequestFacts(input);
+  if (input.idempotencyKey !== null) {
+    try {
+      const receipt = deps.store.workspace.getResourceMaterializationReceiptForProject(
+        projectId,
+        input.idempotencyKey,
+        requestFacts,
+      );
+      if (receipt !== null) {
+        await verifyResourceMaterializationReceiptPayload(deps, receipt.result);
+        sendJson(res, 200, receipt.result);
+        return;
+      }
+    } catch (error) {
+      // The request has already crossed the public codec boundary. A codec
+      // failure while reading an immutable receipt therefore describes
+      // durable server state, not malformed client input.
+      if (error instanceof WorkspaceStoreCodecError) throw error;
+      if (!sendResourceMutationError(res, error, deps, projectId)) throw error;
+      return;
+    }
+  }
   if (ready.graph.revision !== input.resource.baseGraphRevision
     || ready.activeSnapshot.id !== input.resource.expectedSnapshotId) {
     sendJson(res, 409, {
@@ -1111,6 +1277,14 @@ export async function handleMaterializeResource(
 
   const resourceId = randomUUID();
   const revisionId = randomUUID();
+  const payloadIntent = beginResourceMaterializationPayloadIntent({
+    dataDir: deps.dataDir,
+    projectId,
+    workspaceId: ready.workspace.id,
+    resourceId,
+    revisionId,
+    idempotencyKey: input.idempotencyKey,
+  });
   let frozen;
   try {
     frozen = await snapshotOwnedResourceRevisionSource({
@@ -1126,6 +1300,14 @@ export async function handleMaterializeResource(
       fetchExternal: deps.resourceExternalFetch,
     });
   } catch (error) {
+    try {
+      rollbackResourceMaterializationPayloadIntent(deps.dataDir, payloadIntent);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Resource materialization source failed and its durable payload intent could not be rolled back",
+      );
+    }
     if (error instanceof ResourceRevisionSourceInputError) throw new HttpError(400, error.message);
     if (error instanceof ContextIntegrityError || error instanceof TypeError) {
       sendJson(res, 422, { error: error.message, code: "resource_source_validation_error" });
@@ -1134,28 +1316,43 @@ export async function handleMaterializeResource(
     throw error;
   }
 
+  const publication = {
+    resourceId,
+    nodeId: randomUUID(),
+    commandId: randomUUID(),
+    ...input.resource,
+    revision: {
+      revisionId,
+      parentRevisionId: null,
+      manifestPath: frozen.snapshot.manifestPath,
+      summary: frozen.summary,
+      metadata: { ...frozen.metadata },
+      checksum: frozen.snapshot.checksum,
+      provenance: { ...frozen.provenance },
+    },
+    reason: input.reason,
+  };
   let result: ReturnType<typeof deps.store.workspace.createPublishedResourceForProject>;
+  let created = true;
   try {
-    result = deps.store.workspace.createPublishedResourceForProject(projectId, {
-      resourceId,
-      nodeId: randomUUID(),
-      commandId: randomUUID(),
-      ...input.resource,
-      revision: {
-        revisionId,
-        parentRevisionId: null,
-        manifestPath: frozen.snapshot.manifestPath,
-        summary: frozen.summary,
-        metadata: { ...frozen.metadata },
-        checksum: frozen.snapshot.checksum,
-        provenance: { ...frozen.provenance },
-      },
-      reason: input.reason,
-    });
+    if (input.idempotencyKey === null) {
+      result = deps.store.workspace.createPublishedResourceForProject(projectId, publication);
+    } else {
+      const committed = deps.store.workspace.commitResourceMaterializationForProject({
+        projectId,
+        idempotencyKey: input.idempotencyKey,
+        request: requestFacts,
+        publication,
+      });
+      result = committed.receipt.result;
+      created = committed.created;
+      if (!created) await verifyResourceMaterializationReceiptPayload(deps, result);
+    }
   } catch (error) {
     let cleanupError: unknown;
     try {
       await removeSealedResourceRevisionPayload(deps.dataDir, frozen.snapshot);
+      rollbackResourceMaterializationPayloadIntent(deps.dataDir, payloadIntent);
     } catch (candidate) {
       cleanupError = candidate;
     }
@@ -1165,10 +1362,35 @@ export async function handleMaterializeResource(
         "Resource materialization failed and its newly frozen payload could not be rolled back",
       );
     }
+    if (error instanceof WorkspaceStoreCodecError) throw error;
     if (!sendResourceMutationError(res, error, deps, projectId)) throw error;
     return;
   }
-  sendJson(res, 201, result);
+  if (!created) {
+    try {
+      await removeSealedResourceRevisionPayload(deps.dataDir, frozen.snapshot);
+      rollbackResourceMaterializationPayloadIntent(deps.dataDir, payloadIntent);
+    } catch (error) {
+      throw new AggregateError(
+        [error],
+        "Resource materialization replayed but its unused frozen payload could not be removed",
+      );
+    }
+  } else {
+    try {
+      completeResourceMaterializationPayloadIntent(deps.dataDir, payloadIntent);
+    } catch (error) {
+      // The database publication and immutable payload are already committed.
+      // Retain the intent so startup recovery can finalize it safely.
+      console.warn("[dezin:resource-materialization] committed payload intent will be finalized on startup", {
+        projectId,
+        resourceId,
+        revisionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  sendJson(res, created ? 201 : 200, result);
 }
 
 export async function handleGetResource(

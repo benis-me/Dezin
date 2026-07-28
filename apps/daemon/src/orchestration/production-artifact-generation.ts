@@ -48,6 +48,9 @@ import {
   type ProductionArtifactRunAdapterOptions,
 } from "./production-artifact-run-adapter.ts";
 import { createProductionArtifactProviderRunner } from "./production-artifact-provider-sandbox.ts";
+import {
+  createProductionArtifactResourceReferenceMaterializer,
+} from "./artifact-resource-reference.ts";
 import { createProductionArtifactAgentExecutionPorts } from "./target-confined-artifact-agent.ts";
 import {
   hydrateArtifactImageGeneration,
@@ -589,6 +592,10 @@ export function createProductionArtifactGenerationExecutor(
       };
     },
     sharinganCaptures: options.sharinganCaptures,
+    resourceReferences: createProductionArtifactResourceReferenceMaterializer({
+      store: options.store,
+      dataDir: options.dataDir,
+    }),
     onEvent: options.onEvent,
     reportError: options.reportError,
   });

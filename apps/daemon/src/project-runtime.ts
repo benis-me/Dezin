@@ -5,7 +5,7 @@
  */
 
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
@@ -59,6 +59,17 @@ interface PreviewPreparation {
 
 const DEPENDENCY_MANIFESTS = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"] as const;
 const DEPENDENCY_STAMP = ".dezin-dependency-fingerprint";
+const STANDARD_PROJECT_SCAFFOLD_FILES = [
+  "package.json",
+  "index.html",
+  "vite.config.js",
+  join("src", "main.jsx"),
+] as const;
+
+function standardProjectScaffoldIsComplete(projectDir: string): boolean {
+  return existsSync(join(projectDir, ".git"))
+    && STANDARD_PROJECT_SCAFFOLD_FILES.every((required) => existsSync(join(projectDir, required)));
+}
 
 async function dependencyManifestFingerprint(projectDir: string): Promise<string> {
   const hash = createHash("sha256");
@@ -74,6 +85,38 @@ async function dependencyManifestFingerprint(projectDir: string): Promise<string
   }
   if (!found) throw new Error("dependencies not installed yet");
   return hash.digest("hex");
+}
+
+function dependencyManifestFingerprintSync(projectDir: string): string | null {
+  const hash = createHash("sha256");
+  let found = false;
+  for (const name of DEPENDENCY_MANIFESTS) {
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(join(projectDir, name));
+    } catch {
+      continue;
+    }
+    found = true;
+    hash.update(name);
+    hash.update("\0");
+    hash.update(bytes);
+    hash.update("\0");
+  }
+  return found ? hash.digest("hex") : null;
+}
+
+function dependencyStampMatchesSync(projectDir: string): boolean {
+  const expected = dependencyManifestFingerprintSync(projectDir);
+  if (expected === null) return false;
+  try {
+    return readFileSync(
+      join(projectDir, "node_modules", DEPENDENCY_STAMP),
+      "utf8",
+    ).trim() === expected;
+  } catch {
+    return false;
+  }
 }
 
 async function writeDependencyStamp(projectDir: string): Promise<void> {
@@ -394,6 +437,111 @@ export async function setupImportedStandardProject(projectId: string, projectDir
   await operation;
 }
 
+/**
+ * Resume an interrupted Standard setup without copying over an existing
+ * Project. A live setup is joined; after a daemon restart only missing template
+ * files are merged and dependency installation continues from an exact stamp.
+ */
+export async function resumeStandardProjectSetup(
+  projectId: string,
+  projectDir: string,
+  signal?: AbortSignal,
+  options: {
+    installDependencies?: (projectDir: string, signal?: AbortSignal) => Promise<number>;
+  } = {},
+): Promise<void> {
+  const live = runtimes.get(projectId);
+  if (live?.operation && live.phase !== "error") {
+    await waitForCaller(live.operation, signal);
+    if (live.phase === "ready") return;
+  }
+  signal?.throwIfAborted();
+  const { rt, detach } = createRuntime(projectId, "scaffolding", signal);
+  const operation = (async () => {
+    try {
+      assertRuntimeActive(projectId, rt, signal);
+      await mkdir(projectDir, { recursive: true });
+      const packagePath = join(projectDir, "package.json");
+      if (existsSync(packagePath)) {
+        const expected = await dependencyManifestFingerprint(projectDir);
+        const installed = await readFile(
+          join(projectDir, "node_modules", DEPENDENCY_STAMP),
+          "utf8",
+        ).catch(() => "");
+        if (installed.trim() === expected && standardProjectScaffoldIsComplete(projectDir)) {
+          rt.phase = "ready";
+          rt.error = undefined;
+          appendLog(rt, "Standard project setup was already complete");
+          return;
+        }
+      }
+      appendLog(rt, "Recovering missing Standard project scaffold files");
+      // Always merge every missing template entry while setup is incomplete:
+      // package.json may have been the first file copied before a crash.
+      // force:false is load-bearing: existing/user-edited files are never
+      // overwritten during restart recovery.
+      await cp(templateDir(), projectDir, {
+        recursive: true,
+        force: false,
+        errorOnExist: false,
+      });
+      for (const required of STANDARD_PROJECT_SCAFFOLD_FILES) {
+        if (!existsSync(join(projectDir, required))) {
+          throw new Error(`Standard project scaffold is missing ${required}`);
+        }
+      }
+      assertRuntimeActive(projectId, rt, signal);
+      if (!existsSync(join(projectDir, ".git"))) {
+        const gitCode = await run("git", ["init", "-q"], projectDir, rt, "git init (resume)");
+        if (gitCode !== 0) throw new Error("Standard project Git recovery failed");
+      }
+      await gitCommit(projectDir, "Dezin: resume scaffold setup");
+      const expectedFingerprint = await dependencyManifestFingerprint(projectDir);
+      const nodeModules = join(projectDir, "node_modules");
+      const installedFingerprint = await readFile(join(nodeModules, DEPENDENCY_STAMP), "utf8")
+        .catch(() => "");
+      if (existsSync(nodeModules) && installedFingerprint.trim() === expectedFingerprint) {
+        rt.phase = "ready";
+        rt.error = undefined;
+        appendLog(rt, "Recovered missing Standard project scaffold files");
+        return;
+      }
+      rt.phase = "installing";
+      appendLog(rt, "Resuming interrupted dependency installation");
+      await rm(nodeModules, { recursive: true, force: true });
+      const code = options.installDependencies
+        ? await options.installDependencies(projectDir, signal)
+        : await run(
+            "npm",
+            ["install", "--no-audit", "--no-fund", "--loglevel=error"],
+            projectDir,
+            rt,
+            "npm install (resume)",
+          );
+      assertRuntimeActive(projectId, rt, signal);
+      if (code !== 0 || !existsSync(nodeModules)) {
+        throw new Error("npm install failed while resuming Standard project setup");
+      }
+      await writeDependencyStamp(projectDir);
+      await gitCommit(projectDir, "Dezin: resume dependency installation");
+      rt.phase = "ready";
+      rt.error = undefined;
+      appendLog(rt, "Standard project setup recovery is ready");
+    } catch (error) {
+      if (!rt.released && !signal?.aborted && runtimes.get(projectId) === rt) {
+        rt.phase = "error";
+        rt.error = error instanceof Error ? error.message : "setup recovery failed";
+        appendLog(rt, rt.error, "error");
+      }
+      throw error;
+    } finally {
+      detach();
+    }
+  })();
+  rt.operation = operation;
+  await waitForCaller(operation, signal);
+}
+
 export function getSetup(projectId: string, projectDir: string): { phase: SetupPhase; error?: string; logs: RuntimeLog[] } {
   const rt = runtimes.get(projectId);
   const relatedLogs = [...runtimes.entries()]
@@ -403,7 +551,10 @@ export function getSetup(projectId: string, projectDir: string): { phase: SetupP
     .slice(-30);
   if (rt) return { phase: rt.phase, error: rt.error, logs: relatedLogs };
   // Not tracked this process: infer from disk (e.g. after a daemon restart).
-  if (existsSync(join(projectDir, "node_modules"))) return { phase: "ready", logs: relatedLogs };
+  if (standardProjectScaffoldIsComplete(projectDir)
+    && dependencyStampMatchesSync(projectDir)) {
+    return { phase: "ready", logs: relatedLogs };
+  }
   if (existsSync(join(projectDir, "package.json"))) return { phase: "installing", logs: relatedLogs };
   return { phase: "scaffolding", logs: relatedLogs };
 }

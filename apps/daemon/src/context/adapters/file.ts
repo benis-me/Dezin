@@ -559,13 +559,15 @@ export async function snapshotBytes(input: ResourceSnapshotInput, bytes: Uint8Ar
   }
   const canonicalMimeType = normalizedMime(mimeType);
   const textual = canonicalMimeType.startsWith("text/") || canonicalMimeType === "application/json";
-  const textPayloadByteLimit = input.kind === "moodboard" && canonicalMimeType === "application/json"
+  const largeBundleJson = (input.kind === "moodboard" || input.kind === "sharingan-capture")
+    && canonicalMimeType === "application/json";
+  const textPayloadByteLimit = largeBundleJson
     ? MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES
     : MAX_TEXT_PAYLOAD_BYTES;
   if (textual && bytes.byteLength > textPayloadByteLimit) {
     throw new ContextIntegrityError(
-      input.kind === "moodboard" && canonicalMimeType === "application/json"
-        ? "Moodboard Resource bundle exceeds the 48 MiB verifier limit"
+      largeBundleJson
+        ? `${input.kind === "moodboard" ? "Moodboard" : "Sharingan Capture"} Resource bundle exceeds the 48 MiB verifier limit`
         : "Text Resource snapshot exceeds the 8 MiB verifier limit",
     );
   }
@@ -733,6 +735,109 @@ function wrapUntrusted(kind: BaseResourceKind, revision: ResourceRevisionSnapsho
   ].join("\n");
 }
 
+function clippedUtf8(value: string, maxBytes: number): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.byteLength <= maxBytes) return value;
+  return new TextDecoder("utf-8").decode(encoded.subarray(0, Math.max(0, maxBytes)));
+}
+
+function boundedProjectReferenceValue(value: unknown, maxBytes: number): unknown {
+  assertPortableContextValue(value, "Project Reference evidence");
+  const serialized = stableStringify(value);
+  const bytes = Buffer.from(serialized, "utf8");
+  if (bytes.byteLength <= maxBytes) return value;
+  return {
+    representation: "bounded exact canonical JSON prefix",
+    byteLength: bytes.byteLength,
+    checksum: checksumBytes(bytes),
+    prefix: clippedUtf8(serialized, Math.max(0, maxBytes - 256)),
+  };
+}
+
+function projectReferenceContextBody(payload: Buffer): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+  } catch {
+    throw new ContextIntegrityError("Project Reference bundle is not valid UTF-8 JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ContextIntegrityError("Project Reference bundle must be an object");
+  }
+  const root = parsed as Record<string, unknown>;
+  const source = root.source;
+  const design = root.design;
+  if (root.protocol !== "dezin.project-reference-bundle.v1"
+    || !source || typeof source !== "object" || Array.isArray(source)
+    || !design || typeof design !== "object" || Array.isArray(design)) {
+    throw new ContextIntegrityError("Project Reference bundle protocol or structure is invalid");
+  }
+  const designRecord = design as Record<string, unknown>;
+  const files = Array.isArray(designRecord.files) ? designRecord.files : [];
+  let remainingTextBytes = 256 * 1024;
+  const fileEvidence = files.slice(0, 128).map((file, index) => {
+    if (!file || typeof file !== "object" || Array.isArray(file)) {
+      throw new ContextIntegrityError(`Project Reference source file ${index} is invalid`);
+    }
+    const record = file as Record<string, unknown>;
+    if (typeof record.path !== "string" || typeof record.mimeType !== "string"
+      || typeof record.byteLength !== "number" || typeof record.checksum !== "string"
+      || (record.encoding !== "utf8" && record.encoding !== "base64")
+      || typeof record.content !== "string") {
+      throw new ContextIntegrityError(`Project Reference source file ${index} metadata is invalid`);
+    }
+    if (record.encoding === "base64") {
+      return {
+        path: record.path,
+        mimeType: record.mimeType,
+        byteLength: record.byteLength,
+        checksum: record.checksum,
+        representation: "exact binary bytes remain in the pinned bundle",
+      };
+    }
+    const original = record.content;
+    const originalBytes = Buffer.byteLength(original, "utf8");
+    const allowance = Math.min(64 * 1024, remainingTextBytes);
+    const content = clippedUtf8(original, allowance);
+    const contentBytes = Buffer.byteLength(content, "utf8");
+    remainingTextBytes = Math.max(0, remainingTextBytes - contentBytes);
+    return {
+      path: record.path,
+      mimeType: record.mimeType,
+      byteLength: record.byteLength,
+      checksum: record.checksum,
+      content,
+      ...(contentBytes === originalBytes ? {} : {
+        contentRepresentation: "bounded exact UTF-8 prefix",
+        contentByteLength: originalBytes,
+        contentChecksum: checksumBytes(Buffer.from(original, "utf8")),
+      }),
+    };
+  });
+  const body = {
+    protocol: root.protocol,
+    source,
+    design: {
+      artifact: boundedProjectReferenceValue(designRecord.artifact, 24 * 1024),
+      track: boundedProjectReferenceValue(designRecord.track, 16 * 1024),
+      revision: boundedProjectReferenceValue(designRecord.revision, 96 * 1024),
+      kernelRevision: boundedProjectReferenceValue(designRecord.kernelRevision, 48 * 1024),
+      assembly: boundedProjectReferenceValue(designRecord.assembly, 16 * 1024),
+      dependencies: boundedProjectReferenceValue(designRecord.dependencies, 24 * 1024),
+      resourcePins: boundedProjectReferenceValue(designRecord.resourcePins, 24 * 1024),
+      graphNode: boundedProjectReferenceValue(designRecord.graphNode, 16 * 1024),
+      adjacentEdges: boundedProjectReferenceValue(designRecord.adjacentEdges, 16 * 1024),
+      adjacentNodes: boundedProjectReferenceValue(designRecord.adjacentNodes, 24 * 1024),
+      sourceFiles: fileEvidence,
+    },
+  };
+  const result = stableStringify(body);
+  if (Buffer.byteLength(result, "utf8") > MAX_CONTEXT_TEXT_BYTES) {
+    throw new ContextIntegrityError("Project Reference planner evidence exceeds its 512 KiB limit");
+  }
+  return result;
+}
+
 export type SnapshotContextBodyRenderer = (
   payload: Buffer,
   revision: ResourceRevisionSnapshot,
@@ -820,13 +925,22 @@ export async function resolveSnapshot(
 export const fileResourceAdapter: ResourceContextAdapter = {
   kind: "file",
   async snapshot(input) {
-    if (input.kind !== "file" || input.source.type !== "owned-file") {
-      throw new ContextIntegrityError("File Resource adapter requires an owned-file source");
+    if (input.kind !== "file"
+      || (input.source.type !== "owned-file" && input.source.type !== "owned-bytes")) {
+      throw new ContextIntegrityError("File Resource adapter requires daemon-owned file or byte content");
     }
-    const bytes = await readOwnedResourceBytes(input.workspaceRoot, input.source.path);
+    const bytes = input.source.type === "owned-file"
+      ? await readOwnedResourceBytes(input.workspaceRoot, input.source.path)
+      : input.source.bytes;
     return snapshotBytes(input, bytes, input.source.mimeType);
   },
   resolve(input) {
-    return resolveSnapshot(input, "file");
+    return resolveSnapshot(
+      input,
+      "file",
+      input.revision.provenance.sourceType === "project-reference"
+        ? projectReferenceContextBody
+        : undefined,
+    );
   },
 };

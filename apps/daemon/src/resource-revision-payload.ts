@@ -956,7 +956,15 @@ async function writeFully(
 export async function verifyResourceRevisionPayload(
   dataDir: string,
   descriptor: ResourceRevisionPayloadDescriptor,
-  options: { destination?: string; signal?: AbortSignal } = {},
+  options: {
+    destination?: string;
+    signal?: AbortSignal;
+    /**
+     * Exact daemon-owned compound JSON bundles may raise the normal text limit.
+     * Callers must still apply their protocol-specific bounded decoder.
+     */
+    maxTextPayloadBytes?: number;
+  } = {},
 ): Promise<void> {
   options.signal?.throwIfAborted();
   const manifestBytes = readStoredManifest(dataDir, descriptor.manifestPath);
@@ -998,10 +1006,17 @@ export async function verifyResourceRevisionPayload(
       || descriptor.mimeType === "image/jpeg"
       || descriptor.mimeType === "image/gif"
       || descriptor.mimeType === "image/webp";
-    const textPayloadByteLimit = descriptor.resourceKind === "moodboard"
-      && descriptor.mimeType === "application/json"
-      ? MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES
-      : MAX_TEXT_PAYLOAD_BYTES;
+    const requestedTextPayloadByteLimit = options.maxTextPayloadBytes;
+    if (requestedTextPayloadByteLimit !== undefined
+      && (!Number.isSafeInteger(requestedTextPayloadByteLimit)
+        || requestedTextPayloadByteLimit < MAX_TEXT_PAYLOAD_BYTES
+        || requestedTextPayloadByteLimit > MAX_RESOURCE_PAYLOAD_BYTES)) {
+      throw new ResourceRevisionPayloadError("Text Resource Revision payload override is out of bounds");
+    }
+    const textPayloadByteLimit = requestedTextPayloadByteLimit
+      ?? (descriptor.resourceKind === "moodboard" && descriptor.mimeType === "application/json"
+        ? MAX_MOODBOARD_RESOURCE_BUNDLE_BYTES
+        : MAX_TEXT_PAYLOAD_BYTES);
     if (needsWholeTextPayload && descriptor.byteLength > textPayloadByteLimit) {
       throw new ResourceRevisionPayloadError("Text Resource Revision payload exceeds its MIME validation bound");
     }

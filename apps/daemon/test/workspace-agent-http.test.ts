@@ -17,8 +17,14 @@ import { BlockedContextError, type AgentTurnRequest } from "../src/context/conte
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import type { ProductionAgentTurnPort } from "../src/orchestration/production-agent-orchestrator.ts";
 import { createProductionWorkspaceAgentOrchestrator } from "../src/orchestration/production-workspace-agent.ts";
+import {
+  createSharinganBootstrapService,
+  type SharinganBootstrapPort,
+} from "../src/sharingan-bootstrap.ts";
+import { semanticSharinganCaptureFiles } from "./support/sharingan-capture-fixture.ts";
 
 const CONTEXT_PACK_ID = `context-pack-${"c".repeat(64)}`;
+const NEVER = new AbortController().signal;
 const FROZEN_CODEBUDDY_AGENT = Object.freeze({
   providerId: "codebuddy" as const,
   command: "codebuddy" as const,
@@ -119,12 +125,17 @@ async function withServer(run: (input: {
   dataDir: string;
   store: Store;
   turns: AgentTurnRequest[];
+  sharinganBootstrap?: SharinganBootstrapPort;
 }) => Promise<void>, options: {
   productionScopedContext?: boolean;
   workspaceAgentFactory?: (input: {
     store: Store;
     turns: AgentTurnRequest[];
   }) => ProductionAgentTurnPort;
+  sharinganBootstrapFactory?: (input: {
+    store: Store;
+    dataDir: string;
+  }) => SharinganBootstrapPort;
 } = {}): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-agent-http-"));
   const store = new Store(join(dataDir, "store.db"));
@@ -196,22 +207,330 @@ async function withServer(run: (input: {
           return { kind: "proposal" as const, proposal };
         },
       });
+  const sharinganBootstrap = options.sharinganBootstrapFactory?.({ store, dataDir });
   const server = createApp({
     store,
     dataDir,
     runtimeSupervisor,
     workspaceAgent,
+    sharinganBootstrap,
+    standardProjectSetup: async () => {},
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   try {
-    await run({ base: `http://127.0.0.1:${port}`, dataDir, store, turns });
+    await run({
+      base: `http://127.0.0.1:${port}`,
+      dataDir,
+      store,
+      turns,
+      ...(sharinganBootstrap === undefined ? {} : { sharinganBootstrap }),
+    });
   } finally {
     await runtimeSupervisor.shutdown();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }
 }
+
+test("Sharingan first turn crosses daemon bootstrap exactly once while ordinary stale turns stay fenced", async () => {
+  const initialTurnId = "turn-00000000-0000-4000-8000-000000000099";
+  await withServer(async ({ base, store, turns, sharinganBootstrap }) => {
+    assert.ok(sharinganBootstrap);
+    const createdResponse = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Sharingan exact source",
+        mode: "standard",
+        sharingan: true,
+        sourceUrl: "https://example.com",
+        initialTurnId,
+      }),
+    });
+    const createdText = await createdResponse.text();
+    assert.equal(createdResponse.status, 201, createdText);
+    const project = JSON.parse(createdText) as { id: string; sourceUrl: string };
+    assert.equal(project.sourceUrl, "https://example.com/");
+
+    // GET is a bootstrap barrier, not a pre-capture Workspace leak.
+    const workspaceResponse = await fetch(`${base}/api/projects/${project.id}/workspace`);
+    const workspaceText = await workspaceResponse.text();
+    assert.equal(workspaceResponse.status, 200, workspaceText);
+    const workspace = JSON.parse(workspaceText) as {
+      graph: { revision: number };
+      activeSnapshot: { id: string };
+      resources: Array<{ id: string; kind: string }>;
+      resourceRevisions: Array<{ id: string; resourceId: string }>;
+    };
+    const state = await sharinganBootstrap.getState(project.id);
+    assert.equal(state?.status, "ready");
+    assert.equal(state?.initialTurnId, initialTurnId);
+    assert.ok(state?.bootstrapBaseGraphRevision !== null);
+    assert.notEqual(state!.bootstrapBaseGraphRevision, workspace.graph.revision);
+    assert.equal(state!.readyGraphRevision, workspace.graph.revision);
+    assert.equal(state!.readySnapshotId, workspace.activeSnapshot.id);
+    assert.equal(workspace.resources.length, 1);
+    assert.equal(workspace.resources[0]!.kind, "sharingan-capture");
+
+    const endpoint = `${base}/api/projects/${project.id}/workspace/agent/turns`;
+    const initial = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        turnId: initialTurnId,
+        agentCommand: "codebuddy",
+        model: "gpt-5.6-sol",
+        message: "Reconstruct this exact captured page",
+        explicitContext: [],
+        graphRevision: state!.bootstrapBaseGraphRevision,
+      }),
+    });
+    assert.equal(initial.status, 201, await initial.text());
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]!.graphRevision, workspace.graph.revision);
+    assert.deepEqual(turns[0]!.explicitContext, [{
+      kind: "resource",
+      id: workspace.resources[0]!.id,
+      resourceKind: "sharingan-capture",
+      revisionId: workspace.resourceRevisions[0]!.id,
+    }]);
+
+    const afterBootstrap = store.workspace.getWorkspace(project.id)!;
+    store.workspace.createResourceForProject(project.id, {
+      kind: "file",
+      title: "Later canvas context",
+      defaultPinPolicy: "pin-current",
+      baseGraphRevision: afterBootstrap.graphRevision,
+      expectedSnapshotId: afterBootstrap.activeSnapshotId,
+    });
+    const advanced = store.workspace.getWorkspace(project.id)!;
+    const uncommittedInitialRetry = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        turnId: initialTurnId,
+        agentCommand: "codebuddy",
+        model: "gpt-5.6-sol",
+        message: "Reconstruct this exact captured page",
+        explicitContext: [],
+        graphRevision: state!.bootstrapBaseGraphRevision,
+      }),
+    });
+    assert.equal(uncommittedInitialRetry.status, 409, await uncommittedInitialRetry.text());
+    assert.equal(turns.length, 1);
+
+    const ordinaryStale = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        turnId: "turn-00000000-0000-4000-8000-000000000098",
+        agentCommand: "codebuddy",
+        model: "gpt-5.6-sol",
+        message: "This stale turn must not be rebound",
+        explicitContext: [],
+        graphRevision: state!.bootstrapBaseGraphRevision,
+      }),
+    });
+    assert.equal(ordinaryStale.status, 409, await ordinaryStale.text());
+    assert.equal(turns.length, 1);
+
+    const fabricatedCapture = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        turnId: "turn-00000000-0000-4000-8000-000000000097",
+        agentCommand: "codebuddy",
+        model: "gpt-5.6-sol",
+        message: "Client-authored capture pin",
+        explicitContext: [{
+          kind: "resource",
+          id: workspace.resources[0]!.id,
+          resourceKind: "sharingan-capture",
+          revisionId: workspace.resourceRevisions[0]!.id,
+        }],
+        graphRevision: advanced.graphRevision,
+      }),
+    });
+    assert.equal(fabricatedCapture.status, 422, await fabricatedCapture.text());
+    assert.equal(turns.length, 1);
+  }, {
+    sharinganBootstrapFactory: ({ store, dataDir }) => createSharinganBootstrapService({
+      store,
+      dataDir,
+      capture: {
+        async capture(request) {
+          return {
+            protocol: "dezin.sharingan-bootstrap-capture.v1",
+            exporter: { id: "dezin-sharingan-capture", version: 1 },
+            source: {
+              requestedUrl: request.sourceUrl,
+              finalUrl: new URL("captured", request.sourceUrl).href,
+              capturedAt: 10,
+            },
+            files: semanticSharinganCaptureFiles({
+              requestedUrl: request.sourceUrl,
+              finalUrl: new URL("captured", request.sourceUrl).href,
+            }),
+          };
+        },
+      },
+    }),
+  });
+});
+
+test("Sharingan initial turn replay keeps its post-bootstrap identity after later graph changes", async () => {
+  const initialTurnId = "turn-00000000-0000-4000-8000-000000000096";
+  let committed: {
+    request: AgentTurnRequest;
+    result: { kind: "proposal"; proposal: WorkspaceProposalRecord };
+  } | null = null;
+  let replayCalls = 0;
+  let turnCalls = 0;
+  await withServer(async ({ base, store, sharinganBootstrap }) => {
+    assert.ok(sharinganBootstrap);
+    const created = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Sharingan lost response replay",
+        mode: "standard",
+        sharingan: true,
+        sourceUrl: "https://example.com/",
+        initialTurnId,
+      }),
+    });
+    const project = await created.json() as { id: string };
+    assert.equal(created.status, 201);
+    const readyResponse = await fetch(`${base}/api/projects/${project.id}/workspace`);
+    assert.equal(readyResponse.status, 200);
+    const ready = await readyResponse.json() as {
+      graph: { revision: number; nodes: Array<{ id: string }> };
+      activeSnapshot: { id: string };
+    };
+    const state = await sharinganBootstrap.getState(project.id);
+    assert.equal(state?.status, "capturing", "the injected ready hint write failure leaves only the recovery hint");
+    const bootstrapReady = await sharinganBootstrap.ensure(project.id, NEVER);
+    assert.equal(bootstrapReady.readyGraphRevision, ready.graph.revision);
+    assert.equal(bootstrapReady.readySnapshotId, ready.activeSnapshot.id);
+    assert.equal(bootstrapReady.initialTurn?.turnId, initialTurnId);
+    const input = {
+      turnId: initialTurnId,
+      agentCommand: "codebuddy",
+      model: "gpt-5.6-sol",
+      message: "Create the exact recovered design",
+      explicitContext: [],
+      graphRevision: bootstrapReady.initialTurn!.graphRevision,
+    };
+    const endpoint = `${base}/api/projects/${project.id}/workspace/agent/turns`;
+    const first = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const firstBody = await first.text();
+    assert.equal(first.status, 201, firstBody);
+    assert.equal(turnCalls, 1);
+    assert.equal(replayCalls, 1);
+    assert.ok(committed);
+    assert.equal(committed.request.graphRevision, ready.graph.revision);
+
+    const current = store.workspace.getWorkspace(project.id)!;
+    store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: current.graphRevision,
+      expectedSnapshotId: current.activeSnapshotId,
+      commands: [{
+        id: "rename-after-sharingan-first-turn",
+        type: "rename-node",
+        nodeId: ready.graph.nodes[0]!.id,
+        name: "Changed after response loss",
+      }],
+    });
+    const replay = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const replayBody = await replay.text();
+    assert.equal(replay.status, 201, replayBody);
+    assert.deepEqual(JSON.parse(replayBody), JSON.parse(firstBody));
+    assert.equal(turnCalls, 1);
+    assert.equal(replayCalls, 2);
+  }, {
+    workspaceAgentFactory: ({ store, turns }) => ({
+      async replayWorkspace(request) {
+        replayCalls += 1;
+        if (committed === null) return null;
+        assert.deepEqual(request, committed.request);
+        return committed.result;
+      },
+      async turn(request) {
+        turnCalls += 1;
+        turns.push(request);
+        assert.equal(request.scope.type, "workspace");
+        const projectId = store.listProjects().find(
+          (project) => store.workspace.getWorkspace(project.id)?.id === request.scope.workspaceId,
+        )!.id;
+        const workspace = store.workspace.getWorkspace(projectId)!;
+        const layout = store.workspace.getLayout(projectId);
+        const proposal = store.workspace.createProposal({
+          projectId,
+          kind: "workspace-generation",
+          baseGraphRevision: request.graphRevision,
+          baseSnapshotId: workspace.activeSnapshotId,
+          layoutId: layout.layoutId,
+          baseLayoutChecksum: layout.checksum,
+          operations: [],
+          layoutOperations: [],
+          generation: {
+            kind: "workspace-generation",
+            agent: FROZEN_CODEBUDDY_AGENT,
+            resourceOperations: [],
+            artifactPlans: [],
+            dependencyPlans: [],
+            prototypeIntents: [],
+            capabilities: [],
+            responsiveFrames: [],
+            qualityProfile: {
+              requiredFrameIds: [],
+              blockingSeverities: [],
+              requireRuntimeChecks: false,
+              requireVisualReview: false,
+            },
+          },
+          rationale: "Committed Sharingan first turn",
+          assumptions: [],
+        });
+        committed = { request, result: { kind: "proposal", proposal } };
+        return committed.result;
+      },
+    }),
+    sharinganBootstrapFactory: ({ store, dataDir }) => createSharinganBootstrapService({
+      store,
+      dataDir,
+      capture: {
+        async capture(request) {
+          return {
+            protocol: "dezin.sharingan-bootstrap-capture.v1",
+            exporter: { id: "dezin-sharingan-capture", version: 1 },
+            source: {
+              requestedUrl: request.sourceUrl,
+              finalUrl: new URL("captured", request.sourceUrl).href,
+              capturedAt: 10,
+            },
+            files: semanticSharinganCaptureFiles({
+              requestedUrl: request.sourceUrl,
+              finalUrl: new URL("captured", request.sourceUrl).href,
+            }),
+          };
+        },
+      },
+      beforeStateWrite(state) {
+        if (state.status === "ready") throw new Error("injected ready hint write failure");
+      },
+    }),
+  });
+});
 
 test("Workspace Agent HTTP owns scope, returns the persisted draft, and rejects caller-owned capability fields", async () => {
   await withServer(async ({ base, store, turns }) => {

@@ -787,6 +787,14 @@ export type ResourceRevisionOwnedSource =
   | { type: "moodboard"; moodboardId: string }
   | { type: "effect"; effectId: string }
   | { type: "uploaded-file"; uploadedFileId: string }
+  | {
+      type: "project-reference";
+      sourceProjectId: string;
+      sourceWorkspaceId: string;
+      sourceSnapshotId: string;
+      sourceArtifactId: string;
+      sourceArtifactRevisionId: string;
+    }
   | { type: "asset"; assetId: string }
   | { type: "external-reference"; url: string };
 
@@ -815,6 +823,8 @@ export type CreateResourceForProjectResult = CreateResourceResult;
 export interface MaterializeResourceInput extends CreateResourceInput {
   source: ResourceRevisionOwnedSource;
   reason: string;
+  /** Stable per-project key used to replay a lost materialization response exactly once. */
+  idempotencyKey?: string;
 }
 
 export interface MaterializeResourceResult extends CreateResourceResult {
@@ -1308,6 +1318,8 @@ export interface CreateProjectInput {
   mode?: ProjectMode;
   sharingan?: boolean;
   sourceUrl?: string;
+  /** Registered by the daemon as the only pre-bootstrap Workspace turn eligible for fence rebinding. */
+  initialTurnId?: string;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -2892,6 +2904,7 @@ function encodeCreateResourceInput(value: CreateResourceInput): CreateResourceIn
 function encodeMaterializeResourceInput(value: MaterializeResourceInput): MaterializeResourceInput {
   const input = codecExactRecord(value, [
     "kind", "title", "defaultPinPolicy", "baseGraphRevision", "expectedSnapshotId", "source", "reason",
+    "idempotencyKey",
   ], "Materialize Resource request");
   const resource = encodeCreateResourceInput({
     kind: input.kind as WorkspaceResourceKind,
@@ -2917,6 +2930,15 @@ function encodeMaterializeResourceInput(value: MaterializeResourceInput): Materi
     ...resource,
     source,
     reason: codecBoundedString(input.reason, "Materialize Resource reason", 2_000),
+    ...(input.idempotencyKey === undefined
+      ? {}
+      : {
+          idempotencyKey: codecBoundedString(
+            input.idempotencyKey,
+            "Materialize Resource idempotency key",
+            200,
+          ),
+        }),
   };
 }
 
@@ -3007,7 +3029,14 @@ function encodeUpdateResourceInput(value: UpdateResourceInput): UpdateResourceIn
 
 function encodeOwnedResourceSource(value: ResourceRevisionOwnedSource): ResourceRevisionOwnedSource {
   const base = codecRecord(value, "Resource Revision source");
-  const type = codecEnum(base.type, ["moodboard", "effect", "uploaded-file", "asset", "external-reference"] as const, "Resource Revision source type");
+  const type = codecEnum(base.type, [
+    "moodboard",
+    "effect",
+    "uploaded-file",
+    "project-reference",
+    "asset",
+    "external-reference",
+  ] as const, "Resource Revision source type");
   switch (type) {
     case "moodboard": {
       const input = codecExactRecord(base, ["type", "moodboardId"], "Moodboard Resource source");
@@ -3020,6 +3049,27 @@ function encodeOwnedResourceSource(value: ResourceRevisionOwnedSource): Resource
     case "uploaded-file": {
       const input = codecExactRecord(base, ["type", "uploadedFileId"], "Uploaded file Resource source");
       return { type, uploadedFileId: codecString(input.uploadedFileId, "Uploaded file Resource source id") };
+    }
+    case "project-reference": {
+      const input = codecExactRecord(base, [
+        "type",
+        "sourceProjectId",
+        "sourceWorkspaceId",
+        "sourceSnapshotId",
+        "sourceArtifactId",
+        "sourceArtifactRevisionId",
+      ], "Project Reference Resource source");
+      return {
+        type,
+        sourceProjectId: codecString(input.sourceProjectId, "Project Reference source Project id"),
+        sourceWorkspaceId: codecString(input.sourceWorkspaceId, "Project Reference source Workspace id"),
+        sourceSnapshotId: codecString(input.sourceSnapshotId, "Project Reference source Snapshot id"),
+        sourceArtifactId: codecString(input.sourceArtifactId, "Project Reference source Artifact id"),
+        sourceArtifactRevisionId: codecString(
+          input.sourceArtifactRevisionId,
+          "Project Reference source Artifact Revision id",
+        ),
+      };
     }
     case "asset": {
       const input = codecExactRecord(base, ["type", "assetId"], "Asset Resource source");

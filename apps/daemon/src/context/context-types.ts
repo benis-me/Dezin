@@ -189,6 +189,7 @@ export type ResourceSnapshotSource =
   }
   | { type: "effect-definition"; definition: Readonly<Record<string, unknown>> }
   | { type: "owned-file"; path: string; mimeType: string; label?: string }
+  | { type: "owned-bytes"; bytes: Uint8Array; mimeType: string; label?: string }
   | {
     type: "bounded-external";
     url: string;

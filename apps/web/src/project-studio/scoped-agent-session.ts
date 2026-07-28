@@ -302,7 +302,7 @@ export function readAgentSession(projectId: string, scopeKey: AgentScopeKey): Ag
   }
 }
 
-export function writeAgentSession(projectId: string, scopeKey: AgentScopeKey, session: AgentSession): void {
+export function writeAgentSession(projectId: string, scopeKey: AgentScopeKey, session: AgentSession): boolean {
   try {
     // Preview URLs are presentation-only capabilities. In particular, arbitrary
     // URLs restored from writable browser storage must never trigger a request.
@@ -317,8 +317,10 @@ export function writeAgentSession(projectId: string, scopeKey: AgentScopeKey, se
       outbox: session.outbox,
       receipt: session.receipt,
     }));
+    return true;
   } catch {
     // Storage may be unavailable or quota-limited; the live session remains usable.
+    return false;
   }
 }
 

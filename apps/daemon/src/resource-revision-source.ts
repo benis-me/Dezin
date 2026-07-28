@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
-import { basename, dirname, extname } from "node:path";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import type {
   Resource,
   ResourceKind as WorkspaceResourceKind,
@@ -9,7 +10,9 @@ import { getBuiltInEffect, type EffectDefinition } from "../../../packages/effec
 import {
   ContextIntegrityError,
   assertIdentifier,
+  checksumBytes,
   cloneAndFreeze,
+  stableStringify,
   type ResourceRevisionSnapshot,
   type ResourceSnapshotSource,
 } from "./context/context-types.ts";
@@ -17,11 +20,24 @@ import { resourceAdapters } from "./context/adapters/index.ts";
 import { readOwnedResourceBytes } from "./context/adapters/file.ts";
 import { moodboardAssetPath } from "./project-moodboard-context.ts";
 import { projectDir } from "./serve-static.ts";
+import {
+  acquireMaterializedRenderAssembly,
+  buildRenderAssembly,
+  RenderAssemblyError,
+} from "./render-assembly.ts";
 
 export type OwnedResourceRevisionSource =
   | { type: "moodboard"; moodboardId: string }
   | { type: "effect"; effectId: string }
   | { type: "uploaded-file"; uploadedFileId: string }
+  | {
+      type: "project-reference";
+      sourceProjectId: string;
+      sourceWorkspaceId: string;
+      sourceSnapshotId: string;
+      sourceArtifactId: string;
+      sourceArtifactRevisionId: string;
+    }
   | { type: "asset"; assetId: string }
   | { type: "external-reference"; url: string };
 
@@ -238,6 +254,27 @@ function normalizeSource(value: unknown): OwnedResourceRevisionSource {
     exactFields(source, ["type", "uploadedFileId"], "Uploaded file Resource source");
     return { type: "uploaded-file", uploadedFileId: uploadedFileIdentity(source.uploadedFileId) };
   }
+  if (source.type === "project-reference") {
+    exactFields(source, [
+      "type",
+      "sourceProjectId",
+      "sourceWorkspaceId",
+      "sourceSnapshotId",
+      "sourceArtifactId",
+      "sourceArtifactRevisionId",
+    ], "Project Reference Resource source");
+    return {
+      type: "project-reference",
+      sourceProjectId: ownedId(source.sourceProjectId, "Project Reference source Project id"),
+      sourceWorkspaceId: ownedId(source.sourceWorkspaceId, "Project Reference source Workspace id"),
+      sourceSnapshotId: ownedId(source.sourceSnapshotId, "Project Reference source Snapshot id"),
+      sourceArtifactId: ownedId(source.sourceArtifactId, "Project Reference source Artifact id"),
+      sourceArtifactRevisionId: ownedId(
+        source.sourceArtifactRevisionId,
+        "Project Reference source Artifact Revision id",
+      ),
+    };
+  }
   if (source.type === "asset") {
     exactFields(source, ["type", "assetId"], "Asset Resource source");
     return { type: "asset", assetId: ownedId(source.assetId, "Asset source id") };
@@ -272,6 +309,7 @@ const SOURCE_RESOURCE_KIND: Readonly<Record<OwnedResourceRevisionSource["type"],
   moodboard: "moodboard",
   effect: "effect",
   "uploaded-file": "file",
+  "project-reference": "file",
   asset: "asset",
   "external-reference": "external-reference",
 };
@@ -299,6 +337,289 @@ function mimeTypeForUploadedFile(path: string): string {
 function summaryLabel(value: string, fallback: string): string {
   const compact = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
   return Array.from(compact || fallback).slice(0, 200).join("");
+}
+
+// Keep enough headroom beneath the shared 64 MiB immutable Resource payload cap
+// for deterministic JSON/base64 framing. This covers Home's full two-image /
+// 12 MiB visual contract plus source, Component roots, fonts, and sidecars.
+const MAX_PROJECT_REFERENCE_BUNDLE_BYTES = 56 * 1024 * 1024;
+const MAX_PROJECT_REFERENCE_FILES = 512;
+const MAX_PROJECT_REFERENCE_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_PROJECT_REFERENCE_TOTAL_FILE_BYTES = 40 * 1024 * 1024;
+const UTF8_SOURCE_MIME_TYPES = new Set([
+  "application/json",
+  "application/javascript",
+  "application/xml",
+  "image/svg+xml",
+]);
+
+function projectReferenceFileMimeType(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".html": case ".htm": return "text/html";
+    case ".css": return "text/css";
+    case ".js": case ".mjs": case ".cjs": case ".jsx": return "text/javascript";
+    case ".ts": case ".tsx": return "text/typescript";
+    case ".json": return "application/json";
+    case ".md": case ".txt": return "text/plain";
+    case ".svg": return "image/svg+xml";
+    case ".png": return "image/png";
+    case ".jpg": case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".webp": return "image/webp";
+    case ".woff": return "font/woff";
+    case ".woff2": return "font/woff2";
+    default: return "application/octet-stream";
+  }
+}
+
+function inside(root: string, candidate: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${sep}`);
+}
+
+async function exactProjectReferenceFiles(
+  sourceRoot: string,
+  includedArtifactRoots: readonly string[],
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const canonicalSourceRoot = await realpath(sourceRoot);
+  const sourceMetadata = await lstat(canonicalSourceRoot);
+  if (!sourceMetadata.isDirectory() || sourceMetadata.isSymbolicLink()) {
+    throw new ContextIntegrityError("Project Reference assembly source root is invalid");
+  }
+  const paths = new Set<string>();
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+    for (const entry of entries) {
+      // RenderAssembly deliberately treats installed dependencies as mutable
+      // runtime cache rather than immutable Revision source.
+      if (entry.name === "node_modules") continue;
+      const absolute = resolve(directory, entry.name);
+      if (!inside(canonicalSourceRoot, absolute)) {
+        throw new ContextIntegrityError("Project Reference Artifact file escaped its assembled source");
+      }
+      if (entry.isSymbolicLink()) {
+        throw new ContextIntegrityError("Project Reference Artifact assembly cannot contain symlinks");
+      }
+      if (entry.isDirectory()) {
+        await visit(absolute);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new ContextIntegrityError("Project Reference Artifact assembly contains a non-file entry");
+      }
+      paths.add(relative(canonicalSourceRoot, absolute).split(sep).join("/"));
+      if (paths.size > MAX_PROJECT_REFERENCE_FILES) {
+        throw new ContextIntegrityError(
+          `Project Reference Artifact assembly exceeds its ${MAX_PROJECT_REFERENCE_FILES}-file limit`,
+        );
+      }
+    }
+  };
+  const roots = [...new Set(includedArtifactRoots)]
+    .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+  for (const artifactRoot of roots) {
+    const absoluteRoot = resolve(canonicalSourceRoot, ...artifactRoot.split("/"));
+    if (!inside(canonicalSourceRoot, absoluteRoot)) {
+      throw new ContextIntegrityError("Project Reference Artifact root escaped its assembled source");
+    }
+    const before = await lstat(absoluteRoot);
+    const canonicalRoot = await realpath(absoluteRoot);
+    if (!inside(canonicalSourceRoot, canonicalRoot) || before.isSymbolicLink() || !before.isDirectory()) {
+      throw new ContextIntegrityError("Project Reference Artifact root is unavailable or invalid");
+    }
+    await visit(canonicalRoot);
+  }
+  let totalBytes = 0;
+  const result: Readonly<Record<string, unknown>>[] = [];
+  for (const path of [...paths].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))) {
+    const absolute = resolve(canonicalSourceRoot, ...path.split("/"));
+    const before = await lstat(absolute);
+    const canonical = await realpath(absolute);
+    if (!inside(canonicalSourceRoot, canonical) || before.isSymbolicLink() || !before.isFile()
+      || before.size > MAX_PROJECT_REFERENCE_FILE_BYTES) {
+      throw new ContextIntegrityError(
+        `Project Reference Artifact file ${path} is unavailable or exceeds its 16 MiB limit`,
+      );
+    }
+    const bytes = await readFile(canonical);
+    const after = await lstat(absolute);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+      || bytes.byteLength !== before.size) {
+      throw new ContextIntegrityError(`Project Reference Artifact file ${path} changed while captured`);
+    }
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_PROJECT_REFERENCE_TOTAL_FILE_BYTES) {
+      throw new ContextIntegrityError("Project Reference Artifact files exceed their 40 MiB total limit");
+    }
+    const mimeType = projectReferenceFileMimeType(path);
+    let text: string | null = null;
+    if (mimeType.startsWith("text/") || UTF8_SOURCE_MIME_TYPES.has(mimeType)) {
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        text = null;
+      }
+    }
+    result.push(Object.freeze({
+      path,
+      mimeType,
+      byteLength: bytes.byteLength,
+      checksum: checksumBytes(bytes),
+      ...(text === null
+        ? { encoding: "base64", content: bytes.toString("base64") }
+        : { encoding: "utf8", content: text }),
+    }));
+  }
+  return Object.freeze(result);
+}
+
+async function exactProjectReferenceBundle(
+  store: Store,
+  dataDir: string,
+  source: Extract<OwnedResourceRevisionSource, { type: "project-reference" }>,
+): Promise<{
+  bytes: Buffer;
+  summary: string;
+  sourceId: string;
+  provenance: Readonly<Record<string, unknown>>;
+}> {
+  const project = store.getProject(source.sourceProjectId);
+  const bundle = store.workspace.getBundleByProjectId(source.sourceProjectId);
+  if (!project || project.mode !== "standard" || !bundle
+    || bundle.workspace.id !== source.sourceWorkspaceId
+    || bundle.workspace.projectId !== source.sourceProjectId) {
+    throw new ContextIntegrityError("Project Reference source Workspace is missing or foreign");
+  }
+  const snapshot = bundle.snapshots.find((candidate) => candidate.id === source.sourceSnapshotId);
+  const artifact = bundle.artifacts.find((candidate) => candidate.id === source.sourceArtifactId);
+  const revision = bundle.revisions.find((candidate) => candidate.id === source.sourceArtifactRevisionId);
+  const track = artifact === undefined
+    ? undefined
+    : bundle.tracks.find((candidate) => candidate.id === revision?.trackId
+      && candidate.artifactId === artifact.id);
+  if (!snapshot || !artifact || !revision || !track
+    || artifact.workspaceId !== bundle.workspace.id
+    || revision.workspaceId !== bundle.workspace.id
+    || revision.artifactId !== artifact.id
+    || snapshot.workspaceId !== bundle.workspace.id
+    || snapshot.artifactRevisions[artifact.id] !== revision.id) {
+    throw new ContextIntegrityError(
+      "Project Reference does not identify one exact immutable Artifact Revision in its Snapshot",
+    );
+  }
+  let graph: typeof bundle.graph;
+  try {
+    graph = store.workspace.getGraphRevision(source.sourceProjectId, snapshot.graphRevision);
+  } catch (error) {
+    throw new ContextIntegrityError(
+      `Project Reference Snapshot lost its immutable graph Revision: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (graph.workspaceId !== bundle.workspace.id || graph.revision !== snapshot.graphRevision) {
+    throw new ContextIntegrityError("Project Reference graph does not match its immutable Snapshot");
+  }
+  const kernelRevision = store.workspace.getKernelRevision(revision.kernelRevisionId);
+  if (!kernelRevision || kernelRevision.workspaceId !== bundle.workspace.id) {
+    throw new ContextIntegrityError("Project Reference Artifact Revision lost its exact Design Kernel");
+  }
+  let assembly: ReturnType<typeof buildRenderAssembly>;
+  let files: readonly Readonly<Record<string, unknown>>[];
+  try {
+    assembly = buildRenderAssembly(
+      store,
+      { projectId: source.sourceProjectId, revisionId: revision.id },
+      { dataDir, shallowSnapshotId: snapshot.id },
+    );
+    if (assembly.rootRevision.id !== revision.id
+      || assembly.rootRevision.sourceCommitHash !== revision.sourceCommitHash
+      || assembly.rootRevision.sourceTreeHash !== revision.sourceTreeHash
+      || assembly.artifactId !== artifact.id
+      || assembly.workspaceId !== bundle.workspace.id) {
+      throw new ContextIntegrityError("Project Reference RenderAssembly substituted its exact Revision");
+    }
+    const materialized = await acquireMaterializedRenderAssembly({ dataDir }, assembly);
+    try {
+      files = await exactProjectReferenceFiles(
+        materialized.sourceDir,
+        ["."],
+      );
+    } finally {
+      await materialized.release();
+    }
+  } catch (error) {
+    if (error instanceof ContextIntegrityError) throw error;
+    if (error instanceof RenderAssemblyError) {
+      throw new ContextIntegrityError(`Project Reference exact Artifact source is unavailable: ${error.message}`);
+    }
+    throw error;
+  }
+  const graphNode = graph.nodes.find((node) => (
+    (node.kind === "page" || node.kind === "component") && node.artifactId === artifact.id
+  )) ?? null;
+  const adjacentEdges = graphNode === null
+    ? []
+    : graph.edges.filter((edge) => (
+        edge.sourceNodeId === graphNode.id || edge.targetNodeId === graphNode.id
+      ));
+  const adjacentNodeIds = new Set(adjacentEdges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]));
+  const body = {
+    protocol: "dezin.project-reference-bundle.v1",
+    source: {
+      project: { id: project.id, name: project.name, mode: project.mode },
+      workspaceId: bundle.workspace.id,
+      snapshotId: snapshot.id,
+      artifactId: artifact.id,
+      artifactRevisionId: revision.id,
+    },
+    design: {
+      artifact,
+      track,
+      revision,
+      kernelRevision,
+      assembly: {
+        assemblyHash: assembly.assemblyHash,
+        dependencyLockHash: assembly.dependencyLockHash,
+        artifactRoot: assembly.artifactRoot,
+        revisionIds: assembly.revisions.map((candidate) => candidate.id),
+        resourceRevisionIds: assembly.resourcePayloads.map((payload) => payload.resourceRevisionId),
+      },
+      dependencies: store.workspace.listArtifactRevisionDependencies(revision.id),
+      resourcePins: store.workspace.listArtifactRevisionResourcePins(revision.id),
+      graphNode,
+      adjacentEdges,
+      adjacentNodes: graph.nodes.filter((node) => adjacentNodeIds.has(node.id)),
+      files,
+    },
+  };
+  const bytes = Buffer.from(`${stableStringify(body)}\n`, "utf8");
+  if (bytes.byteLength > MAX_PROJECT_REFERENCE_BUNDLE_BYTES) {
+    throw new ContextIntegrityError("Project Reference bundle exceeds its 56 MiB byte limit");
+  }
+  const sourceId = [
+    source.sourceProjectId,
+    source.sourceSnapshotId,
+    source.sourceArtifactId,
+    source.sourceArtifactRevisionId,
+  ].join(":");
+  return {
+    bytes,
+    summary: `Project Reference: ${summaryLabel(project.name, "Untitled project")} / ${summaryLabel(artifact.name, "Untitled artifact")}`,
+    sourceId,
+    provenance: cloneAndFreeze({
+      sourceProjectId: project.id,
+      sourceWorkspaceId: bundle.workspace.id,
+      sourceSnapshotId: snapshot.id,
+      sourceArtifactId: artifact.id,
+      sourceArtifactRevisionId: revision.id,
+      sourceArtifactKind: artifact.kind,
+      sourceCommitHash: revision.sourceCommitHash,
+      sourceTreeHash: revision.sourceTreeHash,
+      bundleProtocol: "dezin.project-reference-bundle.v1",
+    }),
+  };
 }
 
 function sourceMismatch(source: OwnedResourceRevisionSource, kind: WorkspaceResourceKind): never {
@@ -382,6 +703,7 @@ export async function snapshotOwnedResourceRevisionSource(
   let summary: string;
   let sourceId: string;
 
+  let additionalProvenance: Readonly<Record<string, unknown>> = {};
   if (input.source.type === "uploaded-file") {
     // Re-normalize even for typed internal callers: TypeScript types are not a
     // runtime security boundary, and only the Project's own .refs basename is valid.
@@ -393,6 +715,17 @@ export async function snapshotOwnedResourceRevisionSource(
       path: ownedFileId,
       mimeType: mimeTypeForUploadedFile(ownedFileId),
       label: basename(ownedFileId),
+    };
+  } else if (input.source.type === "project-reference") {
+    const reference = await exactProjectReferenceBundle(input.store, input.dataDir, input.source);
+    sourceId = reference.sourceId;
+    summary = reference.summary;
+    additionalProvenance = reference.provenance;
+    source = {
+      type: "owned-bytes",
+      bytes: reference.bytes,
+      mimeType: "application/json",
+      label: `${input.source.sourceProjectId}-${input.source.sourceArtifactId}.dezin-reference.json`,
     };
   } else if (input.source.type === "moodboard") {
     sourceId = ownedId(input.source.moodboardId, "Moodboard source id");
@@ -460,6 +793,7 @@ export async function snapshotOwnedResourceRevisionSource(
       sourceType: input.source.type,
       sourceId,
       adapter: input.resource.kind,
+      ...additionalProvenance,
     },
     createdAt: input.createdAt,
   });

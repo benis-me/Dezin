@@ -8,9 +8,12 @@ import { AgentsProvider } from "../lib/agents-context.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { decodeWorkspaceAgentConversation } from "../../../../packages/core/src/workspace-agent-conversation.ts";
 import { ApiError } from "../lib/api.ts";
+import { workspaceAgentRequestFingerprint } from "../lib/workspace-agent-request-fingerprint.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import type {
   AgentInfo,
+  MaterializeResourceInput,
+  MaterializeResourceResult,
   Project,
   ProjectWorkspacePayload,
   Resource,
@@ -25,9 +28,30 @@ import { navigate } from "../router.tsx";
 import { NO_DESIGN_SYSTEM_ID } from "../lib/design-system-selection.ts";
 import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
+import { validPngFile } from "../test/image-fixtures.ts";
+import {
+  peekPendingDesignWorkspaceTurn,
+  setPendingDesignWorkspaceTurn,
+  takePendingImages,
+  takePendingRefs,
+} from "../lib/pending-brief.ts";
+import {
+  WORKSPACE_AGENT_SCOPE,
+  writeAgentSession,
+} from "./scoped-agent-session.ts";
+import { claimPendingTurnReplacement } from "./pending-turn-supersession.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
 const CANONICAL_TURN_ID = /^turn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const INITIAL_TURN_ID = "turn-00000000-0000-4000-8000-000000000001";
+
+function pendingTurnStorageKey(projectId: string): string {
+  return `dezin.pending.design-workspace-turn:${encodeURIComponent(projectId)}`;
+}
+
+function workspaceAgentSessionStorageKey(projectId: string): string {
+  return `dezin.project-studio.agent.v1:${encodeURIComponent(projectId)}:${encodeURIComponent(WORKSPACE_AGENT_SCOPE)}`;
+}
 
 function project(id: string): Project {
   return {
@@ -419,6 +443,76 @@ function MaterializeAgentContextProbe() {
       <output aria-label="Agent attachment context">
         {studio.agentContextItems.map(({ title }) => title).join(" | ") || "none"}
       </output>
+    </section>
+  );
+}
+
+function RecoveryReservationProbe() {
+  const studio = useProjectStudio("p-1");
+  if (studio.load.status !== "ready") return <output aria-label="Recovery reservation load">{studio.load.status}</output>;
+  return (
+    <section>
+      <label>
+        Recovery reservation prompt
+        <textarea
+          value={studio.workspaceAgentDraft}
+          onChange={(event) => studio.setWorkspaceAgentDraft(event.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        onClick={() => studio.setSelectedGraphObjectIds(["node-resource-1"])}
+      >
+        Select exact Resource
+      </button>
+      <button
+        type="button"
+        onClick={() => studio.setAgentContextItems([{
+          id: "resource:context-latest:revision-context-latest",
+          type: "context-ref",
+          title: "Latest composer context",
+          ref: {
+            kind: "resource",
+            id: "context-latest",
+            resourceKind: "file",
+            revisionId: "revision-context-latest",
+          },
+          projectId: "p-1",
+          revisionId: "revision-context-latest",
+        }])}
+      >
+        Replace composer Context
+      </button>
+      <button
+        type="button"
+        onClick={() => void studio.submitWorkspaceAgentPrompt({
+          reserveTurn: async (facts) => {
+            const current = peekPendingDesignWorkspaceTurn("p-1");
+            if (current === null) return null;
+            const expectedActiveTurnId = current.supersededByTurnId ?? current.turnId;
+            const claim = await claimPendingTurnReplacement({
+              projectId: "p-1",
+              expectedActiveTurnId,
+              reservation: {
+                ...facts,
+                contextItems: facts.contextItems.map(({ previewUrl: _previewUrl, type: _type, ...item }) => item),
+              },
+            });
+            if (claim.status !== "claimed" && claim.status !== "reused") return null;
+            return {
+              turnId: claim.turnId,
+              isCurrent: () => {
+                const latest = peekPendingDesignWorkspaceTurn("p-1");
+                return latest?.supersededByTurnId === claim.turnId
+                  && latest.recoveryRequest?.fingerprint === facts.fingerprint;
+              },
+            };
+          },
+        })}
+      >
+        Reserve exact recovery
+      </button>
+      <output aria-label="Recovery reservation error">{studio.workspaceAgentError ?? "none"}</output>
     </section>
   );
 }
@@ -1528,12 +1622,261 @@ test("Design Workspace preserves a registered Agent whose provider id differs fr
   }));
 });
 
-test("a new Standard Design Workspace consumes the Home brief and CodeBuddy selection exactly once", async () => {
+test("a new Standard project stages Home attachments before navigation and never persists their bytes", async () => {
+  const user = userEvent.setup();
+  const createdProject = { ...project("p-staged"), name: "Staged workspace" };
+  const ready = readyWorkspace("p-staged");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveUpload!: (value: { name: string; path: string }) => void;
+  const uploadRef = vi.fn((_projectId: string, _name: string) => (
+    new Promise<{ name: string; path: string }>((resolve) => {
+      resolveUpload = resolve;
+    })
+  ));
+  window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.home.composer", JSON.stringify({ mode: "standard" }));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      createProject: async () => createdProject,
+      getProject: async () => createdProject,
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+      ],
+      uploadRef,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard"));
+  const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+  expect(imageInput).not.toBeNull();
+  fireEvent.change(imageInput!, {
+    target: { files: [validPngFile("direction.jpeg")] },
+  });
+  await screen.findByLabelText("Remove direction.jpeg");
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Create from this direction" },
+  });
+  await user.click(screen.getByLabelText("Design"));
+
+  await waitFor(() => expect(uploadRef).toHaveBeenCalledTimes(1));
+  expect(uploadRef.mock.calls[0]?.[1]).toBe("home-image-1-direction.png");
+  expect(window.location.pathname).toBe("/");
+  const pendingDuringUpload = localStorage.getItem(pendingTurnStorageKey("p-staged"));
+  expect(pendingDuringUpload).not.toBeNull();
+  expect(JSON.parse(pendingDuringUpload!)).toEqual(expect.objectContaining({
+    projectId: "p-staged",
+    brief: "Create from this direction",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  }));
+  expect(JSON.parse(pendingDuringUpload!).turnId).toMatch(CANONICAL_TURN_ID);
+
+  resolveUpload({
+    name: "home-image-1-direction.png",
+    path: ".refs/home-image-1-direction.png",
+  });
+
+  await waitFor(() => expect(window.location.pathname).toBe("/projects/p-staged"));
+  const stored = localStorage.getItem(pendingTurnStorageKey("p-staged"));
+  expect(stored).not.toBeNull();
+  expect(stored).not.toContain("base64");
+  expect(stored).not.toContain("c3RhZ2VkLWltYWdlLWJ5dGVz");
+  expect(stored).toContain(".refs/home-image-1-direction.png");
+  expect(JSON.parse(stored!)).toEqual(expect.objectContaining({
+    attachmentCount: 1,
+    attachmentsStaged: true,
+    attachments: [expect.objectContaining({
+      uploadedFileId: ".refs/home-image-1-direction.png",
+    })],
+  }));
+});
+
+test("a failed Home attachment stage removes the incomplete project and keeps the composer intact", async () => {
+  const user = userEvent.setup();
+  const createdProject = { ...project("p-incomplete"), name: "Incomplete workspace" };
+  const currentSettings = await makeFakeApi().getSettings();
+  const deleteProject = vi.fn(async () => {});
+  window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.home.composer", JSON.stringify({ mode: "standard" }));
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        createProject: async () => createdProject,
+        deleteProject,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "hunyuan",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+        ],
+        uploadRef: async () => {
+          throw new Error("Upload failed");
+        },
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard"));
+  const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+  fireEvent.change(imageInput!, {
+    target: { files: [validPngFile("direction.png")] },
+  });
+  await screen.findByLabelText("Remove direction.png");
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Keep this draft recoverable" },
+  });
+  await user.click(screen.getByLabelText("Design"));
+
+  await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("p-incomplete"));
+  expect(window.location.pathname).toBe("/");
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("Keep this draft recoverable");
+  expect(screen.getByLabelText("Remove direction.png")).toBeInTheDocument();
+  expect(peekPendingDesignWorkspaceTurn("p-incomplete")).toBeNull();
+});
+
+test("a failed incomplete-project cleanup preserves its project-scoped recovery handoff", async () => {
+  const user = userEvent.setup();
+  const createdProject = { ...project("p-cleanup-failed"), name: "Recoverable incomplete workspace" };
+  const currentSettings = await makeFakeApi().getSettings();
+  const deleteProject = vi.fn(async () => {
+    throw new Error("Project deletion failed");
+  });
+  window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.home.composer", JSON.stringify({ mode: "standard" }));
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        createProject: async () => createdProject,
+        deleteProject,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "hunyuan",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
+        ],
+        uploadRef: async () => {
+          throw new Error("Upload failed");
+        },
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard"));
+  const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+  fireEvent.change(imageInput!, {
+    target: { files: [validPngFile("direction.png")] },
+  });
+  await screen.findByLabelText("Remove direction.png");
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Recover this incomplete workspace" },
+  });
+  await user.click(screen.getByLabelText("Design"));
+
+  await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("p-cleanup-failed"));
+  expect(peekPendingDesignWorkspaceTurn("p-cleanup-failed")).toEqual(expect.objectContaining({
+    brief: "Recover this incomplete workspace",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  }));
+});
+
+test("a new Standard Design Workspace materializes a Home screenshot as immutable Agent Context exactly once", async () => {
   const user = userEvent.setup();
   const createdProject = { ...project("p-new"), name: "Fresh workspace" };
   const ready = readyWorkspace("p-new");
   const currentSettings = await makeFakeApi().getSettings();
   const createProject = vi.fn(async () => createdProject);
+  const uploadRef = vi.fn(async (_projectId: string, name: string) => ({
+    name,
+    path: `.refs/${name}`,
+  }));
+  let materialized = 0;
+  const materializeResource = vi.fn(async (
+    _projectId: string,
+    input: MaterializeResourceInput,
+  ): Promise<MaterializeResourceResult> => {
+    const sequence = ++materialized;
+    const resourceId = `resource-initial-${sequence}`;
+    const revisionId = `revision-initial-${sequence}`;
+    const node = {
+      id: `node-initial-${sequence}`,
+      workspaceId: ready.workspace.id,
+      kind: "resource" as const,
+      name: input.title,
+      resourceId,
+    };
+    const graph = {
+      ...ready.graph,
+      revision: ready.graph.revision + sequence,
+      nodes: [...ready.graph.nodes, node],
+    };
+    const resource = {
+      id: resourceId,
+      workspaceId: ready.workspace.id,
+      kind: input.kind,
+      title: input.title,
+      headRevisionId: revisionId,
+      defaultPinPolicy: input.defaultPinPolicy,
+      archivedAt: null,
+      createdAt: sequence + 1,
+      updatedAt: sequence + 1,
+    };
+    const revision = {
+      id: revisionId,
+      workspaceId: ready.workspace.id,
+      resourceId,
+      sequence: 1,
+      parentRevisionId: null,
+      manifestPath: `resource-revisions/${resourceId}/manifest.json`,
+      summary: `Uploaded file: ${input.title}`,
+      metadata: {},
+      checksum: String(sequence).repeat(64),
+      provenance: {},
+      createdByRunId: null,
+      createdAt: sequence + 1,
+    };
+    return {
+      resource,
+      revision,
+      node,
+      graph,
+      snapshot: {
+        ...ready.activeSnapshot,
+        id: `snapshot-initial-${sequence}`,
+        sequence: ready.activeSnapshot.sequence + sequence,
+        graphRevision: graph.revision,
+        graph,
+        resourceRevisions: { [resourceId]: revisionId },
+      },
+    };
+  });
   const workspaceAgentTurn = vi.fn(async (
     _projectId: string,
     _input: WorkspaceAgentTurnInput,
@@ -1555,6 +1898,8 @@ test("a new Standard Design Workspace consumes the Home brief and CodeBuddy sele
         listAgents: async () => [
           { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
         ],
+        uploadRef,
+        materializeResource,
         workspaceAgentTurn,
       })}>
         <AgentsProvider>
@@ -1566,24 +1911,1283 @@ test("a new Standard Design Workspace consumes the Home brief and CodeBuddy sele
 
   await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("hunyuan"));
   expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard");
+  const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+  expect(imageInput).not.toBeNull();
+  fireEvent.change(imageInput!, {
+    target: { files: [validPngFile("direction.png")] },
+  });
+  await screen.findByLabelText("Remove direction.png");
   fireEvent.change(screen.getByLabelText("Describe your design"), {
     target: { value: "Create a complete music discovery workspace" },
   });
   await user.click(screen.getByLabelText("Design"));
 
   await waitFor(() => expect(createProject).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(materializeResource).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(uploadRef.mock.calls.map(([projectId, name]) => [projectId, name])).toEqual([
+    ["p-new", "home-image-1-direction.png"],
+  ]);
+  expect(materializeResource.mock.calls.map(([projectId, input]) => [projectId, {
+    title: input.title,
+    kind: input.kind,
+    source: input.source,
+  }])).toEqual([
+    ["p-new", {
+      title: "direction.png",
+      kind: "file",
+      source: { type: "uploaded-file", uploadedFileId: ".refs/home-image-1-direction.png" },
+    }],
+  ]);
   expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
     message: "Create a complete music discovery workspace",
     agentCommand: "codebuddy",
     model: "hunyuan",
+    explicitContext: [
+      {
+        kind: "resource",
+        id: "resource-initial-1",
+        resourceKind: "file",
+        revisionId: "revision-initial-1",
+      },
+    ],
   }));
+  expect(takePendingImages()).toEqual([]);
+  expect(takePendingRefs()).toEqual([]);
+  expect(peekPendingDesignWorkspaceTurn("p-new")).toBeNull();
 
   act(() => navigate("/"));
   await screen.findByLabelText("Describe your design");
   act(() => navigate("/projects/p-new/canvas"));
   await screen.findByRole("region", { name: "Project canvas" });
   expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+});
+
+test("a pending initial turn is acknowledged only after its Workspace Agent request settles", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveTurn!: (proposal: WorkspaceProposal) => void;
+  const workspaceAgentTurn = vi.fn(() => new Promise<WorkspaceProposal>((resolve) => {
+    resolveTurn = resolve;
+  }));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build a complete resilient workspace",
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(peekPendingDesignWorkspaceTurn("p-1")).not.toBeNull();
+
+  resolveTurn(draftProposal(ready));
+
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("a pending initial turn and its durable outbox replay share one fixed turn identity", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const request: WorkspaceAgentTurnInput = {
+    turnId: INITIAL_TURN_ID,
+    message: "Resume the exact initial workspace",
+    agentCommand: "codebuddy",
+    explicitContext: [],
+    graphRevision: ready.graph.revision,
+    selection: [],
+  };
+  const fingerprint = JSON.stringify({
+    message: request.message,
+    agentCommand: request.agentCommand,
+    explicitContext: request.explicitContext,
+    graphRevision: request.graphRevision,
+    selection: request.selection,
+  });
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: "",
+    contextItems: [],
+    transcript: [{
+      id: `user:${INITIAL_TURN_ID}`,
+      turnId: INITIAL_TURN_ID,
+      role: "user",
+      content: request.message,
+      createdAt: 1,
+      state: "submitted",
+    }],
+    outbox: {
+      kind: "workspace",
+      turnId: INITIAL_TURN_ID,
+      fingerprint,
+      request,
+      createdAt: 1,
+      delivery: { status: "pending" },
+    },
+    receipt: null,
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: request.message,
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId).toBe(INITIAL_TURN_ID);
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+});
+
+test("a definite initial Agent failure preserves the draft and a manual replacement retires the handoff", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let attempt = 0;
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new ApiError(500, "Workspace Planner is unavailable: structured Agent timed out");
+    }
+    return draftProposal(ready);
+  });
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build the durable initial direction",
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).toHaveValue(
+    "Build the durable initial direction",
+  ));
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId).toBe(INITIAL_TURN_ID);
+  expect(peekPendingDesignWorkspaceTurn("p-1")).not.toBeNull();
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Build the revised durable initial direction" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).not.toBe(INITIAL_TURN_ID);
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+
+  act(() => navigate("/"));
+  await screen.findByLabelText("Describe your design");
+  act(() => navigate("/projects/p-1/canvas"));
+  await screen.findByRole("region", { name: "Project canvas" });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(2);
+});
+
+test("a manual replacement durably supersedes the initial turn before its response and replays only that replacement", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn((
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ): Promise<WorkspaceProposal> => {
+    if (workspaceAgentTurn.mock.calls.length === 1) {
+      return new Promise<WorkspaceProposal>(() => {});
+    }
+    return Promise.resolve(draftProposal(ready));
+  });
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build only after every reference is ready",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+  const api = makeFakeApi({
+    getProject: async () => project("p-1"),
+    getWorkspace: async () => ready,
+    getSettings: async () => ({
+      ...currentSettings,
+      agentCommand: "codebuddy",
+      model: "",
+    }),
+    listAgents: async () => [
+      { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+    ],
+    workspaceAgentTurn,
+  });
+  const renderApp = () => render(
+    <ApiProvider client={api}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const firstRender = renderApp();
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue("Build only after every reference is ready"));
+  fireEvent.change(draft, {
+    target: { value: "Build the reviewed replacement direction" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  const superseded = peekPendingDesignWorkspaceTurn("p-1");
+  expect(superseded?.supersededByTurnId).toMatch(CANONICAL_TURN_ID);
+  expect(superseded?.supersededByTurnId).not.toBe(INITIAL_TURN_ID);
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId).toBe(superseded?.supersededByTurnId);
+  expect(JSON.parse(localStorage.getItem(pendingTurnStorageKey("p-1"))!)).toEqual(superseded);
+
+  firstRender.unmount();
+  renderApp();
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls.map((call) => call[1].turnId)).toEqual([
+    superseded?.supersededByTurnId,
+    superseded?.supersededByTurnId,
+  ]);
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("an externally superseded recovery turn cannot surface its stale Proposal response for approval", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  let resolveTurn!: (proposal: WorkspaceProposal) => void;
+  const workspaceAgentTurn = vi.fn(() => new Promise<WorkspaceProposal>((resolve) => {
+    resolveTurn = resolve;
+  }));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Original request awaiting a reviewed replacement",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue("Original request awaiting a reviewed replacement"));
+  fireEvent.change(draft, { target: { value: "First replacement now in flight" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+
+  const firstReplacement = peekPendingDesignWorkspaceTurn("p-1");
+  const firstReplacementTurnId = firstReplacement?.supersededByTurnId;
+  expect(firstReplacementTurnId).toMatch(CANONICAL_TURN_ID);
+  const externalRequest = {
+    message: "Replacement claimed by another window",
+    agentCommand: "codebuddy",
+    explicitContext: [],
+    graphRevision: ready.graph.revision,
+    selection: [],
+  };
+  const externalClaim = await claimPendingTurnReplacement({
+    projectId: "p-1",
+    expectedActiveTurnId: firstReplacementTurnId!,
+    reservation: {
+      fingerprint: workspaceAgentRequestFingerprint(externalRequest),
+      request: externalRequest,
+      contextItems: [],
+    },
+  });
+  expect(externalClaim.status).toBe("claimed");
+
+  resolveTurn(draftProposal(ready));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create proposal" })).toBeEnabled());
+
+  expect(screen.queryByRole("region", { name: "Proposal review" })).not.toBeInTheDocument();
+  expect(peekPendingDesignWorkspaceTurn("p-1")?.supersededByTurnId)
+    .toBe(externalClaim.status === "claimed" ? externalClaim.turnId : "");
+});
+
+test("a recovery reservation persists the same composer Context snapshot used after async selection resolution", async () => {
+  const ready = readyWorkspaceWithResources("p-1");
+  let resolveResource!: (resource: Resource) => void;
+  const getResource = vi.fn(() => new Promise<Resource>((resolve) => {
+    resolveResource = resolve;
+  }));
+  const workspaceAgentTurn = vi.fn(() => new Promise<WorkspaceProposal>(() => {}));
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: "Build from the exact resolved Context",
+    contextItems: [{
+      id: "resource:context-stale:revision-context-stale",
+      type: "context-ref",
+      title: "Stale composer context",
+      ref: {
+        kind: "resource",
+        id: "context-stale",
+        resourceKind: "file",
+        revisionId: "revision-context-stale",
+      },
+      projectId: "p-1",
+      revisionId: "revision-context-stale",
+    }],
+    transcript: [],
+    outbox: null,
+    receipt: null,
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Original Home request",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getResource,
+      workspaceAgentTurn,
+    })}>
+      <RecoveryReservationProbe />
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("textbox", { name: "Recovery reservation prompt" });
+  fireEvent.click(screen.getByRole("button", { name: "Select exact Resource" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reserve exact recovery" }));
+  await waitFor(() => expect(getResource).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Replace composer Context" }));
+  resolveResource(ready.resources!.find((resource) => resource.id === "resource-1")!);
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  const durable = peekPendingDesignWorkspaceTurn("p-1");
+  expect(durable?.recoveryRequest?.request).toEqual(expect.objectContaining({
+    explicitContext: [
+      {
+        kind: "resource",
+        id: "context-latest",
+        resourceKind: "file",
+        revisionId: "revision-context-latest",
+      },
+      {
+        kind: "resource",
+        id: "resource-1",
+        resourceKind: "file",
+        revisionId: "resource-1-revision-1",
+      },
+    ],
+    selection: [{ kind: "node", id: "node-resource-1" }],
+  }));
+  expect(durable?.recoveryRequest?.contextItems).toEqual([
+    expect.objectContaining({
+      title: "Latest composer context",
+      ref: {
+        kind: "resource",
+        id: "context-latest",
+        resourceKind: "file",
+        revisionId: "revision-context-latest",
+      },
+    }),
+  ]);
+  expect(screen.getByRole("status", { name: "Recovery reservation error" })).toHaveTextContent("none");
+});
+
+test("a crash after superseding but before outbox persistence never replays the original turn", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const interruptedReplacement = "Build the replacement recovered from its durable draft";
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: interruptedReplacement,
+    contextItems: [],
+    transcript: [],
+    outbox: null,
+    receipt: null,
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    supersededByTurnId: "turn-00000000-0000-4000-8000-000000000002",
+    brief: "Build the original direction that must stay retired",
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue(interruptedReplacement));
+  expect(await screen.findByText(/replacement request was interrupted before delivery/i)).toBeInTheDocument();
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    message: interruptedReplacement,
+  }));
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId).toMatch(CANONICAL_TURN_ID);
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId).not.toBe(INITIAL_TURN_ID);
+  expect(workspaceAgentTurn.mock.calls[0]![1].turnId)
+    .toBe("turn-00000000-0000-4000-8000-000000000002");
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("a session quota failure cannot lose a replacement prompt or immutable Context across reload", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: "Build the quota-safe replacement",
+    contextItems: [{
+      id: "resource:durable-reference:revision-durable-reference",
+      type: "context-ref",
+      title: "Durable exact context",
+      ref: {
+        kind: "resource",
+        id: "durable-reference",
+        resourceKind: "file",
+        revisionId: "revision-durable-reference",
+      },
+      projectId: "p-1",
+      revisionId: "revision-durable-reference",
+    }],
+    transcript: [],
+    outbox: null,
+    receipt: null,
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Original Home request",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+  const workspaceAgentTurn = vi.fn((
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ): Promise<WorkspaceProposal> => (
+    workspaceAgentTurn.mock.calls.length === 1
+      ? new Promise<WorkspaceProposal>(() => {})
+      : Promise.resolve(draftProposal(ready))
+  ));
+  const api = makeFakeApi({
+    getProject: async () => project("p-1"),
+    getWorkspace: async () => ready,
+    getSettings: async () => ({
+      ...currentSettings,
+      agentCommand: "codebuddy",
+      model: "",
+    }),
+    listAgents: async () => [
+      { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+    ],
+    workspaceAgentTurn,
+  });
+  const availableStorage = localStorage;
+  vi.stubGlobal("localStorage", {
+    get length() { return availableStorage.length; },
+    clear: availableStorage.clear.bind(availableStorage),
+    getItem: availableStorage.getItem.bind(availableStorage),
+    key: availableStorage.key.bind(availableStorage),
+    removeItem: availableStorage.removeItem.bind(availableStorage),
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("dezin.project-studio.agent.v1:")) {
+        throw new DOMException("Session quota exceeded", "QuotaExceededError");
+      }
+      availableStorage.setItem(key, value);
+    },
+  });
+  const renderApp = () => render(
+    <ToastProvider>
+      <ApiProvider client={api}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const firstRender = renderApp();
+  const firstDraft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(firstDraft).toHaveValue("Build the quota-safe replacement"));
+  expect(await screen.findByText("Durable exact context")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  const durable = peekPendingDesignWorkspaceTurn("p-1");
+  expect(durable?.recoveryRequest).toEqual(expect.objectContaining({
+    turnId: durable?.supersededByTurnId,
+    request: expect.objectContaining({
+      message: "Build the quota-safe replacement",
+      explicitContext: [{
+        kind: "resource",
+        id: "durable-reference",
+        resourceKind: "file",
+        revisionId: "revision-durable-reference",
+      }],
+    }),
+    contextItems: [expect.objectContaining({ title: "Durable exact context" })],
+  }));
+
+  firstRender.unmount();
+  vi.stubGlobal("localStorage", availableStorage);
+  availableStorage.removeItem(workspaceAgentSessionStorageKey("p-1"));
+  renderApp();
+
+  const recoveredDraft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(recoveredDraft).toHaveValue("Build the quota-safe replacement"));
+  expect(await screen.findByText("Durable exact context")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(workspaceAgentTurn.mock.calls[0]![1].turnId);
+  expect(workspaceAgentTurn.mock.calls[1]![1].explicitContext).toEqual(
+    workspaceAgentTurn.mock.calls[0]![1].explicitContext,
+  );
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("editing after a committed response fails client validation creates a new CAS child turn", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const pendingAtSecondCalls: NonNullable<ReturnType<typeof peekPendingDesignWorkspaceTurn>>[] = [];
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    if (workspaceAgentTurn.mock.calls.length === 1) {
+      return {
+        ...draftProposal(ready),
+        baseGraphRevision: ready.graph.revision + 1,
+      };
+    }
+    const pending = peekPendingDesignWorkspaceTurn("p-1");
+    if (pending !== null) pendingAtSecondCalls.push(structuredClone(pending));
+    return draftProposal(ready);
+  });
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Original request waiting for explicit recovery",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue("Original request waiting for explicit recovery"));
+  fireEvent.change(draft, { target: { value: "First replacement facts" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText(
+    "Workspace Agent returned a Proposal outside the current canvas Revision.",
+  )).toBeInTheDocument();
+  const firstPending = structuredClone(peekPendingDesignWorkspaceTurn("p-1"));
+  const firstReplacementId = firstPending?.supersededByTurnId;
+  expect(firstReplacementId).toMatch(CANONICAL_TURN_ID);
+
+  fireEvent.change(draft, { target: { value: "Second replacement facts after validation failure" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  const pendingAtSecondCall = pendingAtSecondCalls[0];
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).not.toBe(firstReplacementId);
+  expect(pendingAtSecondCall?.supersessionLineage).toEqual([
+    expect.objectContaining({
+      turnId: firstReplacementId,
+      parentTurnId: INITIAL_TURN_ID,
+    }),
+    expect.objectContaining({
+      turnId: workspaceAgentTurn.mock.calls[1]![1].turnId,
+      parentTurnId: firstReplacementId,
+    }),
+  ]);
+  expect(pendingAtSecondCall?.recoveryRequest?.request.message)
+    .toBe("Second replacement facts after validation failure");
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("an unavailable Home Agent restores the draft and can be replaced with an available Agent", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build with whichever Agent is currently ready",
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codex",
+          model: "",
+        }),
+        listAgents: async () => [
+          {
+            id: "codebuddy",
+            command: "codebuddy",
+            available: false,
+            availability: "authentication-required",
+            models: [],
+          },
+          { id: "codex", command: "codex", available: true, version: "1", models: [] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue("Build with whichever Agent is currently ready"));
+  expect(await screen.findByText(/codebuddy is unavailable/i)).toBeInTheDocument();
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(workspaceAgentTurn.mock.calls[0]![1]).toEqual(expect.objectContaining({
+    agentCommand: "codex",
+    message: "Build with whichever Agent is currently ready",
+  }));
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
+test("a failed initial Resource materialization keeps the staged turn recoverable", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const materializeResource = vi.fn(async () => {
+    throw new Error("Resource snapshot failed");
+  });
+  const workspaceAgentTurn = vi.fn();
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build from the durable reference",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: true,
+    attachments: [{
+      title: "direction.png",
+      uploadedFileId: ".refs/home-image-1-direction.png",
+      preview: true,
+    }],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      materializeResource,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(materializeResource).toHaveBeenCalledTimes(1));
+  expect(materializeResource).toHaveBeenCalledWith("p-1", expect.objectContaining({
+    idempotencyKey: "home-attachment:.refs/home-image-1-direction.png",
+  }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).toHaveValue(
+    "Build from the durable reference",
+  ));
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-1")).toEqual(expect.objectContaining({
+    attachments: [expect.objectContaining({
+      uploadedFileId: ".refs/home-image-1-direction.png",
+    })],
+  }));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(materializeResource).toHaveBeenCalledTimes(1);
+});
+
+test("initial attachment materialization blocks manual replacement and an external supersession cancels the old turn", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const resource = {
+    id: "resource-interleaved",
+    workspaceId: ready.workspace.id,
+    kind: "file" as const,
+    title: "interleaved.png",
+    headRevisionId: "revision-interleaved",
+    defaultPinPolicy: "pin-current" as const,
+    archivedAt: null,
+    createdAt: 2,
+    updatedAt: 2,
+  };
+  const revision = {
+    id: "revision-interleaved",
+    workspaceId: ready.workspace.id,
+    resourceId: resource.id,
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/resource-interleaved/manifest.json",
+    summary: "Uploaded file: interleaved.png",
+    metadata: {},
+    checksum: "c".repeat(64),
+    provenance: {},
+    createdByRunId: null,
+    createdAt: 2,
+  };
+  const node = {
+    id: "node-interleaved",
+    workspaceId: ready.workspace.id,
+    kind: "resource" as const,
+    name: resource.title,
+    resourceId: resource.id,
+  };
+  const graph = { ...ready.graph, revision: 2, nodes: [node] };
+  let resolveMaterialization!: (result: MaterializeResourceResult) => void;
+  const materializeResource = vi.fn(() => new Promise<MaterializeResourceResult>((resolve) => {
+    resolveMaterialization = resolve;
+  }));
+  const workspaceAgentTurn = vi.fn();
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build from the exact immutable reference",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: true,
+    attachments: [{
+      title: "interleaved.png",
+      uploadedFileId: ".refs/interleaved.png",
+      preview: true,
+    }],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      materializeResource,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(materializeResource).toHaveBeenCalledTimes(1));
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "A user edit must not unlock this in-flight attachment" },
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(submit).toBeDisabled();
+  fireEvent.click(submit);
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-1")?.supersededByTurnId).toBeUndefined();
+
+  setPendingDesignWorkspaceTurn({
+    ...peekPendingDesignWorkspaceTurn("p-1")!,
+    supersededByTurnId: "turn-00000000-0000-4000-8000-000000000002",
+  });
+  resolveMaterialization({
+    resource,
+    revision,
+    node,
+    graph,
+    snapshot: {
+      ...ready.activeSnapshot,
+      id: "snapshot-interleaved",
+      sequence: 2,
+      graphRevision: graph.revision,
+      graph,
+      resourceRevisions: { [resource.id]: revision.id },
+    },
+  });
+
+  await waitFor(() => expect(submit).not.toBeDisabled());
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-1")?.supersededByTurnId)
+    .toBe("turn-00000000-0000-4000-8000-000000000002");
+});
+
+test("a completed initial turn reports one cleanup failure without replaying or rerendering forever", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: "",
+    contextItems: [],
+    transcript: [{
+      id: `assistant:${INITIAL_TURN_ID}`,
+      turnId: INITIAL_TURN_ID,
+      role: "assistant",
+      content: "Workspace proposal is ready for review.",
+      createdAt: 2,
+      state: "proposal",
+    }],
+    outbox: null,
+    receipt: {
+      kind: "workspace",
+      turnId: INITIAL_TURN_ID,
+      proposalId: "proposal-initial",
+      status: "draft",
+      createdAt: 2,
+    },
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Do not replay this completed request",
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+  const availableStorage = localStorage;
+  vi.stubGlobal("localStorage", {
+    getItem: availableStorage.getItem.bind(availableStorage),
+    removeItem: availableStorage.removeItem.bind(availableStorage),
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("dezin.pending.design-workspace-turn-ack:")) {
+        throw new DOMException("Quota exceeded", "QuotaExceededError");
+      }
+      availableStorage.setItem(key, value);
+    },
+  });
+  const workspaceAgentTurn = vi.fn();
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const error = await screen.findByRole("alert");
+  expect(error).toHaveTextContent("proposal is ready");
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-1")).not.toBeNull();
+  vi.stubGlobal("localStorage", availableStorage);
+});
+
+test("leaving the workspace releases a suspended initial materialization from the next scope", async () => {
+  const ready = readyWorkspaceWithResources("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const materializeResource = vi.fn(() => new Promise<MaterializeResourceResult>(() => {}));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build from the suspended attachment",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: true,
+    attachments: [{
+      title: "suspended.png",
+      uploadedFileId: ".refs/suspended.png",
+      preview: true,
+    }],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      listResources: async () => ready.resources!,
+      getResource: async (_projectId, resourceId) => ready.resources!.find((resource) => resource.id === resourceId)!,
+      getResourceRevisionView: async (_projectId, resourceId) => resourceRevisionView(ready, resourceId),
+      materializeResource,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(materializeResource).toHaveBeenCalledTimes(1));
+  act(() => navigate("/projects/p-1/resources/resource-1"));
+  const resourceDraft = await screen.findByRole("textbox", { name: "Resource Agent draft" });
+  fireEvent.change(resourceDraft, { target: { value: "Revise this resource independently" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Queue resource task" })).not.toBeDisabled());
+});
+
+test("an interrupted Home attachment stage waits for an explicit replacement and then retires", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build only after every reference is ready",
+    agentCommand: "codebuddy",
+    attachmentCount: 2,
+    attachmentsStaged: false,
+    attachments: [],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).toHaveValue(
+    "Build only after every reference is ready",
+  ));
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-1")).toEqual(expect.objectContaining({
+    attachmentCount: 2,
+    attachmentsStaged: false,
+  }));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+
+  act(() => navigate("/"));
+  await screen.findByLabelText("Describe your design");
+  act(() => navigate("/projects/p-1/canvas"));
+  await screen.findByRole("region", { name: "Project canvas" });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  expect(workspaceAgentTurn).toHaveBeenCalledTimes(1);
+});
+
+test("a pending Home project reference becomes immutable Workspace Agent context before planning", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const uploadRef = vi.fn();
+  const materializeResource = vi.fn(async (
+    _projectId: string,
+    input: MaterializeResourceInput,
+  ): Promise<MaterializeResourceResult> => {
+    const resourceId = "resource-project-reference";
+    const revisionId = "revision-project-reference";
+    const node = {
+      id: "node-project-reference",
+      workspaceId: ready.workspace.id,
+      kind: "resource" as const,
+      name: input.title,
+      resourceId,
+    };
+    const graph = { ...ready.graph, revision: 2, nodes: [node] };
+    return {
+      resource: {
+        id: resourceId,
+        workspaceId: ready.workspace.id,
+        kind: input.kind,
+        title: input.title,
+        headRevisionId: revisionId,
+        defaultPinPolicy: input.defaultPinPolicy,
+        archivedAt: null,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      revision: {
+        id: revisionId,
+        workspaceId: ready.workspace.id,
+        resourceId,
+        sequence: 1,
+        parentRevisionId: null,
+        manifestPath: "resource-revisions/project-reference/manifest.json",
+        summary: "Uploaded project reference",
+        metadata: {},
+        checksum: "f".repeat(64),
+        provenance: {},
+        createdByRunId: null,
+        createdAt: 2,
+      },
+      node,
+      graph,
+      snapshot: {
+        ...ready.activeSnapshot,
+        id: "snapshot-project-reference",
+        sequence: 2,
+        graphRevision: 2,
+        graph,
+        resourceRevisions: { [resourceId]: revisionId },
+      },
+    };
+  });
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => draftProposal(ready));
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    brief: "Build from the existing editorial direction",
+    agentCommand: "codebuddy",
+    attachmentCount: 1,
+    attachmentsStaged: true,
+    attachments: [{
+      title: "Reference source",
+      uploadedFileId: ".refs/home-reference-1-reference-source.html",
+    }],
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      getSettings: async () => ({
+        ...currentSettings,
+        agentCommand: "codebuddy",
+        model: "",
+      }),
+      listAgents: async () => [
+        { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+      ],
+      uploadRef,
+      materializeResource,
+      workspaceAgentTurn,
+    })}>
+      <AgentsProvider>
+        <App />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(materializeResource).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  expect(uploadRef).not.toHaveBeenCalled();
+  expect(materializeResource).toHaveBeenCalledWith("p-1", expect.objectContaining({
+    title: "Reference source",
+    kind: "file",
+    source: {
+      type: "uploaded-file",
+      uploadedFileId: ".refs/home-reference-1-reference-source.html",
+    },
+  }));
+  expect(workspaceAgentTurn.mock.calls[0]![1].explicitContext).toEqual([{
+    kind: "resource",
+    id: "resource-project-reference",
+    resourceKind: "file",
+    revisionId: "revision-project-reference",
+  }]);
 });
 
 test("Workspace Agent persists changed Agent and Design System context before creating a proposal", async () => {
