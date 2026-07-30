@@ -15,6 +15,10 @@ import {
   type GenerationTaskPrototypeMarkerProof,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface ControlledClock {
   clock: StoreClock;
@@ -38,7 +42,8 @@ function controlledClock(prefix: string): ControlledClock {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

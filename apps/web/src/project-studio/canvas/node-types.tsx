@@ -1,12 +1,12 @@
 import { memo } from "react";
-import { ComponentNode } from "./nodes/ComponentNode.tsx";
+import { ArtifactFlowNode } from "./nodes/ArtifactFlowNode.tsx";
 import { LayoutGroupNode } from "./nodes/LayoutGroupNode.tsx";
-import { PageNode } from "./nodes/PageNode.tsx";
 import { ResourceNode } from "./nodes/ResourceNode.tsx";
 
+const artifactNode = memo(ArtifactFlowNode);
 export const workspaceNodeTypes = {
-  page: memo(PageNode),
-  component: memo(ComponentNode),
+  page: artifactNode,
+  component: artifactNode,
   resource: memo(ResourceNode),
   group: memo(LayoutGroupNode),
 };

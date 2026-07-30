@@ -164,7 +164,7 @@ import {
   handleCancelGenerationPlan,
   handleGenerationPlanEvents,
   handleGetGenerationPlan,
-  handleGetLatestActionableWorkspaceAgentGenerationPlan,
+  handleGetLatestWorkspaceAgentGenerationPlan,
   handleGetLatestScopedArtifactGenerationPlan,
   handleListGenerationPlans,
   handleRetryGenerationTask,
@@ -559,7 +559,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/workspace/agent/latest-plan",
-    handler: handleGetLatestActionableWorkspaceAgentGenerationPlan,
+    handler: handleGetLatestWorkspaceAgentGenerationPlan,
   },
   {
     method: "GET",

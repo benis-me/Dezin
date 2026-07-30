@@ -2,9 +2,9 @@ import { useState } from "react";
 import { Check, RotateCw } from "lucide-react";
 import { Spinner } from "./ui/index.ts";
 import { AgentLogo, agentLabel } from "./agent-logos.tsx";
-import { cn } from "../lib/utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { agentAvailabilityReason } from "../lib/agent-availability.ts";
+import { AGENT_SCAN_ERROR } from "../lib/agents-context.tsx";
 
 export default function AgentModelSelectContent({
   agents,
@@ -14,6 +14,7 @@ export default function AgentModelSelectContent({
   onAgentChange,
   onModelChange,
   onRescan,
+  error = null,
   agentDisabledReason,
 }: {
   agents: AgentInfo[];
@@ -22,27 +23,39 @@ export default function AgentModelSelectContent({
   models: string[];
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
-  onRescan: () => Promise<void>;
+  onRescan: () => Promise<unknown>;
+  error?: string | null;
   agentDisabledReason?: (agent: AgentInfo) => string | null;
 }) {
   const [scanning, setScanning] = useState(false);
+  const [rescanError, setRescanError] = useState<string | null>(null);
 
   const rescan = async (): Promise<void> => {
     setScanning(true);
+    setRescanError(null);
     try {
-      await onRescan();
+      const succeeded = await onRescan();
+      if (succeeded === false) setRescanError(AGENT_SCAN_ERROR);
+    } catch {
+      setRescanError(AGENT_SCAN_ERROR);
     } finally {
       setScanning(false);
     }
   };
+  const visibleError = scanning ? null : rescanError ?? error;
 
   return (
-    <>
-      <p className="label-mono px-0.5 pb-1.5">Agent</p>
-      {agents.length === 0 ? (
-        <p className="px-1 py-4 text-center text-xs text-muted-foreground">No agents detected.</p>
-      ) : (
-        <div className="grid grid-cols-2 gap-1.5">
+    <div className="dezin-agent-picker__body">
+      <p className="label-mono dezin-agent-picker__label">Agent</p>
+      {visibleError ? (
+        <p role="alert" className="dezin-agent-picker__empty text-destructive">
+          {visibleError}
+        </p>
+      ) : null}
+      {agents.length === 0 && !visibleError ? (
+        <p className="dezin-agent-picker__empty">{scanning ? "Scanning for agents…" : "No agents detected."}</p>
+      ) : agents.length > 0 ? (
+        <div className="dezin-agent-picker__agents">
           {agents.map((candidate) => {
             const selected = candidate.command === agent;
             const disabledReason = agentAvailabilityReason(candidate) ?? agentDisabledReason?.(candidate) ?? null;
@@ -53,33 +66,31 @@ export default function AgentModelSelectContent({
                 disabled={disabledReason !== null}
                 aria-pressed={selected}
                 title={disabledReason ?? undefined}
+                data-selected={selected || undefined}
+                data-unavailable={disabledReason !== null || undefined}
                 onClick={() => {
                   onAgentChange(candidate.command);
                 }}
-                className={cn(
-                  "relative flex flex-col gap-1.5 rounded-lg border p-2 text-left transition-colors",
-                  selected ? "border-ring bg-surface ring-1 ring-ring/30" : "border-border hover:bg-surface-2/60",
-                  disabledReason && "cursor-not-allowed opacity-55 hover:bg-transparent",
-                )}
+                className="dezin-agent-picker__agent"
               >
                 {selected ? (
                   <Check
                     aria-hidden
                     size={12}
                     strokeWidth={2.5}
-                    className="absolute right-1.5 top-1.5 text-foreground"
+                    className="dezin-agent-picker__selected"
                   />
                 ) : null}
-                <span className="grid size-7 place-items-center rounded-md bg-surface-2 text-foreground">
-                  <AgentLogo id={candidate.id} className="size-4" />
+                <span className="dezin-agent-picker__agent-logo">
+                  <AgentLogo id={candidate.id} />
                 </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-xs font-medium leading-tight">{agentLabel(candidate.id)}</span>
+                <span className="dezin-agent-picker__agent-copy">
+                  <span className="dezin-agent-picker__agent-name">{agentLabel(candidate.id)}</span>
                   {candidate.version ? (
-                    <span className="block truncate text-[11px] text-muted-foreground">{candidate.version.slice(0, 18)}</span>
+                    <span className="dezin-agent-picker__agent-version">{candidate.version.slice(0, 18)}</span>
                   ) : null}
                   {disabledReason ? (
-                    <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                    <span className="dezin-agent-picker__agent-reason">
                       {disabledReason}
                     </span>
                   ) : null}
@@ -88,24 +99,20 @@ export default function AgentModelSelectContent({
             );
           })}
         </div>
-      )}
+      ) : null}
 
       {models.length > 0 ? (
         <>
-          <p className="label-mono px-0.5 pb-1.5 pt-3">Model</p>
-          <div className="flex max-h-44 flex-wrap gap-1 overflow-y-auto pr-0.5">
+          <p className="label-mono dezin-agent-picker__label dezin-agent-picker__label--models">Model</p>
+          <div className="dezin-agent-picker__models">
             {["", ...models].map((candidateModel) => (
               <button
                 key={candidateModel || "default"}
                 type="button"
                 aria-pressed={model === candidateModel}
+                data-selected={model === candidateModel || undefined}
                 onClick={() => onModelChange(candidateModel)}
-                className={cn(
-                  "rounded-md border px-2 py-1 text-xs font-medium transition-colors",
-                  model === candidateModel
-                    ? "border-ring bg-surface text-foreground ring-1 ring-inset ring-ring/30"
-                    : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
-                )}
+                className="dezin-agent-picker__model"
               >
                 {candidateModel || "Default"}
               </button>
@@ -114,17 +121,17 @@ export default function AgentModelSelectContent({
         </>
       ) : null}
 
-      <div className="mt-2.5 border-t border-border/60 pt-1.5">
+      <div className="dezin-agent-picker__rescan-row">
         <button
           type="button"
           onClick={() => void rescan()}
           disabled={scanning}
-          className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+          className="dezin-agent-picker__rescan"
         >
           {scanning ? <Spinner size={13} /> : <RotateCw aria-hidden size={13} strokeWidth={1.75} />}
           {scanning ? "Scanning…" : "Rescan agents"}
         </button>
       </div>
-    </>
+    </div>
   );
 }

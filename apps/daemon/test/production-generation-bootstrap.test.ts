@@ -7,7 +7,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { agentSpawnEnv, type AgentRunner } from "../../../packages/agent/src/index.ts";
-import { RESOURCE_GENERATION_DEADLINE_BUDGET, Store } from "../../../packages/core/src/index.ts";
+import {
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+  Store,
+  type Settings,
+} from "../../../packages/core/src/index.ts";
 import { BUNDLED_DESIGN_SYSTEMS, DesignRegistry } from "../../../packages/design/src/index.ts";
 import { resourceAdapters } from "../src/context/adapters/index.ts";
 import { stableStringify } from "../src/context/context-types.ts";
@@ -33,11 +37,25 @@ import {
 } from "./support/research-resource-fixture.ts";
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
+import {
+  frozenGeneratorFixture,
+  frozenReviewerFixture,
+} from "./support/generation-execution-authority-fixture.ts";
 
-const FROZEN_CODEBUDDY_AGENT = {
+const CODEBUDDY_AGENT_SELECTION = {
   providerId: "codebuddy",
   command: "codebuddy",
   model: "gpt-5.6-sol",
+} as const;
+const CODEX_RESEARCH_AGENT_SELECTION = {
+  providerId: "codex",
+  command: "codex",
+  model: "gpt-5.4-mini",
+} as const;
+const CLAUDE_REVIEWER_SELECTION = {
+  providerId: "claude",
+  command: "claude",
+  model: null,
 } as const;
 
 function emptyGeneration() {
@@ -62,10 +80,16 @@ const DESKTOP_FRAME = { id: "desktop", name: "Desktop", width: 1_440, height: 90
 const PRODUCTION_GENERATION_IDLE_TIMEOUT_MS = 30_000;
 const PRODUCTION_GENERATION_HARD_TIMEOUT_MS = 60_000;
 
-function researchBackedPageGeneration() {
+function researchBackedPageGeneration(settings: Settings) {
   return {
     kind: "workspace-generation" as const,
-    agent: FROZEN_CODEBUDDY_AGENT,
+    agent: frozenGeneratorFixture(settings, CODEBUDDY_AGENT_SELECTION),
+    reviewerAgent: frozenReviewerFixture(
+      settings,
+      CLAUDE_REVIEWER_SELECTION,
+      CODEBUDDY_AGENT_SELECTION,
+    ),
+    researchAgent: frozenGeneratorFixture(settings, CODEX_RESEARCH_AGENT_SELECTION),
     resourceOperations: [{
       operation: "create" as const,
       nodeId: "research-node",
@@ -109,10 +133,15 @@ function exactResearchBackedPageGeneration(input: {
   resourceTitle: string;
   resourceRevisionId: string;
   directionId: string;
-}) {
+}, settings: Settings) {
   return {
     kind: "workspace-generation" as const,
-    agent: FROZEN_CODEBUDDY_AGENT,
+    agent: frozenGeneratorFixture(settings, CODEBUDDY_AGENT_SELECTION),
+    reviewerAgent: frozenReviewerFixture(
+      settings,
+      CLAUDE_REVIEWER_SELECTION,
+      CODEBUDDY_AGENT_SELECTION,
+    ),
     resourceOperations: [{
       operation: "reuse" as const,
       nodeId: input.resourceNodeId,
@@ -313,6 +342,7 @@ test("production Generation bootstrap shares the complete real leaf graph with r
 
   const runtimeSupervisor = new RuntimeSupervisor({ dataDir: root, store });
   let researchEvidenceReads = 0;
+  let researchEvidenceSelectionReads = 0;
   let observedExternalFetch: SafeBoundedExternalFetcher | undefined;
   let observedResourceRuntimeBudget:
     | {
@@ -341,6 +371,17 @@ test("production Generation bootstrap shares the complete real leaf graph with r
       return {
         async retrieveWebEvidence() {
           throw new Error("Research evidence is not used by this empty Plan");
+        },
+      };
+    },
+  });
+  Object.defineProperty(resourceRuntime, "researchEvidenceSelection", {
+    enumerable: true,
+    get() {
+      researchEvidenceSelectionReads += 1;
+      return {
+        async selectEvidence() {
+          throw new Error("Research evidence selection is not used by this empty Plan");
         },
       };
     },
@@ -384,12 +425,16 @@ test("production Generation bootstrap shares the complete real leaf graph with r
   assert.equal(typeof system.control.requestCancellation, "function");
   assert.equal(typeof system.events.notify, "function");
   assert.ok(researchEvidenceReads >= 1, "bootstrap forwards the production Research evidence port into Resource generation");
+  assert.ok(
+    researchEvidenceSelectionReads >= 1,
+    "bootstrap forwards the production Research evidence selector into Resource generation",
+  );
   assert.equal(observedExternalFetch, resourceExternalFetch,
     "bootstrap forwards the daemon's shared safe external fetch boundary to Research");
   assert.deepEqual(observedResourceRuntimeBudget, {
-    agentTimeoutMs: 7 * 60_000,
-    imageTimeoutMs: 5 * 60_000,
-    reviewTimeoutMs: 30_000,
+    agentTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs,
+    imageTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.maxImageCallTimeoutMs,
+    reviewTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs,
   });
   assert.equal(
     RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
@@ -438,7 +483,7 @@ test("same-Plan generated Research may become an Artifact input whose immutable 
       },
     }],
     layoutOperations: [],
-    generation: researchBackedPageGeneration(),
+    generation: researchBackedPageGeneration(store.getSettings()),
     rationale: "Attempt to consume generated Research before a human selects one immutable direction",
     assumptions: [],
   });
@@ -598,7 +643,7 @@ test("production bootstrap lets a new selected Plan claim an empty Page shell fr
       resourceTitle: created.resource.title,
       resourceRevisionId: researchRevision.id,
       directionId: selectedDirection.id,
-    }),
+    }, store.getSettings()),
     rationale: "Generate from the exact immutable Research direction the user selected",
     assumptions: [],
   });

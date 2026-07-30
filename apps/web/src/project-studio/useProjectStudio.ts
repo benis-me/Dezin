@@ -165,6 +165,7 @@ export interface ProjectStudioState {
   focusProposalChange: (changeKey: string) => void;
   approveProposal: (mode: WorkspaceProposalApprovalMode) => Promise<void>;
   rejectProposal: () => Promise<void>;
+  openProposalReview: (proposalId: string) => boolean;
   closeProposalReview: () => void;
   retry: () => void;
 }
@@ -349,7 +350,9 @@ function isProposalValidationError(error: unknown): error is ApiError {
   return error instanceof ApiError
     && error.status === 422
     && (error.details?.code === "workspace_proposal_validation_error"
-      || error.details?.code === "workspace_proposal_validation");
+      || error.details?.code === "workspace_proposal_validation"
+      || error.details?.code === "invalid_research_direction_selection"
+      || error.details?.code === "invalid_generation_authority");
 }
 
 function generationCompileFailureResult(error: unknown): ApprovedProposalResult | null {
@@ -1626,6 +1629,7 @@ export function useProjectStudio(
           content: "Workspace proposal is ready for review.",
           createdAt: Date.now(),
           state: "proposal",
+          proposalId: proposal.id,
         }),
       }));
       setAgentDrafts((currentDrafts) => {
@@ -1643,14 +1647,23 @@ export function useProjectStudio(
       const uncertain = isUncertainNetworkFailure(error);
       recoverableOutbox = uncertain && outboxPersisted;
       if (!uncertain) {
+        const failedAt = Date.now();
         updateAgentSession(scopeKey, (stored) => ({
           ...stored,
           outbox: stored.outbox?.kind === "workspace" && stored.outbox.turnId === turnId
             ? {
                 ...stored.outbox,
-                delivery: { status: "failed", error: message, failedAt: Date.now() },
+                delivery: { status: "failed", error: message, failedAt },
               }
             : stored.outbox,
+          transcript: upsertTranscriptEntry(stored.transcript, {
+            id: `assistant:${turnId}`,
+            turnId,
+            role: "assistant",
+            content: message,
+            createdAt: failedAt,
+            state: "failed",
+          }),
         }));
       }
       setAgentErrors((current) => ({ ...current, [scopeKey]: message }));
@@ -1805,6 +1818,7 @@ export function useProjectStudio(
       }
       scopedPlanDiscoveryEpochRef.current += 1;
       scopedTurnIdsRef.current.delete(scopeKey);
+      const resultRevisionId = receipt.task.resultRevisionId ?? receipt.task.resultResourceRevisionId;
       setScopedAgentReceipts((known) => ({ ...known, [scopeKey]: receipt }));
       setScopedAgentPlanIds((known) => ({ ...known, [scopeKey]: receipt.task.planId }));
       updateAgentSession(scopeKey, (stored) => ({
@@ -1816,9 +1830,12 @@ export function useProjectStudio(
           id: `assistant:${turnId}`,
           turnId,
           role: "assistant",
-          content: `Queued Task ${receipt.task.id} in Plan ${receipt.task.planId}.`,
+          content: "Design work is queued in the build plan.",
           createdAt: Date.now(),
           state: "queued",
+          planId: receipt.task.planId,
+          taskId: receipt.task.id,
+          ...(resultRevisionId ? { resultRevisionId } : {}),
         }),
       }));
       setAgentDrafts((currentDrafts) => {
@@ -2386,6 +2403,15 @@ export function useProjectStudio(
     setProposalFocus(null);
     commitProposalReview({ status: "idle" });
   }, [commitProposalReview]);
+  const openProposalReview = useCallback((proposalId: string): boolean => {
+    const ready = loadRef.current;
+    const proposal = proposals.find((candidate) => candidate.id === proposalId);
+    if (ready.status !== "ready" || proposal === undefined) return false;
+    setFocusedProposalChangeKey(null);
+    setProposalFocus(null);
+    commitProposalReview(reviewStateForProposal(proposal, ready));
+    return true;
+  }, [commitProposalReview, proposals]);
 
   const authoritativeViewport = load.status === "ready" ? load.workspace.layout.viewport : DEFAULT_VIEWPORT;
   const viewport = viewportOverride?.projectId === projectId
@@ -2441,6 +2467,7 @@ export function useProjectStudio(
     focusProposalChange,
     approveProposal,
     rejectProposal,
+    openProposalReview,
     closeProposalReview,
     retry,
   };

@@ -416,7 +416,7 @@ CREATE TABLE IF NOT EXISTS generation_plan_events (
   task_id TEXT,
   type TEXT NOT NULL CHECK(type IN (
     'plan-queued','plan-compile-failed','task-materialization-failed','task-blocked-context',
-    'plan-cancel-requested','task-materialized','task-running','task-candidate-ready','task-needs-rebase',
+    'plan-cancel-requested','task-materialized','task-running','task-progress','task-candidate-ready','task-needs-rebase',
     'task-rebase-disposition','task-retry-requested','task-retry-wait',
     'task-succeeded','task-failed','task-blocked','task-cancel-requested',
     'task-cancelled','plan-succeeded','plan-failed','plan-cancelled'
@@ -644,22 +644,24 @@ WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Research direction Artifact intent receipts are immutable'); END;
 `;
 
-const GENERATION_PLAN_EVENT_CONTROL_TYPES = [
+const GENERATION_PLAN_EVENT_REQUIRED_TYPES = [
   "plan-cancel-requested",
   "task-rebase-disposition",
   "task-retry-requested",
+  "task-progress",
 ] as const;
 
 /**
  * SQLite cannot widen an existing CHECK constraint with ALTER TABLE. Rebuild
  * only the append-only event table when opening a database created before the
- * durable Task 12 controls existed, preserving its exact ordered history.
+ * all currently supported durable event types existed, preserving its exact
+ * ordered history.
  */
 function upgradeGenerationPlanEventTypeConstraint(db: DatabaseSync): void {
   const row = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_plan_events'",
   ).get() as { sql: string | null } | undefined;
-  if (!row?.sql || GENERATION_PLAN_EVENT_CONTROL_TYPES.every((type) => (
+  if (!row?.sql || GENERATION_PLAN_EVENT_REQUIRED_TYPES.every((type) => (
     row.sql!.includes(`'${type}'`)
   ))) return;
 
@@ -680,7 +682,7 @@ function upgradeGenerationPlanEventTypeConstraint(db: DatabaseSync): void {
         task_id TEXT,
         type TEXT NOT NULL CHECK(type IN (
           'plan-queued','plan-compile-failed','task-materialization-failed','task-blocked-context',
-          'plan-cancel-requested','task-materialized','task-running','task-candidate-ready','task-needs-rebase',
+          'plan-cancel-requested','task-materialized','task-running','task-progress','task-candidate-ready','task-needs-rebase',
           'task-rebase-disposition','task-retry-requested','task-retry-wait',
           'task-succeeded','task-failed','task-blocked','task-cancel-requested',
           'task-cancelled','plan-succeeded','plan-failed','plan-cancelled'

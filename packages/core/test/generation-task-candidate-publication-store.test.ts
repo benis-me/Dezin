@@ -10,11 +10,16 @@ import {
   type GenerationPlanEvent,
   type GenerationTask,
   type GenerationTaskAttempt,
+  type GenerationTaskAttemptClaim,
   type GenerationTaskAttemptLease,
   type RenderFrameSpec,
   type StageGenerationTaskCandidateResult,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface PublishGenerationTaskCandidateInput {
   lease: GenerationTaskAttemptLease;
@@ -58,7 +63,8 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -70,6 +76,140 @@ function emptyGeneration() {
       blockingSeverities: [],
       requireRuntimeChecks: false,
       requireVisualReview: false,
+    },
+  };
+}
+
+function artifactCandidateInput(
+  label: string,
+  claim: GenerationTaskAttemptClaim,
+  projectId: string,
+) {
+  const contextPackId = claim.attempt.contextPackId;
+  assert.ok(contextPackId && contextPackId.startsWith("context-pack-"));
+  const contextPackHash = contextPackId.slice("context-pack-".length);
+  const frames = (claim.attempt.payload as { responsiveFrames?: RenderFrameSpec[] }).responsiveFrames;
+  assert.ok(frames && frames.length > 0);
+  const candidate = {
+    kind: "artifact" as const,
+    sourceCommitHash: checksum(`${label}:candidate-commit`),
+    sourceTreeHash: checksum(`${label}:candidate-tree`),
+    renderSpec: { frames },
+    quality: { state: "passed" as const, score: 98, findings: [] },
+  };
+  const visualEvidence = frames.map((frame) => {
+    const sha256 = checksum(`${label}:visual:${frame.id}`);
+    const frameAttemptId = `quality-round-0-${frame.id}`;
+    return {
+      protocol: "dezin.generation-task-visual-evidence.v1",
+      owner: {
+        projectId,
+        workspaceId: claim.task.workspaceId,
+        planId: claim.task.planId,
+        taskId: claim.task.id,
+        attempt: claim.attempt.attempt,
+        candidateCommitHash: candidate.sourceCommitHash,
+        candidateTreeHash: candidate.sourceTreeHash,
+        contextPackId,
+        contextPackHash,
+      },
+      frame: { ...frame, frameAttemptId },
+      round: 0,
+      mediaType: "image/png",
+      sha256,
+      byteLength: 1_024,
+      storageKey: [
+        "generation-task-evidence",
+        projectId,
+        claim.task.workspaceId,
+        claim.task.planId,
+        claim.task.id,
+        `attempt-${claim.attempt.attempt}`,
+        "visual",
+        `round-0-${frame.id}-${sha256}.png`,
+      ].join("/"),
+    };
+  });
+  const qualityEvidence = {
+    protocol: "dezin.standard-artifact-quality.v1",
+    candidate: {
+      commitHash: candidate.sourceCommitHash,
+      treeHash: candidate.sourceTreeHash,
+    },
+    contextPack: { id: contextPackId, hash: contextPackHash },
+    frames: candidate.renderSpec.frames,
+    frameResults: frames.map((frame, index) => ({
+      frameId: frame.id,
+      frameAttemptId: `quality-round-0-${frame.id}`,
+      width: frame.width,
+      height: frame.height,
+      status: "passed",
+      reviewed: true,
+      captureIdentity: {
+        sha256: visualEvidence[index]!.sha256,
+        byteLength: visualEvidence[index]!.byteLength,
+        width: frame.width,
+        height: frame.height,
+      },
+    })),
+    round: 0,
+    runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
+    visualReview: {
+      status: "passed",
+      fidelity: 0.98,
+      evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
+        frameId: frame.id,
+        frameAttemptId: frame.frameAttemptId,
+        sha256,
+        byteLength,
+        storageKey,
+      })),
+    },
+    visualEvidence,
+  };
+  const evaluationManifest = {
+    protocol: "dezin.artifact-run-evaluation-manifest.v1",
+    candidate: qualityEvidence.candidate,
+    round: 0,
+    passed: true,
+    score: candidate.quality.score,
+    qualityState: candidate.quality.state,
+    findingsDigest: checksum(JSON.stringify(candidate.quality.findings)),
+    frameResults: qualityEvidence.frameResults,
+    runtimeChecks: qualityEvidence.runtimeChecks,
+    reviewSummary: qualityEvidence.visualReview,
+    visualEvidence: qualityEvidence.visualEvidence,
+  };
+  return {
+    candidate,
+    evidence: {
+      runtimeChecks: qualityEvidence.runtimeChecks,
+      visualReview: qualityEvidence.visualReview,
+      protocol: "dezin.artifact-run.v1",
+      projectId,
+      taskId: claim.task.id,
+      planId: claim.task.planId,
+      workspaceId: claim.task.workspaceId,
+      attempt: claim.attempt.attempt,
+      attemptCreatedAt: claim.attempt.createdAt,
+      inputHash: claim.attempt.inputHash,
+      contextPackId,
+      contextPackHash,
+      sourceBase: {
+        commitHash: claim.attempt.sourceCommitHash,
+        treeHash: claim.attempt.sourceTreeHash,
+      },
+      candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(claim.attempt),
+      selectedRound: 0,
+      versions: [{
+        round: 0,
+        commitHash: candidate.sourceCommitHash,
+        treeHash: candidate.sourceTreeHash,
+        passed: true,
+        score: candidate.quality.score,
+        evaluationManifest,
+      }],
+      qualityEvidence,
     },
   };
 }
@@ -220,129 +360,7 @@ function createPublicationFixture(label: string) {
   });
   assert.ok(claim);
   control.set(100_001);
-  const frames = (attempt.payload as { responsiveFrames?: RenderFrameSpec[] }).responsiveFrames;
-  assert.ok(frames && frames.length > 0);
-  const candidate = {
-    kind: "artifact" as const,
-    sourceCommitHash: checksum(`${label}:candidate-commit`),
-    sourceTreeHash: checksum(`${label}:candidate-tree`),
-    renderSpec: { frames },
-    quality: { state: "passed", score: 98, findings: [] },
-  };
-  const visualEvidence = frames.map((frame) => {
-    const sha256 = checksum(`${label}:visual:${frame.id}`);
-    const frameAttemptId = `quality-round-0-${frame.id}`;
-    return {
-      protocol: "dezin.generation-task-visual-evidence.v1",
-      owner: {
-        projectId: project.id,
-        workspaceId: task.workspaceId,
-        planId: task.planId,
-        taskId: task.id,
-        attempt: attempt.attempt,
-        candidateCommitHash: candidate.sourceCommitHash,
-        candidateTreeHash: candidate.sourceTreeHash,
-        contextPackId: context.id,
-        contextPackHash: context.hash,
-      },
-      frame: { ...frame, frameAttemptId },
-      round: 0,
-      mediaType: "image/png",
-      sha256,
-      byteLength: 1_024,
-      storageKey: [
-        "generation-task-evidence",
-        project.id,
-        task.workspaceId,
-        task.planId,
-        task.id,
-        `attempt-${attempt.attempt}`,
-        "visual",
-        `round-0-${frame.id}-${sha256}.png`,
-      ].join("/"),
-    };
-  });
-  const qualityEvidence = {
-    protocol: "dezin.standard-artifact-quality.v1",
-    candidate: {
-      commitHash: candidate.sourceCommitHash,
-      treeHash: candidate.sourceTreeHash,
-    },
-    contextPack: { id: context.id, hash: context.hash },
-    frames: candidate.renderSpec.frames,
-    frameResults: frames.map((frame, index) => ({
-      frameId: frame.id,
-      frameAttemptId: `quality-round-0-${frame.id}`,
-      width: frame.width,
-      height: frame.height,
-      status: "passed",
-      reviewed: true,
-      captureIdentity: {
-        sha256: visualEvidence[index]!.sha256,
-        byteLength: visualEvidence[index]!.byteLength,
-        width: frame.width,
-        height: frame.height,
-      },
-    })),
-    round: 0,
-    runtimeChecks: frames.map((frame) => ({ id: `frame:${frame.id}`, status: "passed" })),
-    visualReview: {
-      status: "passed",
-      fidelity: 0.98,
-      evidence: visualEvidence.map(({ frame, sha256, byteLength, storageKey }) => ({
-        frameId: frame.id,
-        frameAttemptId: frame.frameAttemptId,
-        sha256,
-        byteLength,
-        storageKey,
-      })),
-    },
-    visualEvidence,
-  };
-  const evaluationManifest = {
-    protocol: "dezin.artifact-run-evaluation-manifest.v1",
-    candidate: qualityEvidence.candidate,
-    round: 0,
-    passed: true,
-    score: candidate.quality.score,
-    qualityState: candidate.quality.state,
-    findingsDigest: createHash("sha256")
-      .update(JSON.stringify(candidate.quality.findings))
-      .digest("hex"),
-    frameResults: qualityEvidence.frameResults,
-    runtimeChecks: qualityEvidence.runtimeChecks,
-    reviewSummary: qualityEvidence.visualReview,
-    visualEvidence: qualityEvidence.visualEvidence,
-  };
-  const evidence = {
-    runtimeChecks: qualityEvidence.runtimeChecks,
-    visualReview: qualityEvidence.visualReview,
-    protocol: "dezin.artifact-run.v1",
-    projectId: project.id,
-    taskId: task.id,
-    planId: task.planId,
-    workspaceId: task.workspaceId,
-    attempt: attempt.attempt,
-    attemptCreatedAt: attempt.createdAt,
-    inputHash: attempt.inputHash,
-    contextPackId: context.id,
-    contextPackHash: context.hash,
-    sourceBase: {
-      commitHash: attempt.sourceCommitHash,
-      treeHash: attempt.sourceTreeHash,
-    },
-    candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(attempt),
-    selectedRound: 0,
-    versions: [{
-      round: 0,
-      commitHash: candidate.sourceCommitHash,
-      treeHash: candidate.sourceTreeHash,
-      passed: true,
-      score: candidate.quality.score,
-      evaluationManifest,
-    }],
-    qualityEvidence,
-  };
+  const { candidate, evidence } = artifactCandidateInput(label, claim, project.id);
   const staged = store.workspace.stageGenerationTaskCandidateForProject(
     project.id,
     compiled.plan.id,
@@ -367,6 +385,175 @@ function createPublicationFixture(label: string) {
     baseRevision,
     baseSnapshot,
   };
+}
+
+function createSiblingPublicationFixture(label: string, siblingCount = 5) {
+  assert.ok(siblingCount >= 4);
+  const control = controlledClock(`candidate-publication-siblings-${label}`);
+  const store = new Store(":memory:", control.clock);
+  const project = store.createProject({
+    name: `Candidate publication siblings ${label}`,
+    mode: "standard",
+  });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const artifacts = Array.from({ length: siblingCount }, (_, index) => ({
+    artifactId: `publication-sibling-page-${label}-${index + 1}`,
+    trackId: `publication-sibling-track-${label}-${index + 1}`,
+    nodeId: `publication-sibling-node-${label}-${index + 1}`,
+    name: `Generated sibling page ${index + 1}`,
+  }));
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+    commands: artifacts.map((artifact, index) => ({
+      id: `add-publication-sibling-${label}-${index + 1}`,
+      type: "add-node" as const,
+      node: {
+        id: artifact.nodeId,
+        kind: "page" as const,
+        name: artifact.name,
+        artifactId: artifact.artifactId,
+        createIdentity: { initialTrackId: artifact.trackId },
+      },
+    })),
+  });
+  const baseRevisions = new Map<string, ReturnType<typeof store.workspace.createArtifactRevision>>();
+  let baseSnapshotId = graph.snapshot.id;
+  for (const [index, artifact] of artifacts.entries()) {
+    const workspace = store.workspace.getWorkspace(project.id)!;
+    const revision = store.workspace.createArtifactRevision({
+      artifactId: artifact.artifactId,
+      trackId: artifact.trackId,
+      parentRevisionId: null,
+      sourceCommitHash: checksum(`${label}:sibling-${index + 1}:base-commit`),
+      sourceTreeHash: checksum(`${label}:sibling-${index + 1}:base-tree`),
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
+      quality: { state: "passed", score: 100, findings: [] },
+      contextPackHash: null,
+      dependencies: [],
+      resourcePins: [],
+    });
+    baseRevisions.set(artifact.artifactId, revision);
+    baseSnapshotId = store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: baseSnapshotId,
+    }).id;
+  }
+  const workspace = store.workspace.getWorkspace(project.id)!;
+  assert.equal(workspace.activeSnapshotId, baseSnapshotId);
+  const layout = store.workspace.getLayout(project.id);
+  const proposal = store.workspace.createProposal({
+    projectId: project.id,
+    kind: "workspace-generation",
+    baseGraphRevision: workspace.graphRevision,
+    baseSnapshotId,
+    layoutId: layout.layoutId,
+    baseLayoutChecksum: layout.checksum,
+    operations: [],
+    layoutOperations: [],
+    generation: {
+      ...emptyGeneration(),
+      artifactPlans: artifacts.map((artifact) => ({
+        operation: "revise" as const,
+        nodeId: artifact.nodeId,
+        artifactId: artifact.artifactId,
+        kind: "page" as const,
+        name: artifact.name,
+        trackId: artifact.trackId,
+        baseRevisionId: baseRevisions.get(artifact.artifactId)!.id,
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: ["desktop"],
+      })),
+    },
+    rationale: "Publish independent sibling Page candidates from one immutable base Snapshot",
+    assumptions: [],
+  });
+  const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(
+    project.id,
+    approved.plan.id,
+  );
+  const tasks = compiled.tasks.filter((task) => task.kind === "page");
+  assert.equal(tasks.length, siblingCount);
+  const prepared = tasks.map((task, index) => {
+    assert.equal(task.target.type, "artifact");
+    if (task.target.type !== "artifact") assert.fail("expected Artifact target");
+    const artifact = artifacts.find((candidate) => candidate.artifactId === task.target.id);
+    assert.ok(artifact);
+    const baseRevision = baseRevisions.get(artifact.artifactId);
+    assert.ok(baseRevision);
+    const observation = store.workspace.observeGenerationTaskMaterializationForProject(
+      project.id,
+      compiled.plan.id,
+      task.id,
+    );
+    assert.equal(observation.expectedSnapshotId, baseSnapshotId);
+    assert.equal(observation.baseRevisionId, baseRevision.id);
+    const kernel = store.workspace.getKernelRevision(observation.kernelRevisionId);
+    assert.ok(kernel);
+    const baseRevisionChecksum = store.workspace.getArtifactRevisionContextChecksum(baseRevision.id);
+    assert.ok(baseRevisionChecksum);
+    const contextHash = checksum(`${label}:sibling-${index + 1}:context-pack`);
+    const context = store.workspace.persistContextPack({
+      id: `context-pack-${contextHash}`,
+      workspaceId: workspace.id,
+      graphRevision: workspace.graphRevision,
+      target: { type: "artifact", id: artifact.artifactId },
+      intent: "generate",
+      messageChecksum: checksum(`${label}:sibling-${index + 1}:message`),
+      items: [
+        {
+          ref: { kind: "kernel", id: kernel.id, revisionId: kernel.id },
+          resolvedKind: "kernel-revision",
+          kernelRevisionId: kernel.id,
+          checksum: kernel.checksum,
+          reason: "design-kernel",
+          trustLevel: "system",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+        {
+          ref: {
+            kind: "artifact",
+            id: artifact.artifactId,
+            revisionId: baseRevision.id,
+          },
+          resolvedKind: "artifact-revision",
+          artifactRevisionId: baseRevision.id,
+          checksum: baseRevisionChecksum,
+          reason: "target-base",
+          trustLevel: "trusted",
+          boundary: {},
+          tokenEstimate: 1,
+          provenance: {},
+          provided: true,
+        },
+      ],
+      omissions: [],
+      tokenEstimate: 2,
+      manifestPath: `context-packs/candidate-publication-siblings-${label}-${index + 1}.json`,
+      hash: contextHash,
+    });
+    const attempt = store.workspace.createGenerationTaskAttemptForProject(
+      project.id,
+      compiled.plan.id,
+      {
+        ...observation,
+        contextPackId: context.id,
+        sourceCommitHash: baseRevision.sourceCommitHash,
+        sourceTreeHash: baseRevision.sourceTreeHash,
+        retryContextPolicy: "same-context",
+        executionMode: "full",
+      },
+    );
+    return { artifact, baseRevision, task, attempt };
+  });
+  return { control, store, project, workspace, plan: compiled.plan, baseSnapshotId, prepared };
 }
 
 type PublicationFixture = ReturnType<typeof createPublicationFixture>;
@@ -728,6 +915,194 @@ test("publishing a recorded Artifact candidate atomically moves Head and active 
     assert.equal(successEvents[0]?.payload.resultResourceRevisionId, null);
     assert.equal(successEvents[0]?.payload.resultSnapshotId, published.id);
     assert.equal(successEvents[0]?.payload.candidateEvidenceHash, fixture.staged.attempt.candidateEvidenceHash);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("five stale sibling candidates from one Plan publish without consuming rebase budget", () => {
+  const fixture = createSiblingPublicationFixture("same-plan-lineage", 5);
+  try {
+    let expectedParentSnapshotId = fixture.baseSnapshotId;
+    for (const [index, prepared] of fixture.prepared.entries()) {
+      const now = 100_000 + index * 100;
+      fixture.control.set(now);
+      const claim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+        taskId: prepared.task.id,
+        attempt: prepared.attempt.attempt,
+        ownerId: `candidate-publication-sibling-worker-${index + 1}`,
+        now,
+        leaseMs: 30_000,
+      });
+      assert.ok(claim);
+      fixture.control.set(now + 1);
+      const input = artifactCandidateInput(
+        `same-plan-lineage-sibling-${index + 1}`,
+        claim,
+        fixture.project.id,
+      );
+      const staged = fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        { lease: claim.lease, ...input },
+      );
+      publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        { lease: claim.lease },
+      );
+
+      const detail = fixture.store.workspace.getGenerationPlanDetailForProject(
+        fixture.project.id,
+        fixture.plan.id,
+      );
+      const task = detail.tasks.find((candidate) => candidate.id === prepared.task.id);
+      assert.ok(task);
+      assert.equal(task.status, "succeeded");
+      assert.equal(task.rebaseCount, 0);
+      assert.equal(task.resultRevisionId, staged.artifactRevision.id);
+      assert.ok(task.resultSnapshotId);
+      const snapshot = fixture.store.workspace.listSnapshots(fixture.project.id)
+        .find((candidate) => candidate.id === task.resultSnapshotId);
+      assert.ok(snapshot);
+      assert.equal(snapshot.parentSnapshotId, expectedParentSnapshotId);
+      assert.deepEqual(snapshot.provenance, {
+        kind: "artifact-publication",
+        revisionId: staged.artifactRevision.id,
+        planId: fixture.plan.id,
+        taskId: prepared.task.id,
+      });
+      assert.equal(
+        fixture.store.workspace.getTrack(prepared.artifact.trackId)?.headRevisionId,
+        staged.artifactRevision.id,
+      );
+      expectedParentSnapshotId = snapshot.id;
+    }
+
+    const events = fixture.store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    );
+    assert.equal(events.filter((event) => event.type === "task-needs-rebase").length, 0);
+    assert.equal(events.filter((event) => (
+      event.type === "task-succeeded"
+      && fixture.prepared.some((prepared) => prepared.task.id === event.taskId)
+    )).length, fixture.prepared.length);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("an external Snapshot change remains a conflict when a sibling publication follows it", () => {
+  const fixture = createSiblingPublicationFixture("mixed-lineage", 4);
+  try {
+    const externalBase = fixture.store.workspace.getWorkspace(fixture.project.id)!;
+    const external = fixture.store.workspace.applyGraphCommands(fixture.project.id, {
+      baseGraphRevision: externalBase.graphRevision,
+      expectedSnapshotId: externalBase.activeSnapshotId,
+      commands: [{
+        id: "external-mixed-lineage-rename",
+        type: "rename-node",
+        nodeId: fixture.prepared[0]!.artifact.nodeId,
+        name: "Externally renamed before sibling publication",
+      }],
+    });
+
+    const first = fixture.prepared[0]!;
+    fixture.control.set(100_000);
+    const firstClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: first.task.id,
+      attempt: first.attempt.attempt,
+      ownerId: "mixed-lineage-first-worker",
+      now: 100_000,
+      leaseMs: 30_000,
+    });
+    assert.ok(firstClaim);
+    fixture.control.set(100_001);
+    fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        lease: firstClaim.lease,
+        ...artifactCandidateInput("mixed-lineage-first", firstClaim, fixture.project.id),
+      },
+    );
+    publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: firstClaim.lease },
+    );
+    const disposition = fixture.store.workspace.reconcileGenerationTaskNeedsRebaseForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      first.task.id,
+    );
+    assert.equal(disposition.kind, "publication-only");
+    if (disposition.kind !== "publication-only") assert.fail("expected publication-only disposition");
+    assert.equal(disposition.successorAttempt.expectedSnapshotId, external.snapshot.id);
+
+    fixture.control.set(100_100);
+    const successorClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: first.task.id,
+      attempt: disposition.successorAttempt.attempt,
+      ownerId: "mixed-lineage-successor-worker",
+      now: 100_100,
+      leaseMs: 30_000,
+    });
+    assert.ok(successorClaim);
+    fixture.control.set(100_101);
+    publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: successorClaim.lease },
+    );
+    const siblingSnapshotId = fixture.store.workspace.getWorkspace(
+      fixture.project.id,
+    )!.activeSnapshotId;
+    const siblingSnapshot = fixture.store.workspace.listSnapshots(fixture.project.id)
+      .find((snapshot) => snapshot.id === siblingSnapshotId);
+    assert.ok(siblingSnapshot);
+    assert.equal(siblingSnapshot.parentSnapshotId, external.snapshot.id);
+    assert.equal(siblingSnapshot.provenance.kind, "artifact-publication");
+
+    const stale = fixture.prepared[1]!;
+    fixture.control.set(100_200);
+    const staleClaim = fixture.store.workspace.tryClaimGenerationTaskAttempt({
+      taskId: stale.task.id,
+      attempt: stale.attempt.attempt,
+      ownerId: "mixed-lineage-stale-worker",
+      now: 100_200,
+      leaseMs: 30_000,
+    });
+    assert.ok(staleClaim);
+    fixture.control.set(100_201);
+    fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        lease: staleClaim.lease,
+        ...artifactCandidateInput("mixed-lineage-stale", staleClaim, fixture.project.id),
+      },
+    );
+    publicationApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: staleClaim.lease },
+    );
+    const staleTask = fixture.store.workspace.getGenerationPlanDetailForProject(
+      fixture.project.id,
+      fixture.plan.id,
+    ).tasks.find((task) => task.id === stale.task.id);
+    assert.ok(staleTask);
+    assert.equal(staleTask.status, "needs-rebase");
+    assert.equal(staleTask.error?.pointer, "active-snapshot");
+    assert.equal(staleTask.error?.expectedId, fixture.baseSnapshotId);
+    assert.equal(staleTask.error?.actualId, siblingSnapshot.id);
+    assert.equal(
+      fixture.store.workspace.getWorkspace(fixture.project.id)?.activeSnapshotId,
+      siblingSnapshot.id,
+    );
   } finally {
     fixture.store.close();
   }

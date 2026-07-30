@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compileGenerationPlan, GenerationPlanCompileError } from "../src/generation-plan.ts";
+import {
+  compileGenerationPlan,
+  GenerationPlanCompileError,
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+} from "../src/generation-plan.ts";
 import {
   generationTaskIntentHash,
   normalizeGenerationTaskIntent,
@@ -67,6 +71,48 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
         providerId: "codebuddy",
         command: "codebuddy",
         model: "gpt-5.6-sol",
+        executionAuthority: {
+          kind: "generator",
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "codebuddy",
+          credentialSource: "session",
+          credentialRequired: false,
+        },
+      },
+      researchAgent: {
+        providerId: "codex",
+        command: "codex",
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "generator",
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "openai",
+          credentialSource: "session",
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent: {
+        providerId: "claude",
+        command: "claude",
+        model: "claude-opus-4-8",
+        executionAuthority: {
+          kind: "reviewer",
+          baseUrl: "https://api.anthropic.example/v1",
+          credentialSource: "anthropic-profile",
+          credentialRequired: true,
+        },
+      },
+      moodboardImageAuthority: {
+        kind: "moodboard-image",
+        protocol: "dezin.workspace-moodboard-image-authority.v1",
+        providerId: "openai-compatible",
+        baseUrl: "https://images.example.test/v1",
+        model: "image-model-1",
+        apiVersion: "",
+        credentialSource: "global-image",
+        credentialRequired: true,
       },
       resourceOperations: [
         {
@@ -438,13 +484,21 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(Object.isFrozen(compiled.dependencies), true);
 });
 
-test("copies the frozen proposal Agent into every executable Artifact and Resource leaf", () => {
+test("copies the frozen proposal Agent into every executable leaf except split-authority Research", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
   const agent = {
     providerId: "codebuddy" as const,
     command: "codebuddy" as const,
     model: "gpt-5.6-sol",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "codebuddy",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
   };
   const compiled = compileGenerationPlan({
     shell: fixture.shell,
@@ -459,12 +513,17 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
   );
   assert.ok(executable.length > 0);
   assert.ok(executable.every((task) => {
-    assert.deepEqual((task.payload as { agent?: unknown }).agent, agent);
+    const isResearch = task.kind === "resource"
+      && (task.payload as { operation?: { kind?: string } }).operation?.kind === "research";
+    assert.deepEqual(
+      (task.payload as { agent?: unknown }).agent,
+      isResearch ? generation.researchAgent : agent,
+    );
     return true;
   }));
   assert.ok(executable
     .filter((task) => task.kind === "resource")
-    .every((task) => task.resourceLimits.timeoutMs === 25 * 60_000));
+    .every((task) => task.resourceLimits.timeoutMs === RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs));
   assert.ok(executable
     .filter((task) => task.kind === "page" || task.kind === "component")
     .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
@@ -507,6 +566,196 @@ test("copies the frozen proposal Agent into every executable Artifact and Resour
   }
 });
 
+test("freezes split Research generator and reviewer authority into every executable leaf", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const taskAgent = {
+    providerId: "codebuddy" as const,
+    command: "codebuddy" as const,
+    model: "gpt-5.6-sol",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "codebuddy",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
+  const researchAgent = {
+    providerId: "codex" as const,
+    command: "codex" as const,
+    model: "gpt-5.4-mini",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
+  const reviewerAgent = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer" as const,
+      baseUrl: "https://api.anthropic.example/v1",
+      credentialSource: "anthropic-profile" as const,
+      credentialRequired: true,
+    },
+  };
+  const compiled = compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: {
+      ...fixture.proposal,
+      generation: {
+        ...generation,
+        agent: taskAgent,
+        researchAgent,
+        reviewerAgent,
+      },
+    },
+  });
+
+  const executable = compiled.tasks.filter(
+    (task) => task.kind === "resource" || task.kind === "page" || task.kind === "component",
+  );
+  const research = executable.find((task) => (
+    task.kind === "resource"
+    && (task.payload as { operation?: { kind?: string } }).operation?.kind === "research"
+  ));
+  assert.ok(research);
+  assert.deepEqual((research.payload as { agent?: unknown }).agent, researchAgent);
+  assert.ok(executable.filter((task) => task !== research).every((task) => {
+    assert.deepEqual((task.payload as { agent?: unknown }).agent, taskAgent);
+    return true;
+  }));
+  assert.ok(executable.every((task) => {
+    assert.deepEqual((task.payload as { reviewer?: unknown }).reviewer, reviewerAgent);
+    return true;
+  }));
+});
+
+test("rejects incomplete, non-Codex, or same-principal generated Research authority", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  const reviewerAgent = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer" as const,
+      baseUrl: "https://api.anthropic.example/v1",
+      credentialSource: "anthropic-profile" as const,
+      credentialRequired: true,
+    },
+  };
+  for (const authority of [
+    {
+      researchAgent: undefined,
+      reviewerAgent: undefined,
+    },
+    { researchAgent: undefined, reviewerAgent },
+    {
+      researchAgent: {
+        providerId: "codebuddy" as const,
+        command: "codebuddy" as const,
+        model: "gpt-5.6-sol",
+        executionAuthority: {
+          kind: "generator" as const,
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "codebuddy",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent,
+    },
+    {
+      researchAgent: {
+        providerId: "codex" as const,
+        command: "codex" as const,
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "generator" as const,
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "openai",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent: {
+        providerId: "codex" as const,
+        command: "codex" as const,
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "reviewer" as const,
+          baseUrl: "",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+    },
+    {
+      researchAgent: {
+        providerId: "codex" as const,
+        command: "claude" as const,
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "generator" as const,
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "openai",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent,
+    },
+    {
+      researchAgent: {
+        providerId: "codex" as const,
+        command: "codex" as const,
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "generator" as const,
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "openai",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent: {
+        providerId: "claude" as const,
+        command: "codex" as const,
+        model: "claude-opus-4-8",
+        executionAuthority: {
+          kind: "reviewer" as const,
+          baseUrl: "",
+          credentialSource: "session" as const,
+          credentialRequired: false,
+        },
+      },
+    },
+  ]) {
+    assert.throws(
+      () => compileGenerationPlan({
+        shell: fixture.shell,
+        proposal: {
+          ...fixture.proposal,
+          generation: { ...generation, ...authority },
+        },
+      }),
+      GenerationPlanCompileError,
+    );
+  }
+});
+
 test("gives frozen Codex generation enough bounded time for Resource review and visual Artifact QA", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
@@ -514,6 +763,14 @@ test("gives frozen Codex generation enough bounded time for Resource review and 
     providerId: "codex" as const,
     command: "codex" as const,
     model: "gpt-5.4-mini",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
   };
   const compiled = compileGenerationPlan({
     shell: fixture.shell,
@@ -525,7 +782,7 @@ test("gives frozen Codex generation enough bounded time for Resource review and 
 
   assert.ok(compiled.tasks
     .filter((task) => task.kind === "resource")
-    .every((task) => task.resourceLimits.timeoutMs === 25 * 60_000));
+    .every((task) => task.resourceLimits.timeoutMs === RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs));
   assert.ok(compiled.tasks
     .filter((task) => task.kind === "page" || task.kind === "component")
     .every((task) => task.resourceLimits.timeoutMs === 30 * 60_000));
@@ -541,9 +798,17 @@ test("freezes one provider-independent Resource deadline that covers every Moodb
       generation: {
         ...generation,
         agent: {
-          providerId: "anthropic",
+          providerId: "claude",
           command: "claude",
           model: "claude-sonnet-4-5",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "https://api.anthropic.example/v1",
+            organization: "",
+            credentialProviderId: "anthropic",
+            credentialSource: "provider-profile",
+            credentialRequired: true,
+          },
         },
       },
     },
@@ -551,12 +816,18 @@ test("freezes one provider-independent Resource deadline that covers every Moodb
 
   const resourceTasks = compiled.tasks.filter((task) => task.kind === "resource");
   assert.ok(resourceTasks.length > 0);
-  assert.ok(resourceTasks.every((task) => task.resourceLimits.timeoutMs === (
-    (7 * 60_000)
-    + (8 * 90_000)
-    + (8 * 30_000)
-    + (2 * 60_000)
-  )));
+  assert.equal(
+    RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
+    RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs
+      + (RESOURCE_GENERATION_DEADLINE_BUDGET.maxMoodboardAssets
+        * RESOURCE_GENERATION_DEADLINE_BUDGET.imageCallTimeoutMs)
+      + (RESOURCE_GENERATION_DEADLINE_BUDGET.maxMoodboardAssets
+        * RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs)
+      + RESOURCE_GENERATION_DEADLINE_BUDGET.completionReserveMs,
+  );
+  assert.ok(resourceTasks.every(
+    (task) => task.resourceLimits.timeoutMs === RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
+  ));
   const research = resourceTasks.find((task) => task.target.id === "resource-copy");
   const moodboard = resourceTasks.find((task) => task.target.id === "resource-images");
   assert.ok(research);
@@ -577,8 +848,186 @@ test("rejects executable generation that does not freeze its Agent selection", (
     () => compileGenerationPlan(fixture),
     (error: unknown) => error instanceof GenerationPlanCompileError
       && error.code === "invalid-reference"
-      && /freeze an Agent selection/.test(error.message),
+      && /freeze one generating Agent/.test(error.message),
   );
+});
+
+test("rejects host-login generators that claim a non-session credential source", () => {
+  const fixture = approvedPlanFixture();
+  const authority = workspaceGeneration(fixture.proposal).agent?.executionAuthority;
+  assert.equal(authority?.kind, "generator");
+  if (authority?.kind !== "generator") return;
+  (authority as unknown as Record<string, unknown>).credentialSource = "provider-profile";
+
+  assert.throws(
+    () => compileGenerationPlan(fixture),
+    (error: unknown) => error instanceof GenerationPlanCompileError
+      && error.code === "invalid-reference"
+      && /generator execution authority/.test(error.message),
+  );
+});
+
+test("rejects unknown generator credential sources", () => {
+  const fixture = approvedPlanFixture();
+  workspaceGeneration(fixture.proposal).agent = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-sonnet-4-5",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://api.anthropic.example/v1",
+      organization: "",
+      credentialProviderId: "anthropic",
+      credentialSource: "foreign-vault",
+      credentialRequired: true,
+    } as unknown as NonNullable<WorkspaceGenerationPayload["agent"]>["executionAuthority"],
+  };
+
+  assert.throws(
+    () => compileGenerationPlan(fixture),
+    (error: unknown) => error instanceof GenerationPlanCompileError
+      && error.code === "invalid-reference"
+      && /generator execution authority/.test(error.message),
+  );
+});
+
+test("rejects session generator authority that carries an endpoint, organization, or credential requirement", () => {
+  for (const invalid of [
+    { baseUrl: "https://api.anthropic.example/v1" },
+    { organization: "organization-1" },
+    { credentialRequired: true },
+  ]) {
+    const fixture = approvedPlanFixture();
+    workspaceGeneration(fixture.proposal).agent = {
+      providerId: "claude",
+      command: "claude",
+      model: "claude-sonnet-4-5",
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "anthropic",
+        credentialSource: "session",
+        credentialRequired: false,
+        ...invalid,
+      },
+    };
+
+    assert.throws(
+      () => compileGenerationPlan(fixture),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === "invalid-reference"
+        && /generator execution authority/.test(error.message),
+    );
+  }
+});
+
+test("binds an agent-sourced reviewer only to a generator using that same credential source", () => {
+  const fixture = approvedPlanFixture();
+  const generation = workspaceGeneration(fixture.proposal);
+  generation.agent = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-sonnet-4-5",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://api.anthropic.example/v1",
+      organization: "",
+      credentialProviderId: "anthropic",
+      credentialSource: "provider-profile",
+      credentialRequired: true,
+    },
+  };
+  generation.reviewerAgent = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "https://api.anthropic.example/v1",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+
+  assert.throws(
+    () => compileGenerationPlan(fixture),
+    (error: unknown) => error instanceof GenerationPlanCompileError
+      && error.code === "invalid-reference"
+      && /reviewer.*execution authority/.test(error.message),
+  );
+
+  const generatorAuthority = generation.agent.executionAuthority;
+  assert.equal(generatorAuthority?.kind, "generator");
+  if (generatorAuthority?.kind !== "generator") return;
+  generatorAuthority.credentialSource = "agent";
+  const normalized = normalizeWorkspaceProposalGeneration(generation);
+  assert.equal(
+    normalized.kind === "workspace-generation"
+      ? normalized.agent?.executionAuthority?.kind === "generator"
+        ? normalized.agent.executionAuthority.credentialSource
+        : null
+      : null,
+    "agent",
+  );
+  assert.doesNotThrow(() => compileGenerationPlan({
+    ...fixture,
+    proposal: { ...fixture.proposal, generation: normalized },
+  }));
+});
+
+test("generated Moodboard requires one frozen image authority and copies it only to that Task", () => {
+  const missing = approvedPlanFixture();
+  delete workspaceGeneration(missing.proposal).moodboardImageAuthority;
+  assert.throws(
+    () => compileGenerationPlan(missing),
+    (error: unknown) => error instanceof GenerationPlanCompileError
+      && error.code === "invalid-reference"
+      && /Moodboard image execution authority/.test(error.message),
+  );
+
+  const fixture = approvedPlanFixture();
+  const compiled = compileGenerationPlan(fixture);
+  const resourceTasks = compiled.tasks.filter((task) => task.kind === "resource");
+  const moodboard = resourceTasks.find((task) => task.target.id === "resource-images");
+  const research = resourceTasks.find((task) => task.target.id === "resource-copy");
+  assert.ok(moodboard);
+  assert.ok(research);
+  assert.deepEqual(
+    moodboard.payload.moodboardImageAuthority,
+    workspaceGeneration(fixture.proposal).moodboardImageAuthority,
+  );
+  assert.equal(Object.hasOwn(research.payload, "moodboardImageAuthority"), false);
+});
+
+test("Moodboard image authority codec rejects secret fields and embedded NUL bytes", () => {
+  const generation = structuredClone(workspaceGeneration(approvedPlanFixture().proposal));
+  const exact = generation.moodboardImageAuthority;
+  assert.ok(exact);
+
+  assert.throws(
+    () => normalizeWorkspaceProposalGeneration({
+      ...generation,
+      moodboardImageAuthority: {
+        ...exact,
+        apiKey: "must-never-persist",
+      } as unknown as typeof exact,
+    }),
+    /unexpected field apiKey|fields are invalid/,
+  );
+
+  for (const field of ["providerId", "model", "apiVersion"] as const) {
+    assert.throws(
+      () => normalizeWorkspaceProposalGeneration({
+        ...generation,
+        moodboardImageAuthority: {
+          ...exact,
+          [field]: `${exact[field]}${String.fromCharCode(0)}substitution`,
+        },
+      }),
+      /canonical and bounded/,
+    );
+  }
 });
 
 test("preserves unique per-Artifact design instructions in the sealed leaf brief", () => {
@@ -1163,6 +1612,32 @@ test("compiles only an exact immutable Research Revision direction selection int
     }),
     /selected Research.*exact existing Revision/i,
   );
+
+  // Compile proves ownership of an exact Research Revision dependency. Membership
+  // of directionId inside that Revision payload is enforced at Proposal approval
+  // in the daemon (see proposal-research-direction-authority). A truncated id
+  // such as "s" remains structurally valid here and must be rejected there.
+  const truncated = normalizeWorkspaceProposalGeneration({
+    ...generation,
+    resourceOperations: generation.resourceOperations.map((operation) => (
+      operation.resourceId === selection.resourceId
+        ? { ...operation, kind: "research" as const }
+        : operation
+    )),
+    artifactPlans: generation.artifactPlans.map((plan) => plan.artifactId === "page-home"
+      ? {
+          ...plan,
+          researchDirectionSelection: {
+            ...selection,
+            directionId: "s",
+          },
+        }
+      : plan),
+  });
+  assert.doesNotThrow(() => compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: { ...fixture.proposal, generation: truncated },
+  }));
 });
 
 test("freezes auditable v2 briefs, complete capabilities, and Resource adapter identity", () => {
@@ -1172,15 +1647,21 @@ test("freezes auditable v2 briefs, complete capabilities, and Resource adapter i
   const card = byTarget.get("component-card");
   const home = byTarget.get("page-home");
   const copy = byTarget.get("resource-copy");
-  const agent = workspaceGeneration(fixture.proposal).agent;
+  const generation = workspaceGeneration(fixture.proposal);
+  const agent = generation.agent;
+  const researchAgent = generation.researchAgent;
+  const reviewer = generation.reviewerAgent;
   assert.ok(card);
   assert.ok(home);
   assert.ok(copy);
   assert.ok(agent);
+  assert.ok(researchAgent);
+  assert.ok(reviewer);
 
   assert.deepEqual(card.payload, {
     version: 2,
     agent,
+    reviewer,
     artifactPlan: {
       operation: "create",
       nodeId: "node-card",
@@ -1217,7 +1698,9 @@ test("freezes auditable v2 briefs, complete capabilities, and Resource adapter i
   });
   assert.deepEqual(copy.payload, {
     version: 2,
-    agent,
+    agent: researchAgent,
+    reviewer,
+    reviewerAuthorityAgent: agent,
     operation: {
       operation: "create",
       nodeId: "node-copy",

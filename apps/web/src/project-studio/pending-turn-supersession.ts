@@ -151,6 +151,12 @@ function newReplacementTurnId(): string {
 export function claimPendingTurnReplacement(input: {
   projectId: string;
   expectedActiveTurnId: string;
+  /**
+   * Immutable facts already attempted under a legacy pre-reserved active turn.
+   * A failed Agent outbox is authoritative for this value even when an older
+   * pending-turn record predates recoveryRequest persistence.
+   */
+  activeRequestFingerprint?: string;
   reservation: PendingTurnReplacementReservation;
 }): Promise<PendingTurnReplacementClaim> {
   return withPendingTurnLock(input.projectId, () => {
@@ -168,8 +174,14 @@ export function claimPendingTurnReplacement(input: {
       };
     }
 
+    const legacyActiveFingerprint = current.supersededByTurnId === input.expectedActiveTurnId
+      && current.recoveryRequest === undefined
+      ? input.activeRequestFingerprint
+      : undefined;
     const bindsPreviouslyReservedTurn = current.supersededByTurnId !== undefined
-      && current.recoveryRequest === undefined;
+      && current.recoveryRequest === undefined
+      && (legacyActiveFingerprint === undefined
+        || legacyActiveFingerprint === input.reservation.fingerprint);
     const turnId = bindsPreviouslyReservedTurn
       ? current.supersededByTurnId!
       : newReplacementTurnId();
@@ -182,6 +194,16 @@ export function claimPendingTurnReplacement(input: {
     };
     const lineage = [
       ...(current.supersessionLineage ?? []),
+      ...(!bindsPreviouslyReservedTurn
+        && current.supersededByTurnId !== undefined
+        && current.recoveryRequest === undefined
+        && legacyActiveFingerprint !== undefined
+        ? [{
+            turnId: current.supersededByTurnId,
+            parentTurnId: current.turnId,
+            fingerprint: legacyActiveFingerprint,
+          }]
+        : []),
       {
         turnId,
         parentTurnId,

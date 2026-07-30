@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { ReactFlow } from "@xyflow/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
+import { ToastProvider } from "../components/Toast.tsx";
 import {
   ApiError,
   createApiClient,
@@ -1403,6 +1404,63 @@ function renderStudio(overrides: Parameters<typeof makeFakeApi>[0]) {
   );
 }
 
+test("Design Workspace canvas keeps project actions, rename, export, and settings wired through the shared header", async () => {
+  const user = userEvent.setup();
+  const patchProject = vi.fn(async (_projectId: string, input: { name?: string }) => ({
+    ...standardProject(),
+    ...input,
+    updatedAt: 2,
+  }));
+  const onOpenSettings = vi.fn();
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => standardProject(),
+      getWorkspace: async () => workspacePayload(),
+      listWorkspaceProposals: async () => [],
+      patchProject,
+    })}>
+      <ProjectStudioScreen
+        projectId="project-1"
+        artifactId={null}
+        legacyFallback={() => null}
+        onOpenSettings={onOpenSettings}
+      />
+    </ApiProvider>,
+  );
+
+  const projectActions = await screen.findByRole(
+    "button",
+    { name: "Project actions" },
+    { timeout: 5_000 },
+  );
+  const exportProject = screen.getByRole("button", { name: "Export project" });
+  const settings = screen.getByRole("button", { name: "Settings" });
+  expect(projectActions).toBeVisible();
+  expect(exportProject).toBeVisible();
+  expect(settings).toBeVisible();
+
+  await user.click(settings);
+  expect(onOpenSettings).toHaveBeenCalledTimes(1);
+
+  await user.click(projectActions);
+  const renameProject = await screen.findByRole("menuitem", { name: "Rename project" });
+  const actionsMenu = renameProject.closest('[role="menu"]');
+  expect(actionsMenu).not.toBeNull();
+  expect(actionsMenu).toHaveTextContent("Copy Analysis Prompt");
+  expect(actionsMenu).not.toHaveTextContent(/workspace-1|proposal-1|plan-1/);
+
+  await user.click(renameProject);
+  expect(screen.getByRole("dialog", { name: "Rename project" })).toBeInTheDocument();
+  const projectName = screen.getByRole("textbox", { name: "Project name" });
+  expect(projectName).toHaveValue("Storefront");
+  await user.clear(projectName);
+  await user.type(projectName, "KITE Studio");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(patchProject).toHaveBeenCalledWith("project-1", { name: "KITE Studio" }));
+  expect(screen.queryByRole("dialog", { name: "Rename project" })).not.toBeInTheDocument();
+});
+
 function ProposalStudioProbe() {
   const studio = useProjectStudio("project-1");
   if (studio.load.status !== "ready") return <span>{studio.load.status}</span>;
@@ -1593,14 +1651,19 @@ test("Studio review edits and per-item revert use full Proposal CAS payloads wit
     rationale: "Add a complete checkout flow",
   });
   expect(applyWorkspaceGraphCommands).not.toHaveBeenCalled();
+  expect(container.querySelectorAll('aside[aria-label="Proposal review"]')).toHaveLength(1);
+  expect(container.querySelector('aside[aria-label="Proposal review"]')).toHaveAttribute("data-narrow-reachable", "true");
+  expect(container.querySelector('aside[aria-label="Proposal review"]')).not.toHaveAttribute("hidden");
+  fireEvent.click(screen.getByRole("button", { name: "Show build plan" }));
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(container.querySelector('aside[aria-label="Build plan"]')).not.toHaveAttribute("hidden");
+  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  expect(container.querySelectorAll('aside[aria-label="Proposal review"]')).toHaveLength(0);
   expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(1);
-  expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("data-narrow-reachable", "true");
-  fireEvent.click(screen.getByRole("button", { name: "Hide proposal review" }));
-  expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(0);
-  expect(screen.getByRole("button", { name: "Show proposal review" })).toHaveAttribute("aria-expanded", "false");
-  fireEvent.click(screen.getByRole("button", { name: "Show proposal review" }));
-  expect(container.querySelectorAll('aside[aria-label="Inspector"]')).toHaveLength(1);
-  expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("data-narrow-reachable", "true");
+  expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("hidden");
+  expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("inert");
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+  expect(screen.getByRole("button", { name: "Show build plan" })).toHaveAttribute("aria-expanded", "false");
 });
 
 test("approval flushes a pending edit, calls approve once, and atomically advances all canonical pointers", async () => {
@@ -1835,7 +1898,7 @@ test("a delayed Workspace Agent Plan discovery cannot reopen a newly approved Pl
 });
 
 test.each(["failed", "blocked"] as const)(
-  "a %s generation target automatically replaces the approved Proposal with its Build plan",
+  "a %s generation target keeps the approved Proposal visible until the user opens its Build plan",
   async (targetStatus) => {
     const approval = approvedResult("generate");
     const runningPlan = {
@@ -1902,6 +1965,12 @@ test.each(["failed", "blocked"] as const)(
       await backgroundPlan;
     });
 
+    await waitFor(() => expect(getGenerationPlan).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "Proposal approved" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open build plan" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View build plan" }));
     expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
     expect(screen.getByText(targetMessage)).toBeInTheDocument();
@@ -1909,10 +1978,14 @@ test.each(["failed", "blocked"] as const)(
     fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
     expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open build plan" }));
+    expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+    expect(screen.getByText(targetMessage)).toBeInTheDocument();
   },
 );
 
-test("a committed generation compile failure refreshes canonical workspace state and opens its Build plan", async () => {
+test("a committed generation compile failure keeps its terminal Proposal visible until Build plan is opened", async () => {
   const approved = draftProposal({
     revision: 2,
     status: "approved",
@@ -1964,14 +2037,19 @@ test("a committed generation compile failure refreshes canonical workspace state
 
   fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
 
-  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
-  expect(screen.getByRole("alert")).toHaveTextContent("Generated files require an explicit owned source.");
+  expect(await screen.findByRole("heading", { name: "Proposal needs attention" })).toBeInTheDocument();
+  expect(screen.getByText("Generated files require an explicit owned source.")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
   expect(screen.getByLabelText("2 objects at 100 percent zoom")).toBeInTheDocument();
   expect(container.querySelector('[data-id="proposal:proposal-1:node:page-checkout"]')).toBeNull();
   expect(getWorkspace).toHaveBeenCalledTimes(2);
   expect(getWorkspaceProposal).not.toHaveBeenCalled();
-  expect(getGenerationPlan).toHaveBeenCalledWith("project-1", failedPlan.id);
+  expect(getGenerationPlan).toHaveBeenCalledWith("project-1", failedPlan.id, expect.any(AbortSignal));
   expect(approveWorkspaceProposal).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "View build plan" }));
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Generated files require an explicit owned source.");
 
   fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
@@ -2262,15 +2340,35 @@ test("edit state conflict loads and maps the authoritative terminal Proposal", a
   expect(getWorkspaceProposal).toHaveBeenCalledTimes(1);
 });
 
-test("a failed Proposal list never destroys a ready Standard canvas", async () => {
+test("a failed Proposal list notifies through toast without occupying the ready Standard canvas Inspector", async () => {
   const listWorkspaceProposals = vi.fn(async () => {
     throw new Error("proposal index unavailable");
   });
-  renderStudio({ listWorkspaceProposals });
+  const { container } = render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => standardProject(),
+        getWorkspace: async () => workspacePayload(),
+        listWorkspaceProposals,
+      })}>
+        <ProjectStudioScreen
+          projectId="project-1"
+          artifactId={null}
+          legacyFallback={() => null}
+          onOpenSettings={() => {}}
+        />
+      </ApiProvider>
+    </ToastProvider>,
+  );
 
   expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "Proposal unavailable" })).toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "Proposal review" })).toHaveTextContent("proposal index unavailable");
+  const notification = await screen.findByRole("alert");
+  expect(notification).toHaveTextContent("proposal index unavailable");
+  expect(notification.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(screen.queryByRole("region", { name: "Proposal review" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Proposal unavailable" })).not.toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+  expect(container.querySelector('aside[aria-label="Inspector"]')).toHaveAttribute("hidden");
   expect(listWorkspaceProposals).toHaveBeenCalledTimes(1);
 });
 
@@ -2379,7 +2477,9 @@ test("an approved Proposal yields the local Inspector on an Artifact route", asy
 
   fireEvent.click(await screen.findByRole("button", { name: "Approve and generate" }));
   expect(await screen.findByRole("heading", { name: "Inspector" })).toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "open");
   expect(screen.queryByRole("heading", { name: "Proposal approved" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
 });
 
 test("body-persisted approval conflict remains read-only when current workspace refresh fails", async () => {

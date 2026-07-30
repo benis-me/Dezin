@@ -1,8 +1,10 @@
 import type {
+  GenerationPlan,
   GenerationPlanDetail,
   GenerationTask,
   GenerationTaskStatus,
 } from "../../lib/api.ts";
+import { publicFailureMessage } from "./public-failure-message.ts";
 
 export type GenerationTargetPhase =
   | "queued"
@@ -39,21 +41,9 @@ export function generationPlanResultKey(detail: GenerationPlanDetail): string | 
   return results.length > 0 ? `${detail.plan.id}:${results.join("|")}` : null;
 }
 
-const LOCAL_FAILURE_PATH =
-  /\/(?:Users|home|private|tmp|var|opt|usr|Applications|Volumes)(?:\/[^\s/]+)+/g;
-
-function publicFailureMessage(value: string): string {
-  return value.replace(LOCAL_FAILURE_PATH, (matchedPath) => {
-    const trailing = matchedPath.endsWith(".")
-      ? "."
-      : matchedPath.match(/[),;:'"]+$/)?.[0] ?? "";
-    const path = trailing ? matchedPath.slice(0, -trailing.length) : matchedPath;
-    const name = path.split("/").at(-1) ?? "";
-    return `${/^[a-zA-Z0-9._-]{1,80}$/.test(name) ? name : "local path"}${trailing}`;
-  });
-}
-
-function targetPhase(status: GenerationTaskStatus): GenerationTargetPhase {
+export function generationStatusPhase(
+  status: GenerationTaskStatus | GenerationPlan["status"],
+): GenerationTargetPhase {
   switch (status) {
     case "succeeded":
       return "complete";
@@ -61,6 +51,8 @@ function targetPhase(status: GenerationTaskStatus): GenerationTargetPhase {
       return "failed";
     case "blocked":
     case "blocked-context":
+    case "compile-failed":
+    case "requires-new-impact":
       return "blocked";
     case "cancelled":
       return "cancelled";
@@ -73,6 +65,7 @@ function targetPhase(status: GenerationTaskStatus): GenerationTargetPhase {
     case "materialization-pending":
     case "retry-wait":
     case "queued":
+    case "approved":
       return "queued";
   }
 }
@@ -118,7 +111,7 @@ export function buildGenerationTargetStates(
   for (const task of directTasks.values()) {
     if (task.target.type === "workspace") continue;
     const state: GenerationTargetState = {
-      state: targetPhase(task.status),
+      state: generationStatusPhase(task.status),
       planId: detail.plan.id,
       taskId: task.id,
       taskKind: task.kind,

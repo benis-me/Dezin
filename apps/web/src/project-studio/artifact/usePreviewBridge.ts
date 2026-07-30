@@ -24,6 +24,7 @@ interface PreviewSelectionMessage {
   textComplete?: boolean;
   rect?: { x: number; y: number; w: number; h: number };
   instanceId?: string;
+  targetIsStable?: boolean;
   attrs?: { id?: string; ariaLabel?: string; screenLabel?: string };
   displayTarget?: {
     tag?: string;
@@ -47,6 +48,7 @@ type NormalizedPreviewMessage =
       instanceId: string | null;
       mutationCapable: boolean;
       provenanceEligible: boolean;
+      targetIsStable: boolean;
     };
 
 export interface ArtifactElementContext {
@@ -414,6 +416,7 @@ function messageData(value: unknown): NormalizedPreviewMessage | null {
   const textPreview = pickerTextPreview(message, text);
   const tag = trimmed(message.tag, 64)?.toLowerCase() ?? null;
   const textMutationCapable = normalizedLocator.mutationCapable && text !== null;
+  const targetIsStable = message.targetIsStable !== false;
   return {
     type: "selected",
     locator: normalizedLocator.locator,
@@ -425,6 +428,7 @@ function messageData(value: unknown): NormalizedPreviewMessage | null {
     instanceId: trimmed(message.instanceId) ?? null,
     mutationCapable: normalizedLocator.mutationCapable,
     provenanceEligible: normalizedLocator.provenanceEligible,
+    targetIsStable,
     textMutationCapable,
     textMutationUnavailableReason: textMutationCapable
       ? null
@@ -629,6 +633,8 @@ export function usePreviewBridge({
       mutationCapable: data.mutationCapable,
       mutationUnavailableReason: data.mutationCapable
         ? null
+        : !data.targetIsStable
+          ? "Direct edits require the clicked element itself to have a source-backed stable marker. Its nearest stable ancestor remains available to Artifact Agent Context."
         : data.provenanceEligible
           ? "Direct edits are enabled only after immutable source provenance is verified. This selection remains available to Artifact Agent Context."
           : "Direct edits require a source-backed stable marker. This selection remains available to Artifact Agent Context.",
@@ -675,12 +681,16 @@ export function usePreviewBridge({
           return {
             ...current,
             locator: { ...current.locator, sourcePath: manifest.sourcePath },
-            mutationCapable: true,
-            mutationUnavailableReason: null,
-            textMutationCapable: current.text !== null,
-            textMutationUnavailableReason: current.text === null
-              ? "Text editing requires the picker's complete text value; truncated or invalid text remains Agent Context only."
-              : null,
+            mutationCapable: data.targetIsStable,
+            mutationUnavailableReason: data.targetIsStable
+              ? null
+              : "Direct edits require the clicked element itself to have a source-backed stable marker. Its nearest stable ancestor remains available to Artifact Agent Context.",
+            textMutationCapable: data.targetIsStable && current.text !== null,
+            textMutationUnavailableReason: !data.targetIsStable
+              ? "Text editing requires the clicked element itself to have a source-backed stable marker."
+              : current.text === null
+                ? "Text editing requires the picker's complete text value; truncated or invalid text remains Agent Context only."
+                : null,
           };
         });
       })

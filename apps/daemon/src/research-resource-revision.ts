@@ -13,7 +13,11 @@ import type {
   ResearchRevisionSourceView,
   Store,
 } from "../../../packages/core/src/index.ts";
-import { stableStringify, type ContextPack } from "./context/context-types.ts";
+import {
+  isWellFormedContextText,
+  stableStringify,
+  type ContextPack,
+} from "./context/context-types.ts";
 import { createWorkspaceContextPackRepository } from "./context/context-pack-store.ts";
 import {
   ResourceRevisionPayloadError,
@@ -24,7 +28,14 @@ import { isCanonicalResearchHttpUrl } from "./research-canonical-url.ts";
 import { countCanonicalResearchEvidenceComponents } from "./research-evidence-identity.ts";
 
 const MAX_RESEARCH_VIEW_BYTES = 8 * 1024 * 1024;
+const MAX_RESEARCH_SELECTOR_SOURCES = 16;
+const MAX_RESEARCH_SELECTOR_QUERIES = 64;
+const MAX_RESEARCH_SELECTOR_QUERIES_PER_SOURCE = 8;
+const MAX_RESEARCH_SELECTOR_SPANS = 48;
+const MAX_RESEARCH_SELECTOR_SPANS_PER_SOURCE = 6;
+const MAX_RESEARCH_SELECTOR_CATALOG_BYTES = 256 * 1024;
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
+const RESEARCH_EVIDENCE_SPAN_ID = /^research-evidence-span-[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
@@ -74,6 +85,15 @@ function text(value: unknown, label: string, maximum = 32_000, minimum = 1): str
   return value;
 }
 
+function boundedSelectorText(value: unknown, label: string, maximum: number): string {
+  const normalized = text(value, label, maximum);
+  if (normalized.includes("\0") || !isWellFormedContextText(normalized)
+    || Buffer.byteLength(normalized, "utf8") > maximum) {
+    return fail(`${label} is invalid`);
+  }
+  return normalized;
+}
+
 function identifier(value: unknown, label: string): string {
   const id = text(value, label, 256);
   if (!IDENTIFIER.test(id)) return fail(`${label} is not canonical`);
@@ -115,6 +135,317 @@ function sameVerifier(
   right: { id: string; model?: string } | null,
 ): boolean {
   return left?.id === right?.id && (left?.model ?? null) === (right?.model ?? null);
+}
+
+interface DecodedResearchEvidenceSelectorProvenance {
+  id: string;
+  model?: string;
+  catalogHash: string;
+  catalog: {
+    protocol: "dezin.research-evidence-span-catalog.v1";
+    catalogHash: string;
+    sources: Array<{
+      sourceId: string;
+      queries: Array<{
+        findingId: string;
+        supportIndex: number;
+        statement: string;
+      }>;
+      spans: Array<{
+        spanId: string;
+        text: string;
+      }>;
+    }>;
+  };
+  decisions: Array<{
+    findingId: string;
+    supportIndex: number;
+    sourceId: string;
+    selectedSpanId: string | null;
+  }>;
+}
+
+const RESEARCH_EVIDENCE_PROVENANCE_V2_FIELDS = [
+  "protocol",
+  "verifiedSourceCount",
+  "unverifiedSourceCount",
+  "evidenceFindingCount",
+  "hypothesisFindingCount",
+  "receiptIds",
+  "supportReceiptIds",
+  "groundednessVerifier",
+] as const;
+
+const RESEARCH_SELECTOR_BINDING_FAILURE_REASONS = new Set([
+  "binding-unavailable",
+  "binding-rejected",
+  "binding-invalid",
+]);
+
+function exactResearchEvidenceProvenance(
+  value: unknown,
+): Record<string, unknown> {
+  const base = record(value, "Research evidence provenance");
+  if (base.protocol === "dezin.research-evidence-provenance.v2") {
+    return exactRecord(
+      base,
+      RESEARCH_EVIDENCE_PROVENANCE_V2_FIELDS,
+      "Research evidence provenance",
+    );
+  }
+  if (base.protocol === "dezin.research-evidence-provenance.v3") {
+    return exactRecord(
+      base,
+      [...RESEARCH_EVIDENCE_PROVENANCE_V2_FIELDS, "evidenceSelector"],
+      "Research evidence provenance",
+    );
+  }
+  return fail("Research evidence provenance protocol is unsupported");
+}
+
+function researchEvidenceSelectionDecisionKey(input: {
+  findingId: string;
+  supportIndex: number;
+  sourceId: string;
+}): string {
+  return `${input.findingId}\0${input.sourceId}\0${input.supportIndex}`;
+}
+
+function researchEvidenceSelectorProvenance(
+  value: unknown,
+  scope: ResearchBundleScope,
+): DecodedResearchEvidenceSelectorProvenance | null {
+  if (value === null) return null;
+  const selector = exactRecord(
+    value,
+    ["id", "catalogHash", "catalog", "decisions"],
+    "Research evidence selector provenance",
+    ["model"],
+  );
+  const catalog = exactRecord(
+    selector.catalog,
+    ["protocol", "catalogHash", "sources"],
+    "Research evidence selector catalog",
+  );
+  if (catalog.protocol !== "dezin.research-evidence-span-catalog.v1") {
+    return fail("Research evidence selector catalog protocol is unsupported");
+  }
+  const sourceIds = new Set<string>();
+  const spanIds = new Set<string>();
+  const statementsByFinding = new Map<string, string>();
+  const expectedDecisions = new Map<string, ReadonlySet<string>>();
+  let queryCount = 0;
+  let spanCount = 0;
+  const sources = array(
+    catalog.sources,
+    "Research evidence selector catalog sources",
+    1,
+    MAX_RESEARCH_SELECTOR_SOURCES,
+  ).map((rawSource, sourceIndex) => {
+    const source = exactRecord(
+      rawSource,
+      ["sourceId", "queries", "spans"],
+      `Research evidence selector catalog source ${sourceIndex}`,
+    );
+    const sourceId = identifier(
+      source.sourceId,
+      `Research evidence selector catalog source ${sourceIndex} id`,
+    );
+    if (sourceIds.has(sourceId)) {
+      return fail(`Research evidence selector catalog source ${sourceId} is duplicated`);
+    }
+    sourceIds.add(sourceId);
+    const sourceSpanIds = new Set<string>();
+    const spans = array(
+      source.spans,
+      `Research evidence selector catalog source ${sourceId} spans`,
+      1,
+      MAX_RESEARCH_SELECTOR_SPANS_PER_SOURCE,
+    ).map((rawSpan, spanIndex) => {
+      const span = exactRecord(
+        rawSpan,
+        ["spanId", "text"],
+        `Research evidence selector catalog source ${sourceId} span ${spanIndex}`,
+      );
+      const spanId = identifier(
+        span.spanId,
+        `Research evidence selector catalog source ${sourceId} span ${spanIndex} id`,
+      );
+      if (!RESEARCH_EVIDENCE_SPAN_ID.test(spanId) || spanIds.has(spanId)) {
+        return fail(`Research evidence selector catalog span ${spanId} identity is invalid or duplicated`);
+      }
+      spanIds.add(spanId);
+      sourceSpanIds.add(spanId);
+      spanCount += 1;
+      return {
+        spanId,
+        text: boundedSelectorText(
+          span.text,
+          `Research evidence selector catalog source ${sourceId} span ${spanIndex} text`,
+          1_024,
+        ),
+      };
+    });
+    const queries = array(
+      source.queries,
+      `Research evidence selector catalog source ${sourceId} queries`,
+      1,
+      MAX_RESEARCH_SELECTOR_QUERIES_PER_SOURCE,
+    ).map((rawQuery, queryIndex) => {
+      const query = exactRecord(
+        rawQuery,
+        ["findingId", "supportIndex", "statement"],
+        `Research evidence selector catalog source ${sourceId} query ${queryIndex}`,
+      );
+      const normalized = {
+        findingId: identifier(
+          query.findingId,
+          `Research evidence selector catalog source ${sourceId} query ${queryIndex} finding id`,
+        ),
+        supportIndex: safeInteger(
+          query.supportIndex,
+          `Research evidence selector catalog source ${sourceId} query ${queryIndex} support index`,
+          0,
+          MAX_RESEARCH_SELECTOR_QUERIES_PER_SOURCE - 1,
+        ),
+        statement: boundedSelectorText(
+          query.statement,
+          `Research evidence selector catalog source ${sourceId} query ${queryIndex} statement`,
+          8_192,
+        ),
+      };
+      const priorStatement = statementsByFinding.get(normalized.findingId);
+      if (priorStatement !== undefined && priorStatement !== normalized.statement) {
+        return fail("Research evidence selector catalog finding statement is inconsistent");
+      }
+      statementsByFinding.set(normalized.findingId, normalized.statement);
+      const key = researchEvidenceSelectionDecisionKey({ ...normalized, sourceId });
+      if (expectedDecisions.has(key)) {
+        return fail("Research evidence selector catalog contains a duplicated support edge");
+      }
+      expectedDecisions.set(key, sourceSpanIds);
+      queryCount += 1;
+      return normalized;
+    });
+    return { sourceId, queries, spans };
+  });
+  if (queryCount > MAX_RESEARCH_SELECTOR_QUERIES || spanCount > MAX_RESEARCH_SELECTOR_SPANS) {
+    return fail("Research evidence selector catalog exceeds its structural bounds");
+  }
+  const catalogHash = sha256(
+    catalog.catalogHash,
+    "Research evidence selector catalog embedded hash",
+  );
+  const normalizedCatalog = {
+    protocol: "dezin.research-evidence-span-catalog.v1" as const,
+    catalogHash,
+    sources,
+  };
+  if (Buffer.byteLength(stableStringify({
+        protocol: "dezin.research-evidence-selection-request.v1",
+        scope,
+        catalog: normalizedCatalog,
+      }), "utf8")
+      > MAX_RESEARCH_SELECTOR_CATALOG_BYTES
+    || catalogHash !== createHash("sha256").update(stableStringify({
+      protocol: normalizedCatalog.protocol,
+      scope,
+      sources: normalizedCatalog.sources,
+    })).digest("hex")) {
+    return fail("Research evidence selector catalog hash or serialized bound is invalid");
+  }
+  const selectedSpanBySource = new Map<string, string>();
+  const decisionByKey = new Map<string, DecodedResearchEvidenceSelectorProvenance["decisions"][number]>();
+  for (const [decisionIndex, rawDecision] of array(
+    selector.decisions,
+    "Research evidence selector provenance decisions",
+    expectedDecisions.size,
+    expectedDecisions.size,
+  ).entries()) {
+    const decision = exactRecord(
+      rawDecision,
+      ["findingId", "supportIndex", "sourceId", "selectedSpanId"],
+      `Research evidence selector provenance decision ${decisionIndex}`,
+    );
+    const normalized = {
+      findingId: identifier(
+        decision.findingId,
+        `Research evidence selector provenance decision ${decisionIndex} finding id`,
+      ),
+      supportIndex: safeInteger(
+        decision.supportIndex,
+        `Research evidence selector provenance decision ${decisionIndex} support index`,
+        0,
+        MAX_RESEARCH_SELECTOR_QUERIES_PER_SOURCE - 1,
+      ),
+      sourceId: identifier(
+        decision.sourceId,
+        `Research evidence selector provenance decision ${decisionIndex} source id`,
+      ),
+      selectedSpanId: decision.selectedSpanId === null
+        ? null
+        : (() => {
+            const spanId = identifier(
+              decision.selectedSpanId,
+              `Research evidence selector provenance decision ${decisionIndex} selected span id`,
+            );
+            if (!RESEARCH_EVIDENCE_SPAN_ID.test(spanId)) {
+              return fail(
+                `Research evidence selector provenance decision ${decisionIndex} selected span id is invalid`,
+              );
+            }
+            return spanId;
+          })(),
+    };
+    const key = researchEvidenceSelectionDecisionKey(normalized);
+    const availableSpanIds = expectedDecisions.get(key);
+    if (decisionByKey.has(key) || availableSpanIds === undefined
+      || (normalized.selectedSpanId !== null
+        && !availableSpanIds.has(normalized.selectedSpanId))) {
+      return fail("Research evidence selector provenance decision is outside its immutable catalog");
+    }
+    const existing = normalized.selectedSpanId === null
+      ? undefined
+      : selectedSpanBySource.get(normalized.sourceId);
+    if (normalized.selectedSpanId !== null
+      && existing !== undefined
+      && existing !== normalized.selectedSpanId) {
+      return fail("Research evidence selector provenance chose multiple passages for one source");
+    }
+    if (normalized.selectedSpanId !== null) {
+      selectedSpanBySource.set(normalized.sourceId, normalized.selectedSpanId);
+    }
+    decisionByKey.set(key, normalized);
+  }
+  if (decisionByKey.size !== expectedDecisions.size) {
+    return fail("Research evidence selector provenance decisions are not an exhaustive catalog bijection");
+  }
+  const decisions = normalizedCatalog.sources.flatMap((source) =>
+    source.queries.map((query) => {
+      const decision = decisionByKey.get(researchEvidenceSelectionDecisionKey({
+        ...query,
+        sourceId: source.sourceId,
+      }));
+      return decision ?? fail(
+        "Research evidence selector provenance omitted an immutable catalog decision",
+      );
+    }));
+  const outerCatalogHash = sha256(
+    selector.catalogHash,
+    "Research evidence selector catalog hash",
+  );
+  if (outerCatalogHash !== catalogHash) {
+    return fail("Research evidence selector catalog hash identities are inconsistent");
+  }
+  return {
+    id: identifier(selector.id, "Research evidence selector id"),
+    ...(selector.model === undefined
+      ? {}
+      : { model: text(selector.model, "Research evidence selector model", 512) }),
+    catalogHash: outerCatalogHash,
+    catalog: normalizedCatalog,
+    decisions,
+  };
 }
 
 function stringArray(value: unknown, label: string, minimum = 0, maximum = 64): string[] {
@@ -446,10 +777,11 @@ function validateResearchRepairAgainstImmutableRevision(input: {
       return fail("Research direction-only repair changed more than one immutable direction mapping");
     }
   }
-  if (input.qualityState === "grounded") {
-    if (repair.revalidatedEvidenceFindingIds.length < 2) {
-      return fail("Research grounded repair requires at least two revalidated evidence findings");
-    }
+  if (repair.revalidatedEvidenceFindingIds.length < 2
+    && changedDirection.evidenceStatus === "evidence") {
+    return fail("Research grounded repair requires at least two revalidated evidence findings");
+  }
+  if (repair.revalidatedEvidenceFindingIds.length >= 2) {
     if (changedDirection.evidenceStatus !== "evidence"
       || changedDirection.findingIds.length !== repair.revalidatedEvidenceFindingIds.length
       || changedDirection.findingIds.some(
@@ -460,12 +792,9 @@ function validateResearchRepairAgainstImmutableRevision(input: {
         (id, index) => id !== repair.revalidatedEvidenceFindingIds[index],
       )
       || changedDirection.hypothesisFindingIds.length !== 0) {
-      return fail("Research grounded repair provenance does not match the immutable direction");
+      return fail("Research evidence repair provenance does not match the immutable direction");
     }
     return;
-  }
-  if (repair.revalidatedEvidenceFindingIds.length >= 2) {
-    return fail("Research needs-review repair cannot discard a grounded revalidation outcome");
   }
   if (changedDirection.evidenceStatus !== "hypothesis"
     || changedDirection.findingIds.length !== repair.selectedEvidenceFindingIds.length
@@ -480,7 +809,7 @@ function validateResearchRepairAgainstImmutableRevision(input: {
     || changedDirection.hypothesisFindingIds.some(
       (id, index) => id !== repair.droppedFindingIds[index],
     )) {
-    return fail("Research needs-review repair provenance does not match the immutable direction");
+    return fail("Research hypothesis repair provenance does not match the immutable direction");
   }
 }
 
@@ -745,7 +1074,11 @@ function decodeReceipts(
           && item.reason !== "unsupported-media-type"
           && item.reason !== "content-extraction-failed"
           && item.reason !== "excerpt-mismatch"
-          && item.reason !== "representation-invalid")) {
+          && item.reason !== "representation-invalid"
+          && !(receiptProtocol === "dezin.research-evidence-receipt.v2"
+            && (item.reason === "binding-unavailable"
+              || item.reason === "binding-rejected"
+              || item.reason === "binding-invalid")))) {
         return fail(`Research evidence receipt ${index} unverified evidence is inconsistent`);
       }
       const rawExcerpt = exactRecord(item.excerpt, ["text"], `Research evidence receipt ${index} excerpt`);
@@ -977,6 +1310,67 @@ function decodeFindings(
   return findings;
 }
 
+function validateResearchEvidenceSelectorAgainstBundle(input: {
+  selector: DecodedResearchEvidenceSelectorProvenance | null;
+  receipts: readonly DecodedResearchReceipt[];
+  supportReceipts: readonly DecodedResearchSupportReceipt[];
+  findings: readonly ResearchRevisionFindingView[];
+}): void {
+  if (input.selector === null) return;
+  const receiptBySourceId = new Map(
+    input.receipts.map((receipt) => [receipt.sourceId, receipt] as const),
+  );
+  const supportReceiptById = new Map(
+    input.supportReceipts.map((receipt) => [receipt.id, receipt] as const),
+  );
+  const findingById = new Map(
+    input.findings.map((finding) => [finding.id, finding] as const),
+  );
+  const decisionByKey = new Map(
+    input.selector.decisions.map((decision) => [
+      researchEvidenceSelectionDecisionKey(decision),
+      decision,
+    ] as const),
+  );
+  for (const catalogSource of input.selector.catalog.sources) {
+    const sourceReceipt = receiptBySourceId.get(catalogSource.sourceId);
+    for (const query of catalogSource.queries) {
+      const finding = findingById.get(query.findingId);
+      const supportReceiptId = finding?.supportReceiptIds[query.supportIndex];
+      const supportReceipt = supportReceiptId === undefined
+        ? undefined
+        : supportReceiptById.get(supportReceiptId);
+      const decision = decisionByKey.get(researchEvidenceSelectionDecisionKey({
+        ...query,
+        sourceId: catalogSource.sourceId,
+      }));
+      if (finding === undefined || finding.statement !== query.statement
+        || supportReceipt === undefined
+        || supportReceipt.sourceId !== catalogSource.sourceId
+        || decision === undefined) {
+        return fail("Research evidence selector query is not bound to its exact finding support");
+      }
+      if (decision.selectedSpanId === null) {
+        if (supportReceipt.verification !== "unverified") {
+          return fail("Research evidence selector rejection is inconsistent with its support receipt");
+        }
+        continue;
+      }
+      if (sourceReceipt?.verification === "verified") {
+        const selectedSpan = catalogSource.spans.find(
+          (span) => span.spanId === decision.selectedSpanId,
+        );
+        if (selectedSpan === undefined || supportReceipt.verification !== "verified"
+          || supportReceipt.quote.text !== selectedSpan.text) {
+          return fail("Research evidence selector selection is inconsistent with its support receipt");
+        }
+      } else if (supportReceipt.verification !== "unverified") {
+        return fail("Invalid Research evidence selector binding promoted a verified support receipt");
+      }
+    }
+  }
+}
+
 function evidenceReferences(
   item: Record<string, unknown>,
   label: string,
@@ -1065,9 +1459,30 @@ interface ResearchBundleScope {
   resourceKind: "research";
 }
 
+export interface ResearchRevisionTaskAuthority {
+  readonly operation: "create" | "revise";
+  readonly nodeId: string;
+  readonly title: string;
+  readonly brief: {
+    readonly proposalRationale: string;
+    readonly assumptions: readonly string[];
+    readonly targetInstructions: {
+      readonly operation: "create" | "revise";
+      readonly kind: "research";
+      readonly title: string;
+      readonly instructions?: string;
+    };
+  };
+}
+
 function decodeBundleScope(
   value: unknown,
-  owner: { workspaceId: string; resourceId: string; parentRevisionId: string | null },
+  owner: {
+    workspaceId: string;
+    resourceId: string;
+    parentRevisionId: string | null;
+    taskAuthority?: ResearchRevisionTaskAuthority;
+  },
 ): ResearchBundleScope {
   const scope = exactRecord(value, [
     "taskId", "planId", "attempt", "inputHash", "workspaceId", "resourceId", "parentRevisionId",
@@ -1078,7 +1493,7 @@ function decodeBundleScope(
     || (scope.operation !== "create" && scope.operation !== "revise")) {
     return fail("Research Revision payload scope does not match its immutable owner");
   }
-  return {
+  const decoded: ResearchBundleScope = {
     taskId: identifier(scope.taskId, "Research scope Task id"),
     planId: identifier(scope.planId, "Research scope Plan id"),
     attempt: safeInteger(scope.attempt, "Research scope Attempt", 1),
@@ -1092,6 +1507,13 @@ function decodeBundleScope(
     title: text(scope.title, "Research scope title", 4_096),
     resourceKind: "research",
   };
+  if (owner.taskAuthority !== undefined
+    && (decoded.operation !== owner.taskAuthority.operation
+      || decoded.nodeId !== owner.taskAuthority.nodeId
+      || decoded.title !== owner.taskAuthority.title)) {
+    return fail("Research Revision payload scope substituted its frozen Task target");
+  }
+  return decoded;
 }
 
 function decodeBundleContextPack(
@@ -1116,10 +1538,14 @@ function decodeBundleContextPack(
   return decoded;
 }
 
-function validateResearchBrief(value: unknown, scope: ResearchBundleScope): void {
+function validateResearchBrief(
+  value: unknown,
+  scope: ResearchBundleScope,
+  authority?: ResearchRevisionTaskAuthority,
+): void {
   const brief = exactRecord(value, ["proposalRationale", "assumptions", "targetInstructions"], "Research brief");
-  text(brief.proposalRationale, "Research brief rationale", 32_000);
-  stringArray(brief.assumptions, "Research brief assumptions", 0, 64);
+  const proposalRationale = text(brief.proposalRationale, "Research brief rationale", 32_000);
+  const assumptions = stringArray(brief.assumptions, "Research brief assumptions", 0, 64);
   const target = exactRecord(
     brief.targetInstructions,
     ["operation", "kind", "title"],
@@ -1129,11 +1555,23 @@ function validateResearchBrief(value: unknown, scope: ResearchBundleScope): void
   if (target.operation !== scope.operation || target.kind !== "research" || target.title !== scope.title) {
     return fail("Research brief substituted its exact Task target");
   }
-  if (target.instructions !== undefined) {
-    const instructions = text(target.instructions, "Research brief target instructions brief", 2_000);
-    if (Buffer.byteLength(instructions, "utf8") > 2_000) {
-      return fail("Research brief target instructions brief exceeds its UTF-8 byte limit");
-    }
+  const instructions = target.instructions === undefined
+    ? undefined
+    : text(target.instructions, "Research brief target instructions brief", 2_000);
+  if (instructions !== undefined && Buffer.byteLength(instructions, "utf8") > 2_000) {
+    return fail("Research brief target instructions brief exceeds its UTF-8 byte limit");
+  }
+  const expectedTarget = authority?.brief.targetInstructions;
+  if (authority !== undefined
+    && (proposalRationale !== authority.brief.proposalRationale
+      || assumptions.length !== authority.brief.assumptions.length
+      || assumptions.some((assumption, index) => assumption !== authority.brief.assumptions[index])
+      || expectedTarget === undefined
+      || target.operation !== expectedTarget.operation
+      || target.kind !== expectedTarget.kind
+      || target.title !== expectedTarget.title
+      || instructions !== expectedTarget.instructions)) {
+    return fail("Research brief substituted its frozen Task authority");
   }
 }
 
@@ -1146,6 +1584,7 @@ function decodeResearchProvenance(input: {
   repairAuthority: DecodedResearchRepairAuthority | null;
 }): {
   verifier: { id: string; model?: string } | null;
+  evidenceSelector: DecodedResearchEvidenceSelectorProvenance | null;
   repair: DecodedResearchRepairProvenance | null;
 } {
   const outer = record(input.provenance, "Research Revision provenance");
@@ -1166,14 +1605,102 @@ function decodeResearchProvenance(input: {
     || production.contextPackHash !== input.contextPack.hash) {
     return fail("Research production provenance is inconsistent");
   }
-  identifier(production.generatorId, "Research generator id");
-  if (production.model !== undefined) text(production.model, "Research generator model", 512);
-  const evidence = exactRecord(production.researchEvidence, [
-    "protocol", "verifiedSourceCount", "unverifiedSourceCount", "evidenceFindingCount", "hypothesisFindingCount",
-    "receiptIds", "supportReceiptIds", "groundednessVerifier",
-  ], "Research evidence provenance");
-  if (evidence.protocol !== "dezin.research-evidence-provenance.v2") {
-    return fail("Research evidence provenance protocol is unsupported");
+  const generator = {
+    id: identifier(production.generatorId, "Research generator id"),
+    ...(production.model === undefined
+      ? {}
+      : { model: text(production.model, "Research generator model", 512) }),
+  };
+  const evidence = exactResearchEvidenceProvenance(production.researchEvidence);
+  const evidenceSelector = evidence.protocol === "dezin.research-evidence-provenance.v3"
+    ? researchEvidenceSelectorProvenance(evidence.evidenceSelector, input.scope)
+    : null;
+  const groundednessVerifier = verifier(
+    evidence.groundednessVerifier,
+    "Research provenance groundedness verifier",
+  );
+  if (evidence.protocol === "dezin.research-evidence-provenance.v3"
+    && ((evidenceSelector !== null && evidenceSelector.id === generator.id)
+      || (groundednessVerifier !== null && groundednessVerifier.id === generator.id)
+      || (evidenceSelector !== null && groundednessVerifier !== null
+        && !sameVerifier(evidenceSelector, groundednessVerifier)))) {
+    return fail(
+      "Research evidence selector and groundedness verifier must bind one independent reviewer principal",
+    );
+  }
+  const selectorBindingFailures = input.receipts.flatMap((receipt) => {
+    const reason = receipt.raw.reason;
+    return receipt.sourceKind === "web"
+      && receipt.verification === "unverified"
+      && typeof reason === "string"
+      && RESEARCH_SELECTOR_BINDING_FAILURE_REASONS.has(reason)
+      ? [{ sourceId: receipt.sourceId, reason }]
+      : [];
+  });
+  const selectorCatalogSourceIds = new Set(
+    evidenceSelector?.catalog.sources.map((source) => source.sourceId) ?? [],
+  );
+  const selectorSelectedSpanBySource = new Map<string, string>();
+  for (const decision of evidenceSelector?.decisions ?? []) {
+    if (decision.selectedSpanId !== null) {
+      selectorSelectedSpanBySource.set(decision.sourceId, decision.selectedSpanId);
+    }
+  }
+  const selectorSelectedSourceIds = new Set(selectorSelectedSpanBySource.keys());
+  const receiptBySourceId = new Map(
+    input.receipts.map((receipt) => [receipt.sourceId, receipt] as const),
+  );
+  const selectorBindingFailureMatchesAuthority = (
+    sourceId: string,
+    reason: string,
+  ): boolean => {
+    if (evidence.protocol !== "dezin.research-evidence-provenance.v3") return false;
+    if (evidenceSelector === null) return reason === "binding-unavailable";
+    const sourceInCatalog = selectorCatalogSourceIds.has(sourceId);
+    const sourceHasSelection = selectorSelectedSourceIds.has(sourceId);
+    if (reason === "binding-unavailable") return !sourceInCatalog;
+    if (reason === "binding-rejected") return sourceInCatalog && !sourceHasSelection;
+    return reason === "binding-invalid" && sourceInCatalog && sourceHasSelection;
+  };
+  const selectorCatalogReceiptsMatchDecisions = evidenceSelector === null
+    || evidenceSelector.catalog.sources.every((catalogSource) => {
+      const { sourceId } = catalogSource;
+      const receipt = receiptBySourceId.get(sourceId);
+      if (receipt?.sourceKind !== "web") return false;
+      const reason = receipt.raw.reason;
+      if (selectorSelectedSourceIds.has(sourceId)) {
+        if (receipt.verification === "unverified") return reason === "binding-invalid";
+        const selectedSpanId = selectorSelectedSpanBySource.get(sourceId);
+        const selectedSpan = catalogSource.spans.find((span) => span.spanId === selectedSpanId);
+        const requestedUrl = receipt.raw.requestedUrl;
+        if (receipt.raw.protocol !== "dezin.research-evidence-receipt.v2"
+          || selectedSpan === undefined || typeof requestedUrl !== "string"
+          || receipt.canonicalUrl === null || receipt.canonicalTextChecksum === null
+          || receipt.excerpt.utf8Start === null || receipt.excerpt.utf8End === null
+          || selectedSpan.text !== receipt.excerpt.text) {
+          return false;
+        }
+        const expectedSpanId = `research-evidence-span-${createHash("sha256")
+          .update(stableStringify({
+            protocol: "dezin.research-evidence-span.v1",
+            scope: input.scope,
+            sourceId,
+            requestedUrl,
+            canonicalUrl: receipt.canonicalUrl,
+            canonicalTextChecksum: receipt.canonicalTextChecksum,
+            utf8Start: receipt.excerpt.utf8Start,
+            utf8End: receipt.excerpt.utf8End,
+            textChecksum: createHash("sha256").update(selectedSpan.text).digest("hex"),
+          }))
+          .digest("hex")}`;
+        return selectedSpan.spanId === expectedSpanId;
+      }
+      return receipt.verification === "unverified" && reason === "binding-rejected";
+    });
+  if (selectorBindingFailures.some(({ sourceId, reason }) =>
+      !selectorBindingFailureMatchesAuthority(sourceId, reason))
+    || !selectorCatalogReceiptsMatchDecisions) {
+    return fail("Research evidence selector binding provenance is inconsistent");
   }
   const receiptIds = stringArray(evidence.receiptIds, "Research provenance receipt ids", input.receipts.length, input.receipts.length);
   const supportReceiptIds = stringArray(
@@ -1197,7 +1724,8 @@ function decodeResearchProvenance(input: {
     return fail("Research immutable payload repair authority does not match repair provenance");
   }
   return {
-    verifier: verifier(evidence.groundednessVerifier, "Research provenance groundedness verifier"),
+    verifier: groundednessVerifier,
+    evidenceSelector,
     repair,
   };
 }
@@ -1276,21 +1804,50 @@ function validateResearchMetadata(input: {
       input.receipts,
       decisionGradeSourceIds,
     );
+    const supportReceiptById = new Map(
+      input.supportReceipts.map((receipt) => [receipt.id, receipt]),
+    );
+    const evidenceFindingById = new Map(input.findings
+      .filter((finding) => finding.evidenceStatus === "evidence")
+      .map((finding) => [finding.id, finding]));
+    const decisionGradeEvidenceDirectionCount = input.directions.filter((direction) => {
+      if (direction.evidenceStatus !== "evidence") return false;
+      const findingIds = [...new Set(direction.findingIds.filter(
+        (findingId) => evidenceFindingById.has(findingId),
+      ))];
+      const supportReceiptIds = new Set(findingIds.flatMap(
+        (findingId) => evidenceFindingById.get(findingId)!.groundedness.supportReceiptIds,
+      ));
+      const sourceIds = new Set([...supportReceiptIds].flatMap((receiptId) => {
+        const receipt = supportReceiptById.get(receiptId);
+        return receipt === undefined ? [] : [receipt.sourceId];
+      }));
+      return findingIds.length >= 2
+        && decisionGradeVerifiedWebSourceCount(input.receipts, sourceIds) >= 2;
+    }).length;
+    const gateUsesDirectionLocalCoverage =
+      gate.protocol === "dezin.research-decision-grade-gate.v2";
+    if (!gateUsesDirectionLocalCoverage
+      && gate.protocol !== "dezin.research-decision-grade-gate.v1") {
+      return fail("Research decision-grade gate protocol is unsupported");
+    }
+    const decisionGradeDirectionCount = gateUsesDirectionLocalCoverage
+      ? decisionGradeEvidenceDirectionCount
+      : evidenceDirectionCount;
     const expectedBlockers = [
       ...(input.verifier === null ? ["groundedness-verifier-unavailable"] : []),
       ...(verifiedWebSourceCount < 2 ? ["insufficient-verified-web-sources"] : []),
       ...(evidenceFindingCount < 2 ? ["insufficient-evidence-findings"] : []),
-      ...(evidenceDirectionCount < 1 ? ["insufficient-evidence-directions"] : []),
+      ...(decisionGradeDirectionCount < 1 ? ["insufficient-evidence-directions"] : []),
     ];
     const blockers = stringArray(gate.blockers, "Research decision-grade gate blockers", 0, 4);
-    if (gate.protocol !== "dezin.research-decision-grade-gate.v1"
-      || criteria.minimumVerifiedWebSourceCount !== 2
+    if (criteria.minimumVerifiedWebSourceCount !== 2
       || criteria.minimumEvidenceFindingCount !== 2
       || criteria.minimumEvidenceDirectionCount !== 1
       || criteria.requiresGroundednessVerifier !== true
       || observed.verifiedWebSourceCount !== verifiedWebSourceCount
       || observed.evidenceFindingCount !== evidenceFindingCount
-      || observed.evidenceDirectionCount !== evidenceDirectionCount
+      || observed.evidenceDirectionCount !== decisionGradeDirectionCount
       || observed.groundednessVerifierAvailable !== (input.verifier !== null)
       || gate.accepted !== (expectedBlockers.length === 0)
       || blockers.length !== new Set(blockers).size
@@ -1333,6 +1890,8 @@ export interface ResearchRevisionPayloadValidationInput {
   readonly revisionProvenance: Record<string, unknown>;
   /** Exact daemon Context Pack reconstructed from its immutable manifest and Core row. */
   readonly contextPack: ContextPack | null;
+  /** Exact frozen Task semantics supplied by the leased Attempt authority when validating generation output. */
+  readonly taskAuthority?: ResearchRevisionTaskAuthority;
 }
 
 export interface ResearchRevisionDirectionSelectionInput extends ResearchRevisionPayloadValidationInput {
@@ -1458,7 +2017,7 @@ function decodeResearchBundle(
     : null;
   const scope = decodeBundleScope(bundle.scope, input);
   const contextPack = decodeBundleContextPack(bundle.contextPack, scope, input.contextPack);
-  validateResearchBrief(bundle.brief, scope);
+  validateResearchBrief(bundle.brief, scope, input.taskAuthority);
   const decodedSources = decodeSources(bundle.sources, contextPack, input.contextPack!);
   const sources = decodedSources.map((source) => source.view);
   const receipts = decodeReceipts(bundle.receipts, decodedSources, contextPack, input.contextPack!);
@@ -1478,6 +2037,12 @@ function decodeResearchBundle(
     new Map(supportReceipts.map((receipt) => [receipt.id, receipt])),
     groundednessVerifier,
   );
+  validateResearchEvidenceSelectorAgainstBundle({
+    selector: decodedProvenance.evidenceSelector,
+    receipts,
+    supportReceipts,
+    findings,
+  });
   const findingsById = new Map(findings.map((finding) => [finding.id, finding]));
   const designPrinciples = decodePrinciples(bundle.designPrinciples, findingsById);
   const directions = decodeDirections(bundle.directions, findingsById);
@@ -1503,13 +2068,8 @@ function decodeResearchBundle(
     });
   }
   const productionProvenance = record(input.revisionProvenance.adapterProvenance, "Research production provenance");
-  const provenance = exactRecord(
+  const provenance = exactResearchEvidenceProvenance(
     productionProvenance.researchEvidence,
-    [
-      "protocol", "verifiedSourceCount", "unverifiedSourceCount", "evidenceFindingCount", "hypothesisFindingCount",
-      "receiptIds", "supportReceiptIds", "groundednessVerifier",
-    ],
-    "Research evidence provenance",
   );
   const verifiedSourceCount = sources.filter((source) => source.verification === "verified").length;
   const evidenceFindingCount = findings.filter((finding) => finding.evidenceStatus === "evidence").length;

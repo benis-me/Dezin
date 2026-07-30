@@ -11,6 +11,7 @@ import type {
   Settings,
 } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
+import { AGENT_LOAD_ERROR, AGENT_SCAN_ERROR } from "../lib/agents-context.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import type { ImageActionModelField } from "../lib/image-action-defaults.ts";
@@ -65,6 +66,21 @@ function imageNodeAssetId(node: MoodboardNode): string {
   return node.type === "image" && typeof node.data.assetId === "string" ? node.data.assetId.trim() : "";
 }
 
+function reconcileAgentSelection(
+  catalog: AgentInfo[],
+  currentCommand: string,
+  currentModel: string,
+): { command: string; model: string } {
+  const available = catalog.filter((agent) => agent.available);
+  const current = available.find((agent) => agent.command === currentCommand);
+  const selected = current ?? available[0];
+  if (!selected) return { command: "", model: "" };
+  return {
+    command: selected.command,
+    model: current && currentModel && current.models.includes(currentModel) ? currentModel : "",
+  };
+}
+
 export function useMoodboardBoard(boardId: string) {
   const api = useApi();
   const saveCoordinator = useMemo(() => getMoodboardSaveCoordinator(api), [api]);
@@ -77,6 +93,7 @@ export function useMoodboardBoard(boardId: string) {
   const [messages, setMessages] = useState<MoodboardMessage[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [agentDetectionError, setAgentDetectionError] = useState<string | null>(null);
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [agentDefaults, setAgentDefaults] = useState<Pick<Settings, "agentCommand" | "model"> | null>(null);
@@ -168,8 +185,11 @@ export function useMoodboardBoard(boardId: string) {
       .then((next) => {
         if (!alive) return;
         setAgents(next);
+        setAgentDetectionError(null);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (alive) setAgentDetectionError(AGENT_LOAD_ERROR);
+      });
     return () => {
       alive = false;
     };
@@ -223,9 +243,11 @@ export function useMoodboardBoard(boardId: string) {
     if (agentDefaults === null) return;
     const available = agents.filter((agent) => agent.available);
     if (!available.length) return;
-    const useSaved = agentDefaults.agentCommand !== "" && available.some((agent) => agent.command === agentDefaults.agentCommand);
-    setRunAgent((current) => current || (useSaved ? agentDefaults.agentCommand : available[0]!.command));
-    if (useSaved && agentDefaults.model) setRunModel((current) => current || agentDefaults.model);
+    const saved = available.find((agent) => agent.command === agentDefaults.agentCommand);
+    setRunAgent((current) => current || saved?.command || available[0]!.command);
+    if (saved && agentDefaults.model && saved.models.includes(agentDefaults.model)) {
+      setRunModel((current) => current || agentDefaults.model);
+    }
   }, [agentDefaults, agents]);
 
   const flushPendingNodes = useCallback((): Promise<boolean> => saveCoordinator.flush(boardId), [boardId, saveCoordinator]);
@@ -549,12 +571,20 @@ export function useMoodboardBoard(boardId: string) {
     [api, boardId, conversationId, isCurrentBoard, toast],
   );
 
-  const rescanAgents = useCallback(async () => {
-    const next = await api.rescanAgents();
-    setAgents(next);
-    const available = next.filter((agent) => agent.available);
-    setRunAgent((current) => current || available[0]?.command || "");
-  }, [api]);
+  const rescanAgents = useCallback(async (): Promise<boolean> => {
+    setAgentDetectionError(null);
+    try {
+      const next = await api.rescanAgents();
+      const selection = reconcileAgentSelection(next, runAgent, runModel);
+      setAgents(next);
+      setRunAgent(selection.command);
+      setRunModel(selection.model);
+      return true;
+    } catch {
+      setAgentDetectionError(AGENT_SCAN_ERROR);
+      return false;
+    }
+  }, [api, runAgent, runModel]);
 
   const saveAgentModelDefaults = useCallback(
     (patch: Pick<Settings, "agentCommand" | "model">) => {
@@ -596,6 +626,7 @@ export function useMoodboardBoard(boardId: string) {
     selectedId,
     selectedIds,
     agents,
+    agentDetectionError,
     runAgent,
     runModel,
     imageModels,

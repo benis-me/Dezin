@@ -50,6 +50,10 @@ interface ProductionArtifactRunAdapterModule {
       dependencies: ProductionStandardArtifactQualityEvaluatorDependencies;
     }>;
     baseSystemPrompt(input: Omit<ArtifactRunInfrastructureInput, "repositoryDir" | "worktreeDir">): string;
+    progress?(
+      claim: GenerationTaskAttemptClaim,
+      phase: "generating" | "reviewing" | "repairing" | "publishing",
+    ): void;
   }): ArtifactRunExecutor;
   ProductionArtifactRunAdapterError: new (...args: never[]) => Error;
 }
@@ -297,6 +301,7 @@ test("production Artifact factory runs the exact isolated Standard leaf through 
     rmSync(dataDir, { recursive: true, force: true });
   });
   const calls: string[] = [];
+  const progress: string[] = [];
   let isolatedDir = "";
   const executor = module.createProductionArtifactRunExecutor({
     contextPacks: { get: () => contextPack() },
@@ -328,6 +333,10 @@ test("production Artifact factory runs the exact isolated Standard leaf through 
       };
     },
     baseSystemPrompt: () => "You are Dezin's production design Agent.",
+    progress(progressClaim, phase) {
+      assert.equal(progressClaim.lease.leaseToken, "lease-token");
+      progress.push(phase);
+    },
   });
 
   const result = await executor.execute(claim(repo), new AbortController().signal);
@@ -338,6 +347,7 @@ test("production Artifact factory runs the exact isolated Standard leaf through 
   assert.ok(calls.some((call) => call.startsWith("agent:")));
   assert.ok(calls.includes("visual-runtime"));
   assert.ok(calls.includes("runtime-release"));
+  assert.deepEqual(progress, ["generating", "reviewing", "publishing"]);
   const evidence = result.evidence as { candidateRetentionRef?: unknown; versions?: unknown[] };
   assert.equal(typeof evidence.candidateRetentionRef, "string");
   assert.equal(evidence.versions?.length, 1);

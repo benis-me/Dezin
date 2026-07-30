@@ -15,6 +15,7 @@ import { SharinganSession } from "../sharingan-browser.ts";
 import {
   acquirePreviewTargetLease,
   resolvePreviewTarget,
+  type ResolvedPreviewTarget,
 } from "../preview-target.ts";
 import { GenerationPlanEventBroker } from "./generation-plan-events.ts";
 import type { GenerationPlanRuntimeControl } from "./generation-plan-control.ts";
@@ -35,7 +36,10 @@ import {
 } from "./generation-runtime-composition.ts";
 import type { GenerationRuntime } from "./generation-runtime.ts";
 import { GitArtifactSourceBaseResolver } from "./git-source-base-resolver.ts";
-import { resolveArtifactElementSelectionProvenance } from "./artifact-element-selection-provenance.ts";
+import {
+  resolveArtifactElementSelectionProvenance,
+  type ArtifactElementSelectionManifestEntry,
+} from "./artifact-element-selection-provenance.ts";
 import { createProductionGenerationTaskContextResolver } from "./production-generation-context.ts";
 import { createProductionGenerationTaskPublication } from "./production-task-publication-adapter.ts";
 import {
@@ -83,10 +87,66 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-type ProductionPrototypeRuntimeSession = Pick<
+export type ProductionPrototypeRuntimeSession = Pick<
   SharinganSession,
   "applyRenderFrame" | "close" | "probePrototypeMarker" | "setViewport" | "settle"
 >;
+
+export interface ProductionPrototypeMarkerRuntimePort {
+  resolveSelection(input: {
+    store: Store;
+    dataDir: string;
+    projectId: string;
+    workspaceId: string;
+    artifactId: string;
+    revisionId: string;
+    designNodeId: string;
+    signal: AbortSignal;
+  }): Promise<ArtifactElementSelectionManifestEntry>;
+  resolvePreview(input: {
+    store: Store;
+    dataDir: string;
+    projectId: string;
+    revisionId: string;
+  }): Promise<ResolvedPreviewTarget>;
+  acquireLease(input: {
+    store: Store;
+    dataDir: string;
+    resolved: ResolvedPreviewTarget;
+    signal: AbortSignal;
+  }): Promise<{ url: string; release(): Promise<void> }>;
+  openSession(
+    url: string,
+    options: { headless: boolean; signal: AbortSignal },
+  ): Promise<ProductionPrototypeRuntimeSession>;
+}
+
+const PRODUCTION_PROTOTYPE_MARKER_RUNTIME = Object.freeze({
+  resolveSelection(input) {
+    return resolveArtifactElementSelectionProvenance(input);
+  },
+  resolvePreview(input) {
+    return resolvePreviewTarget({
+      store: input.store,
+      dataDir: input.dataDir,
+    }, {
+      kind: "artifact-revision",
+      projectId: input.projectId,
+      revisionId: input.revisionId,
+    });
+  },
+  acquireLease(input) {
+    return acquirePreviewTargetLease({
+      store: input.store,
+      dataDir: input.dataDir,
+    }, input.resolved, input.signal);
+  },
+  openSession(url, options) {
+    return SharinganSession.open(url, options);
+  },
+} satisfies ProductionPrototypeMarkerRuntimePort);
+
+const PRODUCTION_PROTOTYPE_MARKER_RUNTIME_CONCURRENCY = 3;
 
 /**
  * Owns the exact preview browser + lease pair as one resource scope. Abort,
@@ -95,18 +155,19 @@ type ProductionPrototypeRuntimeSession = Pick<
 export async function withProductionPrototypeMarkerRuntimeSession<T>(input: {
   lease: { url: string; release(): Promise<void> };
   signal: AbortSignal;
+  abortPeersOnFailure?: AbortController;
   run(session: ProductionPrototypeRuntimeSession): Promise<T>;
   openSession?: (
     url: string,
     options: { headless: boolean; signal: AbortSignal },
   ) => Promise<ProductionPrototypeRuntimeSession>;
 }): Promise<T> {
-  checkAbort(input.signal);
   let session: ProductionPrototypeRuntimeSession | null = null;
   let result: T | undefined;
   let primaryFailure: unknown;
   let failed = false;
   try {
+    checkAbort(input.signal);
     session = await (input.openSession ?? SharinganSession.open)(
       input.lease.url,
       { headless: true, signal: input.signal },
@@ -115,6 +176,7 @@ export async function withProductionPrototypeMarkerRuntimeSession<T>(input: {
   } catch (error) {
     failed = true;
     primaryFailure = error;
+    input.abortPeersOnFailure?.abort(error);
   }
   const cleanup = await Promise.allSettled([
     Promise.resolve().then(async () => { if (session) await session.close(); }),
@@ -249,7 +311,9 @@ export async function resolveProductionPrototypeMarkers(input: {
     receiptNonce: string;
   }>;
   signal: AbortSignal;
-}): Promise<GenerationTaskPrototypeMarkerProof[]> {
+}, runtime: ProductionPrototypeMarkerRuntimePort = PRODUCTION_PROTOTYPE_MARKER_RUNTIME): Promise<
+  GenerationTaskPrototypeMarkerProof[]
+> {
   checkAbort(input.signal);
   if (input.markers.some((marker) => !/^[0-9a-f]{64}$/.test(marker.receiptNonce))) {
     throw new Error("Prototype marker runtime receipt nonce is invalid");
@@ -258,16 +322,37 @@ export async function resolveProductionPrototypeMarkers(input: {
     input.markers.length,
   );
   for (const [index, marker] of input.markers.entries()) {
-    selections[index] = await resolveArtifactElementSelectionProvenance({
-      store: input.store,
-      dataDir: input.dataDir,
-      projectId: input.projectId,
-      workspaceId: marker.workspaceId,
-      artifactId: marker.artifactId,
-      revisionId: marker.revisionId,
-      designNodeId: marker.sourceMarkerId,
-      signal: input.signal,
-    });
+    try {
+      selections[index] = await runtime.resolveSelection({
+        store: input.store,
+        dataDir: input.dataDir,
+        projectId: input.projectId,
+        workspaceId: marker.workspaceId,
+        artifactId: marker.artifactId,
+        revisionId: marker.revisionId,
+        designNodeId: marker.sourceMarkerId,
+        signal: input.signal,
+      });
+    } catch (error) {
+      if (!input.signal.aborted) throw error;
+      const externalFailure = input.signal.reason;
+      if (error === externalFailure) throw externalFailure;
+      if (error instanceof AggregateError && Array.isArray(error.errors)
+        && error.errors[0] === error.cause) {
+        if (error.cause === externalFailure) throw error;
+        throw new AggregateError(
+          [externalFailure, error.cause, ...error.errors.slice(1)],
+          "Prototype marker selection was aborted and its unresponsive selector also failed",
+          { cause: externalFailure },
+        );
+      }
+      throw new AggregateError(
+        [externalFailure, error],
+        "Prototype marker selection was aborted and its unresponsive selector also failed",
+        { cause: externalFailure },
+      );
+    }
+    checkAbort(input.signal);
   }
   const groups = new Map<string, number[]>();
   input.markers.forEach((marker, index) => {
@@ -275,18 +360,20 @@ export async function resolveProductionPrototypeMarkers(input: {
     groups.set(key, [...(groups.get(key) ?? []), index]);
   });
   const results = new Array<GenerationTaskPrototypeMarkerProof>(input.markers.length);
-  for (const indexes of groups.values()) {
-    checkAbort(input.signal);
+  const siblingAbort = new AbortController();
+  const groupSignal = AbortSignal.any([input.signal, siblingAbort.signal]);
+  const secondaryFailures: unknown[] = [];
+  async function resolveMarkerGroup(indexes: number[], signal: AbortSignal): Promise<void> {
+    checkAbort(signal);
     const firstIndex = indexes[0]!;
     const first = input.markers[firstIndex]!;
-    const resolved = await resolvePreviewTarget({
+    const resolved = await runtime.resolvePreview({
       store: input.store,
       dataDir: input.dataDir,
-    }, {
-      kind: "artifact-revision",
       projectId: input.projectId,
       revisionId: first.revisionId,
     });
+    checkAbort(signal);
     if (resolved.workspaceId !== first.workspaceId
       || resolved.artifactId !== first.artifactId
       || resolved.revisionId !== first.revisionId
@@ -327,16 +414,20 @@ export async function resolveProductionPrototypeMarkers(input: {
     const observations = new Map<number, GenerationTaskPrototypeMarkerProof["runtimeProof"]["frames"]>(
       indexes.map((index) => [index, []]),
     );
-    const lease = await acquirePreviewTargetLease({
+    const lease = await runtime.acquireLease({
       store: input.store,
       dataDir: input.dataDir,
-    }, resolved, input.signal);
+      resolved,
+      signal,
+    });
     await withProductionPrototypeMarkerRuntimeSession({
       lease,
-      signal: input.signal,
+      signal,
+      abortPeersOnFailure: siblingAbort,
+      openSession: runtime.openSession,
       run: async (session) => {
         for (const frame of frames) {
-          checkAbort(input.signal);
+          checkAbort(signal);
           await session.setViewport({ width: frame.width, height: frame.height, label: frame.frameId });
           const frameAttemptId = sha256(JSON.stringify([
             "dezin-prototype-runtime-frame-attempt-v1",
@@ -349,7 +440,7 @@ export async function resolveProductionPrototypeMarkers(input: {
             ...(frame.initialState === undefined ? {} : { initialState: frame.initialState }),
             ...(Object.hasOwn(frame, "fixture") ? { fixture: frame.fixture } : {}),
             ...(frame.background === undefined ? {} : { background: frame.background }),
-          }, input.signal);
+          }, signal);
           await session.settle();
           for (const index of indexes) {
             const marker = input.markers[index]!;
@@ -357,7 +448,7 @@ export async function resolveProductionPrototypeMarkers(input: {
               marker.sourceMarkerId,
               marker.trigger,
               marker.receiptNonce,
-              input.signal,
+              signal,
             );
             observations.get(index)!.push({
               frameId: frame.frameId,
@@ -405,6 +496,66 @@ export async function resolveProductionPrototypeMarkers(input: {
       };
     }
   }
+  const groupQueue = [...groups.values()];
+  let nextGroupIndex = 0;
+
+  function cleanupFailuresAfter(error: unknown, cause: unknown): unknown[] | null {
+    if (error === cause) return [];
+    if (!(error instanceof AggregateError) || error.cause !== cause
+      || !Array.isArray(error.errors) || error.errors[0] !== cause) {
+      return null;
+    }
+    return error.errors.slice(1);
+  }
+
+  function recordSettledFailure(error: unknown): void {
+    const primaryFailure = groupSignal.reason;
+    const primaryCleanupFailures = cleanupFailuresAfter(error, primaryFailure);
+    if (primaryCleanupFailures !== null) {
+      secondaryFailures.push(...primaryCleanupFailures);
+      return;
+    }
+    if (error instanceof AggregateError && Array.isArray(error.errors)
+      && error.errors[0] === error.cause) {
+      secondaryFailures.push(error.cause, ...error.errors.slice(1));
+      return;
+    }
+    secondaryFailures.push(error);
+  }
+
+  async function runGroupWorker(): Promise<void> {
+    while (!groupSignal.aborted) {
+      try {
+        checkAbort(groupSignal);
+        const indexes = groupQueue[nextGroupIndex];
+        if (indexes === undefined) return;
+        nextGroupIndex += 1;
+        await resolveMarkerGroup(indexes, groupSignal);
+      } catch (error) {
+        if (!groupSignal.aborted) siblingAbort.abort(error);
+        recordSettledFailure(error);
+        return;
+      }
+    }
+  }
+  await Promise.all(Array.from({
+    length: Math.min(PRODUCTION_PROTOTYPE_MARKER_RUNTIME_CONCURRENCY, groupQueue.length),
+  }, () => runGroupWorker()));
+  if (groupSignal.aborted) {
+    const primaryFailure = input.signal.aborted ? input.signal.reason : groupSignal.reason;
+    const finalSecondaryFailures = input.signal.aborted && groupSignal.reason !== primaryFailure
+      ? [groupSignal.reason, ...secondaryFailures]
+      : secondaryFailures;
+    if (finalSecondaryFailures.length > 0) {
+      throw new AggregateError(
+        [primaryFailure, ...finalSecondaryFailures],
+        "Prototype marker runtime group failed and a sibling runtime or cleanup also failed",
+        { cause: primaryFailure },
+      );
+    }
+    throw primaryFailure;
+  }
+  checkAbort(input.signal);
   return results;
 }
 

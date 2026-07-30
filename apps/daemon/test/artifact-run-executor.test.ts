@@ -525,6 +525,7 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
     { text: "repair", artifactHtml: "" },
   ]);
   const events: string[] = [];
+  const progress: string[] = [];
   const reported: unknown[] = [];
   const executor = new ArtifactRunExecutor({
     preparation: {
@@ -538,6 +539,10 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
           ],
         });
       },
+    },
+    progress: (progressClaim, phase) => {
+      assert.equal(progressClaim.lease.leaseToken, "token");
+      progress.push(phase);
     },
     onEvent: (_claim, event) => {
       events.push(`${event.type}:${event.round}`);
@@ -635,6 +640,13 @@ test("ArtifactRunExecutor returns the selected immutable candidate with bounded 
   assert.deepEqual(transaction.restored, []);
   assert.equal(runner.inputs[1]?.message, "Repair exact findings, round 1.");
   assert.ok(events.includes("quality:1"));
+  assert.deepEqual(progress, [
+    "generating",
+    "reviewing",
+    "repairing",
+    "reviewing",
+    "publishing",
+  ]);
   assert.deepEqual(reported, []);
 });
 

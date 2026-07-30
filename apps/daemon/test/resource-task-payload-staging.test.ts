@@ -24,6 +24,8 @@ import type {
   ResourcePayloadStagingJournal,
 } from "../../../packages/core/src/index.ts";
 import { stableStringify, type ContextPack } from "../src/context/context-types.ts";
+import type { ResearchRevisionTaskAuthority } from "../src/research-resource-revision.ts";
+import { createResearchRevisionFixture } from "./support/research-resource-fixture.ts";
 
 const MEBIBYTE = 1024 * 1024;
 
@@ -46,6 +48,7 @@ function stageInput(
 ): ResourceTaskPayloadStageInput {
   return {
     taskId: "task-owned-resource-stage",
+    planId: "plan-owned-resource-stage",
     attempt: 1,
     inputHash: "a".repeat(64),
     workspaceId: "workspace-owned-resource-stage",
@@ -72,6 +75,71 @@ function stageInput(
     signal: new AbortController().signal,
     ...overrides,
   };
+}
+
+function completeResearchV4Fixture() {
+  const workspaceId = "workspace-research-fixture";
+  const resourceId = "resource-research-fixture";
+  const contextPackHash = "b".repeat(64);
+  const contextPack = {
+    id: `context-pack-${contextPackHash}`,
+    workspaceId,
+    hash: contextPackHash,
+    graphRevision: 1,
+    target: { type: "resource", id: resourceId },
+    intent: "generate",
+    messageChecksum: "c".repeat(64),
+    items: [],
+    omissions: [],
+    tokenEstimate: 0,
+    manifestPath: "context-packs/research-fixture.json",
+    createdAt: 1,
+  } as unknown as ContextPack;
+  const fixture = createResearchRevisionFixture({
+    workspaceId,
+    resourceId,
+    contextPack,
+  });
+  const firstCandidateAudit = {
+    protocol: "dezin.research-direction-only-first-candidate-audit.v1",
+    findingIds: ["finding-comparison", "finding-celebration", "finding-summary"],
+    evidenceFindingIds: ["finding-comparison", "finding-summary"],
+    hypothesisFindingIds: ["finding-celebration"],
+    directionIds: ["quiet-confidence", "expressive-confirmation"],
+    directionMappings: [{
+      directionId: "quiet-confidence",
+      findingIds: ["finding-celebration"],
+    }, {
+      directionId: "expressive-confirmation",
+      findingIds: ["finding-celebration"],
+    }],
+    changedDirectionOriginalFindingIds: ["finding-celebration"],
+  };
+  const firstCandidateChecksum = createHash("sha256")
+    .update(stableStringify(firstCandidateAudit))
+    .digest("hex");
+  Object.assign(fixture.bundle, {
+    version: 4,
+    repairAuthority: {
+      protocol: "dezin.research-direction-only-repair-authority.v1",
+      firstCandidateAudit: structuredClone(firstCandidateAudit),
+      firstCandidateChecksum,
+    },
+  });
+  fixture.metadata.adapter.version = 4;
+  Object.assign(fixture.provenance.adapterProvenance, {
+    researchRepair: {
+      protocol: "dezin.research-direction-only-repair.v1",
+      firstCandidateAudit,
+      firstCandidateChecksum,
+      gateBlockers: ["insufficient-evidence-directions"],
+      changedDirectionId: "quiet-confidence",
+      selectedEvidenceFindingIds: ["finding-comparison", "finding-summary"],
+      revalidatedEvidenceFindingIds: ["finding-comparison", "finding-summary"],
+      droppedFindingIds: [],
+    },
+  });
+  return { fixture, contextPack };
 }
 
 function largeJsonPayload(): Buffer {
@@ -516,6 +584,7 @@ function referenceGuard(state: { referenced: boolean; removals: number }): Resou
 
 function journalDouble(options: {
   onBegin?: (input: ResourcePayloadStagingBeginInput) => void;
+  planId?: string;
 } = {}): ResourcePayloadJournalDouble {
   const values = new Map<string, ResourcePayloadStagingJournal>();
   return {
@@ -527,7 +596,7 @@ function journalDouble(options: {
       const value: ResourcePayloadStagingJournal = {
         ...journalInput,
         sequence: values.size + 1,
-        planId: "plan-owned-resource-stage",
+        planId: options.planId ?? "plan-owned-resource-stage",
         ownerId: lease.ownerId,
         leaseToken: lease.leaseToken,
         status: "prepared",
@@ -724,6 +793,184 @@ test("stages and replays a generated Moodboard JSON bundle larger than the ordin
   assert.deepEqual(await staging.find(input), receipt);
 });
 
+test("validates complete Research v4 bytes before staging and again on replay", async (t) => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "dezin-resource-stage-research-v4-"));
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const { fixture, contextPack } = completeResearchV4Fixture();
+  const researchTaskAuthority: ResearchRevisionTaskAuthority = {
+    operation: fixture.bundle.scope.operation,
+    nodeId: fixture.bundle.scope.nodeId,
+    title: fixture.bundle.scope.title,
+    brief: {
+      proposalRationale: fixture.bundle.brief.proposalRationale,
+      assumptions: [...fixture.bundle.brief.assumptions],
+      targetInstructions: {
+        operation: fixture.bundle.brief.targetInstructions.operation,
+        kind: "research",
+        title: fixture.bundle.brief.targetInstructions.title,
+      },
+    },
+  };
+  const contextPacks = new Map([[contextPack.id, contextPack]]);
+  const journal = journalDouble({ planId: fixture.bundle.scope.planId });
+  const staging = new OwnedResourceTaskPayloadStaging({
+    storageRoot,
+    references: referenceGuard({ referenced: false, removals: 0 }),
+    journal,
+    contextPacks: {
+      get(workspaceId, contextPackId) {
+        const candidate = contextPacks.get(contextPackId);
+        return workspaceId === candidate?.workspaceId ? candidate : null;
+      },
+    },
+    attemptContextAuthority: {
+      resolveMoodboardAttemptContext() {
+        return {
+          contextPackId: contextPack.id,
+          contextPackHash: contextPack.hash,
+          researchTaskAuthority,
+        };
+      },
+    },
+    now: () => 123_800,
+  });
+  const input = stageInput({
+    taskId: fixture.bundle.scope.taskId,
+    planId: fixture.bundle.scope.planId,
+    inputHash: fixture.bundle.scope.inputHash,
+    workspaceId: fixture.bundle.scope.workspaceId,
+    resourceId: fixture.bundle.scope.resourceId,
+    revisionId: "8be98395-aa2e-5a59-8f52-5df48f075d6e",
+    parentRevisionId: null,
+    adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
+    contextPackId: contextPack.id,
+    contextPackHash: contextPack.hash,
+    researchTaskAuthority,
+    lease: {
+      taskId: fixture.bundle.scope.taskId,
+      workspaceId: fixture.bundle.scope.workspaceId,
+      attempt: fixture.bundle.scope.attempt,
+      ownerId: "worker-research-v4",
+      leaseToken: "lease-research-v4",
+    },
+    bytes: Buffer.from(stableStringify(fixture.bundle), "utf8"),
+    mimeType: "application/json",
+    summary: "Complete Research v4 fixture",
+    metadata: fixture.metadata.adapter,
+    provenance: fixture.provenance.adapterProvenance,
+    evidence: { accepted: true },
+  });
+
+  await staging.validate(input);
+  await assert.rejects(
+    staging.validate({
+      ...input,
+      bytes: Buffer.from(JSON.stringify({
+        format: "dezin-research-resource-bundle",
+        version: 4,
+      }), "utf8"),
+    }),
+    (error: unknown) => error instanceof ResourceTaskPayloadError
+      && error.code === "RESOURCE_PAYLOAD_STAGE_FAILED"
+      && /Research payload is invalid/i.test(error.message),
+  );
+  for (const mutate of [
+    (bundle: any) => {
+      bundle.scope.operation = bundle.scope.operation === "create" ? "revise" : "create";
+      bundle.brief.targetInstructions.operation = bundle.scope.operation;
+    },
+    (bundle: any) => {
+      bundle.scope.nodeId = "node-substituted";
+    },
+    (bundle: any) => {
+      bundle.scope.title = "Substituted Research title";
+      bundle.brief.targetInstructions.title = bundle.scope.title;
+    },
+    (bundle: any) => {
+      bundle.brief.targetInstructions.instructions = "Substituted Research instructions";
+    },
+  ]) {
+    const substituted = structuredClone(fixture.bundle);
+    mutate(substituted);
+    await assert.rejects(
+      staging.validate({
+        ...input,
+        bytes: Buffer.from(stableStringify(substituted), "utf8"),
+      }),
+      (error: unknown) => error instanceof ResourceTaskPayloadError
+        && error.code === "RESOURCE_PAYLOAD_STAGE_FAILED"
+        && /frozen Task|Task target/i.test(error.message),
+    );
+  }
+
+  const receipt = await staging.stage(input);
+  assert.deepEqual(await staging.find(input), receipt);
+
+  const foreignHash = "d".repeat(64);
+  const foreignContextPack = {
+    ...contextPack,
+    id: `context-pack-${foreignHash}`,
+    hash: foreignHash,
+    manifestPath: "context-packs/research-foreign.json",
+  } as ContextPack;
+  contextPacks.set(foreignContextPack.id, foreignContextPack);
+  const foreignFixture = createResearchRevisionFixture({
+    workspaceId: input.workspaceId,
+    resourceId: input.resourceId,
+    contextPack: foreignContextPack,
+  });
+  const relativePath = resourceTaskReceiptRelativePath(input.workspaceId, input.revisionId);
+  const receiptPath = join(storageRoot, ...relativePath.split("/"));
+  const storedReceipt = JSON.parse(await readFile(receiptPath, "utf8")) as Record<string, unknown>;
+  const manifestPath = join(storageRoot, ...(storedReceipt.manifestPath as string).split("/"));
+  const payloadPath = join(dirname(manifestPath), "payload.bin");
+  const foreignPayloadBytes = Buffer.from(stableStringify(foreignFixture.bundle), "utf8");
+  const foreignPayloadChecksum = createHash("sha256").update(foreignPayloadBytes).digest("hex");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    payload: { byteLength: number; checksum: string };
+  };
+  manifest.payload.byteLength = foreignPayloadBytes.byteLength;
+  manifest.payload.checksum = foreignPayloadChecksum;
+  const manifestBytes = Buffer.from(`${stableStringify(manifest)}\n`, "utf8");
+  const manifestChecksum = createHash("sha256").update(manifestBytes).digest("hex");
+  storedReceipt.summary = "Self-consistent foreign Research Context Pack";
+  storedReceipt.metadata = foreignFixture.metadata.adapter;
+  storedReceipt.provenance = foreignFixture.provenance.adapterProvenance;
+  storedReceipt.payloadChecksum = foreignPayloadChecksum;
+  storedReceipt.manifestChecksum = manifestChecksum;
+  storedReceipt.byteSize = foreignPayloadBytes.byteLength;
+  const receiptBytes = Buffer.from(`${JSON.stringify(storedReceipt)}\n`, "utf8");
+  const receiptChecksum = createHash("sha256").update(receiptBytes).digest("hex");
+  for (const [path, bytes] of [
+    [payloadPath, foreignPayloadBytes],
+    [manifestPath, manifestBytes],
+    [receiptPath, receiptBytes],
+  ] as const) {
+    const replacementPath = `${path}.replacement`;
+    await writeFile(replacementPath, bytes);
+    await rename(replacementPath, path);
+  }
+  journal.replacePayloadChecksums(input.revisionId, {
+    payloadChecksum: foreignPayloadChecksum,
+    manifestChecksum,
+    receiptChecksum,
+    byteSize: foreignPayloadBytes.byteLength,
+  });
+
+  await assert.rejects(
+    staging.find(input),
+    (error: unknown) => error instanceof ResourceTaskPayloadError
+      && error.code === "RESOURCE_PAYLOAD_RECEIPT_INVALID"
+      && /Attempt Context Pack/i.test(error.message),
+  );
+  const scan = await (staging as unknown as ReceiptScanner).scanReceipts({
+    limit: 10,
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(scan.receipts, []);
+  assert.deepEqual(scan.invalidReceiptPaths, [relativePath]);
+});
+
 test("keeps the ordinary 8 MiB verifier boundary for non-Moodboard JSON", async (t) => {
   const storageRoot = await mkdtemp(join(tmpdir(), "dezin-resource-stage-large-json-"));
   t.after(() => rm(storageRoot, { recursive: true, force: true }));
@@ -738,7 +985,11 @@ test("keeps the ordinary 8 MiB verifier boundary for non-Moodboard JSON", async 
     inputHash: "c".repeat(64),
     resourceId: "resource-owned-large-research-json",
     revisionId: "9ae98395-aa2e-5a59-8f52-5df48f075d6e",
-    adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
+    adapter: {
+      id: "dezin.resource-adapter.external-reference",
+      version: 1,
+      kind: "external-reference",
+    },
     maxOutputBytes: 48 * MEBIBYTE,
     bytes: largeJsonPayload(),
     mimeType: "application/json",

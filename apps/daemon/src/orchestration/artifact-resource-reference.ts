@@ -40,6 +40,7 @@ import type {
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const CONTEXT_PACK_ID = /^context-pack-([0-9a-f]{64})$/;
+const MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 const REFERENCE_MOUNT = ".dezin/references";
 const PROJECT_REFERENCE_PROTOCOL = "dezin.project-reference-bundle.v1";
 const MAX_REFERENCES = 64;
@@ -367,7 +368,7 @@ function decodeProjectReferencePayload(payload: Buffer): readonly DecodedProject
       throw new ArtifactResourceReferenceError("payload-invalid", "Project Reference contains duplicate file paths");
     }
     paths.add(path);
-    if (typeof file.mimeType !== "string" || file.mimeType.length === 0 || file.mimeType.length > 127
+    if (typeof file.mimeType !== "string" || file.mimeType.length > 127 || !MIME.test(file.mimeType)
       || !Number.isSafeInteger(file.byteLength) || Number(file.byteLength) < 0
       || Number(file.byteLength) > MAX_PROJECT_FILE_BYTES
       || typeof file.checksum !== "string" || !SHA256.test(file.checksum)

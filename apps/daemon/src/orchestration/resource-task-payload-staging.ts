@@ -24,6 +24,7 @@ import {
 } from "../context/adapters/file.ts";
 import {
   stableStringify,
+  type ContextPack,
   type ContextPackRepository,
 } from "../context/context-types.ts";
 import {
@@ -46,6 +47,12 @@ import {
   verifyResourceRevisionPayload,
   type ResourceRevisionPayloadDescriptor,
 } from "../resource-revision-payload.ts";
+import {
+  listResearchRevisionDirections,
+  researchRevisionContextPackId,
+  ResearchResourceRevisionError,
+  type ResearchRevisionTaskAuthority,
+} from "../research-resource-revision.ts";
 import {
   ResourceTaskPayloadError,
   validateResourceTaskPayloadReceipt,
@@ -100,6 +107,7 @@ export interface OwnedResourceTaskPayloadStagingOptions {
 export interface MoodboardAttemptContextIdentity {
   readonly contextPackId: string;
   readonly contextPackHash: string;
+  readonly researchTaskAuthority?: ResearchRevisionTaskAuthority;
 }
 
 export interface MoodboardAttemptContextAuthorityInput
@@ -229,6 +237,17 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
     this.#moodboardV2LineagePolicy = moodboardV2LineagePolicy;
   }
 
+  async validate(input: ResourceTaskPayloadStageInput): Promise<void> {
+    checkAbort(input.signal);
+    await verifyResearchStagePayload(input, this.#getContextPack);
+    await verifyMoodboardStagePayload(
+      input,
+      this.#moodboardV2LineagePolicy,
+      this.#getContextPack,
+    );
+    checkAbort(input.signal);
+  }
+
   async find(scope: ResourceTaskPayloadScope): Promise<ResourceTaskPayloadReceipt | null> {
     checkAbort(scope.signal);
     try {
@@ -243,6 +262,20 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
       const raw = parseReceipt(bytes);
       const receipt = validateResourceTaskPayloadReceipt(raw, scope);
       await verifyResourceRevisionPayload(root, payloadDescriptor(receipt), { signal: scope.signal });
+      const journal = this.#getStaging(cleanupIdentity(receipt));
+      if (journal === null) {
+        throw new ResourceTaskPayloadError(
+          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+          "Owned Resource payload receipt has no exact durable staging journal",
+        );
+      }
+      if (receipt.adapter.kind === "research"
+        && (typeof scope.planId !== "string" || journal.planId !== scope.planId)) {
+        throw new ResourceTaskPayloadError(
+          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+          "Generated Research replay scope does not match its durable Plan authority",
+        );
+      }
       await verifyMoodboardReceiptPayload(
         root,
         receipt,
@@ -251,13 +284,16 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
         this.#moodboardV2LineagePolicy,
         this.#getContextPack,
       );
-      const journal = this.#getStaging(cleanupIdentity(receipt));
-      if (journal === null) {
-        throw new ResourceTaskPayloadError(
-          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
-          "Owned Resource payload receipt has no exact durable staging journal",
-        );
-      }
+      await verifyResearchReceiptPayload(
+        root,
+        receipt,
+        journal.planId,
+        scope.contextPackId,
+        scope.contextPackHash,
+        scope.researchTaskAuthority,
+        scope.signal,
+        this.#getContextPack,
+      );
       assertJournalReceipt(journal, receipt, bytes);
       const completed = journal.status === "receipt-committed"
         ? journal
@@ -288,11 +324,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
 
   async stage(input: ResourceTaskPayloadStageInput): Promise<ResourceTaskPayloadReceipt> {
     checkAbort(input.signal);
-    await verifyMoodboardStagePayload(
-      input,
-      this.#moodboardV2LineagePolicy,
-      this.#getContextPack,
-    );
+    await this.validate(input);
     const planned = plannedPayload(input);
     let journal: ResourcePayloadStagingJournal | null = null;
     let exactJournal = false;
@@ -491,6 +523,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
           }
           assertJournalReceipt(journal, receipt, bytes);
           const expectedContextPack = receipt.adapter.kind === "moodboard"
+            || receipt.adapter.kind === "research"
             ? this.#resolveAttemptContext?.({
                 ...journalIdentity(journal),
                 planId: journal.planId,
@@ -503,6 +536,16 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
             expectedContextPack,
             input.signal,
             this.#moodboardV2LineagePolicy,
+            this.#getContextPack,
+          );
+          await verifyResearchReceiptPayload(
+            root,
+            receipt,
+            journal.planId,
+            expectedContextPack?.contextPackId,
+            expectedContextPack?.contextPackHash,
+            expectedContextPack?.researchTaskAuthority,
+            input.signal,
             this.#getContextPack,
           );
           receipts.push({ relativePath, receipt });
@@ -530,6 +573,221 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
       );
     }
   }
+}
+
+function researchRevisionMetadata(input: {
+  readonly bytes: Uint8Array;
+  readonly mimeType: string;
+  readonly metadata: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    mimeType: input.mimeType,
+    adapter: input.metadata,
+    payload: {
+      mimeType: input.mimeType,
+      byteSize: input.bytes.byteLength,
+      checksum: sha256(input.bytes),
+    },
+  };
+}
+
+function researchRevisionProvenance(input: {
+  readonly taskId: string;
+  readonly attempt: number;
+  readonly inputHash: string;
+  readonly adapter: ResourceTaskPayloadStageInput["adapter"];
+  readonly provenance: Record<string, unknown>;
+}, planId: string): Record<string, unknown> {
+  return {
+    kind: "generation-task-resource",
+    planId,
+    taskId: input.taskId,
+    attempt: input.attempt,
+    inputHash: input.inputHash,
+    adapter: { ...input.adapter },
+    adapterProvenance: input.provenance,
+  };
+}
+
+function resolveResearchContextPack(input: {
+  readonly workspaceId: string;
+  readonly contextPackId: string | undefined;
+  readonly contextPackHash: string | undefined;
+  readonly getContextPack: ContextPackRepository["get"] | null;
+  readonly failureCode: "RESOURCE_PAYLOAD_STAGE_FAILED" | "RESOURCE_PAYLOAD_RECEIPT_INVALID";
+}): ContextPack {
+  const match = typeof input.contextPackId === "string"
+    ? CONTEXT_PACK_ID.exec(input.contextPackId)
+    : null;
+  if (match === null || typeof input.contextPackHash !== "string"
+    || !CHECKSUM.test(input.contextPackHash) || match[1] !== input.contextPackHash) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload has an invalid Attempt Context Pack identity",
+    );
+  }
+  if (input.getContextPack === null) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload Context Pack authority repository is unavailable",
+    );
+  }
+  let contextPack: ContextPack | null;
+  try {
+    contextPack = input.getContextPack(input.workspaceId, input.contextPackId!);
+  } catch (error) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload could not load its frozen Attempt Context Pack",
+      error,
+    );
+  }
+  if (contextPack === null
+    || contextPack.id !== input.contextPackId
+    || contextPack.workspaceId !== input.workspaceId
+    || contextPack.hash !== input.contextPackHash) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload does not match its frozen Attempt Context Pack",
+    );
+  }
+  return contextPack;
+}
+
+function validateCompleteResearchPayload(input: {
+  readonly bytes: Uint8Array;
+  readonly mimeType: string;
+  readonly metadata: Record<string, unknown>;
+  readonly provenance: Record<string, unknown>;
+  readonly taskId: string;
+  readonly planId: string | undefined;
+  readonly attempt: number;
+  readonly inputHash: string;
+  readonly workspaceId: string;
+  readonly resourceId: string;
+  readonly parentRevisionId: string | null;
+  readonly adapter: ResourceTaskPayloadStageInput["adapter"];
+  readonly contextPackId: string | undefined;
+  readonly contextPackHash: string | undefined;
+  readonly researchTaskAuthority?: ResearchRevisionTaskAuthority;
+  readonly getContextPack: ContextPackRepository["get"] | null;
+  readonly failureCode: "RESOURCE_PAYLOAD_STAGE_FAILED" | "RESOURCE_PAYLOAD_RECEIPT_INVALID";
+}): void {
+  if (input.mimeType !== "application/json") {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload must use application/json",
+    );
+  }
+  if (typeof input.planId !== "string" || input.planId.length === 0) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload has no exact immutable Plan authority",
+    );
+  }
+  if (input.researchTaskAuthority === undefined) {
+    throw new ResourceTaskPayloadError(
+      input.failureCode,
+      "Generated Research payload has no exact frozen Task authority",
+    );
+  }
+  const contextPack = resolveResearchContextPack(input);
+  try {
+    listResearchRevisionDirections({
+      bytes: Buffer.from(input.bytes),
+      workspaceId: input.workspaceId,
+      resourceId: input.resourceId,
+      parentRevisionId: input.parentRevisionId,
+      revisionMetadata: researchRevisionMetadata(input),
+      revisionProvenance: researchRevisionProvenance(input, input.planId),
+      contextPack,
+      taskAuthority: input.researchTaskAuthority,
+    });
+  } catch (error) {
+    if (error instanceof ResearchResourceRevisionError) {
+      throw new ResourceTaskPayloadError(
+        input.failureCode,
+        `Generated Research payload is invalid: ${error.message}`,
+        error,
+      );
+    }
+    throw error;
+  }
+}
+
+async function verifyResearchStagePayload(
+  input: ResourceTaskPayloadStageInput,
+  getContextPack: ContextPackRepository["get"] | null,
+): Promise<void> {
+  if (input.adapter.kind !== "research") return;
+  validateCompleteResearchPayload({
+    ...input,
+    planId: input.planId,
+    getContextPack,
+    failureCode: "RESOURCE_PAYLOAD_STAGE_FAILED",
+  });
+}
+
+async function verifyResearchReceiptPayload(
+  root: string,
+  receipt: ResourceTaskPayloadReceipt,
+  planId: string,
+  expectedContextPackId: string | undefined,
+  expectedContextPackHash: string | undefined,
+  researchTaskAuthority: ResearchRevisionTaskAuthority | undefined,
+  signal: AbortSignal,
+  getContextPack: ContextPackRepository["get"] | null,
+): Promise<void> {
+  if (receipt.adapter.kind !== "research") return;
+  const payloadPath = ownedPath(
+    root,
+    posix.join(posix.dirname(receipt.manifestPath), "payload.bin"),
+    "Generated Research payload bytes",
+  );
+  const bytes = await readOwnedFile(root, payloadPath, receipt.byteSize, false);
+  if (bytes === null
+    || bytes.byteLength !== receipt.byteSize
+    || sha256(bytes) !== receipt.payloadChecksum) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Research payload bytes diverge from their receipt",
+    );
+  }
+  const revisionProvenance = researchRevisionProvenance(receipt, planId);
+  const provenanceContextPackId = researchRevisionContextPackId(revisionProvenance);
+  if (expectedContextPackId === undefined || expectedContextPackHash === undefined) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Research payload has no exact durable Attempt Context Pack authority",
+    );
+  }
+  if (provenanceContextPackId !== expectedContextPackId) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Generated Research payload substituted its Attempt Context Pack",
+    );
+  }
+  checkAbort(signal);
+  validateCompleteResearchPayload({
+    bytes,
+    mimeType: receipt.mimeType,
+    metadata: receipt.metadata,
+    provenance: receipt.provenance,
+    taskId: receipt.taskId,
+    planId,
+    attempt: receipt.attempt,
+    inputHash: receipt.inputHash,
+    workspaceId: receipt.workspaceId,
+    resourceId: receipt.resourceId,
+    parentRevisionId: receipt.parentRevisionId,
+    adapter: receipt.adapter,
+    contextPackId: expectedContextPackId,
+    contextPackHash: expectedContextPackHash,
+    researchTaskAuthority,
+    getContextPack,
+    failureCode: "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+  });
+  checkAbort(signal);
 }
 
 async function verifyMoodboardStagePayload(

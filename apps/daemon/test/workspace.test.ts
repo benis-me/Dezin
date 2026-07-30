@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { GenerationPlanCompileError, Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
+import { workspaceMoodboardImageAuthority } from "../src/orchestration/moodboard-image-execution-authority.ts";
 import { ensureStandardProjectWorkspace } from "../src/workspace-migration.ts";
 
 interface WorkspaceServerContext {
@@ -1214,6 +1215,431 @@ test("workspace Proposal HTTP generate approval compiles the immutable Plan befo
       "workspace_proposal_state_conflict",
     );
   });
+});
+
+test("executable Proposal approval rejects missing or forged exact authority before any workspace mutation", async (t) => {
+  const validAgent = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: null,
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "anthropic",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
+  const validReviewer = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: null,
+    executionAuthority: {
+      kind: "reviewer" as const,
+      baseUrl: "",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
+  const cases = [
+    {
+      name: "missing-generator-authority",
+      agent: { providerId: "claude", command: "claude", model: null },
+      reviewerAgent: validReviewer,
+    },
+    {
+      name: "missing-reviewer-authority",
+      agent: validAgent,
+      reviewerAgent: { providerId: "claude", command: "claude", model: null },
+    },
+    {
+      name: "forged-canonical-generator-endpoint",
+      agent: {
+        ...validAgent,
+        executionAuthority: {
+          ...validAgent.executionAuthority,
+          baseUrl: "https://forged-agent.example/v1",
+          credentialSource: "agent" as const,
+          credentialRequired: true,
+        },
+      },
+      reviewerAgent: {
+        ...validReviewer,
+        executionAuthority: {
+          ...validReviewer.executionAuthority,
+          baseUrl: "https://forged-agent.example/v1",
+          credentialSource: "agent" as const,
+          credentialRequired: true,
+        },
+      },
+    },
+    {
+      name: "forged-canonical-reviewer-source",
+      agent: validAgent,
+      reviewerAgent: {
+        ...validReviewer,
+        executionAuthority: {
+          kind: "reviewer" as const,
+          baseUrl: "https://forged-reviewer.example/v1",
+          credentialSource: "anthropic-profile" as const,
+          credentialRequired: true,
+        },
+      },
+    },
+  ] as const;
+  for (const authorityCase of cases) {
+    await t.test(authorityCase.name, async () => {
+      await withWorkspaceServer(async ({ base, store }) => {
+        const project = store.createProject({
+          name: `Executable authority ${authorityCase.name}`,
+          mode: "standard",
+        });
+        const ready = await readyWorkspace(base, project.id);
+        const suffix = `authority-${authorityCase.name}`;
+        const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(proposalCreateBody(ready, suffix, {
+            generation: {
+              ...emptyWorkspaceGenerationPayload(),
+              agent: authorityCase.agent,
+              reviewerAgent: authorityCase.reviewerAgent,
+              artifactPlans: [{
+                operation: "create",
+                nodeId: `proposal-node-${suffix}`,
+                artifactId: `proposal-artifact-${suffix}`,
+                kind: "page",
+                name: `Page ${suffix}`,
+                trackId: `proposal-track-${suffix}`,
+                baseRevisionId: null,
+                dependsOnArtifactIds: [],
+                capabilityIds: [],
+                responsiveFrameIds: ["desktop"],
+              }],
+              responsiveFrames: [{
+                id: "desktop",
+                name: "Desktop",
+                width: 1_440,
+                height: 900,
+              }],
+            },
+          })),
+        });
+        assert.equal(createResponse.status, 201);
+        const proposal = await createResponse.json() as { id: string };
+        const before = {
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          activeSnapshotId: store.workspace.getWorkspace(project.id)?.activeSnapshotId,
+          snapshotIds: store.db.prepare(
+            "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+          ).all(ready.workspace.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        };
+
+        const approvalResponse = await fetch(
+          `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "generate" }),
+          },
+        );
+        assert.equal(approvalResponse.status, 422);
+        assert.equal(
+          (await approvalResponse.json() as { code: string }).code,
+          "invalid_generation_authority",
+        );
+        assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+        assert.deepEqual({
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          activeSnapshotId: store.workspace.getWorkspace(project.id)?.activeSnapshotId,
+          snapshotIds: store.db.prepare(
+            "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+          ).all(ready.workspace.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        }, before);
+      });
+    });
+  }
+});
+
+test("generated Research approval rejects missing or forged split authority before mutating workspace state", async (t) => {
+  const authorities = [
+    {
+      name: "missing",
+      fields: {},
+    },
+    {
+      name: "forged-research-command",
+      fields: {
+        researchAgent: {
+          providerId: "codex",
+          command: "claude",
+          model: "gpt-5.4-mini",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "",
+            organization: "",
+            credentialProviderId: "openai",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        reviewerAgent: {
+          providerId: "claude",
+          command: "claude",
+          model: null,
+          executionAuthority: {
+            kind: "reviewer",
+            baseUrl: "",
+            credentialSource: "agent",
+            credentialRequired: false,
+          },
+        },
+      },
+    },
+    {
+      name: "forged-reviewer-command",
+      fields: {
+        researchAgent: {
+          providerId: "codex",
+          command: "codex",
+          model: "gpt-5.4-mini",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "",
+            organization: "",
+            credentialProviderId: "openai",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        reviewerAgent: {
+          providerId: "claude",
+          command: "codex",
+          model: null,
+          executionAuthority: {
+            kind: "reviewer",
+            baseUrl: "",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+      },
+    },
+  ] as const;
+  for (const authority of authorities) {
+    await t.test(authority.name, async () => {
+      await withWorkspaceServer(async ({ base, store }) => {
+        const project = store.createProject({
+          name: `Research authority ${authority.name}`,
+          mode: "standard",
+        });
+        const ready = await readyWorkspace(base, project.id);
+        const nodeId = `research-node-${authority.name}`;
+        const resourceId = `research-resource-${authority.name}`;
+        const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(proposalCreateBody(ready, authority.name, {
+            operations: [{
+              id: `add-${nodeId}`,
+              type: "add-node",
+              node: {
+                id: nodeId,
+                kind: "resource",
+                name: `Research ${authority.name}`,
+                resourceId,
+                createIdentity: { resourceKind: "research", defaultPinPolicy: "follow-head" },
+              },
+            }],
+            generation: {
+              ...emptyWorkspaceGenerationPayload(),
+              agent: {
+                providerId: "claude",
+                command: "claude",
+                model: null,
+                executionAuthority: {
+                  kind: "generator",
+                  baseUrl: "",
+                  organization: "",
+                  credentialProviderId: "anthropic",
+                  credentialSource: "session",
+                  credentialRequired: false,
+                },
+              },
+              ...authority.fields,
+              resourceOperations: [{
+                operation: "create",
+                nodeId,
+                resourceId,
+                kind: "research",
+                title: `Research ${authority.name}`,
+                revisionPolicy: { kind: "generate" },
+              }],
+            },
+          })),
+        });
+        assert.equal(createResponse.status, 201);
+        const proposal = await createResponse.json() as { id: string };
+        const before = {
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        };
+
+        const approvalResponse = await fetch(
+          `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "generate" }),
+          },
+        );
+        assert.equal(approvalResponse.status, 422);
+        assert.equal(
+          (await approvalResponse.json() as { code: string }).code,
+          "invalid_generation_authority",
+        );
+        assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+        assert.deepEqual({
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        }, before);
+      });
+    });
+  }
+});
+
+test("generated Moodboard approval rejects missing, forged, or drifted image authority before mutating workspace state", async (t) => {
+  for (const authorityCase of ["missing", "forged", "settings-drift"] as const) {
+    await t.test(authorityCase, async () => {
+      await withWorkspaceServer(async ({ base, store }) => {
+        const imageSettings = {
+          aiProviderId: "fal",
+          aiProviderEnabled: true,
+          aiProviderModels: "fal-ai/flux/dev",
+          aiProviderOrganization: "image-api-v1",
+          aiProviderProfiles: "",
+          imageApiBaseUrl: "https://images.example.test/v1",
+          imageApiKey: "current-image-secret",
+          imageApiKeyConfigured: true,
+          imageModel: "fal-ai/flux/dev",
+        };
+        store.updateSettings(imageSettings);
+        const validImageAuthority = workspaceMoodboardImageAuthority(store.getSettings());
+        const project = store.createProject({
+          name: `Moodboard image authority ${authorityCase}`,
+          mode: "standard",
+        });
+        const ready = await readyWorkspace(base, project.id);
+        const nodeId = `moodboard-node-${authorityCase}`;
+        const resourceId = `moodboard-resource-${authorityCase}`;
+        const imageAuthority = authorityCase === "missing"
+          ? {}
+          : {
+              moodboardImageAuthority: authorityCase === "forged"
+                ? { ...validImageAuthority, baseUrl: "https://forged-images.example.test/v1" }
+                : validImageAuthority,
+            };
+        const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(proposalCreateBody(ready, authorityCase, {
+            operations: [{
+              id: `add-${nodeId}`,
+              type: "add-node",
+              node: {
+                id: nodeId,
+                kind: "resource",
+                name: `Moodboard ${authorityCase}`,
+                resourceId,
+                createIdentity: { resourceKind: "moodboard", defaultPinPolicy: "follow-head" },
+              },
+            }],
+            generation: {
+              ...emptyWorkspaceGenerationPayload(),
+              agent: {
+                providerId: "claude",
+                command: "claude",
+                model: null,
+                executionAuthority: {
+                  kind: "generator",
+                  baseUrl: "",
+                  organization: "",
+                  credentialProviderId: "anthropic",
+                  credentialSource: "session",
+                  credentialRequired: false,
+                },
+              },
+              reviewerAgent: {
+                providerId: "claude",
+                command: "claude",
+                model: null,
+                executionAuthority: {
+                  kind: "reviewer",
+                  baseUrl: "",
+                  credentialSource: "session",
+                  credentialRequired: false,
+                },
+              },
+              ...imageAuthority,
+              resourceOperations: [{
+                operation: "create",
+                nodeId,
+                resourceId,
+                kind: "moodboard",
+                title: `Moodboard ${authorityCase}`,
+                revisionPolicy: { kind: "generate" },
+              }],
+            },
+          })),
+        });
+        assert.equal(createResponse.status, 201);
+        const proposal = await createResponse.json() as { id: string };
+        if (authorityCase === "settings-drift") {
+          store.updateSettings({ imageModel: "fal-ai/flux/pro" });
+        }
+        const before = {
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          activeSnapshotId: store.workspace.getWorkspace(project.id)?.activeSnapshotId,
+          snapshotIds: store.db.prepare(
+            "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+          ).all(ready.workspace.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        };
+
+        const response = await fetch(
+          `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "generate" }),
+          },
+        );
+        assert.equal(response.status, 422);
+        assert.equal(
+          (await response.json() as { code: string }).code,
+          "invalid_generation_authority",
+        );
+        assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+        assert.deepEqual({
+          graph: store.workspace.getGraph(project.id),
+          layout: store.workspace.getLayout(project.id),
+          activeSnapshotId: store.workspace.getWorkspace(project.id)?.activeSnapshotId,
+          snapshotIds: store.db.prepare(
+            "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+          ).all(ready.workspace.id),
+          counts: workspaceProposalCounts(store, ready.workspace.id),
+        }, before);
+      });
+    });
+  }
 });
 
 test("generate approval compile failure returns the already-committed canonical workspace and failed Plan", async () => {
@@ -2630,6 +3056,72 @@ test("Proposal validation-shaped failures never relabel durable corruption as 42
     );
     assert.equal(response.status, 500);
     assert.notEqual((await response.json() as { code?: string }).code, "workspace_proposal_validation_error");
+    assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+    assert.equal(workspaceProposalCounts(store, ready.workspace.id).plans, 0);
+  });
+});
+
+test("invalid generation authority never masks durable Proposal corruption as 422", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Authority and Proposal corruption", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const suffix = "authority-corruption";
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, suffix, {
+        generation: {
+          ...emptyWorkspaceGenerationPayload(),
+          agent: { providerId: "claude", command: "claude", model: null },
+          reviewerAgent: {
+            providerId: "claude",
+            command: "claude",
+            model: null,
+            executionAuthority: {
+              kind: "reviewer",
+              baseUrl: "",
+              credentialSource: "agent",
+              credentialRequired: false,
+            },
+          },
+          artifactPlans: [{
+            operation: "create",
+            nodeId: `proposal-node-${suffix}`,
+            artifactId: `proposal-artifact-${suffix}`,
+            kind: "page",
+            name: `Page ${suffix}`,
+            trackId: `proposal-track-${suffix}`,
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: ["desktop"],
+          }],
+          responsiveFrames: [{
+            id: "desktop",
+            name: "Desktop",
+            width: 1_440,
+            height: 900,
+          }],
+        },
+      })),
+    });
+    assert.equal(createResponse.status, 201);
+    const proposal = await createResponse.json() as { id: string };
+    const artifact = store.workspace.getBundleByProjectId(project.id)!.artifacts[0]!;
+    store.db.prepare("UPDATE workspace_artifacts SET name = 'Raw authority drift' WHERE id = ?")
+      .run(artifact.id);
+
+    const response = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+
+    assert.equal(response.status, 500);
+    assert.notEqual((await response.json() as { code?: string }).code, "invalid_generation_authority");
     assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
     assert.equal(workspaceProposalCounts(store, ready.workspace.id).plans, 0);
   });

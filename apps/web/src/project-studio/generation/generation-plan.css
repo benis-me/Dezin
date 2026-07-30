@@ -175,6 +175,102 @@
   min-width: 0;
 }
 
+.dezin-generation-plan__process-section {
+  display: flex;
+  min-height: 132px;
+  max-height: min(224px, 30vh);
+  flex: 0 1 224px;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 12px 14px;
+  background: var(--background);
+}
+
+.dezin-generation-plan__process-content {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
+}
+
+.dezin-generation-plan__timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dezin-generation-plan__timeline-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dezin-generation-plan__event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  min-width: 0;
+  gap: 0 7px;
+  padding: 0 0 12px;
+}
+
+.dezin-generation-plan__event:last-child {
+  padding-bottom: 1px;
+}
+
+.dezin-generation-plan__event:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: -1px;
+  left: 4px;
+  width: 1px;
+  background: var(--border);
+}
+
+.dezin-generation-plan__event-marker {
+  position: relative;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  margin-top: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--background);
+}
+
+.dezin-generation-plan__event-body {
+  min-width: 0;
+}
+
+.dezin-generation-plan__event-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dezin-generation-plan__event-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dezin-generation-plan__event-heading time {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+
 .dezin-generation-plan__tasks-section {
   display: flex;
   min-height: 0;
@@ -198,11 +294,20 @@
 
 .dezin-generation-plan__task {
   position: relative;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
   min-width: 0;
   padding: 13px 0;
   border-bottom: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
+}
+
+.dezin-generation-plan__task-toggle {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
 }
 
 .dezin-generation-plan__task-marker {
@@ -240,6 +345,7 @@
 }
 
 .dezin-generation-plan__task-body {
+  display: block;
   min-width: 0;
 }
 
@@ -289,7 +395,9 @@
 }
 
 .dezin-generation-plan__task-meta,
-.dezin-generation-plan__task-message {
+.dezin-generation-plan__task-message,
+.dezin-generation-plan__task-output {
+  display: block;
   margin-top: 7px;
 }
 
@@ -297,6 +405,18 @@
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.dezin-generation-plan__task-actions {
+  margin-left: 34px;
+}
+
+.dezin-generation-plan__task-output {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
 }
 
 .dezin-generation-plan__artifact-link {

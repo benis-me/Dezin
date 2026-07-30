@@ -164,7 +164,10 @@ test("Standard Artifact execution evaluates bounded repair rounds and selects th
     { role: "user", content: "Create the approved checkout experience." },
     { role: "assistant", content: "draft" },
   ]);
-  assert.deepEqual(events.slice(-3), ["candidate:2", "quality:2", "restore:1"]);
+  assert.deepEqual(
+    events.slice(-4),
+    ["candidate:2", "quality-start:2", "quality:2", "restore:1"],
+  );
 });
 
 test("a later equal passing candidate wins without a redundant restore", async () => {

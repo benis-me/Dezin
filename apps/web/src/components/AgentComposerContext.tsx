@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
 import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, MousePointerClick, Paperclip, Sparkles, X } from "lucide-react";
-import { cn } from "../lib/utils.ts";
 import {
   RUN_CONTEXT_MAX_ITEMS,
   decodeContextItemRef,
@@ -347,7 +346,9 @@ function contextTypeLabel(item: AgentComposerContextItem, iconKind: ContextIconK
 function contextMeta(item: AgentComposerContextItem): string | undefined {
   if (item.type === "file" && typeof item.size === "number") return formatFileSize(item.size);
   if (item.type === "canvas-node") return item.nodeType;
-  if (item.type === "context-ref") return ("revisionId" in item.ref ? item.ref.revisionId : undefined) ?? item.subtitle;
+  if (item.type === "context-ref") {
+    return item.subtitle ?? ("revisionId" in item.ref ? "Pinned revision" : undefined);
+  }
   return item.subtitle;
 }
 
@@ -416,9 +417,9 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
       aria-label={ariaLabel}
       data-testid="agent-context-rail"
       data-context-layout="top-rail"
-      className={cn("min-w-0 border-b border-border/70 pb-2", className)}
+      className={className}
     >
-      <div className="flex min-w-0 gap-1.5 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
+      <div>
         <DragDropProvider onDragEnd={handleDragEnd}>
           {items.map((item, index) => (
             <AgentComposerContextCard
@@ -488,37 +489,33 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
       data-context-assembly-hash={item.type === "context-ref" ? item.assemblyHash : undefined}
       data-context-frame-id={item.type === "context-ref" ? item.frameId : undefined}
       data-context-design-node-id={item.type === "context-ref" ? item.designNodeId : undefined}
+      data-dragging={isDragging || undefined}
+      data-drop-target={isDropTarget || undefined}
       title={tooltipMeta ? `${item.title}: ${tooltipMeta}` : item.title}
-      className={cn(
-        "group flex h-9 w-fit min-w-28 max-w-[184px] shrink-0 select-none items-center gap-1.5 overflow-hidden rounded-lg border border-border bg-card px-1.5 text-xs text-foreground-2 transition-[opacity,border-color,background-color] duration-150 ease-out motion-reduce:transition-none",
-        isDragging && "opacity-55 ring-2 ring-ring/30",
-        isDropTarget && "border-ring ring-2 ring-ring/30",
-      )}
     >
-      <span className="grid size-6 shrink-0 place-items-center overflow-hidden rounded-md border border-border/70 bg-surface-2 text-brand">
+      <span>
         {(item.type === "file" || item.type === "context-ref") && item.previewUrl ? (
-          <img className="size-full object-cover" src={item.previewUrl} alt={item.title} />
+          <img src={item.previewUrl} alt={item.title} />
         ) : (
           contextIcon(iconKind, 12)
         )}
       </span>
-      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{item.title}</span>
+      <span>{item.title}</span>
       {showGrip ? (
         <button
           ref={handleRef}
           type="button"
           aria-label={`Drag ${item.title}`}
-          className="grid h-6 w-3 shrink-0 touch-none cursor-grab place-items-center rounded text-muted-foreground/60 opacity-0 transition-[opacity,color,background-color] group-hover:opacity-100 focus:opacity-100 active:cursor-grabbing"
         >
           <GripVertical size={11} strokeWidth={1.75} />
         </button>
       ) : null}
       {showGrip ? (
         <>
-          <button type="button" disabled={index === 0} className="sr-only" onClick={onMoveBefore}>
+          <button type="button" disabled={index === 0} onClick={onMoveBefore}>
             Move {item.title} before previous context card
           </button>
-          <button type="button" disabled={index >= count - 1} className="sr-only" onClick={onMoveAfter}>
+          <button type="button" disabled={index >= count - 1} onClick={onMoveAfter}>
             Move {item.title} after next context card
           </button>
         </>
@@ -531,7 +528,6 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
           event.stopPropagation();
           onRemove();
         }}
-        className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground/70 transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <X size={10} strokeWidth={2} />
       </button>

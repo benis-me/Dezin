@@ -16,6 +16,38 @@ const FROZEN_CODEBUDDY_AGENT = {
   providerId: "codebuddy",
   command: "codebuddy",
   model: "gpt-5.6-sol",
+  executionAuthority: {
+    kind: "generator",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "codebuddy",
+    credentialSource: "session",
+    credentialRequired: false,
+  },
+} as const;
+const FROZEN_CODEX_RESEARCH_AGENT = {
+  providerId: "codex",
+  command: "codex",
+  model: "gpt-5.4-mini",
+  executionAuthority: {
+    kind: "generator",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "openai",
+    credentialSource: "session",
+    credentialRequired: false,
+  },
+} as const;
+const FROZEN_CLAUDE_REVIEWER = {
+  providerId: "claude",
+  command: "claude",
+  model: "claude-opus-4-6",
+  executionAuthority: {
+    kind: "reviewer",
+    baseUrl: "",
+    credentialSource: "session",
+    credentialRequired: false,
+  },
 } as const;
 const RESOURCE_INSTRUCTIONS = [
   "Compare exactly three research directions.",
@@ -63,6 +95,8 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
     generation: {
       kind: "workspace-generation",
       agent: FROZEN_CODEBUDDY_AGENT,
+      researchAgent: FROZEN_CODEX_RESEARCH_AGENT,
+      reviewerAgent: FROZEN_CLAUDE_REVIEWER,
       resourceOperations: [{
         operation: "create",
         nodeId: "node-research",
@@ -256,12 +290,16 @@ test("accepts every fully populated payload frozen by compileGenerationPlan", ()
   for (const task of tasks) validateGenerationTaskPayload(task);
 });
 
-test("preserves legacy v2 leaves and independently validates every bounded frozen Agent identity", () => {
-  const tasks = [taskOfKind("resource"), taskOfTarget("page-home")];
+test("preserves authority-free historical leaves but requires exact generator authority on every present Agent", () => {
+  const tasks = [
+    [taskOfKind("resource"), FROZEN_CODEX_RESEARCH_AGENT],
+    [taskOfTarget("page-home"), FROZEN_CODEBUDDY_AGENT],
+  ] as const;
 
-  for (const task of tasks) {
+  for (const [task, expectedAgent] of tasks) {
     const payload = clonePayload(task) as any;
-    assert.deepEqual(payload.agent, FROZEN_CODEBUDDY_AGENT);
+    assert.deepEqual(payload.agent, expectedAgent);
+    assert.deepEqual(payload.reviewer, FROZEN_CLAUDE_REVIEWER);
     validateGenerationTaskPayload(task);
 
     const missing = clonePayload(task);
@@ -276,11 +314,35 @@ test("preserves legacy v2 leaves and independently validates every bounded froze
     extra.agent.extra = true;
     expectContractError(withPayload(task, extra), /Agent fields/i);
 
+    const missingAuthority = clonePayload(task) as any;
+    delete missingAuthority.agent.executionAuthority;
+    expectContractError(withPayload(task, missingAuthority), /Agent fields/i);
+
+    const wrongAuthorityRole = clonePayload(task) as any;
+    wrongAuthorityRole.agent.executionAuthority = {
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: false,
+    };
+    expectContractError(
+      withPayload(task, wrongAuthorityRole),
+      /Agent execution authority fields|kind must be generator/i,
+    );
+
     const registeredMismatch = clonePayload(task) as any;
     registeredMismatch.agent = {
       providerId: "trae",
       command: "trae-cli",
       model: "doubao-seed-1.6",
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "https://agents.example.test/v1/",
+        organization: "dezin",
+        credentialProviderId: "trae",
+        credentialSource: "agent",
+        credentialRequired: true,
+      },
     };
     validateGenerationTaskPayload(withPayload(task, registeredMismatch));
 
@@ -290,7 +352,14 @@ test("preserves legacy v2 leaves and independently validates every bounded froze
       command: "legacy-cli",
       model: null,
     };
-    validateGenerationTaskPayload(withPayload(task, readableLegacy));
+    expectContractError(withPayload(task, readableLegacy), /Agent fields/i);
+
+    const mismatchedProvider = clonePayload(task) as any;
+    mismatchedProvider.agent = {
+      ...registeredMismatch.agent,
+      providerId: "claude",
+    };
+    expectContractError(withPayload(task, mismatchedProvider), /command\/provider.*mismatched/i);
 
     for (const [field, value] of [
       ["providerId", ""],
@@ -302,9 +371,7 @@ test("preserves legacy v2 leaves and independently validates every bounded froze
     ] as const) {
       const invalidIdentity = clonePayload(task) as any;
       invalidIdentity.agent = {
-        providerId: "trae",
-        command: "trae-cli",
-        model: null,
+        ...registeredMismatch.agent,
         [field]: value,
       };
       expectContractError(
@@ -333,9 +400,141 @@ test("preserves legacy v2 leaves and independently validates every bounded froze
     expectContractError(withPayload(task, accessor), /Agent fields.*data properties/i);
   }
 
-  const nullableModel = clonePayload(tasks[1]!) as any;
-  nullableModel.agent = { providerId: "claude", command: "claude", model: null };
-  validateGenerationTaskPayload(withPayload(tasks[1]!, nullableModel));
+  const nullableModel = clonePayload(tasks[1][0]) as any;
+  nullableModel.agent = { ...FROZEN_CODEBUDDY_AGENT, model: null };
+  validateGenerationTaskPayload(withPayload(tasks[1][0], nullableModel));
+});
+
+test("requires exact reviewer authority and binds Claude agent-source review to the frozen generator", () => {
+  const page = taskOfTarget("page-home");
+
+  const missingAuthority = clonePayload(page) as any;
+  delete missingAuthority.reviewer.executionAuthority;
+  expectContractError(withPayload(page, missingAuthority), /reviewer fields/i);
+
+  const malformedAuthorities: Array<[unknown, RegExp]> = [
+    [{
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: false,
+      secret: "must-not-cross-the-task-boundary",
+    }, /reviewer execution authority fields/i],
+    [{
+      kind: "reviewer",
+      baseUrl: "https://user:secret@example.test/",
+      credentialSource: "anthropic-profile",
+      credentialRequired: true,
+    }, /credential-free/i],
+    [{
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: true,
+    }, /session reviewer/i],
+    [{
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "unknown",
+      credentialRequired: false,
+    }, /credential source.*unsupported/i],
+  ];
+  for (const [executionAuthority, pattern] of malformedAuthorities) {
+    const invalid = clonePayload(page) as any;
+    invalid.reviewer.executionAuthority = executionAuthority;
+    expectContractError(withPayload(page, invalid), pattern);
+  }
+
+  const nonClaudeProfile = clonePayload(page) as any;
+  nonClaudeProfile.reviewer = {
+    providerId: "codebuddy",
+    command: "codebuddy",
+    model: null,
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "https://review.example.test/",
+      credentialSource: "anthropic-profile",
+      credentialRequired: true,
+    },
+  };
+  expectContractError(withPayload(page, nonClaudeProfile), /non-Claude reviewer.*session/i);
+
+  const claudeAgentSource = clonePayload(page) as any;
+  claudeAgentSource.agent = {
+    providerId: "claude",
+    command: "claude",
+    model: null,
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://agent.example.test/",
+      organization: "dezin",
+      credentialProviderId: "anthropic",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  claudeAgentSource.reviewer = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-6",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "https://agent.example.test/",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  validateGenerationTaskPayload(withPayload(page, claudeAgentSource));
+
+  const substitutedAgentSource = structuredClone(claudeAgentSource);
+  substitutedAgentSource.reviewer.executionAuthority.baseUrl = "https://other.example.test/";
+  expectContractError(
+    withPayload(page, substitutedAgentSource),
+    /must match the frozen Claude generator authority/i,
+  );
+});
+
+test("validates split Research review against the retained Proposal generator authority", () => {
+  const resource = taskOfKind("resource");
+  const payload = clonePayload(resource) as any;
+  payload.reviewerAuthorityAgent = {
+    providerId: "claude",
+    command: "claude",
+    model: null,
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://agent.example.test/",
+      organization: "dezin",
+      credentialProviderId: "anthropic",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  payload.reviewer = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-6",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "https://agent.example.test/",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  validateGenerationTaskPayload(withPayload(resource, payload));
+
+  const missingRetainedGenerator = structuredClone(payload);
+  delete missingRetainedGenerator.reviewerAuthorityAgent;
+  expectContractError(
+    withPayload(resource, missingRetainedGenerator),
+    /must match the frozen Claude generator authority/i,
+  );
+
+  const page = taskOfTarget("page-home");
+  expectContractError(
+    withPayload(page, { ...clonePayload(page), reviewerAuthorityAgent: payload.reviewerAuthorityAgent }),
+    /payload fields/i,
+  );
 });
 
 test("rejects readable legacy v1 leaf payloads with an explicit recompile disposition", () => {
@@ -486,6 +685,50 @@ test("validates Resource operation and generate policy recursively", () => {
   delete legacy.operation.instructions;
   delete legacy.brief.targetInstructions.instructions;
   validateGenerationTaskPayload(withPayload(resource, legacy));
+});
+
+test("binds secret-free image authority to generated Moodboard Tasks only", () => {
+  const resource = taskOfKind("resource");
+  const moodboardPayload = clonePayload(resource) as any;
+  delete moodboardPayload.reviewerAuthorityAgent;
+  moodboardPayload.operation.kind = "moodboard";
+  moodboardPayload.operation.title = "Visual direction";
+  moodboardPayload.brief.targetInstructions.kind = "moodboard";
+  moodboardPayload.brief.targetInstructions.title = "Visual direction";
+  moodboardPayload.adapter = {
+    id: "dezin.resource-adapter.moodboard",
+    version: 1,
+    kind: "moodboard",
+  };
+  moodboardPayload.moodboardImageAuthority = {
+    kind: "moodboard-image",
+    protocol: "dezin.workspace-moodboard-image-authority.v1",
+    providerId: "fal",
+    baseUrl: "https://images.example.test/v1",
+    model: "fal-ai/flux/dev",
+    apiVersion: "",
+    credentialSource: "global-image",
+    credentialRequired: true,
+  };
+  const moodboard = withPayload(resource, moodboardPayload);
+  validateGenerationTaskPayload(moodboard);
+
+  const missing = structuredClone(moodboardPayload);
+  delete missing.moodboardImageAuthority;
+  expectContractError(withPayload(resource, missing), /Moodboard.*image execution authority/i);
+
+  const secret = structuredClone(moodboardPayload);
+  secret.moodboardImageAuthority.apiKey = "must-never-cross-the-Task-boundary";
+  expectContractError(withPayload(resource, secret), /image.*authority fields/i);
+
+  const researchWithImageAuthority = clonePayload(resource);
+  researchWithImageAuthority.moodboardImageAuthority = structuredClone(
+    moodboardPayload.moodboardImageAuthority,
+  );
+  expectContractError(
+    withPayload(resource, researchWithImageAuthority),
+    /valid only for generated Moodboard Resource Tasks|incompatible with Resource Task kind/i,
+  );
 });
 
 test("validates Prototype intents, transitions, Frames, and Artifact ids recursively", () => {

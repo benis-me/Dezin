@@ -5,7 +5,7 @@ import {
   Position,
   type EdgeProps,
 } from "@xyflow/react";
-import { CornerDownRight } from "lucide-react";
+import { Link2 } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceFlowEdge } from "../workspace-graph-adapter.ts";
 import { canvasEdgeTheme } from "./edge-theme.ts";
@@ -199,7 +199,7 @@ export function PrototypeEdge({
             data-status={data?.status ?? undefined}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
-            <CornerDownRight size={10} strokeWidth={1.7} aria-hidden />
+            <Link2 size={10} strokeWidth={1.7} aria-hidden />
             {data?.label ?? "prototype"}
           </span>
         </EdgeLabelRenderer>

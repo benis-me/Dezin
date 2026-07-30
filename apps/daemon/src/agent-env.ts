@@ -8,6 +8,10 @@ import {
   providerRuntimeConfig,
   serializeProviderProfiles,
 } from "./provider-profile-config.ts";
+import {
+  agentProviderCredentialEnvironment,
+  resolveAgentProviderCredential,
+} from "./agent-provider-credential.ts";
 
 function setIfPresent(env: NodeJS.ProcessEnv, key: string, value: string | undefined): void {
   const trimmed = value?.trim();
@@ -31,17 +35,19 @@ export function buildAgentEnv(settings: Settings, command: string, daemonToken?:
     // Settings-derived and ambient daemon provider credentials when the child
     // environment is composed.
     for (const key of CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS) env[key] = undefined;
-  } else if (providerId === "claude") {
-    setIfPresent(env, "ANTHROPIC_API_KEY", settings.apiKey);
-    setIfPresent(env, "ANTHROPIC_BASE_URL", settings.apiBaseUrl);
+  } else if (providerId === "claude" || providerId === "gemini") {
+    Object.assign(
+      env,
+      agentProviderCredentialEnvironment(
+        providerId,
+        resolveAgentProviderCredential(settings, providerId),
+      ),
+    );
   } else if (providerId === "codex") {
     // Codex is selected as a locally authenticated coding Agent. The project
     // model-provider settings serve image/reviewer APIs and must not replace
     // the CLI's host login or leak in from the daemon environment.
     for (const key of CODEX_HOST_LOGIN_ENVIRONMENT_KEYS) env[key] = undefined;
-  } else if (providerId === "gemini") {
-    setIfPresent(env, "GEMINI_API_KEY", settings.apiKey);
-    setIfPresent(env, "GOOGLE_API_KEY", settings.apiKey);
   }
 
   // Lets the coding Agent authenticate to token-gated daemon endpoints (e.g. the
@@ -62,25 +68,32 @@ export function buildVisualReviewerEnv(
   reviewerCommand: string = "claude",
 ): NodeJS.ProcessEnv {
   if (getProvider(reviewerCommand)?.id !== "claude") return {};
-  const profile = providerRuntimeConfig(settings, "anthropic");
-  if (profile.enabled) {
-    if (profile.apiKeyConfigured && !profile.apiKey.trim()) {
-      throw new Error("Current credential for the frozen Anthropic visual reviewer is unavailable");
-    }
-    const env: NodeJS.ProcessEnv = {};
-    setIfPresent(env, "ANTHROPIC_API_KEY", profile.apiKey);
-    setIfPresent(env, "ANTHROPIC_BASE_URL", profile.baseUrl);
-    return env;
+  const credential = resolveAgentProviderCredential(settings, "claude");
+  if (credential?.credentialRequired && !credential.apiKey) {
+    throw new Error(
+      credential.source === "provider-profile"
+        ? "Current credential for the frozen Anthropic visual reviewer is unavailable"
+        : "Current credential for the frozen Claude visual reviewer is unavailable",
+    );
   }
-  if (getProvider(settings.agentCommand)?.id !== "claude") return {};
-  if (settings.apiKeyConfigured && !settings.apiKey.trim()) {
-    throw new Error("Current credential for the frozen Claude visual reviewer is unavailable");
-  }
-  return buildAgentEnv(settings, "claude");
+  return agentProviderCredentialEnvironment("claude", credential);
 }
 
 function sameEndpoint(left: string | undefined, right: string | undefined): boolean {
-  return (left ?? "").trim() === (right ?? "").trim();
+  const canonical = (value: string | undefined): string | null => {
+    const raw = (value ?? "").trim();
+    if (!raw) return "";
+    try {
+      const url = new URL(raw);
+      if ((url.protocol !== "http:" && url.protocol !== "https:")
+        || url.username || url.password || url.search || url.hash) return null;
+      return url.href;
+    } catch {
+      return null;
+    }
+  };
+  const leftEndpoint = canonical(left);
+  return leftEndpoint !== null && leftEndpoint === canonical(right);
 }
 
 /**
@@ -107,9 +120,12 @@ export function hydrateVisualReviewerSettings(
   const quality: Settings = {
     ...structuredClone(frozenSettings),
     apiKey: "",
+    apiKeyConfigured: false,
     imageApiKey: "",
     videoApiKey: "",
-    aiProviderProfiles: serializeProviderProfiles(frozenProfiles),
+    aiProviderProfiles: (frozenSettings.aiProviderProfiles ?? "").trim()
+      ? serializeProviderProfiles(frozenProfiles)
+      : "",
     visualQaAgentCommand: reviewerProviderId,
     visualQaModel: reviewer.model ?? "",
   };
@@ -155,16 +171,19 @@ export function hydrateVisualReviewerSettings(
   // The generic BYOK pair belongs to the project Agent. It is a valid Claude
   // reviewer credential only if both snapshots still identify Claude and the
   // immutable endpoint did not drift.
-  const frozenAgentIsClaude = getProvider(frozenSettings.agentCommand)?.id === "claude";
-  const liveAgentIsClaude = getProvider(liveSettings.agentCommand)?.id === "claude";
-  if (frozenAgentIsClaude && liveAgentIsClaude) {
-    quality.apiKeyConfigured = Boolean(
-      frozenSettings.apiKeyConfigured
-      || liveSettings.apiKeyConfigured
-      || liveSettings.apiKey.trim(),
-    );
-    if (sameEndpoint(frozenSettings.apiBaseUrl, liveSettings.apiBaseUrl)) {
-      quality.apiKey = liveSettings.apiKey.trim();
+  const frozenCredential = resolveAgentProviderCredential(frozenSettings, "claude");
+  const liveCredential = resolveAgentProviderCredential(liveSettings, "claude");
+  if (frozenCredential?.source === "agent") {
+    const liveStillMatches = liveCredential?.source === "agent"
+      && sameEndpoint(frozenCredential.baseUrl, liveCredential.baseUrl);
+    // Source or endpoint drift is an authority failure even when the frozen
+    // snapshot used a host/session credential instead of an API key. Preserve
+    // the frozen endpoint but force the existing spawn guard to fail closed.
+    quality.apiKeyConfigured = liveStillMatches
+      ? Boolean(frozenCredential.credentialRequired || liveCredential.credentialRequired)
+      : true;
+    if (liveStillMatches) {
+      quality.apiKey = liveCredential.apiKey;
     }
   }
   return quality;

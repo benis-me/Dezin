@@ -15,6 +15,10 @@ import {
   type RenderFrameSpec,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface ControlledClock {
   clock: StoreClock;
@@ -42,7 +46,8 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -840,6 +845,10 @@ test("opening a pre-control database widens the event CHECK and preserves its Pl
 
     const reopened = new Store(database, fixture.control.clock);
     try {
+      const eventSchema = reopened.db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_plan_events'",
+      ).get() as { sql: string };
+      assert.match(eventSchema.sql, /'task-progress'/);
       const before = reopened.workspace.listGenerationPlanEventsForProject(projectId, planId);
       assert.deepEqual(before.map((event) => event.type), ["plan-queued"]);
       const cancelled = reopened.workspace.cancelGenerationPlanForProject(projectId, planId);

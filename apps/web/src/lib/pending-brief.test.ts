@@ -7,9 +7,11 @@ import {
 } from "./pending-brief.ts";
 import {
   acknowledgePendingDesignWorkspaceTurn,
+  claimPendingTurnReplacement,
   claimSupersedingPendingTurn,
   persistSupersedingPendingTurn,
 } from "../project-studio/pending-turn-supersession.ts";
+import { workspaceAgentRequestFingerprint } from "./workspace-agent-request-fingerprint.ts";
 
 const TURN_ONE = "turn-00000000-0000-4000-8000-000000000001";
 const TURN_TWO = "turn-00000000-0000-4000-8000-000000000002";
@@ -248,6 +250,89 @@ test("only one concurrent renderer may claim an unsuperseded Home turn", async (
   const winner = peekPendingDesignWorkspaceTurn(original.projectId);
   expect(winner?.supersededByTurnId).toBe(first ? TURN_TWO : TURN_THREE);
   expect(winner?.brief).toBe(first ? "Build replacement A" : "Build replacement B");
+});
+
+test("a legacy active replacement replays unchanged facts but forks edited immutable facts", async () => {
+  const oldRequest = {
+    message: "Build the failed replacement",
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-sol",
+    explicitContext: [{
+      kind: "resource" as const,
+      id: "reference-old",
+      resourceKind: "file" as const,
+      revisionId: "revision-old",
+    }],
+    graphRevision: 7,
+    selection: [],
+  };
+  const oldFingerprint = workspaceAgentRequestFingerprint(oldRequest);
+  const original = {
+    turnId: TURN_ONE,
+    supersededByTurnId: TURN_TWO,
+    brief: oldRequest.message,
+    agentCommand: oldRequest.agentCommand,
+    model: oldRequest.model,
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  };
+
+  expect(setPendingDesignWorkspaceTurn({
+    projectId: "project-exact-replay",
+    ...original,
+  })).toBe(true);
+  const unchanged = await claimPendingTurnReplacement({
+    projectId: "project-exact-replay",
+    expectedActiveTurnId: TURN_TWO,
+    activeRequestFingerprint: oldFingerprint,
+    reservation: {
+      fingerprint: oldFingerprint,
+      request: oldRequest,
+      contextItems: [],
+    },
+  });
+  expect(unchanged.status).toBe("claimed");
+  expect(unchanged.status === "claimed" && unchanged.turnId).toBe(TURN_TWO);
+
+  expect(setPendingDesignWorkspaceTurn({
+    projectId: "project-edited-retry",
+    ...original,
+  })).toBe(true);
+  const editedRequest = {
+    ...oldRequest,
+    explicitContext: [{
+      kind: "resource" as const,
+      id: "reference-new",
+      resourceKind: "file" as const,
+      revisionId: "revision-new",
+    }],
+  };
+  const edited = await claimPendingTurnReplacement({
+    projectId: "project-edited-retry",
+    expectedActiveTurnId: TURN_TWO,
+    activeRequestFingerprint: oldFingerprint,
+    reservation: {
+      fingerprint: workspaceAgentRequestFingerprint(editedRequest),
+      request: editedRequest,
+      contextItems: [],
+    },
+  });
+  expect(edited.status).toBe("claimed");
+  if (edited.status !== "claimed") return;
+  expect(edited.turnId).toMatch(/^turn-/);
+  expect(edited.turnId).not.toBe(TURN_TWO);
+  expect(edited.turn.supersessionLineage).toEqual([
+    {
+      turnId: TURN_TWO,
+      parentTurnId: TURN_ONE,
+      fingerprint: oldFingerprint,
+    },
+    {
+      turnId: edited.turnId,
+      parentTurnId: TURN_TWO,
+      fingerprint: workspaceAgentRequestFingerprint(editedRequest),
+    },
+  ]);
 });
 
 test("project deletion discards malformed recovery records and every acknowledgement marker", () => {

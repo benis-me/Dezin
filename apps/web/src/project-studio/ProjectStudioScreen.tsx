@@ -1,6 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ExoticComponent } from "react";
 
 import { type AgentComposerContextItem } from "../components/AgentComposerContext.tsx";
+import {
+  ProjectRenameDialog,
+  useProjectHeaderActions,
+} from "../components/ProjectHeaderActions.tsx";
+import { useToast } from "../components/Toast.tsx";
 import { Button } from "../components/ui/index.ts";
 import { persistAgentModelDefaultsStrict } from "../lib/agent-model-defaults.ts";
 import {
@@ -15,6 +20,7 @@ import {
 } from "../lib/agent-availability.ts";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { buildProjectAnalysisPrompt } from "../lib/project-analysis-prompt.ts";
 import {
   peekPendingDesignWorkspaceTurn,
   type PendingDesignWorkspaceRecoveryContextItem,
@@ -25,6 +31,7 @@ import type {
   ArtifactRevision,
   DesignSystemCard,
   GenerationPlanDetail,
+  GenerationTask,
   Resource,
   ResourceRevision,
   ResourceRevisionOwnedSource,
@@ -35,7 +42,9 @@ import { navigate } from "../router.tsx";
 import { ArtifactEditorSurface, useArtifactEditorController } from "./artifact/ArtifactEditorSurface.tsx";
 import { ArtifactInspector } from "./artifact/ArtifactInspector.tsx";
 import {
+  generationPlanActivityStatus,
   GenerationPlanInspector,
+  terminalGenerationPlan,
   type GenerationPlanDetailChange,
   type GenerationPlanTargetLabels,
 } from "./generation/GenerationPlanPanel.tsx";
@@ -62,7 +71,13 @@ import {
   acknowledgePendingDesignWorkspaceTurn,
   claimPendingTurnReplacement,
 } from "./pending-turn-supersession.ts";
-import { WorkspaceAgentPanel } from "./WorkspaceAgentPanel.tsx";
+import type { AgentTranscriptEntry } from "./scoped-agent-session.ts";
+import {
+  WorkspaceAgentPanel,
+  type AgentTraceOutput,
+  type AgentTraceStatus,
+  type ProjectedAgentTranscriptEntry,
+} from "./WorkspaceAgentPanel.tsx";
 
 const ProjectCanvas = lazy(() => import("./canvas/ProjectCanvas.tsx").then((module) => ({ default: module.ProjectCanvas })));
 
@@ -93,7 +108,67 @@ interface ArtifactCandidateRouteIdentity {
 const EMPTY_CANVAS_RESOURCE_REVISION_STATES: Readonly<Record<string, CanvasResourceRevisionState>> = {};
 const EMPTY_CANVAS_ARTIFACT_REVISION_QUALITY_STATES: Readonly<Record<string, CanvasArtifactRevisionQualityState>> = {};
 const SETTINGS_LOAD_ERROR_AFTER_FAILURES = 5;
-const SETTINGS_LOAD_ERROR_MESSAGE = "Couldn't load Agent and Design System settings. Reconnecting…";
+const SETTINGS_LOAD_ERROR_MESSAGE = "Agent and Design System settings couldn't load after 5 tries. Dezin is retrying; use Rescan agents to retry now.";
+type WorkspaceRightPanel = "proposal" | "plan" | null;
+
+function projectAgentTrace(
+  entry: AgentTranscriptEntry,
+  detail: GenerationPlanDetail | null,
+  labels: GenerationPlanTargetLabels,
+  artifactId: string | null,
+  resourceId: string | null,
+): ProjectedAgentTranscriptEntry["trace"] {
+  if (detail === null) {
+    const kind = artifactId === null ? resourceId === null ? null : "resource" : "artifact";
+    const targetId = artifactId ?? resourceId;
+    if (entry.planId === undefined || entry.resultRevisionId === undefined || kind === null || targetId === null) {
+      return undefined;
+    }
+    const name = kind === "artifact" ? labels.artifacts.get(targetId) ?? "Artifact" : labels.resources.get(targetId) ?? "Resource";
+    return {
+      status: "succeeded",
+      planId: entry.planId,
+      ...(entry.taskId === undefined ? {} : { taskId: entry.taskId }),
+      output: { kind, targetId, revisionId: entry.resultRevisionId, label: `${name} Revision` },
+    };
+  }
+  const task = entry.taskId === undefined
+    ? detail.tasks.length === 1 ? detail.tasks[0] : undefined
+    : detail.tasks.find((candidate) => candidate.id === entry.taskId);
+  const taskStatus = task?.status;
+  const planStatus = detail.plan.status;
+  const status: AgentTraceStatus = taskStatus === "succeeded" || taskStatus === "cancelled"
+    ? taskStatus
+    : taskStatus === "failed" || taskStatus === "blocked"
+      ? "failed"
+      : planStatus === "succeeded" || planStatus === "cancelled"
+        ? planStatus
+        : planStatus === "failed" || planStatus === "compile-failed" || planStatus === "requires-new-impact"
+          ? "failed"
+          : taskStatus === "running" || planStatus === "running" ? "running" : "queued";
+  let output: AgentTraceOutput | undefined;
+  if (task?.target.type === "artifact" && task.resultRevisionId !== null) {
+    output = {
+      kind: "artifact",
+      targetId: task.target.id,
+      revisionId: task.resultRevisionId,
+      label: `${labels.artifacts.get(task.target.id) ?? (task.kind === "component" ? "Component" : "Page")} Revision`,
+    };
+  } else if (task?.target.type === "resource" && task.resultResourceRevisionId !== null) {
+    output = {
+      kind: "resource",
+      targetId: task.target.id,
+      revisionId: task.resultResourceRevisionId,
+      label: `${labels.resources.get(task.target.id) ?? "Resource"} Revision`,
+    };
+  }
+  return {
+    status,
+    planId: detail.plan.id,
+    ...(task === undefined ? {} : { taskId: task.id }),
+    ...(output === undefined ? {} : { output }),
+  };
+}
 
 interface SharedSettingsRead {
   promise: Promise<Settings>;
@@ -136,14 +211,6 @@ function acquireSettingsRead(api: ApiClient): AcquiredSettingsRead {
       }, 0);
     },
   };
-}
-
-function terminalGenerationPlan(detail: GenerationPlanDetail): boolean {
-  return detail.plan.status === "succeeded"
-    || detail.plan.status === "failed"
-    || detail.plan.status === "compile-failed"
-    || detail.plan.status === "requires-new-impact"
-    || detail.plan.status === "cancelled";
 }
 
 export function buildResourceRevisionStates(
@@ -275,14 +342,19 @@ export function ProjectStudioScreen({
   onOpenSettings: (section?: string) => void;
 }) {
   const api = useApi();
+  const { toast } = useToast();
   const {
     provided: agentsProvided,
     agents,
     loading: agentsLoading,
+    error: agentsError,
     rescan: rescanAgents,
   } = useAgents();
   const studio = useProjectStudio(projectId, artifactId, resourceId);
   const { load } = studio;
+  const artifactScope = artifactId !== null;
+  const resourceScope = resourceId !== null;
+  const workspaceScope = !artifactScope && !resourceScope;
   const readyWorkspace = load.status === "ready" ? load.workspace : null;
   const [designSystems, setDesignSystems] = useState<DesignSystemCard[]>([]);
   const [designSystemCatalogStatus, setDesignSystemCatalogStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -290,6 +362,7 @@ export function ProjectStudioScreen({
   const [defaultDesignSystemId, setDefaultDesignSystemId] = useState("");
   const [settingsLoadStatus, setSettingsLoadStatus] = useState<"loading" | "ready" | "error">("loading");
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const [settingsLoadRetryEpoch, setSettingsLoadRetryEpoch] = useState(0);
   const designSystemId = projectDesignSystemId === null
     ? defaultDesignSystemId
     : designSystemPickerValue(projectDesignSystemId ?? null);
@@ -374,9 +447,13 @@ export function ProjectStudioScreen({
   const [resourceIntentPlanId, setResourceIntentPlanId] = useState<string | null>(null);
   const [workspacePlanId, setWorkspacePlanId] = useState<string | null>(null);
   const [workspacePlanDetail, setWorkspacePlanDetail] = useState<GenerationPlanDetail | null>(null);
+  const [viewedPlanDetail, setViewedPlanDetail] = useState<GenerationPlanDetail | null>(null);
   const [workspacePlanObservationEpoch, setWorkspacePlanObservationEpoch] = useState(0);
-  const workspacePlanResultKeyRef = useRef<string | null>(null);
-  const [dismissedWorkspacePlanId, setDismissedWorkspacePlanId] = useState<string | null>(null);
+  const workspacePlanResultKeysRef = useRef(new Set<string>());
+  const [workspaceRightPanel, setWorkspaceRightPanel] = useState<WorkspaceRightPanel>(null);
+  const planPanelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const pendingTraceTaskIdRef = useRef<string | null>(null);
+  const autoOpenedProposalIdRef = useRef<string | null>(null);
   const [prototypeFlowSession, setPrototypeFlowSession] = useState<PrototypeFlowSession | null>(null);
   const presentFlowButtonRef = useRef<HTMLButtonElement | null>(null);
   const restorePresentFlowFocusRef = useRef(false);
@@ -443,39 +520,46 @@ export function ProjectStudioScreen({
   }, [projectId, recordAttachmentError]);
   const scopedGenerationPlanId = artifactCandidate !== null
     ? artifactCandidate.planId
-    : artifactId !== null && artifactRevisionId === null
+    : artifactScope && artifactRevisionId === null
       ? studio.artifactAgentPlanId
-      : resourceId !== null && resourceRevisionId === null
+      : resourceScope && resourceRevisionId === null
         ? studio.resourceAgentPlanId
         : null;
-  const observedGenerationPlanId = artifactId === null && resourceId === null
+  const observedGenerationPlanId = workspaceScope
     ? workspacePlanId
     : resourceIntentPlanId ?? scopedGenerationPlanId ?? workspacePlanId;
+  const observeGenerationPlanResult = useCallback((detail: GenerationPlanDetail): void => {
+    const resultKey = generationPlanResultKey(detail);
+    if (resultKey === null || workspacePlanResultKeysRef.current.has(resultKey)) return;
+    workspacePlanResultKeysRef.current.add(resultKey);
+    studio.reconcileGenerationPublication();
+  }, [studio.reconcileGenerationPublication]);
   const commitWorkspacePlanDetail = useCallback((detail: GenerationPlanDetail): void => {
     setWorkspacePlanDetail(detail);
-    const resultKey = generationPlanResultKey(detail);
-    if (resultKey !== null && resultKey !== workspacePlanResultKeyRef.current) {
-      workspacePlanResultKeyRef.current = resultKey;
-      studio.reconcileGenerationPublication();
-    }
-  }, [studio.reconcileGenerationPublication]);
+    observeGenerationPlanResult(detail);
+  }, [observeGenerationPlanResult]);
   const handleGenerationPlanDetailChange = useCallback((
     change: GenerationPlanDetailChange,
   ): void => {
-    if (change.detail.plan.id !== observedGenerationPlanId) return;
-    commitWorkspacePlanDetail(change.detail);
-    if (change.source === "retry" && !terminalGenerationPlan(change.detail)) {
+    setViewedPlanDetail(change.detail);
+    observeGenerationPlanResult(change.detail);
+    if (change.detail.plan.id === observedGenerationPlanId) {
+      setWorkspacePlanDetail(change.detail);
+    }
+    if (change.detail.plan.id === observedGenerationPlanId
+      && change.source === "retry"
+      && !terminalGenerationPlan(change.detail)) {
       setWorkspacePlanObservationEpoch((epoch) => epoch + 1);
     }
-  }, [commitWorkspacePlanDetail, observedGenerationPlanId]);
-  const scopedAgentSubmitting = artifactId !== null
+  }, [observeGenerationPlanResult, observedGenerationPlanId]);
+  const scopedAgentSubmitting = artifactScope
     ? studio.artifactAgentSubmitting
-    : resourceId !== null
+    : resourceScope
       ? studio.resourceAgentSubmitting
       : false;
-  const scopedAgentReceiptId = artifactId !== null
+  const scopedAgentReceiptId = artifactScope
     ? studio.artifactAgentReceipt?.task.id ?? null
-    : resourceId !== null
+    : resourceScope
       ? studio.resourceAgentReceipt?.task.id ?? null
       : null;
   const scopedSubmissionRef = useRef({
@@ -487,6 +571,13 @@ export function ProjectStudioScreen({
   const approvedPlanFromReview = studio.proposalReview.status === "approved"
     ? studio.proposalReview.plan?.id ?? null
     : null;
+  const reviewableProposal = studio.proposalReview.status === "draft"
+    || studio.proposalReview.status === "saving"
+    || studio.proposalReview.status === "validation-error"
+    || studio.proposalReview.status === "conflicted"
+    ? studio.proposalReview
+    : null;
+  const workspaceProposalId = reviewableProposal?.proposal.id ?? null;
 
   useEffect(() => {
     studioAgentRef.current = studioAgent;
@@ -571,7 +662,7 @@ export function ProjectStudioScreen({
       for (const read of activeReads) read.release();
       activeReads.clear();
     };
-  }, [api]);
+  }, [api, settingsLoadRetryEpoch]);
 
   useEffect(() => {
     const onSettingsUpdated = (event: Event): void => {
@@ -662,6 +753,23 @@ export function ProjectStudioScreen({
     setStudioModel(model);
     if (studioAgentRef.current) saveAgentModelDefaults(studioAgentRef.current, model);
   }, [saveAgentModelDefaults]);
+
+  const retrySettingsLoad = useCallback((): void => {
+    setSettingsLoadError(null);
+    setSettingsLoadStatus("loading");
+    // Let acquireSettingsRead's zero-delay release discard the failed shared read
+    // before starting an explicit retry from the Agent menu.
+    window.setTimeout(() => {
+      if (contextActionGuardRef.current.mounted) {
+        setSettingsLoadRetryEpoch((epoch) => epoch + 1);
+      }
+    }, 0);
+  }, []);
+
+  const rescanStudioAgents = useCallback(async (): Promise<void> => {
+    if (settingsLoadStatus === "error") retrySettingsLoad();
+    await rescanAgents();
+  }, [rescanAgents, retrySettingsLoad, settingsLoadStatus]);
 
   const changeDesignSystem = useCallback((nextId: string | null): void => {
     const previousId = projectDesignSystemId;
@@ -943,7 +1051,13 @@ export function ProjectStudioScreen({
   useEffect(() => {
     setWorkspacePlanId(null);
     setWorkspacePlanDetail(null);
-    setDismissedWorkspacePlanId(null);
+    setViewedPlanDetail(null);
+    setWorkspaceRightPanel(null);
+    workspacePlanResultKeysRef.current.clear();
+    autoOpenedProposalIdRef.current = null;
+  }, [projectId]);
+
+  useEffect(() => {
     if (workspaceId === null) return;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -976,7 +1090,7 @@ export function ProjectStudioScreen({
 
   useEffect(() => {
     setWorkspacePlanDetail(null);
-    workspacePlanResultKeyRef.current = null;
+    setViewedPlanDetail(null);
   }, [observedGenerationPlanId, projectId]);
 
   useEffect(() => {
@@ -1020,8 +1134,24 @@ export function ProjectStudioScreen({
   useEffect(() => {
     if (approvedPlanFromReview === null) return;
     setWorkspacePlanId(approvedPlanFromReview);
-    setDismissedWorkspacePlanId(null);
+    setViewedPlanDetail(null);
   }, [approvedPlanFromReview]);
+
+  useEffect(() => {
+    if (!workspaceScope) return;
+    if (workspaceProposalId !== null) {
+      if (autoOpenedProposalIdRef.current === workspaceProposalId) return;
+      autoOpenedProposalIdRef.current = workspaceProposalId;
+      setWorkspaceRightPanel("proposal");
+    } else if (workspaceRightPanel === "proposal" && studio.proposalReview.status === "idle") {
+      setWorkspaceRightPanel(null);
+    }
+  }, [
+    studio.proposalReview.status,
+    workspaceProposalId,
+    workspaceRightPanel,
+    workspaceScope,
+  ]);
 
   useEffect(() => {
     const tracked = scopedSubmissionRef.current;
@@ -1059,6 +1189,24 @@ export function ProjectStudioScreen({
     artifacts: new Map((readyWorkspace?.artifacts ?? []).map((artifact) => [artifact.id, artifact.name])),
     resources: new Map(availableResources.map((resource) => [resource.id, resource.title])),
   }), [availableResources, readyWorkspace?.artifacts]);
+  const projectedAgentTranscript = useMemo(() => studio.agentTranscript.map((entry): ProjectedAgentTranscriptEntry => {
+    const viewedMatches = viewedPlanDetail !== null && (
+      viewedPlanDetail.plan.id === entry.planId || viewedPlanDetail.plan.proposalId === entry.proposalId
+    );
+    const workspaceMatches = workspacePlanDetail !== null && (
+      workspacePlanDetail.plan.id === entry.planId || workspacePlanDetail.plan.proposalId === entry.proposalId
+    );
+    const detail = viewedMatches ? viewedPlanDetail : workspaceMatches ? workspacePlanDetail : null;
+    const trace = projectAgentTrace(entry, detail, generationPlanTargetLabels, artifactId, resourceId);
+    return trace === undefined ? entry : { ...entry, trace };
+  }), [
+    artifactId,
+    generationPlanTargetLabels,
+    resourceId,
+    studio.agentTranscript,
+    viewedPlanDetail,
+    workspacePlanDetail,
+  ]);
   const resourceRevisionStates = useMemo(() => readyWorkspace === null
     ? EMPTY_CANVAS_RESOURCE_REVISION_STATES
     : buildResourceRevisionStates(
@@ -1079,27 +1227,16 @@ export function ProjectStudioScreen({
     readyWorkspace?.activeSnapshot.artifactRevisions,
     readyWorkspace?.revisions,
   ]);
+  const planViewActive = workspaceScope
+    ? workspaceRightPanel === "plan"
+    : scopedInspectorMode === "plan";
+  const visibleGenerationPlanDetail = planViewActive
+    ? viewedPlanDetail ?? workspacePlanDetail
+    : workspacePlanDetail;
   const generationTargetStates = useMemo(
-    () => buildGenerationTargetStates(workspacePlanDetail),
-    [workspacePlanDetail],
+    () => buildGenerationTargetStates(visibleGenerationPlanDetail),
+    [visibleGenerationPlanDetail],
   );
-  const attentionGenerationPlanId = workspacePlanDetail !== null
-    && [
-      ...Object.values(generationTargetStates.artifacts),
-      ...Object.values(generationTargetStates.resources),
-    ].some((target) => target.state === "failed" || target.state === "blocked")
-    ? workspacePlanDetail.plan.id
-    : null;
-  const approvedProposalAttentionPlanId = studio.proposalReview.status === "approved"
-    ? attentionGenerationPlanId
-    : null;
-
-  useEffect(() => {
-    if (approvedProposalAttentionPlanId === null) return;
-    setDismissedWorkspacePlanId(null);
-    setScopedInspectorMode("plan");
-  }, [approvedProposalAttentionPlanId]);
-
   const workspaceReferenceCards = useMemo(() => {
     if (readyWorkspace === null) return [] as DaemonContextCard[];
     const artifactCards = readyWorkspace.artifacts.flatMap((artifact): DaemonContextCard[] => {
@@ -1198,9 +1335,46 @@ export function ProjectStudioScreen({
       ...studio.agentContextItems.filter((item) => !selectedRefs.has(JSON.stringify(item.ref))),
     ];
   }, [selectedContextItems, studio.agentContextItems]);
+  const focusGenerationTaskOnCanvas = useCallback((task: GenerationTask): void => {
+    const target = task.target;
+    if (readyWorkspace === null || target.type === "workspace") return;
+    const node = readyWorkspace.graph.nodes.find((candidate) => (
+      target.type === "artifact"
+        ? candidate.kind !== "resource" && candidate.artifactId === target.id
+        : candidate.kind === "resource" && candidate.resourceId === target.id
+    ));
+    if (!node) return;
+    studio.setSelectedGraphObjectIds([node.id]);
+    if (!workspaceScope) {
+      navigate(`/projects/${encodeURIComponent(projectId)}/canvas`);
+    }
+  }, [projectId, readyWorkspace, studio.setSelectedGraphObjectIds, workspaceScope]);
+  useEffect(() => {
+    const taskId = pendingTraceTaskIdRef.current;
+    if (taskId === null || visibleGenerationPlanDetail === null) return;
+    const task = visibleGenerationPlanDetail.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined) return;
+    pendingTraceTaskIdRef.current = null;
+    focusGenerationTaskOnCanvas(task);
+  }, [focusGenerationTaskOnCanvas, visibleGenerationPlanDetail]);
+  const projectForHeader = load.status === "ready" ? load.project : null;
+  const projectHeaderActions = useProjectHeaderActions({
+    api,
+    projectId,
+    projectName: projectForHeader?.name ?? "",
+    projectPath: projectForHeader?.projectPath,
+    analysisPrompt: projectForHeader === null ? null : buildProjectAnalysisPrompt(projectForHeader),
+    enabled: projectForHeader !== null,
+    onRenamed: () => {
+      studio.retry();
+      toast("Project renamed.");
+    },
+    onDeleted: () => navigate("/"),
+    toast,
+  });
 
   if (load.status === "loading") {
-    return <RouteLoading scope={artifactId !== null ? "artifact" : resourceId !== null ? "resource" : "canvas"} />;
+    return <RouteLoading scope={artifactScope ? "artifact" : resourceScope ? "resource" : "canvas"} />;
   }
   if (load.status === "error") {
     return (
@@ -1222,20 +1396,30 @@ export function ProjectStudioScreen({
     return <LegacyFallback projectId={projectId} onOpenSettings={onOpenSettings} />;
   }
 
-  const workspaceScope = artifactId === null && resourceId === null;
-  const artifactScope = artifactId !== null;
-  const resourceScope = resourceId !== null;
+  const selectableStudioAgents = selectableAgents(agents);
   const selectedStudioAgent = agents.find((candidate) => candidate.command === studioAgent);
+  const noSelectableAgentReason = agentsProvided
+    && !agentsLoading
+    && selectableStudioAgents.length === 0
+    ? "No Agent is available. Install or sign in to one, then rescan agents."
+    : null;
+  const agentCatalogError = selectableStudioAgents.length === 0 ? agentsError : null;
   const agentCapabilityPending = agentsProvided && (
     agentsLoading
-    || settingsLoadStatus !== "ready"
-    || settingsAgent === null
-    || studioAgent.length === 0
-    || (!agentSettingsReady && agentSettingsError === null)
+    || settingsLoadStatus === "loading"
+    || (
+      settingsLoadStatus === "ready"
+      && selectableStudioAgents.length > 0
+      && (
+        settingsAgent === null
+        || studioAgent.length === 0
+        || (!agentSettingsReady && agentSettingsError === null)
+      )
+    )
   );
   const agentSubmissionBlockedReason = agentCapabilityPending
     ? "Checking Agent availability…"
-    : agentSettingsError ?? designSystemError ?? (
+    : settingsLoadError ?? agentSettingsError ?? designSystemError ?? agentCatalogError ?? noSelectableAgentReason ?? (
         agentsProvided
           ? agentAvailabilityReason(selectedStudioAgent)
           : null
@@ -1261,14 +1445,11 @@ export function ProjectStudioScreen({
         }`
       : `${resourceKindLabel} · ${resourceRevisionId === null ? "current context" : "pinned Revision"}`;
   const agentTitle = workspaceScope ? "Workspace Agent" : artifactScope ? "Artifact Agent" : "Resource Agent";
-  const reviewableProposal = studio.proposalReview.status === "draft"
-    || studio.proposalReview.status === "saving"
-    || studio.proposalReview.status === "validation-error"
-    || studio.proposalReview.status === "conflicted"
-    ? studio.proposalReview
-    : null;
   const openResourceRevision = (nextResourceId: string, revisionId: string): void => {
     navigate(`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(nextResourceId)}/revisions/${encodeURIComponent(revisionId)}`);
+  };
+  const toggleWorkspacePlanPanel = (): void => {
+    setWorkspaceRightPanel((current) => current === "plan" ? null : "plan");
   };
   const canPresentFlow = presentablePrototypeFlowPages(load.workspace.activeSnapshot).length > 0;
   const main = workspaceScope && prototypeFlowSession !== null
@@ -1276,6 +1457,7 @@ export function ProjectStudioScreen({
         <PrototypeFlowViewer
           projectId={projectId}
           session={prototypeFlowSession}
+          activeSnapshotId={load.workspace.activeSnapshot.id}
           onClose={() => {
             restorePresentFlowFocusRef.current = true;
             setPrototypeFlowSession(null);
@@ -1313,6 +1495,18 @@ export function ProjectStudioScreen({
                 ))
               : undefined}
             presentFlowButtonRef={presentFlowButtonRef}
+            planPanelAvailable
+            planPanelOpen={workspaceRightPanel === "plan"}
+            onTogglePlanPanel={toggleWorkspacePlanPanel}
+            planPanelButtonRef={planPanelButtonRef}
+            exportSourceUrl={api.exportUrl(projectId)}
+            exportFullUrl={api.exportUrl(projectId, "full")}
+            onRenameProject={projectHeaderActions.startRename}
+            onOpenProjectInFinder={projectHeaderActions.openInFinder}
+            canOpenProjectInFinder={projectHeaderActions.canOpenInFinder}
+            onDeleteProject={projectHeaderActions.deleteProject}
+            onCopyAnalysisPrompt={projectHeaderActions.copyAnalysisPrompt}
+            onOpenSettings={() => onOpenSettings()}
             proposal={reviewableProposal?.proposal ?? null}
             proposalDiff={reviewableProposal?.diff ?? null}
             proposalFocus={studio.proposalFocus}
@@ -1367,25 +1561,41 @@ export function ProjectStudioScreen({
             onReturnToHead={() => navigate(`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId!)}`)}
           />
         );
-  const approvedGenerationPlanId = studio.proposalReview.status === "approved"
-    ? studio.proposalReview.plan?.id ?? null
-    : null;
   const preferredGenerationPlanId = workspaceScope
-    ? workspacePlanId ?? approvedGenerationPlanId
-    : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedGenerationPlanId ?? workspacePlanId;
+    ? workspacePlanId ?? approvedPlanFromReview
+    : resourceIntentPlanId ?? scopedGenerationPlanId ?? approvedPlanFromReview ?? workspacePlanId;
+  const openAgentTrace = (entry: ProjectedAgentTranscriptEntry): void => {
+    const planId = entry.trace?.planId ?? entry.planId;
+    if (planId === undefined) {
+      if (entry.proposalId !== undefined && studio.openProposalReview(entry.proposalId)) {
+        setWorkspaceRightPanel("proposal");
+        requestAnimationFrame(() => document.getElementById("workspace-proposal-review-title")?.focus());
+      }
+      return;
+    }
+    pendingTraceTaskIdRef.current = entry.trace?.taskId ?? entry.taskId ?? null;
+    setViewedPlanDetail(null);
+    setWorkspacePlanDetail(null);
+    if (workspaceScope) {
+      setWorkspacePlanId(planId);
+      setWorkspaceRightPanel("plan");
+    } else {
+      setResourceIntentPlanId(planId);
+      setScopedInspectorMode("plan");
+    }
+  };
   const proposalReviewTerminal = studio.proposalReview.status === "approved"
     || studio.proposalReview.status === "rejected"
     || studio.proposalReview.status === "superseded";
-  const proposalReviewOpen = studio.proposalReview.status !== "idle"
-    && approvedProposalAttentionPlanId === null
-    && (workspaceScope || !proposalReviewTerminal)
-    && !(studio.proposalReview.status === "approved"
-      && studio.proposalReview.plan?.status === "compile-failed");
-  const generationPlanOpen = !proposalReviewOpen
-    && preferredGenerationPlanId !== null
-    && (workspaceScope
-      ? dismissedWorkspacePlanId !== preferredGenerationPlanId
-      : scopedInspectorMode === "plan");
+  const proposalReviewOpen = workspaceScope
+    ? workspaceRightPanel === "proposal" && studio.proposalReview.status !== "idle"
+    : studio.proposalReview.status !== "idle"
+      && !proposalReviewTerminal;
+  const generationPlanOpen = workspaceScope
+    ? workspaceRightPanel === "plan"
+    : !proposalReviewOpen
+      && preferredGenerationPlanId !== null
+      && scopedInspectorMode === "plan";
   const inspector = proposalReviewOpen ? (
     <ProposalReviewPanel
       review={studio.proposalReview}
@@ -1399,18 +1609,34 @@ export function ProjectStudioScreen({
       }}
       onApprove={studio.approveProposal}
       onReject={studio.rejectProposal}
-      onClose={studio.closeProposalReview}
+      onClose={() => {
+        studio.closeProposalReview();
+        if (workspaceScope) {
+          if (approvedPlanFromReview !== null) {
+            setWorkspacePlanId(approvedPlanFromReview);
+            setWorkspaceRightPanel("plan");
+          } else {
+            setWorkspaceRightPanel(null);
+          }
+        }
+      }}
     />
   ) : generationPlanOpen ? (
     <GenerationPlanInspector
       projectId={projectId}
       preferredPlanId={preferredGenerationPlanId}
+      authoritativeDetail={workspacePlanDetail}
       targetLabels={generationPlanTargetLabels}
+      onFocusTask={focusGenerationTaskOnCanvas}
       onDetailChange={handleGenerationPlanDetailChange}
       onWorkspaceChanged={studio.reconcileGenerationPublication}
       onClose={() => {
-        if (workspaceScope) setDismissedWorkspacePlanId(preferredGenerationPlanId);
-        else setScopedInspectorMode("inspector");
+        if (workspaceScope) {
+          setWorkspaceRightPanel(null);
+          requestAnimationFrame(() => planPanelButtonRef.current?.focus());
+        } else {
+          setScopedInspectorMode("inspector");
+        }
       }}
     />
   ) : resourceScope ? (
@@ -1433,20 +1659,19 @@ export function ProjectStudioScreen({
       : null;
   const planIsQueued = (artifactScope && studio.artifactAgentReceipt !== null)
     || (resourceScope && studio.resourceAgentReceipt !== null);
-  const planAffordanceLabel = preferredGenerationPlanId === null
+  const activityStatus = visibleGenerationPlanDetail === null
     ? null
-    : planIsQueued ? "Queued build plan" : "Recent build plan";
-  const planAffordance = preferredGenerationPlanId !== null
-    && planAffordanceLabel !== null
-    && !proposalReviewOpen
-    && !generationPlanOpen
-    ? {
-        label: planAffordanceLabel,
-        technicalLabel: `Build plan ${preferredGenerationPlanId}`,
-        onOpen: () => {
-          if (workspaceScope) setDismissedWorkspacePlanId(null);
-          else setScopedInspectorMode("plan");
-        },
+    : generationPlanActivityStatus(visibleGenerationPlanDetail);
+  const planAffordance = preferredGenerationPlanId !== null || visibleGenerationPlanDetail !== null
+      ? {
+          open: generationPlanOpen,
+          planId: preferredGenerationPlanId ?? visibleGenerationPlanDetail?.plan.id,
+          status: activityStatus === null
+          ? planIsQueued ? "Queued" : "Loading build plan"
+          : activityStatus,
+        onToggle: workspaceScope
+          ? toggleWorkspacePlanPanel
+          : () => setScopedInspectorMode((current) => current === "plan" ? "inspector" : "plan"),
       }
     : null;
   const proposalGeneration = reviewableProposal?.proposal.generation.kind === "workspace-generation"
@@ -1460,9 +1685,15 @@ export function ProjectStudioScreen({
     ? {
         summary: reviewableProposal.proposal.rationale.trim() || "Review the proposed workspace changes.",
         changeCount: proposalBuildChangeCount || reviewableProposal.diff.reviewItems.length,
-        onOpen: () => document.getElementById("workspace-proposal-review-title")?.focus(),
+        onOpen: () => {
+          setWorkspaceRightPanel("proposal");
+          requestAnimationFrame(() => document.getElementById("workspace-proposal-review-title")?.focus());
+        },
       }
     : undefined;
+  const proposalReviewError = workspaceScope && studio.proposalReview.status === "error"
+    ? studio.proposalReview.message
+    : null;
 
   const persistOwnedContext = async (input: {
     title: string;
@@ -1486,7 +1717,8 @@ export function ProjectStudioScreen({
   };
 
   return (
-    <ProjectStudioShell
+    <>
+      <ProjectStudioShell
       agent={(
         <WorkspaceAgentPanel
           projectName={load.project.name}
@@ -1529,6 +1761,9 @@ export function ProjectStudioScreen({
                       const claim = await claimPendingTurnReplacement({
                         projectId,
                         expectedActiveTurnId,
+                        ...(studio.workspaceAgentOutbox?.turnId === expectedActiveTurnId
+                          ? { activeRequestFingerprint: studio.workspaceAgentOutbox.fingerprint }
+                          : {}),
                         reservation: {
                           ...facts,
                           contextItems,
@@ -1590,7 +1825,7 @@ export function ProjectStudioScreen({
                   })
                 : undefined}
           submitting={studio.agentTurnSubmitting}
-          error={settingsLoadError ?? attachmentError ?? (workspaceScope
+          error={agentsError ?? settingsLoadError ?? attachmentError ?? proposalReviewError ?? (workspaceScope
             ? studio.workspaceAgentError
             : artifactScope
               ? studio.artifactAgentError
@@ -1623,7 +1858,11 @@ export function ProjectStudioScreen({
             }
             studio.removeAgentContextItem(id);
           }}
-          transcript={studio.agentTranscript}
+          transcript={projectedAgentTranscript}
+          onOpenTrace={openAgentTrace}
+          onOpenTraceOutput={(output) => navigate(output.kind === "artifact"
+            ? `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(output.targetId)}/revisions/${encodeURIComponent(output.revisionId)}`
+            : `/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(output.targetId)}/revisions/${encodeURIComponent(output.revisionId)}`)}
           attaching={attachingContext || initialTurnProcessing}
           onAttachFiles={async (files) => {
             const attachmentScopeKey = scopedInspectorScopeKey;
@@ -1671,7 +1910,7 @@ export function ProjectStudioScreen({
           model={studioModel}
           onAgentChange={changeStudioAgent}
           onModelChange={changeStudioModel}
-          onRescanAgents={rescanAgents}
+          onRescanAgents={rescanStudioAgents}
           submissionBlockedReason={agentSubmissionBlockedReason}
           submissionBlockedPending={agentCapabilityPending}
           designSystems={designSystems}
@@ -1688,8 +1927,9 @@ export function ProjectStudioScreen({
       main={main}
       inspector={inspector}
       agentLabel={agentTitle}
-      inspectorOpen={!workspaceScope || proposalReviewOpen || generationPlanOpen}
-      inspectorLabel={generationPlanOpen ? "Build plan" : "Inspector"}
+      inspectorAvailable
+      inspectorOpen={workspaceScope ? proposalReviewOpen || generationPlanOpen : true}
+      inspectorLabel={proposalReviewOpen ? "Proposal review" : generationPlanOpen ? "Build plan" : "Inspector"}
       inspectorToggleLabel={proposalReviewOpen
         ? "proposal review"
         : generationPlanOpen
@@ -1697,9 +1937,11 @@ export function ProjectStudioScreen({
           : resourceScope
             ? "resource inspector"
             : "artifact inspector"}
-      narrowInspectorContentOwnsClose={generationPlanOpen}
+      narrowInspectorContentOwnsClose={proposalReviewOpen || generationPlanOpen}
       presentation={(artifactScope && artifactEditor.presentation)
         || (workspaceScope && prototypeFlowSession !== null)}
-    />
+      />
+      <ProjectRenameDialog controller={projectHeaderActions} />
+    </>
   );
 }

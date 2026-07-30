@@ -31,6 +31,10 @@ import {
 } from "../src/visual-qa.ts";
 import { sharinganFixturePng } from "./support/sharingan-capture-fixture.ts";
 import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
+import {
+  frozenGeneratorFixture,
+  frozenReviewerFixture,
+} from "./support/generation-execution-authority-fixture.ts";
 
 const FRAME = {
   id: "desktop",
@@ -147,6 +151,17 @@ test("durable Core owns transient Artifact visual-review retries with one Codex 
       visualQaEnabled: true,
       autoImproveEnabled: false,
     });
+    const settings = store.getSettings();
+    const generationAgent = frozenGeneratorFixture(settings, {
+      providerId: "codex",
+      command: "codex",
+      model: "gpt-5.4-mini",
+    });
+    const reviewerAgent = frozenReviewerFixture(settings, {
+      providerId: "claude",
+      command: "claude",
+      model: null,
+    }, generationAgent);
 
     store.workspace.applyGraphCommands(project.id, {
       baseGraphRevision: initialWorkspace.graphRevision,
@@ -176,11 +191,8 @@ test("durable Core owns transient Artifact visual-review retries with one Codex 
       layoutOperations: [],
       generation: {
         kind: "workspace-generation",
-        agent: {
-          providerId: "codex",
-          command: "codex",
-          model: "gpt-5.4-mini",
-        },
+        agent: generationAgent,
+        reviewerAgent,
         resourceOperations: [],
         artifactPlans: [{
           operation: "create",

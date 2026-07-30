@@ -935,10 +935,37 @@ export interface WorkspaceGenerationCapability {
   required: boolean;
 }
 
+export type WorkspaceGenerationExecutionAuthority =
+  | {
+      kind: "generator";
+      baseUrl: string;
+      organization: string;
+      credentialProviderId: string;
+      credentialRequired: boolean;
+    }
+  | {
+      kind: "reviewer";
+      baseUrl: string;
+      credentialSource: "anthropic-profile" | "agent" | "session";
+      credentialRequired: boolean;
+    };
+
 export interface WorkspaceGenerationAgentSelection {
   providerId: string;
   command: string;
   model: string | null;
+  executionAuthority?: WorkspaceGenerationExecutionAuthority;
+}
+
+export interface WorkspaceGenerationMoodboardImageAuthority {
+  kind: "moodboard-image";
+  protocol: "dezin.workspace-moodboard-image-authority.v1";
+  providerId: string;
+  baseUrl: string;
+  model: string;
+  apiVersion: string;
+  credentialSource: "provider-profile" | "global-image";
+  credentialRequired: boolean;
 }
 
 export interface WorkspaceRenderFrameSpec {
@@ -963,6 +990,12 @@ export interface WorkspaceGenerationPayload {
   version?: 2;
   /** Optional only for historical persisted Proposals; new executable mutations require it. */
   agent?: WorkspaceGenerationAgentSelection;
+  /** Optional only for historical persisted Proposals predating split Research authority. */
+  researchAgent?: WorkspaceGenerationAgentSelection;
+  /** Optional only for historical persisted Proposals predating split reviewer authority. */
+  reviewerAgent?: WorkspaceGenerationAgentSelection;
+  /** Optional only for historical persisted Proposals predating frozen image authority. */
+  moodboardImageAuthority?: WorkspaceGenerationMoodboardImageAuthority;
   resourceOperations: WorkspaceGenerationResourceOperation[];
   artifactPlans: WorkspaceGenerationArtifactPlan[];
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
@@ -1167,6 +1200,8 @@ export interface GenerationPlanDetail {
   tasks: GenerationTask[];
   dependencies: GenerationTaskDependency[];
   currentAttempts: GenerationPlanCurrentAttempt[];
+  /** Ordered durable history. Optional while interoperating with older daemons. */
+  events?: GenerationPlanEvent[];
 }
 
 export interface GenerationPlanEvent {
@@ -1820,6 +1855,27 @@ export interface ApiClientOptions {
   baseUrl?: string;
   fetchImpl?: FetchLike;
   daemonToken?: string;
+}
+
+const AGENT_REQUEST_TIMEOUT_MS = 15_000;
+const AGENT_SCAN_IDLE_TIMEOUT_MS = 20_000;
+
+function withinDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  controller: AbortController,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(message));
+      }, timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 export type ApiErrorDetails = Record<string, unknown>;
@@ -3432,7 +3488,7 @@ export interface ApiClient {
   listResources(projectId: string): Promise<Resource[]>;
   createResource(projectId: string, input: CreateResourceInput): Promise<CreateResourceResult>;
   materializeResource(projectId: string, input: MaterializeResourceInput): Promise<MaterializeResourceResult>;
-  getResource(projectId: string, resourceId: string): Promise<Resource>;
+  getResource(projectId: string, resourceId: string, signal?: AbortSignal): Promise<Resource>;
   updateResource(projectId: string, resourceId: string, input: UpdateResourceInput): Promise<UpdateResourceResult>;
   listResourceRevisions(projectId: string, resourceId: string): Promise<ResourceRevision[]>;
   listResourceRevisionHistory(
@@ -3444,12 +3500,14 @@ export interface ApiClient {
     projectId: string,
     resourceId: string,
     revisionId: string,
+    signal?: AbortSignal,
   ): Promise<ResourceRevisionView>;
   getResourceRevisionBlob(path: string, signal?: AbortSignal): Promise<Blob>;
   getResearchResourceRevision(
     projectId: string,
     resourceId: string,
     revisionId: string,
+    signal?: AbortSignal,
   ): Promise<ResearchResourceRevisionView>;
   createResearchDirectionArtifactIntent(
     projectId: string,
@@ -3652,6 +3710,20 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return await decode(await json<unknown>(path, init));
   }
 
+  async function agentJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const controller = new AbortController();
+    try {
+      return await withinDeadline(
+        json<T>(path, { ...init, signal: controller.signal }),
+        AGENT_REQUEST_TIMEOUT_MS,
+        controller,
+        "Agent request timed out. Rescan agents to try again.",
+      );
+    } finally {
+      controller.abort();
+    }
+  }
+
   async function blob(path: string, init?: RequestInit): Promise<Blob> {
     const res = await f(baseUrl + path, initWithDaemonToken(init));
     if (!res.ok) {
@@ -3746,8 +3818,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
-    const res = await f(baseUrl + "/api/agents/rescan-stream", initWithDaemonToken({ method: "POST" }));
-    if (!res.ok) throw new ApiError(res.status, await safeText(res));
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     const handle = (block: string): ScanEvent | null => {
       const data = block
         .split("\n")
@@ -3761,30 +3833,69 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         return null;
       }
     };
-    if (!res.body) {
-      for (const block of (await res.text()).split("\n\n")) {
-        const ev = handle(block);
-        if (ev) yield ev;
+    try {
+      const res = await withinDeadline(
+        f(baseUrl + "/api/agents/rescan-stream", initWithDaemonToken({
+          method: "POST",
+          signal: controller.signal,
+        })),
+        AGENT_REQUEST_TIMEOUT_MS,
+        controller,
+        "Agent scan request timed out. Rescan agents to try again.",
+      );
+      if (!res.ok) {
+        throw new ApiError(res.status, await withinDeadline(
+          safeText(res),
+          AGENT_REQUEST_TIMEOUT_MS,
+          controller,
+          "Agent scan response timed out. Rescan agents to try again.",
+        ));
       }
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf("\n\n")) >= 0) {
-        const ev = handle(buffer.slice(0, idx));
-        buffer = buffer.slice(idx + 2);
-        if (ev) yield ev;
+      if (!res.body) {
+        const text = await withinDeadline(
+          res.text(),
+          AGENT_SCAN_IDLE_TIMEOUT_MS,
+          controller,
+          "Agent scan stalled. Rescan agents to try again.",
+        );
+        for (const block of text.split("\n\n")) {
+          const ev = handle(block);
+          if (ev) {
+            yield ev;
+            if (ev.type === "done") return;
+          }
+        }
+        return;
       }
+      reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await withinDeadline(
+          reader.read(),
+          AGENT_SCAN_IDLE_TIMEOUT_MS,
+          controller,
+          "Agent scan stalled. Rescan agents to try again.",
+        );
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) >= 0) {
+          const ev = handle(buffer.slice(0, idx));
+          buffer = buffer.slice(idx + 2);
+          if (ev) {
+            yield ev;
+            if (ev.type === "done") return;
+          }
+        }
+      }
+      buffer += decoder.decode();
+      const ev = handle(buffer.trim());
+      if (ev) yield ev;
+    } finally {
+      controller.abort();
+      if (reader) void reader.cancel().catch(() => {});
     }
-    buffer += decoder.decode();
-    const ev = handle(buffer.trim());
-    if (ev) yield ev;
   }
 
   const enc = (id: string) => encodeURIComponent(id);
@@ -3896,8 +4007,12 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         decodeMaterializeResourceResult,
         jsonInit("POST", encodeMaterializeResourceInput(input)),
       ),
-    getResource: (projectId, resourceId) =>
-      jsonDecoded(`/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`, decodeResource),
+    getResource: (projectId, resourceId, signal) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`,
+        decodeResource,
+        signal === undefined ? undefined : { signal },
+      ),
     updateResource: (projectId, resourceId, input) =>
       jsonDecoded(
         `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`,
@@ -3919,10 +4034,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         decodeResourceRevisionHistoryPage,
       );
     },
-    getResourceRevisionView: (projectId, resourceId, revisionId) =>
+    getResourceRevisionView: (projectId, resourceId, revisionId, signal) =>
       jsonDecoded(
         `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}`,
         decodeResourceRevisionView,
+        signal === undefined ? undefined : { signal },
       ),
     getResourceRevisionBlob: (path, signal) => {
       if (!/^\/api\/projects\/[^/?#]+\/resources\/[^/?#]+\/revisions\/[^/?#]+\/(?:payload|embedded-assets\/[^/?#]+)(?:\?download=1)?$/.test(path)) {
@@ -3930,10 +4046,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       }
       return blob(path, signal === undefined ? undefined : { signal });
     },
-    getResearchResourceRevision: (projectId, resourceId, revisionId) =>
+    getResearchResourceRevision: (projectId, resourceId, revisionId, signal) =>
       jsonDecoded(
         `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}/research`,
         decodeResearchResourceRevision,
+        signal === undefined ? undefined : { signal },
       ),
     createResearchDirectionArtifactIntent: (projectId, resourceId, revisionId, directionId, input) =>
       json<ApprovedResearchDirectionArtifactIntentResult>(
@@ -4053,8 +4170,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     updateSettings: (patch) => json<Settings>("/api/settings", jsonInit("PUT", patch)),
     testModelProvider: (providerId) => json<ModelProviderTestResult>("/api/model-providers/test", jsonInit("POST", { providerId })),
     listModelProviderModels: (providerId) => json<ModelProviderModelsResult>("/api/model-providers/models", jsonInit("POST", { providerId })),
-    listAgents: () => json<AgentInfo[]>("/api/agents"),
-    rescanAgents: () => json<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
+    listAgents: () => agentJson<AgentInfo[]>("/api/agents"),
+    rescanAgents: () => agentJson<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
     getHealth: () => json<Health>("/api/health"),
     optimizePrompt: (input) => json<PromptOptimizeResult>("/api/prompts/optimize", jsonInit("POST", input)),
     listFiles: (id) => json<ProjectFile[]>(`/api/projects/${enc(id)}/files`),

@@ -33,6 +33,7 @@ import {
   buildAgentEnv,
   hydrateVisualReviewerSettings,
 } from "../agent-env.ts";
+import { agentProviderExecutionEnvironment } from "../agent-provider-credential.ts";
 import { inspectBoundedPngImage } from "../artifact-thumbnail.ts";
 import {
   generateImages,
@@ -54,6 +55,7 @@ import {
 import { createProductionArtifactAgentExecutionPorts } from "./target-confined-artifact-agent.ts";
 import {
   hydrateArtifactImageGeneration,
+  hydrateArtifactAgentExecution,
   hydrateArtifactExecutionSettings,
   requireArtifactExecutionProfile,
   type BoundArtifactImageGeneration,
@@ -72,6 +74,7 @@ export interface ProductionArtifactGenerationOptions {
     signal: AbortSignal,
   ) => string | Promise<string>;
   readonly sharinganCaptures?: SharinganCaptureRevisionMaterializerPort;
+  readonly progress?: ProductionArtifactRunAdapterOptions["progress"];
   readonly onEvent?: ProductionArtifactRunAdapterOptions["onEvent"];
   readonly reportError?: ProductionArtifactRunAdapterOptions["reportError"];
   /** Test seam; production always uses the confined Artifact provider factory. */
@@ -451,6 +454,7 @@ export function bindArtifactExecutionProfile(input: {
   readonly liveSettings: Settings;
 }): BoundArtifactExecutionProfile {
   const profile = requireArtifactExecutionProfile(input.contextPack, input.ownership);
+  const agentExecution = hydrateArtifactAgentExecution(profile, input.liveSettings);
   const settings = hydrateArtifactExecutionSettings(profile, input.liveSettings);
   const qualitySettings = hydrateVisualReviewerSettings(
     settings,
@@ -465,7 +469,9 @@ export function bindArtifactExecutionProfile(input: {
     settings: Object.freeze(settings),
     qualitySettings: Object.freeze(qualitySettings),
     environment: Object.freeze({
-      ...buildAgentEnv(settings, profile.agent.command),
+      ...(agentExecution.providerId === "claude" || agentExecution.providerId === "gemini"
+        ? agentProviderExecutionEnvironment(agentExecution)
+        : buildAgentEnv(settings, profile.agent.command)),
       // A scoped Page/Component Agent must never inherit the daemon-wide bearer
       // capability, even when the daemon itself was launched with it in process.env.
       DEZIN_DAEMON_TOKEN: undefined,
@@ -596,6 +602,7 @@ export function createProductionArtifactGenerationExecutor(
       store: options.store,
       dataDir: options.dataDir,
     }),
+    progress: options.progress,
     onEvent: options.onEvent,
     reportError: options.reportError,
   });

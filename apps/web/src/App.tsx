@@ -185,6 +185,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
         <HomeScreen
           onNewProject={async (brief, skillId, designSystemId, mode, sharingan, agentSelection, attachments) => {
             let createdProjectId: string | null = null;
+            let recoverableStandardProjectId: string | null = null;
             try {
               const initialTurnId = mode === "standard" ? pendingWorkspaceTurnId() : undefined;
               const project = await api.createProject({
@@ -214,6 +215,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 if (!setPendingDesignWorkspaceTurn(pendingTurn)) {
                   throw new Error("Initial project context could not be saved for recovery");
                 }
+                recoverableStandardProjectId = project.id;
                 await stageDesignWorkspaceAttachments(
                   api,
                   project.id,
@@ -244,6 +246,13 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 .catch(() => {});
               navigate(`/projects/${project.id}`);
             } catch {
+              if (createdProjectId !== null && recoverableStandardProjectId === createdProjectId) {
+                setPendingImages([]);
+                setPendingRefs([]);
+                navigate(`/projects/${createdProjectId}`);
+                toast("Project created. Add the missing attachments to continue.", { variant: "error" });
+                return;
+              }
               if (createdProjectId !== null) {
                 try {
                   await api.deleteProject(createdProjectId);

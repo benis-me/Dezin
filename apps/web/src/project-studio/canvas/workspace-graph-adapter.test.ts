@@ -130,6 +130,7 @@ test("adapter uses immutable revision thumbnails, parent-relative layout, and st
   expect(page.data.projectId).toBe("project 1");
   expect(page.data).not.toHaveProperty("thumbnailUrl");
   expect(page.data.revisionId).toBe("revision-1");
+  expect(page.ariaLabel).toContain("generation settled, revision published, preview available");
   expect(overview.nodes.find((node) => node.id === "page-1")?.style).toEqual(page.style);
   expect(overview.nodes.find((node) => node.id === "page-1")?.data.zoomLevel).toBe("overview");
 });
@@ -165,13 +166,23 @@ test("adapter binds Research quality and awaiting-selection state to the exact a
         qualityState: "needs-review",
       },
     },
-    resourceRevisionPreviews: {
+    resourceRevisionPreviewStates: {
       "research-1": {
-        kind: "research",
-        executiveSummary: "Checkout confidence depends on a concise decision hierarchy.",
-        findingCount: 4,
-        evidenceDirectionCount: 2,
-        hypothesisDirectionCount: 1,
+        binding: {
+          workspaceId: "workspace-1",
+          resourceId: "research-1",
+          revisionId: "research-revision-7",
+          resourceKind: "research",
+        },
+        status: "ready",
+        preview: {
+          kind: "research",
+          executiveSummary: "Checkout confidence depends on a concise decision hierarchy.",
+          findingCount: 4,
+          evidenceDirectionCount: 2,
+          hypothesisDirectionCount: 1,
+        },
+        error: null,
       },
     },
     awaitingSelectionResourceIds: new Set(["research-1"]),
@@ -190,6 +201,9 @@ test("adapter binds Research quality and awaiting-selection state to the exact a
   });
   expect(research.data.generationState).toBe("awaiting-selection");
   expect(research.ariaLabel).toContain("quality needs-review");
+  expect(research.ariaLabel).toBe(
+    "resource Checkout research, incoming 0, outgoing 0, generation awaiting selection, revision published, preview ready, quality needs-review",
+  );
 });
 
 test("adapter projects direct generation states onto Artifact and Resource nodes without inventing Revisions", () => {
@@ -216,16 +230,25 @@ test("adapter projects direct generation states onto Artifact and Resource nodes
     },
   });
 
-  expect(flow.nodes.find((node) => node.id === "page-1")?.data).toMatchObject({
+  const page = flow.nodes.find((node) => node.id === "page-1")!;
+  expect(page.data).toMatchObject({
     revisionId: null,
     generationState: "failed",
     generationMessage: "Agent quota exhausted",
   });
-  expect(flow.nodes.find((node) => node.id === "resource-1")?.data).toMatchObject({
+  expect(page.ariaLabel).toBe(
+    "page Checkout, incoming 0, outgoing 1, generation failed, no revision, preview unavailable, quality unassessed",
+  );
+  expect(page.ariaLabel).not.toContain("Agent quota exhausted");
+  const research = flow.nodes.find((node) => node.id === "resource-1")!;
+  expect(research.data).toMatchObject({
     revisionId: null,
     generationState: "blocked",
     generationMessage: "Blocked by a failed prerequisite",
   });
+  expect(research.ariaLabel).toBe(
+    "resource Checkout research, incoming 0, outgoing 0, generation blocked, no revision, preview unavailable, quality unassessed",
+  );
 });
 
 test("layout groups are adapter-only parents and recursively collapsed descendants hide with incident edges", () => {

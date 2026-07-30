@@ -195,7 +195,7 @@ test("HomeScreen allows a project reference to be the only design input", async 
   expect(rail).toHaveAttribute("data-context-layout", "top-rail");
   expect(rail.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(rail.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveClass("h-9");
+  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveAttribute("data-context-icon", "project");
   expect(within(rail).getByText("Reference source")).toBeInTheDocument();
   expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveAttribute("title", "Reference source: Project");
   await screen.findByLabelText("Remove Reference source");
@@ -1615,7 +1615,9 @@ function renderSettings(over = {}) {
   render(
     <ApiProvider client={api}>
       <AgentsProvider>
-        <SettingsScreen dark={false} onToggleDark={onToggleDark} />
+        <ToastProvider>
+          <SettingsScreen dark={false} onToggleDark={onToggleDark} />
+        </ToastProvider>
       </AgentsProvider>
     </ApiProvider>,
   );
@@ -1631,9 +1633,54 @@ test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data"
   // the detected daemon agent shows as a card with its version
   expect(await screen.findByText(/claude 1\.2\.3/)).toBeInTheDocument();
   // an uninstalled agent is shown but disabled (not selectable)
-  expect(screen.getByRole("button", { name: /Gemini/ })).toBeDisabled();
+  const missingAgent = screen.getByRole("button", { name: /Gemini/ });
+  expect(missingAgent).toBeDisabled();
+  expect(missingAgent).toHaveTextContent("Not found");
   fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
   expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
+});
+
+test("SettingsScreen reports a failed Agent check without claiming the configured CLI is missing", async () => {
+  renderSettings({
+    listAgents: async () => {
+      throw new Error("daemon restarted");
+    },
+    getSettings: async () => settingsFixture({ agentCommand: "codex", model: "gpt-5" }),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Agent availability couldn't be checked. Use Rescan agents to try again.",
+  );
+  const configuredAgent = screen.getByRole("button", { name: /Codex/ });
+  expect(configuredAgent).toBeDisabled();
+  expect(configuredAgent).toHaveTextContent("Not checked");
+  expect(screen.queryByText("Not found")).toBeNull();
+});
+
+test("SettingsScreen exposes a double rescan failure and keeps the last-good Agent list", async () => {
+  renderSettings({
+    listAgents: async () => AGENTS,
+    scanAgentsStream: async function* () {
+      throw new Error("stream interrupted");
+    },
+    rescanAgents: async () => {
+      throw new Error("daemon restarted");
+    },
+    getSettings: async () => settingsFixture({ agentCommand: "codex", model: "gpt-5" }),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+  expect(await screen.findByText("codex 1.0.0")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+
+  const alerts = await screen.findAllByRole("alert");
+  expect(alerts.some((alert) => alert.textContent?.includes(
+    "Agent scan stopped before it completed. Use Rescan agents to try again.",
+  ))).toBe(true);
+  expect(alerts.some((alert) => alert.textContent?.includes("Couldn't rescan agents."))).toBe(true);
+  expect(screen.getByRole("button", { name: /Codex/ })).toHaveTextContent("codex 1.0.0");
 });
 
 test("SettingsScreen distinguishes a signed-out CodeBuddy from a missing CLI", async () => {

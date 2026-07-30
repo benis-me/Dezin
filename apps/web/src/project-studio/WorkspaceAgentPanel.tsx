@@ -21,8 +21,38 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import type { AgentInfo, DesignSystemCard, EffectCard, Moodboard } from "../lib/api.ts";
-import { cn } from "../lib/utils.ts";
 import type { AgentTranscriptEntry } from "./scoped-agent-session.ts";
+
+export type AgentTraceStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export interface AgentTraceOutput {
+  kind: "artifact" | "resource";
+  targetId: string;
+  revisionId: string;
+  label: string;
+}
+export type ProjectedAgentTranscriptEntry = AgentTranscriptEntry & {
+  trace?: {
+    status: AgentTraceStatus;
+    planId: string;
+    taskId?: string;
+    output?: AgentTraceOutput;
+  };
+};
+
+const TRACE_STATUS_COPY: Record<
+  AgentTraceStatus,
+  readonly [title: string, detail: string, turnState: string]
+> = {
+  running: ["Build in progress", "Dezin is producing the approved design output.", "Building"],
+  succeeded: ["Build complete", "The approved design work completed successfully.", "Complete"],
+  failed: [
+    "Build needs attention",
+    "The build stopped before publishing its requested output. Open the plan for details.",
+    "Needs attention",
+  ],
+  cancelled: ["Build cancelled", "This build ended without changing the active design.", "Cancelled"],
+  queued: ["Build queued", "Approved design work is queued in the build plan.", "Build queued"],
+};
 
 const NOOP_CONTEXT_CHANGE = (_items: AgentComposerContextItem[]) => {};
 const NOOP_CONTEXT_REMOVE = (_id: string) => {};
@@ -47,7 +77,7 @@ function shouldCollapseBrief(content: string): boolean {
     || estimatedBriefWidthUnits(content) > COLLAPSED_BRIEF_WIDTH_UNIT_LIMIT;
 }
 
-function latestProposalTranscriptEntryId(transcript: readonly AgentTranscriptEntry[]): string | null {
+function latestProposalTranscriptEntryId(transcript: readonly ProjectedAgentTranscriptEntry[]): string | null {
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
     const entry = transcript[index]!;
     if (entry.role === "assistant" && entry.state === "proposal") return entry.id;
@@ -61,58 +91,143 @@ type ProposalAffordance = {
   onOpen: () => void;
 };
 
+type PlanAffordance = {
+  open?: boolean;
+  planId?: string;
+  status?: string;
+  onToggle: () => void;
+};
+
+function traceCopy(
+  entry: ProjectedAgentTranscriptEntry,
+  proposalAffordance?: ProposalAffordance,
+): readonly [title: string, detail: string] {
+  if (entry.state === "failed" && entry.trace === undefined) {
+    return ["Needs attention", entry.content];
+  }
+  const output = entry.trace?.output;
+  const status = entry.trace?.status;
+  if (status !== undefined) {
+    const copy = TRACE_STATUS_COPY[status];
+    return [
+      copy[0],
+      status === "succeeded" && output
+        ? `${output.label} is ready as an immutable Revision.`
+        : copy[1],
+    ];
+  }
+  return entry.state === "proposal"
+    ? ["Proposal ready", proposalAffordance?.summary ?? "A reviewable workspace proposal is ready."]
+    : ["Build queued", "Design work is queued in the build plan."];
+}
+
+function turnStateLabel(entry: ProjectedAgentTranscriptEntry): string {
+  const status = entry.trace?.status;
+  if (status !== undefined) return TRACE_STATUS_COPY[status][2];
+  return entry.state === "proposal"
+    ? "Ready for review"
+    : entry.state === "failed"
+      ? "Needs attention"
+      : entry.state === "queued"
+        ? "Build queued"
+        : entry.role === "user" ? "Sent" : "Working";
+}
+
 function TranscriptMessage({
   entry,
+  planAffordance,
   proposalAffordance,
+  onOpenTrace,
+  onOpenTraceOutput,
+  onRetry,
+  retryDisabled = false,
 }: {
-  entry: AgentTranscriptEntry;
+  entry: ProjectedAgentTranscriptEntry;
+  planAffordance?: PlanAffordance | null;
   proposalAffordance?: ProposalAffordance;
+  onOpenTrace?: (entry: ProjectedAgentTranscriptEntry) => void;
+  onOpenTraceOutput?: (output: AgentTraceOutput) => void;
+  onRetry?: () => void | Promise<void>;
+  retryDisabled?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const contentId = useId();
   const collapsible = entry.role === "user" && shouldCollapseBrief(entry.content);
 
-  if (entry.role === "assistant" && entry.state === "proposal" && proposalAffordance) {
+  if (entry.role === "assistant"
+    && (entry.state === "proposal" || entry.state === "queued" || entry.state === "failed")) {
+    const review = entry.state === "proposal" && entry.trace === undefined;
+    const failedSubmission = entry.state === "failed" && entry.trace === undefined;
+    const planId = entry.trace?.planId ?? entry.planId;
+    const [title, detail] = traceCopy(entry, proposalAffordance);
+    const open = planAffordance?.open && planAffordance.planId === planId
+      ? undefined
+      : (review ? proposalAffordance?.onOpen : undefined)
+      ?? (onOpenTrace && (planId ?? entry.proposalId ?? entry.taskId)
+        ? () => onOpenTrace(entry)
+        : undefined);
+    const output = entry.trace?.output;
     return (
       <div
-        data-agent-proposal-summary
-        className="rounded-xl border border-border/70 bg-card px-3 py-2.5"
+        data-agent-trace-state={entry.trace?.status ?? entry.state}
       >
-        <div className="flex min-w-0 items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="text-xs font-medium text-foreground">Proposal ready</h3>
-            <p className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">
-              {proposalAffordance.summary}
-            </p>
+        <div>
+          <div>
+            <h3>{title}</h3>
+            <p>{detail}</p>
           </div>
-          <span className="shrink-0 rounded-full bg-surface-2 px-2 py-1 text-[11px] text-muted-foreground">
-            {proposalAffordance.changeCount} {proposalAffordance.changeCount === 1 ? "change" : "changes"}
-          </span>
+          {review && proposalAffordance ? (
+            <span>
+              {proposalAffordance.changeCount} {proposalAffordance.changeCount === 1 ? "change" : "changes"}
+            </span>
+          ) : null}
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          className="mt-2.5 h-7"
-          onClick={proposalAffordance.onOpen}
-        >
-          Review proposal
-        </Button>
+        {failedSubmission ? (
+          <p data-agent-failure-retained>
+            Your brief is retained. You can revise it or try again without rebuilding the request.
+          </p>
+        ) : null}
+        {failedSubmission && onRetry ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={retryDisabled}
+            onClick={() => void onRetry()}
+          >
+            Try again
+          </Button>
+        ) : null}
+        {open ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={open}
+          >
+            {review ? "Review proposal" : "View in plan"}
+          </Button>
+        ) : null}
+        {output && onOpenTraceOutput ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={() => onOpenTraceOutput(output)}
+          >
+            Open {output.label}
+          </Button>
+        ) : null}
       </div>
     );
   }
 
-  const content = entry.role === "assistant" && entry.state === "proposal"
-    ? "Workspace proposal is ready for review."
-    : entry.content;
-
   return (
     <>
-      <div id={contentId} className="contents">
+      <div id={contentId}>
         <AgentMessageBody
           role={entry.role}
-          content={content}
-          className={collapsible && !expanded ? "max-h-56 overflow-hidden" : undefined}
+          content={entry.content}
         />
       </div>
       {collapsible ? (
@@ -120,7 +235,6 @@ function TranscriptMessage({
           type="button"
           variant="ghost"
           size="xs"
-          className="h-6 px-2 text-[11px] font-normal text-muted-foreground hover:text-foreground"
           aria-controls={contentId}
           aria-expanded={expanded}
           onClick={() => setExpanded((current) => !current)}
@@ -142,6 +256,8 @@ export function WorkspaceAgentPanel({
   onContextItemsChange = NOOP_CONTEXT_CHANGE,
   onRemoveContextItem = NOOP_CONTEXT_REMOVE,
   transcript = [],
+  onOpenTrace,
+  onOpenTraceOutput,
   title = "Workspace Agent",
   draftLabel = "Workspace Agent draft",
   placeholder = "Plan a page, component, or workspace change…",
@@ -187,7 +303,9 @@ export function WorkspaceAgentPanel({
   contextItems?: AgentComposerContextItem[];
   onContextItemsChange?: (items: AgentComposerContextItem[]) => void;
   onRemoveContextItem?: (id: string) => void;
-  transcript?: AgentTranscriptEntry[];
+  transcript?: ProjectedAgentTranscriptEntry[];
+  onOpenTrace?: (entry: ProjectedAgentTranscriptEntry) => void;
+  onOpenTraceOutput?: (output: AgentTraceOutput) => void;
   title?: string;
   draftLabel?: string;
   placeholder?: string;
@@ -196,11 +314,7 @@ export function WorkspaceAgentPanel({
   submitting?: boolean;
   error?: string | null;
   status?: string | null;
-  planAffordance?: {
-    label: string;
-    technicalLabel?: string;
-    onOpen: () => void;
-  } | null;
+  planAffordance?: PlanAffordance | null;
   proposalAffordance?: ProposalAffordance;
   submitLabel?: string;
   submittingLabel?: string;
@@ -215,7 +329,7 @@ export function WorkspaceAgentPanel({
   model?: string;
   onAgentChange?: (command: string) => void;
   onModelChange?: (model: string) => void;
-  onRescanAgents?: () => Promise<void>;
+  onRescanAgents?: () => Promise<unknown>;
   agentDisabledReason?: (agent: AgentInfo) => string | null;
   submissionBlockedReason?: string | null;
   submissionBlockedPending?: boolean;
@@ -234,6 +348,7 @@ export function WorkspaceAgentPanel({
     : null;
   const activityMessage = pendingMessage
     ?? (attaching ? "Saving immutable context…" : submitting ? submittingLabel : null);
+  const submitHint = activityMessage ?? submissionBlockedReason;
   const activityLabel = pendingMessage ?? `${title} activity`;
   const errorNotification = submissionBlockedPending ? error : submissionBlockedReason ?? error;
   const activityMessageId = "workspace-agent-activity";
@@ -255,7 +370,7 @@ export function WorkspaceAgentPanel({
     && onModelChange !== undefined
     && onRescanAgents !== undefined;
   const hasDesignSystemPicker = onDesignSystemChange !== undefined;
-  const hasTranscriptFooter = status !== null || planAffordance !== null;
+  const hasTranscriptFooter = status !== null || planAffordance !== null || submitting;
   const latestProposalEntryId = proposalAffordance === undefined
     ? null
     : latestProposalTranscriptEntryId(transcript);
@@ -327,106 +442,136 @@ export function WorkspaceAgentPanel({
   };
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-sidebar" aria-labelledby="workspace-agent-title">
-      <StudioPanelHeader draggable className="titlebar-pad-left gap-2 bg-sidebar px-2.5">
+    <section aria-labelledby="workspace-agent-title">
+      <StudioPanelHeader draggable>
         {onBackHome ? (
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="app-no-drag shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Back to projects"
             title={projectName ? `Back to projects · ${projectName}` : "Back to projects"}
             onClick={onBackHome}
           >
-            <ChevronLeft aria-hidden className="size-3.5" />
+            <ChevronLeft aria-hidden />
           </Button>
         ) : null}
-        <StudioHeaderIdentity className="min-w-0 flex-1">
+        <StudioHeaderIdentity>
           <StudioHeaderCopy
             title={title}
             subtitle={contextLabel}
             titleId="workspace-agent-title"
             headingLevel={2}
-            className="flex-1 text-left"
           />
         </StudioHeaderIdentity>
       </StudioPanelHeader>
 
-      <div className="relative min-h-0 flex-1">
+      <div>
         <div
           ref={transcriptScrollRef}
           onScroll={updateTranscriptBottomState}
-          className="h-full overflow-y-auto px-3.5 py-4"
           aria-label={`${title} transcript`}
         >
           {transcript.length === 0 ? (
-            <div className="grid min-h-40 place-items-center px-3 text-center">
-              <div className="max-w-52">
-                <span className="mx-auto grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground">
-                  <MessageSquareText aria-hidden className="size-4" />
+            <div>
+              <div>
+                <span>
+                  <MessageSquareText aria-hidden />
                 </span>
-                <p className="mt-2.5 text-xs font-medium text-foreground">Work in this scope</p>
-                <p className="mt-1 text-[11px] leading-[1.55] text-muted-foreground">
+                <p>Work in this scope</p>
+                <p>
                   Attach exact project revisions, then describe the design decision or change.
                 </p>
               </div>
             </div>
           ) : (
-            <ol className="space-y-3.5">
-              {transcript.map((entry) => (
-                <li key={entry.id} className="min-w-0">
-                  <article
-                    data-agent-role={entry.role}
-                    data-agent-turn-id={entry.turnId}
-                    className={cn(
-                      entry.role === "user"
-                        ? "flex max-w-full flex-col items-end gap-1"
-                        : "-mx-2 min-w-0 rounded-xl px-2 py-1",
-                    )}
-                  >
-                    <TranscriptMessage
-                      entry={entry}
-                      proposalAffordance={entry.id === latestProposalEntryId ? proposalAffordance : undefined}
-                    />
-                    <p
-                      data-agent-turn-state={entry.id}
-                      className={cn(
-                        "text-[11px] leading-4 text-muted-foreground",
-                        entry.role === "assistant" && "mt-1",
-                      )}
+            <ol>
+              {transcript.map((entry) => {
+                const timestamp = new Date(entry.createdAt);
+                const timestampIso = timestamp.toJSON();
+                return (
+                  <li key={entry.id}>
+                    <article
+                      data-agent-role={entry.role}
+                      data-agent-turn-id={entry.turnId}
                     >
-                      {entry.state}
-                    </p>
-                  </article>
-                </li>
-              ))}
+                      <div
+                        data-agent-message-meta={entry.id}
+                        data-role={entry.role}
+                      >
+                        <span>{entry.role === "user" ? "You" : "Dezin Agent"}</span>
+                        {timestampIso ? (
+                          <time dateTime={timestampIso}>
+                            {timestamp.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                          </time>
+                        ) : null}
+                        <span data-agent-turn-state={entry.id}>
+                          {turnStateLabel(entry)}
+                        </span>
+                      </div>
+                      <TranscriptMessage
+                        entry={entry}
+                        planAffordance={planAffordance}
+                        proposalAffordance={entry.id === latestProposalEntryId ? proposalAffordance : undefined}
+                        onOpenTrace={onOpenTrace}
+                        onOpenTraceOutput={onOpenTraceOutput}
+                        onRetry={onSubmit}
+                        retryDisabled={!canSubmit}
+                      />
+                    </article>
+                  </li>
+                );
+              })}
             </ol>
           )}
+          {submitting ? (
+            <section
+              id={activityMessageId}
+              data-agent-proposal-progress
+              role="status"
+              aria-label={`${title} proposal progress`}
+              aria-live="polite"
+              aria-atomic="true"
+              aria-busy="true"
+            >
+              <div>
+                <LoaderCircle aria-hidden />
+                <strong>Dezin Agent</strong>
+                <span>Thinking</span>
+              </div>
+              <h3>{submittingLabel}</h3>
+              <p>Reviewing the brief and exact context before the next design action.</p>
+            </section>
+          ) : null}
           {planAffordance ? (
-            <div className="mt-3 flex">
+            <section
+              data-agent-build-activity
+              aria-label="Build activity"
+            >
+              <h3>Build activity</h3>
+              <p>{planAffordance.status ?? "Build plan ready"}</p>
               <Button
                 type="button"
                 variant="outline"
                 size="xs"
-                className="h-7 max-w-full rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-normal text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
-                aria-label="Open build plan"
-                title={planAffordance.technicalLabel ?? planAffordance.label}
-                onClick={planAffordance.onOpen}
+                aria-label={planAffordance.open ? "Hide build details" : "Open build plan"}
+                aria-expanded={planAffordance.open}
+                aria-controls="project-studio-inspector"
+                title="Build plan"
+                onClick={planAffordance.onToggle}
               >
-                <PanelRightOpen aria-hidden className="size-3 shrink-0" />
-                <span className="min-w-0 truncate">{planAffordance.label}</span>
+                <PanelRightOpen aria-hidden />
+                {planAffordance.open ? "Hide details" : "Open build plan"}
               </Button>
-            </div>
+            </section>
           ) : null}
           {status ? (
             <div
               role="status"
               aria-label={`${title} task status`}
               aria-live="polite"
-              className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-[11px] leading-4 text-muted-foreground"
             >
-              <span className="min-w-0 truncate">{status}</span>
+              <span>{status}</span>
             </div>
           ) : null}
         </div>
@@ -440,9 +585,8 @@ export function WorkspaceAgentPanel({
                   size="icon-sm"
                   aria-label="Scroll to latest"
                   onClick={() => scrollTranscriptToLatest("smooth")}
-                  className="app-no-drag absolute bottom-3 right-3 z-10 size-8 rounded-full bg-card shadow-sm"
                 >
-                  <ArrowDown aria-hidden className="size-3.5" />
+                  <ArrowDown aria-hidden />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top" sideOffset={6}>Scroll to latest</TooltipContent>
@@ -451,24 +595,22 @@ export function WorkspaceAgentPanel({
         ) : null}
       </div>
 
-      <div className="shrink-0 px-2.5 pb-2.5 pt-1" data-workspace-agent-composer>
+      <div data-workspace-agent-composer>
         <input
           ref={fileInputRef}
           type="file"
           multiple
-          className="hidden"
           onChange={(event) => {
             if (event.target.files) attachFiles(event.target.files);
             event.target.value = "";
           }}
         />
-        <label htmlFor="workspace-agent-draft" className="sr-only">
+        <label htmlFor="workspace-agent-draft">
           {draftLabel}
         </label>
         {hasDesignSystemPicker ? (
           <div
             data-workspace-agent-design-system
-            className="mb-1.5 flex min-w-0 items-center gap-1 px-0.5 [&_button]:max-w-full"
           >
             <DesignSystemSelect
               compact
@@ -485,7 +627,6 @@ export function WorkspaceAgentPanel({
           </div>
         ) : null}
         <form
-          className="relative"
           onSubmit={(event) => {
             event.preventDefault();
             if (canSubmit) void onSubmit();
@@ -514,12 +655,11 @@ export function WorkspaceAgentPanel({
             onChange={onContextItemsChange}
             onRemove={onRemoveContextItem}
             ariaLabel="Selected Agent Context"
-            className="mb-1.5 border-b-0 px-0.5 pb-0"
           />
-          <div className={cn(
-            "overflow-hidden rounded-2xl border border-input bg-card transition-[border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
-            draggingFiles && "border-ring bg-brand/5 ring-2 ring-ring/20",
-          )} data-agent-composer-shell>
+          <div
+            data-agent-composer-shell
+            data-dragging={draggingFiles || undefined}
+          >
             <textarea
               id="workspace-agent-draft"
               aria-label={draftLabel}
@@ -535,13 +675,11 @@ export function WorkspaceAgentPanel({
               placeholder={draggingFiles ? "Drop files to attach…" : placeholder}
               rows={1}
               spellCheck
-              className="field-sizing-content block max-h-40 min-h-[44px] w-full resize-none bg-transparent px-3 pb-2 pt-2.5 text-sm leading-5 text-foreground outline-none placeholder:text-muted-foreground/70"
             />
             <div
               data-workspace-agent-actions
-              className="flex min-h-10 min-w-0 items-center justify-between gap-2 px-2 pb-2 pt-1"
             >
-              <div className="flex min-w-0 flex-1 items-center">
+              <div>
                 {onAttachFiles ? (
                   <AttachMenu
                     fileActionLabel="Upload a reference"
@@ -556,13 +694,13 @@ export function WorkspaceAgentPanel({
                   />
                 ) : null}
                 {!hasAgentPicker && !hasDesignSystemPicker ? (
-                  <span className="truncate px-2 text-[11px] text-muted-foreground">Project context</span>
+                  <span>Project context</span>
                 ) : null}
-                <span className="sr-only">{scopeLabel}</span>
+                <span>{scopeLabel}</span>
               </div>
-              <div className="flex min-w-0 shrink-0 items-center gap-1">
+              <div>
                 {hasAgentPicker ? (
-                  <div className="min-w-0 overflow-hidden [&_button]:min-w-0 [&_button]:max-w-[13rem] [&_button]:overflow-hidden [&_button>span]:min-w-0">
+                  <div>
                     <AgentModelSelect
                       agents={agents}
                       agent={agent}
@@ -580,9 +718,8 @@ export function WorkspaceAgentPanel({
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span
-                          className="inline-flex shrink-0"
-                          tabIndex={activityMessage ? 0 : undefined}
-                          aria-label={activityMessage ?? undefined}
+                          tabIndex={submitHint ? 0 : undefined}
+                          aria-label={submitHint ?? undefined}
                         >
                           <Button
                             type="submit"
@@ -591,16 +728,13 @@ export function WorkspaceAgentPanel({
                             aria-describedby={activityMessage ? activityMessageId : undefined}
                             aria-busy={activityMessage ? true : undefined}
                             disabled={!canSubmit}
-                            className="size-7 shrink-0 rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-30"
                           >
-                            {activityMessage
-                              ? <LoaderCircle aria-hidden className="size-3.5 animate-spin motion-reduce:animate-none" />
-                              : <ArrowUp aria-hidden className="size-3.5" />}
+                            <ArrowUp data-agent-submit-icon aria-hidden />
                           </Button>
                         </span>
                       </TooltipTrigger>
-                      {activityMessage ? (
-                        <TooltipContent side="top" sideOffset={6}>{activityMessage}</TooltipContent>
+                      {submitHint ? (
+                        <TooltipContent side="top" sideOffset={6}>{submitHint}</TooltipContent>
                       ) : null}
                     </Tooltip>
                   </TooltipProvider>
@@ -608,7 +742,7 @@ export function WorkspaceAgentPanel({
               </div>
             </div>
           </div>
-          {activityMessage ? (
+          {activityMessage && !submitting ? (
             <span
               id={activityMessageId}
               role="status"

@@ -12,6 +12,7 @@ export function AgentProviderSettings({
   activeAgent,
   agentsLoading,
   scanStatus,
+  error,
   onLocal,
   onSave,
   onRescan,
@@ -21,6 +22,7 @@ export function AgentProviderSettings({
   activeAgent?: AgentInfo;
   agentsLoading: boolean;
   scanStatus: string | null;
+  error: string | null;
   onLocal: (key: keyof Settings, value: string | boolean) => void;
   onSave: (key: keyof Settings, value: string | boolean) => void;
   onRescan: () => void;
@@ -28,6 +30,18 @@ export function AgentProviderSettings({
   const panelDescription = activeAgent?.id === "codebuddy" || settings.agentCommand === "codebuddy"
     ? "Dezin uses your locally authenticated CodeBuddy CLI session."
     : "Dezin uses the authenticated session from your selected local coding-agent CLI.";
+  const configuredCommand = settings.agentCommand.trim();
+  const displayedAgents: Array<AgentInfo & { checked: boolean }> = agents.length
+    ? agents.map((agent) => ({ ...agent, checked: true }))
+    : configuredCommand
+      ? [{
+          id: configuredCommand,
+          command: configuredCommand,
+          available: false,
+          models: [],
+          checked: false,
+        }]
+      : [];
 
   return (
     <SettingsPanel title="Agents" desc={panelDescription}>
@@ -50,20 +64,22 @@ export function AgentProviderSettings({
               </Button>
             )}
           </div>
+          {error ? (
+            <div role="alert" className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {error}
+            </div>
+          ) : null}
           <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
             {agentsLoading
               ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[78px] animate-pulse rounded-xl border border-border bg-surface-2/50" />)
-              : (agents.length ? agents : [{
-                  id: settings.agentCommand,
-                  command: settings.agentCommand,
-                  available: false,
-                  availability: "not-installed" as const,
-                  version: undefined,
-                  models: [],
-                }]).map((agent) => {
+              : displayedAgents.map((agent) => {
                   const selected = agent.command === settings.agentCommand;
-                  const unavailableReason = agentAvailabilityReason(agent);
-                  const status = agent.available
+                  const unavailableReason = agent.checked
+                    ? agentAvailabilityReason(agent)
+                    : "Agent availability has not been checked. Rescan agents to verify it.";
+                  const status = !agent.checked
+                    ? "Not checked"
+                    : agent.available
                     ? (agent.version?.slice(0, 16) ?? "Detected")
                     : agent.availability === "authentication-required"
                       ? "Sign in required"

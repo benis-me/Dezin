@@ -21,6 +21,25 @@ const FROZEN_TRAE_AGENT = Object.freeze({
   providerId: "trae",
   command: "trae-cli",
   model: "doubao-seed-1.6",
+  executionAuthority: {
+    kind: "generator" as const,
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "trae",
+    credentialSource: "session" as const,
+    credentialRequired: false,
+  },
+});
+const FROZEN_CLAUDE_REVIEWER = Object.freeze({
+  providerId: "claude",
+  command: "claude",
+  model: null,
+  executionAuthority: {
+    kind: "reviewer" as const,
+    baseUrl: "",
+    credentialSource: "session" as const,
+    credentialRequired: false,
+  },
 });
 
 async function withServer(run: (input: {
@@ -182,6 +201,20 @@ function requestBody(
   };
 }
 
+function durableIntentState(store: Store, projectId: string) {
+  return structuredClone({
+    workspace: store.workspace.getWorkspace(projectId),
+    graph: store.workspace.getGraph(projectId),
+    snapshots: store.workspace.listSnapshots(projectId),
+    layout: store.workspace.getLayout(projectId),
+    proposals: store.workspace.listProposals(projectId),
+    plans: store.workspace.listGenerationPlans(projectId),
+    intentRows: store.db.prepare(
+      "SELECT * FROM research_direction_artifact_intents ORDER BY request_id",
+    ).all(),
+  });
+}
+
 test("Research viewer and selection HTTP preserve evidence quality, exact idempotency, and visible dependency", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const { project, research, revision } = await seed(store, dataDir);
@@ -236,13 +269,23 @@ test("Research viewer and selection HTTP preserve evidence quality, exact idempo
     const results = await Promise.all(responses.map(async (response) => ({
       status: response.status,
       body: await response.json() as {
-        proposal: { id: string; generation: { agent: typeof FROZEN_TRAE_AGENT } };
+        proposal: {
+          id: string;
+          generation: {
+            agent: typeof FROZEN_TRAE_AGENT;
+            reviewerAgent: typeof FROZEN_CLAUDE_REVIEWER;
+          };
+        };
         plan: { id: string };
         task: { id: string };
       },
     })));
     assert.deepEqual(results.map(({ status }) => status).sort(), [200, 201]);
     assert.deepEqual(results[0]!.body.proposal.generation.agent, FROZEN_TRAE_AGENT);
+    assert.deepEqual(
+      results[0]!.body.proposal.generation.reviewerAgent,
+      FROZEN_CLAUDE_REVIEWER,
+    );
     assert.equal(new Set(results.map(({ body: result }) => result.proposal.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.plan.id)).size, 1);
     assert.equal(new Set(results.map(({ body: result }) => result.task.id)).size, 1);
@@ -330,12 +373,205 @@ test("hypothesis direction requires explicit confirmation before creating a succ
       body: JSON.stringify({ ...unconfirmedBody, confirmHypothesis: true }),
     });
     const confirmedBody = await confirmed.json() as {
-      proposal?: { generation: { agent: typeof FROZEN_TRAE_AGENT } };
+      proposal?: {
+        generation: {
+          agent: typeof FROZEN_TRAE_AGENT;
+          reviewerAgent: typeof FROZEN_CLAUDE_REVIEWER;
+        };
+      };
       plan?: { id: string };
       error?: string;
     };
     assert.equal(confirmed.status, 201, JSON.stringify(confirmedBody));
     assert.ok(confirmedBody.plan?.id);
     assert.deepEqual(confirmedBody.proposal?.generation.agent, FROZEN_TRAE_AGENT);
+    assert.deepEqual(
+      confirmedBody.proposal?.generation.reviewerAgent,
+      FROZEN_CLAUDE_REVIEWER,
+    );
   });
+});
+
+test("Research direction Artifact intent rejects invalid live generator authority before durable mutation", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const { project, research, revision } = await seed(store, dataDir);
+    store.updateSettings({
+      agentCommand: "claude",
+      apiBaseUrl: "https://provider.example.test/v1?route=not-canonical",
+      aiProviderId: "",
+      aiProviderProfiles: "",
+    });
+    const before = store.workspace.getWorkspace(project.id)!;
+    const beforeLayout = store.workspace.getLayout(project.id);
+    const body = {
+      ...requestBody(
+        store,
+        project.id,
+        research.resource.id,
+        "selection-00000000-0000-4000-8000-000000000013",
+      ),
+      agentCommand: "claude",
+      model: null,
+    };
+
+    const response = await fetch(
+      `${base}/api/projects/${project.id}/resources/${research.resource.id}/revisions/${revision.id}/directions/quiet-confidence/artifact-intents`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    const result = await response.json() as { code?: string; error?: string };
+    assert.equal(response.status, 422, JSON.stringify(result));
+    assert.equal(result.code, "research_direction_intent_invalid");
+    assert.doesNotMatch(JSON.stringify(result), /route=not-canonical/);
+    assert.equal(Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_proposals",
+    ).get() as { count: number }).count), 0);
+    assert.equal(Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM generation_plans",
+    ).get() as { count: number }).count), 0);
+    assert.equal(Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM research_direction_artifact_intents",
+    ).get() as { count: number }).count), 0);
+    const after = store.workspace.getWorkspace(project.id)!;
+    const afterLayout = store.workspace.getLayout(project.id);
+    assert.equal(after.graphRevision, before.graphRevision);
+    assert.equal(after.activeSnapshotId, before.activeSnapshotId);
+    assert.equal(afterLayout.checksum, beforeLayout.checksum);
+  });
+});
+
+test("Research direction Artifact intent rejects concurrent Settings authority drift before durable mutation", async (t) => {
+  const testCredential = "research-intent-barrier-test-credential";
+  const anthropicProfile = (input: {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+  }) => JSON.stringify({
+    anthropic: {
+      enabled: input.enabled,
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      apiKeyConfigured: Boolean(input.apiKey),
+      models: "",
+      organization: "",
+    },
+  });
+  const scenarios = [
+    {
+      name: "generator endpoint and credential drift",
+      selectionRequestId: "selection-00000000-0000-4000-8000-000000000014",
+      configure(store: Store) {
+        store.updateSettings({
+          agentCommand: "claude",
+          model: "",
+          apiBaseUrl: "https://agent-before.example.test/v1",
+          apiKey: testCredential,
+          aiProviderId: "",
+          aiProviderProfiles: "",
+          visualQaAgentCommand: "codex",
+          visualQaModel: "",
+        });
+      },
+      requestAgent: { agentCommand: "claude", model: null },
+      drift(store: Store) {
+        store.updateSettings({
+          apiBaseUrl: "https://agent-after.example.test/v1",
+          apiKey: "",
+        });
+      },
+    },
+    {
+      name: "reviewer credential source drift",
+      selectionRequestId: "selection-00000000-0000-4000-8000-000000000015",
+      configure(store: Store) {
+        store.updateSettings({
+          agentCommand: FROZEN_TRAE_AGENT.command,
+          model: FROZEN_TRAE_AGENT.model,
+          apiBaseUrl: "",
+          apiKey: "",
+          visualQaAgentCommand: "claude",
+          visualQaModel: "",
+          aiProviderProfiles: anthropicProfile({
+            enabled: true,
+            baseUrl: "https://reviewer-before.example.test/v1",
+            apiKey: testCredential,
+          }),
+        });
+      },
+      requestAgent: {
+        agentCommand: FROZEN_TRAE_AGENT.command,
+        model: FROZEN_TRAE_AGENT.model,
+      },
+      drift(store: Store) {
+        store.updateSettings({
+          aiProviderProfiles: anthropicProfile({
+            enabled: false,
+            baseUrl: "",
+            apiKey: "",
+          }),
+        });
+      },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      await withServer(async ({ base, dataDir, store, ticks }) => {
+        const { project, research, revision } = await seed(store, dataDir);
+        scenario.configure(store);
+        const before = durableIntentState(store, project.id);
+        const originalGetSettings = store.getSettings.bind(store);
+        let armed = true;
+        let releaseDriftBarrier!: () => void;
+        const driftBarrier = new Promise<void>((resolve) => {
+          releaseDriftBarrier = resolve;
+        });
+        store.getSettings = (() => {
+          const settings = originalGetSettings();
+          if (armed) {
+            armed = false;
+            queueMicrotask(() => {
+              scenario.drift(store);
+              releaseDriftBarrier();
+            });
+          }
+          return settings;
+        }) as typeof store.getSettings;
+
+        try {
+          const body = {
+            ...requestBody(
+              store,
+              project.id,
+              research.resource.id,
+              scenario.selectionRequestId,
+            ),
+            ...scenario.requestAgent,
+          };
+          const responsePromise = fetch(
+            `${base}/api/projects/${project.id}/resources/${research.resource.id}/revisions/${revision.id}/directions/quiet-confidence/artifact-intents`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            },
+          );
+          await driftBarrier;
+          const response = await responsePromise;
+          const result = await response.json() as { code?: string; error?: string };
+
+          assert.equal(response.status, 422, JSON.stringify(result));
+          assert.equal(result.code, "research_direction_intent_invalid");
+          assert.doesNotMatch(JSON.stringify(result), new RegExp(testCredential));
+          assert.deepEqual(durableIntentState(store, project.id), before);
+          assert.deepEqual(ticks, []);
+        } finally {
+          store.getSettings = originalGetSettings;
+        }
+      });
+    });
+  }
 });

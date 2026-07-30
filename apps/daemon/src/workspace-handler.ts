@@ -41,6 +41,7 @@ import {
   type ResourceMaterializationRequestFacts,
   type ResearchDirectionArtifactIntentRequestFacts,
   type ResourcePublicationExpectation,
+  type Settings,
   type RestoreArtifactRevisionInput,
   type UpdateResourceForProjectInput,
   type UpdateWorkspaceProposalInput,
@@ -73,6 +74,15 @@ import {
 } from "./workspace-migration.ts";
 import { wakeGenerationPlan } from "./orchestration/generation-plan-control.ts";
 import {
+  assertWorkspaceGenerationExecutionAuthorityMatchesSettings,
+  freezeWorkspaceGeneratorAgentSelection,
+  freezeWorkspaceReviewerAgentSelection,
+  GenerationExecutionAuthorityError,
+} from "./orchestration/generation-execution-authority.ts";
+import {
+  assertProposalResearchDirectionMembership,
+} from "./orchestration/proposal-research-direction-authority.ts";
+import {
   ProductionAgentOrchestratorError,
   type ProductionAgentTurnResult,
   type ProductionScopedAgentTurnResult,
@@ -97,6 +107,7 @@ import {
   SharinganBootstrapError,
   type SharinganBootstrapReady,
 } from "./sharingan-bootstrap.ts";
+import { reviewerAgentCommand, reviewerModel } from "./run-policy.ts";
 
 type ReadyWorkspace = Extract<EnsureStandardProjectWorkspaceResult, { status: "ready" }>;
 const SHARED_BOOTSTRAP_WAIT_SIGNAL = new AbortController().signal;
@@ -270,6 +281,77 @@ function registeredAgentExecutionSelection(
     command,
     model,
   });
+}
+
+function freezeResearchDirectionArtifactIntentAuthorities(
+  settings: Settings,
+  taskAgent: AgentExecutionSelection,
+) {
+  const reviewerCommand = reviewerAgentCommand(settings, taskAgent.command);
+  const reviewerProvider = getProvider(reviewerCommand);
+  if (!reviewerProvider
+    || (reviewerProvider.id !== "claude"
+      && reviewerProvider.id !== "codebuddy"
+      && reviewerProvider.id !== "codex")) {
+    throw new GenerationExecutionAuthorityError(
+      "Research direction Artifact reviewer is unavailable in current Settings",
+    );
+  }
+  const agent = freezeWorkspaceGeneratorAgentSelection(settings, taskAgent);
+  const reviewerAgent = freezeWorkspaceReviewerAgentSelection(settings, {
+    providerId: reviewerProvider.id,
+    command: reviewerCommand,
+    model: reviewerModel(
+      settings,
+      taskAgent.model ?? undefined,
+      taskAgent.command,
+    ) ?? null,
+  }, taskAgent);
+  return Object.freeze({ agent, reviewerAgent });
+}
+
+function generationApprovalAuthorityError(
+  proposal: WorkspaceProposalRecord,
+  deps: AppDeps,
+): GenerationPlanCompileError | null {
+  const generation = proposal.generation;
+  if (generation.kind !== "workspace-generation") return null;
+  try {
+    assertWorkspaceGenerationExecutionAuthorityMatchesSettings(
+      deps.store.getSettings(),
+      generation,
+      proposal.id,
+    );
+    return null;
+  } catch (error) {
+    if (error instanceof GenerationPlanCompileError) return error;
+    if (error instanceof GenerationExecutionAuthorityError) {
+      return new GenerationPlanCompileError("invalid-reference", error.message, {
+        proposalId: proposal.id,
+      });
+    }
+    throw error;
+  }
+}
+
+async function generationApprovalResearchDirectionError(
+  proposal: WorkspaceProposalRecord,
+  deps: AppDeps,
+  projectId: string,
+): Promise<GenerationPlanCompileError | null> {
+  if (proposal.generation.kind !== "workspace-generation") return null;
+  try {
+    await assertProposalResearchDirectionMembership({
+      store: deps.store,
+      dataDir: deps.dataDir,
+      projectId,
+      proposal,
+    });
+    return null;
+  } catch (error) {
+    if (error instanceof GenerationPlanCompileError) return error;
+    throw error;
+  }
 }
 
 async function parseWorkspaceAgentTurnBody(
@@ -1136,6 +1218,37 @@ export async function handleApproveProposal(
   if (!ready) return;
   const proposalId = params.proposalId!;
   try {
+    if (mode === "generate") {
+      const pendingProposal = deps.store.workspace.getProposalForProject(projectId, proposalId);
+      const authorityError = generationApprovalAuthorityError(pendingProposal, deps);
+      if (authorityError !== null) {
+        revalidateProposalDurableState(deps, projectId, proposalId);
+        sendJson(res, 422, {
+          error: authorityError.message,
+          code: "invalid_generation_authority",
+          proposalId,
+          compileCode: authorityError.code,
+          details: authorityError.details,
+        });
+        return;
+      }
+      const directionError = await generationApprovalResearchDirectionError(
+        pendingProposal,
+        deps,
+        projectId,
+      );
+      if (directionError !== null) {
+        revalidateProposalDurableState(deps, projectId, proposalId);
+        sendJson(res, 422, {
+          error: directionError.message,
+          code: "invalid_research_direction_selection",
+          proposalId,
+          compileCode: directionError.code,
+          details: directionError.details,
+        });
+        return;
+      }
+    }
     const { proposal, graph, snapshot, layout, plan } = deps.store.workspace.approveProposalForProject(
       projectId,
       proposalId,
@@ -1491,13 +1604,27 @@ export async function handleCreateResearchDirectionArtifactIntent(
   const input = await parseResearchDirectionArtifactIntentBody(req);
   const ready = await requireReadyWorkspace(res, deps, projectId);
   if (!ready) return;
+  let generationAuthorities;
+  try {
+    generationAuthorities = freezeResearchDirectionArtifactIntentAuthorities(
+      deps.store.getSettings(),
+      input.agent,
+    );
+  } catch (error) {
+    if (!(error instanceof GenerationExecutionAuthorityError)) throw error;
+    sendJson(res, 422, {
+      error: error.message,
+      code: "research_direction_intent_invalid",
+    });
+    return;
+  }
   const intentRequest: ResearchDirectionArtifactIntentRequestFacts = {
     workspaceId: ready.workspace.id,
     resourceId: params.resourceId!,
     revisionId: params.revisionId!,
     directionId: params.directionId!,
     artifactId: input.artifactId,
-    agent: input.agent,
+    agent: generationAuthorities.agent,
     resourceHeadRevisionId: input.expectedResourceHeadRevisionId,
     graphRevision: input.expectedGraphRevision,
     snapshotId: input.expectedSnapshotId,
@@ -1581,7 +1708,7 @@ export async function handleCreateResearchDirectionArtifactIntent(
     && edge.sourceNodeId === resourceNode.id
     && edge.targetNodeId === artifactNode.id);
   const relationshipSuffix = input.selectionRequestId.slice("selection-".length);
-  const proposalInput: CreateWorkspaceProposalInput = {
+  const proposalInput = {
     projectId,
     kind: "workspace-generation",
     baseGraphRevision: input.expectedGraphRevision,
@@ -1602,7 +1729,7 @@ export async function handleCreateResearchDirectionArtifactIntent(
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
-      agent: input.agent,
+      ...generationAuthorities,
       resourceOperations: [{
         operation: "reuse",
         nodeId: resourceNode.id,
@@ -1649,8 +1776,13 @@ export async function handleCreateResearchDirectionArtifactIntent(
         : "The selected direction is grounded by verified evidence.",
     ],
     createdByRunId: null,
-  };
+  } satisfies CreateWorkspaceProposalInput;
   try {
+    assertWorkspaceGenerationExecutionAuthorityMatchesSettings(
+      deps.store.getSettings(),
+      proposalInput.generation,
+      input.selectionRequestId,
+    );
     const result = deps.store.workspace.createApprovedResearchDirectionArtifactIntentForProject(
       projectId,
       input.selectionRequestId,
@@ -1660,6 +1792,13 @@ export async function handleCreateResearchDirectionArtifactIntent(
     wakeGenerationPlan(deps.generationPlanEvents, deps.generationPlanRuntime, result.plan.id);
     sendJson(res, result.created ? 201 : 200, result);
   } catch (error) {
+    if (error instanceof GenerationExecutionAuthorityError) {
+      sendJson(res, 422, {
+        error: error.message,
+        code: "research_direction_intent_invalid",
+      });
+      return;
+    }
     if (error instanceof ResearchDirectionArtifactIntentConflictError) {
       sendJson(res, 409, {
         error: error.message,

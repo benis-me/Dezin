@@ -74,7 +74,7 @@ describe("page node", () => {
       "data-class",
       expect.stringContaining("dezin-flow-handle--routing"),
     );
-    expect(container.querySelector(".dezin-flow-card__title-mark")).toHaveAttribute("data-kind", "page");
+    expect(container.querySelector(".dezin-flow-card__type")).toHaveAttribute("data-kind", "page");
   });
 
   test("keeps the page title, kind, and generation status legible at overview zoom", () => {
@@ -100,6 +100,24 @@ describe("page node", () => {
     expect(screen.getByLabelText("Cinematic Black/Red Home status: running")).toHaveClass("dezin-flow-card__overview-meta");
     expect(screen.getByLabelText("Cinematic Black/Red Home status: running")).toHaveTextContent("running");
     expect(screen.queryByText(/rev revision/i)).toBeNull();
+    expect(screen.queryByText(/revision-home/i)).toBeNull();
+  });
+
+  test("shows a published Revision as terminal after its generation task succeeds", () => {
+    render(<PageNode {...{
+      data: {
+        ...data,
+        name: "Home",
+        zoomLevel: "overview",
+        revisionId: "revision-home",
+        generationState: "complete",
+      },
+      selected: false,
+      isConnectable: true,
+    } as unknown as NodeProps<WorkspaceFlowNode>} />);
+
+    expect(screen.getByLabelText("Home status: Published")).toHaveTextContent("Published");
+    expect(screen.queryByText("Finalizing")).toBeNull();
   });
 
   test("marks an overview selection for the stronger canvas selection treatment", () => {

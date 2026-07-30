@@ -1391,6 +1391,7 @@ test("labels a stable marked ancestor from the actual clicked descendant without
         textPreview: "Poster-first film discovery",
         attrs: { ariaLabel: "", screenLabel: "" },
       },
+      targetIsStable: false,
     },
   );
 
@@ -1404,6 +1405,10 @@ test("labels a stable marked ancestor from the actual clicked descendant without
   );
   expect(screen.getByLabelText("Selected Agent Context")).not.toHaveTextContent(aggregate);
   expect(screen.getByText("Technical locator").closest("details")).toHaveTextContent("Technical locator");
+  expect(await screen.findByRole("status", { name: "Direct editing unavailable" })).toHaveTextContent(
+    /clicked element itself.*stable marker/i,
+  );
+  expect(screen.queryByRole("heading", { name: "Direct properties" })).not.toBeInTheDocument();
 });
 
 test("prefers explicit labels and uses structural semantics instead of container text", async () => {
@@ -1818,18 +1823,25 @@ test("Artifact Agent queues the active Head with exact element identity and open
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
   expect(screen.queryByRole("status", { name: "Artifact Agent task status" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
-  expect(screen.getByText("Preparing")).toBeInTheDocument();
+  const openBuildActivity = screen.getByLabelText("Build activity");
+  expect(openBuildActivity).toHaveTextContent("Queued");
+  expect(within(openBuildActivity).getByRole("button", { name: "Hide build details" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Close build plan" })).toHaveLength(1);
   expect(screen.queryByText("Complete")).not.toBeInTheDocument();
   expect(draft).toHaveValue("");
 
   fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
   expect(await screen.findByRole("heading", { name: "Inspector" })).toBeInTheDocument();
-  const restorePlan = screen.getByRole("button", { name: "Open build plan" });
-  expect(restorePlan).toHaveTextContent("Queued build plan");
-  expect(restorePlan).not.toHaveTextContent("plan-artifact-agent");
-  expect(restorePlan).toHaveAttribute("title", "Build plan plan-artifact-agent");
+  const closedBuildActivity = screen.getByLabelText("Build activity");
+  expect(closedBuildActivity).toHaveTextContent("Queued");
+  expect(closedBuildActivity).not.toHaveTextContent("plan-artifact-agent");
+  const restorePlan = within(closedBuildActivity).getByRole("button", { name: "Open build plan" });
   fireEvent.click(restorePlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(within(screen.getByLabelText("Build activity")).getByRole(
+    "button",
+    { name: "Hide build details" },
+  )).toBeInTheDocument();
 
   view.unmount();
   render(
@@ -1881,7 +1893,10 @@ test("Artifact Agent does not open an older discovered Plan when the current sub
     resolveDiscoveredPlan(work.detail.plan.id);
     await Promise.resolve();
   });
-  expect(screen.getByLabelText("Artifact Agent activity")).toBeInTheDocument();
+  const progress = screen.getByRole("status", { name: "Artifact Agent proposal progress" });
+  expect(progress).toHaveTextContent("Thinking");
+  expect(progress).toHaveTextContent("Queuing an exact artifact Task…");
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
   act(() => rejectTurn(new Error("Queue connection failed")));
 
   const queueError = await screen.findByRole("alert");
@@ -3379,6 +3394,9 @@ test("restores and forks saved history when the active Track has no Head", async
     revision.id,
     { expectedHeadRevisionId: null, expectedSnapshotId: "snapshot-1" },
   ));
+  await waitFor(() => expect(
+    screen.queryByRole("dialog", { name: "Artifact versions" }),
+  ).not.toBeInTheDocument());
 
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   versions = await screen.findByRole("dialog", { name: "Artifact versions" });

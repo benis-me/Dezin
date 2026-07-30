@@ -30,7 +30,20 @@ import {
   type Ref,
 } from "react";
 import { useToast } from "../../components/Toast.tsx";
-import { Button, StudioToolbarHeader } from "../../components/ui/index.ts";
+import {
+  ProjectActionsMenu,
+  ProjectExportMenu,
+  ProjectPanelToggleButton,
+  ProjectSettingsButton,
+} from "../../components/ProjectHeaderActions.tsx";
+import {
+  Button,
+  StudioHeaderActions,
+  StudioHeaderCopy,
+  StudioHeaderIdentity,
+  StudioToolbarHeader,
+  TooltipProvider,
+} from "../../components/ui/index.ts";
 import type {
   WorkspaceGraph,
   WorkspaceGraphCommand,
@@ -54,7 +67,7 @@ import { WorkspaceOutline } from "./WorkspaceOutline.tsx";
 import { workspaceEdgeTypes } from "./edge-types.tsx";
 import { workspaceNodeTypes } from "./node-types.tsx";
 import {
-  useResourceNodeRevisionPreviews,
+  useResourceNodeRevisionPreviewController,
   type ResourceNodeRevisionBinding,
 } from "./resource-node-preview.ts";
 import {
@@ -103,6 +116,18 @@ const CANVAS_ARIA_LABEL_CONFIG = {
   "node.a11yDescription.keyboardDisabled": CANVAS_NODE_KEYBOARD_DESCRIPTION,
   "edge.a11yDescription.default": "Press Enter or Space to select a relationship. Delete or Backspace removes selected editable relationships; Escape clears selection. Uses relationships are derived and read-only.",
 } satisfies Partial<AriaLabelConfig>;
+const NODE_DEFINITION_FIELDS = [
+  "type", "ariaLabel", "parentId", "extent", "hidden", "selected", "className",
+  "focusable", "draggable", "connectable", "selectable", "deletable", "zIndex",
+] as const;
+const NODE_GEOMETRY_FIELDS = [
+  "type", "parentId", "extent", "hidden", "initialWidth", "initialHeight", "expandParent",
+] as const;
+const EDGE_DEFINITION_FIELDS = [
+  "source", "target", "sourceHandle", "targetHandle", "type", "ariaLabel", "hidden",
+  "selected", "className", "focusable", "selectable", "deletable", "animated", "zIndex",
+  "interactionWidth",
+] as const;
 
 function restoreDeleteButtonFocus(): void {
   requestAnimationFrame(() => {
@@ -127,15 +152,13 @@ function sameViewport(left: Viewport, right: WorkspaceViewport): boolean {
     && Math.abs(left.zoom - right.zoom) < epsilon;
 }
 
-function freshGroupId(): string {
+function freshId(prefix: string): string {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `group-${suffix}`;
+  return `${prefix}-${suffix}`;
 }
 
-function freshRemoveEdgeCommandId(edgeId: string): string {
-  const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `remove-edge-${edgeId}-${suffix}`;
-}
+const freshGroupId = () => freshId("group");
+const freshRemoveEdgeCommandId = (edgeId: string) => freshId(`remove-edge-${edgeId}`);
 
 function reducedMotion(): boolean {
   return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
@@ -181,6 +204,18 @@ export interface ProjectCanvasProps {
   onOpenResource?: (resourceId: string, revisionId: string | null) => void;
   onPresentFlow?: () => void;
   presentFlowButtonRef?: Ref<HTMLButtonElement>;
+  planPanelAvailable?: boolean;
+  planPanelOpen?: boolean;
+  onTogglePlanPanel?: () => void;
+  planPanelButtonRef?: Ref<HTMLButtonElement>;
+  exportSourceUrl?: string;
+  exportFullUrl?: string;
+  onRenameProject?: () => void;
+  onOpenProjectInFinder?: () => void;
+  canOpenProjectInFinder?: boolean;
+  onDeleteProject?: () => void;
+  onCopyAnalysisPrompt?: () => void;
+  onOpenSettings?: () => void;
   proposal?: { id: string } | null;
   proposalDiff?: ProposalDiff | null;
   proposalFocus?: ProposalFocusRequest | null;
@@ -212,7 +247,7 @@ interface SurfaceResizeDelta {
 }
 
 function hasSurfaceResizeDelta(delta: SurfaceResizeDelta): boolean {
-  return delta.x !== 0 || delta.y !== 0;
+  return Math.abs(delta.x) >= 0.5 || Math.abs(delta.y) >= 0.5;
 }
 
 function compensateViewportForSurfaceResize(
@@ -244,23 +279,19 @@ function sameShallowRecord(
   return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
+function sameFields<T extends object, K extends keyof T>(
+  left: T,
+  right: T,
+  fields: readonly K[],
+): boolean {
+  return fields.every((field) => left[field] === right[field]);
+}
+
 function sameNodeDefinition(
   left: WorkspaceFlowNode,
   right: WorkspaceFlowNode,
 ): boolean {
-  return left.type === right.type
-    && left.ariaLabel === right.ariaLabel
-    && left.parentId === right.parentId
-    && left.extent === right.extent
-    && left.hidden === right.hidden
-    && left.selected === right.selected
-    && left.className === right.className
-    && left.focusable === right.focusable
-    && left.draggable === right.draggable
-    && left.connectable === right.connectable
-    && left.selectable === right.selectable
-    && left.deletable === right.deletable
-    && left.zIndex === right.zIndex
+  return sameFields(left, right, NODE_DEFINITION_FIELDS)
     && sameShallowRecord(
       left.style as Readonly<Record<string, unknown>> | undefined,
       right.style as Readonly<Record<string, unknown>> | undefined,
@@ -274,13 +305,7 @@ function sameNodeGeometryDefinition(
 ): boolean {
   const leftStyle = left.style as Readonly<Record<string, unknown>> | undefined;
   const rightStyle = right.style as Readonly<Record<string, unknown>> | undefined;
-  return left.type === right.type
-    && left.parentId === right.parentId
-    && left.extent === right.extent
-    && left.hidden === right.hidden
-    && left.initialWidth === right.initialWidth
-    && left.initialHeight === right.initialHeight
-    && left.expandParent === right.expandParent
+  return sameFields(left, right, NODE_GEOMETRY_FIELDS)
     && leftStyle?.width === rightStyle?.width
     && leftStyle?.height === rightStyle?.height
     && left.data.zoomLevel === right.data.zoomLevel
@@ -316,21 +341,7 @@ function sameEdgeDefinition(
   left: WorkspaceFlowEdge,
   right: WorkspaceFlowEdge,
 ): boolean {
-  return left.source === right.source
-    && left.target === right.target
-    && left.sourceHandle === right.sourceHandle
-    && left.targetHandle === right.targetHandle
-    && left.type === right.type
-    && left.ariaLabel === right.ariaLabel
-    && left.hidden === right.hidden
-    && left.selected === right.selected
-    && left.className === right.className
-    && left.focusable === right.focusable
-    && left.selectable === right.selectable
-    && left.deletable === right.deletable
-    && left.animated === right.animated
-    && left.zIndex === right.zIndex
-    && left.interactionWidth === right.interactionWidth
+  return sameFields(left, right, EDGE_DEFINITION_FIELDS)
     && sameOptionalRecord(left.markerStart, right.markerStart)
     && sameOptionalRecord(left.markerEnd, right.markerEnd)
     && sameShallowRecord(
@@ -448,6 +459,18 @@ export function ProjectCanvas({
   onOpenResource,
   onPresentFlow,
   presentFlowButtonRef,
+  planPanelAvailable = false,
+  planPanelOpen = false,
+  onTogglePlanPanel,
+  planPanelButtonRef,
+  exportSourceUrl,
+  exportFullUrl,
+  onRenameProject,
+  onOpenProjectInFinder,
+  canOpenProjectInFinder = false,
+  onDeleteProject,
+  onCopyAnalysisPrompt,
+  onOpenSettings,
   proposal = null,
   proposalDiff = null,
   proposalFocus = null,
@@ -521,7 +544,10 @@ export function ProjectCanvas({
       resourceKind: revision.resourceKind,
     }];
   }), [graph.nodes, resourceRevisionStates]);
-  const resourceRevisionPreviews = useResourceNodeRevisionPreviews(projectId, resourcePreviewBindings);
+  const {
+    states: resourceRevisionPreviewStates,
+    retry: retryResourceRevisionPreview,
+  } = useResourceNodeRevisionPreviewController(projectId, resourcePreviewBindings);
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
@@ -752,20 +778,7 @@ export function ProjectCanvas({
         viewportSaveJobsRef.current = Math.max(0, viewportSaveJobsRef.current - 1);
       }
     }
-    if (projectEpoch !== canvasProjectEpochRef.current) {
-      if (pendingViewportRef.current === null
-        && pendingResizeViewportRef.current === null
-        && viewportSaveJobsRef.current === 0) {
-        const authoritative = authoritativeLayoutRef.current.viewport;
-        setZoom(authoritative.zoom);
-        setAdapterZoom(authoritative.zoom);
-        const instance = flowRef.current;
-        if (instance && !sameViewport(instance.getViewport(), authoritative)) {
-          void instance.setViewport(authoritative).catch(() => {});
-        }
-      }
-      return false;
-    }
+    if (projectEpoch !== canvasProjectEpochRef.current) return false;
     const authoritative = authoritativeLayoutRef.current.viewport;
     const ownsLatestIntent = intentVersion === viewportIntentVersionRef.current;
     if (ownsLatestIntent) onViewportChange(authoritative);
@@ -822,10 +835,10 @@ export function ProjectCanvas({
     void persistLayout([
       { type: "move", objectId: groupId, x: bounds.x, y: bounds.y },
       { type: "resize-group", groupId, width: bounds.width, height: bounds.height },
-    ], "Group resized").then((saved) => {
+    ], "Group resized").then(() => {
       if (pendingResizeBoundsRef.current.get(groupId)?.generation !== generation) return;
       pendingResizeBoundsRef.current.delete(groupId);
-      if (!saved) setReconcileVersion((version) => version + 1);
+      setReconcileVersion((version) => version + 1);
     });
   }, [persistLayout]);
 
@@ -837,7 +850,8 @@ export function ProjectCanvas({
       artifactRevisionIds,
       artifactRevisionQualityStates,
       resourceRevisionStates,
-      resourceRevisionPreviews,
+      resourceRevisionPreviewStates,
+      onRetryResourcePreview: retryResourceRevisionPreview,
       artifactGenerationStates,
       resourceGenerationStates,
       awaitingSelectionResourceIds,
@@ -892,7 +906,8 @@ export function ProjectCanvas({
     resizeGroup,
     artifactRevisionQualityStates,
     resourceRevisionStates,
-    resourceRevisionPreviews,
+    resourceRevisionPreviewStates,
+    retryResourceRevisionPreview,
     resourceGenerationStates,
     selectedEdgeSet,
     selectedSet,
@@ -1108,16 +1123,14 @@ export function ProjectCanvas({
     void persistLayout(
       (currentLayout) => buildMoveCommands(currentLayout, ids, positions),
       successMessage,
-    ).then((saved) => {
+    ).then(() => {
       let clearedLatestMove = false;
       for (const id of ids) {
         if (pendingMovePositionsRef.current.get(id)?.generation !== generation) continue;
         pendingMovePositionsRef.current.delete(id);
         clearedLatestMove = true;
       }
-      if (!saved && clearedLatestMove) {
-        setReconcileVersion((version) => version + 1);
-      }
+      if (clearedLatestMove) setReconcileVersion((version) => version + 1);
     });
   }, [persistLayout]);
 
@@ -1525,32 +1538,57 @@ export function ProjectCanvas({
       className="dezin-project-canvas"
       onKeyDownCapture={handleKeyDownCapture}
     >
-      <StudioToolbarHeader draggable className="dezin-project-canvas__header">
-        <div className="dezin-project-canvas__identity">
-          <h1 title={projectName}>{projectName}</h1>
-          <span>Canvas</span>
-        </div>
-        <div className="dezin-project-canvas__header-actions app-no-drag">
-          {onPresentFlow ? (
-            <Button
-              ref={presentFlowButtonRef}
-              type="button"
-              variant="outline"
-              size="sm"
-              className="dezin-project-canvas__present"
-              aria-label="Present prototype flow"
-              onClick={onPresentFlow}
-            >
-              <Play aria-hidden size={11} fill="currentColor" />
-              Present flow
-            </Button>
-          ) : null}
-          <div className="dezin-project-canvas__measure" aria-label={`${canonicalModel.nodes.length} objects at ${Math.round(zoom * 100)} percent zoom`}>
-            <span>{canonicalModel.nodes.length} objects</span>
-            <span>{Math.round(zoom * 100)}%</span>
-          </div>
-        </div>
-      </StudioToolbarHeader>
+      <TooltipProvider delayDuration={120}>
+        <StudioToolbarHeader draggable className="dezin-project-canvas__header">
+          <StudioHeaderIdentity className="dezin-project-canvas__identity">
+            <StudioHeaderCopy title={<span title={projectName}>{projectName}</span>} subtitle="Canvas" />
+          </StudioHeaderIdentity>
+          <StudioHeaderActions className="dezin-project-canvas__header-actions">
+            {onPresentFlow ? (
+              <Button
+                ref={presentFlowButtonRef}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="dezin-project-canvas__present"
+                aria-label="Present prototype flow"
+                onClick={onPresentFlow}
+              >
+                <Play aria-hidden size={11} fill="currentColor" />
+                Present
+              </Button>
+            ) : null}
+            <div className="dezin-project-canvas__measure" aria-label={`${canonicalModel.nodes.length} objects at ${Math.round(zoom * 100)} percent zoom`}>
+              <span>{canonicalModel.nodes.length} objects</span>
+              <span>{Math.round(zoom * 100)}%</span>
+            </div>
+            {planPanelAvailable && onTogglePlanPanel ? (
+              <ProjectPanelToggleButton
+                open={planPanelOpen}
+                onToggle={onTogglePlanPanel}
+                controls="workspace-plan-inspector"
+                buttonRef={planPanelButtonRef}
+              />
+            ) : null}
+            {onRenameProject
+              && onOpenProjectInFinder
+              && onDeleteProject
+              && onCopyAnalysisPrompt ? (
+                <ProjectActionsMenu
+                  canOpenInFinder={canOpenProjectInFinder}
+                  onRename={onRenameProject}
+                  onOpenInFinder={onOpenProjectInFinder}
+                  onDelete={onDeleteProject}
+                  onCopyAnalysisPrompt={onCopyAnalysisPrompt}
+                />
+              ) : null}
+            {exportSourceUrl && exportFullUrl ? (
+              <ProjectExportMenu sourceUrl={exportSourceUrl} fullUrl={exportFullUrl} />
+            ) : null}
+            {onOpenSettings ? <ProjectSettingsButton onOpen={onOpenSettings} /> : null}
+          </StudioHeaderActions>
+        </StudioToolbarHeader>
+      </TooltipProvider>
 
       <div ref={surfaceRef} className="dezin-project-canvas__surface" data-tool={tool}>
         {surfaceMeasured ? (

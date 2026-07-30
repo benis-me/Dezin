@@ -1865,6 +1865,35 @@ test("MoodboardAgentPanel renders project-style messages with copy actions", () 
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 
+test("MoodboardAgentPanel distinguishes an initial Agent detection failure from no installed Agents", async () => {
+  const user = userEvent.setup();
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        agentDetectionError="Agent availability couldn't be checked. Use Rescan agents to try again."
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => false}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Agent availability couldn't be checked. Use Rescan agents to try again.",
+  );
+  expect(screen.queryByText("No agents detected.")).not.toBeInTheDocument();
+});
+
 test("MoodboardAgentPanel does not submit Enter while an IME composition is active", async () => {
   const onSend = vi.fn().mockResolvedValue(undefined);
   render(

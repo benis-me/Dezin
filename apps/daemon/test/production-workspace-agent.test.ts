@@ -191,7 +191,31 @@ test("production Workspace Agent resolves immutable context in a scratch directo
     result.proposal.generation.kind === "workspace-generation"
       ? result.proposal.generation.agent
       : undefined,
-    CLAUDE_AGENT,
+    {
+      ...CLAUDE_AGENT,
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "anthropic",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    },
+  );
+  assert.deepEqual(
+    result.proposal.generation.kind === "workspace-generation"
+      ? result.proposal.generation.reviewerAgent
+      : undefined,
+    {
+      ...CLAUDE_AGENT,
+      executionAuthority: {
+        kind: "reviewer",
+        baseUrl: "",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    },
   );
   assert.deepEqual(store.workspace.listProposals(project.id), [result.proposal]);
   assert.equal(Number((store.db.prepare(
@@ -585,11 +609,13 @@ test("production Workspace Agent bounds a realistic multi-Artifact planning targ
           verificationStates: ["default"],
         };
       }),
-      components: artifacts.slice(12).map((artifact) => ({
+      components: artifacts.slice(12).map((artifact, index) => ({
         existingNodeId: artifact.nodeId,
         operation: "generate" as const,
         name: artifact.name,
-        instructions: "Keep this shared component coherent across Research directions cinematic-black-red, warm-paper-ink, and electric-cobalt-grid.",
+        instructions: index === 0
+          ? "Keep this shared component coherent across the three KITE directions without changing its underlying structure."
+          : "Keep this shared component coherent across Research directions cinematic-black-red, warm-paper-ink, and electric-cobalt-grid.",
         verificationStates: ["default", "hover", "focus"],
       })),
       resources: [],
@@ -787,13 +813,13 @@ test("production Workspace Agent keeps non-matrix exact Research directions scop
       existingNodeId: null,
       operation: "generate",
       name: "Ambiguous Home",
-      instructions: "Generate the complete first Page.",
+      instructions: "Generate the complete first Page across Research directions without changing its structure.",
       verificationStates: ["default"],
     }, {
       existingNodeId: null,
       operation: "generate",
       name: "Ambiguous Detail",
-      instructions: "Generate the complete second Page.",
+      instructions: "Generate the complete second Page across Research directions without changing its structure.",
       verificationStates: ["default"],
     }],
     components: [],
@@ -919,6 +945,10 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
     agentCommand: "claude",
     model: "claude-global-must-not-win",
     apiKey: "live-setting-must-not-be-injected-into-codebuddy",
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
   });
   const project = store.createProject({ name: "Workspace Agent CodeBuddy", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
@@ -1010,7 +1040,51 @@ test("production Workspace Agent uses the frozen CodeBuddy model despite mutable
     result.kind === "proposal" && result.proposal.generation.kind === "workspace-generation"
       ? result.proposal.generation.agent
       : undefined,
-    turn.agent,
+    {
+      ...turn.agent,
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "codebuddy",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    },
+  );
+  assert.deepEqual(
+    result.kind === "proposal" && result.proposal.generation.kind === "workspace-generation"
+      ? result.proposal.generation.researchAgent
+      : undefined,
+    {
+      providerId: "codex",
+      command: "codex",
+      model: "gpt-5.4-mini",
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "openai",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    },
+  );
+  assert.deepEqual(
+    result.kind === "proposal" && result.proposal.generation.kind === "workspace-generation"
+      ? result.proposal.generation.reviewerAgent
+      : undefined,
+    {
+      providerId: "claude",
+      command: "claude",
+      model: "claude-opus-4-8",
+      executionAuthority: {
+        kind: "reviewer",
+        baseUrl: "",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    },
   );
   assert.equal(result.kind, "proposal");
   assert.deepEqual(
@@ -1502,6 +1576,13 @@ test("production Workspace Agent keeps new root placements clear of occupied can
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
   t.after(() => store.close());
+  store.updateSettings({
+    aiProviderId: "openai-compatible",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "test-image-key",
+    imageModel: "image-model-1",
+  });
   const project = store.createProject({ name: "Workspace Agent CodeBuddy root layout", mode: "standard" });
   const initial = store.workspace.ensureWorkspaceRecord(project.id);
   const mutation = store.workspace.applyGraphCommands(project.id, {
@@ -2454,6 +2535,17 @@ test("production Workspace Agent generates the first Revision into an exact empt
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
   t.after(() => store.close());
+  store.updateSettings({
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+    aiProviderId: "openai-compatible",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "test-image-key",
+    imageModel: "image-model-1",
+  });
   const project = store.createProject({ name: "Workspace Agent empty Resource shell", mode: "standard" });
   const foundation = store.workspace.ensureWorkspaceRecord(project.id);
   const graphWithPrototype = store.workspace.applyGraphCommands(project.id, {
@@ -2558,7 +2650,7 @@ test("production Workspace Agent generates the first Revision into an exact empt
   assert.equal(compiled.tasks.filter((task) => task.target.type === "resource").length, 1);
 });
 
-test("Codex semantic planning compiles explicit visual states into Artifact-scoped desktop and mobile QA Frames", async (t) => {
+test("Codex semantic planning compiles explicit visual states into applicable Artifact-scoped QA Frames", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-state-frames-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
@@ -2586,7 +2678,7 @@ test("Codex semantic planning compiles explicit visual states into Artifact-scop
             operation: "generate",
             name: "KITE Checkout",
             instructions: "Design a complete ticket checkout with populated, validation, processing, and error behavior.",
-            verificationStates: ["validation-error", "payment-processing"],
+            verificationStates: ["validation-error", "payment-processing", "mobile-filter-open"],
           }],
           components: [{
             existingNodeId: null,
@@ -2597,6 +2689,7 @@ test("Codex semantic planning compiles explicit visual states into Artifact-scop
               "cinematic-black-red",
               "warm-paper-ink",
               "electric-cobalt-grid",
+              "record-card-hover",
             ],
           }],
           resources: [],
@@ -2635,11 +2728,11 @@ test("Codex semantic planning compiles explicit visual states into Artifact-scop
   });
   assert.deepEqual(
     new Set(statesFor(checkout.responsiveFrameIds)),
-    new Set(["validation-error", "payment-processing"]),
+    new Set(["validation-error", "payment-processing", "mobile-filter-open"]),
   );
   assert.deepEqual(
     new Set(statesFor(switcher.responsiveFrameIds)),
-    new Set(["cinematic-black-red", "warm-paper-ink", "electric-cobalt-grid"]),
+    new Set(["cinematic-black-red", "warm-paper-ink", "electric-cobalt-grid", "record-card-hover"]),
   );
   for (const state of [
     "validation-error",
@@ -2655,6 +2748,12 @@ test("Codex semantic planning compiles explicit visual states into Artifact-scop
       true,
     );
   }
+  const mobileOnly = generation.responsiveFrames.filter((frame) => frame.initialState === "mobile-filter-open");
+  assert.equal(mobileOnly.length, 1);
+  assert.equal(mobileOnly[0]!.width >= 320 && mobileOnly[0]!.width <= 480, true);
+  const desktopOnly = generation.responsiveFrames.filter((frame) => frame.initialState === "record-card-hover");
+  assert.equal(desktopOnly.length, 1);
+  assert.equal(desktopOnly[0]!.width >= 1_280 && desktopOnly[0]!.height >= 720, true);
 
   assert.ok(observedSchema);
   const exactObservedSchema = observedSchema as unknown as Record<string, unknown>;
@@ -2665,7 +2764,9 @@ test("Codex semantic planning compiles explicit visual states into Artifact-scop
   assert.equal(pageProperties.verificationStates!.maxItems, 6);
   assert.equal(Object.hasOwn(pageProperties.verificationStates!, "uniqueItems"), false);
   assert.match(observedSystemPrompt, /verificationStates.*non-default.*visibl/i);
-  assert.match(observedSystemPrompt, /server.*desktop.*mobile.*QA Frames/i);
+  assert.match(observedSystemPrompt, /server.*general states.*desktop.*mobile.*QA Frames/i);
+  assert.match(observedSystemPrompt, /mobile.*touch.*mobile only/i);
+  assert.match(observedSystemPrompt, /hover.*pointer.*mouse.*desktop only/i);
   assert.match(observedSystemPrompt, /every generated Component.*uses.*Do not leave.*orphaned/is);
 });
 
@@ -2674,6 +2775,19 @@ test("Codex semantic planning makes generated Research and Moodboard outputs har
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
   t.after(() => store.close());
+  store.updateSettings({
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    aiProviderModels: "fal-ai/flux/dev",
+    aiProviderProfiles: "",
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "planner-test-image-secret",
+    imageModel: "fal-ai/flux/dev",
+  });
   const project = store.createProject({ name: "Workspace Agent Resource dependencies", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
@@ -2730,6 +2844,17 @@ test("Codex semantic planning makes generated Research and Moodboard outputs har
   assert.equal(result.proposal.generation.kind, "workspace-generation");
   if (result.proposal.generation.kind !== "workspace-generation") return;
   const generation = result.proposal.generation;
+  assert.deepEqual(generation.moodboardImageAuthority, {
+    kind: "moodboard-image",
+    protocol: "dezin.workspace-moodboard-image-authority.v1",
+    providerId: "fal",
+    baseUrl: "https://images.example.test/v1",
+    model: "fal-ai/flux/dev",
+    apiVersion: "",
+    credentialSource: "global-image",
+    credentialRequired: true,
+  });
+  assert.doesNotMatch(JSON.stringify(generation), /planner-test-image-secret/);
   const page = generation.artifactPlans.find((plan) => plan.name === "KITE Home");
   assert.ok(page);
   const resourceIds = new Set(generation.resourceOperations.map((operation) => operation.resourceId));
@@ -2747,8 +2872,23 @@ test("Codex semantic planning makes generated Research and Moodboard outputs har
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
   const pageTask = compiled.tasks.find((task) => task.kind === "page");
   assert.ok(pageTask);
+  const resourceTasks = compiled.tasks.filter((task) => task.kind === "resource");
+  const moodboardTask = resourceTasks.find(
+    (task) => (task.payload.operation as Record<string, unknown>).kind === "moodboard",
+  );
+  const researchTask = resourceTasks.find(
+    (task) => (task.payload.operation as Record<string, unknown>).kind === "research",
+  );
+  assert.ok(moodboardTask);
+  assert.ok(researchTask);
+  assert.deepEqual(
+    moodboardTask.payload.moodboardImageAuthority,
+    generation.moodboardImageAuthority,
+  );
+  assert.equal(Object.hasOwn(researchTask.payload, "moodboardImageAuthority"), false);
+  assert.doesNotMatch(JSON.stringify(compiled), /planner-test-image-secret/);
   const resourceTaskIds = new Set(
-    compiled.tasks.filter((task) => task.kind === "resource").map((task) => task.id),
+    resourceTasks.map((task) => task.id),
   );
   assert.deepEqual(new Set(pageTask.dependencyIds.filter((id) => resourceTaskIds.has(id))), resourceTaskIds);
 });
@@ -4111,6 +4251,121 @@ test("production Workspace Agent freezes a total-plus-per-direction matrix used 
   assert.equal(pagesSchema.maxItems, 12);
 });
 
+test("production Workspace Agent freezes the FIELD NOTES each-with end-user Page matrix", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-field-notes-matrix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "FIELD NOTES", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const directions = ["Analog Editorial", "Midnight Club", "Signal Grid"] as const;
+  const pageNames = ["Home", "Browse", "Record Detail", "Membership Checkout"] as const;
+  const cells = directions.flatMap((direction, directionIndex) => (
+    pageNames.map((page, pageIndex) => ({
+      requestSlotId: `direction-${directionIndex + 1}-page-${pageIndex + 1}`,
+      direction,
+      page,
+    }))
+  ));
+  const observedTimeouts: number[] = [];
+  const observedSchemas: Record<string, unknown>[] = [];
+  let observedMatrix: {
+    readonly totalPages?: number;
+    readonly cells?: readonly {
+      readonly id?: string;
+      readonly direction?: string;
+      readonly page?: string;
+    }[];
+  } | undefined;
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner(async (input) => {
+      observedTimeouts.push(input.timeoutMs ?? 0);
+      const schemaIndex = input.args.indexOf("--output-schema");
+      observedSchemas.push(
+        JSON.parse(readFileSync(input.args[schemaIndex + 1]!, "utf8")) as Record<string, unknown>,
+      );
+      const requestLine = input.stdin.split("\n").find((line) => (
+        line.includes('"protocol":"dezin.workspace-agent-request.v1"')
+      ));
+      assert.ok(requestLine, "the FIELD NOTES request contract must reach the Planner");
+      observedMatrix = (JSON.parse(requestLine) as {
+        explicitPageMatrix?: typeof observedMatrix;
+      }).explicitPageMatrix;
+      return {
+        stdout: codexPlannerResponse({
+          pages: cells.map(({ requestSlotId, direction, page }) => ({
+            existingNodeId: null,
+            operation: "generate",
+            requestSlotId,
+            name: `${direction} — ${page}`,
+            instructions: `Design the complete ${page} listening-club experience with realistic content and states.`,
+            verificationStates: [],
+          })),
+          components: [],
+          resources: [],
+          relations: [],
+          rationale: "Preserve all twelve FIELD NOTES Page cells.",
+          assumptions: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    }),
+  });
+
+  const result = await orchestrator.turn({
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+    turnId: "turn-00000000-0000-4000-8000-000000000064",
+    message: [
+      "Build a complete multi-page design workspace for FIELD NOTES, an independent listening club and record-discovery membership service.",
+      "Generate exactly three unmistakably different visual directions, each with exactly four independent end-user Pages: Home, Browse, Record Detail, and Membership Checkout.",
+      "Direction 1 — Analog Editorial: warm paper stock, ink black and rust, expressive serif typography, archival record-sleeve photography, generous printed-magazine rhythm.",
+      "Direction 2 — Midnight Club: near-black, oxblood and electric red, condensed display type, dramatic live-performance imagery, asymmetric cinematic composition.",
+      "Direction 3 — Signal Grid: cobalt, off-white and acid lime, modular grid, neo-grotesk plus mono detail, kinetic digital-culture energy; never an admin dashboard.",
+      "Create one shared Components group with real reusable Global Header, Record Card, Audio Preview, Membership Tier Selector, and Checkout Form.",
+      "Run decision-grade Research first, then create a real Moodboard with distinct usable imagery for all three directions.",
+      "Add explicit prototype links Home → Browse → Record Detail → Membership Checkout for each direction.",
+      "Every Page needs complete realistic product content, desktop and mobile Frames, and visible key interaction states.",
+      "Publish immutable Research, Moodboard, Component and Page Revisions with canvas preview covers and Viewer-ready output.",
+      "Do not create overview, process, specification, editor, dashboard, or thumbnail-collection Pages.",
+    ].join(" "),
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  }, new AbortController().signal);
+
+  assert.equal(result.kind, "proposal");
+  assert.deepEqual(observedTimeouts, [12 * 60 * 1_000]);
+  assert.equal(observedMatrix?.totalPages, 12);
+  assert.equal(observedMatrix?.cells?.length, 12);
+  assert.deepEqual(
+    observedMatrix?.cells?.map((cell) => cell.id),
+    cells.map((cell) => cell.requestSlotId),
+  );
+  assert.deepEqual(
+    observedMatrix?.cells?.slice(0, pageNames.length).map((cell) => cell.page),
+    pageNames,
+  );
+  assert.equal(observedMatrix?.cells?.[0]?.page, "Home");
+  const schemaProperties = observedSchemas[0]!.properties as Record<string, unknown>;
+  const pagesSchema = schemaProperties.pages as Record<string, unknown>;
+  const pageItem = pagesSchema.items as Record<string, unknown>;
+  const pageProperties = pageItem.properties as Record<string, Record<string, unknown>>;
+  assert.equal(pagesSchema.minItems, 12);
+  assert.equal(pagesSchema.maxItems, 12);
+  assert.ok((pageItem.required as unknown[]).includes("requestSlotId"));
+  assert.deepEqual(
+    pageProperties.requestSlotId!.enum,
+    cells.map((cell) => cell.requestSlotId),
+  );
+});
+
 test("production Workspace Agent freezes exact uses relations instead of keeping stale base extras", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-exact-uses-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -4854,6 +5109,12 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
   t.after(() => store.close());
+  store.updateSettings({
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  });
   const project = store.createProject({ name: "Gemini resource-only planner", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   const semanticIntent = {
@@ -4983,8 +5244,191 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
     semanticIntent.resources[0]!.instructions,
   );
   assert.deepEqual(
+    result.proposal.generation.kind === "workspace-generation"
+      ? {
+          researchAgent: result.proposal.generation.researchAgent,
+          reviewerAgent: result.proposal.generation.reviewerAgent,
+        }
+      : null,
+    {
+      researchAgent: {
+        providerId: "codex",
+        command: "codex",
+        model: "gpt-5.4-mini",
+        executionAuthority: {
+          kind: "generator",
+          baseUrl: "",
+          organization: "",
+          credentialProviderId: "openai",
+          credentialSource: "session",
+          credentialRequired: false,
+        },
+      },
+      reviewerAgent: {
+        providerId: "claude",
+        command: "claude",
+        model: "claude-opus-4-8",
+        executionAuthority: {
+          kind: "reviewer",
+          baseUrl: "",
+          credentialSource: "session",
+          credentialRequired: false,
+        },
+      },
+    },
+  );
+  assert.deepEqual((resourceTask.payload as Record<string, unknown>).agent, {
+    providerId: "codex",
+    command: "codex",
+    model: "gpt-5.4-mini",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session",
+      credentialRequired: false,
+    },
+  });
+  assert.deepEqual((resourceTask.payload as Record<string, unknown>).reviewer, {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: false,
+    },
+  });
+  assert.deepEqual(
     compiled.tasks.map((task) => task.kind),
     ["resource", "prototype-validation", "checkpoint"],
+  );
+});
+
+test("production Workspace Agent rejects invalid Research split authority before persisting a Proposal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-research-authority-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  store.updateSettings({
+    researchAgentCommand: "codebuddy",
+    researchModel: "gpt-5.6-sol",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  });
+  const project = store.createProject({ name: "Research authority preflight", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const semanticIntent = {
+    pages: [],
+    components: [],
+    resources: [{
+      existingNodeId: null,
+      operation: "generate",
+      kind: "research",
+      title: "Decision-grade checkout evidence",
+      instructions: "Compare three exact checkout directions using verified web evidence.",
+    }],
+    relations: [],
+    rationale: "Research before implementation.",
+    assumptions: [],
+  };
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_GEMINI_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: JSON.stringify(semanticIntent),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+  const request = {
+    scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+    intent: "plan",
+    agent: { providerId: "gemini", command: "gemini", model: "gemini-2.5-pro" },
+    message: "Create Research only.",
+    explicitContext: [],
+    graphRevision: workspace.graphRevision,
+  } as const;
+
+  await assert.rejects(
+    orchestrator.turn({
+      ...request,
+      turnId: "turn-00000000-0000-4000-8000-000000000052",
+    }, new AbortController().signal),
+    /Research generation requires Codex.*Settings > Quality > Research agent/i,
+  );
+  store.updateSettings({
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5.4-mini",
+  });
+  await assert.rejects(
+    orchestrator.turn({
+      ...request,
+      turnId: "turn-00000000-0000-4000-8000-000000000053",
+    }, new AbortController().signal),
+    /independent reviewer.*non-Codex reviewer.*Settings > Quality/i,
+  );
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
+});
+
+test("production Workspace Agent rejects generated Moodboard intent without image authority before persisting a Proposal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-image-authority-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({ name: "Moodboard authority preflight", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const orchestrator = createProductionWorkspaceAgentOrchestrator({
+    store,
+    dataDir: root,
+    resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+    structuredAgentPlatform: "darwin",
+    resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    createSpawner: () => new RecordingSpawner({
+      stdout: codexPlannerResponse({
+        pages: [],
+        components: [],
+        resources: [{
+          existingNodeId: null,
+          operation: "generate",
+          kind: "moodboard",
+          title: "Exact image direction",
+          instructions: "Generate one decision-grade visual direction from production image bytes.",
+        }],
+        relations: [],
+        rationale: "Establish the visual direction.",
+        assumptions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    }),
+  });
+
+  await assert.rejects(
+    orchestrator.turn({
+      scope: { type: "workspace", id: workspace.id, workspaceId: workspace.id },
+      intent: "plan",
+      agent: { providerId: "codex", command: "codex", model: "gpt-5.4-mini" },
+      turnId: "turn-00000000-0000-4000-8000-000000000054",
+      message: "Generate a Moodboard.",
+      explicitContext: [],
+      graphRevision: workspace.graphRevision,
+    }, new AbortController().signal),
+    /Moodboard image execution authority is invalid.*Settings/i,
+  );
+  assert.deepEqual(store.workspace.listProposals(project.id), []);
+  assert.equal(
+    (store.db.prepare(
+      "SELECT COUNT(*) AS count FROM generation_plans WHERE workspace_id = ?",
+    ).get(workspace.id) as { count: number }).count,
+    0,
   );
 });
 

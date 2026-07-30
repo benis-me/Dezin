@@ -233,7 +233,7 @@ export async function handleGetLatestScopedArtifactGenerationPlan(
   sendJson(res, 200, { planId: plan?.id ?? null });
 }
 
-export async function handleGetLatestActionableWorkspaceAgentGenerationPlan(
+export async function handleGetLatestWorkspaceAgentGenerationPlan(
   _req: IncomingMessage,
   res: ServerResponse,
   params: Record<string, string>,
@@ -241,7 +241,7 @@ export async function handleGetLatestActionableWorkspaceAgentGenerationPlan(
 ): Promise<void> {
   const projectId = params.id!;
   requireProject(deps, projectId);
-  const plan = deps.store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(projectId);
+  const plan = deps.store.workspace.getLatestWorkspaceAgentGenerationPlanForProject(projectId);
   sendJson(res, 200, { planId: plan?.id ?? null });
 }
 

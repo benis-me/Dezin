@@ -22,7 +22,11 @@ export interface AgentTranscriptEntry {
   role: "user" | "assistant";
   content: string;
   createdAt: number;
-  state: "submitted" | "queued" | "proposal";
+  state: "submitted" | "queued" | "proposal" | "failed";
+  proposalId?: string;
+  planId?: string;
+  taskId?: string;
+  resultRevisionId?: string;
 }
 
 export type AgentTurnOutbox =
@@ -94,6 +98,12 @@ function canonicalTurnId(value: unknown): string | null {
   return typeof value === "string" && CANONICAL_TURN_ID.test(value) ? value : null;
 }
 
+function optionalTraceId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  return id.length > 0 && id.length <= 512 ? id : undefined;
+}
+
 function decodeImmutableContextRef(value: unknown): ContextItemRef {
   const ref = decodeContextItemRef(value);
   if (ref.kind !== "inline" && ref.revisionId === undefined) {
@@ -137,8 +147,13 @@ function parseTranscript(value: unknown): AgentTranscriptEntry[] {
     const turnId = canonicalTurnId(input?.turnId);
     if (!input || !turnId || typeof input.id !== "string" || typeof input.content !== "string"
       || (input.role !== "user" && input.role !== "assistant")
-      || (input.state !== "submitted" && input.state !== "queued" && input.state !== "proposal")
+      || (input.state !== "submitted" && input.state !== "queued"
+        && input.state !== "proposal" && input.state !== "failed")
       || !Number.isFinite(input.createdAt)) return [];
+    const proposalId = optionalTraceId(input.proposalId);
+    const planId = optionalTraceId(input.planId);
+    const taskId = optionalTraceId(input.taskId);
+    const resultRevisionId = optionalTraceId(input.resultRevisionId);
     return [{
       id: input.id,
       turnId,
@@ -146,6 +161,10 @@ function parseTranscript(value: unknown): AgentTranscriptEntry[] {
       content: input.content.slice(0, MAX_DRAFT_LENGTH),
       createdAt: Number(input.createdAt),
       state: input.state,
+      ...(proposalId === undefined ? {} : { proposalId }),
+      ...(planId === undefined ? {} : { planId }),
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(resultRevisionId === undefined ? {} : { resultRevisionId }),
     }];
   }).slice(-MAX_TRANSCRIPT_ENTRIES);
 }

@@ -47,26 +47,21 @@ test("canvas tools expose Dezin tooltips instead of browser title attributes", a
   expect(screen.getByRole("tooltip")).toHaveTextContent("V");
 
   await user.unhover(select);
-  const fit = screen.getByRole("button", { name: "Fit workspace" });
-  await user.hover(fit);
-  expect(await screen.findByRole("tooltip")).toHaveTextContent("Fit workspace");
-  expect(screen.getByRole("tooltip")).toHaveTextContent("⇧1");
+  await user.click(screen.getByRole("button", { name: "Canvas zoom: 80%" }));
+  expect(screen.getByRole("menuitem", { name: /Fit workspace/ })).toHaveTextContent("⇧1");
 });
 
 test("selection actions stay out of the toolbar until the canvas context can use them", () => {
   const { container } = renderToolbar();
 
-  expect(screen.queryByRole("group", { name: "Grouping tools" })).toBeNull();
+  expect(screen.queryByRole("toolbar", { name: "Selection actions" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Group selection/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Ungroup selection/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Delete group/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Delete selected relationship/ })).toBeNull();
   expect(screen.getByRole("button", { name: "Relationship filter: Prototype flow" })).toBeInTheDocument();
-  expect(
-    [...container.querySelectorAll("[data-canvas-context-slot]")].map((slot) => (
-      slot.getAttribute("data-canvas-context-slot")
-    )),
-  ).toEqual(["group-create", "group-ungroup", "group-delete", "relationship-delete"]);
+  expect(container.querySelector(".dezin-canvas-toolbar--context")).toBeNull();
+  expect(container.querySelectorAll(".dezin-canvas-toolbar")).toHaveLength(3);
 });
 
 test("the toolbar enables only the grouping actions that apply to the current selection", async () => {
@@ -116,19 +111,20 @@ test("an editable selected relationship exposes its delete action", async () => 
   expect(onDeleteRelationship).toHaveBeenCalledOnce();
 });
 
-test("select and hand share Dezin's quiet segmented interaction control", async () => {
+test("select and hand share Dezin's quiet centered interaction bar", async () => {
   const user = userEvent.setup();
   const onToolChange = vi.fn();
   renderToolbar({ onToolChange });
 
-  expect(screen.getByRole("navigation", { name: "Canvas tools" })).toHaveClass("app-no-drag");
-  const interactionMode = screen.getByRole("group", { name: "Canvas interaction mode" });
-  expect(interactionMode).toHaveClass("border-border", "bg-surface-2/60");
+  const interactionMode = screen.getByRole("navigation", { name: "Canvas tools" });
+  expect(interactionMode).toHaveClass("dezin-canvas-toolbar--tools");
+  expect(interactionMode.parentElement).toHaveClass("app-no-drag");
 
   const select = screen.getByRole("button", { name: "Select tool" });
   const hand = screen.getByRole("button", { name: "Hand tool" });
   expect(select).toHaveAttribute("aria-pressed", "true");
   expect(hand).toHaveAttribute("aria-pressed", "false");
+  expect(select).toHaveAttribute("data-active", "true");
   expect(select).not.toHaveClass("!bg-primary", "!text-primary-foreground");
   expect(hand).not.toHaveClass("!bg-primary", "!text-primary-foreground");
   expect(screen.getByRole("button", { name: "Toggle workspace outline" })).not.toHaveClass(
@@ -147,8 +143,12 @@ test("zoom controls expose the current percentage, presets, and direct adjustmen
   const onSetZoom = vi.fn();
   renderToolbar({ zoom: 0.8, onZoomOut, onZoomIn, onSetZoom });
 
-  await user.click(screen.getByRole("button", { name: "Zoom out" }));
-  await user.click(screen.getByRole("button", { name: "Zoom in" }));
+  const zoomOut = screen.getByRole("button", { name: "Zoom out" });
+  const zoomIn = screen.getByRole("button", { name: "Zoom in" });
+  expect(zoomOut).not.toHaveAttribute("aria-pressed");
+  expect(zoomIn).not.toHaveAttribute("aria-pressed");
+  await user.click(zoomOut);
+  await user.click(zoomIn);
   expect(onZoomOut).toHaveBeenCalledOnce();
   expect(onZoomIn).toHaveBeenCalledOnce();
 
@@ -177,14 +177,14 @@ test("relationship visibility uses one compact menu instead of three competing t
   expect(screen.queryByRole("button", { name: "Show all relations" })).toBeNull();
 });
 
-test("the narrow canvas toolbar remains touch-scrollable without painting a native scrollbar", () => {
+test("the canvas toolbar islands stay clipped inside the surface without native scrollbars", () => {
   const css = readFileSync(`${process.cwd()}/src/project-studio/canvas/project-canvas.css`, "utf8");
-  const toolbarStart = css.indexOf(".dezin-canvas-toolbar {");
-  const toolbarEnd = css.indexOf("}", toolbarStart);
-  const toolbarRule = css.slice(toolbarStart, toolbarEnd);
+  const layerStart = css.indexOf(".dezin-canvas-toolbar-layer {");
+  const layerEnd = css.indexOf("}", layerStart);
+  const layerRule = css.slice(layerStart, layerEnd);
 
-  expect(toolbarRule).toMatch(/overflow-x:\s*auto/);
-  expect(toolbarRule).toMatch(/overflow-y:\s*hidden/);
-  expect(toolbarRule).toMatch(/scrollbar-width:\s*none/);
-  expect(css).toMatch(/\.dezin-canvas-toolbar::?-webkit-scrollbar\s*\{[^}]*display:\s*none/s);
+  expect(layerRule).toMatch(/position:\s*absolute/);
+  expect(layerRule).toMatch(/overflow:\s*hidden/);
+  expect(layerRule).toMatch(/pointer-events:\s*none/);
+  expect(css).not.toMatch(/\.dezin-canvas-toolbar\s*\{[^}]*overflow-[xy]:\s*auto/s);
 });

@@ -20,7 +20,30 @@ function fakeClock(): StoreClock {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+      executionAuthority: {
+        kind: "generator" as const,
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "codebuddy",
+        credentialSource: "session" as const,
+        credentialRequired: false,
+      },
+    },
+    reviewerAgent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+      executionAuthority: {
+        kind: "reviewer" as const,
+        baseUrl: "",
+        credentialSource: "session" as const,
+        credentialRequired: false,
+      },
+    },
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -248,6 +271,8 @@ test("an approved Plan shell compiles exactly once into a normalized durable DAG
   const store = new Store(":memory:", fakeClock());
   const { project, plan } = createApprovedPlanShell(store);
 
+  const shell = store.workspace.getGenerationPlanDetailForProject(project.id, plan.id);
+  assert.deepEqual(shell.events, []);
   const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, plan.id);
   assert.equal(compiled.plan.status, "queued");
   assert.deepEqual(store.workspace.listActiveGenerationPlanIdsForProject(project.id), [plan.id]);
@@ -266,6 +291,10 @@ test("an approved Plan shell compiles exactly once into a normalized durable DAG
   assert.deepEqual(
     store.workspace.listGenerationPlanEventsForProject(project.id, plan.id, { after: 0, limit: 100 })
       .map(({ sequence, type, taskId }) => ({ sequence, type, taskId })),
+    [{ sequence: 1, type: "plan-queued", taskId: null }],
+  );
+  assert.deepEqual(
+    compiled.events?.map(({ sequence, type, taskId }) => ({ sequence, type, taskId })),
     [{ sequence: 1, type: "plan-queued", taskId: null }],
   );
 
@@ -666,6 +695,10 @@ test("a Component Instance identity collision rolls back construction and termin
   assert.equal(events.length, 1);
   assert.equal(events[0]?.type, "plan-compile-failed");
   assert.equal(events[0]?.payload.code, "invalid-reference");
+  assert.deepEqual(
+    store.workspace.getGenerationPlanDetailForProject(project.id, plan.id).events,
+    events,
+  );
   store.close();
 });
 
@@ -752,6 +785,77 @@ test("Plan compilation fails closed on corrupted active Artifact identity withou
   assert.deepEqual(
     store.workspace.listGenerationPlanEventsForProject(project.id, plan.id, { after: 0, limit: 100 }),
     [],
+  );
+  store.close();
+});
+
+test("public createProposal keeps historical missing authority decodable but cannot compile it for execution", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Historical authority omission", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const shell = {
+    artifactId: "historical-authority-page",
+    nodeId: "historical-authority-node",
+    trackId: "historical-authority-track",
+    name: "Historical authority page",
+  };
+  addEmptyPageShell(store, project.id, shell);
+  const workspace = store.workspace.getWorkspace(project.id)!;
+  const layout = store.workspace.getLayout(project.id);
+  const historicalGeneration = {
+    ...emptyGeneration(),
+    agent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+    },
+    reviewerAgent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+    },
+    artifactPlans: [{
+      operation: "create" as const,
+      nodeId: shell.nodeId,
+      artifactId: shell.artifactId,
+      kind: "page" as const,
+      name: shell.name,
+      trackId: shell.trackId,
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: [],
+      responsiveFrameIds: ["desktop"],
+    }],
+  };
+  const proposal = store.workspace.createProposal({
+    projectId: project.id,
+    kind: "workspace-generation",
+    baseGraphRevision: workspace.graphRevision,
+    baseSnapshotId: workspace.activeSnapshotId,
+    layoutId: layout.layoutId,
+    baseLayoutChecksum: layout.checksum,
+    operations: [],
+    layoutOperations: [],
+    generation: historicalGeneration,
+    rationale: "Decode one historical Proposal without execution authority",
+    assumptions: [],
+  });
+
+  assert.equal(
+    proposal.generation.kind === "workspace-generation"
+      ? proposal.generation.agent?.executionAuthority
+      : null,
+    undefined,
+  );
+  const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+  assert.ok(approved.plan);
+  assert.throws(
+    () => store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan!.id),
+    /exact non-secret generator execution authority/i,
+  );
+  assert.equal(
+    store.workspace.getGenerationPlanForProject(project.id, approved.plan.id).status,
+    "compile-failed",
   );
   store.close();
 });

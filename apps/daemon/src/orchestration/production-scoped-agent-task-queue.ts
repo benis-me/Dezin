@@ -1,13 +1,16 @@
 import type {
   CreateWorkspaceProposalInput,
   GenerationPlan,
+  Settings,
   ScopedAgentTurnRequestFacts,
   Store,
   RenderFrameSpec,
+  WorkspaceGenerationAgentSelection,
   WorkspaceGenerationDependencyPlan,
   WorkspaceGenerationPayload,
   WorkspaceGenerationResourceOperation,
 } from "../../../../packages/core/src/index.ts";
+import { getProvider } from "../../../../packages/agent/src/index.ts";
 import {
   BlockedContextError,
   ContextIntegrityError,
@@ -22,6 +25,19 @@ import type {
   ProductionScopedTaskReplayInput,
   ProductionScopedTaskQueuePort,
 } from "./production-agent-orchestrator.ts";
+import {
+  researchAgentCommand,
+  researchModel,
+  reviewerAgentCommand,
+  reviewerModel,
+} from "../run-policy.ts";
+import {
+  freezeWorkspaceGeneratorAgentSelection,
+  freezeWorkspaceReviewerAgentSelection,
+} from "./generation-execution-authority.ts";
+import {
+  workspaceMoodboardImageAuthority,
+} from "./moodboard-image-execution-authority.ts";
 
 const GENERATED_RESOURCE_KINDS = new Set(["research", "moodboard", "sharingan-capture"]);
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -72,6 +88,116 @@ function scopedTurnRequestFacts(request: AgentTurnRequest): ScopedAgentTurnReque
 
 function compareBinary(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));
+}
+
+function frozenScopedGenerationAuthorities(input: {
+  settings: Settings;
+  taskAgent: AgentTurnRequest["agent"];
+  hasGeneratedResearch: boolean;
+  hasGeneratedMoodboard: boolean;
+}): {
+  agent: WorkspaceGenerationAgentSelection;
+  reviewerAgent: WorkspaceGenerationAgentSelection;
+  researchAgent?: WorkspaceGenerationAgentSelection;
+  moodboardImageAuthority?: ReturnType<typeof workspaceMoodboardImageAuthority>;
+} {
+  const taskProvider = getProvider(input.taskAgent.command);
+  if (!taskProvider || taskProvider.id !== input.taskAgent.providerId) {
+    throw new ContextIntegrityError(
+      "Scoped generation Agent selection is unavailable or does not match its provider",
+    );
+  }
+  const taskSelection: WorkspaceGenerationAgentSelection = {
+    providerId: taskProvider.id,
+    command: input.taskAgent.command,
+    model: input.taskAgent.model,
+  };
+  const reviewerCommand = reviewerAgentCommand(input.settings, input.taskAgent.command);
+  const reviewerProvider = getProvider(reviewerCommand);
+  if (!reviewerProvider
+    || (reviewerProvider.id !== "claude"
+      && reviewerProvider.id !== "codebuddy"
+      && reviewerProvider.id !== "codex")) {
+    throw new ContextIntegrityError(
+      "Scoped generation reviewer must be Claude Code, CodeBuddy, or Codex",
+    );
+  }
+  const reviewerSelection: WorkspaceGenerationAgentSelection = {
+    providerId: reviewerProvider.id,
+    command: reviewerCommand,
+    model: reviewerModel(
+      input.settings,
+      input.taskAgent.model ?? undefined,
+      input.taskAgent.command,
+    ) ?? null,
+  };
+  let agent: WorkspaceGenerationAgentSelection;
+  let reviewerAgent: WorkspaceGenerationAgentSelection;
+  try {
+    agent = freezeWorkspaceGeneratorAgentSelection(input.settings, taskSelection);
+    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
+      input.settings,
+      reviewerSelection,
+      taskSelection,
+    );
+  } catch (error) {
+    throw new ContextIntegrityError(
+      `Scoped generation execution authority is invalid: ${String(error)}`,
+    );
+  }
+  let moodboardImageAuthority: ReturnType<typeof workspaceMoodboardImageAuthority> | undefined;
+  if (input.hasGeneratedMoodboard) {
+    try {
+      moodboardImageAuthority = workspaceMoodboardImageAuthority(input.settings);
+    } catch (error) {
+      throw new ContextIntegrityError(
+        `Scoped Moodboard image execution authority is invalid; enable one image provider with an exact endpoint, model, and credential in Settings and submit again: ${String(error)}`,
+      );
+    }
+  }
+  if (!input.hasGeneratedResearch) {
+    return {
+      agent,
+      reviewerAgent,
+      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+    };
+  }
+
+  const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
+  const researchProvider = getProvider(researchCommand);
+  if (!researchProvider || researchProvider.id !== "codex") {
+    throw new ContextIntegrityError(
+      "Scoped Research generation requires Codex as its frozen Research Agent",
+    );
+  }
+  if (researchProvider.id === reviewerProvider.id) {
+    throw new ContextIntegrityError(
+      "Scoped Research generation requires a reviewer independent from its Codex generator",
+    );
+  }
+  const researchSelection: WorkspaceGenerationAgentSelection = {
+    providerId: researchProvider.id,
+    command: researchCommand,
+    model: researchModel(
+      input.settings,
+      input.taskAgent.model ?? undefined,
+      input.taskAgent.command,
+    ) ?? null,
+  };
+  let researchAgent: WorkspaceGenerationAgentSelection;
+  try {
+    researchAgent = freezeWorkspaceGeneratorAgentSelection(input.settings, researchSelection);
+  } catch (error) {
+    throw new ContextIntegrityError(
+      `Scoped Research execution authority is invalid: ${String(error)}`,
+    );
+  }
+  return {
+    agent,
+    reviewerAgent,
+    researchAgent,
+    ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+  };
 }
 
 function renderFrames(
@@ -310,9 +436,23 @@ function proposalInput(
       "Workspace Snapshot or layout changed before the scoped Agent Task could be queued",
     );
   }
-  const generation = request.scope.type === "artifact"
+  const plannedGeneration = request.scope.type === "artifact"
     ? artifactGeneration(store, projectId, request, pack.id)
     : resourceGeneration(store, projectId, request, pack.id);
+  const authorities = frozenScopedGenerationAuthorities({
+    settings: store.getSettings(),
+    taskAgent: request.agent,
+    hasGeneratedResearch: plannedGeneration.resourceOperations.some((operation) => (
+      operation.kind === "research" && operation.revisionPolicy.kind === "generate"
+    )),
+    hasGeneratedMoodboard: plannedGeneration.resourceOperations.some((operation) => (
+      operation.kind === "moodboard" && operation.revisionPolicy.kind === "generate"
+    )),
+  });
+  const generation: WorkspaceGenerationPayload = {
+    ...plannedGeneration,
+    ...authorities,
+  };
   return {
     projectId,
     kind: "workspace-generation",

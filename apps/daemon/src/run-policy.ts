@@ -134,8 +134,17 @@ export function researchAgentCommand(settings: Settings, fallback: string): stri
   return settings.researchAgentCommand.trim() || fallback || settings.agentCommand || "claude";
 }
 
-export function researchModel(settings: Settings, fallback?: string): string | undefined {
-  return settings.researchModel.trim() || fallback || settings.model || undefined;
+export function researchModel(
+  settings: Settings,
+  fallback?: string,
+  fallbackCommand: string = settings.agentCommand,
+): string | undefined {
+  const command = researchAgentCommand(settings, fallbackCommand);
+  const configuredCommand = settings.researchAgentCommand.trim();
+  const configuredModel = settings.researchModel.trim();
+  if (configuredModel && (!configuredCommand || configuredCommand === command)) return configuredModel;
+  if (getProvider(fallbackCommand)?.id !== getProvider(command)?.id) return undefined;
+  return fallback || settings.model || undefined;
 }
 
 export function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {

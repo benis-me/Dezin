@@ -141,6 +141,13 @@ export default defineConfig({
             test: /node_modules[\\/](?:react|react-dom|scheduler|@dnd-kit|@preact[\\/]signals-core)[\\/]/,
             includeDependenciesRecursively: false,
           }, {
+            name: "agent-ui",
+            // Agent pickers and transcript rendering are the shared UI boundary
+            // for every generation surface. Keeping these small wrappers in one
+            // chunk avoids duplicate JSX/runtime imports without changing copy.
+            test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/](?:AgentMessageBody|AgentModelSelect(?:Content)?|AgentOutputText|Markdown)\.tsx|node_modules[\\/]streamdown[\\/]dist[\\/]highlighted-body-[^\\/]+\.js)$/,
+            includeDependenciesRecursively: false,
+          }, {
             name: "icons",
             // Keep the tree-shaken Lucide set in one shared dictionary instead of
             // repeating its runtime scaffolding across independently lazy screens.

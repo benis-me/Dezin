@@ -32,6 +32,7 @@ import type {
   WorkspaceProposal,
   WorkspaceProposalApprovalMode,
 } from "../../lib/api.ts";
+import { generationPlanFailureMessage } from "../generation/public-failure-message.ts";
 import type { ProposalChange, ProposalDiff } from "./proposal-diff.ts";
 
 export interface ProposalIssue {
@@ -367,8 +368,8 @@ export function ProposalReviewPanel({
 
   if (review.status === "idle") return null;
   const header = (
-    <StudioPanelHeader className="dezin-proposal-review__header gap-3 px-3">
-      <StudioHeaderIdentity className="min-w-0 flex-1">
+    <StudioPanelHeader className="dezin-proposal-review__header">
+      <StudioHeaderIdentity className="dezin-proposal-review__identity">
         <StudioHeaderCopy
           title="Workspace proposal"
           subtitle="Review queue"
@@ -412,16 +413,26 @@ export function ProposalReviewPanel({
     );
   }
   if (review.status === "approved" || review.status === "rejected" || review.status === "superseded") {
-    const result = review.status === "approved"
+    const compileFailure = review.status === "approved" && review.plan?.status === "compile-failed"
+      ? generationPlanFailureMessage(review.plan)
+      : null;
+    const result = compileFailure !== null
       ? {
-          label: "Proposal approved",
-          message: review.plan
-            ? "Generation is approved and ready to build."
-            : "Workspace structure was applied.",
-          technicalTitle: review.plan ? `Build plan ${review.plan.id}` : undefined,
-          Icon: Check,
+          label: "Proposal needs attention",
+          message: compileFailure,
+          technicalTitle: undefined,
+          Icon: AlertTriangle,
         }
-      : review.status === "rejected"
+      : review.status === "approved"
+        ? {
+            label: "Proposal approved",
+            message: review.plan
+              ? "Generation is approved and ready to build."
+              : "Workspace structure was applied.",
+            technicalTitle: review.plan ? `Build plan ${review.plan.id}` : undefined,
+            Icon: Check,
+          }
+        : review.status === "rejected"
         ? {
             label: "Proposal rejected",
             message: "No workspace changes were applied.",
@@ -437,7 +448,12 @@ export function ProposalReviewPanel({
     return (
       <section className="dezin-proposal-review" role="region" aria-label="Proposal review">
         {header}
-        <div className="dezin-proposal-review__result" data-result-state={review.status} role="status" aria-live="polite">
+        <div
+          className="dezin-proposal-review__result"
+          data-result-state={compileFailure !== null ? "compile-failed" : review.status}
+          role="status"
+          aria-live="polite"
+        >
           <result.Icon size={16} aria-hidden />
           <h2>{result.label}</h2>
           <p title={result.technicalTitle}>{result.message}</p>
@@ -498,7 +514,7 @@ export function ProposalReviewPanel({
           <div>
             <h3 ref={alertHeadingRef} tabIndex={-1}>Proposal base changed</h3>
             <p>This proposal is read-only. Review it against the current workspace before creating a replacement.</p>
-            <dl className="divide-y divide-border">
+            <dl className="dezin-proposal-review__conflicts">
               <StudioFactRow
                 label="Graph"
                 value={`${review.conflict.expectedGraphRevision} → ${review.conflict.actualGraphRevision}`}
@@ -534,7 +550,7 @@ export function ProposalReviewPanel({
           <span>Rationale</span>
           <Textarea
             aria-label="Proposal rationale"
-            className="min-h-[50px] resize-y"
+            className="dezin-proposal-review__textarea"
             value={rationale}
             readOnly={!editable}
             onChange={(event) => {
@@ -550,7 +566,7 @@ export function ProposalReviewPanel({
           <span>Assumptions <small>one per line</small></span>
           <Textarea
             aria-label="Proposal assumptions"
-            className="min-h-[50px] resize-y"
+            className="dezin-proposal-review__textarea"
             value={assumptions}
             readOnly={!editable}
             onChange={(event) => {
@@ -650,7 +666,7 @@ export function ProposalReviewPanel({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="h-auto min-h-[38px] w-full justify-start px-2 py-1.5 text-left aria-[current=true]:bg-surface-2 aria-[current=true]:text-foreground"
+                    className="dezin-proposal-review__change"
                     data-review-control
                     aria-label={reviewActionLabel(change, "Review")}
                     aria-current={active ? "true" : undefined}
@@ -667,7 +683,7 @@ export function ProposalReviewPanel({
                   </Button>
                   {editable ? (
                     <IconButton
-                      className="h-full min-h-[38px] w-full"
+                      className="dezin-proposal-review__rename"
                       aria-label={reviewActionLabel(change, "Revert")}
                       disabled={busy}
                       onClick={() => void revert(change, index)}
@@ -730,7 +746,7 @@ export function ProposalReviewPanel({
             type="button"
             variant="ghost"
             size="sm"
-            className="w-full"
+            className="dezin-proposal-review__approve"
             disabled={busy}
             onClick={() => void onReject()}
           >

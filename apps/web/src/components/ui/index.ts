@@ -49,6 +49,7 @@ export { Field } from "./Field.tsx";
 
 // Dezin-only helpers built on shadcn primitives
 export { IconButton, Kbd } from "./IconButton.tsx";
+export { StudioToolButton } from "./StudioToolButton.tsx";
 export { Spinner, Skeleton, Loading } from "./feedback.tsx";
 export { Picker, type PickerOption } from "./Picker.tsx";
 export { Segmented, type SegmentedOption } from "./SegmentedControl.tsx";

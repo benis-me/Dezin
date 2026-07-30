@@ -12,7 +12,12 @@ import type {
   SpawnInput,
   SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
-import { Store, type Settings } from "../../../packages/core/src/index.ts";
+import {
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+  Store,
+  type Settings,
+  type WorkspaceGenerationAgentSelection,
+} from "../../../packages/core/src/index.ts";
 import {
   ContextPackStore,
   createWorkspaceContextPackRepository,
@@ -27,6 +32,7 @@ import type {
   ProductionResourceAgentRequest,
   ProductionMoodboardImageRequest,
   ProductionMoodboardQualityRequest,
+  ProductionResearchEvidenceSelectionRequest,
   ProductionResearchGroundednessRequest,
   ProductionSharinganCaptureExportRequest,
   ProductionResourceGenerationScope,
@@ -37,6 +43,7 @@ import {
   RESEARCH_EVIDENCE_FETCH_POLICY,
 } from "../src/orchestration/production-resource-generators.ts";
 import { freezeResourceExecutionProfile } from "../src/orchestration/production-generation-context.ts";
+import { workspaceMoodboardImageAuthority } from "../src/orchestration/moodboard-image-execution-authority.ts";
 import {
   ProductionResourceRuntimeError,
   createProductionResourceRuntimePorts,
@@ -80,7 +87,34 @@ function scope(resourceKind: ProductionResourceGenerationScope["resourceKind"] =
   });
 }
 
-function executionProfile(kind: "research" | "moodboard", current: Settings) {
+function executionProfile(
+  kind: "research" | "moodboard",
+  current: Settings,
+  reviewer?: WorkspaceGenerationAgentSelection,
+) {
+  const moodboardImageSettings = kind === "moodboard"
+    ? (() => {
+        try {
+          workspaceMoodboardImageAuthority(current);
+          return current;
+        } catch {
+          // Agent-transport tests that do not exercise the image port still
+          // need one structurally valid, non-secret Moodboard image authority.
+          return {
+            ...current,
+            aiProviderId: "fal",
+            aiProviderEnabled: true,
+            aiProviderModels: "fal-ai/flux/dev",
+            aiProviderOrganization: "",
+            aiProviderProfiles: "",
+            imageApiBaseUrl: "https://images.example.test/v1",
+            imageApiKey: "test-image-key",
+            imageApiKeyConfigured: true,
+            imageModel: "fal-ai/flux/dev",
+          };
+        }
+      })()
+    : current;
   return freezeResourceExecutionProfile({
     ownership: {
       projectId: "project-1",
@@ -92,6 +126,11 @@ function executionProfile(kind: "research" | "moodboard", current: Settings) {
     resourceKind: kind,
     adapter: { id: `dezin.resource-adapter.${kind}`, version: 1, kind },
     settings: current,
+    ...(kind === "moodboard" ? { moodboardImageSettings } : {}),
+    ...(reviewer === undefined ? {} : { reviewer }),
+    ...(kind === "moodboard"
+      ? { moodboardImageAuthority: workspaceMoodboardImageAuthority(moodboardImageSettings) }
+      : {}),
   });
 }
 
@@ -120,6 +159,18 @@ function agentContextPack(
       },
       capabilityDescriptors: [],
       adapter: exactProfile.adapter,
+      ...(exactProfile.imageGeneration === null ? {} : {
+        moodboardImageAuthority: {
+          kind: "moodboard-image",
+          protocol: "dezin.workspace-moodboard-image-authority.v1",
+          providerId: exactProfile.imageGeneration.providerId,
+          baseUrl: exactProfile.imageGeneration.baseUrl,
+          model: exactProfile.imageGeneration.model,
+          apiVersion: exactProfile.imageGeneration.apiVersion,
+          credentialSource: exactProfile.imageGeneration.credentialSource,
+          credentialRequired: exactProfile.imageGeneration.credentialRequired,
+        },
+      }),
     },
     capabilities: [],
     qaProfile: {
@@ -191,8 +242,9 @@ function defaultAgentSettings(overrides: Partial<Settings> = {}): Settings {
 function agentRequest(
   signal = new AbortController().signal,
   currentSettings = defaultAgentSettings(),
+  reviewer?: WorkspaceGenerationAgentSelection,
 ): ProductionResourceAgentRequest {
-  const exactProfile = executionProfile("research", currentSettings);
+  const exactProfile = executionProfile("research", currentSettings, reviewer);
   const contextPack = agentContextPack("research", exactProfile);
   const exactScope = Object.freeze({ ...scope("research"), contextPackId: contextPack.id });
   return Object.freeze({
@@ -213,6 +265,100 @@ function agentRequest(
     callTimeoutMs: 7 * 60_000,
     signal,
   }) as ProductionResourceAgentRequest;
+}
+
+function groundednessRequest(
+  research: ProductionResourceAgentRequest,
+  supportReceiptIds: string | readonly string[],
+  exactScope: ProductionResearchGroundednessRequest["scope"] = research.scope,
+): ProductionResearchGroundednessRequest {
+  const exactSupportReceiptIds = typeof supportReceiptIds === "string"
+    ? [supportReceiptIds]
+    : [...supportReceiptIds];
+  return {
+    protocol: "dezin.research-groundedness-request.v1",
+    executionProfile: research.executionProfile,
+    scope: exactScope,
+    contextPack: research.contextPack,
+    claims: [{
+      findingId: "finding-1",
+      statement: "People verify status before acting.",
+      supports: exactSupportReceiptIds.map((supportReceiptId, index) => ({
+        supportReceiptId,
+        sourceId: `source-${index + 1}`,
+        quote: "People verify status before acting.",
+      })),
+    }],
+    callTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs,
+    signal: research.signal,
+  };
+}
+
+function evidenceSelectionRequest(
+  research: ProductionResourceAgentRequest,
+): ProductionResearchEvidenceSelectionRequest {
+  const sources = Object.freeze([
+    Object.freeze({
+      sourceId: "source-1",
+      queries: Object.freeze([
+        Object.freeze({
+          findingId: "finding-1",
+          supportIndex: 0,
+          statement: "People verify status before acting.",
+        }),
+        Object.freeze({
+          findingId: "finding-2",
+          supportIndex: 0,
+          statement: "Operators compare the current revision.",
+        }),
+      ]),
+      spans: Object.freeze([
+        Object.freeze({
+          spanId: `research-evidence-span-${"a".repeat(64)}`,
+          text: "People verify status before acting.",
+        }),
+        Object.freeze({
+          spanId: `research-evidence-span-${"b".repeat(64)}`,
+          text: "Operators compare the current revision.",
+        }),
+      ]),
+    }),
+    Object.freeze({
+      sourceId: "source-2",
+      queries: Object.freeze([
+        Object.freeze({
+          findingId: "finding-1",
+          supportIndex: 1,
+          statement: "People verify status before acting.",
+        }),
+      ]),
+      spans: Object.freeze([
+        Object.freeze({
+          spanId: `research-evidence-span-${"c".repeat(64)}`,
+          text: "The page discusses an adjacent topic but does not establish the statement.",
+        }),
+      ]),
+    }),
+  ]);
+  const catalogProtocol = "dezin.research-evidence-span-catalog.v1" as const;
+  const catalogHash = sha256(stableStringify({
+    protocol: catalogProtocol,
+    scope: research.scope,
+    sources,
+  }));
+  return Object.freeze({
+    protocol: "dezin.research-evidence-selection-request.v1",
+    executionProfile: research.executionProfile,
+    scope: research.scope,
+    contextPack: research.contextPack,
+    catalog: Object.freeze({
+      protocol: catalogProtocol,
+      catalogHash,
+      sources,
+    }),
+    callTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs,
+    signal: research.signal,
+  });
 }
 
 function researchAgentRequestWithPriorArt(
@@ -312,9 +458,10 @@ function moodboardAgentRequest(
     imageApiKey: "current-image-key",
     imageModel: "fal-ai/flux/dev",
   }),
+  reviewer?: WorkspaceGenerationAgentSelection,
 ): ProductionResourceAgentRequest {
-  const base = agentRequest(signal, currentSettings);
-  const exactProfile = executionProfile("moodboard", currentSettings);
+  const base = agentRequest(signal, currentSettings, reviewer);
+  const exactProfile = executionProfile("moodboard", currentSettings, reviewer);
   const contextPack = agentContextPack("moodboard", exactProfile);
   const exactScope = Object.freeze({ ...scope("moodboard"), contextPackId: contextPack.id });
   return Object.freeze({
@@ -459,6 +606,37 @@ async function withStore(
   }
 }
 
+test("production Research Agent fails closed before spawn when the frozen provider cannot supply Web Search", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings({
+      agentCommand: "claude",
+      model: "sonnet",
+      apiKey: "local-key",
+      apiBaseUrl: "https://byok.example/v1",
+      aiProviderId: "",
+      aiProviderProfiles: "",
+    });
+    const spawner = new RecordingSpawner({ stdout: "{}", stderr: "", exitCode: 0 });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      createSpawner: () => spawner,
+    });
+
+    await assert.rejects(
+      () => ports.agent.generateStructured(
+        agentRequest(new AbortController().signal, store.getSettings()),
+      ),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESOURCE_AGENT_CAPABILITY_UNAVAILABLE"
+        && error.failureClass === "adapter"
+        && /only configured Resource transport with Web Search/.test(error.message),
+    );
+    assert.equal(spawner.inputs.length, 0);
+  });
+});
+
 test("production Resource Agent uses the configured BYOK provider in one isolated bounded JSON-only turn", async () => {
   await withStore(async ({ root, store }) => {
     store.updateSettings({
@@ -466,10 +644,12 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
       model: "sonnet",
       apiKey: "local-key",
       apiBaseUrl: "https://byok.example/v1",
+      aiProviderId: "",
+      aiProviderProfiles: "",
     });
     const output = {
-      protocol: "dezin.research-generation.v3",
-      executiveSummary: "Evidence summary",
+      protocol: "dezin.moodboard-generation.v2",
+      assetSpecs: [],
     };
     const spawner = new RecordingSpawner({
       stdout: JSON.stringify(output),
@@ -491,7 +671,7 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
         return spawner;
       },
     });
-    const request = agentRequest(new AbortController().signal, store.getSettings());
+    const request = moodboardAgentRequest(new AbortController().signal, store.getSettings());
 
     const result = await ports.agent.generateStructured(request);
 
@@ -508,7 +688,7 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
     assert.equal(spawned.timeoutMs, 12_345);
     assert.equal(spawned.signal, request.signal);
     assert.match(spawned.stdin, /IMMUTABLE_TASK_JSON_UTF8_BYTES=/);
-    assert.match(spawned.stdin, /dezin\.research-generation-prompt\.v3/);
+    assert.match(spawned.stdin, /dezin\.moodboard-generation-prompt\.v2/);
     assert.equal(spawned.env?.ANTHROPIC_API_KEY, "local-key");
     assert.equal(spawned.env?.ANTHROPIC_BASE_URL, "https://byok.example/v1");
     assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
@@ -522,19 +702,16 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
     assert.equal(spawned.args.includes("standalone_web_search"), false);
     assert.ok(!spawned.args.some((argument) => /bypass|danger|yolo/i.test(argument)));
     assert.ok(spawned.args.join(" ").includes("JSON object only"));
-    assert.ok(spawned.args.join(" ").includes("dezin.research-generation.v3"));
-    assert.match(spawned.args.join(" "), /Each source: id, kind\(context\|web\|user\), title, locator, excerpt, binding, notes/);
-    assert.match(spawned.args.join(" "), /Web binding must be null/);
-    assert.match(spawned.args.join(" "), /contextPackId, contextPackHash, itemOrdinal, itemChecksum/);
+    assert.ok(spawned.args.join(" ").includes("dezin.moodboard-generation.v2"));
     assert.match(
       spawned.args.join(" "),
-      /directions must be a JSON array with 2-16 items/i,
-      "the prompt must expose the validator's direction cardinality instead of leaving it implicit",
+      /assetSpecs must be a JSON array with 1-8 items/i,
+      "the prompt must expose the validator's Asset cardinality instead of leaving it implicit",
     );
     assert.match(
       spawned.args.join(" "),
-      /visualLanguage must be a JSON array with 2-16 non-empty strings/i,
-      "the prompt must not invite a single prose visual-language value that the production contract rejects",
+      /Never return image bytes, base64, MIME, checksum, or pixel dimensions/i,
+      "the prompt must keep image generation behind the daemon port",
     );
     assert.deepEqual(spawnerOptions, [{
       timeoutMs: 12_345,
@@ -546,25 +723,78 @@ test("production Resource Agent uses the configured BYOK provider in one isolate
   });
 });
 
-test("production Resource Agent accepts one decision-grade repair inside the frozen Research v3 envelope", async () => {
+test("production Resource Agent default timeout follows the frozen generation deadline budget", async () => {
   await withStore(async ({ root, store }) => {
     store.updateSettings({
       agentCommand: "claude",
       model: "sonnet",
+    });
+    const spawner = new RecordingSpawner({
+      stdout: JSON.stringify({
+        protocol: "dezin.moodboard-generation.v2",
+        assetSpecs: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+    const spawnerOptions: NodeSpawnerOptions[] = [];
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      createSpawner(options) {
+        spawnerOptions.push(options);
+        return spawner;
+      },
+    });
+    const request = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+
+    await ports.agent.generateStructured(request);
+
+    assert.equal(
+      spawner.inputs[0]!.timeoutMs,
+      RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs,
+    );
+    assert.equal(
+      spawnerOptions[0]!.timeoutMs,
+      RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs,
+    );
+  });
+});
+
+test("production Resource Agent accepts one decision-grade repair inside the frozen Research v3 envelope", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
     });
     const output = {
       protocol: "dezin.research-generation.v3",
       executiveSummary: "Repaired evidence summary",
     };
     const spawner = new RecordingSpawner({
-      stdout: JSON.stringify(output),
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-resource-repair" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "message-resource-repair",
+            type: "agent_message",
+            text: JSON.stringify(output),
+          },
+        }),
+        JSON.stringify({ type: "turn.completed", usage: {} }),
+      ].join("\n"),
       stderr: "",
       exitCode: 0,
     });
     const ports = createProductionResourceRuntimePorts({
       store,
       dataDir: root,
-      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+      resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+      structuredAgentPlatform: "darwin",
+      resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
       createSpawner: () => spawner,
     });
     const baseRequest = agentRequest(new AbortController().signal, store.getSettings());
@@ -848,7 +1078,7 @@ test("production Resource Agent replays frozen semantics with only the exact pro
       aiProviderOrganization: "old-org",
       aiProviderProfiles: oldProfiles,
     });
-    const oldRequest = agentRequest(new AbortController().signal, store.getSettings());
+    const oldRequest = moodboardAgentRequest(new AbortController().signal, store.getSettings());
     store.updateSettings({
       agentCommand: "claude",
       model: "old-model",
@@ -879,7 +1109,7 @@ test("production Resource Agent replays frozen semantics with only the exact pro
     assert.deepEqual(result.generator, { id: "claude", model: "old-model" });
     assert.equal(spawner.inputs[0]!.command, TEST_CLAUDE_EXECUTABLE);
     assert.ok(spawner.inputs[0]!.args.includes("old-model"));
-    assert.equal(spawner.inputs[0]!.env?.ANTHROPIC_API_KEY, "rotated-generic-key");
+    assert.equal(spawner.inputs[0]!.env?.ANTHROPIC_API_KEY, "rotated-exact-provider-key");
     assert.equal(spawner.inputs[0]!.env?.ANTHROPIC_BASE_URL, "https://old.example/v1");
     assert.equal(spawner.inputs[0]!.env?.OPENAI_API_KEY, undefined);
   });
@@ -901,16 +1131,39 @@ test("production Resource Agent rejects provider, endpoint, organization, and cr
     }),
   });
   for (const [label, drift] of [
-    ["command/provider", { agentCommand: "codex", aiProviderId: "openai" }],
-    ["endpoint", { apiBaseUrl: "https://drifted.example/v1" }],
-    ["organization", { aiProviderOrganization: "drifted-org" }],
-    ["credential requirement and foreign profile key", {
+    ["credential source", {
+      agentCommand: "codex",
+      aiProviderId: "openai",
+      aiProviderProfiles: JSON.stringify({
+        openai: {
+          enabled: true, baseUrl: "", apiKey: "foreign-key",
+          models: "frozen-model", organization: "",
+        },
+      }),
+    }],
+    ["endpoint", {
+      aiProviderProfiles: JSON.stringify({
+        anthropic: {
+          enabled: true, baseUrl: "https://drifted.example/v1", apiKey: "current-key",
+          models: "frozen-model", organization: "frozen-org",
+        },
+      }),
+    }],
+    ["organization", {
+      aiProviderProfiles: JSON.stringify({
+        anthropic: {
+          enabled: true, baseUrl: "https://frozen.example/v1", apiKey: "current-key",
+          models: "frozen-model", organization: "drifted-org",
+        },
+      }),
+    }],
+    ["credential requirement", {
       apiKey: "",
       apiKeyConfigured: false,
       aiProviderProfiles: JSON.stringify({
         anthropic: {
           enabled: true, baseUrl: "https://frozen.example/v1",
-          apiKey: "provider-profile-key-must-not-be-relabeled-as-the-Agent-key", apiKeyConfigured: true,
+          apiKey: "", apiKeyConfigured: false,
           models: "frozen-model", organization: "frozen-org",
         },
       }),
@@ -918,7 +1171,7 @@ test("production Resource Agent rejects provider, endpoint, organization, and cr
   ] satisfies Array<readonly [string, Partial<Settings>]>) {
     await withStore(async ({ root, store }) => {
       store.updateSettings(frozenSettings);
-      const request = agentRequest(new AbortController().signal, store.getSettings());
+      const request = moodboardAgentRequest(new AbortController().signal, store.getSettings());
       store.updateSettings({ ...drift, apiKey: drift.apiKey ?? "current-key-must-not-cross" });
       const spawner = new RecordingSpawner({ stdout: "{}", stderr: "", exitCode: 0 });
       const ports = createProductionResourceRuntimePorts({
@@ -947,9 +1200,30 @@ test("production Resource Agent ignores live model drift and spawns with the fro
       apiKey: "frozen-key",
       aiProviderId: "anthropic",
       aiProviderOrganization: "frozen-org",
+      aiProviderProfiles: JSON.stringify({
+        anthropic: {
+          enabled: true,
+          baseUrl: "https://frozen.example/v1",
+          apiKey: "frozen-key",
+          models: "frozen-model",
+          organization: "frozen-org",
+        },
+      }),
     }));
-    const request = agentRequest(new AbortController().signal, store.getSettings());
-    store.updateSettings({ model: "drifted-model", apiKey: "rotated-exact-key" });
+    const request = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+    store.updateSettings({
+      model: "drifted-model",
+      apiKey: "generic-key-must-not-bind",
+      aiProviderProfiles: JSON.stringify({
+        anthropic: {
+          enabled: true,
+          baseUrl: "https://frozen.example/v1",
+          apiKey: "rotated-exact-key",
+          models: "drifted-live-model",
+          organization: "frozen-org",
+        },
+      }),
+    });
     const spawner = new RecordingSpawner({ stdout: "{}", stderr: "", exitCode: 0 });
     const ports = createProductionResourceRuntimePorts({
       store,
@@ -974,9 +1248,10 @@ test("production Resource Agent fails closed when the frozen provider credential
       model: "old-model",
       apiKey: "old-key-without-profile-copy",
       aiProviderId: "anthropic",
+      aiProviderEnabled: true,
       aiProviderProfiles: "",
     });
-    const request = agentRequest(new AbortController().signal, store.getSettings());
+    const request = moodboardAgentRequest(new AbortController().signal, store.getSettings());
     store.updateSettings({
       agentCommand: "codex",
       model: "new-model",
@@ -1121,6 +1396,58 @@ test("production Moodboard image port reuses the canonical image path only after
   });
 });
 
+test("production Moodboard image port passes materialized provider defaults without runtime fallback", async () => {
+  await withStore(async ({ root, store }) => {
+    store.updateSettings({
+      aiProviderId: "fal",
+      aiProviderEnabled: true,
+      aiProviderModels: "fal-ai/flux/dev",
+      aiProviderOrganization: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "current-image-key",
+      imageModel: "fal-ai/flux/dev",
+    });
+    const base = moodboardAgentRequest(new AbortController().signal, store.getSettings());
+    let observedProvider: any;
+    const expectedBytes = sharinganFixturePng(768, 512);
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      requestImage: async (provider) => {
+        observedProvider = provider;
+        return expectedBytes.toString("base64");
+      },
+    });
+
+    const result = await ports.moodboardImages.generateImage({
+      protocol: "dezin.moodboard-image-request.v1",
+      executionProfile: base.executionProfile,
+      scope: base.scope,
+      contextPack: base.contextPack,
+      asset: {
+        id: "asset-default-endpoint",
+        fileName: "default-endpoint.png",
+        prompt: "A precise editorial field report still life.",
+        caption: "Explicit default endpoint",
+        aspectRatio: "3:2",
+        referenceIds: [],
+      },
+      maxOutputBytes: 8 * 1024 * 1024,
+      callTimeoutMs: 90_000,
+      signal: base.signal,
+    });
+
+    assert.equal(observedProvider.baseUrl, "https://fal.run");
+    assert.equal(observedProvider.apiVersion, "");
+    assert.deepEqual(result.generator, {
+      providerId: "fal",
+      model: "fal-ai/flux/dev",
+      baseUrl: "https://fal.run",
+      apiVersion: "",
+    });
+  });
+});
+
 test("production Moodboard image port owns a finite per-call deadline and aborts the provider signal", async () => {
   await withStore(async ({ root, store }) => {
     store.updateSettings({
@@ -1229,7 +1556,8 @@ test("production Moodboard image port never sends a current key after frozen end
       await assert.rejects(
         () => ports.moodboardImages.generateImage(request),
         (error: unknown) => error instanceof ProductionResourceRuntimeError
-          && error.code === "MOODBOARD_IMAGE_PROVIDER_FAILED",
+          && error.code === "RESOURCE_RUNTIME_CONFIGURATION_INVALID"
+          && error.failureClass === "context",
       );
       assert.equal(providerCalled, false, JSON.stringify(drift));
     });
@@ -1262,7 +1590,11 @@ test("production Resource quality ports use the independent no-tools review tran
           text: JSON.stringify({
             verdicts: [{
               findingId: "finding-1", supported: true,
-              supportReceiptIds: [supportReceiptId], rationale: "The exact quote directly entails the statement.",
+              supportVerdicts: [{
+                supportReceiptId,
+                directlySupports: true,
+              }],
+              rationale: "The exact quote directly entails the statement.",
             }],
           }),
         };
@@ -1283,8 +1615,12 @@ test("production Resource quality ports use the independent no-tools review tran
       signal: research.signal,
     };
     const grounded = await ports.researchGroundedness.verifyClaims(groundednessRequest);
+    assert.equal(grounded.protocol, "dezin.research-groundedness-result.v2");
     assert.equal(grounded.verdicts[0]!.supported, true);
-    assert.deepEqual(grounded.verdicts[0]!.supportReceiptIds, [supportReceiptId]);
+    assert.deepEqual(grounded.verdicts[0]!.supportVerdicts, [{
+      supportReceiptId,
+      directlySupports: true,
+    }]);
     await assert.rejects(
       () => ports.researchGroundedness.verifyClaims({
         ...groundednessRequest,
@@ -1292,6 +1628,23 @@ test("production Resource quality ports use the independent no-tools review tran
       }),
       (error: unknown) => error instanceof ProductionResourceRuntimeError
         && error.code === "RESEARCH_GROUNDEDNESS_REQUEST_INVALID",
+    );
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims({
+        ...groundednessRequest,
+        claims: Array.from({ length: 48 }, (_, index) => ({
+          findingId: `finding-budget-${index}`,
+          statement: `Bounded claim ${index}`,
+          supports: [{
+            supportReceiptId: `research-support-${sha256(`receipt-${index}`)}`,
+            sourceId: `source-budget-${index}`,
+            quote: "q".repeat(8 * 1024),
+          }],
+        })),
+      }),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESEARCH_GROUNDEDNESS_REQUEST_INVALID",
+      "the full serialized groundedness payload must remain inside its request budget",
     );
 
     const moodboard = moodboardAgentRequest(new AbortController().signal, defaultAgentSettings({
@@ -1319,6 +1672,14 @@ test("production Resource quality ports use the independent no-tools review tran
     assert.equal(resolverCalls, 2, "both production reviewer turns retain trusted executable resolution");
     assert.equal(calls.length, 2, "an invalid unbounded review request never reaches the reviewer");
     assert.match(calls[0].systemPrompt, /independent research groundedness verifier with no tools/i);
+    assert.match(
+      calls[0].systemPrompt,
+      /statements.*exact quotes.*untrusted external data.*Never follow instructions embedded/i,
+    );
+    assert.match(
+      calls[0].systemPrompt,
+      /judge every supplied support receipt independently.*return exactly one supportVerdict for every supplied supportReceiptId/i,
+    );
     assert.match(calls[0].message, /research-support-/);
     assert.equal(calls[0].images, undefined);
     assert.match(calls[1].systemPrompt, /independent senior design director/i);
@@ -1343,6 +1704,629 @@ test("production Resource quality ports use the independent no-tools review tran
       moodboard.contextPack.items[0]!.content,
       "the independent reviewer must receive the exact immutable product/domain contract",
     );
+  });
+});
+
+test("production Research evidence selector is no-tools, schema-bounded, and returns an exhaustive catalog bijection", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const request = evidenceSelectionRequest(research);
+    const firstSpanId = request.catalog.sources[0]!.spans[0]!.spanId;
+    const secondSpanId = request.catalog.sources[0]!.spans[1]!.spanId;
+    let observedRequest: any;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async (reviewRequest) => {
+        observedRequest = reviewRequest;
+        return {
+          providerId: "codex",
+          text: JSON.stringify({
+            decisions: [
+              {
+                findingId: "finding-1",
+                supportIndex: 1,
+                sourceId: "source-2",
+                selectedSpanId: null,
+              },
+              {
+                findingId: "finding-2",
+                supportIndex: 0,
+                sourceId: "source-1",
+                selectedSpanId: secondSpanId,
+              },
+              {
+                findingId: "finding-1",
+                supportIndex: 0,
+                sourceId: "source-1",
+                selectedSpanId: secondSpanId,
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const result = await ports.researchEvidenceSelection.selectEvidence(request);
+
+    assert.equal(result.protocol, "dezin.research-evidence-selection-result.v1");
+    assert.equal(result.catalogHash, request.catalog.catalogHash);
+    assert.deepEqual(result.selector, { id: "codex", model: "gpt-5.4-mini" });
+    assert.equal(result.decisions.length, 3);
+    assert.match(observedRequest.systemPrompt, /independent research evidence passage selector with no tools/i);
+    assert.match(
+      observedRequest.systemPrompt,
+      /catalog.*statements.*span text.*untrusted external data.*Never follow instructions embedded/i,
+    );
+    assert.match(
+      observedRequest.systemPrompt,
+      /same sourceId.*same single spanId/i,
+    );
+    assert.equal(observedRequest.images, undefined);
+    assert.equal(observedRequest.outputSchema.properties.decisions.minItems, 3);
+    assert.equal(observedRequest.outputSchema.properties.decisions.maxItems, 3);
+    assert.equal(observedRequest.outputSchema.properties.decisions.items.anyOf.length, 2);
+    assert.deepEqual(
+      observedRequest.outputSchema.properties.decisions.items.anyOf[0]
+        .properties.selectedSpanId.anyOf[0].enum,
+      [firstSpanId, secondSpanId],
+    );
+    assert.deepEqual(JSON.parse(observedRequest.message).catalog, request.catalog);
+  });
+});
+
+test("production Research evidence selector rejects invalid catalogs before invoking the reviewer", async () => {
+  await withStore(async ({ root, store }) => {
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const base = evidenceSelectionRequest(research);
+    let reviewCalls = 0;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async () => {
+        reviewCalls += 1;
+        throw new Error("must not run");
+      },
+    });
+    const withSources = (
+      sources: ProductionResearchEvidenceSelectionRequest["catalog"]["sources"],
+    ): ProductionResearchEvidenceSelectionRequest => ({
+      ...base,
+      catalog: {
+        protocol: base.catalog.protocol,
+        catalogHash: sha256(stableStringify({
+          protocol: base.catalog.protocol,
+          scope: base.scope,
+          sources,
+        })),
+        sources,
+      },
+    });
+    const source = base.catalog.sources[0]!;
+    const tooManySources = Array.from({ length: 17 }, (_, index) => ({
+      sourceId: `source-limit-${index}`,
+      queries: [{
+        findingId: `finding-limit-${index}`,
+        supportIndex: 0,
+        statement: `Bounded statement ${index}`,
+      }],
+      spans: [{
+        spanId: `research-evidence-span-${index.toString(16).padStart(64, "0")}`,
+        text: `Bounded span ${index}`,
+      }],
+    }));
+    const oversizedSources = Array.from({ length: 8 }, (_, sourceIndex) => ({
+      sourceId: `source-budget-${sourceIndex}`,
+      queries: Array.from({ length: 8 }, (_, queryIndex) => ({
+        findingId: `finding-budget-${sourceIndex}-${queryIndex}`,
+        supportIndex: queryIndex,
+        statement: `Statement ${sourceIndex}-${queryIndex} ${"x".repeat(5_000)}`,
+      })),
+      spans: [{
+        spanId: `research-evidence-span-${(sourceIndex + 32).toString(16).padStart(64, "0")}`,
+        text: `Bounded span ${sourceIndex}`,
+      }],
+    }));
+    const tooManyQuerySources = Array.from({ length: 9 }, (_, sourceIndex) => ({
+      sourceId: `source-query-limit-${sourceIndex}`,
+      queries: Array.from({ length: 8 }, (_, queryIndex) => ({
+        findingId: `finding-query-limit-${sourceIndex}-${queryIndex}`,
+        supportIndex: queryIndex,
+        statement: `Bounded statement ${sourceIndex}-${queryIndex}`,
+      })),
+      spans: [{
+        spanId: `research-evidence-span-${(sourceIndex + 64).toString(16).padStart(64, "0")}`,
+        text: `Bounded span ${sourceIndex}`,
+      }],
+    }));
+    const tooManySpanSources = Array.from({ length: 9 }, (_, sourceIndex) => ({
+      sourceId: `source-span-limit-${sourceIndex}`,
+      queries: [{
+        findingId: `finding-span-limit-${sourceIndex}`,
+        supportIndex: 0,
+        statement: `Bounded statement ${sourceIndex}`,
+      }],
+      spans: Array.from({ length: 6 }, (_, spanIndex) => ({
+        spanId: `research-evidence-span-${(sourceIndex * 6 + spanIndex + 96)
+          .toString(16).padStart(64, "0")}`,
+        text: `Bounded span ${sourceIndex}-${spanIndex}`,
+      })),
+    }));
+    const invalidRequests = [
+      {
+        ...base,
+        catalog: { ...base.catalog, catalogHash: "f".repeat(64) },
+      },
+      withSources([...base.catalog.sources, source]),
+      withSources(tooManySources),
+      withSources(tooManyQuerySources),
+      withSources(tooManySpanSources),
+      withSources(oversizedSources),
+    ];
+
+    for (const invalidRequest of invalidRequests) {
+      await assert.rejects(
+        () => ports.researchEvidenceSelection.selectEvidence(invalidRequest),
+        (error: unknown) => error instanceof ProductionResourceRuntimeError
+          && error.code === "RESEARCH_EVIDENCE_SELECTION_REQUEST_INVALID"
+          && error.failureClass === "adapter",
+      );
+    }
+    assert.equal(reviewCalls, 0);
+  });
+});
+
+test("production Research evidence selector rejects missing, duplicate, substituted, and cross-source decisions", async () => {
+  const cases = [
+    {
+      label: "missing",
+      decisions: [
+        { findingId: "finding-1", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-2", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+      ],
+    },
+    {
+      label: "duplicate",
+      decisions: [
+        { findingId: "finding-1", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-1", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-1", supportIndex: 1, sourceId: "source-2", selectedSpanId: null },
+      ],
+    },
+    {
+      label: "substituted",
+      decisions: [
+        { findingId: "finding-unknown", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-2", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-1", supportIndex: 1, sourceId: "source-2", selectedSpanId: null },
+      ],
+    },
+    {
+      label: "cross-source",
+      decisions: [
+        {
+          findingId: "finding-1",
+          supportIndex: 0,
+          sourceId: "source-1",
+          selectedSpanId: `research-evidence-span-${"c".repeat(64)}`,
+        },
+        { findingId: "finding-2", supportIndex: 0, sourceId: "source-1", selectedSpanId: null },
+        { findingId: "finding-1", supportIndex: 1, sourceId: "source-2", selectedSpanId: null },
+      ],
+    },
+    {
+      label: "multiple-passages-one-source",
+      decisions: [
+        {
+          findingId: "finding-1",
+          supportIndex: 0,
+          sourceId: "source-1",
+          selectedSpanId: `research-evidence-span-${"a".repeat(64)}`,
+        },
+        {
+          findingId: "finding-2",
+          supportIndex: 0,
+          sourceId: "source-1",
+          selectedSpanId: `research-evidence-span-${"b".repeat(64)}`,
+        },
+        { findingId: "finding-1", supportIndex: 1, sourceId: "source-2", selectedSpanId: null },
+      ],
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    await withStore(async ({ root, store }) => {
+      const research = agentRequest(new AbortController().signal, store.getSettings());
+      const request = evidenceSelectionRequest(research);
+      let reviewCalls = 0;
+      const ports = createProductionResourceRuntimePorts({
+        store,
+        dataDir: root,
+        reviewTransport: async () => {
+          reviewCalls += 1;
+          return {
+            providerId: "claude",
+            text: JSON.stringify({ decisions: testCase.decisions }),
+          };
+        },
+      });
+
+      await assert.rejects(
+        () => ports.researchEvidenceSelection.selectEvidence(request),
+        (error: unknown) => error instanceof ProductionResourceRuntimeError
+          && error.code === "RESEARCH_EVIDENCE_SELECTION_FAILED"
+          && error.failureClass === "agent-transport",
+        testCase.label,
+      );
+      assert.equal(reviewCalls, 1, testCase.label);
+    });
+  }
+});
+
+test("production Research groundedness rejects incomplete, duplicate, substituted, inconsistent, or oversized verdicts", async () => {
+  const firstSupportReceiptId = `research-support-${"d".repeat(64)}`;
+  const secondSupportReceiptId = `research-support-${"e".repeat(64)}`;
+  const unknownSupportReceiptId = `research-support-${"f".repeat(64)}`;
+  const cases = [
+    {
+      label: "missing",
+      supported: true,
+      supportVerdicts: [{
+        supportReceiptId: firstSupportReceiptId,
+        directlySupports: true,
+      }],
+    },
+    {
+      label: "duplicate",
+      supported: true,
+      supportVerdicts: [
+        { supportReceiptId: firstSupportReceiptId, directlySupports: true },
+        { supportReceiptId: firstSupportReceiptId, directlySupports: false },
+      ],
+    },
+    {
+      label: "substituted",
+      supported: true,
+      supportVerdicts: [
+        { supportReceiptId: firstSupportReceiptId, directlySupports: true },
+        { supportReceiptId: unknownSupportReceiptId, directlySupports: false },
+      ],
+    },
+    {
+      label: "inconsistent",
+      supported: true,
+      supportVerdicts: [
+        { supportReceiptId: firstSupportReceiptId, directlySupports: false },
+        { supportReceiptId: secondSupportReceiptId, directlySupports: false },
+      ],
+    },
+    {
+      label: "oversized rationale",
+      supported: true,
+      supportVerdicts: [
+        { supportReceiptId: firstSupportReceiptId, directlySupports: true },
+        { supportReceiptId: secondSupportReceiptId, directlySupports: false },
+      ],
+      rationale: "r".repeat(513),
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    await withStore(async ({ root, store }) => {
+      let reviewCalls = 0;
+      const ports = createProductionResourceRuntimePorts({
+        store,
+        dataDir: root,
+        reviewTransport: async () => {
+          reviewCalls += 1;
+          return {
+            providerId: "claude",
+            text: JSON.stringify({
+              verdicts: [{
+                findingId: "finding-1",
+                supported: testCase.supported,
+                supportVerdicts: testCase.supportVerdicts,
+                rationale: "rationale" in testCase
+                  ? testCase.rationale
+                  : "This malformed verdict must fail closed.",
+              }],
+            }),
+          };
+        },
+      });
+      const research = agentRequest(new AbortController().signal, store.getSettings());
+
+      await assert.rejects(
+        () => ports.researchGroundedness.verifyClaims(groundednessRequest(
+          research,
+          [firstSupportReceiptId, secondSupportReceiptId],
+        )),
+        (error: unknown) => error instanceof ProductionResourceRuntimeError
+          && error.code === "RESEARCH_GROUNDEDNESS_REVIEW_FAILED"
+          && error.failureClass === "agent-transport",
+        testCase.label,
+      );
+      assert.equal(reviewCalls, 2, `${testCase.label} must remain invalid after the bounded retry`);
+    });
+  }
+});
+
+test("production Research groundedness reviewer retries one schema-invalid turn inside one immutable call deadline", async () => {
+  await withStore(async ({ root, store }) => {
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    const calls: any[] = [];
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async (request) => {
+        calls.push(request);
+        if (calls.length === 1) {
+          return { providerId: "claude", text: "{\"verdicts\":" };
+        }
+        return {
+          providerId: "claude",
+          text: JSON.stringify({
+            verdicts: [{
+              findingId: "finding-1",
+              supported: true,
+              supportVerdicts: [{
+                supportReceiptId,
+                directlySupports: true,
+              }],
+              rationale: "The exact quote directly entails the statement.",
+            }],
+          }),
+        };
+      },
+    });
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+
+    const result = await ports.researchGroundedness.verifyClaims(
+      groundednessRequest(research, supportReceiptId),
+    );
+
+    assert.equal(result.verdicts[0]!.supported, true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].remoteRetryMode, "caller-owned");
+    assert.equal(calls[1].remoteRetryMode, "caller-owned");
+    assert.ok(calls[0].timeoutMs <= RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs);
+    assert.ok(calls[1].timeoutMs <= calls[0].timeoutMs);
+  });
+});
+
+test("production Research groundedness owns at most two real provider attempts for fast retryable failures", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    const spawner = new RecordingSpawner({
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-groundedness-retry-budget" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "turn.failed",
+          error: { message: "HTTP 503 Service Unavailable" },
+        }),
+      ].join("\n"),
+      stderr: "",
+      exitCode: 1,
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      createSpawner: () => spawner,
+      resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+      structuredAgentPlatform: "darwin",
+      resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    });
+
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims(
+        groundednessRequest(research, supportReceiptId),
+      ),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESEARCH_GROUNDEDNESS_REVIEW_FAILED"
+        && error.details?.reasonCode === "upstream-unavailable"
+        && error.details?.retryable === true,
+    );
+
+    assert.equal(
+      spawner.inputs.length,
+      2,
+      "one caller-owned retry budget must cap real provider attempts across the complete review",
+    );
+    const firstTimeoutMs = spawner.inputs[0]!.timeoutMs;
+    const secondTimeoutMs = spawner.inputs[1]!.timeoutMs;
+    assert.ok(typeof firstTimeoutMs === "number");
+    assert.ok(typeof secondTimeoutMs === "number");
+    assert.ok(secondTimeoutMs <= firstTimeoutMs);
+  });
+});
+
+test("production Research groundedness spends the same two-attempt deadline on a real schema-invalid provider turn", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "claude",
+      model: "sonnet",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    let providerCalls = 0;
+    const spawner = new RecordingSpawner(async () => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { stdout: "{\"verdicts\":", stderr: "", exitCode: 0 };
+      }
+      return {
+        stdout: JSON.stringify({
+          verdicts: [{
+            findingId: "finding-1",
+            supported: true,
+            supportVerdicts: [{
+              supportReceiptId,
+              directlySupports: true,
+            }],
+            rationale: "The exact quote directly entails the statement.",
+          }],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      createSpawner: () => spawner,
+      resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
+    });
+
+    const result = await ports.researchGroundedness.verifyClaims(
+      groundednessRequest(research, supportReceiptId),
+    );
+
+    assert.equal(result.verdicts[0]!.supported, true);
+    assert.equal(spawner.inputs.length, 2);
+    const firstTimeoutMs = spawner.inputs[0]!.timeoutMs;
+    const secondTimeoutMs = spawner.inputs[1]!.timeoutMs;
+    assert.ok(typeof firstTimeoutMs === "number");
+    assert.ok(typeof secondTimeoutMs === "number");
+    assert.ok(
+      secondTimeoutMs < firstTimeoutMs,
+      "the second provider attempt must consume the first turn's elapsed time instead of extending the deadline",
+    );
+  });
+});
+
+test("production Research groundedness spends one real provider attempt on terminal quota exhaustion", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    const spawner = new RecordingSpawner({
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-groundedness-quota" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "turn.failed",
+          error: { message: "HTTP 429 quota exhausted" },
+        }),
+      ].join("\n"),
+      stderr: "",
+      exitCode: 1,
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      createSpawner: () => spawner,
+      resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+      structuredAgentPlatform: "darwin",
+      resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    });
+
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims(
+        groundednessRequest(research, supportReceiptId),
+      ),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESOURCE_AGENT_QUOTA_EXHAUSTED"
+        && error.details?.reasonCode === "quota-exhausted"
+        && error.details?.retryable === false,
+    );
+    assert.equal(spawner.inputs.length, 1);
+  });
+});
+
+test("production Research groundedness spends one review attempt on provider identity substitution", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    let reviewCalls = 0;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async () => {
+        reviewCalls += 1;
+        return {
+          providerId: "claude",
+          text: JSON.stringify({
+            verdicts: [{
+              findingId: "finding-1",
+              supported: true,
+              supportVerdicts: [{
+                supportReceiptId,
+                directlySupports: true,
+              }],
+              rationale: "This substituted provider result must not be accepted.",
+            }],
+          }),
+        };
+      },
+    });
+
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims(
+        groundednessRequest(research, supportReceiptId),
+      ),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESOURCE_REVIEW_PROVIDER_SUBSTITUTED",
+    );
+    assert.equal(reviewCalls, 1);
+  });
+});
+
+test("production Research groundedness rejects substituted scope before any real provider attempt", async () => {
+  await withStore(async ({ root, store }) => {
+    const current = defaultAgentSettings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+    });
+    store.updateSettings(current);
+    const research = agentRequest(new AbortController().signal, store.getSettings());
+    const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    const spawner = new RecordingSpawner({
+      stdout: "provider must not run",
+      stderr: "",
+      exitCode: 0,
+    });
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      createSpawner: () => spawner,
+      resolveRegisteredExecutable: () => TEST_CODEX_EXECUTABLE,
+      structuredAgentPlatform: "darwin",
+      resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
+    });
+
+    await assert.rejects(
+      () => ports.researchGroundedness.verifyClaims(groundednessRequest(
+        research,
+        supportReceiptId,
+        Object.freeze({ ...research.scope, taskId: "task-substituted" }),
+      )),
+      (error: unknown) => error instanceof ProductionResourceRuntimeError
+        && error.code === "RESEARCH_GROUNDEDNESS_REQUEST_INVALID",
+    );
+    assert.equal(spawner.inputs.length, 0);
   });
 });
 
@@ -1517,6 +2501,69 @@ test("production Moodboard reviewer preserves frozen Codex identity, confinement
   });
 });
 
+test("absolute Codex reviewer command survives profile validation and keeps host-login timeout and schema", async () => {
+  await withStore(async ({ root, store }) => {
+    const absoluteReviewer: WorkspaceGenerationAgentSelection = {
+      providerId: "codex",
+      command: "/trusted/bin/codex",
+      model: "gpt-5.4-mini",
+      executionAuthority: {
+        kind: "reviewer",
+        baseUrl: "",
+        credentialSource: "session" as const,
+        credentialRequired: false,
+      },
+    };
+    const current = defaultAgentSettings();
+    store.updateSettings(current);
+    const research = agentRequest(
+      new AbortController().signal,
+      store.getSettings(),
+      absoluteReviewer,
+    );
+    assert.deepEqual(research.executionProfile.reviewer, {
+      command: "/trusted/bin/codex",
+      providerId: "codex",
+      model: "gpt-5.4-mini",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: false,
+      credentialAuthority: null,
+    });
+
+    const supportReceiptId = `research-support-${"e".repeat(64)}`;
+    let observedRequest: any;
+    const ports = createProductionResourceRuntimePorts({
+      store,
+      dataDir: root,
+      reviewTransport: async (request) => {
+        observedRequest = request;
+        return {
+          providerId: "codex",
+          text: JSON.stringify({
+            verdicts: [{
+              findingId: "finding-1",
+              supported: true,
+              supportVerdicts: [{ supportReceiptId, directlySupports: true }],
+              rationale: "The exact quote directly entails the statement.",
+            }],
+          }),
+        };
+      },
+    });
+
+    const result = await ports.researchGroundedness.verifyClaims({
+      ...groundednessRequest(research, supportReceiptId),
+      callTimeoutMs: 5 * 60_000,
+    });
+
+    assert.equal(result.verdicts[0]?.supported, true);
+    assert.equal(observedRequest.command, "/trusted/bin/codex");
+    assert.equal(observedRequest.timeoutMs, 5 * 60_000);
+    assert.equal(observedRequest.outputSchema?.properties?.verdicts?.type, "array");
+  });
+});
+
 test("production Codex groundedness reviewer constrains the native JSONL terminal message to exact verdict fields", async () => {
   await withStore(async ({ root, store }) => {
     const current = defaultAgentSettings({
@@ -1550,7 +2597,10 @@ test("production Codex groundedness reviewer constrains the native JSONL termina
                 verdicts: [{
                   findingId: "finding-1",
                   supported: true,
-                  supportReceiptIds: [supportReceiptId],
+                  supportVerdicts: [{
+                    supportReceiptId,
+                    directlySupports: true,
+                  }],
                   rationale: "The exact quote directly entails the statement.",
                 }],
               }),
@@ -1594,9 +2644,21 @@ test("production Codex groundedness reviewer constrains the native JSONL termina
     assert.equal(observedSchema?.additionalProperties, false);
     assert.deepEqual(
       observedSchema?.properties.verdicts.items.required,
-      ["findingId", "supported", "supportReceiptIds", "rationale"],
+      ["findingId", "supported", "supportVerdicts", "rationale"],
     );
     assert.equal(observedSchema?.properties.verdicts.items.additionalProperties, false);
+    assert.deepEqual(
+      observedSchema?.properties.verdicts.items.properties.supportVerdicts.items.required,
+      ["supportReceiptId", "directlySupports"],
+    );
+    assert.equal(
+      observedSchema?.properties.verdicts.items.properties.supportVerdicts.items.additionalProperties,
+      false,
+    );
+    assert.equal(
+      observedSchema?.properties.verdicts.items.properties.rationale.maxLength,
+      512,
+    );
   });
 });
 
@@ -1630,13 +2692,13 @@ test("production Codex groundedness schema stays bounded at 256 claims and runti
       const schema = JSON.parse(schemaText) as Record<string, any>;
       observedSchemaBytes.push(Buffer.byteLength(schemaText, "utf8"));
       observedFindingSchemas.push(schema.properties.verdicts.items.properties.findingId);
-      const injectUnknownFindingId = invocation === 2;
+      const injectUnknownFindingId = invocation >= 2;
       const verdicts = claims.map((claim, index) => ({
         findingId: injectUnknownFindingId && index === 0
           ? "finding-unknown"
           : claim.findingId,
         supported: false,
-        supportReceiptIds: [],
+        supportVerdicts: [],
         rationale: "No supplied support receipt establishes this claim.",
       }));
       return {
@@ -1684,12 +2746,13 @@ test("production Codex groundedness schema stays bounded at 256 claims and runti
         && error.failureClass === "agent-transport",
       "a bounded transport schema must not replace exact runtime membership validation",
     );
-    assert.deepEqual(observedSchemaBytes.length, 2);
+    assert.deepEqual(observedSchemaBytes.length, 3);
     assert.ok(
       observedSchemaBytes.every((bytes) => bytes <= 64 * 1024),
       `groundedness schemas must stay within the Codex 64 KiB boundary: ${observedSchemaBytes.join(", ")}`,
     );
     assert.deepEqual(observedFindingSchemas, [
+      { type: "string", minLength: 1, maxLength: 256 },
       { type: "string", minLength: 1, maxLength: 256 },
       { type: "string", minLength: 1, maxLength: 256 },
     ]);
@@ -1942,10 +3005,12 @@ test("production Resource reviewer preserves terminal CodeBuddy quota semantics"
     store.updateSettings(current);
     const research = agentRequest(new AbortController().signal, store.getSettings());
     const supportReceiptId = `research-support-${"d".repeat(64)}`;
+    let reviewCalls = 0;
     const ports = createProductionResourceRuntimePorts({
       store,
       dataDir: root,
       reviewTransport: async () => {
+        reviewCalls += 1;
         throw new SafeStructuredAgentError(
           "quota-exhausted",
           "Structured Agent provider quota is exhausted",
@@ -1984,6 +3049,7 @@ test("production Resource reviewer preserves terminal CodeBuddy quota semantics"
         return true;
       },
     );
+    assert.equal(reviewCalls, 1, "terminal quota exhaustion must not consume a review retry");
   });
 });
 
@@ -2192,7 +3258,7 @@ test("production Research evidence degrades empty HTTP bodies to stable unavaila
 
 test("production Resource Agent rejects decorated, oversized, and failed CLI output", async () => {
   await withStore(async ({ root, store }) => {
-    const request = agentRequest();
+    const request = moodboardAgentRequest();
     for (const [output, code] of [
       [{ stdout: "result:\n{\"ok\":true}", stderr: "", exitCode: 0 }, "RESOURCE_AGENT_OUTPUT_INVALID"],
       [{ stdout: "x".repeat(request.maxOutputBytes + 1), stderr: "", exitCode: 0 }, "RESOURCE_AGENT_OUTPUT_BUDGET_EXCEEDED"],
@@ -2238,7 +3304,7 @@ test("production Resource Agent exposes only terminal quota failure metadata", a
     });
 
     await assert.rejects(
-      () => ports.agent.generateStructured(agentRequest(
+      () => ports.agent.generateStructured(moodboardAgentRequest(
         new AbortController().signal,
         store.getSettings(),
       )),
@@ -2276,7 +3342,7 @@ test("production Resource Agent preserves cancellation and cleans its isolated c
         assert.fail("aborted process must not resolve");
       }),
     });
-    const generation = ports.agent.generateStructured(agentRequest(controller.signal));
+    const generation = ports.agent.generateStructured(moodboardAgentRequest(controller.signal));
     controller.abort(reason);
     await assert.rejects(generation, (error: unknown) => error === reason);
     assert.equal(await lstat(isolatedCwd).catch(() => null), null);
@@ -2462,6 +3528,25 @@ function emptyGeneration() {
       providerId: "codebuddy" as const,
       command: "codebuddy" as const,
       model: "gpt-5.6-sol",
+      executionAuthority: {
+        kind: "generator" as const,
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "codebuddy",
+        credentialSource: "session" as const,
+        credentialRequired: false,
+      },
+    },
+    reviewerAgent: {
+      providerId: "codebuddy" as const,
+      command: "codebuddy" as const,
+      model: "gpt-5.6-sol",
+      executionAuthority: {
+        kind: "reviewer" as const,
+        baseUrl: "",
+        credentialSource: "session" as const,
+        credentialRequired: false,
+      },
     },
     resourceOperations: [],
     artifactPlans: [],
@@ -2617,7 +3702,13 @@ async function createBoundCapture(
       version: 1,
       kind: "sharingan-capture",
     },
-    settings: store.getSettings(),
+    settings: {
+      ...store.getSettings(),
+      agentCommand: "codebuddy",
+      model: "gpt-5.6-sol",
+      visualQaAgentCommand: "codebuddy",
+      visualQaModel: "gpt-5.6-sol",
+    },
   });
   const kernelContent = JSON.stringify({
     protocol: "dezin.generation-kernel-context.v1",

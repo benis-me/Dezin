@@ -1,58 +1,35 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import {
-  BookOpenText,
-  CircleCheck,
-  ImageOff,
   Images,
-  Link2,
   LoaderCircle,
   Orbit,
-  TriangleAlert,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useApi } from "../../../lib/api-context.tsx";
-import type { ResourceNodeRevisionPreview } from "../resource-node-preview.ts";
+import type {
+  ResourceNodeRevisionPreview,
+  ResourceNodeRevisionPreviewStatus,
+} from "../resource-node-preview.ts";
 import type { WorkspaceFlowNode } from "../workspace-graph-adapter.ts";
-
-type CoverLoadState =
-  | { status: "loading" }
-  | { status: "ready"; objectUrl: string }
-  | { status: "error" };
 
 function MoodboardCover({
   cover,
 }: {
   cover: NonNullable<Extract<ResourceNodeRevisionPreview, { kind: "moodboard" }>["cover"]>;
 }) {
-  const api = useApi();
-  const [state, setState] = useState<CoverLoadState>({ status: "loading" });
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let objectUrl: string | null = null;
-    setState({ status: "loading" });
-    void api.getResourceRevisionBlob(cover.path, controller.signal).then((blob) => {
-      if (controller.signal.aborted) return;
-      objectUrl = URL.createObjectURL(blob);
-      if (controller.signal.aborted) {
-        URL.revokeObjectURL(objectUrl);
-        objectUrl = null;
-        return;
-      }
-      setState({ status: "ready", objectUrl });
-    }).catch(() => {
-      if (!controller.signal.aborted) setState({ status: "error" });
-    });
+    const nextObjectUrl = URL.createObjectURL(cover.blob);
+    setObjectUrl(nextObjectUrl);
     return () => {
-      controller.abort();
-      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
+      URL.revokeObjectURL(nextObjectUrl);
     };
-  }, [api, cover.path]);
+  }, [cover.blob]);
 
-  if (state.status === "ready") {
+  if (objectUrl !== null) {
     return (
       <img
-        src={state.objectUrl}
+        src={objectUrl}
         alt={cover.alt}
         width={cover.width ?? undefined}
         height={cover.height ?? undefined}
@@ -61,16 +38,45 @@ function MoodboardCover({
       />
     );
   }
-  return state.status === "loading"
-    ? <LoaderCircle className="animate-spin" size={16} aria-label="Loading Moodboard cover" />
-    : <ImageOff size={16} aria-label="Moodboard cover unavailable" />;
+  return <LoaderCircle className="animate-spin" size={16} aria-label="Loading Moodboard cover" />;
 }
 
 function ResourceVisualPreview({
   preview,
+  status,
+  name,
+  onRetry,
 }: {
   preview: ResourceNodeRevisionPreview | null | undefined;
+  status: ResourceNodeRevisionPreviewStatus | null | undefined;
+  name: string;
+  onRetry?: () => void;
 }) {
+  if (status === "error") {
+    return (
+      <button
+        type="button"
+        className="nodrag nopan dezin-flow-resource__preview dezin-flow-resource__preview-empty dezin-flow-resource__preview-retry"
+        aria-label={`Retry ${name} preview`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRetry?.();
+        }}
+      >
+        Preview unavailable
+      </button>
+    );
+  }
+  if (status === "loading" || status === "refreshing") {
+    return (
+      <div className="dezin-flow-resource__preview dezin-flow-resource__preview-empty" role="status">
+        <LoaderCircle className="animate-spin" size={16} aria-hidden />
+        {status === "refreshing" ? "Refreshing preview" : "Loading preview"}
+      </div>
+    );
+  }
   if (preview?.kind === "moodboard") {
     return (
       <div
@@ -109,7 +115,7 @@ function ResourceVisualPreview({
   }
   return (
     <div className="dezin-flow-resource__glyph" aria-hidden>
-      <BookOpenText size={17} strokeWidth={1.45} />
+      <Orbit size={17} strokeWidth={1.45} />
     </div>
   );
 }
@@ -137,15 +143,25 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       : data.revisionId
         ? "Revision ready"
         : "Awaiting revision";
-  const statusLabel = generationLabel ?? (awaitingSelection ? `${qualityLabel} · choose direction` : qualityLabel);
-  const resourceKindLabel = data.resourcePreview?.kind === "research"
+  const previewLabel = data.resourcePreviewStatus === "error"
+    ? data.resourcePreview ? "Preview refresh failed" : "Preview unavailable"
+    : data.resourcePreviewStatus === "refreshing"
+      ? "Refreshing preview"
+      : data.resourcePreviewStatus === "loading"
+        ? "Loading preview"
+        : null;
+  const statusLabel = generationLabel
+    ?? (awaitingSelection ? `${qualityLabel} · choose direction` : qualityLabel);
+  const visibleStatusLabel = previewLabel ?? statusLabel;
+  const resourceKind = data.resourcePreview?.kind ?? data.resourceKind;
+  const resourceKindLabel = resourceKind === "research"
     ? "Research"
-    : data.resourcePreview?.kind === "moodboard"
+    : resourceKind === "moodboard"
       ? "Moodboard"
       : "Context resource";
-  const ResourceKindIcon = data.resourcePreview?.kind === "research"
-    ? BookOpenText
-    : data.resourcePreview?.kind === "moodboard"
+  const ResourceKindIcon = resourceKind === "research"
+    ? Orbit
+    : resourceKind === "moodboard"
       ? Images
       : Orbit;
   return (
@@ -157,12 +173,19 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
       data-resource-quality={data.resourceQualityState ?? undefined}
       data-awaiting-selection={awaitingSelection || undefined}
       data-generation-state={data.generationState}
-      data-resource-preview={data.resourcePreview?.kind}
-      title={data.generationMessage ?? undefined}
+      data-resource-preview={data.resourcePreview?.kind ?? (data.resourcePreviewStatus ? "pending" : undefined)}
+      title={data.generationMessage ?? (data.resourcePreviewStatus === "error" ? "Preview unavailable. Retry the exact Revision." : undefined)}
     >
       <Handle id="resource-target-left" type="target" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="resource-target-right" type="target" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
-      <ResourceVisualPreview preview={data.resourcePreview} />
+      <ResourceVisualPreview
+        preview={data.resourcePreview}
+        status={data.resourcePreviewStatus}
+        name={data.name}
+        onRetry={data.resourceId && data.onRetryResourcePreview
+          ? () => data.onRetryResourcePreview?.(data.resourceId!)
+          : undefined}
+      />
       <div className="dezin-flow-resource__copy">
         <span className="dezin-flow-card__kind">
           <ResourceKindIcon size={10} />
@@ -172,18 +195,13 @@ export function ResourceNode({ data, selected }: NodeProps<WorkspaceFlowNode>) {
         {!overview && (
           <div className="dezin-flow-card__meta">
             <span>{data.incomingCount + data.outgoingCount} relations</span>
-            <span>
-              {data.resourceQualityState === "grounded"
-                ? <CircleCheck size={10} aria-hidden />
-                : data.resourceQualityState === "needs-review"
-                  ? <TriangleAlert size={10} aria-hidden />
-                  : null}
-              {statusLabel}
+            <span data-state={data.resourceQualityState ?? data.generationState}>
+              <span>{statusLabel}</span>
+              {previewLabel ? <small data-state={data.resourcePreviewStatus}>{previewLabel}</small> : null}
             </span>
-            <span className="dezin-flow-resource__id"><Link2 size={10} /> {data.resourceId}</span>
           </div>
         )}
-        {overview && <span className="dezin-flow-card__overview-meta">{statusLabel}</span>}
+        {overview && <span className="dezin-flow-card__overview-meta">{visibleStatusLabel}</span>}
       </div>
       <Handle id="resource-source-left" type="source" position={Position.Left} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />
       <Handle id="resource-source-right" type="source" position={Position.Right} isConnectable={false} className="dezin-flow-handle dezin-flow-handle--routing" aria-hidden tabIndex={-1} style={{ visibility: "hidden" }} />

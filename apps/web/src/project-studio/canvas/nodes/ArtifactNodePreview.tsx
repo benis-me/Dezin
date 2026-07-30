@@ -1,30 +1,26 @@
 import { Component, ImageOff, LoaderCircle, PanelTop, RotateCcw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/index.ts";
-import type { ApiClient } from "../../../lib/api.ts";
+import { ApiError, type ApiClient } from "../../../lib/api.ts";
 import { useApi } from "../../../lib/api-context.tsx";
+import { withRequestDeadline } from "../../../lib/request-deadline.ts";
 import type { SemanticZoomLevel, WorkspaceFlowNodeData } from "../workspace-graph-adapter.ts";
 
 type ArtifactKind = "page" | "component";
 
-interface ThumbnailRequestState {
-  key: string;
-  status: "idle" | "loading" | "ready" | "error";
-  objectUrl: string | null;
-}
+type ThumbnailRequestState = readonly [
+  key: string,
+  status: "idle" | "loading" | "ready" | "error",
+  objectUrl: string | null,
+];
 
-const IDLE_REQUEST: ThumbnailRequestState = {
-  key: "idle",
-  status: "idle",
-  objectUrl: null,
-};
+const IDLE_REQUEST: ThumbnailRequestState = ["idle", "idle", null];
 
 interface ThumbnailCacheEntry {
-  status: "pending" | "ready";
-  blob: Blob | null;
+  pending: boolean;
   request: Promise<Blob>;
   controller: AbortController;
-  consumers: Set<symbol>;
+  consumers: number;
 }
 
 interface ThumbnailLease {
@@ -33,31 +29,35 @@ interface ThumbnailLease {
 }
 
 const MAX_CACHED_THUMBNAILS = 96;
+const THUMBNAIL_RETRY_DELAYS_MS = [300, 1_000] as const;
+const CANVAS_FAILURE_DETAIL_MAX_CHARS = 96;
 const thumbnailCacheByApi = new WeakMap<ApiClient, Map<string, ThumbnailCacheEntry>>();
+
+function boundedCanvasFailureDetail(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  if (normalized.length <= CANVAS_FAILURE_DETAIL_MAX_CHARS) return normalized;
+  return `${normalized.slice(0, CANVAS_FAILURE_DETAIL_MAX_CHARS - 1).trimEnd()}…`;
+}
 
 function thumbnailCacheKey(projectId: string, artifactId: string, revisionId: string): string {
   return `${projectId}\u0000${artifactId}\u0000${revisionId}`;
 }
 
 function thumbnailCache(api: ApiClient): Map<string, ThumbnailCacheEntry> {
-  const existing = thumbnailCacheByApi.get(api);
-  if (existing) return existing;
-  const created = new Map<string, ThumbnailCacheEntry>();
-  thumbnailCacheByApi.set(api, created);
-  return created;
+  const cache = thumbnailCacheByApi.get(api) ?? new Map<string, ThumbnailCacheEntry>();
+  thumbnailCacheByApi.set(api, cache);
+  return cache;
 }
 
 function trimThumbnailCache(cache: Map<string, ThumbnailCacheEntry>): void {
   while (cache.size > MAX_CACHED_THUMBNAILS) {
     const disposable = [...cache].find(([, entry]) => (
-      entry.status === "ready" || entry.consumers.size === 0
+      !entry.pending || entry.consumers === 0
     ));
     if (disposable === undefined) return;
     const [key, entry] = disposable;
     cache.delete(key);
-    if (entry.status === "pending" && !entry.controller.signal.aborted) {
-      entry.controller.abort();
-    }
+    if (entry.pending) entry.controller.abort();
   }
 }
 
@@ -80,10 +80,13 @@ function readThumbnail(
   } else {
     const controller = new AbortController();
     let created!: ThumbnailCacheEntry;
-    const request = api.getArtifactThumbnail(projectId, artifactId, revisionId, controller.signal)
+    const request = withRequestDeadline(
+      controller.signal,
+      "Thumbnail preparation timed out. Try again.",
+      (signal) => api.getArtifactThumbnail(projectId, artifactId, revisionId, signal),
+    )
       .then((blob) => {
-        created.status = "ready";
-        created.blob = blob;
+        created.pending = false;
         trimThumbnailCache(cache);
         return blob;
       }, (error: unknown) => {
@@ -91,40 +94,36 @@ function readThumbnail(
         throw error;
       });
     created = {
-      status: "pending",
-      blob: null,
+      pending: true,
       request,
       controller,
-      consumers: new Set(),
+      consumers: 0,
     };
     entry = created;
     cache.set(key, created);
     trimThumbnailCache(cache);
   }
 
-  const consumer = Symbol("thumbnail-consumer");
-  entry.consumers.add(consumer);
+  entry.consumers += 1;
   let released = false;
   return {
-    request: entry.status === "ready" && entry.blob !== null
-      ? Promise.resolve(entry.blob)
-      : entry.request,
+    request: entry.request,
     release: () => {
       if (released) return;
       released = true;
-      entry!.consumers.delete(consumer);
-      if (entry!.status !== "pending" || entry!.consumers.size !== 0) return;
+      entry!.consumers -= 1;
+      if (!entry!.pending || entry!.consumers !== 0) return;
       // Semantic zoom can tear down and recreate the same preview in one render turn.
       // Deferring cancellation preserves that shared request while still stopping work
       // as soon as the final real consumer leaves the canvas.
       queueMicrotask(() => {
         if (
-          entry!.status === "pending"
-          && entry!.consumers.size === 0
+          entry!.pending
+          && entry!.consumers === 0
           && cache.get(key) === entry
         ) {
           cache.delete(key);
-          if (!entry!.controller.signal.aborted) entry!.controller.abort();
+          entry!.controller.abort();
         }
       });
     },
@@ -136,9 +135,7 @@ function invalidateThumbnail(api: ApiClient, projectId: string, artifactId: stri
   const key = thumbnailCacheKey(projectId, artifactId, revisionId);
   const entry = cache.get(key);
   cache.delete(key);
-  if (entry?.status === "pending" && !entry.controller.signal.aborted) {
-    entry.controller.abort();
-  }
+  if (entry?.pending) entry.controller.abort();
 }
 
 export function ArtifactNodePreview({
@@ -177,6 +174,8 @@ export function ArtifactNodePreview({
     ? `${projectId}\u0000${artifactId}\u0000${revisionId}\u0000${attempt}`
     : "idle";
 
+  useEffect(() => setAttempt(0), [artifactId, projectId, revisionId]);
+
   useEffect(() => {
     if (!hasPublishedRevision || hasEnteredPreloadMargin) return;
     const preview = previewRef.current;
@@ -199,45 +198,58 @@ export function ArtifactNodePreview({
       return;
     }
     let objectUrl: string | null = null;
+    let retryTimer: number | null = null;
     let disposed = false;
     setLoadedObjectUrl(null);
     setFailedObjectUrl(null);
-    setRequest({ key: requestKey, status: "loading", objectUrl: null });
+    setRequest([requestKey, "loading", null]);
     const lease = readThumbnail(api, projectId, artifactId, revisionId);
     void lease.request
       .then((blob) => {
         if (disposed) return;
         objectUrl = URL.createObjectURL(blob);
-        setRequest({ key: requestKey, status: "ready", objectUrl });
+        setRequest([requestKey, "ready", objectUrl]);
       })
-      .catch(() => {
-        if (!disposed) {
-          setRequest({ key: requestKey, status: "error", objectUrl: null });
+      .catch((error: unknown) => {
+        if (disposed) return;
+        if (
+          attempt < THUMBNAIL_RETRY_DELAYS_MS.length
+          && error instanceof ApiError
+          && [404, 502, 503, 504].includes(error.status)
+        ) {
+          retryTimer = window.setTimeout(
+            () => setAttempt((value) => value + 1),
+            THUMBNAIL_RETRY_DELAYS_MS[attempt],
+          );
+          return;
         }
+        setRequest([requestKey, "error", null]);
       });
     return () => {
       disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       lease.release();
       if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
     };
   }, [api, artifactId, enabled, projectId, requestKey, revisionId]);
 
-  const visibleRequest = request.key === requestKey
+  const visibleRequest = request[0] === requestKey
     ? request
     : enabled
-      ? { key: requestKey, status: "loading" as const, objectUrl: null }
+      ? [requestKey, "loading", null] as const
       : IDLE_REQUEST;
-  const imageReady = visibleRequest.objectUrl !== null
-    && loadedObjectUrl === visibleRequest.objectUrl
-    && failedObjectUrl !== visibleRequest.objectUrl;
-  const imageFailed = visibleRequest.objectUrl !== null
-    && failedObjectUrl === visibleRequest.objectUrl;
+  const visibleObjectUrl = visibleRequest[2];
+  const imageReady = visibleObjectUrl !== null
+    && loadedObjectUrl === visibleObjectUrl
+    && failedObjectUrl !== visibleObjectUrl;
+  const imageFailed = visibleObjectUrl !== null
+    && failedObjectUrl === visibleObjectUrl;
   const unpublishedState = generationState === "awaiting-selection" || generationState === "idle"
     ? "empty"
     : generationState;
   const visualState = revisionId === null
       ? unpublishedState
-    : visibleRequest.status === "error" || imageFailed
+    : visibleRequest[1] === "error" || imageFailed
       ? "error"
       : imageReady
         ? "ready"
@@ -245,18 +257,17 @@ export function ArtifactNodePreview({
   const KindIcon = artifactKind === "page" ? PanelTop : Component;
   const kindLabel = artifactKind === "page" ? "Page" : "Component";
   const quietLoading = zoomLevel !== "full";
-  const previewMessage = useMemo(() => {
-    if (visualState === "empty") return "Not generated";
-    if (visualState === "queued") return "Queued for generation";
-    if (visualState === "running") return "Generating…";
-    if (visualState === "complete") return "Generated · syncing revision";
-    if (visualState === "failed") return "Generation failed";
-    if (visualState === "blocked") return "Blocked by dependency";
-    if (visualState === "cancelled") return "Generation cancelled";
-    if (visualState === "error") return "Preview unavailable";
-    if (visualState === "loading") return "Rendering preview…";
-    return null;
-  }, [generationState, visualState]);
+  const busy = visualState === "loading" || visualState === "queued" || visualState === "running";
+  const previewMessage = visualState === "empty" ? "Not generated"
+    : visualState === "queued" ? "Queued for generation"
+      : visualState === "running" ? "Generating…"
+        : visualState === "complete" ? "Generated · syncing revision"
+          : visualState === "failed" ? "Generation failed"
+            : visualState === "blocked" ? "Blocked by dependency"
+              : visualState === "cancelled" ? "Generation cancelled"
+                : visualState === "error" ? "Preview unavailable"
+                  : visualState === "loading" ? "Rendering preview…"
+                    : null;
 
   return (
     <div
@@ -266,20 +277,20 @@ export function ArtifactNodePreview({
       data-state={visualState}
       role="group"
       aria-label={`${kindLabel} preview for ${name}`}
-      aria-busy={visualState === "loading" || visualState === "queued" || visualState === "running" || undefined}
+      aria-busy={busy || undefined}
     >
-      {visibleRequest.objectUrl !== null && (
+      {visibleObjectUrl !== null && (
         <img
-          key={visibleRequest.objectUrl}
-          src={visibleRequest.objectUrl}
+          key={visibleObjectUrl}
+          src={visibleObjectUrl}
           alt={`${name} design preview`}
           draggable={false}
           decoding="async"
           width={280}
           height={160}
           data-ready={imageReady || undefined}
-          onLoad={() => setLoadedObjectUrl(visibleRequest.objectUrl)}
-          onError={() => setFailedObjectUrl(visibleRequest.objectUrl)}
+          onLoad={() => setLoadedObjectUrl(visibleObjectUrl)}
+          onError={() => setFailedObjectUrl(visibleObjectUrl)}
         />
       )}
       {zoomLevel === "overview" ? (
@@ -293,8 +304,9 @@ export function ArtifactNodePreview({
           className="dezin-flow-card__placeholder"
           data-state={visualState}
           data-motion={visualState === "loading" && quietLoading ? "quiet" : undefined}
+          title={generationMessage ?? undefined}
         >
-          {visualState === "loading" || visualState === "queued" || visualState === "running"
+          {busy
             ? quietLoading
               ? <KindIcon className="dezin-flow-card__preview-static" size={17} strokeWidth={1.5} aria-hidden />
               : <LoaderCircle className="dezin-flow-card__preview-spinner" size={17} strokeWidth={1.5} aria-hidden />
@@ -302,8 +314,11 @@ export function ArtifactNodePreview({
               ? <ImageOff size={17} strokeWidth={1.5} aria-hidden />
               : <KindIcon size={17} strokeWidth={1.5} aria-hidden />}
           <span>{previewMessage}</span>
-          {revisionId === null && generationMessage && zoomLevel === "full" ? (
-            <small title={generationMessage}>{generationMessage}</small>
+          {revisionId === null
+            && generationMessage
+            && zoomLevel === "full"
+            && visualState === "failed" ? (
+            <small title={generationMessage}>{boundedCanvasFailureDetail(generationMessage)}</small>
           ) : null}
           {visualState === "error" && (
             <Button

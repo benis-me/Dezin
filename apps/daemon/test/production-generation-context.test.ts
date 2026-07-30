@@ -878,7 +878,7 @@ test("production Context resolution freezes Task Snapshot pins including Researc
   assert.equal(targetItem.ref.kind, "inline");
   assert.equal(targetItem.ref.id, TARGET_ARTIFACT_ID);
   assert.match(targetItem.content, /Create a precise checkout flow/);
-  assert.match(targetItem.content, /dezin\.artifact-execution-profile\.v4/);
+  assert.match(targetItem.content, /dezin\.artifact-execution-profile\.v5/);
   assert.match(targetItem.content, new RegExp(frozenExecution.prompt.rendererProtocol.replaceAll(".", "\\.")));
   const frozenTarget = JSON.parse(targetItem.content) as Record<string, unknown>;
   assert.equal(frozenTarget.protocol, "dezin.generation-target-context.v3");
@@ -1162,7 +1162,7 @@ test("production Context resolution freezes Task Snapshot pins including Researc
     resourcePins: [],
     componentPins: [],
   };
-  let resourceModel = "gpt-5.4";
+  let researchModel = "gpt-5.4";
   const resourceResolver = new module.ProductionGenerationTaskContextResolver({
     workspace,
     packStore,
@@ -1178,15 +1178,19 @@ test("production Context resolution freezes Task Snapshot pins including Researc
       },
       resourceKind: "research",
       adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
-      settings: { ...executionProfile("unused").settings.value, model: resourceModel, apiKey: "resource-secret" },
+      settings: {
+        ...executionProfile("unused").settings.value,
+        researchModel,
+        apiKey: "resource-secret",
+      },
     }),
   });
   const resourceFirst = await resourceResolver.resolve(resourceTask, new AbortController().signal);
-  resourceModel = "gpt-5.5";
+  researchModel = "gpt-5.5";
   const resourceRematerialized = await resourceResolver.resolve(resourceTask, new AbortController().signal);
   assert.notEqual(resourceFirst.hash, resourceRematerialized.hash);
   assert.ok(resourceFirst.items.some((item) => item.contextClass === "target"
-    && item.content.includes("dezin.resource-execution-profile.v3")
+    && item.content.includes("dezin.resource-execution-profile.v4")
     && item.content.includes("dezin.research-generation-prompt.v3")));
   const resourceTarget = JSON.parse(resourceFirst.items.find(
     (item) => item.contextClass === "target",

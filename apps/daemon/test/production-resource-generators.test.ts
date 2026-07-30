@@ -6,7 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { deflateSync, inflateSync } from "node:zlib";
 
-import { Store } from "../../../packages/core/src/index.ts";
+import {
+  RESOURCE_GENERATION_DEADLINE_BUDGET,
+  Store,
+} from "../../../packages/core/src/index.ts";
 import {
   checksumBytes,
   estimateContextTokens,
@@ -20,10 +23,12 @@ import {
   createProductionResourceGenerationImplementations,
   type ProductionResourceAgentRequest,
   type ProductionResearchEvidencePort,
+  type ProductionResearchEvidenceSelectionPort,
   type ProductionResearchGroundednessPort,
   type ProductionSharinganCaptureExportRequest,
 } from "../src/orchestration/production-resource-generators.ts";
 import { freezeResourceExecutionProfile } from "../src/orchestration/production-generation-context.ts";
+import { workspaceMoodboardImageAuthority } from "../src/orchestration/moodboard-image-execution-authority.ts";
 import {
   ProductionResourceRuntimeError,
   createProductionResourceRuntimePorts,
@@ -286,6 +291,7 @@ function pack(
     model: "fal-ai/flux/dev",
   },
   reviewerModel = "",
+  reviewerCommand?: string,
 ): ContextPack {
   const title = kind === "research" ? "Climate product research" : kind === "moodboard" ? "Editorial moodboard" : "Exact capture";
   const instructions = kind === "research"
@@ -293,6 +299,21 @@ function pack(
     : kind === "moodboard"
       ? "Generate exactly three actionable visual references, one for each named direction."
       : "Capture the exact selected region and preserve its measured visual evidence.";
+  const profileSettings = {
+    agentCommand: "claude", model: reviewerModel, apiBaseUrl: "", apiKey: "",
+    defaultDesignSystemId: "modern-minimal", customInstructions: "", imageApiBaseUrl: imageProvider.baseUrl,
+    imageApiKey: imageConfigured ? "moodboard-image-secret" : "",
+    imageApiKeyConfigured: imageConfigured,
+    imageModel: imageConfigured ? imageProvider.model : "",
+    removeBackgroundModel: "", editRegionModel: "",
+    extractLayerModel: "", videoApiBaseUrl: "", videoApiKey: "", videoModel: "",
+    aiProviderId: imageProvider.providerId, aiProviderEnabled: true, aiProviderModels: imageProvider.model,
+    aiProviderOrganization: "", aiProviderProfiles: "", visualQaEnabled: false,
+    autoFixLiveRuntimeErrors: false, sharinganAffirmed: false,
+    visualQaAgentCommand: reviewerCommand ?? (kind === "research" ? "codex" : ""),
+    visualQaModel: "", researchEnabled: true, researchAgentCommand: "", researchModel: "",
+    autoImproveEnabled: true, autoImproveMaxRounds: 2,
+  };
   const executionProfile = freezeResourceExecutionProfile({
     ownership: {
       projectId: "project-1",
@@ -303,20 +324,10 @@ function pack(
     },
     resourceKind: kind,
     adapter: { id: `dezin.resource-adapter.${kind}`, version: 1, kind },
-    settings: {
-      agentCommand: "claude", model: reviewerModel, apiBaseUrl: "", apiKey: "",
-      defaultDesignSystemId: "modern-minimal", customInstructions: "", imageApiBaseUrl: imageProvider.baseUrl,
-      imageApiKey: imageConfigured ? "moodboard-image-secret" : "",
-      imageApiKeyConfigured: imageConfigured,
-      imageModel: imageConfigured ? imageProvider.model : "",
-      removeBackgroundModel: "", editRegionModel: "",
-      extractLayerModel: "", videoApiBaseUrl: "", videoApiKey: "", videoModel: "",
-      aiProviderId: imageProvider.providerId, aiProviderEnabled: true, aiProviderModels: imageProvider.model,
-      aiProviderOrganization: "", aiProviderProfiles: "", visualQaEnabled: false,
-      autoFixLiveRuntimeErrors: false, sharinganAffirmed: false, visualQaAgentCommand: "",
-      visualQaModel: "", researchEnabled: true, researchAgentCommand: "", researchModel: "",
-      autoImproveEnabled: true, autoImproveMaxRounds: 2,
-    },
+    settings: profileSettings,
+    ...(kind === "moodboard" && imageConfigured
+      ? { moodboardImageAuthority: workspaceMoodboardImageAuthority(profileSettings) }
+      : {}),
   });
   const targetContent = stableStringify({
     protocol: "dezin.generation-target-context.v2",
@@ -340,6 +351,18 @@ function pack(
       },
       capabilityDescriptors: [{ id: "browser", kind: "browser", required: true }],
       adapter: executionProfile.adapter,
+      ...(executionProfile.imageGeneration === null ? {} : {
+        moodboardImageAuthority: {
+          kind: "moodboard-image",
+          protocol: "dezin.workspace-moodboard-image-authority.v1",
+          providerId: executionProfile.imageGeneration.providerId,
+          baseUrl: executionProfile.imageGeneration.baseUrl,
+          model: executionProfile.imageGeneration.model,
+          apiVersion: executionProfile.imageGeneration.apiVersion,
+          credentialSource: executionProfile.imageGeneration.credentialSource,
+          credentialRequired: executionProfile.imageGeneration.credentialRequired,
+        },
+      }),
     },
     capabilities: ["browser"],
     qaProfile: {
@@ -575,7 +598,10 @@ function exactPackForId(_workspaceId: string, id: string): ContextPack | null {
   return null;
 }
 
-function input(kind: ResourceGenerationAdapterInput["resourceKind"]): ResourceGenerationAdapterInput {
+function input(
+  kind: ResourceGenerationAdapterInput["resourceKind"],
+  reportProgress?: ResourceGenerationAdapterInput["reportProgress"],
+): ResourceGenerationAdapterInput {
   const instructions = kind === "research"
     ? "Compare exactly three evidence-backed directions and recommend one with explicit tradeoffs."
     : kind === "moodboard"
@@ -609,9 +635,10 @@ function input(kind: ResourceGenerationAdapterInput["resourceKind"]): ResourceGe
       },
     },
     capabilityDescriptors: [{ id: "browser", kind: "browser", required: true }],
-    taskTimeoutMs: 25 * 60_000,
+    taskTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs,
     maxRepairRounds: 0,
     maxOutputBytes: kind === "moodboard" ? 48 * 1024 * 1024 : 8 * 1024 * 1024,
+    ...(reportProgress === undefined ? {} : { reportProgress }),
     signal: new AbortController().signal,
   } as ResourceGenerationAdapterInput;
 }
@@ -715,7 +742,7 @@ function groundedResearchVerifier(supported = true): ProductionResearchGroundedn
   return {
     async verifyClaims(request) {
       return {
-        protocol: "dezin.research-groundedness-result.v1",
+        protocol: "dezin.research-groundedness-result.v2",
         scope: request.scope,
         verifier: {
           id: request.executionProfile.reviewer.providerId,
@@ -726,9 +753,72 @@ function groundedResearchVerifier(supported = true): ProductionResearchGroundedn
         verdicts: request.claims.map((claim) => ({
           findingId: claim.findingId,
           supported: supported && claim.supports.length > 0,
-          supportReceiptIds: supported ? claim.supports.map((support) => support.supportReceiptId) : [],
+          supportVerdicts: claim.supports.map((support) => ({
+            supportReceiptId: support.supportReceiptId,
+            directlySupports: supported,
+          })),
           rationale: supported ? "The exact quotes directly support this statement." : "The quotes are adjacent but do not directly support this statement.",
         })),
+      };
+    },
+  };
+}
+
+function canonicalMismatchEvidencePort(
+  canonicalBySource: ReadonlyMap<string, string>,
+): ProductionResearchEvidencePort {
+  return {
+    async retrieveWebEvidence(request) {
+      const canonicalText = canonicalBySource.get(request.sourceId);
+      assert.ok(canonicalText, `missing canonical fixture for ${request.sourceId}`);
+      const sourceBytes = Buffer.from(`<p>${canonicalText}</p>`, "utf8");
+      const canonicalBytes = Buffer.from(canonicalText, "utf8");
+      return {
+        protocol: "dezin.research-web-evidence-representation.v2",
+        scope: request.scope,
+        sourceId: request.sourceId,
+        requestedUrl: request.requestedUrl,
+        finalUrl: request.requestedUrl,
+        retrievedAt: 1_234,
+        status: 200,
+        source: {
+          mimeType: "text/html",
+          byteLength: sourceBytes.byteLength,
+          checksum: sha256(sourceBytes),
+          bytes: sourceBytes,
+        },
+        canonicalText: {
+          mimeType: "text/plain; charset=utf-8",
+          byteLength: canonicalBytes.byteLength,
+          checksum: sha256(canonicalBytes),
+          extractor: { id: "dezin.html-visible-text", version: 1 },
+          bytes: canonicalBytes,
+        },
+      };
+    },
+  };
+}
+
+function firstSpanResearchEvidenceSelector(): ProductionResearchEvidenceSelectionPort {
+  return {
+    async selectEvidence(request) {
+      return {
+        protocol: "dezin.research-evidence-selection-result.v1",
+        scope: request.scope,
+        catalogHash: request.catalog.catalogHash,
+        selector: {
+          id: request.executionProfile.reviewer.providerId,
+          ...(request.executionProfile.reviewer.model === null
+            ? {}
+            : { model: request.executionProfile.reviewer.model }),
+        },
+        decisions: request.catalog.sources.flatMap((source) =>
+          source.queries.map((query) => ({
+            findingId: query.findingId,
+            supportIndex: query.supportIndex,
+            sourceId: source.sourceId,
+            selectedSpanId: source.spans[0]?.spanId ?? null,
+          }))),
       };
     },
   };
@@ -856,11 +946,14 @@ function moodboardImplementation(
     readonly maxOutputBytes: number;
     readonly asset: { readonly id: string };
   }) => void,
+  observeAgentRequest?: (request: ProductionResourceAgentRequest) => void,
+  getContextPack: typeof exactPackForId = exactPackForId,
 ) {
   return createProductionResourceGenerationImplementations({
-    contextPacks: { get: exactPackForId },
+    contextPacks: { get: getContextPack },
     agent: {
       async generateStructured(request) {
+        observeAgentRequest?.(request);
         return {
           protocol: "dezin.resource-agent-result.v1",
           scope: request.scope,
@@ -1017,7 +1110,7 @@ test("Research generation consumes one exact Context Pack and emits structured t
     evidenceDirectionCount: 2,
     hypothesisDirectionCount: 0,
     decisionGradeGate: {
-      protocol: "dezin.research-decision-grade-gate.v1",
+      protocol: "dezin.research-decision-grade-gate.v2",
       criteria: {
         minimumVerifiedWebSourceCount: 2,
         minimumEvidenceFindingCount: 2,
@@ -1027,7 +1120,7 @@ test("Research generation consumes one exact Context Pack and emits structured t
       observed: {
         verifiedWebSourceCount: 2,
         evidenceFindingCount: 3,
-        evidenceDirectionCount: 2,
+        evidenceDirectionCount: 1,
         groundednessVerifierAvailable: true,
       },
       accepted: true,
@@ -1040,14 +1133,15 @@ test("Research generation consumes one exact Context Pack and emits structured t
   assert.deepEqual(result.evidence.unverifiedSourceIds, []);
   assert.deepEqual(result.evidence.receiptChecksums, bundle.receipts.map((receipt: any) => receipt.checksum));
   assert.deepEqual(result.provenance.researchEvidence, {
-    protocol: "dezin.research-evidence-provenance.v2",
+    protocol: "dezin.research-evidence-provenance.v3",
     verifiedSourceCount: 3,
     unverifiedSourceCount: 0,
     evidenceFindingCount: 3,
     hypothesisFindingCount: 0,
     receiptIds: bundle.receipts.map((receipt: any) => receipt.id),
     supportReceiptIds: bundle.supportReceipts.map((receipt: any) => receipt.id),
-    groundednessVerifier: { id: "claude" },
+    evidenceSelector: null,
+    groundednessVerifier: { id: "codex" },
   });
   assert.equal(requests.length, 1);
   assert.equal(requests[0]!.protocol, "dezin.resource-agent-request.v1");
@@ -1200,6 +1294,7 @@ test("Research generation consumes one exact Context Pack and emits structured t
 
 test("Research performs one bounded same-provider repair from an explicit decision-grade rejection audit", async () => {
   const requests: ProductionResourceAgentRequest[] = [];
+  const progress: string[] = [];
   const evidenceAttempts = new Map<string, number>();
   const verifiedEvidence = verifiedResearchEvidence();
   const implementations = createProductionResourceGenerationImplementations({
@@ -1228,10 +1323,14 @@ test("Research performs one bounded same-provider repair from an explicit decisi
         return verifiedEvidence.retrieveWebEvidence(request);
       },
     },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: groundedResearchVerifier(),
   });
 
-  const result = await implementations.research!(input("research"));
+  const result = await implementations.research!(input(
+    "research",
+    (phase) => { progress.push(phase); },
+  ));
   assert.equal(result.metadata.qualityState, "grounded");
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1]!.executionProfile.agent, requests[0]!.executionProfile.agent);
@@ -1268,12 +1367,12 @@ test("Research performs one bounded same-provider repair from an explicit decisi
   assert.deepEqual(repairPrompt.repair.rejectionAudit.gate.observed, {
     verifiedWebSourceCount: 1,
     evidenceFindingCount: 3,
-    evidenceDirectionCount: 2,
+    evidenceDirectionCount: 0,
     groundednessVerifierAvailable: true,
   });
   assert.deepEqual(
     repairPrompt.repair.rejectionAudit.gate.blockers,
-    ["insufficient-verified-web-sources"],
+    ["insufficient-verified-web-sources", "insufficient-evidence-directions"],
   );
   assert.deepEqual(
     repairPrompt.repair.rejectionAudit.sources.find(
@@ -1301,6 +1400,835 @@ test("Research performs one bounded same-provider repair from an explicit decisi
   assert.equal("receipts" in repairPrompt.repair.candidateBundle, false);
   assert.equal("supportReceipts" in repairPrompt.repair.candidateBundle, false);
   assert.doesNotMatch(requests[1]!.message, /"(?:supportReceipts|receipts)"/);
+  assert.deepEqual(progress, [
+    "generating",
+    "verifying-sources",
+    "reviewing",
+    "repairing",
+    "verifying-sources",
+    "reviewing",
+    "reviewing",
+  ]);
+});
+
+test("Research deterministically repairs preserved Web Search excerpts from exact unique support quotes", async () => {
+  const requests: ProductionResourceAgentRequest[] = [];
+  const retrievals = new Map<string, number>();
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Primary accessibility guidance requires meaningful text alternatives and warns that decorative images should not carry essential information. This canonical paragraph is intentionally long enough to become a bounded repair option.",
+    ],
+    [
+      "source-web-2",
+      "Primary visualisation guidance recommends choosing chart forms for the comparison task, labelling values clearly, and explaining uncertainty beside the evidence. This separate canonical paragraph creates an independent evidence identity.",
+    ],
+  ]);
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: researchDraft(),
+          };
+        }
+        const prompt = JSON.parse(request.message) as any;
+        const repaired = structuredClone(researchDraft());
+        const optionBySource = new Map<string, any>();
+        for (const option of prompt.repair.canonicalWebExcerptOptions) {
+          if (!optionBySource.has(option.sourceId)) optionBySource.set(option.sourceId, option);
+        }
+        for (const source of repaired.sources.filter((item) => item.kind === "web")) {
+          const option = optionBySource.get(source.id);
+          assert.ok(option, `missing canonical option for ${source.id}`);
+          assert.equal(
+            source.excerpt,
+            researchDraft().sources.find((candidate) => candidate.id === source.id)!.excerpt,
+            "the repair does not copy a long excerpt or trust a model-supplied checksum",
+          );
+        }
+        for (const finding of repaired.findings) {
+          for (const support of finding.supports) {
+            const option = optionBySource.get(support.sourceId);
+            if (option) support.quote = option.text.slice(0, 96);
+          }
+        }
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: repaired,
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        retrievals.set(request.sourceId, (retrievals.get(request.sourceId) ?? 0) + 1);
+        const canonicalText = canonicalBySource.get(request.sourceId)!;
+        const canonicalBytes = Buffer.from(canonicalText, "utf8");
+        const sourceBytes = Buffer.from(`<main>${canonicalText}</main>`, "utf8");
+        return {
+          protocol: "dezin.research-web-evidence-representation.v2",
+          scope: request.scope,
+          sourceId: request.sourceId,
+          requestedUrl: request.requestedUrl,
+          finalUrl: request.requestedUrl,
+          retrievedAt: 1_000,
+          status: 200,
+          source: {
+            mimeType: "text/html",
+            byteLength: sourceBytes.byteLength,
+            checksum: sha256(sourceBytes),
+            bytes: sourceBytes,
+          },
+          canonicalText: {
+            mimeType: "text/plain; charset=utf-8",
+            byteLength: canonicalBytes.byteLength,
+            checksum: sha256(canonicalBytes),
+            extractor: { id: "dezin.html-visible-text", version: 1 },
+            bytes: canonicalBytes,
+          },
+        };
+      },
+    },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: groundedResearchVerifier(),
+  });
+
+  const result = await implementations.research!(input("research"));
+  assert.equal(result.metadata.qualityState, "grounded");
+  assert.equal(
+    "canonicalExcerptRepairDiagnostics" in result.evidence,
+    false,
+    "accepted grounded repair output must not expose rejection-only diagnostics",
+  );
+  assert.equal(requests.length, 2);
+  assert.equal(retrievals.get("source-web-1"), 2);
+  assert.equal(retrievals.get("source-web-2"), 2);
+  const repairPrompt = JSON.parse(requests[1]!.message) as any;
+  const options = repairPrompt.repair.canonicalWebExcerptOptions as any[];
+  assert.ok(options.length >= 2 && options.length <= 24);
+  assert.ok(Buffer.byteLength(stableStringify(options), "utf8") <= 48 * 1_024);
+  assert.match(requests[1]!.systemPrompt, /untrusted read-only data/i);
+  assert.match(requests[1]!.systemPrompt, /all support quotes.*exactly one trusted option/i);
+  assert.match(requests[1]!.systemPrompt, /checksum reference.*daemon-owned option/i);
+  assert.match(requests[1]!.systemPrompt, /independently re-fetch.*exact offsets.*groundedness verifier/i);
+  for (const option of options) {
+    assert.equal(option.protocol, "dezin.research-canonical-excerpt-option.v1");
+    assert.equal(option.requestedUrl, researchDraft().sources.find((source) => source.id === option.sourceId)!.locator);
+    assert.equal(option.canonicalUrl, option.requestedUrl);
+    assert.equal(option.canonicalTextChecksum, sha256(Buffer.from(canonicalBySource.get(option.sourceId)!, "utf8")));
+    assert.equal(option.utf8End - option.utf8Start, Buffer.byteLength(option.text, "utf8"));
+    assert.ok(Buffer.byteLength(option.text, "utf8") <= 1_024);
+    const { checksum, ...identity } = option;
+    assert.equal(checksum, sha256(stableStringify(identity)));
+  }
+  const persistedBundle = Buffer.from(result.bytes).toString("utf8");
+  assert.doesNotMatch(persistedBundle, /canonical-excerpt-option/);
+  assert.doesNotMatch(persistedBundle, /canonical-web-source-lineage/);
+});
+
+test("Research exposes only anonymous repair diagnostics when a changed exact substring stays unbound", async () => {
+  const requests: ProductionResourceAgentRequest[] = [];
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Primary accessibility guidance requires meaningful text alternatives and warns that decorative images should not carry essential information. This canonical paragraph is intentionally long enough to become a bounded repair option.",
+    ],
+    [
+      "source-web-2",
+      "Primary visualisation guidance recommends choosing chart forms for the comparison task, labelling values clearly, and explaining uncertainty beside the evidence. This separate canonical paragraph creates an independent evidence identity.",
+    ],
+  ]);
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: researchDraft(),
+          };
+        }
+        const prompt = JSON.parse(request.message) as any;
+        const repaired = structuredClone(researchDraft());
+        const optionBySource = new Map<string, any>();
+        for (const option of prompt.repair.canonicalWebExcerptOptions) {
+          if (!optionBySource.has(option.sourceId)) optionBySource.set(option.sourceId, option);
+        }
+        for (const source of repaired.sources.filter((item) => item.kind === "web")) {
+          const option = optionBySource.get(source.id);
+          assert.ok(option);
+          source.excerpt = source.id === "source-web-1"
+            ? option.text.slice(0, 96)
+            : option.text;
+          if (source.id === "source-web-1") assert.notEqual(source.excerpt, option.text);
+        }
+        for (const finding of repaired.findings) {
+          for (const support of finding.supports) {
+            const option = optionBySource.get(support.sourceId);
+            if (option) support.quote = option.text.slice(0, 64);
+          }
+        }
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: repaired,
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        const canonicalText = canonicalBySource.get(request.sourceId)!;
+        const canonicalBytes = Buffer.from(canonicalText, "utf8");
+        const sourceBytes = Buffer.from(`<main>${canonicalText}</main>`, "utf8");
+        return {
+          protocol: "dezin.research-web-evidence-representation.v2",
+          scope: request.scope,
+          sourceId: request.sourceId,
+          requestedUrl: request.requestedUrl,
+          finalUrl: request.requestedUrl,
+          retrievedAt: 1_000,
+          status: 200,
+          source: {
+            mimeType: "text/html",
+            byteLength: sourceBytes.byteLength,
+            checksum: sha256(sourceBytes),
+            bytes: sourceBytes,
+          },
+          canonicalText: {
+            mimeType: "text/plain; charset=utf-8",
+            byteLength: canonicalBytes.byteLength,
+            checksum: sha256(canonicalBytes),
+            extractor: { id: "dezin.html-visible-text", version: 1 },
+            bytes: canonicalBytes,
+          },
+        };
+      },
+    },
+    researchGroundedness: groundedResearchVerifier(),
+  });
+
+  const result = await implementations.research!(input("research"));
+  assert.equal(result.metadata.qualityState, "needs-review");
+  const diagnostics = (result.evidence as any).canonicalExcerptRepairDiagnostics as any[];
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => Object.keys(diagnostic).sort()),
+    Array.from({ length: 2 }, () => [
+      "candidateExcerptByteLength",
+      "candidateExcerptIdentityHash",
+      "canonicalTextChecksumSameAsFirstPass",
+      "canonicalUrlSameAsFirstPass",
+      "decision",
+      "matchingOptionCount",
+      "optionCount",
+      "quoteCount",
+      "receiptReason",
+      "requestedUrlHash",
+      "requestedUrlSameAsFirstPass",
+      "selectedOptionIdentityHash",
+      "sourceIdSameAsFirstPass",
+      "sourceIdentityHash",
+    ]),
+  );
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.decision),
+    ["changed-unresolved", "exact-option-hit"],
+  );
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.optionCount),
+    [1, 1],
+  );
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.quoteCount).sort((left, right) => left - right),
+    [1, 3],
+  );
+  assert.ok(diagnostics.every((diagnostic) =>
+    /^[a-f0-9]{64}$/.test(diagnostic.candidateExcerptIdentityHash)
+    && /^[a-f0-9]{64}$/.test(diagnostic.sourceIdentityHash)
+    && /^[a-f0-9]{64}$/.test(diagnostic.requestedUrlHash)
+    && diagnostic.sourceIdSameAsFirstPass === true
+    && diagnostic.requestedUrlSameAsFirstPass === true
+    && diagnostic.canonicalUrlSameAsFirstPass === true
+    && diagnostic.canonicalTextChecksumSameAsFirstPass === true));
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => ({
+      matchingOptionCount: diagnostic.matchingOptionCount,
+      candidateExcerptByteLength: diagnostic.candidateExcerptByteLength,
+      selected: diagnostic.selectedOptionIdentityHash === null ? null : "sha256",
+      receiptReason: diagnostic.receiptReason,
+    })),
+    [
+      {
+        matchingOptionCount: 0,
+        candidateExcerptByteLength: 96,
+        selected: null,
+      receiptReason: "binding-unavailable",
+      },
+      {
+        matchingOptionCount: 1,
+        candidateExcerptByteLength: Buffer.byteLength(canonicalBySource.get("source-web-2")!, "utf8"),
+        selected: "sha256",
+        receiptReason: "binding-unavailable",
+      },
+    ],
+  );
+  assert.match(diagnostics[1]!.selectedOptionIdentityHash, /^[a-f0-9]{64}$/);
+  const firstRepairOptions = (JSON.parse(requests[1]!.message) as any)
+    .repair.canonicalWebExcerptOptions as any[];
+  const serializedDiagnostics = stableStringify(diagnostics);
+  for (const source of researchDraft().sources.filter((item) => item.kind === "web")) {
+    assert.doesNotMatch(serializedDiagnostics, new RegExp(source.id));
+    assert.equal(serializedDiagnostics.includes(source.locator), false);
+    assert.equal(serializedDiagnostics.includes(source.excerpt), false);
+  }
+  for (const canonicalText of canonicalBySource.values()) {
+    assert.equal(serializedDiagnostics.includes(canonicalText), false);
+  }
+  for (const option of firstRepairOptions) {
+    assert.equal(
+      serializedDiagnostics.includes(option.checksum),
+      false,
+      "global canonical option checksums must never be persisted in diagnostics",
+    );
+  }
+
+  requests.length = 0;
+  const secondResult = await implementations.research!({
+    ...input("research"),
+    attempt: input("research").attempt + 1,
+  });
+  assert.equal(secondResult.metadata.qualityState, "needs-review");
+  const secondDiagnostics = (secondResult.evidence as any)
+    .canonicalExcerptRepairDiagnostics as any[];
+  assert.equal(secondDiagnostics.length, diagnostics.length);
+  for (let index = 0; index < diagnostics.length; index += 1) {
+    assert.notEqual(
+      secondDiagnostics[index]!.candidateExcerptIdentityHash,
+      diagnostics[index]!.candidateExcerptIdentityHash,
+      "the same candidate excerpt must have a different identity hash in another Attempt",
+    );
+    assert.notEqual(secondDiagnostics[index]!.sourceIdentityHash, diagnostics[index]!.sourceIdentityHash);
+    assert.notEqual(secondDiagnostics[index]!.requestedUrlHash, diagnostics[index]!.requestedUrlHash);
+  }
+  assert.notEqual(
+    secondDiagnostics[1]!.selectedOptionIdentityHash,
+    diagnostics[1]!.selectedOptionIdentityHash,
+    "the same selected canonical option must have a different identity hash in another Attempt",
+  );
+  const secondRepairOptions = (JSON.parse(requests[1]!.message) as any)
+    .repair.canonicalWebExcerptOptions as any[];
+  assert.equal(
+    secondRepairOptions.find((option) => option.sourceId === "source-web-2").checksum,
+    firstRepairOptions.find((option) => option.sourceId === "source-web-2").checksum,
+    "the test must exercise the same global option identity across Attempts",
+  );
+});
+
+test("Research canonical repair never lexically promotes forged, ambiguous, or drifted authority", async () => {
+  for (const mode of [
+    "wrong-source",
+    "tampered-text",
+    "one-char-mutation",
+    "forged-checksum",
+    "zero-quote-match",
+    "ambiguous-quote",
+    "canonical-url-drift",
+    "canonical-text-drift",
+  ] as const) {
+    const requests: ProductionResourceAgentRequest[] = [];
+    const retrievals = new Map<string, number>();
+    const canonicalBySource = new Map([
+      [
+        "source-web-1",
+        mode === "ambiguous-quote"
+          ? ["A", "B", "C", "D"].map((marker) =>
+              `Repeated authoritative clause supports the finding exactly. ${marker.repeat(1_400)}`)
+            .join("\n")
+          : "Canonical source one contains a sufficiently long exact paragraph for bounded repair and independent verification.",
+      ],
+      ["source-web-2", "Canonical source two contains a different sufficiently long paragraph for bounded repair and independent verification."],
+    ]);
+    const implementations = createProductionResourceGenerationImplementations({
+      contextPacks: { get: exactPackForId },
+      agent: {
+        async generateStructured(request) {
+          requests.push(request);
+          if (requests.length === 1) {
+            return {
+              protocol: "dezin.resource-agent-result.v1",
+              scope: request.scope,
+              generator: { id: "claude" },
+              output: researchDraft(),
+            };
+          }
+          const prompt = JSON.parse(request.message) as any;
+          const repaired = structuredClone(researchDraft());
+          const options = prompt.repair.canonicalWebExcerptOptions as any[];
+          const first = options.find((option) => option.sourceId === "source-web-1");
+          const second = options.find((option) => option.sourceId === "source-web-2");
+          repaired.sources.find((source) => source.id === "source-web-1")!.excerpt =
+            mode === "tampered-text"
+              ? `${first.text} changed`
+              : mode === "one-char-mutation"
+                ? `${first.text.slice(0, -1)}${first.text.endsWith("X") ? "Y" : "X"}`
+              : mode === "forged-checksum"
+                ? `dezin-canonical-excerpt-option:${"f".repeat(64)}`
+              : mode === "ambiguous-quote" || mode === "zero-quote-match"
+                ? researchDraft().sources.find((source) => source.id === "source-web-1")!.excerpt
+              : mode === "wrong-source"
+                ? second.text
+                : first.text;
+          repaired.sources.find((source) => source.id === "source-web-2")!.excerpt = second.text;
+          for (const finding of repaired.findings) {
+            for (const support of finding.supports) {
+              if ((mode === "ambiguous-quote" || mode === "zero-quote-match")
+                && support.sourceId === "source-web-1") {
+                support.quote = mode === "ambiguous-quote"
+                  ? "Repeated authoritative clause"
+                  : "Quote absent from every bounded canonical option.";
+                continue;
+              }
+              const source = support.sourceId === "source-web-1" ? first
+                : support.sourceId === "source-web-2" ? second
+                  : null;
+              if (source) support.quote = source.text.slice(0, 64);
+            }
+          }
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: repaired,
+          };
+        },
+      },
+      researchEvidence: {
+        async retrieveWebEvidence(request) {
+          const retrieval = (retrievals.get(request.sourceId) ?? 0) + 1;
+          retrievals.set(request.sourceId, retrieval);
+          const originalCanonicalText = canonicalBySource.get(request.sourceId)!;
+          const canonicalText = mode === "canonical-text-drift"
+            && request.sourceId === "source-web-1"
+            && retrieval === 2
+            ? `Changed canonical preface. ${originalCanonicalText}`
+            : originalCanonicalText;
+          const finalUrl = mode === "canonical-url-drift"
+            && request.sourceId === "source-web-1"
+            && retrieval === 2
+            ? `${request.requestedUrl}?revision=2`
+            : request.requestedUrl;
+          const canonicalBytes = Buffer.from(canonicalText, "utf8");
+          const sourceBytes = Buffer.from(`<main>${canonicalBytes.toString("utf8")}</main>`, "utf8");
+          return {
+            protocol: "dezin.research-web-evidence-representation.v2",
+            scope: request.scope,
+            sourceId: request.sourceId,
+            requestedUrl: request.requestedUrl,
+            finalUrl,
+            retrievedAt: 1_000,
+            status: 200,
+            source: {
+              mimeType: "text/html",
+              byteLength: sourceBytes.byteLength,
+              checksum: sha256(sourceBytes),
+              bytes: sourceBytes,
+            },
+            canonicalText: {
+              mimeType: "text/plain; charset=utf-8",
+              byteLength: canonicalBytes.byteLength,
+              checksum: sha256(canonicalBytes),
+              extractor: { id: "dezin.html-visible-text", version: 1 },
+              bytes: canonicalBytes,
+            },
+          };
+        },
+      },
+      researchGroundedness: groundedResearchVerifier(),
+    });
+
+    if (mode === "forged-checksum") {
+      await assert.rejects(
+        () => implementations.research!(input("research")),
+        (error: unknown) => error instanceof ProductionResourceGenerationError
+          && error.code === "RESOURCE_GENERATOR_OUTPUT_INVALID"
+          && /unavailable canonical excerpt option/i.test(error.message),
+      );
+      continue;
+    }
+    const result = await implementations.research!(input("research"));
+    assert.equal(result.metadata.qualityState, "needs-review", mode);
+    assert.equal((result.metadata.decisionGradeGate as any).accepted, false, mode);
+    assert.ok(
+      (result.metadata.decisionGradeGate as any).blockers.includes("insufficient-verified-web-sources"),
+      mode,
+    );
+    const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+    assert.equal(
+      bundle.receipts.find((receipt: any) => receipt.sourceId === "source-web-1").reason,
+      "binding-unavailable",
+      mode,
+    );
+  }
+});
+
+test("Research canonical repair lineage cannot be bypassed by source renames or URL aliases", async () => {
+  for (const mode of [
+    "source-rename",
+    "canonical-url-alias",
+    "rename-canonical-drift",
+  ] as const) {
+    const requests: ProductionResourceAgentRequest[] = [];
+    const original = researchDraft();
+    const originalSource = original.sources.find((source) => source.id === "source-web-1")!;
+    const canonicalByOriginalSource = new Map([
+      [
+        "source-web-1",
+        "Canonical source one contains a sufficiently long exact paragraph for bounded repair and independent verification.",
+      ],
+      [
+        "source-web-2",
+        "Canonical source two contains a different sufficiently long paragraph for bounded repair and independent verification.",
+      ],
+    ]);
+    const renamedSourceId = "source-web-1-repaired";
+    const aliasUrl = "https://alias.example.org/research/source-one";
+    const implementations = createProductionResourceGenerationImplementations({
+      contextPacks: { get: exactPackForId },
+      agent: {
+        async generateStructured(request) {
+          requests.push(request);
+          if (requests.length === 1) {
+            return {
+              protocol: "dezin.resource-agent-result.v1",
+              scope: request.scope,
+              generator: { id: "claude" },
+              output: structuredClone(original),
+            };
+          }
+          const prompt = JSON.parse(request.message) as any;
+          const options = prompt.repair.canonicalWebExcerptOptions as any[];
+          const first = options.find((option) => option.sourceId === "source-web-1");
+          const second = options.find((option) => option.sourceId === "source-web-2");
+          assert.ok(first);
+          assert.ok(second);
+          const repaired = structuredClone(original);
+          const source = repaired.sources.find((candidate) => candidate.id === "source-web-1")!;
+          source.id = renamedSourceId;
+          source.locator = mode === "canonical-url-alias" ? aliasUrl : originalSource.locator;
+          source.excerpt = first.text;
+          repaired.sources.find((candidate) => candidate.id === "source-web-2")!.excerpt = second.text;
+          for (const finding of repaired.findings) {
+            for (const support of finding.supports) {
+              if (support.sourceId === "source-web-1") {
+                support.sourceId = renamedSourceId;
+                support.quote = first.text.slice(0, 64);
+              } else if (support.sourceId === "source-web-2") {
+                support.quote = second.text.slice(0, 64);
+              }
+            }
+          }
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: repaired,
+          };
+        },
+      },
+      researchEvidence: {
+        async retrieveWebEvidence(request) {
+          const firstPass = requests.length === 1;
+          const isFirstSource = request.sourceId === "source-web-1"
+            || request.sourceId === renamedSourceId;
+          const originalCanonicalText = canonicalByOriginalSource.get(
+            isFirstSource ? "source-web-1" : request.sourceId,
+          )!;
+          const canonicalText = !firstPass
+            && isFirstSource
+            && mode === "rename-canonical-drift"
+            ? `Changed canonical preface. ${originalCanonicalText}`
+            : originalCanonicalText;
+          const finalUrl = !firstPass && isFirstSource
+            ? mode === "canonical-url-alias"
+              ? originalSource.locator
+              : mode === "rename-canonical-drift"
+                ? `${originalSource.locator}?revision=2`
+                : request.requestedUrl
+            : request.requestedUrl;
+          const canonicalBytes = Buffer.from(canonicalText, "utf8");
+          const sourceBytes = Buffer.from(`<main>${canonicalText}</main>`, "utf8");
+          return {
+            protocol: "dezin.research-web-evidence-representation.v2",
+            scope: request.scope,
+            sourceId: request.sourceId,
+            requestedUrl: request.requestedUrl,
+            finalUrl,
+            retrievedAt: 1_000,
+            status: 200,
+            source: {
+              mimeType: "text/html",
+              byteLength: sourceBytes.byteLength,
+              checksum: sha256(sourceBytes),
+              bytes: sourceBytes,
+            },
+            canonicalText: {
+              mimeType: "text/plain; charset=utf-8",
+              byteLength: canonicalBytes.byteLength,
+              checksum: sha256(canonicalBytes),
+              extractor: { id: "dezin.html-visible-text", version: 1 },
+              bytes: canonicalBytes,
+            },
+          };
+        },
+      },
+      researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+      researchGroundedness: groundedResearchVerifier(),
+    });
+
+    const result = await implementations.research!(input("research"));
+    assert.equal(result.metadata.qualityState, "needs-review", mode);
+    assert.equal((result.metadata.decisionGradeGate as any).accepted, false, mode);
+    assert.ok(
+      (result.metadata.decisionGradeGate as any).blockers.includes("insufficient-verified-web-sources"),
+      mode,
+    );
+    const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+    assert.equal(
+      bundle.receipts.find((receipt: any) => receipt.sourceId === renamedSourceId).reason,
+      "binding-invalid",
+      mode,
+    );
+  }
+});
+
+test("Research repair may introduce a genuinely new independently verified Web source", async () => {
+  const requests: ProductionResourceAgentRequest[] = [];
+  const original = researchDraft();
+  const freshSourceId = "source-web-fresh";
+  const freshUrl = "https://fresh.example.org/research/evidence";
+  const freshCanonicalText =
+    "Fresh independent evidence gives a sufficiently long exact paragraph for a newly introduced source.";
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Canonical source one contains a sufficiently long exact paragraph for bounded repair and independent verification.",
+    ],
+    [
+      "source-web-2",
+      "Canonical source two contains a different sufficiently long paragraph for bounded repair and independent verification.",
+    ],
+    [freshSourceId, freshCanonicalText],
+  ]);
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        requests.push(request);
+        if (requests.length === 1) {
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: structuredClone(original),
+          };
+        }
+        const prompt = JSON.parse(request.message) as any;
+        const second = (prompt.repair.canonicalWebExcerptOptions as any[])
+          .find((option) => option.sourceId === "source-web-2");
+        assert.ok(second);
+        const repaired = structuredClone(original);
+        const source = repaired.sources.find((candidate) => candidate.id === "source-web-1")!;
+        source.id = freshSourceId;
+        source.title = "Fresh independent evidence";
+        source.locator = freshUrl;
+        source.excerpt = freshCanonicalText;
+        repaired.sources.find((candidate) => candidate.id === "source-web-2")!.excerpt = second.text;
+        for (const finding of repaired.findings) {
+          for (const support of finding.supports) {
+            if (support.sourceId === "source-web-1") {
+              support.sourceId = freshSourceId;
+              support.quote = freshCanonicalText.slice(0, 64);
+            } else if (support.sourceId === "source-web-2") {
+              support.quote = second.text.slice(0, 64);
+            }
+          }
+        }
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: repaired,
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        const canonicalText = canonicalBySource.get(request.sourceId)!;
+        const canonicalBytes = Buffer.from(canonicalText, "utf8");
+        const sourceBytes = Buffer.from(`<main>${canonicalText}</main>`, "utf8");
+        return {
+          protocol: "dezin.research-web-evidence-representation.v2",
+          scope: request.scope,
+          sourceId: request.sourceId,
+          requestedUrl: request.requestedUrl,
+          finalUrl: request.requestedUrl,
+          retrievedAt: 1_000,
+          status: 200,
+          source: {
+            mimeType: "text/html",
+            byteLength: sourceBytes.byteLength,
+            checksum: sha256(sourceBytes),
+            bytes: sourceBytes,
+          },
+          canonicalText: {
+            mimeType: "text/plain; charset=utf-8",
+            byteLength: canonicalBytes.byteLength,
+            checksum: sha256(canonicalBytes),
+            extractor: { id: "dezin.html-visible-text", version: 1 },
+            bytes: canonicalBytes,
+          },
+        };
+      },
+    },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: groundedResearchVerifier(),
+  });
+
+  const result = await implementations.research!(input("research"));
+  assert.equal(result.metadata.qualityState, "grounded");
+  const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+  assert.equal(
+    bundle.receipts.find((receipt: any) => receipt.sourceId === freshSourceId).verification,
+    "verified",
+  );
+});
+
+test("Research fairly caps canonical repair options without rejecting a seven-source repair", async () => {
+  const draft = researchDraft();
+  for (let index = 3; index <= 7; index += 1) {
+    draft.sources.push({
+      id: `source-web-${index}`,
+      kind: "web",
+      title: `Additional primary source ${index}`,
+      locator: `https://example.com/research/source-${index}`,
+      excerpt: `Search discovery snippet for source ${index}.`,
+      binding: null,
+      notes: "Additional independently retrievable primary evidence.",
+    });
+  }
+  let agentCalls = 0;
+  let selectedOptions: any[] = [];
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        agentCalls += 1;
+        if (agentCalls === 2) {
+          const prompt = JSON.parse(request.message) as any;
+          selectedOptions = prompt.repair.canonicalWebExcerptOptions;
+          const repaired = structuredClone(draft);
+          const firstBySource = new Map<string, any>();
+          for (const option of selectedOptions) {
+            if (!firstBySource.has(option.sourceId)) firstBySource.set(option.sourceId, option);
+          }
+          for (const sourceId of ["source-web-1", "source-web-2"]) {
+            const option = firstBySource.get(sourceId);
+            assert.ok(option, `missing fair canonical option for ${sourceId}`);
+            repaired.sources.find((source) => source.id === sourceId)!.excerpt = option.text;
+          }
+          repaired.sources.find((source) => source.id === "source-web-4")!.excerpt =
+            `source-web-4 canonical quarter 3 ${"D".repeat(64)}`;
+          for (const finding of repaired.findings) {
+            for (const support of finding.supports) {
+              const option = firstBySource.get(support.sourceId);
+              if (option) support.quote = option.text.slice(0, 64);
+            }
+          }
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: repaired,
+          };
+        }
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: draft,
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        const canonicalText = [0, 1, 2, 3]
+          .map((quarter) =>
+            `${request.sourceId} canonical quarter ${quarter} ${String.fromCharCode(65 + quarter).repeat(1_250)}`)
+          .join("\n");
+        const canonicalBytes = Buffer.from(canonicalText, "utf8");
+        const sourceBytes = Buffer.from(`<main>${canonicalText}</main>`, "utf8");
+        return {
+          protocol: "dezin.research-web-evidence-representation.v2",
+          scope: request.scope,
+          sourceId: request.sourceId,
+          requestedUrl: request.requestedUrl,
+          finalUrl: request.requestedUrl,
+          retrievedAt: 1_000,
+          status: 200,
+          source: {
+            mimeType: "text/html",
+            byteLength: sourceBytes.byteLength,
+            checksum: sha256(sourceBytes),
+            bytes: sourceBytes,
+          },
+          canonicalText: {
+            mimeType: "text/plain; charset=utf-8",
+            byteLength: canonicalBytes.byteLength,
+            checksum: sha256(canonicalBytes),
+            extractor: { id: "dezin.html-visible-text", version: 1 },
+            bytes: canonicalBytes,
+          },
+        };
+      },
+    },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: groundedResearchVerifier(),
+  });
+
+  const result = await implementations.research!(input("research"));
+  assert.equal(agentCalls, 2);
+  assert.equal(result.metadata.qualityState, "grounded");
+  assert.equal(selectedOptions.length, 24);
+  assert.ok(Buffer.byteLength(stableStringify(selectedOptions), "utf8") <= 48 * 1_024);
+  assert.deepEqual(
+    Array.from({ length: 7 }, (_, offset) => selectedOptions
+      .filter((option) => option.sourceId === `source-web-${offset + 1}`).length),
+    [4, 4, 4, 3, 3, 3, 3],
+  );
+  const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+  assert.deepEqual(
+    {
+      verification: bundle.receipts.find(
+        (receipt: any) => receipt.sourceId === "source-web-4",
+      ).verification,
+      reason: bundle.receipts.find(
+        (receipt: any) => receipt.sourceId === "source-web-4",
+      ).reason,
+    },
+    { verification: "unverified", reason: "binding-unavailable" },
+    "an exact but unselected mismatch excerpt cannot become repair authority",
+  );
 });
 
 test("Research direction-only rejection gives repair one exact evidence-only findingIds mapping contract", async () => {
@@ -1326,10 +2254,11 @@ test("Research direction-only rejection gives repair one exact evidence-only fin
       },
     },
     researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: {
       async verifyClaims(request) {
         return {
-          protocol: "dezin.research-groundedness-result.v1",
+          protocol: "dezin.research-groundedness-result.v2",
           scope: request.scope,
           verifier: { id: request.executionProfile.reviewer.providerId },
           verdicts: request.claims.map((claim) => {
@@ -1337,9 +2266,10 @@ test("Research direction-only rejection gives repair one exact evidence-only fin
             return {
               findingId: claim.findingId,
               supported,
-              supportReceiptIds: supported
-                ? claim.supports.map((support) => support.supportReceiptId)
-                : [],
+              supportVerdicts: claim.supports.map((support) => ({
+                supportReceiptId: support.supportReceiptId,
+                directlySupports: supported,
+              })),
               rationale: supported
                 ? "The exact quotes directly support this statement."
                 : "The quotes do not independently support this statement.",
@@ -1492,6 +2422,7 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
         return await verifiedEvidence.retrieveWebEvidence(request);
       },
     },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: {
       async verifyClaims(request) {
         groundednessRequests.push(request.claims.map((claim) => ({
@@ -1504,7 +2435,7 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
           })),
         })));
         return {
-          protocol: "dezin.research-groundedness-result.v1",
+          protocol: "dezin.research-groundedness-result.v2",
           scope: request.scope,
           verifier: { id: request.executionProfile.reviewer.providerId },
           verdicts: request.claims.map((claim) => {
@@ -1514,9 +2445,10 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
             return {
               findingId: claim.findingId,
               supported,
-              supportReceiptIds: supported
-                ? claim.supports.map((support) => support.supportReceiptId)
-                : [],
+              supportVerdicts: claim.supports.map((support) => ({
+                supportReceiptId: support.supportReceiptId,
+                directlySupports: supported,
+              })),
               rationale: supported
                 ? "The exact quotes directly support this statement."
                 : "The quotes do not independently support this statement.",
@@ -1568,10 +2500,16 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
     ],
   );
   assert.equal(groundednessRequests.length, 2);
+  const groundednessClaimIdentity = (claims: typeof groundednessRequests[number]) =>
+    claims.map((claim) => ({
+      findingId: claim.findingId,
+      statement: claim.statement,
+      supportSourceIds: claim.supports.map((support) => support.sourceId),
+    }));
   assert.deepEqual(
-    groundednessRequests[1],
-    groundednessRequests[0],
-    "the second groundedness review must receive the same frozen claims and supports",
+    groundednessClaimIdentity(groundednessRequests[1]!),
+    groundednessClaimIdentity(groundednessRequests[0]!),
+    "the second groundedness review must receive the same frozen claims and support sources",
   );
 
   const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as Record<string, any>;
@@ -1592,16 +2530,26 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
     kind: source.kind,
     title: source.title,
     locator: source.locator,
-    excerpt: source.excerpt,
     binding: source.binding,
     notes: source.notes,
   });
   assert.equal(bundle.executiveSummary, rejectedDraft.executiveSummary);
   assert.deepEqual(
     bundle.sources.map(sourceSemantics),
-    rejectedDraft.sources,
-    "repair-authored source drift must not enter the immutable bundle",
+    rejectedDraft.sources.map(sourceSemantics),
+    "repair-authored source identity and descriptive semantics must not enter the immutable bundle",
   );
+  for (const source of bundle.sources.filter((candidate: Record<string, any>) =>
+    candidate.kind === "web")) {
+    const receipt = bundle.receipts.find((candidate: Record<string, any>) =>
+      candidate.sourceId === source.id);
+    assert.equal(receipt.verification, "verified");
+    assert.equal(
+      source.excerpt,
+      receipt.excerpt.text,
+      "a changed Web excerpt must come only from the selector-bound daemon receipt",
+    );
+  }
   assert.deepEqual(
     {
       statement: bundle.findings[0].statement,
@@ -1706,6 +2654,100 @@ test("Research direction-only repair caps second-pass evidence at the sealed fir
   );
 });
 
+test("Research direction-only repair remains projectable when two revalidated findings cover only one Web component", async () => {
+  const rejectedDraft = researchDraft();
+  rejectedDraft.findings[0]!.supports = [
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+  ];
+  rejectedDraft.findings[1]!.supports = [
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  rejectedDraft.findings[2]!.supports = [
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  rejectedDraft.directions = rejectedDraft.directions.map((direction) => ({
+    ...direction,
+    findingIds: ["finding-3"],
+  }));
+  const repairedDraft = structuredClone(rejectedDraft);
+  repairedDraft.directions[0]!.findingIds = ["finding-1", "finding-2"];
+  let agentCalls = 0;
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        agentCalls += 1;
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: structuredClone(agentCalls === 1 ? rejectedDraft : repairedDraft),
+        };
+      },
+    },
+    researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: {
+      async verifyClaims(request) {
+        return {
+          protocol: "dezin.research-groundedness-result.v2",
+          scope: request.scope,
+          verifier: { id: request.executionProfile.reviewer.providerId },
+          verdicts: request.claims.map((claim) => {
+            const supportVerdicts = claim.supports.map((support) => ({
+              supportReceiptId: support.supportReceiptId,
+              directlySupports: claim.findingId === "finding-3"
+                ? support.sourceId === "source-web-2"
+                : support.sourceId === "source-web-1",
+            }));
+            return {
+              findingId: claim.findingId,
+              supported: supportVerdicts.some((support) => support.directlySupports),
+              supportVerdicts,
+              rationale: "Each supplied receipt was judged independently.",
+            };
+          }),
+        };
+      },
+    },
+  });
+
+  const result = await implementations.research!(input("research"));
+  const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as Record<string, any>;
+  assert.equal(bundle.version, 4);
+  assert.equal(result.metadata.qualityState, "needs-review");
+  assert.deepEqual((result.metadata.decisionGradeGate as any).blockers, [
+    "insufficient-evidence-directions",
+  ]);
+  assert.deepEqual(bundle.directions[0].findingIds, ["finding-1", "finding-2"]);
+  assert.equal(bundle.directions[0].evidenceStatus, "evidence");
+  assert.equal(
+    (result.evidence as any).researchEvidenceCoverage.finalPass
+      .maximumDirectionVerifiedWebComponentCount,
+    1,
+  );
+  bundle.brief.targetInstructions.title = bundle.scope.title;
+  assert.equal(selectResearchRevisionDirection({
+    bytes: Buffer.from(stableStringify(bundle), "utf8"),
+    directionId: "direction-1",
+    workspaceId: "workspace-1",
+    resourceId: "resource-1",
+    parentRevisionId: "resource-revision-0",
+    revisionMetadata: { adapter: result.metadata },
+    revisionProvenance: {
+      kind: "generation-task-resource",
+      planId: "plan-1",
+      taskId: "task-1",
+      attempt: 2,
+      inputHash: "d".repeat(64),
+      adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
+      adapterProvenance: result.provenance,
+    },
+    contextPack: pack("resource-1", "research"),
+  }).id, "direction-1");
+});
+
 test("Research direction-only repair fails closed before revalidation for invalid mapping authority", async () => {
   const cases: Array<{
     name: string;
@@ -1787,7 +2829,7 @@ test("Research direction-only repair fails closed before revalidation for invali
         async verifyClaims(request) {
           groundednessCalls += 1;
           return {
-            protocol: "dezin.research-groundedness-result.v1",
+            protocol: "dezin.research-groundedness-result.v2",
             scope: request.scope,
             verifier: { id: request.executionProfile.reviewer.providerId },
             verdicts: request.claims.map((claim) => {
@@ -1795,9 +2837,10 @@ test("Research direction-only repair fails closed before revalidation for invali
               return {
                 findingId: claim.findingId,
                 supported,
-                supportReceiptIds: supported
-                  ? claim.supports.map((support) => support.supportReceiptId)
-                  : [],
+                supportVerdicts: claim.supports.map((support) => ({
+                  supportReceiptId: support.supportReceiptId,
+                  directlySupports: supported,
+                })),
                 rationale: supported
                   ? "The exact quotes directly support this statement."
                   : "The quotes do not independently support this statement.",
@@ -1864,15 +2907,22 @@ test("Research stops after one rejected repair and fails closed when the outer d
   await assert.rejects(
     () => deadlineBound.research!({
       ...input("research"),
-      // This covered completion + reviewer + all 16 fetch timeouts under the
-      // old arithmetic, but not the 16 independently bounded extractors.
-      taskTimeoutMs: (2 * 60_000) + 30_000 + (16 * 8_000) + 1,
+      // This covers completion + one reviewer + all 16 fetch timeouts, but
+      // cannot cover the selector and final groundedness reviews now reserved
+      // by the exact decision-grade repair protocol.
+      taskTimeoutMs: RESOURCE_GENERATION_DEADLINE_BUDGET.completionReserveMs
+        + RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs
+        + (16 * 8_000)
+        + 1,
     }),
     (error: unknown) => error instanceof ProductionResourceGenerationError
       && error.code === "RESOURCE_GENERATOR_BUDGET_EXCEEDED",
   );
   assert.equal(deadlineRequests.length, 1);
-  assert.equal(deadlineRequests[0]!.callTimeoutMs, (16 * 8_000) + 1);
+  assert.equal(
+    deadlineRequests[0]!.callTimeoutMs,
+    (16 * 8_000) + 1 - (2 * RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs),
+  );
 });
 
 test("Abort during the only Research repair turn wins over a late Agent result", async () => {
@@ -2110,6 +3160,7 @@ test("production Research composition promotes safe HTTP evidence to verified re
       },
     },
     researchEvidence: runtime.researchEvidence,
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: groundedResearchVerifier(),
   });
 
@@ -2131,6 +3182,491 @@ test("production Research composition promotes safe HTTP evidence to verified re
     ["source-web-1", "verified", 1_234],
     ["source-web-2", "verified", 1_234],
   ]);
+});
+
+test("Research binds only selector-chosen daemon canonical spans before independent groundedness review", async () => {
+  const draft = researchDraft();
+  draft.sources[1]!.excerpt = "A paraphrased accessibility citation that is not present in the fetched page.";
+  draft.sources[2]!.excerpt = "A paraphrased chart citation that is not present in the fetched page.";
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Color is not enough to carry series identity; labels, shape, line style, and contrast provide accessible alternatives.",
+    ],
+    [
+      "source-web-2",
+      "Each metric needs its source and update recency nearby, with legible chart annotations for readers.",
+    ],
+  ]);
+  const selectorPack = pack(
+    "resource-1",
+    "research",
+    true,
+    { providerId: "fal", baseUrl: "", model: "fal-ai/flux/dev" },
+    "",
+    "codex",
+  );
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: {
+      get(_workspaceId, id) {
+        return id === selectorPack.id ? selectorPack : null;
+      },
+    },
+    agent: {
+      async generateStructured(request) {
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: draft,
+        };
+      },
+    },
+    researchEvidence: canonicalMismatchEvidencePort(canonicalBySource),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: {
+      async verifyClaims(request) {
+        return {
+          protocol: "dezin.research-groundedness-result.v2",
+          scope: request.scope,
+          verifier: {
+            id: request.executionProfile.reviewer.providerId,
+            ...(request.executionProfile.reviewer.model === null
+              ? {}
+              : { model: request.executionProfile.reviewer.model }),
+          },
+          verdicts: request.claims.map((claim) => {
+            const supportVerdicts = claim.supports.map((support) => ({
+              supportReceiptId: support.supportReceiptId,
+              directlySupports:
+                (claim.findingId === "finding-1"
+                  && support.quote.includes("source and update recency"))
+                || (claim.findingId === "finding-2"
+                  && support.quote.includes("Color is not enough"))
+                || (claim.findingId === "finding-3"
+                  && support.quote.includes("primary takeaway")),
+            }));
+            return {
+              findingId: claim.findingId,
+              supported: supportVerdicts.some((support) => support.directlySupports),
+              supportVerdicts,
+              rationale: "Only the exact daemon-owned span that directly entails the statement is accepted.",
+            };
+          }),
+        };
+      },
+    },
+  });
+
+  const result = await implementations.research!({
+    ...input("research"),
+    contextPackId: selectorPack.id,
+  });
+  const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+  assert.deepEqual(
+    bundle.sources.slice(1).map((source: any) => [source.id, source.verification, source.excerpt]),
+    [...canonicalBySource].map(([sourceId, excerpt]) => [sourceId, "verified", excerpt]),
+  );
+  assert.equal(
+    bundle.supportReceipts.some((receipt: any) =>
+      receipt.verification === "verified"
+      && [...canonicalBySource.values()].includes(receipt.quote.text)),
+    true,
+  );
+  assert.equal((result.metadata.decisionGradeGate as any).accepted, true);
+  assert.equal(result.metadata.qualityState, "grounded");
+  const selectorProvenance = (result.provenance as any).researchEvidence.evidenceSelector;
+  assert.equal(selectorProvenance.id, "codex");
+  assert.match(
+    selectorProvenance.catalogHash,
+    /^[a-f0-9]{64}$/,
+  );
+  assert.equal(selectorProvenance.catalog.catalogHash, selectorProvenance.catalogHash);
+  assert.equal(
+    selectorProvenance.catalogHash,
+    sha256(stableStringify({
+      protocol: selectorProvenance.catalog.protocol,
+      scope: bundle.scope,
+      sources: selectorProvenance.catalog.sources,
+    })),
+  );
+  assert.equal(
+    selectorProvenance.decisions.length,
+    selectorProvenance.catalog.sources.reduce(
+      (total: number, source: any) => total + source.queries.length,
+      0,
+    ),
+  );
+});
+
+test("Research selector sees relevant canonical evidence beyond 2 KiB through the production HTML extractor", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-production-research-late-span-"));
+  const store = new Store();
+  t.after(async () => {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const filler = Array.from(
+    { length: 72 },
+    (_, index) => `<p>Background section ${index} records neutral publication context without the target evidence.</p>`,
+  ).join("");
+  assert.ok(Buffer.byteLength(filler, "utf8") > 2_048);
+  const canonicalByHost = new Map([
+    [
+      "www.w3.org",
+      "Color alone cannot carry series identity. Labels, shape, line style, and contrast provide accessible alternatives.",
+    ],
+    [
+      "analysisfunction.civilservice.gov.uk",
+      "Every metric needs its source and update recency nearby, plus legible chart annotations for readers.",
+    ],
+  ]);
+  const fetchExternal = createProductionSafeBoundedExternalFetcher({
+    resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+    requestHop: async (hop) => ({
+      status: 200,
+      mimeType: "text/html; charset=utf-8",
+      bytes: Buffer.from(
+        `<html><body>${filler}<section><h2>Applicable guidance</h2><p>${
+          canonicalByHost.get(hop.url.hostname)
+        }</p></section></body></html>`,
+        "utf8",
+      ),
+      location: null,
+      remoteAddress: hop.pinnedAddress.address,
+    }),
+  });
+  const runtime = createProductionResourceRuntimePorts({
+    store,
+    dataDir: root,
+    researchExternalFetch: fetchExternal,
+    now: () => 1_234,
+  });
+  const draft = researchDraft();
+  draft.sources[1]!.excerpt = "Paraphrased accessibility guidance.";
+  draft.sources[2]!.excerpt = "Paraphrased chart guidance.";
+  let sawLateEvidence = false;
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: draft,
+        };
+      },
+    },
+    researchEvidence: runtime.researchEvidence,
+    researchEvidenceSelection: {
+      async selectEvidence(request) {
+        return {
+          protocol: "dezin.research-evidence-selection-result.v1",
+          scope: request.scope,
+          catalogHash: request.catalog.catalogHash,
+          selector: { id: request.executionProfile.reviewer.providerId },
+          decisions: request.catalog.sources.flatMap((source) => {
+            const evidencePhrase = source.sourceId === "source-web-1"
+              ? "Color alone cannot carry series identity"
+              : "source and update recency nearby";
+            const selected = source.spans.find((span) => span.text.includes(evidencePhrase));
+            assert.ok(selected, `late canonical evidence was omitted for ${source.sourceId}`);
+            sawLateEvidence = true;
+            return source.queries.map((query) => ({
+              findingId: query.findingId,
+              supportIndex: query.supportIndex,
+              sourceId: source.sourceId,
+              selectedSpanId: selected.spanId,
+            }));
+          }),
+        };
+      },
+    },
+    researchGroundedness: {
+      async verifyClaims(request) {
+        return {
+          protocol: "dezin.research-groundedness-result.v2",
+          scope: request.scope,
+          verifier: { id: request.executionProfile.reviewer.providerId },
+          verdicts: request.claims.map((claim) => {
+            const supportVerdicts = claim.supports.map((support) => ({
+              supportReceiptId: support.supportReceiptId,
+              directlySupports:
+                (claim.findingId === "finding-1"
+                  && support.quote.includes("source and update recency nearby"))
+                || (claim.findingId === "finding-2"
+                  && support.quote.includes("Color alone cannot carry series identity")),
+            }));
+            return {
+              findingId: claim.findingId,
+              supported: supportVerdicts.some((support) => support.directlySupports),
+              supportVerdicts,
+              rationale: "The selected late-page canonical span directly supports the claim.",
+            };
+          }),
+        };
+      },
+    },
+  });
+  const result = await implementations.research!(input("research"));
+  assert.equal(sawLateEvidence, true);
+  assert.equal((result.metadata.decisionGradeGate as any).accepted, true);
+  assert.equal(result.metadata.qualityState, "grounded");
+});
+
+test("Research evidence selection rejects forged, duplicate, wrong-source, cross-catalog, and substituted decisions", async () => {
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      `Color is not enough to carry series identity; labels, shape, line style, and contrast provide accessible alternatives. ${"A".repeat(1_500)}`,
+    ],
+    [
+      "source-web-2",
+      `Each metric needs its source and update recency nearby, with legible chart annotations for readers. ${"B".repeat(1_500)}`,
+    ],
+  ]);
+  const variants = [
+    "forged-span",
+    "duplicate-edge",
+    "wrong-source",
+    "cross-catalog",
+    "substituted-selector",
+    "multiple-passages-one-source",
+  ] as const;
+  for (const variant of variants) {
+    const draft = researchDraft();
+    draft.sources[1]!.excerpt = "Paraphrased first Web citation.";
+    draft.sources[2]!.excerpt = "Paraphrased second Web citation.";
+    const baseSelector = firstSpanResearchEvidenceSelector();
+    const implementations = createProductionResourceGenerationImplementations({
+      contextPacks: { get: exactPackForId },
+      agent: {
+        async generateStructured(request) {
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output: draft,
+          };
+        },
+      },
+      researchEvidence: canonicalMismatchEvidencePort(canonicalBySource),
+      researchEvidenceSelection: {
+        async selectEvidence(request) {
+          const valid = await baseSelector.selectEvidence(request);
+          const decisions = valid.decisions.map((decision) => ({ ...decision }));
+          if (variant === "forged-span") {
+            decisions[0]!.selectedSpanId = "evidence-span-forged";
+          } else if (variant === "duplicate-edge") {
+            decisions[1] = { ...decisions[0]! };
+          } else if (variant === "wrong-source") {
+            decisions[0]!.sourceId = decisions[0]!.sourceId === "source-web-1"
+              ? "source-web-2"
+              : "source-web-1";
+          } else if (variant === "multiple-passages-one-source") {
+            const source = request.catalog.sources.find((candidate) =>
+              candidate.queries.length >= 2 && candidate.spans.length >= 2);
+            assert.ok(source);
+            assert.notEqual(source.spans[0]!.spanId, source.spans[1]!.spanId);
+            const indexes = source.queries.slice(0, 2).map((query) =>
+              decisions.findIndex((decision) =>
+                decision.findingId === query.findingId
+                && decision.supportIndex === query.supportIndex
+                && decision.sourceId === source.sourceId));
+            assert.ok(indexes.every((index) => index >= 0));
+            decisions[indexes[0]!]!.selectedSpanId = source.spans[0]!.spanId;
+            decisions[indexes[1]!]!.selectedSpanId = source.spans[1]!.spanId;
+            assert.notEqual(
+              decisions[indexes[0]!]!.selectedSpanId,
+              decisions[indexes[1]!]!.selectedSpanId,
+            );
+          }
+          return {
+            ...valid,
+            ...(variant === "cross-catalog" ? { catalogHash: "f".repeat(64) } : {}),
+            ...(variant === "substituted-selector"
+              ? { selector: { id: "codebuddy" } }
+              : {}),
+            decisions,
+          };
+        },
+      },
+      researchGroundedness: groundedResearchVerifier(),
+    });
+    await assert.rejects(
+      implementations.research!(input("research")),
+      (error) => error instanceof ProductionResourceGenerationError
+        && (error.code === "RESOURCE_QUALITY_REVIEW_FAILED"
+          || error.code === "RESOURCE_GENERATOR_SCOPE_SUBSTITUTED"),
+      variant,
+    );
+  }
+});
+
+test("Research selector null and transport failure never promote exact canonical repair options", async () => {
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Color is not enough to carry series identity; labels, shape, line style, and contrast provide accessible alternatives.",
+    ],
+    [
+      "source-web-2",
+      "Each metric needs its source and update recency nearby, with legible chart annotations for readers.",
+    ],
+  ]);
+  for (const mode of ["null", "transport-failure"] as const) {
+    const draft = researchDraft();
+    draft.sources[1]!.excerpt = "Paraphrased first Web citation.";
+    draft.sources[2]!.excerpt = "Paraphrased second Web citation.";
+    let agentCallCount = 0;
+    const baseSelector = firstSpanResearchEvidenceSelector();
+    const implementations = createProductionResourceGenerationImplementations({
+      contextPacks: { get: exactPackForId },
+      agent: {
+        async generateStructured(request) {
+          agentCallCount += 1;
+          const output = structuredClone(draft);
+          if (agentCallCount === 2) {
+            const prompt = JSON.parse(request.message) as any;
+            const optionBySource = new Map<string, any>();
+            for (const option of prompt.repair.canonicalWebExcerptOptions) {
+              if (!optionBySource.has(option.sourceId)) optionBySource.set(option.sourceId, option);
+            }
+            for (const source of output.sources.filter((item) => item.kind === "web")) {
+              const option = optionBySource.get(source.id);
+              assert.ok(option);
+              source.excerpt = option.text;
+            }
+            for (const finding of output.findings) {
+              for (const support of finding.supports) {
+                const option = optionBySource.get(support.sourceId);
+                if (option) support.quote = option.text;
+              }
+            }
+          }
+          return {
+            protocol: "dezin.resource-agent-result.v1",
+            scope: request.scope,
+            generator: { id: "claude" },
+            output,
+          };
+        },
+      },
+      researchEvidence: canonicalMismatchEvidencePort(canonicalBySource),
+      researchEvidenceSelection: {
+        async selectEvidence(request) {
+          if (mode === "transport-failure") throw new Error("selector transport unavailable");
+          const valid = await baseSelector.selectEvidence(request);
+          return {
+            ...valid,
+            decisions: valid.decisions.map((decision) => ({
+              ...decision,
+              selectedSpanId: null,
+            })),
+          };
+        },
+      },
+      researchGroundedness: groundedResearchVerifier(),
+    });
+    const result = await implementations.research!(input("research"));
+    assert.equal(agentCallCount, 2, mode);
+    const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+    const webReceipts = bundle.receipts.filter((receipt: any) => receipt.sourceKind === "web");
+    assert.deepEqual(
+      webReceipts.map((receipt: any) => [receipt.verification, receipt.reason]),
+      [
+        ["unverified", mode === "null" ? "binding-rejected" : "binding-unavailable"],
+        ["unverified", mode === "null" ? "binding-rejected" : "binding-unavailable"],
+      ],
+      mode,
+    );
+    assert.equal((result.metadata.decisionGradeGate as any).accepted, false);
+    assert.equal(result.metadata.qualityState, "needs-review");
+    assert.equal(
+      (result.provenance as any).researchEvidence.evidenceSelector === null,
+      mode === "transport-failure",
+    );
+  }
+});
+
+test("Research selector cannot bind a canonical URL or byte representation that drifted after first-pass sealing", async () => {
+  const canonicalBySource = new Map([
+    [
+      "source-web-1",
+      "Color is not enough to carry series identity; labels, shape, line style, and contrast provide accessible alternatives.",
+    ],
+    [
+      "source-web-2",
+      "Each metric needs its source and update recency nearby, with legible chart annotations for readers.",
+    ],
+  ]);
+  const retrievalCount = new Map<string, number>();
+  const draft = researchDraft();
+  draft.sources[1]!.excerpt = "Paraphrased first Web citation.";
+  draft.sources[2]!.excerpt = "Paraphrased second Web citation.";
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: draft,
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        const count = (retrievalCount.get(request.sourceId) ?? 0) + 1;
+        retrievalCount.set(request.sourceId, count);
+        const canonicalText = `${canonicalBySource.get(request.sourceId)!}${
+          count === 1 ? "" : " A changed representation must invalidate the sealed binding."
+        }`;
+        const sourceBytes = Buffer.from(`<p>${canonicalText}</p>`, "utf8");
+        const canonicalBytes = Buffer.from(canonicalText, "utf8");
+        return {
+          protocol: "dezin.research-web-evidence-representation.v2",
+          scope: request.scope,
+          sourceId: request.sourceId,
+          requestedUrl: request.requestedUrl,
+          finalUrl: count === 1
+            ? request.requestedUrl
+            : new URL("/drifted-representation", request.requestedUrl).toString(),
+          retrievedAt: 1_234 + count,
+          status: 200,
+          source: {
+            mimeType: "text/html",
+            byteLength: sourceBytes.byteLength,
+            checksum: sha256(sourceBytes),
+            bytes: sourceBytes,
+          },
+          canonicalText: {
+            mimeType: "text/plain; charset=utf-8",
+            byteLength: canonicalBytes.byteLength,
+            checksum: sha256(canonicalBytes),
+            extractor: { id: "dezin.html-visible-text", version: 1 },
+            bytes: canonicalBytes,
+          },
+        };
+      },
+    },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: groundedResearchVerifier(),
+  });
+  const result = await implementations.research!(input("research"));
+  const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
+  const webReceipts = bundle.receipts.filter((receipt: any) => receipt.sourceKind === "web");
+  assert.deepEqual(
+    webReceipts.map((receipt: any) => [receipt.verification, receipt.reason]),
+    [
+      ["unverified", "binding-invalid"],
+      ["unverified", "binding-invalid"],
+    ],
+  );
+  assert.equal((result.metadata.decisionGradeGate as any).accepted, false);
+  assert.equal(result.metadata.qualityState, "needs-review");
 });
 
 test("production Research composition rejects a citation that appears only inside hidden HTML", async (t) => {
@@ -2185,6 +3721,7 @@ test("production Research composition rejects a citation that appears only insid
       },
     },
     researchEvidence: runtime.researchEvidence,
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: groundedResearchVerifier(),
   });
 
@@ -2203,7 +3740,7 @@ test("production Research composition rejects a citation that appears only insid
   assert.equal(result.metadata.unverifiedSourceCount, 1);
   assert.deepEqual(
     (result.metadata.decisionGradeGate as any).blockers,
-    ["insufficient-verified-web-sources"],
+    ["insufficient-verified-web-sources", "insufficient-evidence-directions"],
   );
 });
 
@@ -2329,13 +3866,16 @@ test("Research rejects groundedness verifier identity substitution before promot
         async verifyClaims(request) {
           verifierCalls += 1;
           return {
-            protocol: "dezin.research-groundedness-result.v1",
+            protocol: "dezin.research-groundedness-result.v2",
             scope: request.scope,
             verifier: substitution.verifier(request.executionProfile.reviewer),
             verdicts: request.claims.map((claim) => ({
               findingId: claim.findingId,
               supported: true,
-              supportReceiptIds: claim.supports.map((support) => support.supportReceiptId),
+              supportVerdicts: claim.supports.map((support) => ({
+                supportReceiptId: support.supportReceiptId,
+                directlySupports: true,
+              })),
               rationale: "The exact quotes directly support this statement.",
             })),
           } as any;
@@ -2358,6 +3898,10 @@ test("Research rejects groundedness verifier identity substitution before promot
 test("Research generated revisions remain projectable when verified sources have unbound support quotes", async () => {
   const draft = researchDraft();
   const unboundQuote = "Users can only proceed after every required task is complete.";
+  draft.findings[0]!.supports.push({
+    sourceId: "source-web-1",
+    quote: WEB_EXCERPT_1,
+  });
   draft.findings[1]!.supports[0]!.quote = unboundQuote;
   const implementations = createProductionResourceGenerationImplementations({
     contextPacks: { get: exactPackForId },
@@ -2372,6 +3916,21 @@ test("Research generated revisions remain projectable when verified sources have
       },
     },
     researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: {
+      async selectEvidence(request) {
+        const selected = await firstSpanResearchEvidenceSelector().selectEvidence(request);
+        return {
+          ...selected,
+          decisions: selected.decisions.map((decision) => ({
+            ...decision,
+            selectedSpanId: decision.findingId === "finding-2"
+              && decision.sourceId === "source-web-1"
+              ? null
+              : decision.selectedSpanId,
+          })),
+        };
+      },
+    },
     researchGroundedness: groundedResearchVerifier(),
   });
 
@@ -2481,6 +4040,7 @@ test("Research lets the groundedness verifier select a sufficient verified subse
         return await verified.retrieveWebEvidence(request);
       },
     },
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: groundedResearchVerifier(),
   });
 
@@ -2492,7 +4052,10 @@ test("Research lets the groundedness verifier select a sufficient verified subse
   assert.equal(result.metadata.qualityState, "needs-review");
   const decisionGradeGate = result.metadata.decisionGradeGate as any;
   assert.equal(decisionGradeGate.accepted, false);
-  assert.deepEqual(decisionGradeGate.blockers, ["insufficient-verified-web-sources"]);
+  assert.deepEqual(decisionGradeGate.blockers, [
+    "insufficient-verified-web-sources",
+    "insufficient-evidence-directions",
+  ]);
   assert.equal(
     bundle.supportReceipts.some((receipt: any) => receipt.sourceId === "source-web-2"
       && receipt.verification === "unverified"),
@@ -2562,11 +4125,12 @@ test("Research decision-grade gate counts distinct verified Web references inste
     researchGroundedness: groundedResearchVerifier(),
   });
 
-  const result = await implementations.research!(input("research"));
-  const decisionGradeGate = result.metadata.decisionGradeGate as any;
-  assert.equal(result.metadata.qualityState, "needs-review");
-  assert.equal(decisionGradeGate.observed.verifiedWebSourceCount, 1);
-  assert.deepEqual(decisionGradeGate.blockers, ["insufficient-verified-web-sources"]);
+  await assert.rejects(
+    () => implementations.research!(input("research")),
+    (error: unknown) => error instanceof ProductionResourceGenerationError
+      && error.code === "RESOURCE_GENERATOR_OUTPUT_INVALID"
+      && /two distinct canonical Web source candidates/i.test(error.message),
+  );
 });
 
 test("Research decision-grade gate counts canonical evidence once across distinct requested URL aliases", async () => {
@@ -2603,6 +4167,7 @@ test("Research decision-grade gate counts canonical evidence once across distinc
       },
       requestedUrl: request.requestedUrl,
     })),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: groundedResearchVerifier(),
   });
 
@@ -2612,7 +4177,10 @@ test("Research decision-grade gate counts canonical evidence once across distinc
   assert.equal(result.metadata.qualityState, "needs-review");
   assert.equal(decisionGradeGate.accepted, false);
   assert.equal(decisionGradeGate.observed.verifiedWebSourceCount, 1);
-  assert.deepEqual(decisionGradeGate.blockers, ["insufficient-verified-web-sources"]);
+  assert.deepEqual(decisionGradeGate.blockers, [
+    "insufficient-verified-web-sources",
+    "insufficient-evidence-directions",
+  ]);
 
   bundle.brief.targetInstructions.title = bundle.scope.title;
   assert.equal(selectResearchRevisionDirection({
@@ -2690,7 +4258,10 @@ test("Research decision-grade identity collapses transitively cross-linked canon
   const gate = result.metadata.decisionGradeGate as any;
   assert.equal(gate.observed.verifiedWebSourceCount, 1);
   assert.equal(gate.accepted, false);
-  assert.deepEqual(gate.blockers, ["insufficient-verified-web-sources"]);
+  assert.deepEqual(gate.blockers, [
+    "insufficient-verified-web-sources",
+    "insufficient-evidence-directions",
+  ]);
   assert.equal(result.metadata.qualityState, "needs-review");
 
   bundle.brief.targetInstructions.title = bundle.scope.title;
@@ -2871,8 +4442,13 @@ test("Research Revision rejects missing decision-grade metadata for verified Web
 
 test("Research Revision requires decision-grade metadata when Web v2 evidence is unverified but Context grounds directions", async () => {
   const draft = researchDraft();
-  for (const finding of draft.findings) {
-    finding.supports = [{ sourceId: "source-context", quote: CONTEXT_EXCERPT }];
+  for (const [index, finding] of draft.findings.entries()) {
+    finding.supports = [
+      { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+      index === 0
+        ? { sourceId: "source-web-1", quote: WEB_EXCERPT_1 }
+        : { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+    ];
   }
   const implementations = createProductionResourceGenerationImplementations({
     contextPacks: { get: exactPackForId },
@@ -2967,10 +4543,11 @@ test("Research decision-grade gate counts only verified Web evidence selected by
       },
     },
     researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
     researchGroundedness: {
       async verifyClaims(request) {
         return {
-          protocol: "dezin.research-groundedness-result.v1",
+          protocol: "dezin.research-groundedness-result.v2",
           scope: request.scope,
           verifier: {
             id: request.executionProfile.reviewer.providerId,
@@ -2985,7 +4562,10 @@ test("Research decision-grade gate counts only verified Web evidence selected by
             return {
               findingId: claim.findingId,
               supported: true,
-              supportReceiptIds: [selected.supportReceiptId],
+              supportVerdicts: claim.supports.map((support) => ({
+                supportReceiptId: support.supportReceiptId,
+                directlySupports: support.supportReceiptId === selected.supportReceiptId,
+              })),
               rationale: "Only this exact receipt supports the decision claim.",
             };
           }),
@@ -2998,7 +4578,281 @@ test("Research decision-grade gate counts only verified Web evidence selected by
   const gate = result.metadata.decisionGradeGate as any;
   assert.equal(result.metadata.qualityState, "needs-review");
   assert.equal(gate.observed.verifiedWebSourceCount, 1);
-  assert.deepEqual(gate.blockers, ["insufficient-verified-web-sources"]);
+  assert.deepEqual(gate.blockers, [
+    "insufficient-verified-web-sources",
+    "insufficient-evidence-directions",
+  ]);
+  assert.deepEqual((result.evidence as any).researchEvidenceCoverage, {
+    protocol: "dezin.research-evidence-coverage.v1",
+    repairMode: "full-replacement",
+    firstPassGate: {
+      observed: {
+        verifiedWebSourceCount: 1,
+        evidenceFindingCount: 3,
+        evidenceDirectionCount: 0,
+        groundednessVerifierAvailable: true,
+      },
+      blockers: [
+        "insufficient-verified-web-sources",
+        "insufficient-evidence-directions",
+      ],
+    },
+    finalPass: {
+      webSourceCount: 2,
+      verifiedWebReceiptCount: 2,
+      unverifiedWebReceiptCount: 0,
+      verifiedWebSupportReceiptCount: 4,
+      groundednessSelectedWebSupportReceiptCount: 1,
+      groundednessSelectedWebSourceCount: 1,
+      groundednessSelectedWebCanonicalComponentCount: 1,
+      evidenceFindingCount: 3,
+      evidenceDirectionCount: 2,
+      qualifyingDecisionGradeDirectionCount: 0,
+      maximumDirectionEvidenceFindingCount: 2,
+      maximumDirectionVerifiedWebComponentCount: 1,
+    },
+  });
+});
+
+test("Research full repair rejects a Context-only replacement before a second retrieval or review", async () => {
+  const firstDraft = researchDraft();
+  const contextOnlyRepair = researchDraft();
+  contextOnlyRepair.sources = [
+    contextOnlyRepair.sources[0]!,
+    {
+      ...contextOnlyRepair.sources[0]!,
+      id: "source-user",
+      kind: "user",
+      title: "Pinned user brief",
+    },
+  ];
+  for (const finding of contextOnlyRepair.findings) {
+    finding.supports = [{ sourceId: "source-context", quote: CONTEXT_EXCERPT }];
+  }
+  let agentCalls = 0;
+  let evidenceCalls = 0;
+  let groundednessCalls = 0;
+  const verified = verifiedResearchEvidence();
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        agentCalls += 1;
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: structuredClone(agentCalls === 1 ? firstDraft : contextOnlyRepair),
+        };
+      },
+    },
+    researchEvidence: {
+      async retrieveWebEvidence(request) {
+        evidenceCalls += 1;
+        if (request.sourceId === "source-web-2") {
+          throw new ProductionResearchEvidenceUnavailableError(
+            "network-failed",
+            "source unavailable",
+          );
+        }
+        return await verified.retrieveWebEvidence(request);
+      },
+    },
+    researchGroundedness: {
+      async verifyClaims(request) {
+        groundednessCalls += 1;
+        return await groundedResearchVerifier().verifyClaims(request);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => implementations.research!(input("research")),
+    (error: unknown) => error instanceof ProductionResourceGenerationError
+      && error.code === "RESOURCE_GENERATOR_OUTPUT_INVALID"
+      && /two distinct canonical Web source candidates/i.test(error.message),
+  );
+  assert.equal(agentCalls, 2);
+  assert.equal(evidenceCalls, 2);
+  assert.equal(groundednessCalls, 1);
+});
+
+test("Research rejects Web findings outside the selected direction instead of composing independent gate totals", async () => {
+  const draft = researchDraft();
+  draft.findings[0]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+  ];
+  draft.findings[1]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  draft.findings[2]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  for (const direction of draft.directions) direction.findingIds = ["finding-1", "finding-3"];
+  let groundednessCalls = 0;
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: structuredClone(draft),
+        };
+      },
+    },
+    researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: {
+      async verifyClaims(request) {
+        groundednessCalls += 1;
+        return {
+          protocol: "dezin.research-groundedness-result.v2",
+          scope: request.scope,
+          verifier: { id: request.executionProfile.reviewer.providerId },
+          verdicts: request.claims.map((claim) => {
+            const supportVerdicts = claim.supports.map((support) => ({
+              supportReceiptId: support.supportReceiptId,
+              directlySupports: groundednessCalls === 1
+                ? support.sourceId === "source-context"
+                : claim.findingId === "finding-2"
+                  ? support.sourceId === "source-web-1" || support.sourceId === "source-web-2"
+                  : support.sourceId === "source-context",
+            }));
+            return {
+              findingId: claim.findingId,
+              supported: supportVerdicts.some((support) => support.directlySupports),
+              supportVerdicts,
+              rationale: "Each supplied receipt was judged independently.",
+            };
+          }),
+        };
+      },
+    },
+  });
+
+  const result = await implementations.research!(input("research"));
+  const gate = result.metadata.decisionGradeGate as any;
+  assert.equal(groundednessCalls, 2);
+  assert.deepEqual(gate.observed, {
+    verifiedWebSourceCount: 2,
+    evidenceFindingCount: 3,
+    evidenceDirectionCount: 0,
+    groundednessVerifierAvailable: true,
+  });
+  assert.deepEqual(gate.blockers, ["insufficient-evidence-directions"]);
+  assert.equal(result.metadata.qualityState, "needs-review");
+  assert.equal(
+    (result.evidence as any).researchEvidenceCoverage.finalPass
+      .qualifyingDecisionGradeDirectionCount,
+    0,
+  );
+
+  const legacyBundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as Record<string, any>;
+  legacyBundle.brief.targetInstructions.title = legacyBundle.scope.title;
+  const legacyMetadata = structuredClone(result.metadata) as Record<string, any>;
+  legacyMetadata.qualityState = "grounded";
+  legacyMetadata.decisionGradeGate.protocol = "dezin.research-decision-grade-gate.v1";
+  legacyMetadata.decisionGradeGate.observed.evidenceDirectionCount = 2;
+  legacyMetadata.decisionGradeGate.accepted = true;
+  legacyMetadata.decisionGradeGate.blockers = [];
+  assert.equal(selectResearchRevisionDirection({
+    bytes: Buffer.from(stableStringify(legacyBundle), "utf8"),
+    directionId: "direction-1",
+    workspaceId: "workspace-1",
+    resourceId: "resource-1",
+    parentRevisionId: "resource-revision-0",
+    revisionMetadata: { adapter: legacyMetadata },
+    revisionProvenance: {
+      kind: "generation-task-resource",
+      planId: "plan-1",
+      taskId: "task-1",
+      attempt: 2,
+      inputHash: "d".repeat(64),
+      adapter: { id: "dezin.resource-adapter.research", version: 1, kind: "research" },
+      adapterProvenance: result.provenance,
+    },
+    contextPack: pack("resource-1", "research"),
+  }).id, "direction-1", "legacy gate v1 must retain its immutable aggregate semantics");
+});
+
+test("Research cannot combine one Web component from each of two directions", async () => {
+  const draft = researchDraft();
+  draft.findings[0]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+  ];
+  draft.findings[1]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  draft.findings[2]!.supports = [
+    { sourceId: "source-context", quote: CONTEXT_EXCERPT },
+    { sourceId: "source-web-1", quote: WEB_EXCERPT_1 },
+    { sourceId: "source-web-2", quote: WEB_EXCERPT_2 },
+  ];
+  draft.directions[0]!.findingIds = ["finding-1", "finding-3"];
+  draft.directions[1]!.findingIds = ["finding-2", "finding-3"];
+  let groundednessCalls = 0;
+  const implementations = createProductionResourceGenerationImplementations({
+    contextPacks: { get: exactPackForId },
+    agent: {
+      async generateStructured(request) {
+        return {
+          protocol: "dezin.resource-agent-result.v1",
+          scope: request.scope,
+          generator: { id: "claude" },
+          output: structuredClone(draft),
+        };
+      },
+    },
+    researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
+    researchGroundedness: {
+      async verifyClaims(request) {
+        groundednessCalls += 1;
+        return {
+          protocol: "dezin.research-groundedness-result.v2",
+          scope: request.scope,
+          verifier: { id: request.executionProfile.reviewer.providerId },
+          verdicts: request.claims.map((claim) => {
+            const supportVerdicts = claim.supports.map((support) => ({
+              supportReceiptId: support.supportReceiptId,
+              directlySupports: groundednessCalls === 1
+                ? support.sourceId === "source-context"
+                : claim.findingId === "finding-1"
+                  ? support.sourceId === "source-web-1"
+                  : claim.findingId === "finding-2"
+                    ? support.sourceId === "source-web-2"
+                    : support.sourceId === "source-context",
+            }));
+            return {
+              findingId: claim.findingId,
+              supported: supportVerdicts.some((support) => support.directlySupports),
+              supportVerdicts,
+              rationale: "Each supplied receipt was judged independently.",
+            };
+          }),
+        };
+      },
+    },
+  });
+
+  const result = await implementations.research!(input("research"));
+  const gate = result.metadata.decisionGradeGate as any;
+  assert.equal(gate.observed.verifiedWebSourceCount, 2);
+  assert.equal(gate.observed.evidenceDirectionCount, 0);
+  assert.deepEqual(gate.blockers, ["insufficient-evidence-directions"]);
+  assert.equal(
+    (result.evidence as any).researchEvidenceCoverage.finalPass
+      .maximumDirectionVerifiedWebComponentCount,
+    1,
+  );
 });
 
 test("Research never promotes exact verified receipts without the independent groundedness verifier", async () => {
@@ -3015,6 +4869,7 @@ test("Research never promotes exact verified receipts without the independent gr
       },
     },
     researchEvidence: verifiedResearchEvidence(),
+    researchEvidenceSelection: firstSpanResearchEvidenceSelector(),
   });
   const result = await implementations.research!(input("research"));
   const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
@@ -3929,7 +5784,9 @@ test("Moodboard Agent emits only Asset specs; daemon-generated reviewed PNGs own
       },
     ],
   );
-  assert.ok(qualityRequests.every((request) => request.callTimeoutMs === 30_000));
+  assert.ok(qualityRequests.every(
+    (request) => request.callTimeoutMs === RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs,
+  ));
   assert.ok(qualityRequests.every((request) => request.image.checksum === sha256(MOODBOARD_PNG)));
 });
 
@@ -3979,6 +5836,7 @@ test("Moodboard rejects ill-formed UTF-16 Agent text before any image or review 
 
 test("Moodboard repairs only a failed Asset within the frozen repair budget and seals the reviewed repair trail", async () => {
   const draft = moodboardDraft(2);
+  const progress: string[] = [];
   const imageRequests: any[] = [];
   const qualityRequests: any[] = [];
   const reviewAttempts = new Map<string, number>();
@@ -4045,7 +5903,7 @@ test("Moodboard repairs only a failed Asset within the frozen repair budget and 
   });
 
   const result = await implementations.moodboard!({
-    ...input("moodboard"),
+    ...input("moodboard", (phase) => { progress.push(phase); }),
     maxRepairRounds: 1,
   });
   const bundle = JSON.parse(Buffer.from(result.bytes).toString("utf8")) as any;
@@ -4056,6 +5914,15 @@ test("Moodboard repairs only a failed Asset within the frozen repair budget and 
     "the failed Asset alone is regenerated; a passing sibling is generated once",
   );
   assert.equal(qualityRequests.length, 3);
+  assert.deepEqual(progress, [
+    "generating",
+    "generating-assets",
+    "reviewing",
+    "repairing",
+    "reviewing",
+    "generating-assets",
+    "reviewing",
+  ]);
   assert.deepEqual(imageRequests[1]!.executionProfile, imageRequests[0]!.executionProfile);
   assert.deepEqual(
     {
@@ -4500,6 +6367,53 @@ test("Moodboard repair budget is Attempt-wide and cannot be reused by a later fa
   assert.equal(reviewCounts.get("asset-2"), 1);
 });
 
+test("legacy 25-minute same-Plan Moodboard keeps the full primary Agent deadline from its exact pinned Research cardinality", async () => {
+  const pinnedPack = moodboardPackWithPinnedResearch();
+  const agentTimeouts: number[] = [];
+  const implementations = moodboardImplementation(
+    moodboardDraftForPinnedResearch(),
+    MOODBOARD_PNG,
+    "pass",
+    undefined,
+    (request) => agentTimeouts.push(request.callTimeoutMs),
+    (_workspaceId, id) => id === pinnedPack.id ? pinnedPack : null,
+  );
+
+  await implementations.moodboard!({
+    ...input("moodboard"),
+    contextPackId: pinnedPack.id,
+    taskTimeoutMs: 25 * 60_000,
+    maxRepairRounds: 1,
+  });
+
+  assert.deepEqual(agentTimeouts, [
+    RESOURCE_GENERATION_DEADLINE_BUDGET.agentCallTimeoutMs,
+  ]);
+});
+
+test("legacy 25-minute Moodboard without immutable pinned cardinality fails before the primary Agent call", async () => {
+  const agentTimeouts: number[] = [];
+  const implementations = moodboardImplementation(
+    moodboardDraft(),
+    MOODBOARD_PNG,
+    "pass",
+    undefined,
+    (request) => agentTimeouts.push(request.callTimeoutMs),
+  );
+
+  await assert.rejects(
+    implementations.moodboard!({
+      ...input("moodboard"),
+      taskTimeoutMs: 25 * 60_000,
+      maxRepairRounds: 1,
+    }),
+    (error: unknown) => error instanceof ProductionResourceGenerationError
+      && error.code === "RESOURCE_GENERATOR_BUDGET_EXCEEDED"
+      && /immutable pinned Research cardinality/i.test(error.message),
+  );
+  assert.deepEqual(agentTimeouts, []);
+});
+
 test("Moodboard derives a safe cardinality-aware image deadline from the live outer Task budget", async () => {
   for (let assetCount = 1; assetCount <= 8; assetCount += 1) {
     const observed: number[] = [];
@@ -4513,11 +6427,11 @@ test("Moodboard derives a safe cardinality-aware image deadline from the live ou
     await implementations.moodboard!(input("moodboard"));
 
     const maximum = Math.min(
-      5 * 60_000,
+      RESOURCE_GENERATION_DEADLINE_BUDGET.maxImageCallTimeoutMs,
       Math.floor((
-        (25 * 60_000)
-        - (2 * 60_000)
-        - (assetCount * 30_000)
+        RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs
+        - RESOURCE_GENERATION_DEADLINE_BUDGET.completionReserveMs
+        - (assetCount * RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs)
       ) / assetCount),
     );
     assert.equal(observed.length, assetCount);
@@ -4526,7 +6440,9 @@ test("Moodboard derives a safe cardinality-aware image deadline from the live ou
       `${assetCount} assets must initially share the remaining Task budget without falling back to the old 90s ceiling`,
     );
     assert.ok(
-      observed.every((timeoutMs) => timeoutMs <= 5 * 60_000 && timeoutMs >= observed[0]!),
+      observed.every((timeoutMs) =>
+        timeoutMs <= RESOURCE_GENERATION_DEADLINE_BUDGET.maxImageCallTimeoutMs
+        && timeoutMs >= observed[0]!),
       "unused time from an early image may be safely redistributed, but no call may exceed the runtime ceiling",
     );
   }
@@ -4549,11 +6465,11 @@ test("Moodboard reserves the frozen Attempt-wide repair image and review before 
 
   const remainingCalls = assetCount + 1;
   const maximum = Math.min(
-    5 * 60_000,
+    RESOURCE_GENERATION_DEADLINE_BUDGET.maxImageCallTimeoutMs,
     Math.floor((
-      (25 * 60_000)
-      - (2 * 60_000)
-      - (remainingCalls * 30_000)
+      RESOURCE_GENERATION_DEADLINE_BUDGET.taskTimeoutMs
+      - RESOURCE_GENERATION_DEADLINE_BUDGET.completionReserveMs
+      - (remainingCalls * RESOURCE_GENERATION_DEADLINE_BUDGET.reviewCallTimeoutMs)
     ) / remainingCalls),
   );
   assert.equal(observed.length, assetCount);
@@ -4828,31 +6744,11 @@ test("Moodboard publication rejects 1x1, malformed, scope-substituted, and indep
   );
 });
 
-test("Moodboard fails before the Agent turn when the frozen image provider is not configured", async () => {
-  const disabledPack = pack("resource-1", "moodboard", false);
-  let agentCalls = 0;
-  const implementations = createProductionResourceGenerationImplementations({
-    contextPacks: { get: (_workspaceId, id) => id === disabledPack.id ? disabledPack : null },
-    agent: {
-      async generateStructured(request) {
-        agentCalls += 1;
-        return {
-          protocol: "dezin.resource-agent-result.v1",
-          scope: request.scope,
-          generator: { id: "claude" },
-          output: moodboardDraft(),
-        };
-      },
-    },
-    moodboardImages: { async generateImage() { return assert.fail("image provider must not run"); } },
-    moodboardQuality: { async reviewImage() { return assert.fail("quality reviewer must not run"); } },
-  });
-  await assert.rejects(
-    () => implementations.moodboard!({ ...input("moodboard"), contextPackId: disabledPack.id }),
-    (error: unknown) => error instanceof ProductionResourceGenerationError
-      && error.code === "RESOURCE_GENERATOR_CONFIGURATION_INVALID",
+test("Moodboard cannot freeze an executable Context Pack when its image provider is not configured", () => {
+  assert.throws(
+    () => pack("resource-1", "moodboard", false),
+    /requires exact image execution authority/,
   );
-  assert.equal(agentCalls, 0);
 });
 
 test("Sharingan generation accepts only an exact scoped capture export and produces a self-contained bundle", async () => {

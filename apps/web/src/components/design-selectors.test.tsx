@@ -114,9 +114,67 @@ test("AgentModelSelect uses the lighter bottom divider", async () => {
   );
 
   await user.click(screen.getByRole("button", { name: "Agent and model" }));
-  expect(await screen.findByRole("dialog")).toHaveClass("overflow-y-auto");
+  expect(await screen.findByRole("dialog")).toHaveClass("dezin-agent-picker__content");
   const rescan = await screen.findByRole("button", { name: "Rescan agents" });
-  expect(rescan.parentElement?.className).toContain("border-border/60");
+  expect(rescan.parentElement).toHaveClass("dezin-agent-picker__rescan-row");
+});
+
+test("AgentModelSelect exposes a false rescan result and clears it after recovery", async () => {
+  const user = userEvent.setup();
+  const onRescan = vi.fn()
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce(true);
+  render(
+    <AgentModelSelect
+      agents={[]}
+      agent=""
+      model=""
+      onAgentChange={() => {}}
+      onModelChange={() => {}}
+      onRescan={onRescan}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  expect(screen.getByText("No agents detected.")).toBeVisible();
+
+  await user.click(screen.getByRole("button", { name: "Rescan agents" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Agent scan stopped before it completed. Use Rescan agents to try again.",
+  );
+  expect(screen.queryByText("No agents detected.")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Rescan agents" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByText("No agents detected.")).toBeVisible();
+  expect(onRescan).toHaveBeenCalledTimes(2);
+});
+
+test("AgentModelSelect catches a rejected rescan while preserving last-good agents", async () => {
+  const user = userEvent.setup();
+  const onRescan = vi.fn(async () => {
+    throw new Error("scan transport stopped");
+  });
+  render(
+    <AgentModelSelect
+      agents={[{ id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] }]}
+      agent="codex"
+      model="gpt-5"
+      onAgentChange={() => {}}
+      onModelChange={() => {}}
+      onRescan={onRescan}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  await user.click(screen.getByRole("button", { name: "Rescan agents" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Agent scan stopped before it completed. Use Rescan agents to try again.",
+  );
+  expect(screen.getByRole("button", { name: /Codex/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: "gpt-5" })).toBeVisible();
+  expect(onRescan).toHaveBeenCalledOnce();
 });
 
 test("AgentModelSelect delegates an agent switch once without a stale model callback", async () => {

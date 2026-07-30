@@ -38,6 +38,7 @@ import {
   StudioPanelHeader,
 } from "../../components/ui/index.ts";
 import { useApi } from "../../lib/api-context.tsx";
+import { withRequestDeadline } from "../../lib/request-deadline.ts";
 import type {
   ReadyProjectWorkspacePayload,
   ResearchResourceRevisionView,
@@ -142,15 +143,16 @@ export function ResearchResourceViewer({
 
   useEffect(() => {
     const epoch = ++loadEpoch.current;
+    const controller = new AbortController();
     setLoad({ status: "loading" });
     setSelectedDirectionId(null);
     setHypothesisConfirmed(false);
     setSubmitError(null);
-    const readExact = async (attempt = 0): Promise<
+    const readExact = async (signal: AbortSignal, attempt = 0): Promise<
       | { status: "ready"; view: ResearchResourceRevisionView }
       | { status: "empty"; title: string }
     > => {
-      const resource = await api.getResource(projectId, resourceId);
+      const resource = await api.getResource(projectId, resourceId, signal);
       const revisionId = requestedRevisionId ?? resource.headRevisionId;
       if (resource.id !== resourceId || resource.workspaceId !== workspace.workspace.id || resource.kind !== "research") {
         throw new Error("This Resource is not the active Workspace Research bundle.");
@@ -159,14 +161,14 @@ export function ResearchResourceViewer({
         throw new Error("Archived Research has no writable Current Head. Open an exact immutable Revision from history.");
       }
       if (revisionId === null) return { status: "empty", title: resource.title };
-      const view = await api.getResearchResourceRevision(projectId, resourceId, revisionId);
+      const view = await api.getResearchResourceRevision(projectId, resourceId, revisionId, signal);
       if (view.resource.id !== resourceId || view.resource.workspaceId !== resource.workspaceId
         || view.resource.kind !== "research" || view.revision.id !== revisionId
         || view.revision.resourceId !== resourceId) {
         throw new Error("Research Revision identity changed while it was loading.");
       }
       if (requestedRevisionId === null && view.observed.headRevisionId !== revisionId) {
-        if (attempt === 0) return readExact(1);
+        if (attempt === 0) return readExact(signal, 1);
         throw new Error("Current Research Head changed while it was opening. Try again.");
       }
       if (view.resource.headRevisionId !== view.observed.headRevisionId) {
@@ -178,7 +180,11 @@ export function ResearchResourceViewer({
       }
       return { status: "ready", view };
     };
-    void readExact().then((result) => {
+    void withRequestDeadline(
+      controller.signal,
+      "Research loading timed out. Try again.",
+      (signal) => readExact(signal),
+    ).then((result) => {
       if (epoch !== loadEpoch.current) return;
       if (result.status === "empty") {
         setLoad(result);
@@ -196,6 +202,7 @@ export function ResearchResourceViewer({
       if (epoch === loadEpoch.current) setLoad({ status: "error", message: errorMessage(error) });
     });
     return () => {
+      controller.abort();
       if (epoch === loadEpoch.current) loadEpoch.current += 1;
     };
   }, [

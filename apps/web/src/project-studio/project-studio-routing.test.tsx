@@ -16,6 +16,11 @@ import type {
 } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
+import {
+  emptyAgentSession,
+  WORKSPACE_AGENT_SCOPE,
+  writeAgentSession,
+} from "./scoped-agent-session.ts";
 
 function project(id: string, mode: Project["mode"] = "standard"): Project {
   return {
@@ -240,7 +245,9 @@ test("Canvas Present flow opens an exact Snapshot viewer without resolving mutab
     snapshotId: "snapshot-p-1",
     startArtifactId: "artifact-p-1",
   }, expect.any(AbortSignal));
-  expect(screen.getAllByText(/snapshot-p-1/i)).not.toHaveLength(0);
+  expect(screen.getByLabelText("Revision ID")).toHaveTextContent("revision-head");
+  expect(screen.getByLabelText("Snapshot ID")).toHaveTextContent("snapshot-p-1");
+  expect(screen.getByText("Active snapshot")).toBeInTheDocument();
 
   fireEvent.keyDown(window, { key: "Escape" });
   expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
@@ -366,7 +373,7 @@ function generationPlanDetail(
   };
 }
 
-test("Workspace canvas keeps Plan history closed until a Plan is explicitly opened", async () => {
+test("Workspace canvas keeps the Build plan closed until its explicit header toggle is used", async () => {
   const ordinary = generationPlanDetail("plan-history", "artifact-p-1", 2);
   const listGenerationPlans = vi.fn(async () => [ordinary.plan]);
   const getGenerationPlan = vi.fn(async () => ordinary);
@@ -385,11 +392,241 @@ test("Workspace canvas keeps Plan history closed until a Plan is explicitly open
   await act(async () => { await Promise.resolve(); });
   expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  const toggle = screen.getByRole("button", { name: "Show build plan" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
   expect(listGenerationPlans).not.toHaveBeenCalled();
   expect(getGenerationPlan).not.toHaveBeenCalled();
+
+  fireEvent.click(toggle);
+
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "open");
+  expect(screen.getByRole("button", { name: "Hide build plan" })).toHaveAttribute("aria-expanded", "true");
+  await waitFor(() => expect(listGenerationPlans).toHaveBeenCalledWith("p-1"));
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith("p-1", ordinary.plan.id));
 });
 
-test("Workspace canvas restores its latest live Workspace Agent Plan after re-entry", async () => {
+test("Workspace Agent history opens the exact persisted Plan trace", async () => {
+  const historical = generationPlanDetail("plan-transcript-history", "artifact-p-1", 2);
+  writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    ...emptyAgentSession(),
+    transcript: [{
+      id: "assistant-turn-history",
+      turnId: "turn-12345678-1234-4123-8123-123456789abc",
+      role: "assistant",
+      content: "Design work is queued in the build plan.",
+      createdAt: 2,
+      state: "queued",
+      planId: historical.plan.id,
+      taskId: historical.tasks[0]!.id,
+    }],
+  });
+  const getGenerationPlan = vi.fn(async () => historical);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      listGenerationPlans: async () => [historical.plan],
+      getGenerationPlan,
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+  const trace = document.querySelector<HTMLElement>("[data-agent-trace-state='queued']");
+  expect(trace).not.toBeNull();
+  fireEvent.click(within(trace!).getByRole("button", { name: "View in plan" }));
+
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith("p-1", historical.plan.id));
+  expect(screen.getByRole("button", { name: "Hide build plan" })).toHaveAttribute("aria-expanded", "true");
+  expect(trace).not.toHaveTextContent(historical.plan.id);
+});
+
+test("approved Workspace proposal history follows its Plan through terminal completion", async () => {
+  const completed = generationPlanDetail("plan-approved-proposal", "artifact-p-1", 2);
+  writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    ...emptyAgentSession(),
+    transcript: [{
+      id: "assistant-approved-proposal",
+      turnId: "turn-32345678-1234-4123-8123-123456789abc",
+      role: "assistant",
+      content: "Workspace proposal is ready for review.",
+      createdAt: 2,
+      state: "proposal",
+      proposalId: completed.plan.proposalId,
+    }],
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => readyWorkspace("p-1"),
+      getLatestWorkspaceAgentPlanId: async () => completed.plan.id,
+      getGenerationPlan: async () => completed,
+      listGenerationPlans: async () => [completed.plan],
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  const trace = await waitFor(() => {
+    const value = document.querySelector<HTMLElement>("[data-agent-trace-state='succeeded']");
+    expect(value).not.toBeNull();
+    return value!;
+  });
+  expect(trace).toHaveTextContent("Build complete");
+  expect(trace).not.toHaveTextContent(completed.plan.id);
+  fireEvent.click(within(trace).getByRole("button", { name: "View in plan" }));
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
+});
+
+test("Artifact Agent projects a result-less enqueue receipt into the terminal Plan output", async () => {
+  window.history.pushState({}, "", "/projects/p-1/artifacts/artifact-p-1");
+  const completed = generationPlanDetail("plan-artifact-output", "artifact-p-1", 2);
+  const queuedTask = {
+    ...completed.tasks[0]!,
+    status: "queued" as const,
+    currentAttempt: 0,
+    resultRevisionId: null,
+    finishedAt: null,
+  };
+  writeAgentSession("p-1", "artifact:artifact-p-1", {
+    ...emptyAgentSession(),
+    receipt: {
+      kind: "scoped",
+      turnId: "turn-12345678-1234-4123-8123-123456789abc",
+      receipt: { task: queuedTask, contextPackId: `context-pack-${"a".repeat(64)}` },
+      createdAt: 2,
+    },
+    transcript: [{
+      id: "assistant-artifact-output",
+      turnId: "turn-12345678-1234-4123-8123-123456789abc",
+      role: "assistant",
+      content: "Design work is queued in the build plan.",
+      createdAt: 2,
+      state: "queued",
+      planId: completed.plan.id,
+      taskId: queuedTask.id,
+    }],
+  });
+  const getGenerationPlan = vi.fn(async () => completed);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => revisionWorkspace("p-1"),
+      getGenerationPlan,
+      listGenerationPlans: async () => [completed.plan],
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith(
+    "p-1",
+    completed.plan.id,
+    expect.any(AbortSignal),
+  ));
+  const trace = await waitFor(() => {
+    const value = document.querySelector<HTMLElement>("[data-agent-trace-state='succeeded']");
+    expect(value).not.toBeNull();
+    return value!;
+  });
+  expect(trace).toHaveTextContent("Build complete");
+  expect(trace).not.toHaveTextContent(completed.plan.id);
+  fireEvent.click(within(trace).getByRole("button", { name: "Open Landing page Revision" }));
+  expect(window.location.pathname).toBe(
+    `/projects/p-1/artifacts/artifact-p-1/revisions/${completed.tasks[0]!.resultRevisionId}`,
+  );
+});
+
+test("Resource Agent exposes its terminal immutable Resource Revision from the transcript", async () => {
+  window.history.pushState({}, "", "/projects/p-1/resources/resource-1");
+  const workspace = readyWorkspace("p-1");
+  if (workspace.status !== "ready") throw new Error("workspace fixture must be ready");
+  const resource: Resource = {
+    id: "resource-1",
+    workspaceId: workspace.workspace.id,
+    kind: "file",
+    title: "Editorial references",
+    headRevisionId: null,
+    defaultPinPolicy: "follow-head",
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  workspace.resources = [resource];
+  const artifactPlan = generationPlanDetail("plan-resource-output", "artifact-p-1", 2);
+  const completed: GenerationPlanDetail = {
+    ...artifactPlan,
+    tasks: [{
+      ...artifactPlan.tasks[0]!,
+      kind: "resource",
+      target: { type: "resource", workspaceId: workspace.workspace.id, id: resource.id },
+      resultRevisionId: null,
+      resultResourceRevisionId: "resource-revision-output",
+    }],
+  };
+  const queuedTask = {
+    ...completed.tasks[0]!,
+    status: "queued" as const,
+    currentAttempt: 0,
+    resultResourceRevisionId: null,
+    finishedAt: null,
+  };
+  writeAgentSession("p-1", "resource:resource-1", {
+    ...emptyAgentSession(),
+    receipt: {
+      kind: "scoped",
+      turnId: "turn-22345678-1234-4123-8123-123456789abc",
+      receipt: { task: queuedTask, contextPackId: `context-pack-${"b".repeat(64)}` },
+      createdAt: 2,
+    },
+    transcript: [{
+      id: "assistant-resource-output",
+      turnId: "turn-22345678-1234-4123-8123-123456789abc",
+      role: "assistant",
+      content: "Design work is queued in the build plan.",
+      createdAt: 2,
+      state: "queued",
+      planId: completed.plan.id,
+      taskId: queuedTask.id,
+    }],
+  });
+  const getGenerationPlan = vi.fn(async () => completed);
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => workspace,
+      listResources: async () => [resource],
+      getResource: async () => resource,
+      getGenerationPlan,
+      listGenerationPlans: async () => [completed.plan],
+    })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith(
+    "p-1",
+    completed.plan.id,
+    expect.any(AbortSignal),
+  ));
+  const trace = await waitFor(() => {
+    const value = document.querySelector<HTMLElement>("[data-agent-trace-state='succeeded']");
+    expect(value).not.toBeNull();
+    return value!;
+  });
+  expect(trace).toHaveTextContent("Build complete");
+  expect(trace).not.toHaveTextContent(completed.tasks[0]!.resultResourceRevisionId!);
+  fireEvent.click(within(trace).getByRole("button", { name: "Open Editorial references Revision" }));
+  expect(window.location.pathname).toBe(
+    `/projects/p-1/resources/resource-1/revisions/${completed.tasks[0]!.resultResourceRevisionId}`,
+  );
+});
+
+test("Workspace canvas discovers its latest live Plan but opens it only through an explicit action", async () => {
   const settled = generationPlanDetail("plan-live-workspace-agent", "artifact-p-1", 2);
   const active: GenerationPlanDetail = {
     ...settled,
@@ -408,25 +645,39 @@ test("Workspace canvas restores its latest live Workspace Agent Plan after re-en
     </ApiProvider>,
   );
 
-  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+  const headerToggle = screen.getByRole("button", { name: "Show build plan" });
+  expect(headerToggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  const activityAction = await screen.findByRole("button", { name: "Open build plan" });
+  expect(activityAction).toHaveTextContent("Open build plan");
+  expect(activityAction).toHaveAttribute("title", "Build plan");
+  expect(activityAction).not.toHaveTextContent(active.plan.id);
+  expect(screen.getByRole("region", { name: "Build activity" })).toHaveTextContent("Building");
   expect(screen.queryByLabelText("Workspace Agent task status")).not.toBeInTheDocument();
   expect(getLatestWorkspaceAgentPlanId).toHaveBeenCalledWith("p-1", expect.any(AbortSignal));
 
-  fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
+  fireEvent.click(headerToggle);
+  expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Hide build plan" })).toHaveAttribute("aria-expanded", "true");
+
+  fireEvent.click(within(
+    screen.getByRole("complementary", { name: "Build plan" }),
+  ).getByRole("button", { name: "Close build plan" }));
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Show build plan" })).toHaveAttribute("aria-expanded", "false");
   const restorePlan = screen.getByRole("button", { name: "Open build plan" });
-  expect(restorePlan).toHaveTextContent("Recent build plan");
+  expect(restorePlan).toHaveTextContent("Open build plan");
   expect(restorePlan).not.toHaveTextContent(active.plan.id);
-  expect(restorePlan).toHaveAttribute("title", `Build plan ${active.plan.id}`);
+  expect(restorePlan).toHaveAttribute("title", "Build plan");
   expect(screen.queryByLabelText("Workspace Agent task status")).not.toBeInTheDocument();
 
   fireEvent.click(restorePlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Hide build plan" })).toHaveAttribute("aria-expanded", "true");
 });
 
-test("background Plan results reconcile published Revisions even when the Build plan Inspector is not mounted", async () => {
+test("background Plan results reconcile published Revisions without reopening the closed Build plan", async () => {
   const completed = generationPlanDetail("plan-background-publication", "artifact-p-1", 2);
   const getWorkspace = vi.fn(async () => readyWorkspace("p-1"));
   const getGenerationPlan = vi.fn(async () => completed);
@@ -442,7 +693,9 @@ test("background Plan results reconcile published Revisions even when the Build 
     </ApiProvider>,
   );
 
-  expect(await screen.findByRole("heading", { name: "Proposal unavailable" })).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+  expect(screen.getByRole("button", { name: "Show build plan" })).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
   await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledWith(
     "p-1",
@@ -450,9 +703,12 @@ test("background Plan results reconcile published Revisions even when the Build 
     expect.any(AbortSignal),
   ));
   await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(2));
+  expect(screen.getByTestId("project-studio-shell")).toHaveAttribute("data-inspector-layout", "closed");
+  expect(screen.getByRole("button", { name: "Show build plan" })).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
 });
 
-test("Workspace canvas restores a failed Workspace Agent Plan with its retry action after re-entry", async () => {
+test("Workspace canvas exposes a discovered failed Plan and its retry action after the user opens it", async () => {
   const settled = generationPlanDetail("plan-failed-workspace-agent", "artifact-p-1", 2);
   const failed: GenerationPlanDetail = {
     ...settled,
@@ -503,6 +759,10 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
     </ApiProvider>,
   );
 
+  expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Open build plan" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Show build plan" }));
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
   expect(await screen.findByRole("list", { name: "Generation tasks" })).toHaveTextContent("Landing page");
   await waitFor(() => {
@@ -510,7 +770,8 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
   });
   const canvasNode = container.querySelector<HTMLElement>('[data-id="node-p-1"]')!;
   expect(await within(canvasNode).findByText("failed")).toBeInTheDocument();
-  expect(parentObservationCalls).toBe(1);
+  expect(parentObservationCalls).toBeGreaterThanOrEqual(1);
+  const observationCallsBeforeRetry = parentObservationCalls;
 
   fireEvent.click(screen.getByRole("button", { name: "Retry Page with the same context" }));
   await waitFor(() => expect(retryGenerationTask).toHaveBeenCalledWith(
@@ -520,7 +781,7 @@ test("Workspace canvas restores a failed Workspace Agent Plan with its retry act
     "same-context",
   ));
   await waitFor(() => expect(within(canvasNode).getByText("queued")).toBeInTheDocument());
-  await waitFor(() => expect(parentObservationCalls).toBeGreaterThan(1));
+  await waitFor(() => expect(parentObservationCalls).toBeGreaterThan(observationCallsBeforeRetry));
 });
 
 test("Artifact route restores the newest durable scoped Plan without displacing the Inspector", async () => {
@@ -547,10 +808,11 @@ test("Artifact route restores the newest durable scoped Plan without displacing 
   );
 
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Build plan" })).not.toBeInTheDocument();
   const openPlan = await screen.findByRole("button", { name: "Open build plan" });
-  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).toHaveTextContent("Open build plan");
   expect(openPlan).not.toHaveTextContent(exact.plan.id);
-  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
+  expect(openPlan).toHaveAttribute("title", "Build plan");
   await waitFor(() => expect(getWorkspace).toHaveBeenCalledTimes(3));
   fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
@@ -609,9 +871,9 @@ test("Artifact route retries scoped Plan discovery after a transient lookup fail
   await waitFor(() => expect(getLatestScopedArtifactPlanId).toHaveBeenCalledTimes(2), { timeout: 1_500 });
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
   const openPlan = screen.getByRole("button", { name: "Open build plan" });
-  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).toHaveTextContent("Open build plan");
   expect(openPlan).not.toHaveTextContent(exact.plan.id);
-  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
+  expect(openPlan).toHaveAttribute("title", "Build plan");
   fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 });
@@ -646,9 +908,9 @@ test("Artifact route discovers a scoped Plan created by another viewer after the
   await waitFor(() => expect(getLatestScopedArtifactPlanId).toHaveBeenCalledTimes(2), { timeout: 3_000 });
   expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
   const openPlan = screen.getByRole("button", { name: "Open build plan" });
-  expect(openPlan).toHaveTextContent("Recent build plan");
+  expect(openPlan).toHaveTextContent("Open build plan");
   expect(openPlan).not.toHaveTextContent(exact.plan.id);
-  expect(openPlan).toHaveAttribute("title", `Build plan ${exact.plan.id}`);
+  expect(openPlan).toHaveAttribute("title", "Build plan");
   fireEvent.click(openPlan);
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
 });

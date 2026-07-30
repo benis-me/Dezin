@@ -1,4 +1,4 @@
-import { ChevronRight, Component, Frame, PanelTop, Paperclip, SquareArrowOutUpRight, X } from "lucide-react";
+import { ArrowUpRight, ChevronRight, Component, Frame, PanelTop, Paperclip, X } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { Button } from "../../components/ui/Button.tsx";
 import { IconButton } from "../../components/ui/IconButton.tsx";
@@ -83,7 +83,7 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
                   aria-label={openTooltip}
                   onKeyDown={stopCanvasShortcuts}
                 >
-                  <SquareArrowOutUpRight aria-hidden />
+                  <ArrowUpRight aria-hidden />
                 </Link>
               </Button>
             </TooltipTrigger>
@@ -102,7 +102,7 @@ function OutlineBranch({ projectId, node, childrenByParent, onSelect, onToggleCo
                   aria-label={openTooltip}
                   onKeyDown={stopCanvasShortcuts}
                 >
-                  <SquareArrowOutUpRight aria-hidden />
+                  <ArrowUpRight aria-hidden />
                 </Link>
               </Button>
             </TooltipTrigger>

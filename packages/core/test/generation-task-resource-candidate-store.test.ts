@@ -18,6 +18,12 @@ import {
   type StoreClock,
   type WorkspaceSnapshotRecord,
 } from "../src/index.ts";
+import {
+  azureMoodboardImageAuthority,
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+  codexResearchGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface ControlledClock {
   clock: StoreClock;
@@ -177,7 +183,9 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    researchAgent: codexResearchGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -469,6 +477,7 @@ test("generated Moodboard materialization pins every same-Plan generated Researc
       layoutOperations: [],
       generation: {
         ...emptyGeneration(),
+        moodboardImageAuthority: azureMoodboardImageAuthority(),
         resourceOperations: [
           {
             operation: "revise",

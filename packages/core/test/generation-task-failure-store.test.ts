@@ -13,6 +13,12 @@ import {
   type GenerationTaskFailureClass,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  azureMoodboardImageAuthority,
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+  codexResearchGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface ControlledClock {
   clock: StoreClock;
@@ -60,7 +66,9 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    researchAgent: codexResearchGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -253,6 +261,9 @@ function createClaimedResourceFixture(
     layoutOperations: [],
     generation: {
       ...emptyGeneration(),
+      ...(kind === "moodboard"
+        ? { moodboardImageAuthority: azureMoodboardImageAuthority() }
+        : {}),
       resourceOperations: [{
         operation: "revise",
         nodeId: created.node.id,
@@ -664,6 +675,111 @@ test("retryable provider failures append exact successors with 1s, 4s, and 16s b
   }
 });
 
+test("a deterministic Resource generator configuration failure terminalizes without a same-input retry", () => {
+  const fixture = createClaimedResourceFixture("configuration-terminal", "research");
+  const error = {
+    name: "ProductionResourceGenerationError",
+    code: "RESOURCE_GENERATOR_CONFIGURATION_INVALID",
+    message: "Decision-grade Research requires a reviewer principal distinct from the generating Agent",
+  };
+  try {
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "adapter", error),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+    assert.equal(attemptFor(fixture.store, fixture, fixture.attempt.attempt).status, "failed");
+    assert.equal(
+      Number((fixture.store.db.prepare(
+        "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+      ).get(fixture.task.id) as { count: number }).count),
+      1,
+    );
+    assert.equal(taskRow(fixture.store, fixture.task.id).status, "failed");
+    assert.equal(taskRow(fixture.store, fixture.validation.id).status, "blocked");
+    assert.equal(taskRow(fixture.store, fixture.checkpoint.id).status, "blocked");
+    assert.equal(
+      fixture.store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id).status,
+      "failed",
+    );
+    const events = fixture.store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    );
+    assert.equal(events.filter(
+      (event) => event.type === "task-retry-wait" && event.taskId === fixture.task.id,
+    ).length, 0);
+    const failed = events.filter(
+      (event) => event.type === "task-failed" && event.taskId === fixture.task.id,
+    );
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0]?.payload.retryExhausted, false);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("deterministic Resource provider and adapter availability failures never append retries", () => {
+  const failures = [
+    ["RESOURCE_AGENT_PROVIDER_UNAVAILABLE", "provider"],
+    ["RESOURCE_AGENT_CAPABILITY_UNAVAILABLE", "provider"],
+    ["RESOURCE_AGENT_REQUEST_INVALID", "provider"],
+    ["RESOURCE_REVIEW_PROVIDER_SUBSTITUTED", "agent-transport"],
+    ["RESOURCE_GENERATOR_SCOPE_SUBSTITUTED", "adapter"],
+    ["RESOURCE_ADAPTER_VERSION_UNAVAILABLE", "adapter"],
+    ["RESOURCE_ADAPTER_KIND_UNAVAILABLE", "adapter"],
+    ["RESOURCE_ADAPTER_UNAVAILABLE", "adapter"],
+  ] as const;
+  for (const [index, [code, failureClass]] of failures.entries()) {
+    const fixture = createClaimedResourceFixture(`deterministic-terminal-${index}`, "research");
+    try {
+      const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        failureInput(fixture.claim, failureClass, {
+          name: "DeterministicResourceExecutionError",
+          code,
+          message: `deterministic ${code}`,
+        }),
+      ) as {
+        status: string;
+        successorAttempt: GenerationTaskAttempt | null;
+        nextEligibleAt: number | null;
+      };
+      assert.equal(result.status, "failed", code);
+      assert.equal(result.successorAttempt, null, code);
+      assert.equal(result.nextEligibleAt, null, code);
+      assert.equal(
+        Number((fixture.store.db.prepare(
+          "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+        ).get(fixture.task.id) as { count: number }).count),
+        1,
+        code,
+      );
+      assert.equal(
+        fixture.store.workspace.listGenerationPlanEventsForProject(
+          fixture.project.id,
+          fixture.plan.id,
+          { after: 0, limit: 1_000 },
+        ).filter((event) => event.type === "task-retry-wait").length,
+        0,
+        code,
+      );
+    } finally {
+      fixture.store.close();
+    }
+  }
+});
+
 test("a quality-gate QA failure gets one bounded same-input retry before blocking descendants", () => {
   const fixture = createClaimedPageFixture("quality-gate-retry");
   const validationStatusBeforeRetry = taskRow(fixture.store, fixture.validation.id).status;
@@ -843,7 +959,42 @@ test("an exact current Moodboard adapter keeps the bounded non-Research quality-
   }
 });
 
-test("a Research Task cannot gain a quality-gate retry by forging a non-Research adapter identity", () => {
+test("an unknown current Resource payload field cannot gain a quality-gate retry", () => {
+  const fixture = createClaimedResourceFixture("unknown-payload-field", "moodboard");
+  try {
+    const forgedPayload = structuredClone(fixture.task.payload);
+    forgedPayload.unrecognizedExecutionAuthority = {
+      kind: "moodboard-image",
+    };
+    replaceGenerationTaskPayloadBypassingImmutableGuard(
+      fixture.store,
+      fixture.task,
+      forgedPayload,
+    );
+
+    const result = failureApi(fixture.store).finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      failureInput(fixture.claim, "qa", {
+        name: "GenerationTaskQualityGateError",
+        code: "generation-task-quality-gate",
+        message: "Unknown Resource payload quality rejection",
+      }),
+    ) as {
+      status: string;
+      successorAttempt: GenerationTaskAttempt | null;
+      nextEligibleAt: number | null;
+    };
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.successorAttempt, null);
+    assert.equal(result.nextEligibleAt, null);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a Research Task cannot gain a quality-gate retry by forging a non-Research adapter and image authority", () => {
   const fixture = createClaimedResourceFixture("forged-adapter", "research");
   try {
     const forgedPayload = structuredClone(fixture.task.payload);
@@ -865,6 +1016,7 @@ test("a Research Task cannot gain a quality-gate retry by forging a non-Research
         kind: "moodboard",
       },
     };
+    forgedPayload.moodboardImageAuthority = azureMoodboardImageAuthority();
     replaceGenerationTaskPayloadBypassingImmutableGuard(
       fixture.store,
       fixture.task,

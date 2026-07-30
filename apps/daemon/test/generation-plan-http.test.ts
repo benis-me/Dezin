@@ -196,12 +196,12 @@ test("Generation Plan HTTP exposes one narrow latest scoped Artifact Plan lookup
   });
 });
 
-test("Generation Plan HTTP exposes one narrow latest actionable Workspace Agent Plan lookup", async () => {
+test("Generation Plan HTTP exposes the latest Workspace Agent Plan including terminal history", async () => {
   await withServer(async ({ base, store }) => {
     const project = store.createProject({ name: "Workspace Agent Plan HTTP", mode: "standard" });
     const workspace = store.workspace.ensureWorkspaceRecord(project.id);
     const reads: string[] = [];
-    Object.defineProperty(store.workspace, "getLatestActionableWorkspaceAgentGenerationPlanForProject", {
+    Object.defineProperty(store.workspace, "getLatestWorkspaceAgentGenerationPlanForProject", {
       configurable: true,
       value(projectId: string) {
         reads.push(projectId);

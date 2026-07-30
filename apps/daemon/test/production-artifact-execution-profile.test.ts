@@ -298,16 +298,29 @@ function samePlanGeneratedResearchRequest(
     instructions,
   };
   const observation = next.observation as {
+    dependencyOutputs?: Array<{
+      taskId: string;
+      resultRevisionId: string | null;
+      resultResourceRevisionId: string | null;
+      resultSnapshotId: string | null;
+    }>;
     resourcePins: Array<{
       resourceId: string;
       revisionId: string;
       sourceTaskId: string | null;
     }>;
   };
+  next.task.dependencyIds = ["generated-research-task"];
   observation.resourcePins = observation.resourcePins.map((pin) => ({
     ...pin,
     sourceTaskId: "generated-research-task",
   }));
+  observation.dependencyOutputs = [{
+    taskId: "generated-research-task",
+    resultRevisionId: null,
+    resultResourceRevisionId: observation.resourcePins[0]!.revisionId,
+    resultSnapshotId: "generated-research-snapshot",
+  }];
   return next;
 }
 
@@ -319,6 +332,9 @@ function profile(overrides: {
   agentApiKey?: string;
   agentApiBaseUrl?: string;
   agentOrganization?: string;
+  aiProviderId?: string;
+  aiProviderEnabled?: boolean;
+  aiProviderProfiles?: string;
   visualQaSetting?: boolean;
   effectiveVisualQa?: boolean;
   visualQaAgentCommand?: string;
@@ -359,12 +375,13 @@ function profile(overrides: {
     apiBaseUrl: overrides.agentApiBaseUrl ?? settings().apiBaseUrl,
     apiKey: overrides.agentApiKey ?? settings().apiKey,
     aiProviderOrganization: overrides.agentOrganization ?? settings().aiProviderOrganization,
+    aiProviderId: overrides.aiProviderId ?? overrides.imageProviderId ?? settings().aiProviderId,
+    aiProviderEnabled: overrides.aiProviderEnabled ?? settings().aiProviderEnabled,
     visualQaEnabled: overrides.visualQaSetting ?? settings().visualQaEnabled,
     visualQaAgentCommand: overrides.visualQaAgentCommand ?? settings().visualQaAgentCommand,
     visualQaModel: overrides.visualQaModel ?? settings().visualQaModel,
     imageModel: overrides.imageModel ?? settings().imageModel,
-    aiProviderId: overrides.imageProviderId ?? settings().aiProviderId,
-    aiProviderProfiles: JSON.stringify(providerProfiles),
+    aiProviderProfiles: overrides.aiProviderProfiles ?? JSON.stringify(providerProfiles),
   };
   const command = currentSettings.agentCommand || "claude";
   const frozenReviewerCommand = reviewerAgentCommand(currentSettings, command);
@@ -584,16 +601,20 @@ test("Artifact execution profile freezes every output and QA semantic without pe
   const frozen = profile();
   const serialized = stableStringify(frozen);
 
-  assert.equal(frozen.protocol, "dezin.artifact-execution-profile.v4");
+  assert.equal(frozen.protocol, "dezin.artifact-execution-profile.v5");
   assert.equal(frozen.hasExactSharinganCapture, false);
   assert.equal(frozen.settings.value.apiKey, "");
+  assert.equal(frozen.settings.value.apiKeyConfigured, true);
   assert.equal(frozen.settings.value.imageApiKey, "");
+  assert.equal(frozen.settings.value.imageApiKeyConfigured, true);
   assert.equal(frozen.settings.value.videoApiKey, "");
+  assert.equal(frozen.settings.value.videoApiKeyConfigured, true);
   assert.deepEqual(frozen.agent, {
     command: "codex",
     providerId: "codex",
     model: "gpt-5.4",
     credentialProviderId: "openai",
+    credentialSource: "session",
     baseUrl: "",
     organization: "",
     credentialRequired: false,
@@ -710,6 +731,7 @@ test("CodeBuddy Artifact binding keeps the frozen model and never injects API cr
     providerId: "codebuddy",
     model: "gpt-5.6-sol",
     credentialProviderId: "codebuddy",
+    credentialSource: "session",
     baseUrl: "",
     organization: "",
     credentialRequired: false,
@@ -777,29 +799,111 @@ test("Codex Artifact execution settings retain frozen semantics and use only hos
   assert.doesNotMatch(hydrated.aiProviderProfiles, /must-not-cross-provider-boundary/);
 });
 
-test("Artifact execution settings reject cross-provider and endpoint credential substitution", () => {
+test("Artifact execution settings rotate one exact provider credential and reject source or endpoint substitution", () => {
+  const endpoint = "https://anthropic.example.test/v1";
+  const anthropicProfiles = (baseUrl: string, apiKey: string) => JSON.stringify({
+    anthropic: {
+      enabled: true,
+      baseUrl,
+      apiKey,
+      models: "claude-sonnet-4-6",
+      organization: "reviewer-org-frozen",
+    },
+  });
   const frozen = profile({
     agentCommand: "claude",
     model: "claude-sonnet-4-6",
-    agentApiBaseUrl: "https://anthropic.example.test/v1",
+    agentApiBaseUrl: endpoint,
+    anthropicReviewerBaseUrl: endpoint,
+    anthropicReviewerApiKey: "frozen-secret",
   });
   const base = {
     ...settings(),
-    agentCommand: "claude",
+    agentCommand: "gemini",
     model: "mutated-model",
-    apiBaseUrl: "https://anthropic.example.test/v1",
-    apiKey: "current-secret",
+    aiProviderProfiles: anthropicProfiles(endpoint, "current-secret"),
   };
+
+  const exact = hydrateArtifactExecutionSettings(frozen, base);
+  assert.equal(exact.agentCommand, "claude");
+  assert.equal(exact.model, "claude-sonnet-4-6");
+  assert.equal(exact.apiKey, "current-secret");
+
   for (const live of [
-    { ...base, agentCommand: "gemini" },
-    { ...base, apiBaseUrl: "https://drifted.example.test/v1" },
-    { ...base, apiKey: "" },
+    {
+      ...base,
+      aiProviderProfiles: anthropicProfiles("https://drifted.example.test/v1", "current-secret"),
+    },
+    { ...base, aiProviderProfiles: "{}" },
+    { ...base, aiProviderProfiles: anthropicProfiles(endpoint, "") },
   ]) {
     assert.throws(
       () => hydrateArtifactExecutionSettings(frozen, live),
-      /credential for the frozen Artifact Agent provider, endpoint, and organization is unavailable/i,
+      /credential for the frozen Artifact Agent provider, source, endpoint, and organization is unavailable/i,
     );
   }
+});
+
+test("Artifact execution rejects credential-requirement drift for the same provider profile", () => {
+  const endpoint = "https://anthropic.example.test/v1";
+  const anthropicProfiles = (apiKey: string) => JSON.stringify({
+    anthropic: {
+      enabled: true,
+      baseUrl: endpoint,
+      apiKey,
+      models: "claude-sonnet-4-6",
+      organization: "org-frozen",
+    },
+  });
+  const frozen = profile({
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    aiProviderProfiles: anthropicProfiles(""),
+  });
+
+  assert.equal(frozen.agent.credentialSource, "provider-profile");
+  assert.equal(frozen.agent.credentialRequired, false);
+  assert.throws(
+    () => hydrateArtifactExecutionSettings(frozen, {
+      ...settings(),
+      agentCommand: "claude",
+      model: "claude-sonnet-4-6",
+      aiProviderProfiles: anthropicProfiles("newly-configured-key"),
+    }),
+    /credential for the frozen Artifact Agent provider, source, endpoint, and organization is unavailable/i,
+  );
+});
+
+test("legacy Claude key-only Artifact authority persists no secret and hydrates the same source", () => {
+  const frozen = profile({
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    agentApiBaseUrl: "",
+    agentApiKey: "legacy-key-only-secret",
+    aiProviderId: "",
+    aiProviderEnabled: false,
+    aiProviderProfiles: "",
+    imageEnabled: false,
+  });
+
+  assert.equal(frozen.agent.credentialSource, "agent");
+  assert.equal(frozen.agent.credentialRequired, true);
+  assert.equal(frozen.settings.value.apiKey, "");
+  assert.equal(frozen.settings.value.apiKeyConfigured, true);
+  assert.doesNotMatch(stableStringify(frozen), /legacy-key-only-secret/);
+
+  const hydrated = hydrateArtifactExecutionSettings(frozen, {
+    ...settings(),
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    apiBaseUrl: "",
+    apiKey: "rotated-key-only-secret",
+    aiProviderId: "",
+    aiProviderEnabled: false,
+    aiProviderProfiles: "",
+  });
+  assert.equal(hydrated.apiKey, "rotated-key-only-secret");
+  assert.equal(hydrated.apiBaseUrl, "");
 });
 
 test("Artifact execution settings allow credential-free local auth without borrowing a foreign key", () => {
@@ -818,7 +922,7 @@ test("Artifact execution settings allow credential-free local auth without borro
   assert.equal(hydrated.aiProviderOrganization, "");
 });
 
-test("legacy Codex Artifact BYOK profiles hydrate through host login without reviving frozen endpoint semantics", () => {
+test("ambiguous legacy Codex Artifact BYOK profiles fail closed", () => {
   const current = profile();
   const legacyBodyWithOldChecksum = {
     ...structuredClone(current),
@@ -835,18 +939,16 @@ test("legacy Codex Artifact BYOK profiles hydrate through host login without rev
     checksum: checksumBytes(stableStringify(legacyBody)),
   } as FrozenArtifactExecutionProfile;
 
-  const hydrated = hydrateArtifactExecutionSettings(legacy, {
-    ...settings(),
-    agentCommand: "codex",
-    apiBaseUrl: "https://another-project-provider.example.test/v1",
-    apiKey: "must-not-enter-codex",
-    aiProviderOrganization: "another-org",
-  });
-
-  assert.equal(hydrated.agentCommand, "codex");
-  assert.equal(hydrated.apiBaseUrl, "");
-  assert.equal(hydrated.aiProviderOrganization, "");
-  assert.equal(hydrated.apiKey, "");
+  assert.throws(
+    () => hydrateArtifactExecutionSettings(legacy, {
+      ...settings(),
+      agentCommand: "codex",
+      apiBaseUrl: "https://another-project-provider.example.test/v1",
+      apiKey: "must-not-enter-codex",
+      aiProviderOrganization: "another-org",
+    }),
+    /credential semantic does not match frozen settings/i,
+  );
 
   const substitutedBodyWithOldChecksum = {
     ...structuredClone(legacy),
@@ -886,29 +988,11 @@ test("legacy Codex Artifact BYOK profiles hydrate through host login without rev
   );
 });
 
-test("checksum-valid legacy Artifact v4 Context keeps its exact frozen Claude reviewer without admitting hybrid tampering", () => {
-  const current = profile({
-    visualQaAgentCommand: "",
-    visualQaModel: "",
-  });
-  const legacyBodyWithCurrentChecksum = {
-    ...structuredClone(current),
-    agent: {
-      ...structuredClone(current.agent),
-      baseUrl: current.settings.value.apiBaseUrl,
-      organization: current.settings.value.aiProviderOrganization,
-      credentialRequired: true,
-    },
-    quality: {
-      ...structuredClone(current.quality),
-      reviewer: {
-        command: "claude",
-        providerId: "claude",
-        model: null,
-      },
-    },
-  };
-  const { checksum: _currentChecksum, ...legacyBody } = legacyBodyWithCurrentChecksum;
+test("checksum-valid legacy Artifact v4 Context fails closed without credential-source authority", () => {
+  const current = structuredClone(profile()) as any;
+  current.protocol = "dezin.artifact-execution-profile.v4";
+  delete current.agent.credentialSource;
+  const { checksum: _currentChecksum, ...legacyBody } = current;
   const legacy = {
     ...legacyBody,
     checksum: checksumBytes(stableStringify(legacyBody)),
@@ -920,88 +1004,47 @@ test("checksum-valid legacy Artifact v4 Context keeps its exact frozen Claude re
     taskId: TASK_ID,
     targetArtifactId: ARTIFACT_ID,
   };
-  const live = {
-    ...settings(),
-    visualQaAgentCommand: "codex",
-    visualQaModel: "live-reviewer-must-not-win",
-    apiBaseUrl: "https://live-project-provider.example.test/v1",
-    apiKey: "live-project-key-must-not-enter",
-    aiProviderOrganization: "live-project-org",
-  };
-
-  const required = requireArtifactExecutionProfile(packWithProfile(legacy), ownership);
-  assert.deepEqual(required.quality.reviewer, {
-    command: "claude",
-    providerId: "claude",
-    model: null,
-  });
-  const hydrated = hydrateArtifactExecutionSettings(required, live);
-  assert.equal(hydrated.agentCommand, "codex");
-  assert.equal(hydrated.apiBaseUrl, "");
-  assert.equal(hydrated.aiProviderOrganization, "");
-  assert.equal(hydrated.apiKey, "");
-  assert.equal(hydrated.visualQaAgentCommand, "claude");
-  assert.equal(hydrated.visualQaModel, "");
-
-  const bound = bindArtifactExecutionProfile({
-    contextPack: packWithProfile(legacy),
-    ownership,
-    liveSettings: live,
-  });
-  assert.equal(bound.agentCommand, "codex");
-  assert.equal(bound.environment.OPENAI_API_KEY, undefined);
-  assert.equal(bound.qualitySettings.visualQaAgentCommand, "claude");
-  assert.equal(bound.qualitySettings.visualQaModel, "");
-  assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings, "claude"), {});
-
-  const checksumProfile = (
-    value: Omit<FrozenArtifactExecutionProfile, "checksum">,
-  ): FrozenArtifactExecutionProfile => ({
-    ...value,
-    checksum: checksumBytes(stableStringify(value)),
-  }) as FrozenArtifactExecutionProfile;
-  const tamperedReviewerBody = {
-    ...structuredClone(legacyBody),
-    quality: {
-      ...structuredClone(legacy.quality),
-      reviewer: {
-        command: "claude",
-        providerId: "claude",
-        model: "tampered-reviewer",
-      },
-    },
-  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
-  const hybridCurrentAgentBody = {
-    ...structuredClone(legacyBody),
-    agent: structuredClone(current.agent),
-  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
-  const nonBlankSettingsValue = {
-    ...structuredClone(legacy.settings.value),
-    visualQaModel: "tampered-setting",
-  };
-  const nonBlankSettingsBody = {
-    ...structuredClone(legacyBody),
-    settings: {
-      value: nonBlankSettingsValue,
-      checksum: checksumBytes(stableStringify(nonBlankSettingsValue)),
-    },
-  } as Omit<FrozenArtifactExecutionProfile, "checksum">;
-  for (const candidate of [
-    checksumProfile(tamperedReviewerBody),
-    checksumProfile(hybridCurrentAgentBody),
-    checksumProfile(nonBlankSettingsBody),
-  ]) {
-    assert.throws(
-      () => requireArtifactExecutionProfile(packWithProfile(candidate), ownership),
-      /reviewer does not match frozen quality settings/i,
-    );
-  }
+  assert.throws(
+    () => requireArtifactExecutionProfile(packWithProfile(legacy), ownership),
+    /protocol or checksum is invalid/i,
+  );
 });
 
 test("Artifact execution canonicalizes a credential-free image provider URL from Settings", () => {
   const frozen = profile({ imageProviderBaseUrl: "https://images.example.test" });
 
   assert.equal(frozen.imageGeneration.baseUrl, "https://images.example.test/");
+});
+
+test("Artifact execution rejects credentials, query, or fragment in every persisted Agent endpoint", () => {
+  for (const unsafeBaseUrl of [
+    "https://user:pass@api.example.test/v1",
+    "https://api.example.test/v1?token=secret",
+    "https://api.example.test/v1#credential",
+  ]) {
+    assert.throws(
+      () => profile({ agentApiBaseUrl: unsafeBaseUrl }),
+      /must be canonical and credential-free/i,
+      unsafeBaseUrl,
+    );
+
+    const providerProfiles = JSON.parse(settings().aiProviderProfiles) as Record<string, unknown>;
+    providerProfiles.anthropic = {
+      enabled: true,
+      baseUrl: unsafeBaseUrl,
+      apiKey: "provider-key",
+      models: "claude-sonnet-4-6",
+      organization: "",
+    };
+    assert.throws(
+      () => profile({
+        agentCommand: "claude",
+        aiProviderProfiles: JSON.stringify(providerProfiles),
+      }),
+      /must be canonical and credential-free/i,
+      unsafeBaseUrl,
+    );
+  }
 });
 
 test("Artifact execution rejects image provider URLs with broader non-canonical rewrites", () => {
@@ -1322,7 +1365,9 @@ test("production Artifact binding exposes the exact reviewer credential only to 
   assert.equal(bound.qualitySettings.visualQaModel, "reviewer-frozen");
   assert.deepEqual(buildVisualReviewerEnv(bound.qualitySettings), {
     ANTHROPIC_API_KEY: "fresh-reviewer-key",
-    ANTHROPIC_BASE_URL: "https://frozen-anthropic.example.test",
+    ANTHROPIC_BASE_URL: "https://frozen-anthropic.example.test/",
+    ANTHROPIC_AUTH_TOKEN: undefined,
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
   });
   const reviewer = parseProviderProfiles(bound.qualitySettings.aiProviderProfiles).anthropic;
   assert.equal(reviewer?.models, "claude-sonnet-4-6");
@@ -1583,6 +1628,11 @@ test("production materialization freezes Project, settings, design, skill, Resea
           command: "codebuddy",
           model: "gpt-5.6-sol",
         },
+        reviewer: {
+          providerId: "claude",
+          command: "claude",
+          model: "reviewer-frozen",
+        },
         artifactPlan: {
           researchDirectionSelection: {
             protocol: "dezin.research-direction-selection.v1",
@@ -1619,6 +1669,7 @@ test("production materialization freezes Project, settings, design, skill, Resea
     providerId: "codebuddy",
     model: "gpt-5.6-sol",
     credentialProviderId: "codebuddy",
+    credentialSource: "session",
     baseUrl: "",
     organization: "",
     credentialRequired: false,
@@ -1633,9 +1684,9 @@ test("production materialization freezes Project, settings, design, skill, Resea
   assert.doesNotMatch(frozen.researchDirection?.content ?? "", /Mutable legacy shadow/);
   assert.deepEqual(frozen.quality.ignores, [{ ruleId: "intentional-density", selector: ".summary" }]);
   assert.deepEqual(frozen.quality.reviewer, {
-    command: "codebuddy",
-    providerId: "codebuddy",
-    model: "gpt-5.6-sol",
+    command: "claude",
+    providerId: "claude",
+    model: "reviewer-frozen",
   });
   assert.deepEqual(frozen.imageGeneration, {
     protocol: "dezin.artifact-image-generation.v2",
@@ -1678,6 +1729,7 @@ test("production materialization freezes Project, settings, design, skill, Resea
   assert.equal(rematerialized.project.name, "Mutated checkout");
   assert.equal(rematerialized.agent.command, "codebuddy");
   assert.equal(rematerialized.agent.model, "gpt-5.6-sol");
+  assert.deepEqual(rematerialized.quality.reviewer, frozen.quality.reviewer);
   assert.equal(rematerialized.imageGeneration.model, "image-mutated");
   assert.equal(
     rematerialized.imageGeneration.baseUrl,
@@ -1792,6 +1844,127 @@ test("same-Plan generated Research freezes one exact direction matched by immuta
   );
   assert.equal(repeated.checksum, frozen.checksum);
   assert.deepEqual(repeated.researchDirection, frozen.researchDirection);
+});
+
+test("legacy same-Plan Page binds one immutable Research direction by matching ordinal and Page title", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const frozen = await fixture.loader(
+    samePlanGeneratedResearchRequest(
+      fixture.request,
+      "Required explicit Page scope — Direction: Direction 2; Page: Checkout. Build the exact approved checkout flow.",
+      { kind: "page", name: "Direction 2 Checkout" },
+    ),
+    new AbortController().signal,
+  );
+
+  assert.ok(frozen.researchDirection);
+  assert.equal(frozen.researchDirection.directionId, "expressive-confirmation");
+  assert.equal(frozen.researchDirection.directionIds, undefined);
+  const direction = JSON.parse(frozen.researchDirection.content) as {
+    id: string;
+    title: string;
+  };
+  assert.deepEqual(
+    { id: direction.id, title: direction.title },
+    { id: "expressive-confirmation", title: "Expressive confirmation" },
+  );
+});
+
+test("legacy Page refuses automatic Research selection when the pin is not an exact same-Plan dependency output", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    "Required explicit Page scope — Direction: Direction 1; Page: Checkout. Build the exact approved checkout flow.",
+    { kind: "page", name: "Direction 1 Checkout" },
+  );
+  request.observation.resourcePins[0]!.sourceTaskId = "other-plan-research-task";
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof BlockedContextError);
+      assert.match(error.message, /same Plan/i);
+      assert.ok(error.missing.some((item) => item.endsWith(":direction-selection")));
+      return true;
+    },
+  );
+});
+
+test("legacy same-Plan Page blocks an ordinal outside the immutable Research direction set", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    "Required explicit Page scope — Direction: Direction 3; Page: Checkout. Build the exact approved checkout flow.",
+    { kind: "page", name: "Direction 3 Checkout" },
+  );
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof BlockedContextError);
+      assert.match(error.message, /Research direction.*no exact match/i);
+      return true;
+    },
+  );
+});
+
+test("legacy same-Plan Page blocks mismatched ordinal-title authority", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    "Required explicit Page scope — Direction: Direction 1; Page: Home. Build the exact approved home flow.",
+    { kind: "page", name: "Direction 1 Checkout" },
+  );
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof BlockedContextError);
+      assert.match(error.message, /Research direction.*no exact match/i);
+      return true;
+    },
+  );
+});
+
+test("legacy same-Plan Page blocks more than one ordinal-title clause", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    [
+      "Required explicit Page scope — Direction: Direction 1; Page: Checkout.",
+      "Direction: Direction 2; Page: Checkout.",
+    ].join(" "),
+    { kind: "page", name: "Direction 1 Checkout" },
+  );
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof BlockedContextError);
+      assert.match(error.message, /Research direction.*no exact match/i);
+      return true;
+    },
+  );
+});
+
+test("legacy same-Plan Page blocks an ambiguous immutable Research title set", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, (direction) => {
+    direction.title = "Expressive confirmation";
+  });
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    "Required explicit Page scope — Direction: Direction 1; Page: Checkout. Build the exact approved checkout flow.",
+    { kind: "page", name: "Direction 1 Checkout" },
+  );
+
+  await assert.rejects(
+    async () => fixture.loader(request, new AbortController().signal),
+    (error: unknown) => {
+      assert.ok(error instanceof BlockedContextError);
+      assert.match(error.message, /Research direction.*no exact match/i);
+      return true;
+    },
+  );
 });
 
 test("exact reused Research selection freezes its ordered immutable direction set for one Artifact", async (t) => {
@@ -2011,6 +2184,34 @@ test("same-Plan generated Research rechecks the immutable Component inheritance 
   }
 });
 
+test("legacy Page rechecks same-Plan dependency authority after Research payload materialization", async (t) => {
+  const fixture = await artifactResearchValidationFixture(t, () => {});
+  const request = samePlanGeneratedResearchRequest(
+    fixture.request,
+    "Required explicit Page scope — Direction: Direction 1; Page: Checkout. Build the exact approved checkout flow.",
+    { kind: "page", name: "Direction 1 Checkout" },
+  );
+  const originalRevisionRead = fixture.store.workspace.getResourceRevisionForProject
+    .bind(fixture.store.workspace);
+  Object.defineProperty(fixture.store.workspace, "getResourceRevisionForProject", {
+    configurable: true,
+    value(...args: Parameters<typeof originalRevisionRead>) {
+      request.observation.dependencyOutputs[0]!.taskId = "cross-plan-research-task";
+      return originalRevisionRead(...args);
+    },
+  });
+
+  try {
+    await assert.rejects(
+      async () => fixture.loader(request, new AbortController().signal),
+      /generated Research direction contract changed during materialization/i,
+    );
+  } finally {
+    delete (fixture.store.workspace as unknown as Record<string, unknown>)
+      .getResourceRevisionForProject;
+  }
+});
+
 test("Artifact execution rejects a Research direction that references a missing finding", async (t) => {
   const fixture = await artifactResearchValidationFixture(t, (direction) => {
     direction.findingIds = ["finding-missing"];
@@ -2102,6 +2303,220 @@ test("Artifact execution preserves an explicit no-design-system selection", asyn
   assert.equal(frozen.designSystem, null);
   assert.doesNotMatch(frozen.prompt.systemPrompt, /Active design system/);
   assert.doesNotMatch(frozen.prompt.systemPrompt, /Global Default System/);
+});
+
+test("Artifact reviewer authority admits same-source secret rotation and rejects endpoint or source drift", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-artifact-reviewer-authority-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({
+    name: "Frozen reviewer authority",
+    mode: "standard",
+    designSystemId: "__dezin_no_design_system__",
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const reviewerProfiles = (baseUrl: string, apiKey: string, enabled = true) => JSON.stringify({
+    anthropic: {
+      enabled,
+      baseUrl,
+      apiKey,
+      models: "claude-opus-4-8",
+      organization: "reviewer-org",
+    },
+  });
+  store.updateSettings({
+    agentCommand: "codex",
+    model: "gpt-5.4",
+    aiProviderId: "openai",
+    aiProviderEnabled: true,
+    aiProviderProfiles: reviewerProfiles(
+      "https://reviewer-authority.example/v1",
+      "proposal-time-secret",
+    ),
+    visualQaEnabled: true,
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  });
+  const loader = createProductionArtifactExecutionProfileLoader({
+    store,
+    dataDir: root,
+    designRegistry: new DesignRegistry([]),
+    repositoryDirForWorkspace: () => root,
+  });
+  const request = {
+    projectId: project.id,
+    planId: PLAN_ID,
+    task: {
+      id: TASK_ID,
+      planId: PLAN_ID,
+      workspaceId: workspace.id,
+      kind: "page",
+      target: {
+        type: "artifact",
+        workspaceId: workspace.id,
+        id: ARTIFACT_ID,
+        trackId: "track-reviewer-authority",
+      },
+      payload: {
+        version: 2,
+        agent: {
+          providerId: "codex",
+          command: "codex",
+          model: "gpt-5.4",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "",
+            organization: "",
+            credentialProviderId: "openai",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        reviewer: {
+          providerId: "claude",
+          command: "claude",
+          model: "claude-opus-4-8",
+          executionAuthority: {
+            kind: "reviewer",
+            baseUrl: "https://reviewer-authority.example/v1",
+            credentialSource: "anthropic-profile",
+            credentialRequired: true,
+          },
+        },
+        brief: { proposalRationale: "Build with one independently frozen reviewer." },
+      },
+      qaProfile: { requireVisualReview: true },
+    },
+    observation: { resourcePins: [] },
+  } as never;
+
+  const first = await loader(request, new AbortController().signal);
+  store.updateSettings({
+    aiProviderProfiles: reviewerProfiles(
+      "https://reviewer-authority.example/v1",
+      "rotated-same-source-secret",
+    ),
+  });
+  const rotated = await loader(request, new AbortController().signal);
+  assert.equal(rotated.checksum, first.checksum);
+  assert.deepEqual(rotated.quality.reviewer, first.quality.reviewer);
+
+  store.updateSettings({
+    aiProviderProfiles: reviewerProfiles(
+      "https://drifted-reviewer.example/v1",
+      "rotated-same-source-secret",
+    ),
+  });
+  await assert.rejects(
+    async () => loader(request, new AbortController().signal),
+    /changed the frozen Task reviewer endpoint, credential source, or credential requirement/i,
+  );
+
+  store.updateSettings({
+    aiProviderProfiles: reviewerProfiles(
+      "https://reviewer-authority.example/v1",
+      "rotated-same-source-secret",
+      false,
+    ),
+  });
+  await assert.rejects(
+    async () => loader(request, new AbortController().signal),
+    /changed the frozen Task reviewer endpoint, credential source, or credential requirement/i,
+  );
+});
+
+test("Artifact authority materializes a non-default Claude generator against Codex Settings without false drift", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dezin-artifact-nondefault-authority-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new Store(join(root, "store.db"));
+  t.after(() => store.close());
+  const project = store.createProject({
+    name: "Non-default frozen Artifact Agent",
+    mode: "standard",
+    designSystemId: "__dezin_no_design_system__",
+  });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  store.updateSettings({
+    agentCommand: "codex",
+    model: "gpt-5.4",
+    apiBaseUrl: "https://must-not-be-relabelled.example/v1",
+    apiKey: "must-not-be-relabelled",
+    aiProviderId: "openai",
+    visualQaEnabled: true,
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  });
+  const loader = createProductionArtifactExecutionProfileLoader({
+    store,
+    dataDir: root,
+    designRegistry: new DesignRegistry([]),
+    repositoryDirForWorkspace: () => root,
+  });
+  const request = {
+    projectId: project.id,
+    planId: PLAN_ID,
+    task: {
+      id: TASK_ID,
+      planId: PLAN_ID,
+      workspaceId: workspace.id,
+      kind: "page",
+      target: {
+        type: "artifact",
+        workspaceId: workspace.id,
+        id: ARTIFACT_ID,
+        trackId: "track-nondefault-authority",
+      },
+      payload: {
+        version: 2,
+        agent: {
+          providerId: "claude",
+          command: "claude",
+          model: "claude-sonnet-4-6",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "",
+            organization: "",
+            credentialProviderId: "anthropic",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        reviewer: {
+          providerId: "claude",
+          command: "claude",
+          model: "claude-opus-4-8",
+          executionAuthority: {
+            kind: "reviewer",
+            baseUrl: "",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        brief: { proposalRationale: "Use the explicitly selected Claude generator." },
+      },
+      qaProfile: { requireVisualReview: true },
+    },
+    observation: { resourcePins: [] },
+  } as never;
+
+  const frozen = await loader(request, new AbortController().signal);
+  assert.deepEqual(frozen.agent, {
+    command: "claude",
+    providerId: "claude",
+    model: "claude-sonnet-4-6",
+    credentialProviderId: "anthropic",
+    credentialSource: "session",
+    baseUrl: "",
+    organization: "",
+    credentialRequired: false,
+  });
+  assert.deepEqual(frozen.quality.reviewer, {
+    command: "claude",
+    providerId: "claude",
+    model: "claude-opus-4-8",
+  });
+  assert.doesNotMatch(JSON.stringify(frozen), /must-not-be-relabelled/);
 });
 
 test("a Sharingan Project does not apply exact-Capture semantics to an unlinked Artifact Task", async (t) => {

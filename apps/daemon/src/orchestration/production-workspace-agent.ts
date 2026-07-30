@@ -16,10 +16,12 @@ import {
   type Resource,
   type ResourceRevision,
   type RenderFrameSpec,
+  type Settings,
   type SharedDesignKernelRevision,
   type Store,
   type WorkspaceAgentTurnRequestFacts,
   type WorkspaceBundle,
+  type WorkspaceGenerationAgentSelection,
   type WorkspaceLayout,
 } from "../../../../packages/core/src/index.ts";
 import {
@@ -65,6 +67,19 @@ import {
   runSafeStructuredAgent,
   type SafeStructuredAgentImage,
 } from "./safe-structured-agent.ts";
+import {
+  researchAgentCommand,
+  researchModel,
+  reviewerAgentCommand,
+  reviewerModel,
+} from "../run-policy.ts";
+import {
+  freezeWorkspaceGeneratorAgentSelection,
+  freezeWorkspaceReviewerAgentSelection,
+} from "./generation-execution-authority.ts";
+import {
+  workspaceMoodboardImageAuthority,
+} from "./moodboard-image-execution-authority.ts";
 
 const MAX_PLANNER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_STATE_CAPTURE_ATTEMPTS = 3;
@@ -1282,7 +1297,7 @@ function explicitPageRequestList(value: string): ExplicitPageRequestList {
   if (totalTail !== null) {
     withoutParenthetical = withoutParenthetical.slice(0, totalTail.index).trim();
   }
-  const namedCount = /^(?:(?:exactly|恰好|正好)\s*)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|[一二两三四五六七八九十]+)\s*(?:个|张|项)?\s*(?:(?:independent|distinct)\s+|独立的?\s*)?(?:(?:pages?|screens?|routes?)(?:\s+artifacts?)?|页面|屏幕|路由)\s*(?:(?:named|called)\s+|(?:分别)?(?:名为|叫作|是|为)\s*)?[:：]?\s*/iu
+  const namedCount = /^(?:(?:exactly|恰好|正好)\s*)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|[一二两三四五六七八九十]+)\s*(?:个|张|项)?\s*(?:(?:independent|distinct)\s+|独立的?\s*)?(?:end[- ]user\s+)?(?:(?:pages?|screens?|routes?)(?:\s+artifacts?)?|页面|屏幕|路由)\s*(?:(?:named|called)\s+|(?:分别)?(?:名为|叫作|是|为)\s*)?[:：]?\s*/iu
     .exec(withoutParenthetical);
   const pages = explicitRequestList(
     namedCount === null
@@ -1404,7 +1419,7 @@ function explicitPageMatrixFromRequest(request: string): ExplicitPageMatrixContr
   if (numberedMatrix !== null) return numberedMatrix;
   const inlineTotalMatrix = inlineTotalExplicitPageMatrixFromRequest(request);
   if (inlineTotalMatrix !== null) return inlineTotalMatrix;
-  const englishHeader = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+(?:(?:different|distinct)\s+)?(?:visual\s+)?directions?\b/iu.exec(request);
+  const englishHeader = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+(?:(?:unmistakably\s+)?(?:different|distinct)\s+)?(?:visual\s+)?directions?\b/iu.exec(request);
   const chineseHeader = /(\d+|[一二两三四五六七八九十]+)\s*(?:个|种)?\s*(?:不同(?:的)?\s*)?(?:视觉\s*)?方向/u
     .exec(request);
   const header = englishHeader ?? chineseHeader;
@@ -1424,9 +1439,11 @@ function explicitPageMatrixFromRequest(request: string): ExplicitPageMatrixContr
   const directions = directionRefs.map(({ direction }) => direction);
   const englishPages = /\b(?:each|every)(?:\s+direction)?\s+(?:(?:must|should)\s+)?(?:has|have|includes?|contains?|needs?)\s+([^.!?\n]+)/iu
     .exec(afterHeader);
+  const englishPagesWithExactCount = /\b(?:each|every)(?:\s+direction)?\s+with\s+((?:exactly)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen)\s+(?:independent|distinct)\s+(?:end[- ]user\s+)?(?:pages?|screens?|routes?)(?:\s+artifacts?)?\s*(?:(?:named|called)\s+)?[:：]?\s*[^.!?\n]+)/iu
+    .exec(afterHeader);
   const chinesePages = /(?:每|各)\s*(?:一\s*)?(?:个|种)?\s*(?:视觉\s*)?方向\s*(?:都|均|分别)?\s*(?:(?:必须|需要|应该|应当)\s*)?(?:有|包含|包括|含有|具备)\s*([^。！？\n]+)/u
     .exec(afterHeader);
-  const pagesMatch = englishPages ?? chinesePages;
+  const pagesMatch = englishPages ?? englishPagesWithExactCount ?? chinesePages;
   if (pagesMatch === null) return null;
   const pageRequest = explicitPageRequestList(pagesMatch[1]!);
   const pages = pageRequest.pages;
@@ -1742,23 +1759,43 @@ function semanticArtifactStateFrames(input: {
   readonly mobile: RenderFrameSpec;
 }): RenderFrameSpec[] {
   return input.states.flatMap((state, stateIndex) => (
-    [input.desktop, input.mobile].map((viewport, viewportIndex): RenderFrameSpec => {
-      const { id: _id, name: _name, initialState: _initialState, ...frame } = viewport;
-      return {
-        ...frame,
-        id: `state-${semanticStableId(
-          input.seed,
-          "artifact-state-frame",
-          input.artifactIndex * MAX_SEMANTIC_VERIFICATION_STATES * 2
-            + stateIndex * 2
-            + viewportIndex,
-          `${input.artifactId}\0${state}\0${viewport.id}`,
-        )}`,
-        name: `${input.artifactName} · ${state} · ${viewport.name ?? viewport.id}`.slice(0, 512),
-        initialState: state,
-      };
-    })
+    semanticStateViewports(state, input.desktop, input.mobile)
+      .map(({ viewport, viewportIndex }): RenderFrameSpec => {
+        const { id: _id, name: _name, initialState: _initialState, ...frame } = viewport;
+        return {
+          ...frame,
+          id: `state-${semanticStableId(
+            input.seed,
+            "artifact-state-frame",
+            input.artifactIndex * MAX_SEMANTIC_VERIFICATION_STATES * 2
+              + stateIndex * 2
+              + viewportIndex,
+            `${input.artifactId}\0${state}\0${viewport.id}`,
+          )}`,
+          name: `${input.artifactName} · ${state} · ${viewport.name ?? viewport.id}`.slice(0, 512),
+          initialState: state,
+        };
+      })
   ));
+}
+
+function semanticStateViewports(
+  state: string,
+  desktop: RenderFrameSpec,
+  mobile: RenderFrameSpec,
+): readonly { readonly viewport: RenderFrameSpec; readonly viewportIndex: 0 | 1 }[] {
+  const normalized = state.toLocaleLowerCase("en-US");
+  const explicitlyMobile = /(?:^|[-_ ])(?:mobile|touch)(?:$|[-_ ])/.test(normalized);
+  const explicitlyDesktop = /(?:^|[-_ ])(?:desktop|wide)(?:$|[-_ ])/.test(normalized);
+  if (explicitlyMobile && !explicitlyDesktop) return [{ viewport: mobile, viewportIndex: 1 }];
+  if (explicitlyDesktop && !explicitlyMobile) return [{ viewport: desktop, viewportIndex: 0 }];
+  if (/(?:^|[-_ ])(?:hover|pointer|mouse)(?:$|[-_ ])/.test(normalized)) {
+    return [{ viewport: desktop, viewportIndex: 0 }];
+  }
+  return [
+    { viewport: desktop, viewportIndex: 0 },
+    { viewport: mobile, viewportIndex: 1 },
+  ];
 }
 
 interface RootLayoutBounds {
@@ -2120,15 +2157,143 @@ function explicitResearchDirectionIds(input: {
     ))
     .map(({ id }) => id);
   if (matchedMatrixDirections.length > 0) return matchedMatrixDirections;
+  if (input.artifact.kind === "component" && matrixDirections.length > 0) {
+    return matrixDirections.map(({ id }) => id);
+  }
+  // Require at least two characters so truncated Agent output such as
+  // directionId "s" (live KITE Program Card failure) cannot freeze a selection.
   const labeledDirectionIds = (value: string) => [
     ...value.matchAll(
-      /\b(?:research\s+)?direction(?:\s+id)?\s*(?:[:=]\s*)?([a-z0-9][a-z0-9._-]{0,127})\b/giu,
+      /\b(?:research\s+)?direction\b(?:\s+id\s*(?:[:=]\s*)?|\s*[:=]\s*)([a-z0-9][a-z0-9._-]{1,127})\b/giu,
     ),
   ].map((match) => match[1]!.toLocaleLowerCase("en-US"));
   const artifactDirectionIds = [...new Set(labeledDirectionIds(input.artifact.instructions))];
   if (artifactDirectionIds.length > 0) return artifactDirectionIds;
   const requestDirectionIds = [...new Set(labeledDirectionIds(input.requestMessage))];
   return requestDirectionIds.length === 1 ? requestDirectionIds : [];
+}
+
+function frozenWorkspaceGenerationAuthorities(input: {
+  readonly settings: Settings;
+  readonly taskAgent: AgentTurnRequest["agent"];
+  readonly hasGeneratedResearch: boolean;
+  readonly hasGeneratedMoodboard: boolean;
+}): {
+  readonly agent: WorkspaceGenerationAgentSelection;
+  readonly reviewerAgent: WorkspaceGenerationAgentSelection;
+  readonly researchAgent?: WorkspaceGenerationAgentSelection;
+  readonly moodboardImageAuthority?: ReturnType<typeof workspaceMoodboardImageAuthority>;
+} {
+  const taskProvider = getProvider(input.taskAgent.command);
+  if (!taskProvider || taskProvider.id !== input.taskAgent.providerId) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace generation Agent selection is unavailable or no longer matches its provider; choose an available Project Agent and submit again",
+    );
+  }
+  const reviewerCommand = reviewerAgentCommand(input.settings, input.taskAgent.command);
+  const reviewerProvider = getProvider(reviewerCommand);
+  if (!reviewerProvider
+    || (reviewerProvider.id !== "claude"
+      && reviewerProvider.id !== "codebuddy"
+      && reviewerProvider.id !== "codex")) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace generation reviewer is unavailable; choose Claude Code, CodeBuddy, or Codex in Settings > Quality and submit again",
+    );
+  }
+  const reviewerSelection: WorkspaceGenerationAgentSelection = {
+    providerId: reviewerProvider.id,
+    command: reviewerCommand,
+    model: reviewerModel(
+      input.settings,
+      input.taskAgent.model ?? undefined,
+      input.taskAgent.command,
+    ) ?? null,
+  };
+  let reviewerAgent: WorkspaceGenerationAgentSelection;
+  try {
+    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
+      input.settings,
+      reviewerSelection,
+      input.taskAgent,
+    );
+  } catch (error) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace generation reviewer execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
+      error,
+    );
+  }
+  const agentSelection: WorkspaceGenerationAgentSelection = {
+    providerId: taskProvider.id,
+    command: input.taskAgent.command,
+    model: input.taskAgent.model,
+  };
+  let agent: WorkspaceGenerationAgentSelection;
+  try {
+    agent = freezeWorkspaceGeneratorAgentSelection(input.settings, agentSelection);
+  } catch (error) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace generation Agent execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
+      error,
+    );
+  }
+  let moodboardImageAuthority: ReturnType<typeof workspaceMoodboardImageAuthority> | undefined;
+  if (input.hasGeneratedMoodboard) {
+    try {
+      moodboardImageAuthority = workspaceMoodboardImageAuthority(input.settings);
+    } catch (error) {
+      throw new ProductionWorkspacePlannerError(
+        "Moodboard image execution authority is invalid; enable one image provider with an exact endpoint, model, and credential in Settings and submit again",
+        error,
+      );
+    }
+  }
+  if (!input.hasGeneratedResearch) {
+    return {
+      agent,
+      reviewerAgent,
+      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+    };
+  }
+
+  const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
+  const researchProvider = getProvider(researchCommand);
+  if (!researchProvider || researchProvider.id !== "codex") {
+    throw new ProductionWorkspacePlannerError(
+      "Research generation requires Codex as the Research agent; choose Codex in Settings > Quality > Research agent and submit again",
+    );
+  }
+  if (researchProvider.id === reviewerProvider.id) {
+    throw new ProductionWorkspacePlannerError(
+      "Research generation requires an independent reviewer; choose a non-Codex reviewer in Settings > Quality and submit again",
+    );
+  }
+  const researchSelection: WorkspaceGenerationAgentSelection = {
+    providerId: researchProvider.id,
+    command: researchCommand,
+    model: researchModel(
+      input.settings,
+      input.taskAgent.model ?? undefined,
+      input.taskAgent.command,
+    ) ?? null,
+  };
+  let researchAgent: WorkspaceGenerationAgentSelection;
+  try {
+    researchAgent = freezeWorkspaceGeneratorAgentSelection(
+      input.settings,
+      researchSelection,
+    );
+  } catch (error) {
+    throw new ProductionWorkspacePlannerError(
+      "Workspace generation Research execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
+      error,
+    );
+  }
+  return {
+    agent,
+    reviewerAgent,
+    researchAgent,
+    ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+  };
 }
 
 function compileSemanticProposal(
@@ -2147,6 +2312,7 @@ function compileSemanticProposal(
     explicitPinnedResources: readonly ExplicitPinnedResourceRevision[];
     requestMessage: string;
     agent: AgentTurnRequest["agent"];
+    settings: Settings;
     pageMatrix: ExplicitPageMatrixContract | null;
     usesContract: ExplicitUsesContract | null;
   },
@@ -2174,6 +2340,16 @@ function compileSemanticProposal(
       "Workspace semantic Workspace intent must contain at least one Page, Component, or Resource",
     );
   }
+  const generationAuthorities = frozenWorkspaceGenerationAuthorities({
+    settings: input.settings,
+    taskAgent: input.agent,
+    hasGeneratedResearch: resourceIntents.some((resource) => (
+      resource.kind === "research" && resource.operation === "generate"
+    )),
+    hasGeneratedMoodboard: resourceIntents.some((resource) => (
+      resource.kind === "moodboard" && resource.operation === "generate"
+    )),
+  });
   const legacyBootstrapNodeId = parsedPages.length === 0
     ? null
     : claimableLegacyBootstrapPage(input.bundle, input.resources);
@@ -2896,6 +3072,7 @@ function compileSemanticProposal(
     generation: {
       kind: "workspace-generation",
       ...(prototypeIntents.length === 0 ? {} : { version: 2 }),
+      ...generationAuthorities,
       resourceOperations: [
         ...compiledResources.map(({ shouldPlace: _shouldPlace, ...resource }) => resource),
         ...explicitResourceOperations,
@@ -3044,7 +3221,10 @@ function normalizePlannerProposal(
       baseLayoutChecksum: input.layout.checksum,
       operations,
       layoutOperations: body.layoutOperations,
-      generation: { ...generation, agent: input.agent },
+      // compileSemanticProposal already replaced every planner-supplied
+      // principal with daemon-frozen generator/reviewer authority. Preserve
+      // that exact server-owned selection through codec normalization.
+      generation,
       rationale: body.rationale,
       assumptions: body.assumptions,
       createdByRunId: null,
@@ -3113,7 +3293,7 @@ function semanticPlannerSystemPrompt(): string {
     "- Page/Component `operation` has exactly two legal values: `generate` or `reuse`. For each existing Page or Component you intend to regenerate or reuse, copy its exact current Workspace node id into `existingNodeId`. Use `reuse` only to pin an unchanged existing Artifact with an active Revision; use null only with `generate` for a new Artifact. Never invent or substitute an existingNodeId. Omitted existing Artifacts remain untouched.",
     "- The request payload contains a compact `currentWorkspaceNodes` identity map. Before using null, compare the intended normalized name with that map. A matching current node must use its exact `id` as `existingNodeId`; use `generate` to revise it or `reuse` only when its `activeRevisionId` is non-null and it should remain unchanged. If a genuinely new Artifact is required, give it a distinct name rather than creating a same-name substitute.",
     "- Every Page and Component needs a unique name and an `instructions` string preserving its unique purpose, realistic content, required states, composition, and shared-component role. Keep each instructions string below 2,000 UTF-8 bytes.",
-    `- Every Page and Component also needs a \`verificationStates\` array with at most ${MAX_SEMANTIC_VERIFICATION_STATES} exact, named non-default states that must be visibly different in the rendered design (for example validation-error, payment-processing, or a named visual direction). Use an empty array only when the Artifact is genuinely static. The server deterministically expands each state into desktop and mobile QA Frames; do not describe responsive Frames yourself.`,
+    `- Every Page and Component also needs a \`verificationStates\` array with at most ${MAX_SEMANTIC_VERIFICATION_STATES} exact, named non-default states that must be visibly different in the rendered design (for example validation-error, payment-processing, or a named visual direction). Use an empty array only when the Artifact is genuinely static. The server deterministically expands general states into desktop and mobile QA Frames, explicit mobile/touch states into mobile only, and explicit desktop/wide or hover/pointer/mouse states into desktop only; do not describe responsive Frames yourself.`,
     "- When Pages and Components are planned together, every generated Component must be the target of at least one exact `uses` relation from each Page or Component that consumes it. Do not leave generated Components orphaned or let Pages redraw a substitute instead of consuming the shared master.",
     "- Prior uncommitted user requests are background for retries; the current request always wins on conflict. Preserve explicit requirements from a prior brief when the current request says to retry, continue, or preserve them.",
     "- Every explicitly named Page, route, or screen is one independent Page Artifact. If the request says N directions each contain M named Pages, return all N × M Page cells. Never collapse them into one Page per direction, and never add an Overview or Hub unless the user requested it.",
@@ -3636,6 +3816,7 @@ class ProductionWorkspacePlanner {
         resources,
         explicitPinnedResources,
         requestMessage: input.request.message,
+        settings,
         pageMatrix,
         usesContract,
       });

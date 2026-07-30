@@ -121,12 +121,12 @@ test("keeps Design System above the composer and Agent selection beside send", (
   expect(composerActions).toContainElement(submit);
   expect(composerActions).toContainElement(agentPicker);
   expect(composerActions).not.toContainElement(designSystemPicker);
-  expect(composerActions).toHaveClass("min-w-0", "justify-between");
+  expect(composerActions).toHaveAttribute("data-workspace-agent-actions");
   expect(composerActions).not.toHaveClass("flex-wrap");
   expect(composerRouting).toBeNull();
   expect(designSystemControls).toContainElement(designSystemPicker);
-  expect(designSystemControls).toHaveClass("mb-1.5");
-  expect(contextRail).toHaveClass("mb-1.5", "border-b-0", "pb-0");
+  expect(designSystemControls).toHaveAttribute("data-workspace-agent-design-system");
+  expect(contextRail).toHaveAttribute("aria-label", "Selected Agent Context");
   expect(
     designSystemControls!.compareDocumentPosition(composerShell!) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
@@ -156,7 +156,7 @@ test("renders user and assistant turns with the shared Dezin message hierarchy a
           role: "assistant",
           content: "## Proposal\n- Preserve the rhythm",
           createdAt: 2,
-          state: "queued",
+          state: "submitted",
         },
       ]}
     />,
@@ -173,7 +173,157 @@ test("renders user and assistant turns with the shared Dezin message hierarchy a
   expect(assistantMessage).not.toHaveClass("border", "bg-card");
   expect(within(assistantMessage as HTMLElement).getByRole("heading", { name: "Proposal" })).toBeInTheDocument();
   expect(within(assistantMessage as HTMLElement).getByRole("listitem")).toHaveTextContent("Preserve the rhythm");
-  expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).toHaveTextContent("queued");
+  expect(container.querySelector('[data-agent-message-meta="user-turn"]')).toHaveTextContent("You");
+  expect(container.querySelector('[data-agent-turn-state="user-turn"]')).toHaveTextContent("Sent");
+  expect(container.querySelector('[data-agent-message-meta="assistant-turn"]')).toHaveTextContent("Dezin Agent");
+  expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).toHaveTextContent("Working");
+  expect(container.querySelector('[data-agent-message-meta="user-turn"] time')).toHaveAttribute(
+    "datetime",
+    new Date(1).toISOString(),
+  );
+  expect(container.querySelector('[data-agent-message-meta="assistant-turn"] time')).toHaveAttribute(
+    "datetime",
+    new Date(2).toISOString(),
+  );
+  expect(container.querySelector('[data-agent-turn-state="assistant-turn"]')).not.toHaveTextContent("submitted");
+});
+
+test("turns queued planner identifiers into designer-readable build status", () => {
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[{
+        id: "assistant-queued",
+        turnId: "turn-assistant-queued",
+        role: "assistant",
+        content: "Queued Task 2e1b3d46-192e-42e0-8f9a-8e4b1190a3ca in Plan 7b8e2a00-2da2-48cc-af17-f607f942194b.",
+        createdAt: 1,
+        state: "queued",
+      }]}
+    />,
+  );
+
+  expect(screen.getByText("Design work is queued in the build plan.")).toBeInTheDocument();
+  expect(container.querySelector('[data-agent-trace-state="queued"]')).not.toBeNull();
+  expect(container.querySelector('[data-agent-turn-state="assistant-queued"]')).toHaveTextContent("Build queued");
+  expect(screen.queryByText(/2e1b3d46|7b8e2a00/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  expect(container.querySelector('[data-agent-turn-state="assistant-queued"]')).not.toHaveTextContent(/^queued$/i);
+});
+
+test("opens traceable proposal and build cards without exposing their persisted identities", async () => {
+  const user = userEvent.setup();
+  const onOpenTrace = vi.fn();
+  const proposal = {
+    id: "assistant-proposal-history",
+    turnId: "turn-assistant-proposal-history",
+    role: "assistant" as const,
+    content: "Proposal proposal-long-internal-id is ready.",
+    createdAt: 1,
+    state: "proposal" as const,
+    proposalId: "proposal-long-internal-id",
+  };
+  const queued = {
+    id: "assistant-queued-history",
+    turnId: "turn-assistant-queued-history",
+    role: "assistant" as const,
+    content: "Queued task-long-internal-id in plan-long-internal-id.",
+    createdAt: 2,
+    state: "queued" as const,
+    planId: "plan-long-internal-id",
+    taskId: "task-long-internal-id",
+    resultRevisionId: "revision-long-internal-id",
+  };
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[proposal, queued]}
+      onOpenTrace={onOpenTrace}
+    />,
+  );
+
+  expect(container.querySelectorAll("[data-agent-trace-state]")).toHaveLength(2);
+  expect(screen.getByText("A reviewable workspace proposal is ready.")).toBeInTheDocument();
+  expect(screen.getByText("Design work is queued in the build plan.")).toBeInTheDocument();
+  expect(screen.queryByText(/proposal-long|plan-long|task-long|revision-long/)).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Review proposal" }));
+  await user.click(screen.getByRole("button", { name: "View in plan" }));
+  expect(onOpenTrace).toHaveBeenNthCalledWith(1, proposal);
+  expect(onOpenTrace).toHaveBeenNthCalledWith(2, queued);
+});
+
+test("projects failed and cancelled terminal Plans into readable transcript states", () => {
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft=""
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      transcript={[
+        {
+          id: "assistant-failed",
+          turnId: "turn-assistant-failed",
+          role: "assistant",
+          content: "plan-sensitive-failed task-sensitive-failed",
+          createdAt: 1,
+          state: "queued",
+          trace: { status: "failed", planId: "plan-sensitive-failed", taskId: "task-sensitive-failed" },
+        },
+        {
+          id: "assistant-cancelled",
+          turnId: "turn-assistant-cancelled",
+          role: "assistant",
+          content: "plan-sensitive-cancelled task-sensitive-cancelled",
+          createdAt: 2,
+          state: "queued",
+          trace: { status: "cancelled", planId: "plan-sensitive-cancelled", taskId: "task-sensitive-cancelled" },
+        },
+      ]}
+      onOpenTrace={() => {}}
+    />,
+  );
+
+  expect(container.querySelector("[data-agent-trace-state='failed']")).toHaveTextContent("Build needs attention");
+  expect(container.querySelector("[data-agent-trace-state='cancelled']")).toHaveTextContent("Build cancelled");
+  expect(container.querySelector('[data-agent-turn-state="assistant-failed"]')).toHaveTextContent("Needs attention");
+  expect(container.querySelector('[data-agent-turn-state="assistant-cancelled"]')).toHaveTextContent("Cancelled");
+  expect(screen.queryByText(/plan-sensitive|task-sensitive/)).not.toBeInTheDocument();
+});
+
+test("renders a durable proposal failure with the retained brief and a direct retry", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn();
+  const { container } = render(
+    <WorkspaceAgentPanel
+      draft="Build three complete visual directions"
+      onDraftChange={() => {}}
+      contextLabel="Workspace"
+      onSubmit={onSubmit}
+      transcript={[{
+        id: "assistant-failed-proposal",
+        turnId: "turn-sensitive-internal-id",
+        role: "assistant",
+        content: "Workspace Planner is unavailable: structured Agent timed out",
+        createdAt: 1,
+        state: "failed",
+      }]}
+    />,
+  );
+
+  const failure = container.querySelector("[data-agent-trace-state='failed']");
+  expect(failure).toHaveTextContent("Needs attention");
+  expect(failure).toHaveTextContent("Workspace Planner is unavailable: structured Agent timed out");
+  expect(failure).toHaveTextContent("Your brief is retained");
+  expect(failure).not.toHaveTextContent("turn-sensitive-internal-id");
+  expect(container.querySelector('[data-agent-turn-state="assistant-failed-proposal"]'))
+    .toHaveTextContent("Needs attention");
+
+  await user.click(screen.getByRole("button", { name: "Try again" }));
+  expect(onSubmit).toHaveBeenCalledTimes(1);
 });
 
 test("keeps a long Workspace brief compact until the reader expands it", async () => {
@@ -199,7 +349,7 @@ test("keeps a long Workspace brief compact until the reader expands it", async (
   );
 
   const body = container.querySelector('[data-agent-message-body="user"]');
-  expect(body).toHaveClass("max-h-56", "overflow-hidden");
+  expect(body).toHaveAttribute("data-agent-message-body", "user");
   const expand = screen.getByRole("button", { name: "Show full brief" });
   expect(expand).toHaveAttribute("aria-expanded", "false");
 
@@ -257,6 +407,7 @@ test("summarizes the active proposal with a change count and Review action inste
   expect(screen.getByText("Create three distinct festival directions with shared components.")).toBeInTheDocument();
   expect(screen.getByText("9 changes")).toBeInTheDocument();
   expect(screen.queryByText(/2e1b3d46/)).not.toBeInTheDocument();
+  expect(screen.getByText("Ready for review")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Review proposal" }));
   expect(onReview).toHaveBeenCalledOnce();
@@ -271,7 +422,7 @@ test("uses the mature Dezin 44px content-sized composer with a 160px ceiling", (
     />,
   );
   const textarea = screen.getByRole("textbox", { name: "Workspace Agent draft" });
-  expect(textarea).toHaveClass("field-sizing-content", "min-h-[44px]", "max-h-40");
+  expect(textarea).toHaveAttribute("id", "workspace-agent-draft");
   expect(textarea).not.toHaveClass("min-h-[72px]");
   expect(textarea).toHaveAttribute("rows", "1");
 });
@@ -422,7 +573,7 @@ test("Studio Agent reports a blocked submission through the global toast without
   expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).not.toHaveAttribute("aria-invalid");
 });
 
-test("keeps pending Agent discovery inside the fixed submit control", () => {
+test("keeps pending Agent discovery accessible without changing the fixed submit icon", () => {
   const onSubmit = vi.fn();
   const { rerender } = render(
     <WorkspaceAgentPanel
@@ -443,7 +594,8 @@ test("keeps pending Agent discovery inside the fixed submit control", () => {
   expect(submit).toBeDisabled();
   expect(submit).toHaveAttribute("aria-busy", "true");
   expect(submit).toHaveAttribute("aria-describedby", pendingStatus.id);
-  expect(submit.querySelector(".animate-spin")).not.toBeNull();
+  expect(submit.querySelector("[data-agent-submit-icon]")).not.toBeNull();
+  expect(submit.querySelector(".animate-spin")).toBeNull();
   expect(submit.parentElement).toHaveAttribute("tabindex", "0");
   expect(submit.parentElement).toHaveAttribute("aria-label", "Checking Agent availability…");
   expect(screen.queryByText("Checking Agent availability…", { selector: "p" })).not.toBeInTheDocument();
@@ -471,7 +623,7 @@ test("keeps pending Agent discovery inside the fixed submit control", () => {
   expect(onSubmit).toHaveBeenCalledTimes(1);
 });
 
-test("keeps transient submit and attachment activity out of the footer layout", () => {
+test("shows proposal thinking in the transcript while keeping attachment activity layout-free", () => {
   const baseProps = {
     draft: "Refine the selected page",
     onDraftChange: () => {},
@@ -483,16 +635,25 @@ test("keeps transient submit and attachment activity out of the footer layout", 
   );
 
   const submit = screen.getByRole("button", { name: "Create proposal" });
-  const submittingStatus = screen.getByRole("status", { name: "Workspace Agent activity" });
-  expect(submittingStatus).toHaveClass("sr-only");
-  expect(submittingStatus).toHaveTextContent("Creating a reviewable proposal…");
+  const submittingStatus = screen.getByRole("status", { name: "Workspace Agent proposal progress" });
+  expect(submittingStatus).toHaveAttribute("data-agent-proposal-progress");
+  expect(submittingStatus).not.toHaveClass("sr-only");
+  expect(submittingStatus).toHaveTextContent("Dezin Agent");
+  expect(submittingStatus).toHaveTextContent("Thinking");
+  expect(screen.getByRole("heading", { name: "Creating a reviewable proposal…" })).toBeInTheDocument();
+  expect(submittingStatus).toHaveTextContent(
+    "Reviewing the brief and exact context before the next design action.",
+  );
   expect(submit).toHaveAttribute("aria-busy", "true");
-  expect(screen.queryByText("Creating a reviewable proposal…", { selector: "p" })).not.toBeInTheDocument();
+  expect(submit.querySelector("[data-agent-submit-icon]")).not.toBeNull();
+  expect(submit.querySelector(".animate-spin")).toBeNull();
+  expect(submittingStatus.querySelector("svg")).not.toBeNull();
 
   rerender(<WorkspaceAgentPanel {...baseProps} attaching />);
   expect(screen.getByRole("status", { name: "Workspace Agent activity" })).toHaveTextContent(
     "Saving immutable context…",
   );
+  expect(screen.queryByRole("status", { name: "Workspace Agent proposal progress" })).not.toBeInTheDocument();
   expect(screen.queryByText("Saving immutable context…", { selector: "p" })).not.toBeInTheDocument();
 });
 
@@ -520,7 +681,7 @@ test("reports an Agent error once through the global toast without a persistent 
   expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
 
-test("keeps a compact restorable Plan affordance in the transcript without transient activity layout shifts", () => {
+test("presents a structured Build activity card with live status and plan access", () => {
   const onOpenPlan = vi.fn();
   render(
     <WorkspaceAgentPanel
@@ -529,18 +690,22 @@ test("keeps a compact restorable Plan affordance in the transcript without trans
       contextLabel="Workspace"
       submissionBlockedPending
       planAffordance={{
-        label: "Recent build plan",
-        technicalLabel: "Build plan 123",
-        onOpen: onOpenPlan,
+        open: false,
+        status: "Building approved design changes",
+        onToggle: onOpenPlan,
       }}
     />,
   );
 
   const affordance = screen.getByRole("button", { name: "Open build plan" });
-  expect(affordance).toHaveTextContent("Recent build plan");
+  const activity = screen.getByLabelText("Build activity");
+  expect(activity).toHaveAttribute("data-agent-build-activity");
+  expect(within(activity).getByRole("heading", { name: "Build activity" })).toBeInTheDocument();
+  expect(activity).toHaveTextContent("Building approved design changes");
+  expect(affordance).toHaveTextContent("Open build plan");
   expect(affordance).not.toHaveTextContent("123");
-  expect(affordance).toHaveAttribute("title", "Build plan 123");
-  expect(affordance).toHaveClass("h-7", "max-w-full", "rounded-full");
+  expect(affordance.closest("[data-agent-build-activity]")).not.toBeNull();
+  expect(affordance).not.toHaveClass("rounded-full");
   expect(affordance.closest("form")).toBeNull();
   expect(affordance.closest('[aria-label="Workspace Agent transcript"]')).not.toBeNull();
   expect(screen.queryByRole("status", { name: "Workspace Agent task status" })).not.toBeInTheDocument();

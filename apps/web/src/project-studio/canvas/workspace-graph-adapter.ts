@@ -13,7 +13,10 @@ import type {
   WorkspaceNode,
 } from "../../lib/api.ts";
 import type { GenerationTargetState } from "../generation/generation-target-state.ts";
-import type { ResourceNodeRevisionPreview } from "./resource-node-preview.ts";
+import type {
+  ResourceNodeRevisionPreview,
+  ResourceNodeRevisionPreviewState,
+} from "./resource-node-preview.ts";
 import {
   WORKSPACE_NODE_SIZES,
   isComponentLibraryGroupId,
@@ -37,6 +40,7 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   resourceKind?: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference" | null;
   resourceQualityState?: "grounded" | "needs-review" | null;
   resourcePreview?: ResourceNodeRevisionPreview | null;
+  resourcePreviewStatus?: ResourceNodeRevisionPreviewState["status"] | null;
   revisionId: string | null;
   zoomLevel: SemanticZoomLevel;
   overviewDirection?: string | null;
@@ -60,6 +64,7 @@ export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   onToggleCollapsed?: (groupId: string, collapsed: boolean) => void;
   onRenameGroup?: (groupId: string, label: string) => void;
   onResizeGroup?: (groupId: string, bounds: { x: number; y: number; width: number; height: number }) => void;
+  onRetryResourcePreview?: (resourceId: string) => void;
 }
 
 export interface WorkspaceEdgeData extends Record<string, unknown> {
@@ -92,7 +97,7 @@ export interface WorkspaceGraphView {
     resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
     qualityState: "grounded" | "needs-review" | null;
   }>>;
-  resourceRevisionPreviews?: Readonly<Record<string, ResourceNodeRevisionPreview>>;
+  resourceRevisionPreviewStates?: Readonly<Record<string, ResourceNodeRevisionPreviewState>>;
   artifactGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   resourceGenerationStates?: Readonly<Record<string, GenerationTargetState>>;
   awaitingSelectionResourceIds?: ReadonlySet<string>;
@@ -101,6 +106,7 @@ export interface WorkspaceGraphView {
   onToggleCollapsed?: WorkspaceFlowNodeData["onToggleCollapsed"];
   onRenameGroup?: WorkspaceFlowNodeData["onRenameGroup"];
   onResizeGroup?: WorkspaceFlowNodeData["onResizeGroup"];
+  onRetryResourcePreview?: WorkspaceFlowNodeData["onRetryResourcePreview"];
 }
 
 export interface WorkspaceFlowModel {
@@ -168,6 +174,10 @@ function edgeCounts(graph: WorkspaceGraph): Map<string, NodeRelationCount> {
     if (relevant(nodes.get(edge.targetNodeId), edge)) counts.get(edge.targetNodeId)!.incoming += 1;
   }
   return counts;
+}
+
+function accessibilityStateLabel(value: string): string {
+  return value.replaceAll("-", " ");
 }
 
 function adaptGroup(
@@ -265,11 +275,13 @@ function adaptGraphNode(
   const generation = node.kind === "resource"
     ? view.resourceGenerationStates?.[node.resourceId]
     : view.artifactGenerationStates?.[node.artifactId];
-  const resourcePreview = node.kind === "resource"
-    ? view.resourceRevisionPreviews?.[node.resourceId] ?? null
-    : null;
+  const resourcePreviewState = node.kind === "resource"
+    ? view.resourceRevisionPreviewStates?.[node.resourceId]
+    : undefined;
+  const resourcePreview = resourcePreviewState?.preview ?? null;
   const awaitingSelection = node.kind === "resource"
     && view.awaitingSelectionResourceIds?.has(node.resourceId);
+  const generationState = awaitingSelection ? "awaiting-selection" : generation?.state ?? "idle";
   const quality = node.kind === "resource"
     ? null
     : activeRevisionQuality?.revisionId === revisionId
@@ -280,10 +292,20 @@ function adaptGraphNode(
       : node.quality ?? null;
   const overviewIdentity = node.kind === "page" ? pageOverviewIdentities.get(node.id) : undefined;
   const size = WORKSPACE_NODE_SIZES[node.kind];
+  const generationLabel = generationState === "idle"
+    ? revisionId ? "settled" : "not started"
+    : accessibilityStateLabel(generationState);
+  const revisionLabel = revisionId ? "revision published" : "no revision";
+  const previewStatus = node.kind === "resource"
+    ? resourcePreviewState?.status ?? (revisionId ? "pending" : "unavailable")
+    : revisionId ? "available" : "unavailable";
+  const qualityLabel = node.kind === "resource"
+    ? resourceState?.qualityState ?? "unassessed"
+    : quality?.state ?? "unassessed";
   return {
     id: node.id,
     type: node.kind,
-    ariaLabel: `${node.kind} ${node.name}, incoming ${counts.get(node.id)?.incoming ?? 0}, outgoing ${counts.get(node.id)?.outgoing ?? 0}, quality ${node.kind === "resource" ? resourceState?.qualityState ?? "unassessed" : quality?.state ?? "unassessed"}`,
+    ariaLabel: `${node.kind} ${node.name}, incoming ${counts.get(node.id)?.incoming ?? 0}, outgoing ${counts.get(node.id)?.outgoing ?? 0}, generation ${generationLabel}, ${revisionLabel}, preview ${accessibilityStateLabel(previewStatus)}, quality ${qualityLabel}`,
     position: { x: layoutObject.x, y: layoutObject.y },
     parentId: layoutObject.parentGroupId ?? undefined,
     extent: layoutObject.parentGroupId ? "parent" : undefined,
@@ -300,6 +322,7 @@ function adaptGraphNode(
       resourceKind: node.kind === "resource" ? resourceState?.resourceKind ?? null : null,
       resourceQualityState: node.kind === "resource" ? resourceState?.qualityState ?? null : null,
       resourcePreview,
+      resourcePreviewStatus: resourcePreviewState?.status ?? null,
       revisionId,
       zoomLevel: semanticZoomLevel(view.zoom),
       overviewDirection: overviewIdentity?.direction ?? null,
@@ -308,7 +331,7 @@ function adaptGraphNode(
       outgoingCount: counts.get(node.id)?.outgoing ?? 0,
       qualityState: node.kind === "resource" ? "not-applicable" : quality?.state ?? "unassessed",
       qualityScore: node.kind === "resource" ? null : quality?.score ?? null,
-      generationState: awaitingSelection ? "awaiting-selection" : generation?.state ?? "idle",
+      generationState,
       generationMessage: generation?.message ?? null,
       generationPlanId: generation?.planId ?? null,
       generationTaskId: generation?.taskId ?? null,
@@ -318,6 +341,7 @@ function adaptGraphNode(
       memberCount: 0,
       minimumGroupWidth: 0,
       minimumGroupHeight: 0,
+      onRetryResourcePreview: node.kind === "resource" ? view.onRetryResourcePreview : undefined,
     },
   };
 }

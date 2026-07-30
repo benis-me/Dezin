@@ -124,8 +124,12 @@ test("viewer keeps the exact Snapshot across navigation and releases the old and
     startArtifactId: "page-b",
   }, expect.any(AbortSignal));
   await waitFor(() => expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-page-a"));
-  expect(screen.getByText(/revision-b/i)).toBeInTheDocument();
-  expect(screen.getAllByText(/snapshot-exact/i)).not.toHaveLength(0);
+  expect(screen.getByRole("region", { name: "Prototype flow viewer" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Revision ID")).toHaveTextContent("revision-b");
+  expect(screen.getByLabelText("Snapshot ID")).toHaveTextContent("snapshot-exact");
+  expect(screen.getByText("Active snapshot")).toBeInTheDocument();
+  expect(screen.getByLabelText("Revision ID")).toHaveAttribute("title", "revision-b");
+  expect(screen.getByLabelText("Snapshot ID")).toHaveAttribute("title", "snapshot-exact");
 
   const back = screen.getByRole("button", { name: "Back in prototype flow" });
   expect(back).toBeEnabled();
@@ -223,6 +227,53 @@ test("trusted Escape from the focused exact Page exits prototype flow through th
   port!.close();
 });
 
+test("keeps the frozen identity visible and marks the session when its Snapshot is no longer active", async () => {
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"]);
+  const client = makeFakeApi({
+    resolvePreviewTarget: async (_projectId, target) => resolved(
+      target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+    ),
+    acquirePreviewTargetLease: async (_projectId, exact) => ({
+      leaseId: "lease-stale-session",
+      url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+      bridgeNonce: NONCE,
+      expiresAt: Date.now() + 60_000,
+      resolved: exact,
+    }),
+  });
+  const view = render(
+    <ApiProvider client={client}>
+      <PrototypeFlowViewer
+        projectId="project-flow"
+        session={session}
+        activeSnapshotId={session.snapshotId}
+        onClose={vi.fn()}
+      />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle("Alpha flow preview");
+  expect(screen.getByLabelText("Revision ID")).toHaveTextContent("revision-a");
+  expect(screen.getByLabelText("Snapshot ID")).toHaveTextContent("snapshot-exact");
+  expect(screen.getByText("Active snapshot")).toBeInTheDocument();
+
+  view.rerender(
+    <ApiProvider client={client}>
+      <PrototypeFlowViewer
+        projectId="project-flow"
+        session={session}
+        activeSnapshotId="snapshot-new-head"
+        onClose={vi.fn()}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByText("Frozen session · no longer active")).toBeInTheDocument();
+  expect(screen.getByLabelText("Revision ID")).toHaveTextContent("revision-a");
+  expect(screen.getByLabelText("Snapshot ID")).toHaveTextContent("snapshot-exact");
+  expect(screen.getByTitle("Alpha flow preview")).toBe(frame);
+});
+
 test("applies and acknowledges the frozen default RenderSpec frame before declaring a Page prepared", async () => {
   const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], flowRevisions());
   render(
@@ -267,6 +318,120 @@ test("applies and acknowledges the frozen default RenderSpec frame before declar
     frameAttemptId: command.frameAttemptId,
   });
   await waitFor(() => expect(viewport).toHaveStyle({ visibility: "visible" }));
+  port.close();
+});
+
+test("cold start succeeds when exact Page acquisition takes 10 seconds", async () => {
+  vi.useFakeTimers();
+  let resolveLease!: () => void;
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"]);
+  const acquirePreviewTargetLease = vi.fn((_projectId: string, exact: ResolvedPreviewTarget) => (
+    new Promise<{
+      leaseId: string;
+      url: string;
+      bridgeNonce: string;
+      expiresAt: number;
+      resolved: ResolvedPreviewTarget;
+    }>((resolveLeasePromise) => {
+      resolveLease = () => resolveLeasePromise({
+        leaseId: "lease-cold-start",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      });
+    })
+  ));
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease,
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(10_000);
+    resolveLease();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  const frame = screen.getByTitle("Alpha flow preview") as HTMLIFrameElement;
+  expect(screen.queryByRole("alert")).toBeNull();
+  const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+  fireEvent.load(frame);
+  const bootstrap = (postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>).find(
+    ([message]) => (message as { type?: string }).type === "bridge-init",
+  );
+  const port = bootstrap?.[2]?.[0] as MessagePort;
+  port.start();
+  port.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText("Active snapshot")).toBeInTheDocument();
+  port.close();
+});
+
+test("cold start reports the acquisition stage when its 15-second budget expires", async () => {
+  vi.useFakeTimers();
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"]);
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease: async () => new Promise<never>(() => {}),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+  expect(screen.getByRole("alert")).toHaveTextContent(/Exact Page acquisition.*(15 seconds|timed out)/i);
+  expect(screen.getByRole("button", { name: "Retry exact Page preparation" })).toBeEnabled();
+});
+
+test("reports a distinct frame acknowledgement timeout after acquisition and bridge readiness", async () => {
+  const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], flowRevisions());
+  render(
+    <ApiProvider client={makeFakeApi({
+      resolvePreviewTarget: async (_projectId, target) => resolved(
+        target as Extract<PreviewTarget, { kind: "workspace-flow" }>,
+      ),
+      acquirePreviewTargetLease: async (_projectId, exact) => ({
+        leaseId: "lease-frame-ack-timeout",
+        url: `http://preview.local/page-a#dezin-bridge=${NONCE}`,
+        bridgeNonce: NONCE,
+        expiresAt: Date.now() + 60_000,
+        resolved: exact,
+      }),
+    })}>
+      <PrototypeFlowViewer projectId="project-flow" session={session} onClose={vi.fn()} />
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle("Alpha flow preview") as HTMLIFrameElement;
+  const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+  fireEvent.load(frame);
+  const bootstrap = (postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>).find(
+    ([message]) => (message as { type?: string }).type === "bridge-init",
+  );
+  const port = bootstrap?.[2]?.[0] as MessagePort;
+  const received: Array<Record<string, unknown>> = [];
+  port.onmessage = (event) => received.push(event.data as Record<string, unknown>);
+  port.start();
+  port.postMessage({ source: "dezin", type: "bridge-ready", nonce: NONCE, protocol: 1 });
+  await waitFor(() => expect(received.some((message) => message.type === "set-frame")).toBe(true));
+
+  const alert = await screen.findByRole("alert", undefined, { timeout: 3_000 });
+  expect(alert).toHaveTextContent("Frame acknowledgement");
+  expect(alert).toHaveTextContent("within 1.5 seconds");
   port.close();
 });
 
@@ -342,7 +507,7 @@ test("manual Page selection preserves the current viewport profile across differ
   expect(viewport).toHaveStyle({ width: "393px", height: "852px" });
 });
 
-test("surfaces an initial bridge-readiness deadline instead of leaving the first Page silently unprepared", async () => {
+test("surfaces the iframe and bridge stage deadline instead of leaving the first Page silently unprepared", async () => {
   vi.useFakeTimers();
   const session = createPrototypeFlowSession(flowSnapshot(), ["node-a"], flowRevisions());
   render(
@@ -365,7 +530,7 @@ test("surfaces an initial bridge-readiness deadline instead of leaving the first
   const viewport = frame.closest<HTMLElement>('[data-prototype-frame-id="desktop"]');
   expect(viewport).toHaveStyle({ visibility: "hidden" });
   await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
-  expect(screen.getByRole("alert")).toHaveTextContent("did not become ready");
+  expect(screen.getByRole("alert")).toHaveTextContent("iframe and preview bridge did not become ready within 5 seconds");
   expect(viewport).toHaveStyle({ visibility: "hidden" });
   expect(screen.getByText("Exact Frame unavailable")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Retry exact Page preparation" })).toBeEnabled();
@@ -565,7 +730,7 @@ test("cross-Page navigation times out an unready bridge, releases only the pendi
     vi.advanceTimersByTime(5_001);
     await Promise.resolve();
   });
-  expect(screen.getByRole("alert")).toHaveTextContent("did not become ready");
+  expect(screen.getByRole("alert")).toHaveTextContent("iframe and preview bridge did not become ready within 5 seconds");
   expect(screen.queryByTitle("Beta flow preview")).not.toBeInTheDocument();
   expect(screen.getByTitle("Alpha flow preview")).toBe(alpha);
   expect(releasePreviewTargetLease).toHaveBeenCalledWith("lease-page-b");
@@ -573,7 +738,7 @@ test("cross-Page navigation times out an unready bridge, releases only the pendi
   port.close();
 });
 
-test("cross-Page navigation applies one five-second deadline across lease acquisition and bridge readiness", async () => {
+test("cross-Page navigation allows a 10-second acquisition before enforcing a bounded bridge stage", async () => {
   let resolvePendingLease!: (lease: {
     leaseId: string;
     url: string;
@@ -631,7 +796,7 @@ test("cross-Page navigation applies one five-second deadline across lease acquis
   expect(screen.getByRole("status", { name: "Preparing prototype navigation" })).toBeInTheDocument();
 
   await act(async () => {
-    vi.advanceTimersByTime(4_000);
+    vi.advanceTimersByTime(10_000);
     await Promise.resolve();
   });
   resolvePendingLease({
@@ -651,12 +816,13 @@ test("cross-Page navigation applies one five-second deadline across lease acquis
     await Promise.resolve();
   });
   expect(screen.getByTitle("Beta flow preview")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).toBeNull();
 
   await act(async () => {
-    vi.advanceTimersByTime(1_001);
+    vi.advanceTimersByTime(5_001);
     await Promise.resolve();
   });
-  expect(screen.getByRole("alert")).toHaveTextContent(/within 5 seconds|timed out/i);
+  expect(screen.getByRole("alert")).toHaveTextContent("iframe and preview bridge did not become ready within 5 seconds");
   expect(screen.queryByTitle("Beta flow preview")).not.toBeInTheDocument();
   expect(screen.getByTitle("Alpha flow preview")).toBe(alpha);
   expect(screen.getByRole("button", { name: "Retry prototype navigation" })).toBeEnabled();
@@ -1118,7 +1284,7 @@ test("moves keyboard focus into the newly committed Page after an atomic cross-P
   betaPort.close();
 });
 
-test("same-Page resolution that ignores abort still fails within the shared five-second deadline", async () => {
+test("same-Page resolution that ignores abort fails at the 15-second resolution stage deadline", async () => {
   const snapshot = flowSnapshot();
   snapshot.graph.edges.unshift({
     id: "edge-same-page-timeout",
@@ -1188,10 +1354,10 @@ test("same-Page resolution that ignores abort still fails within the shared five
   expect(screen.getByRole("status", { name: "Preparing prototype navigation" })).toBeInTheDocument();
 
   await act(async () => {
-    vi.advanceTimersByTime(5_001);
+    vi.advanceTimersByTime(15_001);
     await Promise.resolve();
   });
-  expect(screen.getByRole("alert")).toHaveTextContent("within 5 seconds");
+  expect(screen.getByRole("alert")).toHaveTextContent("state resolution did not complete within 15 seconds");
   expect(screen.getByTitle("Alpha flow preview")).toBe(frame);
   expect(screen.getByRole("button", { name: "Retry prototype navigation" })).toBeEnabled();
   expect(screen.getByRole("combobox", { name: "Prototype flow start Page" })).toBeEnabled();

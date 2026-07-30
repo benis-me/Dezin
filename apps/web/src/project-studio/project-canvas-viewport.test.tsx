@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useCallback, useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -490,8 +491,11 @@ test("a failed Fit workspace save follows the same authoritative rollback semant
   const fittedViewport = flowHarness.state.fitViewport;
   renderCanvas({ onSaveLayout, onViewportChange });
   await flushCanvasMeasurementFrame();
+  vi.useRealTimers();
+  const user = userEvent.setup();
 
-  fireEvent.click(screen.getByRole("button", { name: "Fit workspace" }));
+  await user.click(screen.getByRole("button", { name: /Canvas zoom:/ }));
+  await user.click(screen.getByRole("menuitem", { name: /Fit workspace/ }));
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -528,8 +532,11 @@ test("Fit workspace keeps the asymmetric padded camera without a second upward t
   }));
   renderCanvas({ onSaveLayout, onViewportChange });
   await flushCanvasMeasurementFrame();
+  vi.useRealTimers();
+  const user = userEvent.setup();
 
-  fireEvent.click(screen.getByRole("button", { name: "Fit workspace" }));
+  await user.click(screen.getByRole("button", { name: /Canvas zoom:/ }));
+  await user.click(screen.getByRole("menuitem", { name: /Fit workspace/ }));
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -653,4 +660,76 @@ test.each([
   const expectedFinalViewport = secondFails ? firstViewport : secondViewport;
   expect(onViewportChange).toHaveBeenLastCalledWith(expectedFinalViewport);
   expect(flowHarness.state.viewport).toEqual(expectedFinalViewport);
+});
+
+test("a late viewport response from the previous project cannot move the current canvas", async () => {
+  let resolveFirst!: (saved: WorkspaceLayout) => void;
+  const firstSave = new Promise<WorkspaceLayout>((resolve) => { resolveFirst = resolve; });
+  const secondViewport = { x: 240, y: 120, zoom: 1.25 };
+  const secondGraph: WorkspaceGraph = {
+    ...graph,
+    workspaceId: "workspace-2",
+    nodes: graph.nodes.map((node) => ({ ...node, workspaceId: "workspace-2" })),
+  };
+  const secondLayout: WorkspaceLayout = {
+    ...layout,
+    workspaceId: "workspace-2",
+    viewport: secondViewport,
+    checksum: "layout-project-2",
+  };
+  const shared = {
+    projectName: "Storefront",
+    artifactRevisionIds: { "artifact-1": "revision-1" },
+    selectedNodeIds: [] as const,
+    onSelectionChange: () => {},
+    onViewportChange: () => {},
+    onApplyGraphCommands: async () => {},
+    onOpenArtifact: () => {},
+  };
+  const rendered = render(
+    <ToastProvider>
+      <ProjectCanvas
+        {...shared}
+        projectId="project-1"
+        graph={graph}
+        layout={layout}
+        viewport={layout.viewport}
+        onSaveLayout={() => firstSave}
+      />
+    </ToastProvider>,
+  );
+  await flushCanvasMeasurementFrame();
+  fireEvent.click(screen.getByRole("button", { name: "Simulate viewport move" }));
+  await act(async () => {
+    vi.advanceTimersByTime(300);
+    await Promise.resolve();
+  });
+
+  rendered.rerender(
+    <ToastProvider>
+      <ProjectCanvas
+        {...shared}
+        projectId="project-2"
+        graph={secondGraph}
+        layout={secondLayout}
+        viewport={secondViewport}
+        onSaveLayout={async () => secondLayout}
+      />
+    </ToastProvider>,
+  );
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  flowHarness.state.viewport = secondViewport;
+  flowHarness.instance.setViewport.mockClear();
+
+  await act(async () => {
+    resolveFirst({ ...layout, viewport: flowHarness.state.nextViewport, checksum: "late-project-1" });
+    await firstSave;
+    await Promise.resolve();
+  });
+
+  expect(flowHarness.instance.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.state.viewport).toEqual(secondViewport);
 });

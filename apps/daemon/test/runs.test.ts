@@ -590,6 +590,8 @@ test("run passes BYOK settings to spawned agent turns", async () => {
       agentCommand: "claude",
       apiKey: "sk-local",
       apiBaseUrl: "https://api.local.test",
+      aiProviderId: "",
+      aiProviderProfiles: "",
     });
     const project = await createProject(base);
     const res = await fetch(`${base}/api/runs`, {

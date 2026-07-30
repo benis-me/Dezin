@@ -30,10 +30,10 @@ test("AgentOutputText keeps long paths and inline code inside the chat column", 
     <AgentOutputText text="Files: src/components/{Sidebar,Thread,Composer,Inspector,Logo,icons}/very-long-unbroken-path. Run with `npm run dev`." />,
   );
 
-  const output = container.querySelector(".dz-selectable");
+  const output = container.querySelector(".dezin-agent-output");
   const command = screen.getByText("npm run dev");
 
-  expect(output).toHaveClass("min-w-0", "max-w-full", "overflow-x-hidden", "[overflow-wrap:anywhere]");
+  expect(output).toHaveClass("dezin-markdown", "dezin-agent-output");
   expect(command.tagName).toBe("CODE");
-  expect(command).toHaveClass("whitespace-normal", "[overflow-wrap:anywhere]");
+  expect(command.closest(".dezin-markdown")).toBe(output);
 });

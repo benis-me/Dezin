@@ -1,24 +1,19 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Aperture, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Search, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
+import { Aperture, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Search, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
   Dialog,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
   FadeIn,
   IconButton,
-  Input,
   PanelBar,
   Popover,
   PopoverContent,
   PopoverTrigger,
   Segmented,
   Spinner,
+  StudioHeaderActions,
   Tabs,
   Tooltip,
   TooltipTrigger,
@@ -26,6 +21,13 @@ import {
   TooltipProvider,
   type TabItem,
 } from "../components/ui/index.ts";
+import {
+  ProjectActionsMenu,
+  ProjectExportMenu,
+  ProjectRenameDialog,
+  ProjectSettingsButton,
+  useProjectHeaderActions,
+} from "../components/ProjectHeaderActions.tsx";
 import { diffStat, type DiffLine } from "../lib/diff.ts";
 import { composeVariationBrief } from "../lib/variation-brief.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
@@ -93,6 +95,7 @@ import { normalizeAgentModel } from "../lib/agent-availability.ts";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import { buildProjectAnalysisPrompt } from "../lib/project-analysis-prompt.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import { decodeRunContextRefs, decodeRunSelectionRefs } from "../lib/api.ts";
@@ -112,11 +115,11 @@ import {
 import { usePreviewRuntimeErrors, buildRuntimeErrorRepairPrompt, type RuntimeError } from "../lib/preview-runtime-errors.ts";
 import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOverlay.tsx";
 import { cn } from "../lib/utils.ts";
-import { native } from "../lib/native.ts";
 import { isImeComposing } from "../lib/keyboard.ts";
 import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 
 export { computeMarkupPosition } from "./workspace-markup.ts";
+export { buildProjectAnalysisPrompt } from "../lib/project-analysis-prompt.ts";
 
 const TABS = ["Preview", "Sharingan", "Research", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
@@ -322,29 +325,6 @@ function requireVersionPreview(preview: VersionPreview): VersionPreview {
 
 function prototypePreviewUrl(url: string, timestamp = Date.now()): string {
   return cacheBustedPreviewUrl(withPreviewBridgeNonce(url), timestamp);
-}
-
-export function buildProjectAnalysisPrompt(project: Project): string {
-  const projectPath = project.projectPath?.trim() || `(Dezin did not expose a projectPath for ${project.id})`;
-  const gapInstruction = project.sharingan
-    ? "2. Identify every required source-fidelity gap between the generated result and the captured source site. Include file, component, or CSS locations for each issue."
-    : "2. Identify the highest-impact gaps between the result and the intended direction, prioritized as P0/P1/P2. Include file, component, or CSS locations for each issue.";
-  return `Analyze this Dezin-generated project and identify why the design result does not match the intended direction.
-
-Project name: ${project.name}
-Project mode: ${project.mode}
-Project path: ${projectPath}
-Project ID: ${project.id}
-
-Read the source, assets, configuration, and generated output under the project path. Structure your answer as:
-1. Describe 5-8 concrete observations about what the project actually renders today.
-${gapInstruction}
-3. Analyze likely contributing factors: original input prompt, agent/model behavior, Dezin context, design system, generation mode, asset selection, and Quality-check blind spots.
-4. Propose improvements that can be verified directly in this project, including concrete code directions.
-5. Recommend Dezin product-side improvements to the generation pipeline, prompt structure, Quality checks, or iteration workflow.
-6. Design the next test round: which variables to keep fixed, which variables to change, and how to judge whether the improvement is real.
-
-The goal is not only to fix this project. Use it as a Dezin generation-quality sample and extract reusable product improvements.`;
 }
 
 function writeQueue(projectId: string, queue: QueuedPrompt[]): void {
@@ -2129,8 +2109,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [projectMode, setProjectMode] = useState<ProjectMode>("prototype");
   const [projectName, setProjectName] = useState("");
   const [projectPath, setProjectPath] = useState("");
-  const [projectNameDraft, setProjectNameDraft] = useState("");
-  const [projectRenameOpen, setProjectRenameOpen] = useState(false);
   const [dsId, setDsId] = useState("");
   const [viewDs, setViewDs] = useState(false);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
@@ -2184,8 +2162,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
-  const [projectActionsOpen, setProjectActionsOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
   const workspaceConversationPercent =
     readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 33, 24, 55);
@@ -2840,71 +2816,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       toast("Copied.");
     } catch {
       toast("Couldn't copy that message.", { variant: "error" });
-    }
-  };
-
-  const copyProjectAnalysisPrompt = async (): Promise<void> => {
-    const target =
-      (project ? (project.sharingan ? { ...project, designSystemId: null } : project) : null) ??
-      (isExisting
-        ? {
-            id: projectId,
-            name: projectName || "Untitled project",
-            skillId: null,
-            designSystemId: isSharinganProject ? null : (dsId || null),
-            mode: projectMode,
-            createdAt: 0,
-            updatedAt: 0,
-            projectPath: projectPath || undefined,
-          }
-        : null);
-    if (!target) return;
-    try {
-      await navigator.clipboard.writeText(buildProjectAnalysisPrompt(target));
-      toast("Copied analysis prompt.");
-    } catch {
-      toast("Couldn't copy the analysis prompt.", { variant: "error" });
-    }
-  };
-
-  const openProjectInFinder = async (): Promise<void> => {
-    const path = project?.projectPath || projectPath;
-    if (!path || !native?.openPath) {
-      toast("Finder is available in the desktop app.", { variant: "error" });
-      return;
-    }
-    const opened = await native.openPath(path);
-    if (!opened) {
-      toast("Couldn't open the project folder.", { variant: "error" });
-    }
-  };
-
-  const startProjectRename = (): void => {
-    setProjectNameDraft(projectName);
-    setProjectRenameOpen(true);
-  };
-
-  const commitProjectRename = async (): Promise<void> => {
-    const name = projectNameDraft.trim();
-    if (!isExisting || !name) return;
-    try {
-      const next = await api.patchProject(projectId, { name });
-      setProject(next);
-      setProjectName(next.name);
-      setProjectNameDraft("");
-      setProjectRenameOpen(false);
-    } catch {
-      toast("Couldn't rename the project.", { variant: "error" });
-    }
-  };
-
-  const deleteProject = async (): Promise<void> => {
-    if (!isExisting || !window.confirm("Delete this project permanently? This can't be undone.")) return;
-    try {
-      await api.deleteProject(projectId);
-      navigate("/");
-    } catch {
-      toast("Couldn't delete the project.", { variant: "error" });
     }
   };
 
@@ -4493,7 +4404,34 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
   const isSharinganProject = project?.sharingan === true;
-  const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
+  const projectAnalysisTarget =
+    (project ? (project.sharingan ? { ...project, designSystemId: null } : project) : null) ??
+    (isExisting
+      ? {
+          id: projectId,
+          name: projectName || "Untitled project",
+          skillId: null,
+          designSystemId: isSharinganProject ? null : (dsId || null),
+          mode: projectMode,
+          createdAt: 0,
+          updatedAt: 0,
+          projectPath: projectPath || undefined,
+        }
+      : null);
+  const projectHeaderActions = useProjectHeaderActions({
+    api,
+    projectId,
+    projectName,
+    projectPath: project?.projectPath || projectPath || undefined,
+    analysisPrompt: projectAnalysisTarget ? buildProjectAnalysisPrompt(projectAnalysisTarget) : null,
+    enabled: isExisting,
+    onRenamed: (next) => {
+      setProject(next);
+      setProjectName(next.name);
+    },
+    onDeleted: () => navigate("/"),
+    toast,
+  });
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
   // Failed attempts and partially-recorded restore rows are evidence, not a published version
@@ -5116,7 +5054,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             />
           </div>
           <TooltipProvider delayDuration={120}>
-            <div className="flex items-center gap-1">
+            <StudioHeaderActions className="gap-1">
               {tab === "Preview" && previewSrc ? (
                 <>
                   <Segmented
@@ -5190,82 +5128,22 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
               ) : null}
               {isExisting ? (
-                <DropdownMenu open={projectActionsOpen} onOpenChange={setProjectActionsOpen}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="app-no-drag inline-flex">
-                        <DropdownMenuTrigger
-                          aria-label="Project actions"
-                          onClick={() => setProjectActionsOpen(true)}
-                          className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-[transform,color,background-color] duration-150 ease-out hover:bg-surface-2 hover:text-foreground active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
-                        >
-                          <MoreHorizontal size={15} strokeWidth={1.75} />
-                        </DropdownMenuTrigger>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent sideOffset={2}>Project actions</TooltipContent>
-                  </Tooltip>
-                  <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuItem onClick={startProjectRename}>
-                      <Pencil size={15} strokeWidth={1.75} />
-                      Rename project
-                    </DropdownMenuItem>
-                    <DropdownMenuItem disabled={!canOpenProjectPath} onClick={() => void openProjectInFinder()}>
-                      <Folder size={15} strokeWidth={1.75} />
-                      Open in Finder
-                    </DropdownMenuItem>
-                    <DropdownMenuItem variant="destructive" onClick={() => void deleteProject()}>
-                      <Trash2 size={15} strokeWidth={1.75} />
-                      Delete project
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => void copyProjectAnalysisPrompt()}>
-                      <Copy size={15} strokeWidth={1.75} />
-                      Copy Analysis Prompt
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <ProjectActionsMenu
+                  canOpenInFinder={projectHeaderActions.canOpenInFinder}
+                  onRename={projectHeaderActions.startRename}
+                  onOpenInFinder={() => void projectHeaderActions.openInFinder()}
+                  onDelete={() => void projectHeaderActions.deleteProject()}
+                  onCopyAnalysisPrompt={() => void projectHeaderActions.copyAnalysisPrompt()}
+                />
               ) : null}
               {canExport ? (
-                <DropdownMenu open={exportOpen} onOpenChange={setExportOpen}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="app-no-drag inline-flex">
-                        <DropdownMenuTrigger
-                          aria-label="Export project"
-                          onClick={() => setExportOpen(true)}
-                          className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-[transform,color,background-color] duration-150 ease-out hover:bg-surface-2 hover:text-foreground active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
-                        >
-                          <Download size={15} strokeWidth={1.75} />
-                        </DropdownMenuTrigger>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent sideOffset={2}>Export project</TooltipContent>
-                  </Tooltip>
-                  <DropdownMenuContent align="end" className="w-48">
-                    <DropdownMenuItem asChild>
-                      <a href={api.exportUrl(projectId)} download>
-                        Source ZIP
-                      </a>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem asChild>
-                      <a href={api.exportUrl(projectId, "full")} download>
-                        Full project ZIP
-                      </a>
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <ProjectExportMenu
+                  sourceUrl={api.exportUrl(projectId)}
+                  fullUrl={api.exportUrl(projectId, "full")}
+                />
               ) : null}
-              {onOpenSettings ? (
-                <>
-                  <ToolbarTooltip label="Settings">
-                    <IconButton aria-label="Settings" onClick={() => onOpenSettings()} className="app-no-drag">
-                      <Settings size={15} strokeWidth={1.75} />
-                    </IconButton>
-                  </ToolbarTooltip>
-                </>
-              ) : null}
-            </div>
+              {onOpenSettings ? <ProjectSettingsButton onOpen={() => onOpenSettings()} /> : null}
+            </StudioHeaderActions>
           </TooltipProvider>
         </div>
 
@@ -5453,32 +5331,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
         </Dialog>
       ) : null}
-      {projectRenameOpen ? (
-        <Dialog open onClose={() => setProjectRenameOpen(false)} label="Rename project" className="sm:max-w-md" showClose>
-          <form
-            className="space-y-4 p-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void commitProjectRename();
-            }}
-          >
-            <Input
-              aria-label="Project name"
-              autoFocus
-              value={projectNameDraft}
-              onChange={(event) => setProjectNameDraft(event.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="ghost" onClick={() => setProjectRenameOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={!projectNameDraft.trim()}>
-                Save
-              </Button>
-            </div>
-          </form>
-        </Dialog>
-      ) : null}
+      <ProjectRenameDialog controller={projectHeaderActions} />
       <PreviewModal open={fullscreen} src={previewSrc ?? undefined} onClose={() => setFullscreen(false)} />
 
       {diff ? (

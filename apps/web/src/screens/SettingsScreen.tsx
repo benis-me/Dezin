@@ -117,7 +117,14 @@ export function SettingsScreen({
   const confirmedSettingsRef = useRef<Settings | null>(null);
   const editEpochsRef = useRef(new Map<keyof Settings, number>());
   const mutationQueuesRef = useRef(new Map<keyof Settings, Promise<void>>());
-  const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
+  const {
+    agents,
+    loading: agentsInitial,
+    scanning,
+    status: scanStatus,
+    error: agentsError,
+    rescan,
+  } = useAgents();
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
@@ -393,9 +400,14 @@ export function SettingsScreen({
                 activeAgent={activeAgent}
                 agentsLoading={agentsLoading}
                 scanStatus={scanStatus}
+                error={agentsError}
                 onLocal={setLocal}
                 onSave={save}
-                onRescan={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
+                onRescan={() => {
+                  void rescan().then((succeeded) => {
+                    if (!succeeded) toast("Couldn't rescan agents.", { variant: "error" });
+                  });
+                }}
               />
             )}
             {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}

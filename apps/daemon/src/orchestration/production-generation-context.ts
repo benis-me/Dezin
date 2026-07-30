@@ -16,6 +16,7 @@ import type {
   Store,
   WorkspaceArtifactRecord,
   WorkspaceGenerationAgentSelection,
+  WorkspaceGenerationMoodboardImageAuthority,
   WorkspaceGraph,
   WorkspaceSnapshot,
 } from "../../../../packages/core/src/index.ts";
@@ -72,10 +73,16 @@ import {
 import {
   parseProviderProfiles,
   providerRuntimeConfig,
-  redactProviderProfiles,
+  serializeProviderProfiles,
 } from "../provider-profile-config.ts";
+import { resolveAgentProviderCredential } from "../agent-provider-credential.ts";
 import { buildProjectAgentPrompt } from "../run-handler.ts";
-import { reviewerAgentCommand, reviewerModel } from "../run-policy.ts";
+import {
+  researchAgentCommand,
+  researchModel,
+  reviewerAgentCommand,
+  reviewerModel,
+} from "../run-policy.ts";
 import type {
   GenerationTaskContextRequest,
   GenerationTaskContextResolver,
@@ -85,13 +92,24 @@ import {
   SHARINGAN_CAPTURE_RESOURCE_BUNDLE_PROTOCOL,
   validateSharinganCaptureResourceBundleSemantics,
 } from "./sharingan-capture-resource-bundle.ts";
+import {
+  workspaceGeneratorExecutionAuthority,
+  workspaceReviewerExecutionAuthority,
+} from "./generation-execution-authority.ts";
+import {
+  assertWorkspaceMoodboardImageAuthorityMatchesSettings,
+  hydrateWorkspaceMoodboardImageAuthority,
+} from "./moodboard-image-execution-authority.ts";
+import {
+  validateMoodboardImageExecutionAuthority,
+} from "./generation-task-contracts.ts";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 
-const EXECUTION_PROFILE_PROTOCOL = "dezin.artifact-execution-profile.v4" as const;
+const EXECUTION_PROFILE_PROTOCOL = "dezin.artifact-execution-profile.v5" as const;
 const IMAGE_GENERATION_PROFILE_PROTOCOL = "dezin.artifact-image-generation.v2" as const;
-const RESOURCE_EXECUTION_PROFILE_PROTOCOL = "dezin.resource-execution-profile.v3" as const;
-const RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL = "dezin.resource-image-generation.v1" as const;
+const RESOURCE_EXECUTION_PROFILE_PROTOCOL = "dezin.resource-execution-profile.v4" as const;
+const RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL = "dezin.resource-image-generation.v2" as const;
 const ARTIFACT_TARGET_CONTEXT_PROTOCOL = "dezin.generation-target-context.v3" as const;
 const RESOURCE_TARGET_CONTEXT_PROTOCOL = "dezin.generation-target-context.v2" as const;
 const RESOURCE_KINDS = Object.freeze([
@@ -109,16 +127,19 @@ const SETTINGS_FIELDS = Object.freeze([
   "model",
   "apiBaseUrl",
   "apiKey",
+  "apiKeyConfigured",
   "defaultDesignSystemId",
   "customInstructions",
   "imageApiBaseUrl",
   "imageApiKey",
+  "imageApiKeyConfigured",
   "imageModel",
   "removeBackgroundModel",
   "editRegionModel",
   "extractLayerModel",
   "videoApiBaseUrl",
   "videoApiKey",
+  "videoApiKeyConfigured",
   "videoModel",
   "aiProviderId",
   "aiProviderEnabled",
@@ -169,6 +190,7 @@ export interface FrozenArtifactExecutionProfile {
     readonly providerId: string;
     readonly model: string | null;
     readonly credentialProviderId: string;
+    readonly credentialSource: "provider-profile" | "agent" | "session";
     readonly baseUrl: string;
     readonly organization: string;
     readonly credentialRequired: boolean;
@@ -293,16 +315,26 @@ export interface FrozenResourceExecutionProfile {
     readonly baseUrl: string;
     readonly organization: string;
     readonly credentialProviderId: string;
+    readonly credentialSource: "provider-profile" | "agent" | "session";
     readonly credentialRequired: boolean;
   };
   /** Independent no-tools quality reviewer identity, frozen separately from the generating Agent. */
   readonly reviewer: {
-    readonly command: "claude" | "codebuddy" | "codex";
+    readonly command: string;
     readonly providerId: "claude" | "codebuddy" | "codex";
     readonly model: string | null;
     readonly baseUrl: string;
     readonly credentialSource: "anthropic-profile" | "agent" | "session";
     readonly credentialRequired: boolean;
+    readonly credentialAuthority: {
+      readonly owner: "resource-agent" | "proposal-generator";
+      readonly providerId: "claude";
+      readonly baseUrl: string;
+      readonly organization: string;
+      readonly credentialProviderId: "anthropic";
+      readonly credentialSource: "agent";
+      readonly credentialRequired: boolean;
+    } | null;
   };
   /** Present only for Moodboard Tasks; freezes every non-secret image-provider semantic. */
   readonly imageGeneration: {
@@ -312,6 +344,7 @@ export interface FrozenResourceExecutionProfile {
     readonly baseUrl: string;
     readonly model: string;
     readonly apiVersion: string;
+    readonly credentialSource: "provider-profile" | "global-image";
     readonly credentialRequired: boolean;
   } | null;
   readonly sharingan: {
@@ -331,6 +364,17 @@ export interface FreezeResourceExecutionProfileInput {
   readonly resourceKind: Resource["kind"];
   readonly adapter: FrozenResourceExecutionProfile["adapter"];
   readonly settings: Settings;
+  /**
+   * The immutable image authority is compared with the original Settings
+   * snapshot, not the Task-Agent projection which may rewrite unrelated
+   * generic Agent fields such as organization.
+   */
+  readonly moodboardImageSettings?: Settings;
+  readonly agent?: WorkspaceGenerationAgentSelection;
+  /** Proposal generator retained only when Research uses a split generating principal. */
+  readonly reviewerAuthorityAgent?: WorkspaceGenerationAgentSelection;
+  readonly reviewer?: WorkspaceGenerationAgentSelection;
+  readonly moodboardImageAuthority?: WorkspaceGenerationMoodboardImageAuthority;
 }
 
 export interface ResourceExecutionProfileExpectation extends ResourceExecutionProfileOwnership {
@@ -354,13 +398,36 @@ function plainRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function taskGenerationAgentSelection(
+  payload: Record<string, unknown>,
+  field: "agent" | "reviewerAuthorityAgent",
+  label: string,
+): WorkspaceGenerationAgentSelection | null {
+  if (!Object.hasOwn(payload, field)) return null;
+  try {
+    return normalizeWorkspaceGenerationAgentSelection(payload[field], label);
+  } catch (error) {
+    if (error instanceof WorkspaceStoreCodecError) {
+      throw new ContextIntegrityError(error.message);
+    }
+    throw error;
+  }
+}
+
 function taskAgentSelection(
   payload: Record<string, unknown>,
   label: string,
 ): WorkspaceGenerationAgentSelection | null {
-  if (!Object.hasOwn(payload, "agent")) return null;
+  return taskGenerationAgentSelection(payload, "agent", label);
+}
+
+function taskReviewerSelection(
+  payload: Record<string, unknown>,
+  label: string,
+): WorkspaceGenerationAgentSelection | null {
+  if (!Object.hasOwn(payload, "reviewer")) return null;
   try {
-    return normalizeWorkspaceGenerationAgentSelection(payload.agent, label);
+    return normalizeWorkspaceGenerationAgentSelection(payload.reviewer, label);
   } catch (error) {
     if (error instanceof WorkspaceStoreCodecError) {
       throw new ContextIntegrityError(error.message);
@@ -382,11 +449,39 @@ function settingsForFrozenTaskAgent(
   }
   const currentCommand = settings.agentCommand.trim() || "claude";
   const currentProviderId = providerIdentity(currentCommand);
-  const reviewerProviderId = agent.providerId === "claude"
-    || agent.providerId === "codebuddy"
-    || agent.providerId === "codex"
-    ? agent.providerId
-    : null;
+  if (agent.executionAuthority !== undefined) {
+    if (agent.executionAuthority.kind !== "generator") {
+      throw new ContextIntegrityError(
+        "Frozen Task Agent carries reviewer execution authority",
+      );
+    }
+    let currentAuthority;
+    try {
+      currentAuthority = workspaceGeneratorExecutionAuthority(settings, agent);
+    } catch (error) {
+      throw new ContextIntegrityError(
+        `Current Settings cannot resolve the frozen Task Agent execution authority: ${String(error)}`,
+      );
+    }
+    if (!isDeepStrictEqual(currentAuthority, agent.executionAuthority)) {
+      throw new ContextIntegrityError(
+        "Current Settings changed the frozen Task Agent endpoint, organization, credential provider, credential source, or credential requirement",
+      );
+    }
+    const hostAuthenticated = selectedProviderId === "codebuddy" || selectedProviderId === "codex";
+    const ownsGenericCredential = currentProviderId === selectedProviderId;
+    return {
+      ...settings,
+      agentCommand: agent.command,
+      model: agent.model ?? "",
+      apiBaseUrl: agent.executionAuthority.baseUrl,
+      apiKey: hostAuthenticated || !ownsGenericCredential ? "" : settings.apiKey,
+      ...(Object.hasOwn(settings, "apiKeyConfigured")
+        ? { apiKeyConfigured: agent.executionAuthority.credentialRequired }
+        : {}),
+      aiProviderOrganization: agent.executionAuthority.organization,
+    };
+  }
   return {
     ...settings,
     ...(currentProviderId === selectedProviderId
@@ -400,15 +495,53 @@ function settingsForFrozenTaskAgent(
         }),
     agentCommand: agent.command,
     model: agent.model ?? "",
-    ...(reviewerProviderId === null
-      ? {}
-      : {
-          // A post-approval Task's immutable Agent selection owns the complete
-          // generation chain; stale global Visual QA settings cannot switch its
-          // critic to another provider or model.
-          visualQaAgentCommand: reviewerProviderId,
-          visualQaModel: agent.model ?? "",
-        }),
+    // The Task selection freezes the generating Agent only. The independently
+    // configured reviewer remains part of this same one-time Settings snapshot
+    // and is frozen separately into the execution profile below.
+  };
+}
+
+function settingsForFrozenReviewer(
+  settings: Settings,
+  reviewer: WorkspaceGenerationAgentSelection | null,
+  generatingAgent?: WorkspaceGenerationAgentSelection | null,
+): Settings {
+  if (reviewer === null) return settings;
+  const providerId = providerIdentity(reviewer.command);
+  if (providerId !== reviewer.providerId
+    || (providerId !== "claude" && providerId !== "codebuddy" && providerId !== "codex")) {
+    throw new ContextIntegrityError(
+      "Frozen Task reviewer provider does not match its supported command identity",
+    );
+  }
+  if (reviewer.executionAuthority !== undefined) {
+    if (reviewer.executionAuthority.kind !== "reviewer") {
+      throw new ContextIntegrityError(
+        "Frozen Task reviewer carries generator execution authority",
+      );
+    }
+    let currentAuthority;
+    try {
+      currentAuthority = workspaceReviewerExecutionAuthority(
+        settings,
+        reviewer,
+        generatingAgent ?? undefined,
+      );
+    } catch (error) {
+      throw new ContextIntegrityError(
+        `Current Settings cannot resolve the frozen Task reviewer execution authority: ${String(error)}`,
+      );
+    }
+    if (!isDeepStrictEqual(currentAuthority, reviewer.executionAuthority)) {
+      throw new ContextIntegrityError(
+        "Current Settings changed the frozen Task reviewer endpoint, credential source, or credential requirement",
+      );
+    }
+  }
+  return {
+    ...settings,
+    visualQaAgentCommand: reviewer.command,
+    visualQaModel: reviewer.model ?? "",
   };
 }
 
@@ -512,12 +645,36 @@ function artifactImageProviderCredential(settings: Settings, providerId: string)
 
 function sanitizedSettings(settings: Settings): Settings {
   const clone = structuredClone(settings);
+  const profiles = parseProviderProfiles(clone.aiProviderProfiles);
+  for (const [providerId, profile] of Object.entries(profiles)) {
+    profile.baseUrl = credentialFreeAgentBaseUrl(
+      profile.baseUrl,
+      `Artifact provider profile ${providerId} base URL`,
+    );
+    profile.apiKeyConfigured = Boolean(profile.apiKey.trim() || profile.apiKeyConfigured);
+    profile.apiKey = "";
+  }
   return {
     ...clone,
+    apiBaseUrl: credentialFreeAgentBaseUrl(
+      clone.apiBaseUrl,
+      "Artifact Agent API base URL",
+    ),
     apiKey: "",
+    apiKeyConfigured: Boolean(clone.apiKey.trim() || clone.apiKeyConfigured),
+    imageApiBaseUrl: credentialFreeAgentBaseUrl(
+      clone.imageApiBaseUrl,
+      "Artifact image API base URL",
+    ),
     imageApiKey: "",
+    imageApiKeyConfigured: Boolean(clone.imageApiKey.trim() || clone.imageApiKeyConfigured),
+    videoApiBaseUrl: credentialFreeAgentBaseUrl(
+      clone.videoApiBaseUrl,
+      "Artifact video API base URL",
+    ),
     videoApiKey: "",
-    aiProviderProfiles: redactProviderProfiles(clone.aiProviderProfiles),
+    videoApiKeyConfigured: Boolean(clone.videoApiKey.trim() || clone.videoApiKeyConfigured),
+    aiProviderProfiles: clone.aiProviderProfiles.trim() ? serializeProviderProfiles(profiles) : "",
   };
 }
 
@@ -564,24 +721,27 @@ function artifactAgentCredentialSemantic(
   providerId: string,
 ): Pick<
   FrozenArtifactExecutionProfile["agent"],
-  "credentialProviderId" | "baseUrl" | "organization" | "credentialRequired"
+  "credentialProviderId" | "credentialSource" | "baseUrl" | "organization" | "credentialRequired"
 > {
   if (providerId === "codebuddy" || providerId === "codex") {
     return {
       credentialProviderId: resourceCredentialProviderId(providerId),
+      credentialSource: "session",
       baseUrl: "",
       organization: "",
       credentialRequired: false,
     };
   }
-  const usesAnthropicEndpoint = providerId === "claude";
-  const credentialRequired = Boolean(settings.apiKey.trim() || settings.apiKeyConfigured);
-  const baseUrl = usesAnthropicEndpoint ? settings.apiBaseUrl.trim() : "";
+  const credential = resolveAgentProviderCredential(settings, providerId);
   return {
     credentialProviderId: resourceCredentialProviderId(providerId),
-    baseUrl,
-    organization: "",
-    credentialRequired,
+    credentialSource: credential?.source ?? "session",
+    baseUrl: credentialFreeAgentBaseUrl(
+      credential?.baseUrl ?? "",
+      "Artifact execution Agent base URL",
+    ),
+    organization: credential?.organization ?? "",
+    credentialRequired: credential?.credentialRequired ?? false,
   };
 }
 
@@ -589,7 +749,7 @@ function legacyArtifactCodexCredentialSemantic(
   settings: Settings,
 ): Pick<
   FrozenArtifactExecutionProfile["agent"],
-  "credentialProviderId" | "baseUrl" | "organization" | "credentialRequired"
+  "credentialProviderId" | "credentialSource" | "baseUrl" | "organization" | "credentialRequired"
 > {
   const baseUrl = settings.apiBaseUrl.trim();
   const selectedProfile = parseProviderProfiles(settings.aiProviderProfiles)[settings.aiProviderId.trim()];
@@ -600,6 +760,7 @@ function legacyArtifactCodexCredentialSemantic(
   );
   return {
     credentialProviderId: resourceCredentialProviderId("codex"),
+    credentialSource: credentialRequired || baseUrl ? "agent" : "session",
     baseUrl,
     organization: baseUrl || credentialRequired ? settings.aiProviderOrganization.trim() : "",
     credentialRequired,
@@ -625,27 +786,38 @@ function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionPro
       baseUrl: "",
       credentialSource: "session" as const,
       credentialRequired: false,
+      credentialAuthority: null,
     });
   }
-  const anthropic = providerRuntimeConfig(settings, "anthropic");
-  if (anthropic.enabled) {
+  const credential = resolveAgentProviderCredential(settings, "claude");
+  if (credential?.source === "provider-profile") {
     return Object.freeze({
       command: "claude" as const,
       providerId: "claude" as const,
       model,
-      baseUrl: credentialFreeAgentBaseUrl(anthropic.baseUrl),
+      baseUrl: credentialFreeAgentBaseUrl(credential.baseUrl),
       credentialSource: "anthropic-profile" as const,
-      credentialRequired: Boolean(anthropic.apiKey.trim() || anthropic.apiKeyConfigured),
+      credentialRequired: credential.credentialRequired,
+      credentialAuthority: null,
     });
   }
-  if (getProvider(settings.agentCommand)?.id === "claude") {
+  if (credential?.source === "agent") {
     return Object.freeze({
       command: "claude" as const,
       providerId: "claude" as const,
       model,
-      baseUrl: credentialFreeAgentBaseUrl(settings.apiBaseUrl),
+      baseUrl: credentialFreeAgentBaseUrl(credential.baseUrl),
       credentialSource: "agent" as const,
-      credentialRequired: resourceCredentialConfigured(settings),
+      credentialRequired: credential.credentialRequired,
+      credentialAuthority: Object.freeze({
+        owner: "resource-agent" as const,
+        providerId: "claude" as const,
+        baseUrl: credentialFreeAgentBaseUrl(credential.baseUrl),
+        organization: credential.organization,
+        credentialProviderId: "anthropic" as const,
+        credentialSource: "agent" as const,
+        credentialRequired: credential.credentialRequired,
+      }),
     });
   }
   return Object.freeze({
@@ -655,6 +827,61 @@ function resourceReviewerProfile(settings: Settings): FrozenResourceExecutionPro
     baseUrl: "",
     credentialSource: "session" as const,
     credentialRequired: false,
+    credentialAuthority: null,
+  });
+}
+
+function frozenResourceAgentProfile(
+  selection: WorkspaceGenerationAgentSelection,
+): FrozenResourceExecutionProfile["agent"] {
+  const providerId = providerIdentity(selection.command);
+  const authority = selection.executionAuthority;
+  if (providerId !== selection.providerId || authority?.kind !== "generator") {
+    throw new ContextIntegrityError(
+      "Frozen Resource Agent selection does not carry exact generator execution authority",
+    );
+  }
+  return Object.freeze({
+    command: selection.command,
+    providerId: selection.providerId,
+    model: selection.model,
+    baseUrl: authority.baseUrl,
+    organization: authority.organization,
+    credentialProviderId: authority.credentialProviderId,
+    credentialSource: authority.credentialSource,
+    credentialRequired: authority.credentialRequired,
+  });
+}
+
+function frozenResourceReviewerProfile(
+  selection: WorkspaceGenerationAgentSelection,
+): FrozenResourceExecutionProfile["reviewer"] {
+  const providerId = providerIdentity(selection.command);
+  const authority = selection.executionAuthority;
+  if ((providerId !== "claude" && providerId !== "codebuddy" && providerId !== "codex")
+    || providerId !== selection.providerId || authority?.kind !== "reviewer") {
+    throw new ContextIntegrityError(
+      "Frozen Resource reviewer selection does not carry exact reviewer execution authority",
+    );
+  }
+  return Object.freeze({
+    command: selection.command,
+    providerId,
+    model: selection.model,
+    baseUrl: authority.baseUrl,
+    credentialSource: authority.credentialSource,
+    credentialRequired: authority.credentialRequired,
+    credentialAuthority: authority.credentialSource === "agent" && providerId === "claude"
+      ? Object.freeze({
+          owner: "proposal-generator" as const,
+          providerId: "claude" as const,
+          baseUrl: authority.baseUrl,
+          organization: "",
+          credentialProviderId: "anthropic" as const,
+          credentialSource: "agent" as const,
+          credentialRequired: authority.credentialRequired,
+        })
+      : null,
   });
 }
 
@@ -672,39 +899,34 @@ function sharinganExecutionProtocols(
   }) : null;
 }
 
-const IMAGE_PROVIDERS_WITH_DEFAULT_BASE_URL = new Set(["fal", "gemini", "vertex"]);
-
 function resourceImageGenerationProfile(
   kind: Resource["kind"],
   settings: Settings,
+  authority?: WorkspaceGenerationMoodboardImageAuthority,
 ): FrozenResourceExecutionProfile["imageGeneration"] {
-  if (kind !== "moodboard") return null;
-  const providerId = settings.aiProviderId.trim();
-  const runtime = providerRuntimeConfig(settings, providerId);
-  const providerProfile = parseProviderProfiles(settings.aiProviderProfiles)[providerId];
-  const baseUrl = credentialFreeAgentBaseUrl(runtime.baseUrl || settings.imageApiBaseUrl);
-  const model = settings.imageModel.trim();
-  const apiVersion = (runtime.organization || settings.aiProviderOrganization).trim();
-  const credentialRequired = Boolean(
-    providerProfile?.apiKey.trim()
-      || providerProfile?.apiKeyConfigured
-      || (settings.aiProviderId.trim() === providerId
-        && (settings.imageApiKey.trim() || settings.imageApiKeyConfigured)),
-  );
-  const enabled = Boolean(
-    providerId
-      && model
-      && credentialRequired
-      && (baseUrl || IMAGE_PROVIDERS_WITH_DEFAULT_BASE_URL.has(providerId)),
-  );
+  if (kind !== "moodboard") {
+    if (authority !== undefined) {
+      throw new ContextIntegrityError(
+        "Moodboard image execution authority is incompatible with Resource kind",
+      );
+    }
+    return null;
+  }
+  if (authority === undefined) {
+    throw new ContextIntegrityError(
+      "Moodboard Resource execution requires exact image execution authority",
+    );
+  }
+  assertWorkspaceMoodboardImageAuthorityMatchesSettings(settings, authority);
   return Object.freeze({
     protocol: RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL,
-    enabled,
-    providerId,
-    baseUrl,
-    model,
-    apiVersion,
-    credentialRequired,
+    enabled: true,
+    providerId: authority.providerId,
+    baseUrl: authority.baseUrl,
+    model: authority.model,
+    apiVersion: authority.apiVersion,
+    credentialSource: authority.credentialSource,
+    credentialRequired: authority.credentialRequired,
   });
 }
 
@@ -712,31 +934,46 @@ function resourceImageGenerationProfile(
 export function freezeResourceExecutionProfile(
   input: FreezeResourceExecutionProfileInput,
 ): FrozenResourceExecutionProfile {
-  const command = input.settings.agentCommand.trim() || "claude";
+  const fallbackCommand = input.settings.agentCommand.trim() || "claude";
+  const command = input.resourceKind === "research"
+    ? researchAgentCommand(input.settings, fallbackCommand)
+    : fallbackCommand;
+  const model = input.resourceKind === "research"
+    ? researchModel(input.settings, input.settings.model.trim() || undefined) ?? null
+    : input.settings.model.trim() || null;
   const providerId = providerIdentity(command);
   const credentialProviderId = resourceCredentialProviderId(providerId);
   const hostAuthenticated = providerId === "codebuddy" || providerId === "codex";
-  const agentBaseUrl = hostAuthenticated ? "" : credentialFreeAgentBaseUrl(input.settings.apiBaseUrl);
-  const agentCredentialRequired = hostAuthenticated ? false : resourceCredentialConfigured(input.settings);
+  const credential = hostAuthenticated
+    ? null
+    : resolveAgentProviderCredential(input.settings, providerId);
+  const agentBaseUrl = credential === null ? "" : credentialFreeAgentBaseUrl(credential.baseUrl);
+  const agentCredentialRequired = credential?.credentialRequired ?? false;
+  const inferredAgent: FrozenResourceExecutionProfile["agent"] = {
+    command,
+    providerId,
+    model,
+    baseUrl: agentBaseUrl,
+    organization: credential?.organization ?? "",
+    credentialProviderId,
+    credentialSource: credential?.source ?? "session",
+    credentialRequired: agentCredentialRequired,
+  };
   const body = {
     protocol: RESOURCE_EXECUTION_PROFILE_PROTOCOL,
     ownership: structuredClone(input.ownership),
     resource: { kind: input.resourceKind },
     adapter: structuredClone(input.adapter),
     implementation: resourceImplementationProtocols(input.resourceKind),
-    agent: {
-      command,
-      providerId,
-      model: input.settings.model.trim() || null,
-      baseUrl: agentBaseUrl,
-      organization: providerId === "codex" && !agentBaseUrl && !agentCredentialRequired
-        ? ""
-        : hostAuthenticated ? "" : input.settings.aiProviderOrganization.trim(),
-      credentialProviderId,
-      credentialRequired: agentCredentialRequired,
-    },
-    reviewer: resourceReviewerProfile(input.settings),
-    imageGeneration: resourceImageGenerationProfile(input.resourceKind, input.settings),
+    agent: input.agent === undefined ? inferredAgent : frozenResourceAgentProfile(input.agent),
+    reviewer: input.reviewer === undefined
+      ? resourceReviewerProfile(input.settings)
+      : frozenResourceReviewerProfile(input.reviewer),
+    imageGeneration: resourceImageGenerationProfile(
+      input.resourceKind,
+      input.moodboardImageSettings ?? input.settings,
+      input.moodboardImageAuthority,
+    ),
     sharingan: sharinganExecutionProtocols(input.resourceKind),
   };
   return validateResourceExecutionProfile(hashedBody(body));
@@ -807,11 +1044,15 @@ export function validateResourceExecutionProfile(
   }
   const agentRecord = plainRecord(profile.agent, "Resource execution Agent");
   exactKeys(agentRecord, [
-    "command", "providerId", "model", "baseUrl", "organization", "credentialProviderId", "credentialRequired",
+    "command", "providerId", "model", "baseUrl", "organization", "credentialProviderId", "credentialSource",
+    "credentialRequired",
   ], "Resource execution Agent");
   const command = nonEmptyString(agentRecord.command, "Resource execution Agent command");
   const providerId = nonEmptyString(agentRecord.providerId, "Resource execution Agent provider");
-  if (typeof agentRecord.credentialRequired !== "boolean") {
+  if ((agentRecord.credentialSource !== "provider-profile"
+      && agentRecord.credentialSource !== "agent"
+      && agentRecord.credentialSource !== "session")
+    || typeof agentRecord.credentialRequired !== "boolean") {
     throw new ContextIntegrityError("Resource execution Agent credential policy is invalid");
   }
   const agent = {
@@ -824,46 +1065,87 @@ export function validateResourceExecutionProfile(
       agentRecord.credentialProviderId,
       "Resource execution Agent credential provider",
     ),
+    credentialSource: agentRecord.credentialSource as "provider-profile" | "agent" | "session",
     credentialRequired: agentRecord.credentialRequired,
   };
   if (providerIdentity(command) !== providerId
-    || resourceCredentialProviderId(providerId) !== agent.credentialProviderId) {
+    || resourceCredentialProviderId(providerId) !== agent.credentialProviderId
+    || (agent.credentialSource === "session"
+      && (agent.baseUrl !== "" || agent.organization !== "" || agent.credentialRequired))) {
     throw new ContextIntegrityError("Resource execution Agent identity is invalid");
   }
   const reviewerRecord = plainRecord(profile.reviewer, "Resource execution reviewer");
   exactKeys(reviewerRecord, [
     "command", "providerId", "model", "baseUrl", "credentialSource", "credentialRequired",
+    ...(Object.hasOwn(reviewerRecord, "credentialAuthority") ? ["credentialAuthority"] as const : []),
   ], "Resource execution reviewer");
-  if ((reviewerRecord.command !== "claude"
-      && reviewerRecord.command !== "codebuddy"
-      && reviewerRecord.command !== "codex")
-    || reviewerRecord.providerId !== reviewerRecord.command
+  const reviewerCommand = nonEmptyString(
+    reviewerRecord.command,
+    "Resource execution reviewer command",
+  );
+  const reviewerProviderId = providerIdentity(reviewerCommand);
+  if ((reviewerProviderId !== "claude"
+      && reviewerProviderId !== "codebuddy"
+      && reviewerProviderId !== "codex")
+    || reviewerRecord.providerId !== reviewerProviderId
     || (reviewerRecord.credentialSource !== "anthropic-profile"
       && reviewerRecord.credentialSource !== "agent"
       && reviewerRecord.credentialSource !== "session")
     || typeof reviewerRecord.credentialRequired !== "boolean") {
     throw new ContextIntegrityError("Resource execution reviewer identity is invalid");
   }
-  const reviewerCommand = reviewerRecord.command;
   const reviewerCredentialSource = reviewerRecord.credentialSource;
+  let credentialAuthority: FrozenResourceExecutionProfile["reviewer"]["credentialAuthority"] = null;
+  if (Object.hasOwn(reviewerRecord, "credentialAuthority") && reviewerRecord.credentialAuthority !== null) {
+    const authorityRecord = plainRecord(
+      reviewerRecord.credentialAuthority,
+      "Resource execution reviewer credential authority",
+    );
+    exactKeys(authorityRecord, [
+      "owner", "providerId", "baseUrl", "organization", "credentialProviderId",
+      "credentialSource", "credentialRequired",
+    ], "Resource execution reviewer credential authority");
+    if ((authorityRecord.owner !== "resource-agent" && authorityRecord.owner !== "proposal-generator")
+      || authorityRecord.providerId !== "claude"
+      || authorityRecord.credentialProviderId !== "anthropic"
+      || authorityRecord.credentialSource !== "agent"
+      || typeof authorityRecord.credentialRequired !== "boolean") {
+      throw new ContextIntegrityError("Resource execution reviewer credential authority is invalid");
+    }
+    credentialAuthority = Object.freeze({
+      owner: authorityRecord.owner,
+      providerId: "claude" as const,
+      baseUrl: credentialFreeAgentBaseUrl(authorityRecord.baseUrl),
+      organization: stringValue(
+        authorityRecord.organization,
+        "Resource execution reviewer credential authority organization",
+      ),
+      credentialProviderId: "anthropic" as const,
+      credentialSource: "agent" as const,
+      credentialRequired: authorityRecord.credentialRequired,
+    });
+  }
   const reviewer: FrozenResourceExecutionProfile["reviewer"] = {
     command: reviewerCommand,
-    providerId: reviewerCommand,
+    providerId: reviewerProviderId,
     model: nullableString(reviewerRecord.model, "Resource execution reviewer model"),
     baseUrl: credentialFreeAgentBaseUrl(reviewerRecord.baseUrl),
     credentialSource: reviewerCredentialSource,
     credentialRequired: reviewerRecord.credentialRequired,
+    credentialAuthority,
   };
   if ((reviewer.credentialSource === "session" && (reviewer.baseUrl || reviewer.credentialRequired))
-    || ((reviewer.command === "codebuddy" || reviewer.command === "codex")
-      && reviewer.credentialSource !== "session")) {
+    || ((reviewer.providerId === "codebuddy" || reviewer.providerId === "codex")
+      && reviewer.credentialSource !== "session")
+    || (reviewer.credentialSource === "agent"
+      && reviewer.providerId !== "claude")) {
     throw new ContextIntegrityError("Resource execution reviewer credential policy is invalid");
   }
   let imageGeneration: FrozenResourceExecutionProfile["imageGeneration"] = null;
   if (profile.imageGeneration !== null) {
     const item = plainRecord(profile.imageGeneration, "Resource execution image generation");
     exactKeys(item, [
-      "protocol", "enabled", "providerId", "baseUrl", "model", "apiVersion", "credentialRequired",
+      "protocol", "enabled", "providerId", "baseUrl", "model", "apiVersion", "credentialSource", "credentialRequired",
     ], "Resource execution image generation");
     if (item.protocol !== RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL
       || typeof item.enabled !== "boolean" || typeof item.credentialRequired !== "boolean") {
@@ -873,14 +1155,19 @@ export function validateResourceExecutionProfile(
       protocol: RESOURCE_IMAGE_GENERATION_PROFILE_PROTOCOL,
       enabled: item.enabled,
       providerId: nonEmptyString(item.providerId, "Resource image provider"),
-      baseUrl: credentialFreeAgentBaseUrl(item.baseUrl),
+      baseUrl: credentialFreeAgentBaseUrl(item.baseUrl).replace(/\/+$/, ""),
       model: stringValue(item.model, "Resource image model"),
       apiVersion: stringValue(item.apiVersion, "Resource image API version"),
+      credentialSource: item.credentialSource as "provider-profile" | "global-image",
       credentialRequired: item.credentialRequired,
     };
-    if (imageGeneration.enabled && (!imageGeneration.model || !imageGeneration.credentialRequired
-      || (!imageGeneration.baseUrl && !IMAGE_PROVIDERS_WITH_DEFAULT_BASE_URL.has(imageGeneration.providerId)))) {
-      throw new ContextIntegrityError("Enabled Resource image generation is incomplete");
+    if ((imageGeneration.credentialSource !== "provider-profile"
+        && imageGeneration.credentialSource !== "global-image")
+      || imageGeneration.enabled !== true
+      || imageGeneration.credentialRequired !== true
+      || !imageGeneration.model
+      || !imageGeneration.baseUrl) {
+      throw new ContextIntegrityError("Moodboard Resource image generation must be explicitly enabled and complete");
     }
   }
   if ((resourceKind === "moodboard") !== (imageGeneration !== null)) {
@@ -1003,6 +1290,9 @@ function validateSettings(value: unknown): Settings {
   const settings = plainRecord(value, "Artifact execution settings");
   exactKeys(settings, SETTINGS_FIELDS, "Artifact execution settings");
   const stringFields = SETTINGS_FIELDS.filter((key) => ![
+    "apiKeyConfigured",
+    "imageApiKeyConfigured",
+    "videoApiKeyConfigured",
     "aiProviderEnabled",
     "visualQaEnabled",
     "autoFixLiveRuntimeErrors",
@@ -1013,6 +1303,9 @@ function validateSettings(value: unknown): Settings {
   ].includes(key));
   if (stringFields.some((field) => typeof settings[field] !== "string")
     || typeof settings.aiProviderEnabled !== "boolean"
+    || typeof settings.apiKeyConfigured !== "boolean"
+    || typeof settings.imageApiKeyConfigured !== "boolean"
+    || typeof settings.videoApiKeyConfigured !== "boolean"
     || typeof settings.visualQaEnabled !== "boolean"
     || typeof settings.autoFixLiveRuntimeErrors !== "boolean"
     || typeof settings.sharinganAffirmed !== "boolean"
@@ -1053,6 +1346,7 @@ function validateArtifactAgent(value: unknown, settings: Settings): FrozenArtifa
     "providerId",
     "model",
     "credentialProviderId",
+    "credentialSource",
     "baseUrl",
     "organization",
     "credentialRequired",
@@ -1064,6 +1358,9 @@ function validateArtifactAgent(value: unknown, settings: Settings): FrozenArtifa
   };
   if (typeof record.baseUrl !== "string"
     || typeof record.organization !== "string"
+    || (record.credentialSource !== "provider-profile"
+      && record.credentialSource !== "agent"
+      && record.credentialSource !== "session")
     || typeof record.credentialRequired !== "boolean") {
     throw new ContextIntegrityError("Artifact execution Agent credential semantic is invalid");
   }
@@ -1074,21 +1371,25 @@ function validateArtifactAgent(value: unknown, settings: Settings): FrozenArtifa
       record.credentialProviderId,
       "Artifact execution Agent credential provider",
     ),
-    baseUrl: record.baseUrl,
+    credentialSource: record.credentialSource,
+    baseUrl: credentialFreeAgentBaseUrl(
+      record.baseUrl,
+      "Artifact execution Agent base URL",
+    ),
     organization: record.organization,
     credentialRequired: record.credentialRequired,
   };
   const matchesCurrentSemantic = agent.credentialProviderId === expected.credentialProviderId
+    && agent.credentialSource === expected.credentialSource
     && agent.baseUrl === expected.baseUrl
     && agent.organization === expected.organization
-    && (actor.providerId !== "codex" && actor.providerId !== "codebuddy"
-      ? true
-      : agent.credentialRequired === expected.credentialRequired);
+    && agent.credentialRequired === expected.credentialRequired;
   const legacyCodex = actor.providerId === "codex"
     ? legacyArtifactCodexCredentialSemantic(settings)
     : null;
   const matchesLegacyCodexSemantic = legacyCodex !== null
     && agent.credentialProviderId === legacyCodex.credentialProviderId
+    && agent.credentialSource === legacyCodex.credentialSource
     && agent.baseUrl === legacyCodex.baseUrl
     && agent.organization === legacyCodex.organization
     && agent.credentialRequired === legacyCodex.credentialRequired;
@@ -1113,6 +1414,7 @@ function matchesLegacyArtifactV4ReviewerSemantic(
   }
   const legacyAgent = legacyArtifactCodexCredentialSemantic(settings);
   return agent.credentialProviderId === legacyAgent.credentialProviderId
+    && agent.credentialSource === legacyAgent.credentialSource
     && agent.baseUrl === legacyAgent.baseUrl
     && agent.organization === legacyAgent.organization
     && agent.credentialRequired === legacyAgent.credentialRequired;
@@ -1417,6 +1719,53 @@ function validateArtifactExecutionProfile(
   return cloneAndFreeze({ ...resultBody, checksum: profile.checksum });
 }
 
+export type BoundArtifactAgentExecution = Readonly<
+  FrozenArtifactExecutionProfile["agent"] & { readonly apiKey: string }
+>;
+
+function hydrateFrozenAgentExecution<
+  T extends {
+    readonly providerId: string;
+    readonly credentialProviderId: string;
+    readonly credentialSource: "provider-profile" | "agent" | "session";
+    readonly baseUrl: string;
+    readonly organization: string;
+    readonly credentialRequired: boolean;
+  },
+>(agent: T, liveSettings: Settings, label: string): Readonly<T & { readonly apiKey: string }> {
+  const hostAuthenticated = agent.providerId === "codebuddy" || agent.providerId === "codex";
+  const current = hostAuthenticated
+    ? null
+    : resolveAgentProviderCredential(liveSettings, agent.providerId);
+  const currentSource = current?.source ?? "session";
+  const currentCredentialRequired = current?.credentialRequired ?? false;
+  const currentBaseUrl = credentialFreeAgentBaseUrl(
+    current?.baseUrl ?? "",
+    `${label} current base URL`,
+  );
+  const matches = resourceCredentialProviderId(agent.providerId) === agent.credentialProviderId
+    && currentSource === agent.credentialSource
+    && currentBaseUrl === agent.baseUrl
+    && (current?.organization ?? "") === agent.organization
+    && currentCredentialRequired === agent.credentialRequired;
+  const apiKey = matches ? current?.apiKey ?? "" : "";
+  if (!matches || (agent.credentialRequired && !apiKey)) {
+    throw new ContextIntegrityError(
+      `Current credential for the frozen ${label} provider, source, endpoint, and organization is unavailable`,
+    );
+  }
+  return Object.freeze({ ...agent, apiKey });
+}
+
+/** Restores the one exact Agent secret without changing frozen behavior. */
+export function hydrateArtifactAgentExecution(
+  profile: FrozenArtifactExecutionProfile,
+  liveSettings: Settings,
+): BoundArtifactAgentExecution {
+  const exact = validateArtifactExecutionProfile(profile);
+  return hydrateFrozenAgentExecution(exact.agent, liveSettings, "Artifact Agent");
+}
+
 /** Restores only secrets from current Settings; every behavioral field stays frozen. */
 export function hydrateArtifactExecutionSettings(
   profile: FrozenArtifactExecutionProfile,
@@ -1424,35 +1773,13 @@ export function hydrateArtifactExecutionSettings(
 ): Settings {
   const exact = validateArtifactExecutionProfile(profile);
   const frozen = exact.settings.value;
-  const hostAuthenticated = exact.agent.providerId === "codebuddy"
-    || exact.agent.providerId === "codex";
-  if (hostAuthenticated) {
-    return {
-      ...structuredClone(frozen),
-      apiBaseUrl: "",
-      apiKey: "",
-      apiKeyConfigured: false,
-      aiProviderOrganization: "",
-      visualQaEnabled: exact.quality.visualQaEnabled,
-      visualQaAgentCommand: exact.quality.reviewer.command,
-      visualQaModel: exact.quality.reviewer.model ?? "",
-    };
-  }
-  const liveCommand = liveSettings.agentCommand.trim() || "claude";
-  const sameProvider = providerIdentity(liveCommand) === exact.agent.providerId;
-  const liveCredential = artifactAgentCredentialSemantic(liveSettings, exact.agent.providerId);
-  const sameEndpoint = exact.agent.baseUrl === liveCredential.baseUrl;
-  const sameOrganization = exact.agent.organization === liveCredential.organization;
-  const credentialMatches = sameProvider && sameEndpoint && sameOrganization;
-  const apiKey = credentialMatches ? liveSettings.apiKey.trim() : "";
-  if (exact.agent.credentialRequired && !apiKey) {
-    throw new ContextIntegrityError(
-      "Current credential for the frozen Artifact Agent provider, endpoint, and organization is unavailable",
-    );
-  }
+  const execution = hydrateFrozenAgentExecution(exact.agent, liveSettings, "Artifact Agent");
   return {
     ...structuredClone(frozen),
-    apiKey,
+    apiBaseUrl: execution.baseUrl,
+    apiKey: execution.apiKey,
+    apiKeyConfigured: execution.credentialRequired,
+    aiProviderOrganization: execution.organization,
     visualQaEnabled: exact.quality.visualQaEnabled,
     visualQaAgentCommand: exact.quality.reviewer.command,
     visualQaModel: exact.quality.reviewer.model ?? "",
@@ -1510,28 +1837,7 @@ export function hydrateResourceAgentExecution(
   if (!implementation || implementation.id !== exact.agent.providerId) {
     throw new ContextIntegrityError("Frozen Resource Agent implementation is unavailable or incompatible");
   }
-  if (exact.agent.providerId === "codebuddy" || exact.agent.providerId === "codex") {
-    return Object.freeze({
-      ...exact.agent,
-      baseUrl: "",
-      organization: "",
-      credentialRequired: false,
-      apiKey: "",
-    });
-  }
-  const liveCommand = liveSettings.agentCommand.trim() || "claude";
-  const liveProviderId = providerIdentity(liveCommand);
-  const currentBaseUrl = credentialFreeAgentBaseUrl(liveSettings.apiBaseUrl);
-  const currentOrganization = liveSettings.aiProviderOrganization.trim();
-  const credentialMatches = liveProviderId === exact.agent.providerId
-    && resourceCredentialProviderId(liveProviderId) === exact.agent.credentialProviderId
-    && currentBaseUrl === exact.agent.baseUrl
-    && currentOrganization === exact.agent.organization;
-  const apiKey = credentialMatches ? liveSettings.apiKey.trim() : "";
-  if (exact.agent.credentialRequired && !apiKey) {
-    throw new ContextIntegrityError("Current credential for the frozen Resource Agent provider is unavailable");
-  }
-  return Object.freeze({ ...exact.agent, apiKey });
+  return hydrateFrozenAgentExecution(exact.agent, liveSettings, "Resource Agent");
 }
 
 export type BoundResourceReviewerExecution = Readonly<
@@ -1547,17 +1853,30 @@ export function hydrateResourceReviewerExecution(
   if (exact.providerId === "codebuddy" || exact.providerId === "codex") {
     return Object.freeze({ ...exact, apiKey: "" });
   }
-  const current = resourceReviewerProfile(liveSettings);
-  if (!isDeepStrictEqual(current, exact)) {
-    throw new ContextIntegrityError(
-      "Current Resource reviewer command, model, endpoint, credential source, or credential requirement does not match the frozen Attempt",
-    );
+  let apiKey = "";
+  if (exact.credentialSource === "anthropic-profile") {
+    const credential = resolveAgentProviderCredential(liveSettings, "claude");
+    if (credential?.source !== "provider-profile"
+      || credentialFreeAgentBaseUrl(credential.baseUrl) !== exact.baseUrl
+      || credential.credentialRequired !== exact.credentialRequired) {
+      throw new ContextIntegrityError(
+        "Current credential source for the frozen Resource reviewer is unavailable or incompatible",
+      );
+    }
+    apiKey = credential.apiKey;
+  } else if (exact.credentialSource === "agent") {
+    const credential = resolveAgentProviderCredential(liveSettings, "claude");
+    if (credential?.source !== "agent"
+      || credentialFreeAgentBaseUrl(credential.baseUrl) !== exact.baseUrl
+      || credential.credentialRequired !== exact.credentialRequired) {
+      throw new ContextIntegrityError(
+        "Current Agent credential source for the frozen Resource reviewer is unavailable or incompatible",
+      );
+    }
+    apiKey = credential.apiKey;
+  } else if (exact.baseUrl !== "" || exact.credentialRequired) {
+    throw new ContextIntegrityError("Frozen Resource reviewer session credential semantics are invalid");
   }
-  const apiKey = exact.credentialSource === "anthropic-profile"
-    ? providerRuntimeConfig(liveSettings, "anthropic").apiKey.trim()
-    : exact.credentialSource === "agent"
-      ? liveSettings.apiKey.trim()
-      : "";
   if (exact.credentialRequired && !apiKey) {
     throw new ContextIntegrityError("Current credential for the frozen Resource reviewer is unavailable");
   }
@@ -1577,25 +1896,17 @@ export function hydrateResourceImageGeneration(
   if (exact === null || !exact.enabled) {
     throw new ContextIntegrityError("Frozen Moodboard image generation is not configured");
   }
-  const current = providerRuntimeConfig(liveSettings, exact.providerId);
-  const currentBaseUrl = credentialFreeAgentBaseUrl(current.baseUrl || liveSettings.imageApiBaseUrl);
-  const currentApiVersion = (current.organization || liveSettings.aiProviderOrganization).trim();
-  const currentModel = liveSettings.imageModel.trim();
-  const currentProfile = parseProviderProfiles(liveSettings.aiProviderProfiles)[exact.providerId];
-  const providerStillSelected = liveSettings.aiProviderId.trim() === exact.providerId
-    || currentProfile?.enabled === true;
-  if (!providerStillSelected || !current.enabled || currentBaseUrl !== exact.baseUrl
-    || currentApiVersion !== exact.apiVersion || currentModel !== exact.model) {
-    throw new ContextIntegrityError(
-      "Current Moodboard image provider, endpoint, API version, or model does not match the frozen Attempt",
-    );
-  }
-  const apiKey = currentProfile?.apiKey.trim()
-    || (liveSettings.aiProviderId.trim() === exact.providerId ? liveSettings.imageApiKey.trim() : "");
-  if (exact.credentialRequired && !apiKey) {
-    throw new ContextIntegrityError("Current credential for the frozen Moodboard image provider is unavailable");
-  }
-  return Object.freeze({ ...exact, apiKey });
+  const hydrated = hydrateWorkspaceMoodboardImageAuthority(liveSettings, {
+    kind: "moodboard-image",
+    protocol: "dezin.workspace-moodboard-image-authority.v1",
+    providerId: exact.providerId,
+    baseUrl: exact.baseUrl,
+    model: exact.model,
+    apiVersion: exact.apiVersion,
+    credentialSource: exact.credentialSource,
+    credentialRequired: exact.credentialRequired,
+  });
+  return Object.freeze({ ...exact, apiKey: hydrated.apiKey });
 }
 
 function artifactExecutionContextPackHash(pack: ContextPack): string {
@@ -1948,6 +2259,31 @@ export function requireResourceExecutionProfile(
     adapter: expected.adapter,
   };
   const result = validateResourceExecutionProfile(target.resourceExecutionProfile, exactExpected);
+  if (expected.resourceKind === "moodboard") {
+    const authority = validateMoodboardImageExecutionAuthority(
+      payload.moodboardImageAuthority,
+      "Resource execution Task Moodboard image authority",
+    );
+    const profileAuthority: WorkspaceGenerationMoodboardImageAuthority = {
+      kind: "moodboard-image",
+      protocol: "dezin.workspace-moodboard-image-authority.v1",
+      providerId: result.imageGeneration!.providerId,
+      baseUrl: result.imageGeneration!.baseUrl,
+      model: result.imageGeneration!.model,
+      apiVersion: result.imageGeneration!.apiVersion,
+      credentialSource: result.imageGeneration!.credentialSource,
+      credentialRequired: result.imageGeneration!.credentialRequired,
+    };
+    if (!isDeepStrictEqual(profileAuthority, authority)) {
+      throw new ContextIntegrityError(
+        "Resource execution image profile does not match the exact Task Moodboard image authority",
+      );
+    }
+  } else if (payload.moodboardImageAuthority !== undefined) {
+    throw new ContextIntegrityError(
+      "Resource execution Task Moodboard image authority is incompatible with Resource kind",
+    );
+  }
   const provenance = plainRecord(item.provenance, "Resource execution target provenance");
   if (provenance.projectId !== projectId || provenance.workspaceId !== expected.workspaceId
     || provenance.planId !== expected.planId || provenance.taskId !== expected.taskId
@@ -2973,11 +3309,45 @@ function immutableArtifactDirectionKind(
   return request.task.kind;
 }
 
+function immutableArtifactDirectionContract(
+  request: GenerationTaskContextRequest,
+): Readonly<{
+  artifactKind: "component" | "page";
+  artifactName: string;
+  instructions: string;
+  targetName: string;
+  targetInstructions: string;
+}> {
+  const payload = plainRecord(request.task.payload, "Artifact execution Task payload");
+  const artifactPlan = plainRecord(payload.artifactPlan, "Artifact execution plan");
+  const brief = plainRecord(payload.brief, "Artifact execution brief");
+  const target = plainRecord(
+    brief.targetInstructions,
+    "Artifact execution target instructions",
+  );
+  return Object.freeze({
+    artifactKind: immutableArtifactDirectionKind(request),
+    artifactName: nonEmptyString(
+      artifactPlan.name,
+      "Artifact execution plan name",
+    ),
+    instructions: immutableArtifactDirectionInstructions(request),
+    targetName: nonEmptyString(
+      target.name,
+      "Artifact execution target name",
+    ),
+    targetInstructions: nonEmptyString(
+      target.instructions,
+      "Artifact execution target direction instructions",
+    ),
+  });
+}
+
 function generatedResearchDirectionMatches(
   directions: readonly ResearchRevisionDirectionView[],
-  instructions: string,
-  artifactKind: GenerationTaskContextRequest["task"]["kind"],
+  contract: ReturnType<typeof immutableArtifactDirectionContract>,
 ): readonly ResearchRevisionDirectionView[] {
+  const { artifactKind, instructions } = contract;
   const allDirections = /\ball\s+(?:exact\s+)?(?:generated\s+)?(?:research\s+)?directions?\b/i
     .test(instructions);
   const exactCardinality = directions.length === 3
@@ -2987,7 +3357,48 @@ function generatedResearchDirectionMatches(
   const exactMatches = directions.filter((direction) =>
     instructions.includes(direction.id) && instructions.includes(direction.title));
   if (exactMatches.length > 0) return exactMatches;
+  if (artifactKind === "page") {
+    const { artifactName, targetName, targetInstructions } = contract;
+    const nameMatch = /^Direction ([1-9][0-9]*) (.+)$/u.exec(artifactName);
+    const headerMatch =
+      /^Required explicit Page scope — Direction: Direction ([1-9][0-9]*); Page: ([^.;\r\n]+)\./u
+        .exec(instructions);
+    const directionClauses = [...instructions.matchAll(
+      /Direction:\s*Direction ([1-9][0-9]*);\s*Page:\s*([^.;\r\n]+)\./gu,
+    )];
+    const ordinal = nameMatch === null ? Number.NaN : Number(nameMatch[1]);
+    const immutableTitles = directions.map((direction) =>
+      direction.title.normalize("NFKC").trim().toLowerCase());
+    const titlesAreUnambiguous = new Set(immutableTitles).size === directions.length;
+    if (artifactName === targetName
+      && instructions === targetInstructions
+      && nameMatch !== null
+      && headerMatch !== null
+      && directionClauses.length === 1
+      && Number.isSafeInteger(ordinal)
+      && ordinal >= 1
+      && ordinal <= directions.length
+      && Number(headerMatch[1]) === ordinal
+      && nameMatch[2] === headerMatch[2]
+      && titlesAreUnambiguous) {
+      return [directions[ordinal - 1]!];
+    }
+  }
   return artifactKind === "component" ? directions : [];
+}
+
+function isSamePlanGeneratedResearchPin(
+  request: GenerationTaskContextRequest,
+  pin: GenerationTaskContextRequest["observation"]["resourcePins"][number],
+): boolean {
+  const sourceTaskId = pin.sourceTaskId;
+  if (sourceTaskId === null || !request.task.dependencyIds.includes(sourceTaskId)) return false;
+  const outputs = request.observation.dependencyOutputs.filter((output) =>
+    output.taskId === sourceTaskId
+    && output.resultRevisionId === null
+    && output.resultResourceRevisionId === pin.revisionId
+    && output.resultSnapshotId !== null);
+  return outputs.length === 1;
 }
 
 async function frozenResearchDirection(input: {
@@ -3008,7 +3419,7 @@ async function frozenResearchDirection(input: {
   if (researchPins.length === 0) return null;
   const automaticPin = explicitSelection === null
     && researchPins.length === 1
-    && researchPins[0]!.pin.sourceTaskId !== null
+    && isSamePlanGeneratedResearchPin(input.request, researchPins[0]!.pin)
       ? researchPins[0]!
       : null;
   if (explicitSelection === null && automaticPin === null) {
@@ -3025,15 +3436,11 @@ async function frozenResearchDirection(input: {
     revisionId: automaticPin!.pin.revisionId,
     directionId: "",
   };
-  const automaticInstructions = automaticPin === null
+  const automaticArtifactContract = automaticPin === null
     ? null
-    : immutableArtifactDirectionInstructions(input.request);
-  const automaticArtifactKind = automaticPin === null
-    ? null
-    : immutableArtifactDirectionKind(input.request);
+    : immutableArtifactDirectionContract(input.request);
   const automaticContract = automaticPin === null ? null : {
-    artifactKind: automaticArtifactKind!,
-    instructions: automaticInstructions!,
+    ...automaticArtifactContract!,
     resourceId: automaticPin.pin.resourceId,
     revisionId: automaticPin.pin.revisionId,
     sourceTaskId: automaticPin.pin.sourceTaskId,
@@ -3117,13 +3524,12 @@ async function frozenResearchDirection(input: {
       const directions = listResearchRevisionDirections(validation);
       const matched = generatedResearchDirectionMatches(
         directions,
-        automaticInstructions!,
-        automaticArtifactKind!,
+        automaticArtifactContract!,
       );
       if (matched.length === 0) {
         throw new BlockedContextError(
           [`research:${exact.resource.id}@${exact.revision.id}:direction-instruction-match`],
-          "Artifact generation is blocked because Research direction selection has no exact match in the immutable Artifact instructions and those instructions do not request all directions",
+          "Artifact generation is blocked because Research direction selection has no exact match: neither an immutable generated id/title nor an unambiguous same-Plan legacy ordinal/title binding is present, and the instructions do not request all directions",
         );
       }
       directionId = matched[0]!.id;
@@ -3153,13 +3559,15 @@ async function frozenResearchDirection(input: {
     const currentPin = input.request.observation.resourcePins.find((pin) =>
       pin.resourceId === automaticContract.resourceId
       && pin.revisionId === automaticContract.revisionId);
-    const currentContract = currentPin === undefined ? null : {
-      artifactKind: immutableArtifactDirectionKind(input.request),
-      instructions: immutableArtifactDirectionInstructions(input.request),
-      resourceId: currentPin.resourceId,
-      revisionId: currentPin.revisionId,
-      sourceTaskId: currentPin.sourceTaskId,
-    };
+    const currentContract = currentPin === undefined
+      || !isSamePlanGeneratedResearchPin(input.request, currentPin)
+      ? null
+      : {
+          ...immutableArtifactDirectionContract(input.request),
+          resourceId: currentPin.resourceId,
+          revisionId: currentPin.revisionId,
+          sourceTaskId: currentPin.sourceTaskId,
+        };
     if (!isDeepStrictEqual(currentContract, automaticContract)
       || immutableResearchDirectionSelection(input.request) !== null) {
       throw new ContextIntegrityError(
@@ -3201,6 +3609,15 @@ export function createProductionResourceExecutionProfileLoader(
     }
     const payload = plainRecord(request.task.payload, "Resource execution Task payload");
     const frozenTaskAgent = taskAgentSelection(payload, "Resource execution Task Agent selection");
+    const frozenTaskReviewer = taskReviewerSelection(
+      payload,
+      "Resource execution Task reviewer selection",
+    );
+    const frozenReviewerAuthorityAgent = taskGenerationAgentSelection(
+      payload,
+      "reviewerAuthorityAgent",
+      "Resource execution reviewer authority Agent selection",
+    );
     const operation = plainRecord(payload.operation, "Resource execution Task operation");
     const adapterRecord = plainRecord(payload.adapter, "Resource execution Task adapter");
     exactKeys(adapterRecord, ["id", "version", "kind"], "Resource execution Task adapter");
@@ -3210,7 +3627,50 @@ export function createProductionResourceExecutionProfileLoader(
       throw new ContextIntegrityError("Resource execution Task adapter or target identity is invalid");
     }
     const settingsSnapshot = options.store.getSettings();
-    const executionSettingsSnapshot = settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent);
+    let moodboardImageAuthority: WorkspaceGenerationMoodboardImageAuthority | undefined;
+    if (resource.kind === "moodboard") {
+      if (!Object.hasOwn(payload, "moodboardImageAuthority")) {
+        throw new ContextIntegrityError(
+          "Moodboard Resource Task is missing exact image execution authority",
+        );
+      }
+      try {
+        moodboardImageAuthority = validateMoodboardImageExecutionAuthority(
+          payload.moodboardImageAuthority,
+          "Resource execution Moodboard image authority",
+        );
+      } catch (error) {
+        throw new ContextIntegrityError(
+          `Moodboard Resource Task image execution authority is invalid: ${String(error)}`,
+        );
+      }
+    } else if (Object.hasOwn(payload, "moodboardImageAuthority")) {
+      throw new ContextIntegrityError(
+        "Moodboard image execution authority is incompatible with Resource Task kind",
+      );
+    }
+    const reviewerAuthorityAgent = frozenReviewerAuthorityAgent ?? frozenTaskAgent;
+    if (frozenReviewerAuthorityAgent !== null) {
+      settingsForFrozenTaskAgent(settingsSnapshot, frozenReviewerAuthorityAgent);
+    }
+    const reviewerSettings = settingsForFrozenReviewer(
+      settingsSnapshot,
+      frozenTaskReviewer,
+      reviewerAuthorityAgent,
+    );
+    const taskAgentSettings = settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent);
+    const researchAgentSettings = resource.kind === "research" && frozenTaskAgent !== null
+      ? {
+          ...taskAgentSettings,
+          researchAgentCommand: frozenTaskAgent.command,
+          researchModel: frozenTaskAgent.model ?? "",
+        }
+      : taskAgentSettings;
+    const executionSettingsSnapshot = {
+      ...researchAgentSettings,
+      visualQaAgentCommand: reviewerSettings.visualQaAgentCommand,
+      visualQaModel: reviewerSettings.visualQaModel,
+    };
     checkAbort(signal);
     return freezeResourceExecutionProfile({
       ownership: {
@@ -3227,6 +3687,10 @@ export function createProductionResourceExecutionProfileLoader(
         kind: resource.kind,
       },
       settings: executionSettingsSnapshot,
+      moodboardImageSettings: settingsSnapshot,
+      ...(frozenTaskAgent === null ? {} : { agent: frozenTaskAgent }),
+      ...(frozenTaskReviewer === null ? {} : { reviewer: frozenTaskReviewer }),
+      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
     });
   };
 }
@@ -3254,11 +3718,19 @@ export function createProductionArtifactExecutionProfileLoader(
     const projectSnapshot = structuredClone(project);
     const payload = plainRecord(request.task.payload, "Artifact execution Task payload");
     const frozenTaskAgent = taskAgentSelection(payload, "Artifact execution Task Agent selection");
+    const frozenTaskReviewer = taskReviewerSelection(
+      payload,
+      "Artifact execution Task reviewer selection",
+    );
     const settingsSnapshot = options.store.getSettings();
     const command = frozenTaskAgent?.command ?? (settingsSnapshot.agentCommand || "claude");
     const model = frozenTaskAgent === null ? settingsSnapshot.model || null : frozenTaskAgent.model;
     const providerId = frozenTaskAgent?.providerId ?? providerIdentity(command);
-    const executionSettingsSnapshot = settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent);
+    const executionSettingsSnapshot = settingsForFrozenReviewer(
+      settingsForFrozenTaskAgent(settingsSnapshot, frozenTaskAgent),
+      frozenTaskReviewer,
+      frozenTaskAgent,
+    );
     const ignoresSnapshot = options.store.listQualityIgnores(project.id)
       .map((entry) => ({ ruleId: entry.ruleId, selector: entry.selector }))
       .sort((left, right) => compareBinary(
@@ -3474,7 +3946,7 @@ export class ProductionGenerationTaskContextResolver implements GenerationTaskCo
       "Generation Task payload Agent",
     );
     const profileAgent = artifactExecutionProfile?.agent ?? resourceExecutionProfile?.agent;
-    const contextAgent: WorkspaceGenerationAgentSelection = taskAgent
+    const selectedContextAgent: WorkspaceGenerationAgentSelection = taskAgent
       ?? (profileAgent
         ? {
             providerId: profileAgent.providerId,
@@ -3489,6 +3961,11 @@ export class ProductionGenerationTaskContextResolver implements GenerationTaskCo
               command: "claude",
               model: null,
             });
+    const contextAgent = {
+      providerId: selectedContextAgent.providerId,
+      command: selectedContextAgent.command,
+      model: selectedContextAgent.model,
+    };
     const source = new FrozenTaskContextSource({
       workspace: this.#options.workspace,
       loadResourceSnapshot: this.#options.loadResourceSnapshot,

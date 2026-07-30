@@ -20,6 +20,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function moodboardCoverBlob(): Blob {
+  return new Blob([new Uint8Array(512)], { type: "image/webp" });
+}
+
+function makeResourcePreviewApi(
+  overrides: Parameters<typeof makeFakeApi>[0] = {},
+): ApiClient {
+  return makeFakeApi({
+    getResourceRevisionBlob: async () => moodboardCoverBlob(),
+    ...overrides,
+  });
+}
+
 function moodboardView(overrides: Partial<Extract<ResourceRevisionView, { kind: "moodboard" }>> = {}): Extract<ResourceRevisionView, { kind: "moodboard" }> {
   return {
     protocol: "dezin.resource-revision-view.v1",
@@ -174,6 +187,7 @@ function moodboardRevisionView(
   boardName: string,
 ): Extract<ResourceRevisionView, { kind: "moodboard" }> {
   const view = moodboardView();
+  const revisionRoute = `/api/projects/project-1/resources/moodboard-1/revisions/${revisionId}`;
   return {
     ...view,
     resource: {
@@ -190,12 +204,22 @@ function moodboardRevisionView(
       ...view.observed,
       headRevisionId: revisionId,
     },
+    payload: {
+      ...view.payload,
+      url: `${revisionRoute}/payload`,
+      downloadUrl: `${revisionRoute}/payload?download=1`,
+    },
     content: {
       ...view.content,
       board: {
         ...view.content.board,
         name: boardName,
       },
+      assets: view.content.assets.map((asset) => ({
+        ...asset,
+        url: asset.url === null ? null : `${revisionRoute}/assets/${asset.id}`,
+        downloadUrl: `${revisionRoute}/assets/${asset.id}?download=1`,
+      })),
     },
   };
 }
@@ -203,7 +227,9 @@ function moodboardRevisionView(
 describe("loadResourceNodeRevisionPreview", () => {
   test("projects the explicit immutable Moodboard cover Asset into a canvas preview", async () => {
     const getResourceRevisionView = vi.fn(async () => moodboardView());
-    const api = { getResourceRevisionView } as Pick<ApiClient, "getResourceRevisionView">;
+    const blob = moodboardCoverBlob();
+    const getResourceRevisionBlob = vi.fn(async () => blob);
+    const api = { getResourceRevisionView, getResourceRevisionBlob };
 
     await expect(loadResourceNodeRevisionPreview(api, "project-1", {
       workspaceId: "workspace-1",
@@ -216,6 +242,7 @@ describe("loadResourceNodeRevisionPreview", () => {
       cover: {
         assetId: "asset-cover",
         path: "/api/projects/project-1/resources/moodboard-1/revisions/revision-1/assets/asset-cover",
+        blob,
         alt: "KITE / Direction A cover",
         width: 1600,
         height: 900,
@@ -226,6 +253,11 @@ describe("loadResourceNodeRevisionPreview", () => {
       "project-1",
       "moodboard-1",
       "revision-1",
+      expect.any(AbortSignal),
+    );
+    expect(getResourceRevisionBlob).toHaveBeenCalledWith(
+      "/api/projects/project-1/resources/moodboard-1/revisions/revision-1/assets/asset-cover",
+      expect.any(AbortSignal),
     );
   });
 
@@ -238,7 +270,10 @@ describe("loadResourceNodeRevisionPreview", () => {
         workspaceId: "workspace-from-another-project",
       },
     }));
-    const api = { getResourceRevisionView } as Pick<ApiClient, "getResourceRevisionView">;
+    const api = {
+      getResourceRevisionView,
+      getResourceRevisionBlob: vi.fn(async () => moodboardCoverBlob()),
+    };
 
     await expect(loadResourceNodeRevisionPreview(api, "project-1", {
       resourceId: "moodboard-1",
@@ -248,10 +283,45 @@ describe("loadResourceNodeRevisionPreview", () => {
     })).rejects.toThrow("does not match the active canvas binding");
   });
 
+  test("fails the whole exact-Revision preview when Moodboard cover bytes are unavailable", async () => {
+    const api = {
+      getResourceRevisionView: vi.fn(async () => moodboardView()),
+      getResourceRevisionBlob: vi.fn(async () => {
+        throw new Error("Embedded Asset temporarily unavailable");
+      }),
+    };
+
+    await expect(loadResourceNodeRevisionPreview(api, "project-1", {
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-1",
+      revisionId: "revision-1",
+      resourceKind: "moodboard",
+    })).rejects.toThrow("Embedded Asset temporarily unavailable");
+  });
+
+  test("rejects Moodboard cover bytes whose size or MIME disagrees with the exact Revision", async () => {
+    for (const [blob, message] of [
+      [new Blob([new Uint8Array(511)], { type: "image/webp" }), /bytes do not match/i],
+      [new Blob([new Uint8Array(512)], { type: "image/png" }), /MIME does not match/i],
+    ] as const) {
+      const api = {
+        getResourceRevisionView: vi.fn(async () => moodboardView()),
+        getResourceRevisionBlob: vi.fn(async () => blob),
+      };
+      await expect(loadResourceNodeRevisionPreview(api, "project-1", {
+        workspaceId: "workspace-1",
+        resourceId: "moodboard-1",
+        revisionId: "revision-1",
+        resourceKind: "moodboard",
+      })).rejects.toThrow(message);
+    }
+  });
+
   test("projects bounded Research decision content for an editorial canvas preview", async () => {
     const api = {
       getResourceRevisionView: vi.fn(async () => researchView()),
-    } as Pick<ApiClient, "getResourceRevisionView">;
+      getResourceRevisionBlob: vi.fn(async () => moodboardCoverBlob()),
+    };
 
     await expect(loadResourceNodeRevisionPreview(api, "project-1", {
       workspaceId: "workspace-1",
@@ -271,7 +341,8 @@ describe("loadResourceNodeRevisionPreview", () => {
     const response = deferred<ResourceRevisionView>();
     const api = {
       getResourceRevisionView: vi.fn(() => response.promise),
-    } as Pick<ApiClient, "getResourceRevisionView">;
+      getResourceRevisionBlob: vi.fn(async () => moodboardCoverBlob()),
+    };
     const controller = new AbortController();
     const preview = loadResourceNodeRevisionPreview(api, "project-1", {
       workspaceId: "workspace-1",
@@ -286,12 +357,113 @@ describe("loadResourceNodeRevisionPreview", () => {
     await expect(preview).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  test("times out a stalled Resource preview and retries with a fresh abortable request", async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    const getResourceRevisionView = vi.fn((
+      _projectId: string,
+      _resourceId: string,
+      _revisionId: string,
+      signal?: AbortSignal,
+    ) => {
+      if (signal !== undefined) signals.push(signal);
+      return new Promise<ResourceRevisionView>(() => {});
+    });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
+    const wrapper = ({ children }: PropsWithChildren) => createElement(
+      ApiProvider,
+      { client, children },
+    );
+    const binding = {
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-1",
+      revisionId: "revision-1",
+      resourceKind: "moodboard" as const,
+    };
+    const { result } = renderHook(
+      () => useResourceNodeRevisionPreviewController("project-1", [binding]),
+      { wrapper },
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+    expect(result.current.states["moodboard-1"]).toMatchObject({
+      status: "error",
+      error: { message: expect.stringMatching(/timed out/i) },
+    });
+    expect(signals[0]?.aborted).toBe(true);
+
+    act(() => result.current.retry("moodboard-1"));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(getResourceRevisionView).toHaveBeenCalledTimes(2);
+    expect(signals[1]).not.toBe(signals[0]);
+    expect(signals[1]?.aborted).toBe(false);
+    vi.useRealTimers();
+  });
+
+  test("times out stalled Moodboard cover bytes and retries the same exact Revision", async () => {
+    vi.useFakeTimers();
+    const coverSignals: AbortSignal[] = [];
+    let coverAttempts = 0;
+    const getResourceRevisionView = vi.fn(async () => moodboardView());
+    const getResourceRevisionBlob = vi.fn((
+      _path: string,
+      signal?: AbortSignal,
+    ) => {
+      if (signal !== undefined) coverSignals.push(signal);
+      coverAttempts += 1;
+      return coverAttempts === 1
+        ? new Promise<Blob>(() => {})
+        : Promise.resolve(moodboardCoverBlob());
+    });
+    const client = makeResourcePreviewApi({
+      getResourceRevisionView,
+      getResourceRevisionBlob,
+    });
+    const wrapper = ({ children }: PropsWithChildren) => createElement(
+      ApiProvider,
+      { client, children },
+    );
+    const binding = {
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-1",
+      revisionId: "revision-1",
+      resourceKind: "moodboard" as const,
+    };
+    const { result } = renderHook(
+      () => useResourceNodeRevisionPreviewController("project-1", [binding]),
+      { wrapper },
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(result.current.states["moodboard-1"]).toMatchObject({
+      status: "error",
+      preview: null,
+      error: { message: expect.stringMatching(/cover preview timed out/i) },
+    });
+    expect(coverSignals[0]?.aborted).toBe(true);
+
+    act(() => result.current.retry("moodboard-1"));
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.states["moodboard-1"]).toMatchObject({
+      status: "ready",
+      preview: { kind: "moodboard", boardName: "KITE / Direction A" },
+      error: null,
+    });
+    expect(getResourceRevisionView).toHaveBeenCalledTimes(2);
+    expect(getResourceRevisionBlob).toHaveBeenCalledTimes(2);
+    expect(coverSignals[1]).not.toBe(coverSignals[0]);
+    expect(coverSignals[1]?.aborted).toBe(false);
+    vi.useRealTimers();
+  });
+
   test("loads each active immutable Resource Revision once for the canvas", async () => {
     const getResourceRevisionView = vi.fn(async (
       _projectId: string,
       resourceId: string,
     ) => resourceId === "research-1" ? researchView() : moodboardView());
-    const client = makeFakeApi({ getResourceRevisionView });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
     const wrapper = ({ children }: PropsWithChildren) => createElement(
       ApiProvider,
       { client, children },
@@ -331,7 +503,7 @@ describe("loadResourceNodeRevisionPreview", () => {
       _projectId: string,
       resourceId: string,
     ) => resourceId === "research-1" ? researchRequest.promise : moodboardRequest.promise);
-    const client = makeFakeApi({ getResourceRevisionView });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
     const wrapper = ({ children }: PropsWithChildren) => createElement(
       ApiProvider,
       { client, children },
@@ -364,7 +536,7 @@ describe("loadResourceNodeRevisionPreview", () => {
     await waitFor(() => expect(result.current["moodboard-1"]?.kind).toBe("moodboard"));
   });
 
-  test("keeps an unchanged last-good preview while another Resource binding refreshes", async () => {
+  test("keeps unchanged Resources ready while a changed Revision starts fail-closed", async () => {
     const changedMoodboardRequest = deferred<ResourceRevisionView>();
     const getResourceRevisionView = vi.fn((
       _projectId: string,
@@ -375,7 +547,7 @@ describe("loadResourceNodeRevisionPreview", () => {
       if (revisionId === "revision-1") return Promise.resolve(moodboardView());
       return changedMoodboardRequest.promise;
     });
-    const client = makeFakeApi({ getResourceRevisionView });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
     const wrapper = ({ children }: PropsWithChildren) => createElement(
       ApiProvider,
       { client, children },
@@ -413,7 +585,7 @@ describe("loadResourceNodeRevisionPreview", () => {
     });
 
     expect(result.current["research-1"]?.kind).toBe("research");
-    expect(result.current["moodboard-1"]?.kind).toBe("moodboard");
+    expect(result.current["moodboard-1"]).toBeUndefined();
     expect(getResourceRevisionView).toHaveBeenCalledTimes(3);
 
     changedMoodboardRequest.resolve(moodboardRevisionView("revision-2", "KITE / Direction B"));
@@ -425,7 +597,71 @@ describe("loadResourceNodeRevisionPreview", () => {
     });
   });
 
-  test("retains last-good content through a failed refresh and retries only that Resource", async () => {
+  test("masks the previous Revision during the first render before passive loading effects run", async () => {
+    const changedMoodboardRequest = deferred<ResourceRevisionView>();
+    const getResourceRevisionView = vi.fn((
+      _projectId: string,
+      _resourceId: string,
+      revisionId: string,
+    ) => revisionId === "revision-1"
+      ? Promise.resolve(moodboardView())
+      : changedMoodboardRequest.promise);
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
+    const wrapper = ({ children }: PropsWithChildren) => createElement(
+      ApiProvider,
+      { client, children },
+    );
+    const binding = {
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-1",
+      resourceKind: "moodboard" as const,
+    };
+    const renderedStates: Array<ReturnType<
+      typeof useResourceNodeRevisionPreviewController
+    >["states"][string] | null> = [];
+    const { rerender } = renderHook(
+      ({ revisionId }) => {
+        const controller = useResourceNodeRevisionPreviewController("project-1", [
+          { ...binding, revisionId },
+        ]);
+        renderedStates.push(controller.states["moodboard-1"] ?? null);
+        return controller;
+      },
+      {
+        wrapper,
+        initialProps: { revisionId: "revision-1" },
+      },
+    );
+    await waitFor(() => expect(
+      renderedStates.at(-1)?.status,
+    ).toBe("ready"));
+
+    renderedStates.length = 0;
+    rerender({ revisionId: "revision-2" });
+
+    expect(renderedStates[0]).toMatchObject({
+      binding: { revisionId: "revision-2" },
+      status: "loading",
+      preview: null,
+      error: null,
+    });
+    expect(renderedStates.every((state) => (
+      state === null
+      || state.binding.revisionId !== "revision-2"
+      || state.preview === null
+      || state.preview.kind !== "moodboard"
+      || state.preview.boardName !== "KITE / Direction A"
+    ))).toBe(true);
+
+    changedMoodboardRequest.resolve(moodboardRevisionView("revision-2", "KITE / Direction B"));
+    await waitFor(() => expect(renderedStates.at(-1)).toMatchObject({
+      binding: { revisionId: "revision-2" },
+      status: "ready",
+      preview: { kind: "moodboard", boardName: "KITE / Direction B" },
+    }));
+  });
+
+  test("does not attribute Revision A content to Revision B after B fails and retries only B", async () => {
     const failedRefresh = deferred<ResourceRevisionView>();
     let revisionTwoAttempts = 0;
     const getResourceRevisionView = vi.fn((
@@ -440,7 +676,7 @@ describe("loadResourceNodeRevisionPreview", () => {
         ? failedRefresh.promise
         : Promise.resolve(moodboardRevisionView("revision-2", "KITE / Direction B"));
     });
-    const client = makeFakeApi({ getResourceRevisionView });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
     const wrapper = ({ children }: PropsWithChildren) => createElement(
       ApiProvider,
       { client, children },
@@ -474,11 +710,9 @@ describe("loadResourceNodeRevisionPreview", () => {
       ],
     });
     expect(result.current.states["moodboard-1"]).toMatchObject({
-      status: "refreshing",
-      preview: {
-        kind: "moodboard",
-        boardName: "KITE / Direction A",
-      },
+      binding: { revisionId: "revision-2" },
+      status: "loading",
+      preview: null,
       error: null,
     });
 
@@ -487,14 +721,12 @@ describe("loadResourceNodeRevisionPreview", () => {
       await Promise.resolve();
     });
     await waitFor(() => expect(result.current.states["moodboard-1"]).toMatchObject({
+      binding: { revisionId: "revision-2" },
       status: "error",
-      preview: {
-        kind: "moodboard",
-        boardName: "KITE / Direction A",
-      },
+      preview: null,
       error: new Error("Preview service unavailable"),
     }));
-    expect(result.current.previews["research-1"]?.kind).toBe("research");
+    expect(result.current.states["research-1"]?.preview?.kind).toBe("research");
     expect(getResourceRevisionView).toHaveBeenCalledTimes(3);
 
     act(() => result.current.retry("moodboard-1"));
@@ -517,7 +749,7 @@ describe("loadResourceNodeRevisionPreview", () => {
       _resourceId: string,
       revisionId: string,
     ) => revisionId === "revision-1" ? revisionOne.promise : revisionTwo.promise);
-    const client = makeFakeApi({ getResourceRevisionView });
+    const client = makeResourcePreviewApi({ getResourceRevisionView });
     const wrapper = ({ children }: PropsWithChildren) => createElement(
       ApiProvider,
       { client, children },
@@ -550,6 +782,63 @@ describe("loadResourceNodeRevisionPreview", () => {
       revisionOne.resolve(moodboardView());
       await Promise.resolve();
     });
+    expect(result.current.states["moodboard-1"]).toMatchObject({
+      status: "ready",
+      binding: { revisionId: "revision-2" },
+      preview: { kind: "moodboard", boardName: "KITE / Direction B" },
+    });
+  });
+
+  test("cancels pending cover bytes when the same Resource switches Revision", async () => {
+    const revisionOneCover = deferred<Blob>();
+    const coverSignals: AbortSignal[] = [];
+    const getResourceRevisionView = vi.fn(async (
+      _projectId: string,
+      _resourceId: string,
+      revisionId: string,
+    ) => revisionId === "revision-1"
+      ? moodboardView()
+      : moodboardRevisionView("revision-2", "KITE / Direction B"));
+    const getResourceRevisionBlob = vi.fn((
+      path: string,
+      signal?: AbortSignal,
+    ) => {
+      if (signal !== undefined) coverSignals.push(signal);
+      return path.includes("/revision-1/")
+        ? revisionOneCover.promise
+        : Promise.resolve(moodboardCoverBlob());
+    });
+    const client = makeResourcePreviewApi({
+      getResourceRevisionView,
+      getResourceRevisionBlob,
+    });
+    const wrapper = ({ children }: PropsWithChildren) => createElement(
+      ApiProvider,
+      { client, children },
+    );
+    const binding = {
+      workspaceId: "workspace-1",
+      resourceId: "moodboard-1",
+      resourceKind: "moodboard" as const,
+    };
+    const { result, rerender } = renderHook(
+      ({ revisionId }) => useResourceNodeRevisionPreviewController("project-1", [
+        { ...binding, revisionId },
+      ]),
+      { wrapper, initialProps: { revisionId: "revision-1" } },
+    );
+    await waitFor(() => expect(getResourceRevisionBlob).toHaveBeenCalledTimes(1));
+
+    rerender({ revisionId: "revision-2" });
+    await waitFor(() => expect(result.current.states["moodboard-1"]).toMatchObject({
+      status: "ready",
+      binding: { revisionId: "revision-2" },
+      preview: { kind: "moodboard", boardName: "KITE / Direction B" },
+    }));
+    expect(coverSignals[0]?.aborted).toBe(true);
+
+    revisionOneCover.resolve(moodboardCoverBlob());
+    await act(async () => { await Promise.resolve(); });
     expect(result.current.states["moodboard-1"]).toMatchObject({
       status: "ready",
       binding: { revisionId: "revision-2" },

@@ -67,6 +67,6 @@ describe("component node", () => {
     expect(screen.getByLabelText("Order summary status: passed")).toHaveTextContent("passed");
     expect(screen.queryByText(/consumers?/i)).toBeNull();
     expect(screen.queryByText(/rev revision/i)).toBeNull();
-    expect(container.querySelector(".dezin-flow-card__title-mark")).toHaveAttribute("data-kind", "component");
+    expect(container.querySelector(".dezin-flow-card__type")).toHaveAttribute("data-kind", "component");
   });
 });

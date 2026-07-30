@@ -12,6 +12,10 @@ import {
   Store,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 const TURN_ID = "turn-550e8400-e29b-41d4-a716-446655440000";
 const CONTEXT_HASH = "b".repeat(64);
@@ -81,7 +85,7 @@ function seedScopedTurn(store: Store) {
     scopeType: "artifact" as const,
     scopeId: "scoped-turn-page",
     intent: "edit" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
     message,
     graphRevision: workspace.graphRevision,
     baseRevisionId: revision.id,
@@ -98,7 +102,8 @@ function seedScopedTurn(store: Store) {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation" as const,
-      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+      agent: codebuddyGeneratorAgent(),
+      reviewerAgent: claudeSessionReviewerAgent(),
       resourceOperations: [],
       artifactPlans: [{
         operation: "revise" as const,

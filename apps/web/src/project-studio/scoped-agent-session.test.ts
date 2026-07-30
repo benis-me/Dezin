@@ -26,14 +26,27 @@ test("round-trips a scope-owned draft, immutable context, transcript, outbox, an
       artifactId: "artifact-checkout",
       revisionId: "revision-7",
     }],
-    transcript: [{
-      id: `user:${TURN_ID}`,
-      turnId: TURN_ID,
-      role: "user",
-      content: "Refine the checkout hierarchy",
-      createdAt: 7,
-      state: "submitted",
-    }],
+    transcript: [
+      {
+        id: `user:${TURN_ID}`,
+        turnId: TURN_ID,
+        role: "user",
+        content: "Refine the checkout hierarchy",
+        createdAt: 7,
+        state: "submitted",
+      },
+      {
+        id: `assistant:${TURN_ID}`,
+        turnId: TURN_ID,
+        role: "assistant",
+        content: "Design work is queued in the build plan.",
+        createdAt: 8,
+        state: "queued",
+        planId: "plan-resource-research",
+        taskId: "task-resource-research",
+        resultRevisionId: "resource-revision-4",
+      },
+    ],
     outbox: {
       kind: "scoped",
       scopeType: "resource",
@@ -91,6 +104,59 @@ test("round-trips a scope-owned draft, immutable context, transcript, outbox, an
 
   expect(readAgentSession("project-1", "resource:resource-research")).toEqual(session);
   expect(readAgentSession("project-1", "artifact:artifact-checkout")).toEqual(emptyAgentSession());
+});
+
+test("restores legacy transcript entries without inventing malformed trace identities", () => {
+  localStorage.setItem(
+    "dezin.project-studio.agent.v1:project-1:workspace",
+    JSON.stringify({
+      version: 1,
+      projectId: "project-1",
+      scopeKey: "workspace",
+      draft: "",
+      contextItems: [],
+      transcript: [{
+        id: `assistant:${TURN_ID}`,
+        turnId: TURN_ID,
+        role: "assistant",
+        content: "Design work is queued in the build plan.",
+        createdAt: 8,
+        state: "queued",
+        planId: " ",
+        taskId: "x".repeat(513),
+        resultRevisionId: 4,
+      }],
+      outbox: null,
+      receipt: null,
+    }),
+  );
+
+  expect(readAgentSession("project-1", "workspace").transcript).toEqual([{
+    id: `assistant:${TURN_ID}`,
+    turnId: TURN_ID,
+    role: "assistant",
+    content: "Design work is queued in the build plan.",
+    createdAt: 8,
+    state: "queued",
+  }]);
+});
+
+test("round-trips a durable Workspace Agent failure transcript entry", () => {
+  const session: AgentSession = {
+    ...emptyAgentSession(),
+    draft: "Build three complete visual directions",
+    transcript: [{
+      id: `assistant:${TURN_ID}`,
+      turnId: TURN_ID,
+      role: "assistant",
+      content: "Workspace Planner is unavailable: structured Agent timed out",
+      createdAt: 9,
+      state: "failed",
+    }],
+  };
+
+  expect(writeAgentSession("project-1", "workspace", session)).toBe(true);
+  expect(readAgentSession("project-1", "workspace").transcript).toEqual(session.transcript);
 });
 
 test("rejects malformed daemon identities instead of replaying an untrusted outbox", () => {

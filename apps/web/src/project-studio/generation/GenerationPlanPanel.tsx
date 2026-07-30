@@ -2,30 +2,30 @@ import "./generation-plan.css";
 
 import {
   Check,
-  ExternalLink,
-  ListChecks,
   LoaderCircle,
   RefreshCw,
   RotateCcw,
-  Square,
-  TriangleAlert,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "../../components/ui/Button.tsx";
 import {
-  Button,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+} from "../../components/ui/select.tsx";
+import {
   StudioHeaderActions,
   StudioHeaderCopy,
   StudioHeaderIdentity,
-  StudioInspectorSection,
   StudioPanelHeader,
+} from "../../components/ui/StudioHeader.tsx";
+import {
+  StudioInspectorSection,
   StudioStatusBadge,
-} from "../../components/ui/index.ts";
+} from "../../components/ui/StudioInspector.tsx";
 import { useApi } from "../../lib/api-context.tsx";
 import {
   GenerationPlanStreamError,
@@ -37,7 +37,15 @@ import {
   type GenerationTaskStatus,
 } from "../../lib/api.ts";
 import { navigate } from "../../router.tsx";
-import { generationPlanResultKey } from "./generation-target-state.ts";
+import {
+  generationPlanResultKey,
+  generationStatusPhase,
+  type GenerationTargetPhase,
+} from "./generation-target-state.ts";
+import {
+  generationPlanFailureMessage,
+  publicFailureMessage,
+} from "./public-failure-message.ts";
 
 export type GenerationPlanConnection = "connecting" | "live" | "offline" | "error" | "settled";
 
@@ -67,6 +75,8 @@ const TASK_LABELS: Partial<Record<GenerationTask["kind"], string>> = {
   "propagation-publish": "Publish batch",
 };
 
+type DisplayState = "idle" | "active" | "success" | "failure" | "blocked" | "cancelled";
+
 const STATUS_LABELS: Partial<Record<GenerationTaskStatus | GenerationPlan["status"], string>> = {
   approved: "Preparing",
   "materialization-pending": "Preparing",
@@ -81,8 +91,31 @@ const STATUS_LABELS: Partial<Record<GenerationTaskStatus | GenerationPlan["statu
   "requires-new-impact": "Review required",
 };
 
+const DISPLAY_STATES: Record<GenerationTargetPhase, DisplayState> = {
+  queued: "idle",
+  running: "active",
+  complete: "success",
+  failed: "failure",
+  blocked: "blocked",
+  cancelled: "cancelled",
+};
+
+const CONNECTION_LABELS: Record<GenerationPlanConnection, string> = {
+  live: "Live updates",
+  connecting: "Connecting",
+  offline: "Reconnecting",
+  error: "Updates unavailable",
+  settled: "Durable snapshot",
+};
+
 function label(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function textValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text.length > 0 ? text : null;
 }
 
 function taskLabel(kind: GenerationTask["kind"]): string {
@@ -96,29 +129,27 @@ function statusLabel(status: GenerationTaskStatus | GenerationPlan["status"], pl
 
 function displayState(
   status: GenerationTaskStatus | GenerationPlan["status"],
-): "idle" | "active" | "success" | "failure" | "cancelled" {
-  if (status === "succeeded") return "success";
-  if (status === "failed" || status === "blocked" || status === "blocked-context"
-    || status === "compile-failed" || status === "requires-new-impact") return "failure";
-  if (status === "cancelled") return "cancelled";
-  if (status === "running" || status === "retry-wait" || status === "candidate-ready" || status === "needs-rebase"
-    || status === "awaiting-context-refresh" || status === "cancel-requested") return "active";
-  return "idle";
+): DisplayState {
+  if (status === "retry-wait") return "active";
+  return DISPLAY_STATES[generationStatusPhase(status)];
 }
 
 function statusTone(
   state: ReturnType<typeof displayState>,
 ): "neutral" | "active" | "success" | "danger" {
-  if (state === "success") return "success";
   if (state === "failure") return "danger";
-  if (state === "active") return "active";
-  return "neutral";
+  return state === "success" || state === "active" ? state : "neutral";
 }
 
 interface ResearchSelectionDestination {
-  resourceId: string;
-  revisionId: string;
+  key: string;
   href: string;
+  ariaLabel: string;
+  label: string;
+}
+
+function projectRoute(...segments: Array<string | number>): string {
+  return `/${segments.map((segment) => encodeURIComponent(String(segment))).join("/")}`;
 }
 
 function researchSelectionDestinations(projectId: string, task: GenerationTask): ResearchSelectionDestination[] {
@@ -135,15 +166,12 @@ function researchSelectionDestinations(projectId: string, task: GenerationTask):
     if (seen.has(key)) return [];
     seen.add(key);
     return [{
-      resourceId,
-      revisionId,
-      href: `/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId)}/revisions/${encodeURIComponent(revisionId)}`,
+      key,
+      href: projectRoute("projects", projectId, "resources", resourceId, "revisions", revisionId),
+      ariaLabel: `Review Research directions from Revision ${revisionId}`,
+      label: "Review Research directions",
     }];
   });
-}
-
-function taskDisplayState(projectId: string, task: GenerationTask): ReturnType<typeof displayState> {
-  return researchSelectionDestinations(projectId, task).length > 0 ? "active" : displayState(task.status);
 }
 
 function targetLabel(
@@ -154,7 +182,12 @@ function targetLabel(
   const ownedLabel = task.target.type === "artifact"
     ? targetLabels?.artifacts.get(task.target.id)
     : targetLabels?.resources.get(task.target.id);
-  if (typeof ownedLabel === "string" && ownedLabel.trim().length > 0) return ownedLabel.trim();
+  const resolvedLabel = textValue(ownedLabel);
+  if (resolvedLabel !== null) return resolvedLabel;
+  if (/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(task.target.id)
+    || /^[0-9a-f]{24,}$/i.test(task.target.id)) {
+    return `${taskLabel(task.kind)} ${task.ordinal + 1}`;
+  }
   const plain = task.target.id
     .replace(/^artifact-/, "")
     .replace(/^resource-/, "")
@@ -163,14 +196,8 @@ function targetLabel(
   return plain.length > 0 ? plain.replace(/\b\w/g, (character) => character.toUpperCase()) : task.target.id;
 }
 
-const LOCAL_FAILURE_PATH =
-  /\/(?:Users|home|private|tmp|var|opt|usr|Applications|Volumes)(?:\/[^\s/]+)+/g;
-
-function publicFailureMessage(value: string): string {
-  return value.replace(LOCAL_FAILURE_PATH, (path) => {
-    const name = path.split("/").at(-1)?.replace(/[),.;:'"]+$/g, "") ?? "";
-    return /^[a-zA-Z0-9._-]{1,80}$/.test(name) ? name : "local path";
-  });
+export function generationPlanActivityStatus(detail: GenerationPlanDetail): string {
+  return detail.plan.status === "running" ? "Building" : statusLabel(detail.plan.status, true);
 }
 
 function taskMessage(
@@ -184,19 +211,9 @@ function taskMessage(
       ? "Blocked by an upstream task"
       : `Blocked by ${targetLabel(blocker, targetLabels)}`;
   }
-  const message = task.error?.message;
-  if (typeof message === "string" && message.trim().length > 0) {
-    return publicFailureMessage(message.trim());
-  }
-  return task.blockedReason;
-}
-
-function planMessage(plan: GenerationPlan): string | null {
-  if (plan.compileError === null) return null;
-  const message = plan.compileError.message;
-  return typeof message === "string" && message.trim().length > 0
-    ? publicFailureMessage(message.trim())
-    : "The approved proposal could not be compiled.";
+  const message = textValue(task.error?.message);
+  if (message !== null) return publicFailureMessage(message);
+  return task.blockedReason === null ? null : publicFailureMessage(task.blockedReason);
 }
 
 function dependencyLabel(task: GenerationTask): string {
@@ -210,24 +227,19 @@ function canRetry(task: GenerationTask): boolean {
   return task.status === "failed" || task.status === "blocked-context";
 }
 
-function retryablePlan(plan: GenerationPlan): boolean {
-  return plan.status === "failed" || plan.status === "queued" || plan.status === "running";
-}
-
 function immutablePlan(plan: GenerationPlan): boolean {
   return plan.status !== "failed" && TERMINAL_PLAN_STATUSES.has(plan.status);
+}
+
+export function terminalGenerationPlan(detail: GenerationPlanDetail): boolean {
+  return TERMINAL_PLAN_STATUSES.has(detail.plan.status);
 }
 
 function canCancel(plan: GenerationPlan): boolean {
   return plan.status === "approved" || plan.status === "queued" || plan.status === "running";
 }
 
-function shortPlanLabel(plan: GenerationPlan, index: number): string {
-  const suffix = plan.id.length > 8 ? plan.id.slice(-6) : plan.id;
-  return `Plan ${index + 1} · ${suffix}`;
-}
-
-function PlanCloseButton({ onClose }: { onClose?: () => void }) {
+function renderPlanCloseButton(onClose?: () => void) {
   return onClose ? (
     <Button
       type="button"
@@ -243,15 +255,11 @@ function PlanCloseButton({ onClose }: { onClose?: () => void }) {
   ) : null;
 }
 
-function PlanHistorySelect({
-  plans,
-  value,
-  onChange,
-}: {
-  plans: readonly GenerationPlan[];
-  value: string;
-  onChange: (planId: string) => void;
-}) {
+function renderPlanHistorySelect(
+  plans: readonly GenerationPlan[],
+  value: string,
+  onChange: (planId: string) => void,
+) {
   return (
     <div className="dezin-generation-plan__selector">
       <span>History</span>
@@ -266,7 +274,9 @@ function PlanHistorySelect({
         </SelectTrigger>
         <SelectContent align="end" className="z-[100]">
           {plans.map((plan, index) => (
-            <SelectItem key={plan.id} value={plan.id}>{shortPlanLabel(plan, index)}</SelectItem>
+            <SelectItem key={plan.id} value={plan.id} data-plan-id={plan.id}>
+              {`Plan ${index + 1}, ${statusLabel(plan.status, true)}`}
+            </SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -310,12 +320,206 @@ function artifactRevisionDestination(
   }
   if (revisionId === null || action === null) return null;
   const href = action === "candidate"
-    ? `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(task.target.id)}/candidates/${encodeURIComponent(detail.plan.id)}/${encodeURIComponent(task.id)}/${task.currentAttempt}`
-    : `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(task.target.id)}/revisions/${encodeURIComponent(revisionId)}`;
+    ? projectRoute(
+        "projects",
+        projectId,
+        "artifacts",
+        task.target.id,
+        "candidates",
+        detail.plan.id,
+        task.id,
+        task.currentAttempt,
+      )
+    : projectRoute("projects", projectId, "artifacts", task.target.id, "revisions", revisionId);
   const kind = taskLabel(task.kind);
   return action === "candidate"
     ? { href, ariaLabel: `Review ${kind} candidate`, label: "Review candidate", evidenceHash }
     : { href, ariaLabel: `Open published ${kind} revision`, label: "Open published revision", evidenceHash };
+}
+
+function renderDestinationLink(
+  destination: Pick<ArtifactRevisionDestination, "href" | "ariaLabel" | "label">
+    & Partial<Pick<ArtifactRevisionDestination, "evidenceHash">>,
+  key?: string,
+) {
+  return (
+    <a
+      key={key}
+      className="dezin-generation-plan__artifact-link"
+      href={destination.href}
+      aria-label={destination.ariaLabel}
+      title={destination.evidenceHash ? `Candidate evidence ${destination.evidenceHash}` : undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        navigate(destination.href);
+      }}
+    >
+      <span>{destination.label}</span>
+    </a>
+  );
+}
+
+const EVENT_COPY: Readonly<Record<string, string>> = {
+  "task-blocked-context": "Waiting for context",
+  "task-materialized": "Inputs prepared",
+  "task-running": "Generation started",
+  "task-needs-rebase": "Candidate needs rebase",
+  "task-rebase-disposition": "Rebase evaluated",
+  "task-retry-wait": "Retry scheduled",
+  "plan-succeeded": "Build completed",
+};
+
+const TASK_PROGRESS_COPY = {
+  generating: "Generating draft",
+  "verifying-sources": "Verifying sources",
+  reviewing: "Independent review",
+  repairing: "Repairing quality issues",
+  "generating-assets": "Generating visual assets",
+  publishing: "Publishing revision",
+} as const;
+
+type TaskProgressPhase = keyof typeof TASK_PROGRESS_COPY;
+
+function taskProgressPhase(event: GenerationPlanEvent): TaskProgressPhase | null {
+  if (event.type !== "task-progress"
+    || !Number.isSafeInteger(event.payload.attempt)
+    || typeof event.payload.phase !== "string"
+    || !(event.payload.phase in TASK_PROGRESS_COPY)) {
+    return null;
+  }
+  return event.payload.phase as TaskProgressPhase;
+}
+
+function latestTaskProgress(
+  events: readonly GenerationPlanEvent[],
+  task: GenerationTask,
+): TaskProgressPhase | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.taskId !== task.id || event.payload.attempt !== task.currentAttempt) continue;
+    const phase = taskProgressPhase(event);
+    if (phase !== null) return phase;
+  }
+  return null;
+}
+
+function revisionOutput(artifactRevision: unknown, resourceRevision: unknown): string | null {
+  if (artifactRevision !== null && artifactRevision !== undefined) return "Artifact revision published";
+  if (resourceRevision !== null && resourceRevision !== undefined) return "Resource revision published";
+  return null;
+}
+
+function eventTitle(event: GenerationPlanEvent): string {
+  if (event.type === "plan-queued") {
+    const taskCount = event.payload.taskCount;
+    if (!Number.isSafeInteger(taskCount)) return "Build plan queued";
+    return `${taskCount as number} ${taskCount === 1 ? "task" : "tasks"} queued`;
+  }
+  const progress = taskProgressPhase(event);
+  if (progress !== null) return TASK_PROGRESS_COPY[progress];
+  return EVENT_COPY[event.type] ?? label(event.type.replace(/[-_]+/g, " "));
+}
+
+function eventTaskMeta(
+  event: GenerationPlanEvent,
+  task: GenerationTask,
+  targetLabels?: GenerationPlanTargetLabels,
+): string {
+  const attempt = Number.isSafeInteger(event.payload.attempt)
+    ? `Attempt ${event.payload.attempt as number}`
+    : null;
+  const output = revisionOutput(event.payload.resultRevisionId, event.payload.resultResourceRevisionId)
+    ?? (event.payload.candidateRevisionId ? "Artifact candidate ready" : null)
+    ?? (event.payload.candidateResourceRevisionId ? "Resource candidate ready" : null)
+    ?? (event.payload.resultSnapshotId ? "Workspace checkpoint saved" : null);
+  return [
+    taskLabel(task.kind),
+    targetLabel(task, targetLabels),
+    attempt,
+    output,
+  ].filter(Boolean).join(" · ");
+}
+
+function currentTaskOutput(
+  task: GenerationTask,
+  progress: TaskProgressPhase | null = null,
+): string {
+  const revision = revisionOutput(task.resultRevisionId, task.resultResourceRevisionId);
+  if (revision !== null) return revision;
+  if (task.resultSnapshotId !== null) return "Workspace checkpoint saved";
+  if (task.status === "candidate-ready" || task.status === "needs-rebase") {
+    const candidate = task.target.type === "resource" ? "Resource" : "Artifact";
+    return `${candidate} candidate ${task.status === "needs-rebase" ? "awaiting rebase" : "ready"}`;
+  }
+  if (task.status === "running") {
+    return progress === null ? "Generation in progress" : `${TASK_PROGRESS_COPY[progress]} in progress`;
+  }
+  if (task.status === "queued") return "Inputs ready, waiting to run";
+  if (task.status === "retry-wait") return "Retry reserved";
+  if (task.status === "blocked-context") return "Waiting for required context";
+  if (task.status === "failed" || task.status === "blocked" || task.status === "cancelled") {
+    return "No published output";
+  }
+  return "No output yet";
+}
+
+function renderCanvasFocus(
+  task: GenerationTask,
+  targetLabels?: GenerationPlanTargetLabels,
+  onFocusTask?: (task: GenerationTask) => void,
+  labelled = false,
+) {
+  return onFocusTask && task.target.type !== "workspace" ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      aria-label={labelled ? `Show ${targetLabel(task, targetLabels)} on canvas` : undefined}
+      onClick={() => onFocusTask(task)}
+    >
+      Show on canvas
+    </Button>
+  ) : null;
+}
+
+function renderProcessTimeline(
+  events: readonly GenerationPlanEvent[],
+  tasksById: ReadonlyMap<string, GenerationTask>,
+  targetLabels?: GenerationPlanTargetLabels,
+  onFocusTask?: (task: GenerationTask) => void,
+) {
+  if (events.length === 0) {
+    return (
+      <p className="dezin-generation-plan__timeline-empty">
+        No durable activity is available for this plan yet.
+      </p>
+    );
+  }
+  return (
+    <ol className="dezin-generation-plan__timeline" aria-label="Generation process">
+      {[...events].reverse().map((event) => {
+        const time = new Date(event.createdAt);
+        const task = event.taskId === null ? undefined : tasksById.get(event.taskId);
+        return (
+          <li key={event.sequence} className="dezin-generation-plan__event">
+            <span className="dezin-generation-plan__event-marker" aria-hidden />
+            <div className="dezin-generation-plan__event-body">
+              <div className="dezin-generation-plan__event-heading">
+                <strong>{eventTitle(event)}</strong>
+                <time
+                  dateTime={time.toISOString()}
+                >
+                  {time.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                </time>
+              </div>
+              {task ? <small>{eventTaskMeta(event, task, targetLabels)}</small> : null}
+              {task ? renderCanvasFocus(task, targetLabels, onFocusTask, true) : null}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 export function GenerationPlanPanel({
@@ -328,6 +532,7 @@ export function GenerationPlanPanel({
   onSelectPlan,
   onRetry,
   onCancel,
+  onFocusTask,
   onClose,
   showHeader = true,
 }: {
@@ -340,31 +545,29 @@ export function GenerationPlanPanel({
   onSelectPlan: (planId: string) => void;
   onRetry: (taskId: string, mode: GenerationTaskRetryMode) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
+  onFocusTask?: (task: GenerationTask) => void;
   onClose?: () => void;
   showHeader?: boolean;
 }) {
-  const complete = detail.tasks.filter((task) => task.status === "succeeded").length;
-  const tasksById = new Map(detail.tasks.map((task) => [task.id, task]));
-  const failureMessage = planMessage(detail.plan);
-  const connectionLabel = connection === "live"
-    ? "Live updates"
-    : connection === "connecting"
-      ? "Connecting"
-      : connection === "offline"
-        ? "Reconnecting"
-        : connection === "error"
-          ? "Updates unavailable"
-        : "Durable snapshot";
-
+  let complete = 0;
+  const tasksById = new Map<string, GenerationTask>();
+  for (const task of detail.tasks) {
+    tasksById.set(task.id, task);
+    if (task.status === "succeeded") complete += 1;
+  }
+  const directionSelections = detail.tasks.map((task) => researchSelectionDestinations(projectId, task));
+  const retryable = detail.plan.status === "failed"
+    || detail.plan.status === "queued"
+    || detail.plan.status === "running";
+  const events = detail.events ?? [];
+  const failureMessage = generationPlanFailureMessage(detail.plan);
   return (
     <section
       className="dezin-generation-plan"
       aria-labelledby={showHeader ? "generation-plan-title" : undefined}
       aria-label={showHeader ? undefined : "Generation Plan details"}
     >
-      {showHeader ? (
-        <GenerationPlanHeader plan={detail.plan} state="ready" onClose={onClose} />
-      ) : null}
+      {showHeader ? renderGenerationPlanHeader(detail.plan, "ready", onClose) : null}
 
       <StudioInspectorSection
         className="dezin-generation-plan__overview"
@@ -378,7 +581,7 @@ export function GenerationPlanPanel({
           aria-atomic="true"
         >
           <strong>{complete} of {detail.tasks.length} complete</strong>
-          <span data-connection={connection}>{connectionLabel}</span>
+          <span data-connection={connection}>{CONNECTION_LABELS[connection]}</span>
         </div>
         <div
           className="dezin-generation-plan__progress"
@@ -389,16 +592,27 @@ export function GenerationPlanPanel({
           aria-valuenow={complete}
           aria-valuetext={`${complete} of ${detail.tasks.length} tasks complete`}
         >
-          {detail.tasks.map((task) => (
-            <i key={task.id} data-state={taskDisplayState(projectId, task)} aria-hidden />
+          {detail.tasks.map((task, index) => (
+            <i
+              key={task.id}
+              data-state={directionSelections[index]!.length > 0 ? "active" : displayState(task.status)}
+              aria-hidden
+            />
           ))}
         </div>
         {failureMessage ? (
           <p className="dezin-generation-plan__plan-message" role="alert">{failureMessage}</p>
         ) : null}
-        {plans.length > 1 ? (
-          <PlanHistorySelect plans={plans} value={detail.plan.id} onChange={onSelectPlan} />
-        ) : null}
+        {plans.length > 1 ? renderPlanHistorySelect(plans, detail.plan.id, onSelectPlan) : null}
+      </StudioInspectorSection>
+
+      <StudioInspectorSection
+        className="dezin-generation-plan__process-section"
+        heading="Process"
+        actions={<StudioStatusBadge>{events.length}</StudioStatusBadge>}
+        contentClassName="dezin-generation-plan__process-content"
+      >
+        {renderProcessTimeline(events, tasksById, targetLabels, onFocusTask)}
       </StudioInspectorSection>
 
       <StudioInspectorSection
@@ -408,63 +622,54 @@ export function GenerationPlanPanel({
         contentClassName="dezin-generation-plan__tasks-content"
       >
         <ol className="dezin-generation-plan__tasks" aria-label="Generation tasks">
-          {detail.tasks.map((task) => {
+          {detail.tasks.map((task, index) => {
             const label = taskLabel(task.kind);
-            const selectionDestinations = researchSelectionDestinations(projectId, task);
+            const selectionDestinations = directionSelections[index]!;
             const awaitingDirectionSelection = selectionDestinations.length > 0;
             const state = awaitingDirectionSelection ? "active" : displayState(task.status);
             const message = taskMessage(task, tasksById, targetLabels);
             const artifactDestination = artifactRevisionDestination(projectId, task, detail);
             const target = targetLabel(task, targetLabels);
+            const progress = task.status === "running" ? latestTaskProgress(events, task) : null;
             return (
-              <li key={task.id} className="dezin-generation-plan__task" data-state={state}>
-                <span className="dezin-generation-plan__task-marker" data-state={state} aria-hidden />
-                <div className="dezin-generation-plan__task-body">
-                  <div className="dezin-generation-plan__task-topline">
-                    <span className="dezin-generation-plan__task-kind">{label}</span>
-                    <StudioStatusBadge
-                      className="dezin-generation-plan__task-status"
-                      tone={statusTone(state)}
-                    >
-                      {awaitingDirectionSelection ? "Choose direction" : statusLabel(task.status)}
-                    </StudioStatusBadge>
-                    <strong title={target}>{target}</strong>
-                  </div>
-                  <p className="dezin-generation-plan__task-meta">{dependencyLabel(task)}</p>
-                  {message ? <p className="dezin-generation-plan__task-message">{message}</p> : null}
-                  {artifactDestination ? (
-                    <a
-                      className="dezin-generation-plan__artifact-link"
-                      href={artifactDestination.href}
-                      aria-label={artifactDestination.ariaLabel}
-                      title={artifactDestination.evidenceHash === null
-                        ? undefined
-                        : `Candidate evidence ${artifactDestination.evidenceHash}`}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        navigate(artifactDestination.href);
-                      }}
-                    >
-                      <span>{artifactDestination.label}</span>
-                      <ExternalLink aria-hidden />
-                    </a>
-                  ) : null}
+              <li
+                key={task.id}
+                className="dezin-generation-plan__task"
+                data-state={state}
+              >
+                <div
+                  className="dezin-generation-plan__task-toggle"
+                >
+                  <span className="dezin-generation-plan__task-marker" data-state={state} aria-hidden />
+                  <span className="dezin-generation-plan__task-body">
+                    <span className="dezin-generation-plan__task-topline">
+                      <span className="dezin-generation-plan__task-kind">{label}</span>
+                      <StudioStatusBadge
+                        className="dezin-generation-plan__task-status"
+                        tone={statusTone(state)}
+                      >
+                        {awaitingDirectionSelection
+                          ? "Choose direction"
+                          : progress === null
+                            ? statusLabel(task.status)
+                            : TASK_PROGRESS_COPY[progress]}
+                      </StudioStatusBadge>
+                      <strong title={target}>{target}</strong>
+                    </span>
+                    <span className="dezin-generation-plan__task-meta">{dependencyLabel(task)}</span>
+                    {message ? <span className="dezin-generation-plan__task-message">{message}</span> : null}
+                    <span className="dezin-generation-plan__task-output">
+                      Output · {currentTaskOutput(task, progress)}
+                    </span>
+                  </span>
+                </div>
+                <div className="dezin-generation-plan__task-actions">
+                  {renderCanvasFocus(task, targetLabels, onFocusTask)}
+                  {artifactDestination ? renderDestinationLink(artifactDestination) : null}
                   {selectionDestinations.map((destination) => (
-                    <a
-                      key={`${destination.resourceId}:${destination.revisionId}`}
-                      className="dezin-generation-plan__artifact-link"
-                      href={destination.href}
-                      aria-label={`Review Research directions from Revision ${destination.revisionId}`}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        navigate(destination.href);
-                      }}
-                    >
-                      <span>Review Research directions</span>
-                      <ExternalLink aria-hidden />
-                    </a>
+                    renderDestinationLink(destination, destination.key)
                   ))}
-                  {retryablePlan(detail.plan) && canRetry(task) && !awaitingDirectionSelection ? (
+                  {retryable && canRetry(task) && !awaitingDirectionSelection ? (
                     <div
                       className="dezin-generation-plan__retry-actions"
                       role="group"
@@ -514,7 +719,6 @@ export function GenerationPlanPanel({
             aria-label="Cancel generation plan"
             onClick={() => void onCancel()}
           >
-            <Square aria-hidden />
             Stop
           </Button>
         ) : (
@@ -530,31 +734,21 @@ export function GenerationPlanPanel({
 
 type InspectorLoadState = "loading" | "ready" | "empty" | "error";
 
-function GenerationPlanHeader({
-  plan,
-  state,
-  onClose,
-}: {
-  plan: GenerationPlan | null;
-  state: InspectorLoadState;
-  onClose?: () => void;
-}) {
-  const planStatus = plan === null
-    ? state === "loading"
-      ? "Loading"
-      : state === "empty"
-        ? "No plan"
-        : state === "error"
-          ? "Unavailable"
-          : "Ready"
-    : statusLabel(plan.status, true);
-  const planState: ReturnType<typeof displayState> = plan === null
-    ? state === "loading"
-      ? "active"
-      : state === "error"
-        ? "failure"
-        : "idle"
-    : displayState(plan.status);
+const EMPTY_PLAN_HEADERS: Record<InspectorLoadState, readonly [string, DisplayState]> = {
+  loading: ["Loading", "active"],
+  ready: ["Ready", "idle"],
+  empty: ["No plan", "idle"],
+  error: ["Unavailable", "failure"],
+};
+
+function renderGenerationPlanHeader(
+  plan: GenerationPlan | null,
+  state: InspectorLoadState,
+  onClose?: () => void,
+) {
+  const emptyHeader = EMPTY_PLAN_HEADERS[state];
+  const planStatus = plan === null ? emptyHeader[0] : statusLabel(plan.status, true);
+  const planState = plan === null ? emptyHeader[1] : displayState(plan.status);
   return (
     <StudioPanelHeader className="dezin-generation-plan__header gap-3 px-3">
       <StudioHeaderIdentity className="min-w-0 flex-1">
@@ -575,7 +769,7 @@ function GenerationPlanHeader({
           <i aria-hidden />
           <span>{planStatus}</span>
         </StudioStatusBadge>
-        <PlanCloseButton onClose={onClose} />
+        {renderPlanCloseButton(onClose)}
       </StudioHeaderActions>
     </StudioPanelHeader>
   );
@@ -590,19 +784,71 @@ function preferredPlan(plans: readonly GenerationPlan[], preferredPlanId: string
   return active ?? plans[0] ?? null;
 }
 
+function generationPlanEventSequence(detail: GenerationPlanDetail): number {
+  let latest = 0;
+  for (const event of detail.events ?? []) {
+    if (Number.isSafeInteger(event.sequence) && event.sequence > latest) latest = event.sequence;
+  }
+  return latest;
+}
+
+function generationPlanExecutionEpoch(detail: GenerationPlanDetail): number {
+  const epoch = detail.plan.executionEpoch ?? 0;
+  return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
+}
+
+/**
+ * Parent polling and the Inspector stream are independent readers of the same
+ * durable Plan. Accept a parent snapshot only when its durable clock advances;
+ * a delayed poll must never roll a newer retry/cancel/stream result backward.
+ */
+function authoritativeDetailAdvances(
+  current: GenerationPlanDetail,
+  next: GenerationPlanDetail,
+): boolean {
+  if (current.plan.id !== next.plan.id) return false;
+  const currentEpoch = generationPlanExecutionEpoch(current);
+  const nextEpoch = generationPlanExecutionEpoch(next);
+  if (nextEpoch !== currentEpoch) return nextEpoch > currentEpoch;
+  const currentSequence = generationPlanEventSequence(current);
+  const nextSequence = generationPlanEventSequence(next);
+  if (nextSequence !== currentSequence) return nextSequence > currentSequence;
+
+  const nextTaskById = new Map(next.tasks.map((task) => [task.id, task]));
+  let attemptAdvanced = false;
+  for (const task of current.tasks) {
+    const nextTask = nextTaskById.get(task.id);
+    if (nextTask === undefined || nextTask.currentAttempt < task.currentAttempt) return false;
+    if (nextTask.currentAttempt > task.currentAttempt) attemptAdvanced = true;
+  }
+  if (attemptAdvanced) return true;
+
+  const currentTerminal = immutablePlan(current.plan);
+  const nextTerminal = immutablePlan(next.plan);
+  if (currentTerminal !== nextTerminal) return nextTerminal;
+  if (current.plan.status === next.plan.status) return false;
+  const activeStatuses: GenerationPlan["status"][] = ["approved", "queued", "running"];
+  const currentRank = activeStatuses.indexOf(current.plan.status);
+  return currentRank >= 0 && activeStatuses.indexOf(next.plan.status) > currentRank;
+}
+
 export function GenerationPlanInspector({
   projectId,
   preferredPlanId,
+  authoritativeDetail,
   targetLabels,
   onDetailChange,
   onWorkspaceChanged,
+  onFocusTask,
   onClose,
 }: {
   projectId: string;
   preferredPlanId: string | null;
+  authoritativeDetail?: GenerationPlanDetail | null;
   targetLabels?: GenerationPlanTargetLabels;
   onDetailChange?: (change: GenerationPlanDetailChange) => void;
   onWorkspaceChanged?: () => void;
+  onFocusTask?: (task: GenerationTask) => void;
   onClose?: () => void;
 }) {
   const api = useApi();
@@ -613,6 +859,7 @@ export function GenerationPlanInspector({
   const [connection, setConnection] = useState<GenerationPlanConnection>("connecting");
   const [message, setMessage] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadEpoch, setLoadEpoch] = useState(0);
   const selectionEpoch = useRef(0);
   const detailMutationEpoch = useRef(0);
   const actionLock = useRef(false);
@@ -655,6 +902,7 @@ export function GenerationPlanInspector({
     actionLock.current = false;
     setBusyAction(null);
     setLoadState("loading");
+    setPlans([]);
     setMessage(null);
     void api.listGenerationPlans(projectId)
       .then(async (nextPlans) => {
@@ -686,7 +934,7 @@ export function GenerationPlanInspector({
     return () => {
       if (epoch === selectionEpoch.current) selectionEpoch.current += 1;
     };
-  }, [api, commitDetail, preferredPlanId, projectId]);
+  }, [api, commitDetail, loadEpoch, preferredPlanId, projectId]);
 
   const streamPlanId = loadState === "ready" && selectedPlanId !== null
     && detail?.plan.id === selectedPlanId
@@ -800,25 +1048,46 @@ export function GenerationPlanInspector({
       });
   }, [detail, refresh, selectedPlanId]);
 
-  const retry = useCallback(async (taskId: string, mode: GenerationTaskRetryMode) => {
+  useEffect(() => {
+    if (loadState !== "ready"
+      || !authoritativeDetail
+      || authoritativeDetail.plan.id !== selectedPlanId
+      || detail?.plan.id !== selectedPlanId
+      || authoritativeDetail === detail
+      || actionLock.current
+      || !authoritativeDetailAdvances(detail, authoritativeDetail)) return;
+    commitDetail(authoritativeDetail, "observation");
+    if (immutablePlan(authoritativeDetail.plan)) setMessage(null);
+  }, [authoritativeDetail, busyAction, commitDetail, detail, loadState, selectedPlanId]);
+
+  const runAction = useCallback(async (
+    source: Extract<GenerationPlanDetailChangeSource, "retry" | "cancel">,
+    taskId?: string,
+    mode?: GenerationTaskRetryMode,
+  ) => {
     if (selectedPlanId === null || actionLock.current) return;
     const planId = selectedPlanId;
     const epoch = selectionEpoch.current;
     const mutationEpoch = ++detailMutationEpoch.current;
-    const key = `${taskId}:${mode}`;
     actionLock.current = true;
-    setBusyAction(key);
+    setBusyAction(source === "retry" ? `${taskId}:${mode}` : source);
     setMessage(null);
     try {
-      const next = await api.retryGenerationTask(projectId, planId, taskId, mode);
+      const next = source === "retry"
+        ? await api.retryGenerationTask(projectId, planId, taskId!, mode!)
+        : await api.cancelGenerationPlan(projectId, planId);
       if (epoch !== selectionEpoch.current
         || mutationEpoch !== detailMutationEpoch.current
         || next.plan.id !== planId) return;
-      commitDetail(next, "retry");
-      setConnection("connecting");
+      commitDetail(next, source);
+      if (source === "retry") setConnection("connecting");
     } catch (error) {
       if (epoch === selectionEpoch.current) {
-        setMessage(error instanceof Error ? error.message : "The task could not be retried.");
+        setMessage(error instanceof Error
+          ? error.message
+          : source === "retry"
+            ? "The task could not be retried."
+            : "The Generation Plan could not be stopped.");
       }
     } finally {
       if (epoch === selectionEpoch.current) {
@@ -828,31 +1097,12 @@ export function GenerationPlanInspector({
     }
   }, [api, commitDetail, projectId, selectedPlanId]);
 
-  const cancel = useCallback(async () => {
-    if (selectedPlanId === null || actionLock.current) return;
-    const planId = selectedPlanId;
-    const epoch = selectionEpoch.current;
-    const mutationEpoch = ++detailMutationEpoch.current;
-    actionLock.current = true;
-    setBusyAction("cancel");
-    setMessage(null);
-    try {
-      const next = await api.cancelGenerationPlan(projectId, planId);
-      if (epoch !== selectionEpoch.current
-        || mutationEpoch !== detailMutationEpoch.current
-        || next.plan.id !== planId) return;
-      commitDetail(next, "cancel");
-    } catch (error) {
-      if (epoch === selectionEpoch.current) {
-        setMessage(error instanceof Error ? error.message : "The Generation Plan could not be stopped.");
-      }
-    } finally {
-      if (epoch === selectionEpoch.current) {
-        actionLock.current = false;
-        setBusyAction(null);
-      }
-    }
-  }, [api, commitDetail, projectId, selectedPlanId]);
+  const retry = useCallback(
+    (taskId: string, mode: GenerationTaskRetryMode) => runAction("retry", taskId, mode),
+    [runAction],
+  );
+
+  const cancel = useCallback(() => runAction("cancel"), [runAction]);
 
   const readyDetail = loadState === "ready"
     && selectedPlanId !== null
@@ -864,43 +1114,43 @@ export function GenerationPlanInspector({
     : loadState;
   return (
     <section className="dezin-generation-plan__container" aria-labelledby="generation-plan-title">
-      <GenerationPlanHeader
-        plan={renderedState === "ready" ? readyDetail?.plan ?? null : null}
-        state={renderedState}
-        onClose={onClose}
-      />
+      {renderGenerationPlanHeader(
+        renderedState === "ready" ? readyDetail?.plan ?? null : null,
+        renderedState,
+        onClose,
+      )}
       <div className="dezin-generation-plan__body">
-        {renderedState === "loading" ? (
+        {renderedState !== "ready" || readyDetail === null ? (
           <div className="dezin-generation-plan dezin-generation-plan--placeholder">
-            <LoaderCircle className="dezin-generation-plan__placeholder-icon motion-safe:animate-spin" aria-hidden />
-            <p role="status">Loading build plan…</p>
-          </div>
-        ) : renderedState === "empty" ? (
-          <div className="dezin-generation-plan dezin-generation-plan--placeholder">
-            <ListChecks className="dezin-generation-plan__placeholder-icon" aria-hidden />
-            <h2>No build plan yet</h2>
-            <p>Approved generation work will appear here as a durable task sequence.</p>
-          </div>
-        ) : renderedState === "error" || readyDetail === null ? (
-          <div className="dezin-generation-plan dezin-generation-plan--placeholder">
-            <TriangleAlert className="dezin-generation-plan__placeholder-icon" aria-hidden />
-            <h2>Build plan unavailable</h2>
-            <p role="alert">{message ?? "The Generation Plan could not be loaded."}</p>
-            {plans.length > 1 ? (
-              <PlanHistorySelect plans={plans} value={selectedPlanId ?? ""} onChange={selectPlan} />
-            ) : null}
-            {selectedPlanId !== null ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => selectPlan(selectedPlanId)}
-                aria-label="Retry loading build plan"
-              >
-                <RefreshCw aria-hidden />
-                Try again
-              </Button>
-            ) : null}
+            {renderedState === "loading" ? (
+              <>
+                <LoaderCircle className="dezin-generation-plan__placeholder-icon motion-safe:animate-spin" aria-hidden />
+                <p role="status">Loading build plan…</p>
+              </>
+            ) : renderedState === "empty" ? (
+              <>
+                <h2>No build plan yet</h2>
+                <p>Approved generation work will appear here as a durable task sequence.</p>
+              </>
+            ) : (
+              <>
+                <h2>Build plan unavailable</h2>
+                <p role="alert">{message ?? "The Generation Plan could not be loaded."}</p>
+                {plans.length > 1 ? renderPlanHistorySelect(plans, selectedPlanId ?? "", selectPlan) : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => plans.length === 0
+                    ? setLoadEpoch((epoch) => epoch + 1)
+                    : selectedPlanId && selectPlan(selectedPlanId)}
+                  aria-label="Retry loading build plan"
+                >
+                  <RefreshCw aria-hidden />
+                  Try again
+                </Button>
+              </>
+            )}
           </div>
         ) : (
           <GenerationPlanPanel
@@ -913,11 +1163,26 @@ export function GenerationPlanInspector({
             onSelectPlan={selectPlan}
             onRetry={retry}
             onCancel={cancel}
+            onFocusTask={onFocusTask}
             showHeader={false}
           />
         )}
         {renderedState === "ready" && message ? (
-          <p className="dezin-generation-plan__action-error" role="alert">{message}</p>
+          <>
+            <p className="dezin-generation-plan__action-error" role="alert">{message}</p>
+            {connection === "error" && selectedPlanId !== null ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => selectPlan(selectedPlanId)}
+                aria-label="Reconnect build plan updates"
+              >
+                <RefreshCw aria-hidden />
+                Reconnect
+              </Button>
+            ) : null}
+          </>
         ) : null}
       </div>
     </section>

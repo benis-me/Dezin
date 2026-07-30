@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
 import {
@@ -68,13 +68,16 @@ function PreviewProbe({
     expectedRenderSpec,
   });
   return (
-    <output aria-label="Preview state" data-status={preview.status}>
-      {preview.status === "ready"
-        ? `${preview.resolved.revisionId}:${preview.lease.leaseId}`
-        : preview.status === "error"
-          ? preview.error
-          : preview.status}
-    </output>
+    <>
+      <output aria-label="Preview state" data-status={preview.status}>
+        {preview.status === "ready"
+          ? `${preview.resolved.revisionId}:${preview.lease.leaseId}`
+          : preview.status === "error"
+            ? preview.error
+            : preview.status}
+      </output>
+      <button type="button" onClick={preview.retry}>Retry preview</button>
+    </>
   );
 }
 
@@ -108,6 +111,89 @@ test("resolves current before acquiring a lease for that exact immutable revisio
 
   expect(await screen.findByText("revision-1:lease-revision-1")).toBeInTheDocument();
   expect(calls).toEqual(["resolve:artifact-current", "acquire:revision-1"]);
+});
+
+test("times out a never-settling preview acquisition and starts a fresh request on retry", async () => {
+  vi.useFakeTimers();
+  const signals: AbortSignal[] = [];
+  const resolvePreviewTarget = vi.fn((
+    _projectId: string,
+    _target: PreviewTarget,
+    signal?: AbortSignal,
+  ) => {
+    if (signal !== undefined) signals.push(signal);
+    return new Promise<ResolvedPreviewTarget>(() => {});
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({ resolvePreviewTarget })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "loading");
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "error");
+  expect(screen.getByLabelText("Preview state")).toHaveTextContent(/timed out/i);
+  expect(signals[0]?.aborted).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry preview" }));
+  await act(async () => { await Promise.resolve(); });
+
+  expect(resolvePreviewTarget).toHaveBeenCalledTimes(2);
+  expect(signals[1]).not.toBe(signals[0]);
+  expect(signals[1]?.aborted).toBe(false);
+});
+
+test("bounds a never-settling lease acquisition with the same abortable preview request", async () => {
+  vi.useFakeTimers();
+  const current = resolved("artifact-1", "revision-1");
+  const resolveSignals: AbortSignal[] = [];
+  const acquireSignals: AbortSignal[] = [];
+  const resolvePreviewTarget = vi.fn(async (
+    _projectId: string,
+    _target: PreviewTarget,
+    signal?: AbortSignal,
+  ) => {
+    if (signal !== undefined) resolveSignals.push(signal);
+    return current;
+  });
+  const acquirePreviewTargetLease = vi.fn((
+    _projectId: string,
+    _target: ResolvedPreviewTarget,
+    signal?: AbortSignal,
+  ) => {
+    if (signal !== undefined) acquireSignals.push(signal);
+    return new Promise<PreviewTargetLease>(() => {});
+  });
+
+  render(
+    <ApiProvider client={makeFakeApi({ resolvePreviewTarget, acquirePreviewTargetLease })}>
+      <PreviewProbe
+        projectId="project-1"
+        target={{ kind: "artifact-current", projectId: "project-1", artifactId: "artifact-1" }}
+      />
+    </ApiProvider>,
+  );
+  await act(async () => { await Promise.resolve(); });
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(1);
+  expect(acquireSignals[0]).toBe(resolveSignals[0]);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+  expect(screen.getByLabelText("Preview state")).toHaveAttribute("data-status", "error");
+  expect(acquireSignals[0]?.aborted).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry preview" }));
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+  expect(acquirePreviewTargetLease).toHaveBeenCalledTimes(2);
+  expect(acquireSignals[1]).not.toBe(acquireSignals[0]);
+  expect(acquireSignals[1]?.aborted).toBe(false);
 });
 
 test("recovers from a transient preview gateway failure without requiring a manual retry", async () => {

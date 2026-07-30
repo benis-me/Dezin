@@ -27,6 +27,7 @@ const ARTIFACT_OPTION_FIELDS = Object.freeze([
   "environment",
   "sharinganCaptures",
   "resourceReferences",
+  "progress",
   "onEvent",
   "reportError",
 ] as const);
@@ -57,7 +58,7 @@ export interface ProductionArtifactRunAdapterOptions
     ArtifactRunPreparationOptions,
     "createRunner" | "createQualityEvaluator"
   >,
-  Pick<ArtifactRunExecutorOptions, "onEvent" | "reportError"> {
+  Pick<ArtifactRunExecutorOptions, "progress" | "onEvent" | "reportError"> {
   readonly agent: ProductionArtifactAgentAdapter;
   readonly quality: (
     input: ArtifactRunInfrastructureInput,
@@ -145,6 +146,7 @@ function artifactOptions(value: unknown): Record<typeof ARTIFACT_OPTION_FIELDS[n
       environment: undefined,
       sharinganCaptures: undefined,
       resourceReferences: undefined,
+      progress: undefined,
       onEvent: undefined,
       reportError: undefined,
     } as Record<typeof ARTIFACT_OPTION_FIELDS[number], unknown>;
@@ -170,6 +172,7 @@ function requireConfiguration(
   environment: ArtifactRunPreparationOptions["environment"];
   sharinganCaptures: ArtifactRunPreparationOptions["sharinganCaptures"];
   resourceReferences: ArtifactRunPreparationOptions["resourceReferences"];
+  progress: ArtifactRunExecutorOptions["progress"];
   onEvent: ArtifactRunExecutorOptions["onEvent"];
   reportError: ArtifactRunExecutorOptions["reportError"];
   createAgentRunner: ProductionArtifactAgentAdapter["createRunner"];
@@ -186,6 +189,7 @@ function requireConfiguration(
     || typeof configuration.artifactSourceRootForTarget !== "function"
     || typeof configuration.baseSystemPrompt !== "function"
     || (configuration.environment !== undefined && typeof configuration.environment !== "function")
+    || (configuration.progress !== undefined && typeof configuration.progress !== "function")
     || (configuration.onEvent !== undefined && typeof configuration.onEvent !== "function")
     || (configuration.reportError !== undefined && typeof configuration.reportError !== "function")) {
     throw new ProductionArtifactRunAdapterError(
@@ -258,6 +262,9 @@ function requireConfiguration(
     resourceReferences: resourceReferenceMaterialize === null
       ? undefined
       : Object.freeze({ materializeExactReferences: resourceReferenceMaterialize }),
+    progress: configuration.progress === undefined
+      ? undefined
+      : (configuration.progress as NonNullable<ArtifactRunExecutorOptions["progress"]>).bind(owner),
     onEvent: configuration.onEvent === undefined
       ? undefined
       : (configuration.onEvent as NonNullable<ArtifactRunExecutorOptions["onEvent"]>).bind(owner),
@@ -353,6 +360,7 @@ export function createProductionArtifactRunExecutor(
   });
   return new ArtifactRunExecutor({
     preparation,
+    progress: configuration.progress,
     onEvent: configuration.onEvent,
     reportError: configuration.reportError,
   });

@@ -58,6 +58,66 @@ test("resolves a Moodboard scan Context Pack only from the exact durable Attempt
   assert.deepEqual(calls, [["project-1", "plan-1", "task-1", 2]]);
 });
 
+test("restores frozen Research target semantics from the same durable Attempt payload", () => {
+  const authority = createStoreBackedMoodboardAttemptContextAuthority({
+    projectCatalog: { listProjects: () => [{ id: "project-1" }] },
+    workspaceStore: {
+      getWorkspace: () => ({ id: "workspace-1" }),
+      getGenerationTaskAttemptForProject: () => attempt({
+        payload: {
+          version: 2,
+          operation: {
+            operation: "create",
+            nodeId: "node-research",
+            resourceId: "resource-1",
+            kind: "research",
+            title: "Listening Club Research",
+            instructions: "Return evidence-backed directions.",
+          },
+          brief: {
+            proposalRationale: "Ground the product direction.",
+            assumptions: ["The audience values small-group listening."],
+            targetInstructions: {
+              operation: "create",
+              kind: "research",
+              title: "Listening Club Research",
+              instructions: "Return evidence-backed directions.",
+            },
+          },
+        },
+      }),
+    },
+  });
+
+  assert.deepEqual(authority.resolveMoodboardAttemptContext({
+    taskId: "task-1",
+    planId: "plan-1",
+    workspaceId: "workspace-1",
+    resourceId: "resource-1",
+    revisionId: "revision-1",
+    attempt: 2,
+    inputHash: "b".repeat(64),
+  }), {
+    contextPackId: `context-pack-${HASH}`,
+    contextPackHash: HASH,
+    researchTaskAuthority: {
+      operation: "create",
+      nodeId: "node-research",
+      title: "Listening Club Research",
+      brief: {
+        proposalRationale: "Ground the product direction.",
+        assumptions: ["The audience values small-group listening."],
+        targetInstructions: {
+          operation: "create",
+          kind: "research",
+          title: "Listening Club Research",
+          instructions: "Return evidence-backed directions.",
+        },
+      },
+    },
+  });
+});
+
 test("rejects a durable Attempt whose immutable input or Resource target differs", () => {
   for (const patch of [
     { inputHash: "c".repeat(64) },

@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { ApiError } from "../../../lib/api.ts";
 import { ArtifactNodePreview } from "./ArtifactNodePreview.tsx";
 
 const getArtifactThumbnail = vi.fn();
@@ -193,6 +194,47 @@ describe("artifact node preview", () => {
     expect(await screen.findByRole("img", { name: "Checkout design preview" })).not.toBe(secondImage);
   });
 
+  test("bounds automatic retries while a published thumbnail catches up", async () => {
+    vi.useFakeTimers();
+    getArtifactThumbnail.mockRejectedValue(new ApiError(503, "Thumbnail is not ready"));
+    render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-retry"
+        artifactId="artifact-retry"
+        name="Retry checkout"
+        revisionId="revision-retry"
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("button", { name: "Retry Retry checkout preview" })).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      await Promise.resolve();
+    });
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
   test("projects a failed or blocked generation task without requesting a fake thumbnail", () => {
     const { container, rerender } = render(
       <ArtifactNodePreview
@@ -223,8 +265,34 @@ describe("artifact node preview", () => {
       />,
     );
     expect(screen.getByText("Blocked by dependency")).toBeInTheDocument();
+    expect(screen.queryByText("Blocked by failed prerequisite Session Metadata")).toBeNull();
+    expect(container.querySelector(".dezin-flow-card__placeholder")).toHaveAttribute(
+      "title",
+      "Blocked by failed prerequisite Session Metadata",
+    );
     expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "blocked");
     expect(getArtifactThumbnail).not.toHaveBeenCalled();
+  });
+
+  test("bounds root failure detail on the canvas while retaining the exact reason as a title", () => {
+    const failure = "Artifact generation failed after the provider returned a long diagnostic that belongs in the Plan timeline rather than taking over every canvas card.";
+    const { container } = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-1"
+        artifactId="artifact-1"
+        name="Checkout"
+        revisionId={null}
+        generationState="failed"
+        generationMessage={failure}
+      />,
+    );
+
+    const detail = container.querySelector(".dezin-flow-card__placeholder small");
+    expect(detail?.textContent?.length).toBeLessThanOrEqual(96);
+    expect(detail).not.toHaveTextContent(failure);
+    expect(detail).toHaveAttribute("title", failure);
+    expect(container.querySelector(".dezin-flow-card__placeholder")).toHaveAttribute("title", failure);
   });
 
   test("shows a settled sync state without an infinite generation spinner when publication has completed", () => {
@@ -450,6 +518,43 @@ describe("artifact node preview", () => {
     expect(await screen.findByText("Preview unavailable")).toBeInTheDocument();
     expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "error");
     expect(screen.getByRole("button", { name: "Retry Checkout preview" })).toBeInTheDocument();
+  });
+
+  test("times out a stalled thumbnail and aborts it before retrying with a fresh request", async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    getArtifactThumbnail.mockImplementation((
+      _projectId: string,
+      _artifactId: string,
+      _revisionId: string,
+      signal: AbortSignal,
+    ) => {
+      signals.push(signal);
+      return new Promise<Blob>(() => {});
+    });
+    const { container } = render(
+      <ArtifactNodePreview
+        artifactKind="page"
+        projectId="project-timeout"
+        artifactId="artifact-timeout"
+        name="Timeout checkout"
+        revisionId="revision-timeout"
+      />,
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+    expect(container.querySelector(".dezin-flow-card__preview")).toHaveAttribute("data-state", "error");
+    expect(screen.getByRole("button", { name: "Retry Timeout checkout preview" })).toBeInTheDocument();
+    expect(signals[0]?.aborted).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry Timeout checkout preview" }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(getArtifactThumbnail).toHaveBeenCalledTimes(2);
+    expect(signals[1]).not.toBe(signals[0]);
+    expect(signals[1]?.aborted).toBe(false);
+    vi.useRealTimers();
   });
 
   test("overview mode keeps a real thumbnail so zooming out never turns published work into a blank rail", async () => {

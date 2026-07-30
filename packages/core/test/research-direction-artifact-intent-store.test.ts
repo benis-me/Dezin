@@ -11,6 +11,11 @@ import {
   type ResearchDirectionArtifactIntentRequestFacts,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+  codexResearchGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 function fakeClock(): StoreClock {
   let now = 80_000;
@@ -22,11 +27,7 @@ function fakeClock(): StoreClock {
 }
 
 const REQUEST_ID = "selection-00000000-0000-4000-8000-000000000001";
-const FROZEN_CODEBUDDY_AGENT = Object.freeze({
-  providerId: "codebuddy" as const,
-  command: "codebuddy" as const,
-  model: "gpt-5.6-sol",
-});
+const FROZEN_CODEBUDDY_AGENT = Object.freeze(codebuddyGeneratorAgent());
 
 function seed(existingInformsEdge = false) {
   const store = new Store(":memory:", fakeClock());
@@ -133,6 +134,7 @@ function seed(existingInformsEdge = false) {
     generation: {
       kind: "workspace-generation",
       agent: FROZEN_CODEBUDDY_AGENT,
+      reviewerAgent: claudeSessionReviewerAgent(),
       resourceOperations: [{
         operation: "reuse",
         nodeId: research.node.id,
@@ -433,6 +435,7 @@ test("an Artifact consumes same-Plan generated Research through its exact Task d
     title: fixture.research.resource.title,
     revisionPolicy: { kind: "generate" },
   }];
+  proposal.generation.researchAgent = codexResearchGeneratorAgent();
   delete proposal.generation.artifactPlans[0]!.researchDirectionSelection;
   const draft = fixture.store.workspace.createProposal(proposal);
   const approved = fixture.store.workspace.approveProposalForProject(

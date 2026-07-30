@@ -289,6 +289,7 @@ test("picker stays active across consecutive pointer and keyboard selections and
   assert.deepEqual(JSON.parse(JSON.stringify(descendantSelected)), {
     source: "dezin",
     type: "element-selected",
+    targetIsStable: false,
     locator: {
       designNodeId: "hero-banner",
       selector: "[data-design-node-id=\"hero-banner\"]",
@@ -298,7 +299,7 @@ test("picker stays active across consecutive pointer and keyboard selections and
     text: "Desktop frame Poster-first film discovery Schedule Checkout",
     textPreview: "Desktop frame Poster-first film discovery Schedule Checkout",
     textComplete: true,
-    rect: { x: 10, y: 180, w: 720, h: 360 },
+    rect: { x: 48, y: 220, w: 420, h: 72 },
     attrs: {
       ariaLabel: "",
       screenLabel: "",
@@ -312,6 +313,16 @@ test("picker stays active across consecutive pointer and keyboard selections and
       },
     },
   }, "the stable ancestor owns provenance while the actual clicked descendant owns display semantics");
+  assert.deepEqual(
+    {
+      left: (appended[1]?.style as Record<string, unknown> | undefined)?.left,
+      top: (appended[1]?.style as Record<string, unknown> | undefined)?.top,
+      width: (appended[1]?.style as Record<string, unknown> | undefined)?.width,
+      height: (appended[1]?.style as Record<string, unknown> | undefined)?.height,
+    },
+    { left: "48px", top: "220px", width: "420px", height: "72px" },
+    "the pinned picker highlight follows the actual clicked descendant",
+  );
 
   sent.length = 0;
   assert.equal(key("ArrowDown"), true);
@@ -1030,6 +1041,7 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
   assert.equal((legacyPick.styles as Record<string, unknown>).fontSize, "16px");
   const directPick = trustedPickMessages[1]!;
   assert.equal((directPick.locator as Record<string, unknown>).designNodeId, "checkout-continue");
+  assert.equal(directPick.targetIsStable, true);
   assert.deepEqual(JSON.parse(JSON.stringify(directPick.displayTarget)), {
     tag: "button",
     textPreview: "Continue",
@@ -1082,6 +1094,11 @@ test("preview bridge rejects malformed, oversized, target-bearing, and extra-fie
   assert.equal(
     (nestedDirectPick?.locator as Record<string, unknown> | undefined)?.designNodeId,
     "hero-banner",
+  );
+  assert.equal(nestedDirectPick?.targetIsStable, false);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(nestedDirectPick?.rect)),
+    { x: 48, y: 164, w: 420, h: 72 },
   );
   assert.deepEqual(JSON.parse(JSON.stringify(nestedDirectPick?.displayTarget)), {
     tag: "h1",

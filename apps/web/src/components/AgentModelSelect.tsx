@@ -17,6 +17,7 @@ export function AgentModelSelect({
   onAgentChange,
   onModelChange,
   onRescan,
+  error = null,
   agentDisabledReason,
   dropUp = false,
 }: {
@@ -25,7 +26,8 @@ export function AgentModelSelect({
   model: string;
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
-  onRescan: () => Promise<void>;
+  onRescan: () => Promise<unknown>;
+  error?: string | null;
   agentDisabledReason?: (agent: AgentInfo) => string | null;
   dropUp?: boolean;
 }) {
@@ -46,19 +48,19 @@ export function AgentModelSelect({
         aria-label="Agent and model"
         aria-description={`Current Agent and model: ${currentSelectionLabel}`}
         title={currentUnavailableReason ?? undefined}
-        className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+        className="dezin-agent-picker__trigger"
       >
-        {current ? <AgentLogo id={current.id} className="size-3.5" /> : null}
-        <span className="max-w-[9rem] truncate font-medium text-foreground">{current ? agentLabel(current.id) : "Agent"}</span>
-        {model ? <span className="max-w-[7rem] truncate text-muted-foreground">· {model}</span> : null}
-        {currentUnavailableReason ? <CircleAlert aria-hidden size={13} className="text-destructive" /> : null}
+        {current ? <AgentLogo id={current.id} className="dezin-agent-picker__trigger-logo" /> : null}
+        <span className="dezin-agent-picker__trigger-agent">{current ? agentLabel(current.id) : "Agent"}</span>
+        {model ? <span className="dezin-agent-picker__trigger-model">· {model}</span> : null}
+        {currentUnavailableReason ? <CircleAlert aria-hidden size={13} className="dezin-agent-picker__warning" /> : null}
         <ChevronDown size={13} strokeWidth={2} />
       </PopoverTrigger>
       <PopoverContent
         side={dropUp ? "top" : "bottom"}
         align="start"
         aria-label="Choose Agent and model"
-        className="w-80 max-w-[calc(100vw-16px)] overflow-y-auto p-2"
+        className="dezin-agent-picker__content"
       >
         <AgentModelSelectContent
           agents={selectable}
@@ -68,6 +70,7 @@ export function AgentModelSelect({
           onAgentChange={onAgentChange}
           onModelChange={onModelChange}
           onRescan={onRescan}
+          error={error}
           agentDisabledReason={agentDisabledReason}
         />
       </PopoverContent>

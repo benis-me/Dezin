@@ -43,6 +43,7 @@ export function MoodboardAgentPanel({
   onAgentChange,
   onModelChange,
   onRescanAgents,
+  agentDetectionError = null,
   onUploadFiles,
   onSend,
   loading = false,
@@ -63,7 +64,8 @@ export function MoodboardAgentPanel({
   onDeleteConversation?: (id: string) => void;
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
-  onRescanAgents: () => Promise<void>;
+  onRescanAgents: () => Promise<unknown>;
+  agentDetectionError?: string | null;
   onUploadFiles?: (files: FileList | File[] | null) => void;
   onSend: (content: string) => Promise<void>;
   loading?: boolean;
@@ -453,6 +455,7 @@ export function MoodboardAgentPanel({
                         onAgentChange={onAgentChange}
                         onModelChange={onModelChange}
                         onRescan={onRescanAgents}
+                        error={agentDetectionError}
                       />
                       <Tooltip>
                         <TooltipTrigger asChild>

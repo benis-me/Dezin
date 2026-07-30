@@ -16,6 +16,7 @@ import {
   ResourceTaskExecutor,
   VersionedResourceGenerationAdapterRegistry,
   type ResourceGenerationAdapter,
+  type ResourceTaskProgressPort,
 } from "./resource-task-executor.ts";
 
 const RESOURCE_KINDS = Object.freeze([
@@ -34,6 +35,7 @@ const RESOURCE_OPTION_FIELDS = Object.freeze([
   "implementations",
   "contextPacks",
   "attemptContextAuthority",
+  "progress",
   "now",
   "moodboardV2LineagePolicy",
 ] as const);
@@ -51,6 +53,7 @@ export interface ProductionResourceTaskAdapterOptions {
   readonly implementations: ProductionResourceGenerationImplementations;
   readonly contextPacks: Pick<ContextPackRepository, "get">;
   readonly attemptContextAuthority: MoodboardAttemptContextAuthorityPort;
+  readonly progress?: ResourceTaskProgressPort["record"];
   readonly now?: () => number;
   readonly moodboardV2LineagePolicy?: MoodboardV2LineagePolicy;
 }
@@ -155,6 +158,7 @@ function resourceOptions(value: unknown): Record<typeof RESOURCE_OPTION_FIELDS[n
       return invalidRegistration("Production Resource Task adapter options contain invalid fields");
     }
     const result = {
+      progress: undefined,
       now: undefined,
       moodboardV2LineagePolicy: undefined,
     } as Record<typeof RESOURCE_OPTION_FIELDS[number], unknown>;
@@ -233,6 +237,7 @@ export function createProductionResourceTaskExecutor(
   const configuration = resourceOptions(options);
   if (typeof configuration.storageRoot !== "string" || configuration.storageRoot.length === 0
     || configuration.storageRoot.includes("\0")
+    || (configuration.progress !== undefined && typeof configuration.progress !== "function")
     || (configuration.now !== undefined && typeof configuration.now !== "function")
     || (configuration.moodboardV2LineagePolicy !== undefined
       && configuration.moodboardV2LineagePolicy !== "require-production-lineage"
@@ -259,5 +264,12 @@ export function createProductionResourceTaskExecutor(
       configuration.implementations as ProductionResourceGenerationImplementations,
     ),
     staging,
+    ...(configuration.progress === undefined
+      ? {}
+      : {
+          progress: Object.freeze({
+            record: configuration.progress as ResourceTaskProgressPort["record"],
+          }),
+        }),
   });
 }

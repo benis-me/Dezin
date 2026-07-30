@@ -7,6 +7,11 @@ import {
   Store,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+  codexResearchGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 function fakeClock(): StoreClock {
   let now = 30_000;
@@ -20,7 +25,9 @@ function fakeClock(): StoreClock {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    researchAgent: codexResearchGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],

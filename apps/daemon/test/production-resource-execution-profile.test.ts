@@ -17,7 +17,12 @@ import {
   stableStringify,
   type ContextPack,
 } from "../src/context/context-types.ts";
-import type { Settings, Store } from "../../../packages/core/src/index.ts";
+import type {
+  Settings,
+  Store,
+  WorkspaceGenerationAgentSelection,
+} from "../../../packages/core/src/index.ts";
+import { workspaceMoodboardImageAuthority } from "../src/orchestration/moodboard-image-execution-authority.ts";
 
 const OWNERSHIP = Object.freeze({
   projectId: "project-1",
@@ -80,6 +85,9 @@ function profile(
     resourceKind: kind,
     adapter: { id: `dezin.resource-adapter.${kind}`, version: 1, kind },
     settings: currentSettings,
+    ...(kind === "moodboard"
+      ? { moodboardImageAuthority: workspaceMoodboardImageAuthority(currentSettings) }
+      : {}),
   });
 }
 
@@ -110,6 +118,18 @@ function targetContent(executionProfile: FrozenResourceExecutionProfile): string
       },
       capabilityDescriptors: [],
       adapter: executionProfile.adapter,
+      ...(executionProfile.imageGeneration === null ? {} : {
+        moodboardImageAuthority: {
+          kind: "moodboard-image",
+          protocol: "dezin.workspace-moodboard-image-authority.v1",
+          providerId: executionProfile.imageGeneration.providerId,
+          baseUrl: executionProfile.imageGeneration.baseUrl,
+          model: executionProfile.imageGeneration.model,
+          apiVersion: executionProfile.imageGeneration.apiVersion,
+          credentialSource: executionProfile.imageGeneration.credentialSource,
+          credentialRequired: executionProfile.imageGeneration.credentialRequired,
+        },
+      }),
     },
     capabilities: [],
     qaProfile: {
@@ -180,11 +200,10 @@ function pack(executionProfile: FrozenResourceExecutionProfile): ContextPack {
 
 function resourceRequest(
   kind: "research" | "moodboard" | "sharingan-capture" = "research",
-  agent?: {
-    providerId: "claude" | "codebuddy" | "codex";
-    command: "claude" | "codebuddy" | "codex";
-    model: string | null;
-  },
+  agent?: WorkspaceGenerationAgentSelection,
+  reviewer?: WorkspaceGenerationAgentSelection,
+  reviewerAuthorityAgent?: WorkspaceGenerationAgentSelection,
+  moodboardImageAuthority?: ReturnType<typeof workspaceMoodboardImageAuthority>,
 ): GenerationTaskContextRequest {
   const task = {
     id: OWNERSHIP.taskId,
@@ -195,6 +214,9 @@ function resourceRequest(
     payload: {
       version: 2,
       ...(agent === undefined ? {} : { agent }),
+      ...(reviewerAuthorityAgent === undefined ? {} : { reviewerAuthorityAgent }),
+      ...(reviewer === undefined ? {} : { reviewer }),
+      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
       operation: {
         operation: "create",
         nodeId: "resource-node-1",
@@ -240,7 +262,7 @@ function resourceRequest(
   } as unknown as GenerationTaskContextRequest;
 }
 
-test("Resource execution profile freezes one settings observation without persisting credentials", async () => {
+test("Resource execution profile preserves frozen Research and reviewer principals across mutable settings", async () => {
   let current = settings({
     visualQaAgentCommand: "claude",
     visualQaModel: "legacy-reviewer-must-not-override-the-frozen-task",
@@ -262,38 +284,73 @@ test("Resource execution profile freezes one settings observation without persis
   const load = createProductionResourceExecutionProfileLoader({ store: fakeStore });
 
   const frozenAgent = {
-    providerId: "codebuddy" as const,
-    command: "codebuddy" as const,
+    providerId: "codex" as const,
+    command: "codex" as const,
     model: "gpt-5.6-sol",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
   };
-  const first = await load(resourceRequest("research", frozenAgent), new AbortController().signal);
+  const frozenReviewer = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer" as const,
+      baseUrl: "https://api.anthropic.example/v1",
+      credentialSource: "anthropic-profile" as const,
+      credentialRequired: true,
+    },
+  };
+  const first = await load(
+    resourceRequest("research", frozenAgent, frozenReviewer),
+    new AbortController().signal,
+  );
   current = settings({
     agentCommand: "codex",
     model: "gpt-5.4",
     apiBaseUrl: "https://api.openai.example/v1",
     apiKey: "new-secret",
     aiProviderId: "openai",
-    aiProviderProfiles: JSON.stringify({ openai: { apiKey: "new-profile-secret", baseUrl: "", models: "", organization: "" } }),
+    aiProviderProfiles: JSON.stringify({
+      anthropic: {
+        enabled: true,
+        baseUrl: "https://api.anthropic.example/v1",
+        apiKey: "rotated-profile-secret",
+        models: "claude-sonnet-4-6",
+        organization: "org-frozen",
+      },
+    }),
   });
-  const second = await load(resourceRequest("research", frozenAgent), new AbortController().signal);
+  const second = await load(
+    resourceRequest("research", frozenAgent, frozenReviewer),
+    new AbortController().signal,
+  );
 
   assert.equal(reads, 2, "each Context materialization observes Settings exactly once");
   assert.deepEqual(first.agent, {
-    command: "codebuddy",
-    providerId: "codebuddy",
+    command: "codex",
+    providerId: "codex",
     model: "gpt-5.6-sol",
     baseUrl: "",
     organization: "",
-    credentialProviderId: "codebuddy",
+    credentialProviderId: "openai",
+    credentialSource: "session",
     credentialRequired: false,
   });
   assert.deepEqual(first.reviewer, {
-    command: "codebuddy",
-    providerId: "codebuddy",
-    model: "gpt-5.6-sol",
-    baseUrl: "",
-    credentialSource: "session",
-    credentialRequired: false,
+    command: "claude",
+    providerId: "claude",
+    model: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.example/v1",
+    credentialSource: "anthropic-profile",
+    credentialRequired: true,
+    credentialAuthority: null,
   });
   assert.equal(first.implementation.requestProtocol, "dezin.resource-agent-request.v1");
   assert.equal(first.implementation.promptProtocol, "dezin.research-generation-prompt.v3");
@@ -305,17 +362,245 @@ test("Resource execution profile freezes one settings observation without persis
   });
   assert.deepEqual(hydrateResourceReviewerExecution(second, current), {
     ...second.reviewer,
-    apiKey: "",
+    apiKey: "rotated-profile-secret",
   });
   assert.equal(first.checksum, second.checksum);
   assert.equal(
     pack(first).hash,
     pack(second).hash,
-    "mutable unrelated provider settings cannot change a frozen CodeBuddy Resource Attempt",
+    "mutable unrelated provider settings cannot change frozen split authority",
   );
   assert.throws(
-    () => profile("research", settings({ apiBaseUrl: "https://user:secret@example.test/v1" })),
+    () => profile("research", settings({
+      apiBaseUrl: "https://user:secret@example.test/v1",
+      aiProviderId: "",
+      aiProviderProfiles: "",
+    })),
     /credential-free/i,
+  );
+  current = settings({
+    aiProviderProfiles: JSON.stringify({
+      anthropic: {
+        enabled: true,
+        baseUrl: "https://drifted-reviewer.example/v1",
+        apiKey: "rotated-profile-secret",
+        models: "claude-sonnet-4-6",
+        organization: "org-frozen",
+      },
+    }),
+  });
+  await assert.rejects(
+    async () => load(
+      resourceRequest("research", frozenAgent, frozenReviewer),
+      new AbortController().signal,
+    ),
+    /changed the frozen Task reviewer endpoint, credential source, or credential requirement/i,
+  );
+  current = settings();
+  await assert.rejects(
+    async () => load(
+      resourceRequest("research", {
+        ...frozenAgent,
+        executionAuthority: {
+          ...frozenAgent.executionAuthority,
+          baseUrl: "https://substituted-research.example/v1",
+        },
+      }, frozenReviewer),
+      new AbortController().signal,
+    ),
+    /session source cannot carry an endpoint, organization, or require a credential/i,
+  );
+});
+
+test("Research materialization retains the Proposal generator as reviewer credential authority", async () => {
+  let current = settings({
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    apiBaseUrl: "https://api.anthropic.example/v1",
+    apiKey: "proposal-agent-secret",
+    aiProviderOrganization: "proposal-agent-org",
+    aiProviderId: "",
+    aiProviderEnabled: false,
+    aiProviderProfiles: "",
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.6-sol",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  });
+  const fakeStore = {
+    getProject: () => ({ id: OWNERSHIP.projectId, archivedAt: null }),
+    getSettings: () => current,
+    workspace: {
+      getWorkspace: () => ({ id: OWNERSHIP.workspaceId, projectId: OWNERSHIP.projectId }),
+      getResourceForProject: () => ({
+        id: OWNERSHIP.targetResourceId,
+        workspaceId: OWNERSHIP.workspaceId,
+        kind: "research",
+        archivedAt: null,
+      }),
+    },
+  } as unknown as Store;
+  const researchAgent = {
+    providerId: "codex" as const,
+    command: "codex" as const,
+    model: "gpt-5.6-sol",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
+  const proposalAgent = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: "claude-sonnet-4-6",
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "https://api.anthropic.example/v1",
+      organization: "proposal-agent-org",
+      credentialProviderId: "anthropic",
+      credentialSource: "agent" as const,
+      credentialRequired: true,
+    },
+  };
+  const reviewer = {
+    providerId: "claude" as const,
+    command: "claude" as const,
+    model: "claude-opus-4-8",
+    executionAuthority: {
+      kind: "reviewer" as const,
+      baseUrl: "https://api.anthropic.example/v1",
+      credentialSource: "agent" as const,
+      credentialRequired: true,
+    },
+  };
+  const load = createProductionResourceExecutionProfileLoader({ store: fakeStore });
+  const request = resourceRequest("research", researchAgent, reviewer, proposalAgent);
+  const first = await load(request, new AbortController().signal);
+  assert.deepEqual(first.agent, {
+    command: "codex",
+    providerId: "codex",
+    model: "gpt-5.6-sol",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "openai",
+    credentialSource: "session",
+    credentialRequired: false,
+  });
+  assert.deepEqual(first.reviewer, {
+    command: "claude",
+    providerId: "claude",
+    model: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.example/v1",
+    credentialSource: "agent",
+    credentialRequired: true,
+    credentialAuthority: {
+      owner: "proposal-generator",
+      providerId: "claude",
+      baseUrl: "https://api.anthropic.example/v1",
+      organization: "",
+      credentialProviderId: "anthropic",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  });
+  current = { ...current, apiKey: "rotated-proposal-agent-secret" };
+  const rotated = await load(request, new AbortController().signal);
+  assert.equal(rotated.checksum, first.checksum);
+  assert.deepEqual(hydrateResourceReviewerExecution(rotated, current), {
+    ...rotated.reviewer,
+    apiKey: "rotated-proposal-agent-secret",
+  });
+});
+
+test("Research execution profile freezes the configured Codex researcher and an independent reviewer", () => {
+  const exact = profile("research", settings({
+    agentCommand: "claude",
+    model: "claude-sonnet-4-6",
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.6-sol",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-opus-4-8",
+  }));
+
+  assert.deepEqual(exact.agent, {
+    command: "codex",
+    providerId: "codex",
+    model: "gpt-5.6-sol",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "openai",
+    credentialSource: "session",
+    credentialRequired: false,
+  });
+  assert.deepEqual(exact.reviewer, {
+    command: "claude",
+    providerId: "claude",
+    model: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.example/v1",
+    credentialSource: "anthropic-profile",
+    credentialRequired: true,
+    credentialAuthority: null,
+  });
+  assert.notEqual(exact.agent.providerId, exact.reviewer.providerId);
+
+  const { checksum, ...body } = exact;
+  assert.equal(checksum, checksumBytes(stableStringify(body)));
+  assert.deepEqual(requireResourceExecutionProfile(pack(exact), {
+    ...OWNERSHIP,
+    resourceKind: "research",
+    adapter: exact.adapter,
+  }), exact);
+
+  const tampered = structuredClone(exact) as any;
+  tampered.agent.model = "substituted-research-model";
+  assert.throws(
+    () => requireResourceExecutionProfile(pack(tampered), {
+      ...OWNERSHIP,
+      resourceKind: "research",
+      adapter: exact.adapter,
+    }),
+    /checksum/i,
+  );
+});
+
+test("Research execution profile falls back to the global Agent only when Research overrides are empty", () => {
+  const fallbackSettings = settings({
+    agentCommand: "codebuddy",
+    model: "gpt-5.6-terra",
+    researchAgentCommand: "   ",
+    researchModel: "   ",
+  });
+  const research = profile("research", fallbackSettings);
+  const moodboard = profile("moodboard", {
+    ...fallbackSettings,
+    researchAgentCommand: "codex",
+    researchModel: "research-model-must-not-affect-moodboard",
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "image-key",
+    imageModel: "fal-ai/flux/dev",
+  });
+
+  assert.deepEqual(research.agent, {
+    command: "codebuddy",
+    providerId: "codebuddy",
+    model: "gpt-5.6-terra",
+    baseUrl: "",
+    organization: "",
+    credentialProviderId: "codebuddy",
+    credentialSource: "session",
+    credentialRequired: false,
+  });
+  assert.deepEqual(moodboard.agent, research.agent);
+  assert.notEqual(
+    research.checksum,
+    moodboard.checksum,
+    "the Resource kind remains part of the exact frozen profile hash",
   );
 });
 
@@ -341,9 +626,13 @@ test("Resource quality reviewer restores only the exact frozen Claude reviewer c
   assert.equal(hydrated.apiKey, "rotated-review-secret");
   assert.equal(hydrated.model, "claude-sonnet-4-6");
   assert.doesNotMatch(stableStringify(exact), /profile-secret|rotated-review-secret/);
+  assert.equal(hydrateResourceReviewerExecution(exact, {
+    ...frozenSettings,
+    visualQaAgentCommand: "codex",
+    visualQaModel: "mutable-selection-must-not-replace-frozen-reviewer",
+  }).apiKey, "profile-secret");
 
   for (const drift of [
-    { visualQaModel: "claude-opus-4-8" },
     { aiProviderProfiles: JSON.stringify({
       anthropic: {
         enabled: true,
@@ -357,17 +646,58 @@ test("Resource quality reviewer restores only the exact frozen Claude reviewer c
   ] satisfies Partial<Settings>[]) {
     assert.throws(
       () => hydrateResourceReviewerExecution(exact, { ...frozenSettings, ...drift }),
-      /does not match the frozen Attempt/,
+      /unavailable|incompatible/,
     );
   }
 });
 
-test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer identity", async () => {
+test("Resource Agent and reviewer reject same-source credential-requirement drift", () => {
+  const endpoint = "https://api.anthropic.example/v1";
+  const anthropicProfiles = (apiKey: string) => JSON.stringify({
+    anthropic: {
+      enabled: true,
+      baseUrl: endpoint,
+      apiKey,
+      models: "claude-sonnet-4-6",
+      organization: "org-frozen",
+    },
+  });
+  const frozenSettings = settings({
+    apiKey: "",
+    aiProviderProfiles: anthropicProfiles(""),
+    visualQaAgentCommand: "claude",
+  });
+  const frozen = profile("research", frozenSettings);
+  const live = {
+    ...frozenSettings,
+    aiProviderProfiles: anthropicProfiles("newly-configured-key"),
+  };
+
+  assert.equal(frozen.agent.credentialSource, "provider-profile");
+  assert.equal(frozen.agent.credentialRequired, false);
+  assert.equal(frozen.reviewer.credentialSource, "anthropic-profile");
+  assert.equal(frozen.reviewer.credentialRequired, false);
+  assert.throws(
+    () => hydrateResourceAgentExecution(frozen, live),
+    /credential.*unavailable/i,
+  );
+  assert.throws(
+    () => hydrateResourceReviewerExecution(frozen, live),
+    /unavailable|incompatible/i,
+  );
+});
+
+test("Resource execution profile keeps an explicitly frozen reviewer independent from the Task Agent", async () => {
   const current = settings({
     agentCommand: "claude",
     model: "stale-global-model",
     visualQaAgentCommand: "claude",
     visualQaModel: "stale-global-reviewer",
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "image-key",
+    imageModel: "fal-ai/flux/dev",
   });
   const fakeStore = {
     getProject: () => ({ id: OWNERSHIP.projectId, archivedAt: null }),
@@ -387,17 +717,36 @@ test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer
       providerId: "codex",
       command: "codex",
       model: "gpt-5.4-mini",
-    }),
+      executionAuthority: {
+        kind: "generator",
+        baseUrl: "",
+        organization: "",
+        credentialProviderId: "openai",
+        credentialSource: "session",
+        credentialRequired: false,
+      },
+    }, {
+      providerId: "claude",
+      command: "claude",
+      model: "claude-opus-4-8",
+      executionAuthority: {
+        kind: "reviewer",
+        baseUrl: "https://api.anthropic.example/v1",
+        credentialSource: "anthropic-profile",
+        credentialRequired: true,
+      },
+    }, undefined, workspaceMoodboardImageAuthority(current)),
     new AbortController().signal,
   );
 
   assert.deepEqual(frozen.reviewer, {
-    command: "codex",
-    providerId: "codex",
-    model: "gpt-5.4-mini",
-    baseUrl: "",
-    credentialSource: "session",
-    credentialRequired: false,
+    command: "claude",
+    providerId: "claude",
+    model: "claude-opus-4-8",
+    baseUrl: "https://api.anthropic.example/v1",
+    credentialSource: "anthropic-profile",
+    credentialRequired: true,
+    credentialAuthority: null,
   });
   assert.deepEqual(frozen.agent, {
     command: "codex",
@@ -406,6 +755,7 @@ test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer
     baseUrl: "",
     organization: "",
     credentialProviderId: "openai",
+    credentialSource: "session",
     credentialRequired: false,
   });
   assert.doesNotMatch(stableStringify(frozen), /must-never-enter-context|api\\.anthropic/);
@@ -417,7 +767,7 @@ test("Resource execution profile keeps a frozen Codex Task on the Codex reviewer
     visualQaModel: "gpt-5.4-mini",
   }), {
     ...frozen.reviewer,
-    apiKey: "",
+    apiKey: "profile-secret",
   });
 });
 
@@ -440,6 +790,7 @@ test("Codex Resource execution freezes host login even when project provider BYO
     baseUrl: "",
     organization: "",
     credentialProviderId: "openai",
+    credentialSource: "session",
     credentialRequired: false,
   });
   assert.doesNotMatch(
@@ -457,7 +808,7 @@ test("Codex Resource execution freezes host login even when project provider BYO
   });
 });
 
-test("legacy Codex Resource profiles hydrate through host login without reusing frozen BYOK", () => {
+test("ambiguous legacy Codex Resource profiles fail closed instead of reusing frozen BYOK", () => {
   const current = profile("research", settings({
     agentCommand: "codex",
     model: "gpt-5.4-mini",
@@ -469,19 +820,16 @@ test("legacy Codex Resource profiles hydrate through host login without reusing 
   const { checksum: _checksum, ...legacyBody } = legacy;
   legacy.checksum = checksumBytes(stableStringify(legacyBody));
 
-  assert.deepEqual(hydrateResourceAgentExecution(legacy, settings({
-    agentCommand: "codex",
-    model: "gpt-5.4-mini",
-    apiBaseUrl: "",
-    apiKey: "",
-    aiProviderOrganization: "",
-  })), {
-    ...legacy.agent,
-    baseUrl: "",
-    organization: "",
-    credentialRequired: false,
-    apiKey: "",
-  });
+  assert.throws(
+    () => hydrateResourceAgentExecution(legacy, settings({
+      agentCommand: "codex",
+      model: "gpt-5.4-mini",
+      apiBaseUrl: "",
+      apiKey: "",
+      aiProviderOrganization: "",
+    })),
+    /Resource execution Agent identity is invalid/i,
+  );
 });
 
 test("Resource execution profile rejects a mismatched frozen Task Agent identity", () => {
@@ -526,12 +874,13 @@ test("Moodboard execution profile freezes image semantics and hydrates only the 
   });
   const exact = profile("moodboard", frozenSettings);
   assert.deepEqual(exact.imageGeneration, {
-    protocol: "dezin.resource-image-generation.v1",
+    protocol: "dezin.resource-image-generation.v2",
     enabled: true,
     providerId: "fal",
     baseUrl: "https://images.example.test/v1",
     model: "fal-ai/flux/dev",
     apiVersion: "image-api-v1",
+    credentialSource: "global-image",
     credentialRequired: true,
   });
   assert.doesNotMatch(stableStringify(exact), /frozen-current-secret/);
@@ -548,16 +897,135 @@ test("Moodboard execution profile freezes image semantics and hydrates only the 
   ] satisfies Partial<Settings>[]) {
     assert.throws(
       () => hydrateResourceImageGeneration(exact, { ...frozenSettings, ...drift }),
-      /does not match the frozen Attempt/,
+      /match the frozen Moodboard image/,
     );
   }
+  assert.throws(
+    () => hydrateResourceImageGeneration(exact, {
+      ...frozenSettings,
+      aiProviderProfiles: JSON.stringify({
+        fal: {
+          enabled: true,
+          baseUrl: frozenSettings.imageApiBaseUrl,
+          apiKey: "new-profile-secret",
+          models: frozenSettings.imageModel,
+          organization: frozenSettings.aiProviderOrganization,
+        },
+      }),
+    }),
+    /credential source/,
+  );
   assert.throws(
     () => hydrateResourceImageGeneration(exact, {
       ...frozenSettings,
       imageApiKey: "",
       imageApiKeyConfigured: false,
     }),
-    /credential.*unavailable/i,
+    /configured credential|credential.*unavailable/i,
+  );
+
+  const profileCredentialSettings = settings({
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    aiProviderProfiles: JSON.stringify({
+      fal: {
+        enabled: true,
+        baseUrl: "https://images.example.test/v1",
+        apiKey: "profile-secret",
+        models: "fal-ai/flux/dev",
+        organization: "image-api-v1",
+      },
+    }),
+    imageApiBaseUrl: "https://images.example.test/v1",
+    imageApiKey: "global-fallback-must-not-be-used",
+    imageModel: "fal-ai/flux/dev",
+  });
+  const profileCredential = profile("moodboard", profileCredentialSettings);
+  assert.equal(profileCredential.imageGeneration?.credentialSource, "provider-profile");
+  assert.throws(
+    () => hydrateResourceImageGeneration(profileCredential, {
+      ...profileCredentialSettings,
+      aiProviderProfiles: JSON.stringify({
+        fal: {
+          enabled: true,
+          baseUrl: "https://images.example.test/v1",
+          apiKey: "",
+          models: "fal-ai/flux/dev",
+          organization: "image-api-v1",
+        },
+      }),
+    }),
+    /credential source|unavailable/i,
+  );
+});
+
+test("Moodboard execution profile rejects a checksum-valid disabled image policy at the Context boundary", () => {
+  const exact = profile("moodboard", settings({
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "",
+    imageApiKey: "image-secret",
+    imageModel: "fal-ai/flux/dev",
+  }));
+  const disabled = structuredClone(exact) as any;
+  disabled.imageGeneration.enabled = false;
+  const { checksum: _oldChecksum, ...body } = disabled;
+  disabled.checksum = checksumBytes(stableStringify(body));
+
+  assert.throws(
+    () => requireResourceExecutionProfile(pack(disabled), {
+      ...OWNERSHIP,
+      resourceKind: "moodboard",
+      adapter: exact.adapter,
+    }),
+    /enabled|image generation/i,
+  );
+  assert.throws(
+    () => hydrateResourceImageGeneration(disabled, settings({
+      aiProviderId: "fal",
+      aiProviderEnabled: true,
+      imageApiBaseUrl: "",
+      imageApiKey: "image-secret",
+      imageModel: "fal-ai/flux/dev",
+    })),
+    /enabled|image generation/i,
+  );
+});
+
+test("Moodboard Context extraction binds the checksum-valid profile to the exact Task image authority", () => {
+  const exact = profile("moodboard", settings({
+    aiProviderId: "fal",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "",
+    imageApiKey: "image-secret",
+    imageModel: "fal-ai/flux/dev",
+  }));
+  const mismatched = structuredClone(pack(exact));
+  const target = JSON.parse(mismatched.items[0]!.content) as any;
+  target.payload.moodboardImageAuthority.model = "fal-ai/flux/pro";
+  mismatched.items[0]!.content = stableStringify(target);
+  mismatched.items[0]!.checksum = checksumBytes(mismatched.items[0]!.content);
+  const body = {
+    protocol: "dezin-context-pack-v1" as const,
+    workspaceId: mismatched.workspaceId,
+    graphRevision: mismatched.graphRevision,
+    target: mismatched.target,
+    intent: mismatched.intent,
+    messageChecksum: mismatched.messageChecksum,
+    items: mismatched.items,
+    omissions: mismatched.omissions,
+    tokenEstimate: mismatched.tokenEstimate,
+  };
+  mismatched.hash = checksumBytes(stableStringify(body));
+  mismatched.id = `context-pack-${mismatched.hash}`;
+
+  assert.throws(
+    () => requireResourceExecutionProfile(mismatched, {
+      ...OWNERSHIP,
+      resourceKind: "moodboard",
+      adapter: exact.adapter,
+    }),
+    /does not match the exact Task Moodboard image authority/i,
   );
 });
 

@@ -21,6 +21,10 @@ import { createProductionResourceRuntimePorts } from "../src/orchestration/produ
 import type { SafeBoundedExternalFetcher } from "../src/resource-revision-source.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
+import {
+  frozenGeneratorFixture,
+  frozenReviewerFixture,
+} from "./support/generation-execution-authority-fixture.ts";
 
 const TEST_CODEX_EXECUTABLE = "/trusted/codex/install/bin/codex";
 const CLOCK_ACCELERATION = 100;
@@ -112,6 +116,22 @@ async function runTransportFailureScenario(scenario: TransportFailureScenario): 
       }),
       researchEnabled: true,
     });
+    const settings = store.getSettings();
+    const generationAgent = frozenGeneratorFixture(settings, {
+      providerId: "codex",
+      command: "codex",
+      model: "gpt-5.4-mini",
+    });
+    const reviewerAgent = frozenReviewerFixture(settings, {
+      providerId: "claude",
+      command: "claude",
+      model: null,
+    }, generationAgent);
+    const researchAgent = frozenGeneratorFixture(settings, {
+      providerId: "codex",
+      command: "codex",
+      model: "gpt-5.4-mini",
+    });
 
     const resourceId = "decision-research";
     const nodeId = "decision-research-node";
@@ -175,11 +195,9 @@ async function runTransportFailureScenario(scenario: TransportFailureScenario): 
       layoutOperations: [],
       generation: {
         kind: "workspace-generation",
-        agent: {
-          providerId: "codex",
-          command: "codex",
-          model: "gpt-5.4-mini",
-        },
+        agent: generationAgent,
+        reviewerAgent,
+        researchAgent,
         resourceOperations: [{
           operation: "revise",
           nodeId,

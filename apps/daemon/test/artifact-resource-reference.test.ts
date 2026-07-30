@@ -9,7 +9,7 @@ import {
   readdirSync,
   rmSync,
 } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,6 +28,45 @@ const VALID_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const VALID_JPEG = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z",
+  "base64",
+);
+
+interface ProjectReferenceFileFixture {
+  readonly path: string;
+  readonly mimeType: string;
+  readonly byteLength: number;
+  readonly checksum: string;
+  readonly encoding: "utf8" | "base64";
+  readonly content: string;
+}
+
+function projectReferencePayload(files: readonly ProjectReferenceFileFixture[]): Buffer {
+  return Buffer.from(`${stableStringify({
+    protocol: "dezin.project-reference-bundle.v1",
+    source: {
+      project: { id: "source-project", name: "Source", mode: "standard" },
+      workspaceId: "source-workspace",
+      snapshotId: "source-snapshot",
+      artifactId: "source-artifact",
+      artifactRevisionId: "source-revision",
+    },
+    design: {
+      artifact: {},
+      track: {},
+      revision: {},
+      kernelRevision: {},
+      assembly: {},
+      dependencies: [],
+      resourcePins: [],
+      graphNode: null,
+      adjacentEdges: [],
+      adjacentNodes: [],
+      files,
+    },
+  })}\n`, "utf8");
+}
 
 function removeFixture(path: string): void {
   const makeWritable = (entry: string): void => {
@@ -365,6 +404,74 @@ test("Artifact Agent sidecar exposes exact uploaded PNG bytes and hides them fro
   }
 });
 
+test("Artifact Agent sidecar exposes exact uploaded JPEG bytes instead of prompt-only metadata", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-artifact-jpeg-reference-"));
+  const candidateWorktreeDir = join(dataDir, "candidate");
+  const worktreeDir = join(
+    candidateWorktreeDir,
+    "workspaces",
+    "workspace-1",
+    "artifacts",
+    "artifact-1",
+  );
+  const store = new Store(join(dataDir, "store.sqlite"));
+  try {
+    const project = store.createProject({ name: "JPEG Artifact reference", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const exact = await publishedFile({
+      store,
+      dataDir,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      bytes: VALID_JPEG,
+      mimeType: "image/jpeg",
+      sourceType: "uploaded-file",
+    });
+    await mkdir(worktreeDir, { recursive: true });
+    await mkdir(join(worktreeDir, ".sharingan"));
+    await writeFile(
+      join(worktreeDir, ".sharingan", "pages.json"),
+      "{\"protocol\":\"dezin.sharingan.fixture.v1\"}\n",
+    );
+    const fence = await createProductionArtifactResourceReferenceMaterializer({ store, dataDir })
+      .materializeExactReferences({
+        references: exactArtifactResourceReferences({
+          claim: claim({
+            workspaceId: workspace.id,
+            resourceId: exact.resourceId,
+            revisionId: exact.revisionId,
+          }),
+          contextPack: contextPack({
+            workspaceId: workspace.id,
+            resourceId: exact.resourceId,
+            revisionId: exact.revisionId,
+            manifestChecksum: exact.sealed.manifestChecksum,
+            sourceType: "uploaded-file",
+          }),
+        }),
+        worktreeDir,
+        signal: AbortSignal.timeout(5_000),
+      });
+    assert.ok(fence);
+    const bytes = await readFile(join(worktreeDir, fence.references[0]!.payloadPath));
+    assert.deepEqual(bytes, VALID_JPEG);
+    assert.deepEqual([...bytes.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+    assert.equal(existsSync(join(candidateWorktreeDir, ".dezin", "references")), false);
+    assert.equal(
+      await readFile(join(worktreeDir, ".sharingan", "pages.json"), "utf8"),
+      "{\"protocol\":\"dezin.sharingan.fixture.v1\"}\n",
+    );
+    await fence.dispose();
+    assert.equal(
+      await readFile(join(worktreeDir, ".sharingan", "pages.json"), "utf8"),
+      "{\"protocol\":\"dezin.sharingan.fixture.v1\"}\n",
+    );
+  } finally {
+    store.close();
+    removeFixture(dataDir);
+  }
+});
+
 test("Artifact Agent project-reference sidecar extracts exact shared and component bytes", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-artifact-project-reference-"));
   const worktreeDir = join(dataDir, "candidate");
@@ -404,29 +511,7 @@ test("Artifact Agent project-reference sidecar extracts exact shared and compone
       content: sharedBinary.toString("base64"),
     });
     files.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
-    const payload = Buffer.from(`${stableStringify({
-      protocol: "dezin.project-reference-bundle.v1",
-      source: {
-        project: { id: "source-project", name: "Source", mode: "standard" },
-        workspaceId: "source-workspace",
-        snapshotId: "source-snapshot",
-        artifactId: "source-artifact",
-        artifactRevisionId: "source-revision",
-      },
-      design: {
-        artifact: {},
-        track: {},
-        revision: {},
-        kernelRevision: {},
-        assembly: {},
-        dependencies: [],
-        resourcePins: [],
-        graphNode: null,
-        adjacentEdges: [],
-        adjacentNodes: [],
-        files,
-      },
-    })}\n`, "utf8");
+    const payload = projectReferencePayload(files);
     assert.ok(payload.byteLength > 8 * 1024 * 1024, "fixture must exercise the compound JSON override");
     const exact = await publishedFile({
       store,
@@ -476,6 +561,177 @@ test("Artifact Agent project-reference sidecar extracts exact shared and compone
       sharedBinary,
     );
     await fence.dispose();
+  } finally {
+    store.close();
+    removeFixture(dataDir);
+  }
+});
+
+test("Artifact Agent project-reference materialization rejects unsafe paths, types, digests, and budgets", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-artifact-project-reference-adversarial-"));
+  const store = new Store(join(dataDir, "store.sqlite"));
+  try {
+    const project = store.createProject({ name: "Adversarial Project references", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const emptyChecksum = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    const scenarios: ReadonlyArray<{
+      readonly name: string;
+      readonly files: readonly ProjectReferenceFileFixture[];
+      readonly error: RegExp;
+    }> = [
+      {
+        name: "path traversal",
+        files: [{
+          path: "../escape.bin",
+          mimeType: "application/octet-stream",
+          byteLength: 1,
+          checksum: createHash("sha256").update(Buffer.from([0x41])).digest("hex"),
+          encoding: "base64",
+          content: Buffer.from([0x41]).toString("base64"),
+        }],
+        error: /unsafe file path/i,
+      },
+      {
+        name: "immutable inner checksum drift",
+        files: [{
+          path: "src/reference.bin",
+          mimeType: "application/octet-stream",
+          byteLength: 3,
+          checksum: "0".repeat(64),
+          encoding: "base64",
+          content: Buffer.from("abc").toString("base64"),
+        }],
+        error: /bytes do not match.*exact digest/i,
+      },
+      {
+        name: "invalid file MIME type",
+        files: [{
+          path: "src/reference.bin",
+          mimeType: "not-a-mime",
+          byteLength: 1,
+          checksum: createHash("sha256").update(Buffer.from([0x42])).digest("hex"),
+          encoding: "base64",
+          content: Buffer.from([0x42]).toString("base64"),
+        }],
+        error: /metadata is invalid/i,
+      },
+      {
+        name: "per-file byte budget overflow",
+        files: [{
+          path: "src/reference.bin",
+          mimeType: "application/octet-stream",
+          byteLength: (16 * 1024 * 1024) + 1,
+          checksum: emptyChecksum,
+          encoding: "base64",
+          content: "",
+        }],
+        error: /metadata is invalid/i,
+      },
+      {
+        name: "file-count overflow",
+        files: Array.from({ length: 513 }, (_, index) => ({
+          path: `src/file-${index.toString().padStart(4, "0")}.bin`,
+          mimeType: "application/octet-stream",
+          byteLength: 0,
+          checksum: emptyChecksum,
+          encoding: "base64" as const,
+          content: "",
+        })),
+        error: /file list is invalid/i,
+      },
+    ];
+
+    for (const [index, scenario] of scenarios.entries()) {
+      await t.test(scenario.name, async () => {
+        const worktreeDir = join(dataDir, `candidate-${index}`);
+        const payload = projectReferencePayload(scenario.files);
+        const exact = await publishedFile({
+          store,
+          dataDir,
+          projectId: project.id,
+          workspaceId: workspace.id,
+          bytes: payload,
+          mimeType: "application/json",
+          sourceType: "project-reference",
+        });
+        await mkdir(worktreeDir, { recursive: true });
+        const references = exactArtifactResourceReferences({
+          claim: claim({
+            workspaceId: workspace.id,
+            resourceId: exact.resourceId,
+            revisionId: exact.revisionId,
+          }),
+          contextPack: contextPack({
+            workspaceId: workspace.id,
+            resourceId: exact.resourceId,
+            revisionId: exact.revisionId,
+            manifestChecksum: exact.sealed.manifestChecksum,
+            sourceType: "project-reference",
+          }),
+        });
+        await assert.rejects(
+          createProductionArtifactResourceReferenceMaterializer({ store, dataDir })
+            .materializeExactReferences({
+              references,
+              worktreeDir,
+              signal: AbortSignal.timeout(5_000),
+            }),
+          scenario.error,
+        );
+        assert.equal(existsSync(join(worktreeDir, ".dezin", "references")), false);
+        assert.equal(existsSync(join(dataDir, "escape.bin")), false);
+      });
+    }
+  } finally {
+    store.close();
+    removeFixture(dataDir);
+  }
+});
+
+test("Artifact Agent reference materialization rejects a symlinked reserved parent without writing outside cwd", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-artifact-reference-symlink-"));
+  const worktreeDir = join(dataDir, "candidate");
+  const outsideDir = join(dataDir, "outside");
+  const store = new Store(join(dataDir, "store.sqlite"));
+  try {
+    const project = store.createProject({ name: "Symlink reference boundary", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const exact = await publishedFile({
+      store,
+      dataDir,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      bytes: VALID_PNG,
+      mimeType: "image/png",
+      sourceType: "uploaded-file",
+    });
+    await mkdir(worktreeDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await symlink(outsideDir, join(worktreeDir, ".dezin"), "dir");
+    const references = exactArtifactResourceReferences({
+      claim: claim({
+        workspaceId: workspace.id,
+        resourceId: exact.resourceId,
+        revisionId: exact.revisionId,
+      }),
+      contextPack: contextPack({
+        workspaceId: workspace.id,
+        resourceId: exact.resourceId,
+        revisionId: exact.revisionId,
+        manifestChecksum: exact.sealed.manifestChecksum,
+        sourceType: "uploaded-file",
+      }),
+    });
+    await assert.rejects(
+      createProductionArtifactResourceReferenceMaterializer({ store, dataDir })
+        .materializeExactReferences({
+          references,
+          worktreeDir,
+          signal: AbortSignal.timeout(5_000),
+        }),
+      /parent path is unsafe/i,
+    );
+    assert.equal(existsSync(join(outsideDir, "references")), false);
   } finally {
     store.close();
     removeFixture(dataDir);

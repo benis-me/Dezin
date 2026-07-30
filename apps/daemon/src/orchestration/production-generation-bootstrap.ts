@@ -93,6 +93,7 @@ export function createProductionGenerationBootstrap(
     contextPacks,
     agent: resourceRuntime.agent,
     researchEvidence: resourceRuntime.researchEvidence,
+    researchEvidenceSelection: resourceRuntime.researchEvidenceSelection,
     researchGroundedness: resourceRuntime.researchGroundedness,
     moodboardImages: resourceRuntime.moodboardImages,
     moodboardQuality: resourceRuntime.moodboardQuality,
@@ -103,6 +104,13 @@ export function createProductionGenerationBootstrap(
     store: options.store.workspace,
     implementations: resourceImplementations,
     contextPacks,
+    progress(claim, phase) {
+      const event = options.store.workspace.recordGenerationTaskProgress({
+        ...claim.lease,
+        phase,
+      });
+      events.notify(event.planId);
+    },
     attemptContextAuthority: createStoreBackedMoodboardAttemptContextAuthority({
       projectCatalog: options.store,
       workspaceStore: options.store.workspace,
@@ -122,6 +130,13 @@ export function createProductionGenerationBootstrap(
       options.repositoryDirForWorkspace(workspaceId, signal)
     ),
     sharinganCaptures,
+    progress(claim, phase) {
+      const event = options.store.workspace.recordGenerationTaskProgress({
+        ...claim.lease,
+        phase,
+      });
+      events.notify(event.planId);
+    },
     reportError: options.onError,
     ...(options.createArtifactRunner === undefined
       ? {}

@@ -19,6 +19,10 @@ import { createProductionGenerationBootstrap } from "../src/orchestration/produc
 import { createProductionResourceRuntimePorts } from "../src/orchestration/production-resource-runtime.ts";
 import type { SafeBoundedExternalFetcher } from "../src/resource-revision-source.ts";
 import { waitForDurableProgress } from "./support/wait-for-durable-progress.ts";
+import {
+  frozenGeneratorFixture,
+  frozenReviewerFixture,
+} from "./support/generation-execution-authority-fixture.ts";
 
 const TEST_CODEX_EXECUTABLE = "/trusted/codex/install/bin/codex";
 const WEB_URL_1 = "https://www.w3.org/WAI/tutorials/images/";
@@ -240,7 +244,7 @@ function assertPriorResearchExcludedFromCurrentEvidence(
   assert.deepEqual(spawner.envelopes[1]!.repair?.rejectionAudit?.gate?.observed, {
     verifiedWebSourceCount: 1,
     evidenceFindingCount: 3,
-    evidenceDirectionCount: 2,
+    evidenceDirectionCount: 0,
     groundednessVerifierAvailable: true,
   });
 }
@@ -256,10 +260,30 @@ async function runResearchAttemptBoundary(input: {
   });
   const initialWorkspace = store.workspace.ensureWorkspaceRecord(project.id);
   store.updateSettings({
-    agentCommand: "codex",
-    model: "gpt-5.4-mini",
-    aiProviderId: "openai",
+    agentCommand: "claude",
+    model: "claude-generation-model",
+    aiProviderId: "anthropic",
     researchEnabled: true,
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+    visualQaAgentCommand: "claude",
+    visualQaModel: "claude-generation-model",
+  });
+  const settings = store.getSettings();
+  const generationAgent = frozenGeneratorFixture(settings, {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-generation-model",
+  });
+  const reviewerAgent = frozenReviewerFixture(settings, {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-generation-model",
+  }, generationAgent);
+  const researchAgent = frozenGeneratorFixture(settings, {
+    providerId: "codex",
+    command: "codex",
+    model: "gpt-5.4-mini",
   });
   const resourceId = "decision-research";
   const nodeId = "decision-research-node";
@@ -322,11 +346,9 @@ async function runResearchAttemptBoundary(input: {
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
-      agent: {
-        providerId: "codex",
-        command: "codex",
-        model: "gpt-5.4-mini",
-      },
+      agent: generationAgent,
+      reviewerAgent,
+      researchAgent,
       resourceOperations: [{
         operation: "revise",
         nodeId,
@@ -390,17 +412,33 @@ async function runResearchAttemptBoundary(input: {
         resolveStructuredAgentSandboxExecutable: () => "/usr/bin/sandbox-exec",
         reviewTransport: async (request, options) => {
           assert.equal(options?.resolveRegisteredExecutable?.("codex"), TEST_CODEX_EXECUTABLE);
+          assert.equal(request.command, "claude");
           reviewRequests.push(request as JsonRecord);
           const message = JSON.parse(request.message) as JsonRecord;
+          if (message.protocol === "dezin.research-evidence-selection-request.v1") {
+            return {
+              providerId: "claude",
+              text: JSON.stringify({
+                decisions: message.catalog.sources.flatMap((source: JsonRecord) =>
+                  source.queries.map((query: JsonRecord) => ({
+                    findingId: query.findingId,
+                    supportIndex: query.supportIndex,
+                    sourceId: source.sourceId,
+                    selectedSpanId: source.spans[0]?.spanId ?? null,
+                  }))),
+              }),
+            };
+          }
           return {
-            providerId: "codex",
+            providerId: "claude",
             text: JSON.stringify({
               verdicts: message.verdicts.map((claim: JsonRecord) => ({
                 findingId: claim.findingId,
                 supported: claim.supports.length > 0,
-                supportReceiptIds: claim.supports.map(
-                  (support: JsonRecord) => support.supportReceiptId,
-                ),
+                supportVerdicts: claim.supports.map((support: JsonRecord) => ({
+                  supportReceiptId: support.supportReceiptId,
+                  directlySupports: true,
+                })),
                 rationale: "The exact canonical quote directly supports the bounded claim.",
               })),
             }),
@@ -463,7 +501,14 @@ async function runResearchAttemptBoundary(input: {
     );
     assertPriorResearchExcludedFromCurrentEvidence(spawner, resourceId, priorRevisionId);
     assert.equal(spawnerOptions.length, 2);
-    assert.equal(reviewRequests.length, 2);
+    assert.deepEqual(reviewRequests.map((request) => {
+      const message = JSON.parse(request.message) as JsonRecord;
+      return message.protocol ?? "dezin.research-groundedness-request.v1";
+    }), [
+      "dezin.research-groundedness-request.v1",
+      "dezin.research-evidence-selection-request.v1",
+      "dezin.research-groundedness-request.v1",
+    ]);
     assert.equal(fetchCounts.get(WEB_URL_1), 2);
     assert.equal(fetchCounts.get(WEB_URL_2), 2);
     assert.equal(errors.length, 0);
@@ -476,7 +521,7 @@ async function runResearchAttemptBoundary(input: {
       assert.deepEqual((resourceTask.error?.details as JsonRecord)?.observed, {
         verifiedWebSourceCount: 1,
         evidenceFindingCount: 3,
-        evidenceDirectionCount: 2,
+        evidenceDirectionCount: 0,
         groundednessVerifierAvailable: true,
       });
       assert.deepEqual(attempts.map((attempt) => ({

@@ -137,6 +137,7 @@ export function MoodboardScreen({
             activeConversationId={board.conversationId}
             busy={board.agentBusy}
             agents={board.agents}
+            agentDetectionError={board.agentDetectionError}
             agent={board.runAgent}
             model={board.runModel}
             onBack={onBack}

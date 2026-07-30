@@ -12,6 +12,7 @@ import {
   normalizeGenerationTaskAttemptInput,
   normalizeGenerationTaskAttemptLease,
   normalizeHeartbeatGenerationTaskAttemptInput,
+  normalizeRecordGenerationTaskProgressInput,
   normalizeGenerationTaskIntent,
   normalizeListGenerationPlanEventsInput,
   normalizeTryClaimGenerationTaskAttemptInput,
@@ -836,10 +837,44 @@ test("Generation Plan event codecs enforce the exhaustive task/plan event bounda
     payload: { attempt: 1 },
     createdAt: 200,
   });
-  assert.throws(() => asGenerationPlanEvent({
+  const progress = {
+    taskId: "task-page-home",
+    workspaceId: "workspace-1",
+    attempt: 1,
+    ownerId: "scheduler-1",
+    leaseToken: "lease-token-1",
+    phase: "verifying-sources" as const,
+  };
+  assert.deepEqual(normalizeRecordGenerationTaskProgressInput(progress), progress);
+  assert.deepEqual(asGenerationPlanEvent({
     plan_id: "plan-1",
     workspace_id: "workspace-1",
     sequence: 6,
+    task_id: "task-page-home",
+    type: "task-progress",
+    payload_json: "{\"attempt\":1,\"phase\":\"verifying-sources\"}",
+    created_at: 201,
+  }).payload, {
+    attempt: 1,
+    phase: "verifying-sources",
+  });
+  assert.throws(
+    () => normalizeRecordGenerationTaskProgressInput({ ...progress, phase: "reading-secret-environment" }),
+    /phase is unsupported/,
+  );
+  assert.throws(() => asGenerationPlanEvent({
+    plan_id: "plan-1",
+    workspace_id: "workspace-1",
+    sequence: 7,
+    task_id: "task-page-home",
+    type: "task-progress",
+    payload_json: "{\"attempt\":1,\"phase\":\"reviewing\",\"stdout\":\"secret\"}",
+    created_at: 202,
+  }), /unsupported field stdout/);
+  assert.throws(() => asGenerationPlanEvent({
+    plan_id: "plan-1",
+    workspace_id: "workspace-1",
+    sequence: 8,
     task_id: "task-page-home",
     type: "plan-failed",
     payload_json: "{}",

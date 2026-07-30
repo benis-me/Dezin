@@ -59,7 +59,14 @@ export interface StandardArtifactExecutionResult {
 }
 
 export interface StandardArtifactExecutionEvent {
-  type: "turn-start" | "activity" | "turn-end" | "candidate" | "quality" | "restore";
+  type:
+    | "turn-start"
+    | "activity"
+    | "turn-end"
+    | "candidate"
+    | "quality-start"
+    | "quality"
+    | "restore";
   round: number;
   isRepair?: boolean;
   activity?: AgentActivity;
@@ -257,6 +264,7 @@ export async function executeStandardArtifact(
     const repeatedTree = seenTrees.has(candidate.treeHash);
     seenTrees.add(candidate.treeHash);
 
+    input.onEvent?.({ type: "quality-start", round });
     const quality = canonicalQuality(await input.evaluator.evaluate({
       candidate,
       dir: input.transaction.dir,

@@ -1173,10 +1173,61 @@ export interface WorkspaceGenerationCapability {
   required: boolean;
 }
 
+/**
+ * Credential-free generator route frozen by the Proposal-producing turn.
+ * The secret itself is deliberately absent and may only be rebound from the
+ * same credential provider when an Attempt starts.
+ */
+export interface WorkspaceGenerationGeneratorExecutionAuthority {
+  kind: "generator";
+  baseUrl: string;
+  organization: string;
+  credentialProviderId: string;
+  credentialSource: "provider-profile" | "agent" | "session";
+  credentialRequired: boolean;
+}
+
+/**
+ * Credential-free reviewer route frozen independently from the generator.
+ * `credentialSource` distinguishes an explicit Anthropic profile, the global
+ * Project Agent credential pair, and official CLI/session authentication.
+ */
+export interface WorkspaceGenerationReviewerExecutionAuthority {
+  kind: "reviewer";
+  baseUrl: string;
+  credentialSource: "anthropic-profile" | "agent" | "session";
+  credentialRequired: boolean;
+}
+
+export type WorkspaceGenerationExecutionAuthority =
+  | WorkspaceGenerationGeneratorExecutionAuthority
+  | WorkspaceGenerationReviewerExecutionAuthority;
+
+/**
+ * Credential-free image-provider route frozen for generated Moodboards.
+ * Historical Proposals may omit it, but new executable Moodboard generation
+ * must bind one exact authority before approval.
+ */
+export interface WorkspaceGenerationMoodboardImageAuthority {
+  kind: "moodboard-image";
+  protocol: "dezin.workspace-moodboard-image-authority.v1";
+  providerId: string;
+  baseUrl: string;
+  model: string;
+  apiVersion: string;
+  credentialSource: "provider-profile" | "global-image";
+  credentialRequired: boolean;
+}
+
 export interface WorkspaceGenerationAgentSelection {
   providerId: string;
   command: string;
   model: string | null;
+  /**
+   * Optional only for historical Proposals/Tasks. New split Research and
+   * reviewer selections carry one credential-free authority descriptor.
+   */
+  executionAuthority?: WorkspaceGenerationExecutionAuthority;
 }
 
 export interface WorkspaceGenerationPayload {
@@ -1191,8 +1242,20 @@ export interface WorkspaceGenerationPayload {
    * Immutable generating Agent selected when the proposal-producing turn was
    * submitted. Optional only so historical stored Proposals remain readable;
    * new executable mutations and compilation require it.
-   */
+  */
   agent?: WorkspaceGenerationAgentSelection;
+  /**
+   * Immutable Research generator selected from the approved Quality settings.
+   * Optional only for historical stored Proposals that predate split authority.
+   */
+  researchAgent?: WorkspaceGenerationAgentSelection;
+  /**
+   * Immutable independent reviewer selected from the approved Quality settings.
+   * Optional only for historical stored Proposals that predate split authority.
+   */
+  reviewerAgent?: WorkspaceGenerationAgentSelection;
+  /** Optional only for historical Proposals that predate frozen image authority. */
+  moodboardImageAuthority?: WorkspaceGenerationMoodboardImageAuthority;
   resourceOperations: WorkspaceGenerationResourceOperation[];
   artifactPlans: WorkspaceGenerationArtifactPlan[];
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
@@ -1242,6 +1305,8 @@ export interface ArtifactGenerationTaskPayloadV2 extends Record<string, unknown>
   version: 2;
   /** Absent only on legacy Tasks compiled before per-turn Agent selection was durable. */
   agent?: WorkspaceGenerationAgentSelection;
+  /** Absent only on legacy Tasks compiled before reviewer selection was durable. */
+  reviewer?: WorkspaceGenerationAgentSelection;
   artifactPlan: WorkspaceGenerationArtifactPlan;
   dependencyPlans: WorkspaceGenerationDependencyPlan[];
   responsiveFrames: RenderFrameSpec[];
@@ -1253,6 +1318,16 @@ export interface ResourceGenerationTaskPayloadV2 extends Record<string, unknown>
   version: 2;
   /** Absent only on legacy Tasks compiled before per-turn Agent selection was durable. */
   agent?: WorkspaceGenerationAgentSelection;
+  /**
+   * For split-authority Research, the Proposal's normal generator is retained
+   * separately so the shared reviewer credential source can be revalidated
+   * without relabeling the Codex Research Agent.
+   */
+  reviewerAuthorityAgent?: WorkspaceGenerationAgentSelection;
+  /** Absent only on legacy Tasks compiled before reviewer selection was durable. */
+  reviewer?: WorkspaceGenerationAgentSelection;
+  /** Present only for generated Moodboard Tasks. */
+  moodboardImageAuthority?: WorkspaceGenerationMoodboardImageAuthority;
   operation: Extract<WorkspaceGenerationResourceOperation, { revisionPolicy: { kind: "generate" } }>;
   brief: GenerationTaskResourceBrief;
   capabilityDescriptors: WorkspaceGenerationCapability[];
@@ -1718,6 +1793,23 @@ export interface HeartbeatGenerationTaskAttemptInput extends GenerationTaskAttem
   leaseMs: number;
 }
 
+/**
+ * Public, bounded execution phases that may be persisted in the append-only
+ * Generation Plan journal. These values deliberately describe product work,
+ * never provider prompts, process output, credentials, paths, or stack data.
+ */
+export type GenerationTaskProgressPhase =
+  | "generating"
+  | "verifying-sources"
+  | "reviewing"
+  | "repairing"
+  | "generating-assets"
+  | "publishing";
+
+export interface RecordGenerationTaskProgressInput extends GenerationTaskAttemptLease {
+  phase: GenerationTaskProgressPhase;
+}
+
 export interface GenerationTaskAttempt extends GenerationTaskAttemptInput {
   attemptOrigin: GenerationTaskAttemptOrigin;
   predecessorAttempt: number | null;
@@ -1778,6 +1870,7 @@ export type GenerationPlanEventType =
   | "task-blocked-context"
   | "task-materialized"
   | "task-running"
+  | "task-progress"
   | "task-candidate-ready"
   | "task-needs-rebase"
   | "task-rebase-disposition"
@@ -1854,6 +1947,8 @@ export interface GenerationPlanDetail {
   plan: GenerationPlan;
   tasks: GenerationTask[];
   dependencies: GenerationTaskDependency[];
+  /** Ordered durable history. Optional for compatibility with older clients. */
+  events?: GenerationPlanEvent[];
 }
 
 export interface ApprovedProposalResult {

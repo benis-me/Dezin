@@ -1,8 +1,7 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { NodeProps } from "@xyflow/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { ApiProvider } from "../../../lib/api-context.tsx";
-import { makeFakeApi } from "../../../test/fake-api.ts";
 import type { WorkspaceFlowNode, WorkspaceFlowNodeData } from "../workspace-graph-adapter.ts";
 import { ComponentNode } from "./ComponentNode.tsx";
 import { ResourceNode } from "./ResourceNode.tsx";
@@ -138,48 +137,67 @@ describe("semantic relation routing handles", () => {
     expect(screen.getByText("4 findings · 3 directions")).toBeInTheDocument();
   });
 
-  test("Moodboard nodes load the exact authenticated cover Asset as a blob image", async () => {
-    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moodboard-cover");
-    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    const getResourceRevisionBlob = vi.fn(async () => new Blob(["cover"], { type: "image/webp" }));
-    const client = makeFakeApi({ getResourceRevisionBlob });
+  test("a failed exact Resource Revision preview stays visible and can be retried", async () => {
+    const user = userEvent.setup();
+    const onRetryResourcePreview = vi.fn();
+    render(<ResourceNode {...{
+      data: {
+        ...baseData,
+        kind: "resource",
+        name: "Audience research",
+        artifactId: null,
+        resourceId: "research-1",
+        revisionId: "research-revision-1",
+        resourcePreviewStatus: "error",
+        onRetryResourcePreview,
+      },
+      selected: false,
+    } as unknown as NodeProps<WorkspaceFlowNode>} />);
 
-    render(
-      <ApiProvider client={client}>
-        <ResourceNode {...{
-          data: {
-            ...baseData,
-            kind: "resource",
-            name: "Festival moodboard",
-            artifactId: null,
-            resourceId: "moodboard-1",
-            revisionId: "moodboard-revision-1",
-            zoomLevel: "overview",
-            resourceKind: "moodboard",
-            resourcePreview: {
-              kind: "moodboard",
-              boardName: "KITE / Direction A",
-              cover: {
-                assetId: "asset-cover",
-                path: "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
-                alt: "KITE / Direction A cover",
-                width: 1600,
-                height: 900,
-              },
-              assetCount: 7,
+    expect(screen.getByRole("button", { name: "Retry Audience research preview" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry Audience research preview" }));
+    expect(onRetryResourcePreview).toHaveBeenCalledWith("research-1");
+  });
+
+  test("Moodboard nodes render and release the controller-loaded exact cover Blob", async () => {
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moodboard-cover");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const blob = new Blob(["cover"], { type: "image/webp" });
+
+    const { unmount } = render(
+      <ResourceNode {...{
+        data: {
+          ...baseData,
+          kind: "resource",
+          name: "Festival moodboard",
+          artifactId: null,
+          resourceId: "moodboard-1",
+          revisionId: "moodboard-revision-1",
+          zoomLevel: "overview",
+          resourceKind: "moodboard",
+          resourcePreview: {
+            kind: "moodboard",
+            boardName: "KITE / Direction A",
+            cover: {
+              assetId: "asset-cover",
+              path: "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
+              blob,
+              alt: "KITE / Direction A cover",
+              width: 1600,
+              height: 900,
             },
+            assetCount: 7,
           },
-          selected: false,
-        } as unknown as NodeProps<WorkspaceFlowNode>} />
-      </ApiProvider>,
+        },
+        selected: false,
+      } as unknown as NodeProps<WorkspaceFlowNode>} />,
     );
 
     const cover = await screen.findByRole("img", { name: "KITE / Direction A cover" });
     expect(screen.getByText("Moodboard")).toHaveClass("dezin-flow-card__kind");
     expect(cover).toHaveAttribute("src", "blob:moodboard-cover");
-    expect(getResourceRevisionBlob).toHaveBeenCalledWith(
-      "/api/projects/project-1/resources/moodboard-1/revisions/moodboard-revision-1/assets/asset-cover",
-      expect.any(AbortSignal),
-    );
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:moodboard-cover");
   });
 });

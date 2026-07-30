@@ -19,6 +19,7 @@ import type {
   ResourceKind,
   ResourceGenerationTaskPayloadV2,
   WorkspaceGenerationArtifactPlan,
+  WorkspaceGenerationAgentSelection,
   WorkspaceGenerationCapability,
   WorkspaceGenerationDependencyPlan,
   WorkspaceGenerationPayload,
@@ -104,13 +105,16 @@ export const RESOURCE_GENERATION_DEADLINE_BUDGET = Object.freeze({
   imageCallTimeoutMs: 90_000,
   /** Runtime ceiling; the generator derives a smaller live cap after the Agent returns the exact Asset count. */
   maxImageCallTimeoutMs: 5 * 60_000,
-  reviewCallTimeoutMs: 30_000,
+  // Host-login reviewers (notably Codex) regularly need more than 30 seconds
+  // even for a small schema-constrained verdict. Keep this an explicit,
+  // immutable per-call cap and account for the larger reserve below.
+  reviewCallTimeoutMs: 60_000,
   completionReserveMs: 2 * 60_000,
   maxMoodboardAssets: 8,
   taskTimeoutMs: (
     (7 * 60_000)
     + (8 * 90_000)
-    + (8 * 30_000)
+    + (8 * 60_000)
     + (2 * 60_000)
   ),
 } as const);
@@ -436,19 +440,242 @@ function validateV2PrototypePlan(
   }
 }
 
+const GENERATOR_COMMAND_PROVIDERS: Readonly<Record<string, string>> = Object.freeze({
+  claude: "claude",
+  codex: "codex",
+  gemini: "gemini",
+  codebuddy: "codebuddy",
+  "cursor-agent": "cursor-agent",
+  copilot: "copilot",
+  qwen: "qwen",
+  opencode: "opencode",
+  kimi: "kimi",
+  trae: "trae",
+  "trae-cli": "trae",
+  pi: "pi",
+  hermes: "hermes",
+});
+
+function commandProvider(command: string): string | null {
+  const base = command.split(/[\\/]/).pop()?.replace(/\.(?:exe|cmd|bat|ps1)$/i, "") ?? command;
+  return GENERATOR_COMMAND_PROVIDERS[base] ?? null;
+}
+
+function generatorCredentialProviderId(providerId: string): string {
+  if (providerId === "codebuddy") return "codebuddy";
+  if (providerId === "claude") return "anthropic";
+  if (providerId === "codex" || providerId === "copilot") return "openai";
+  return providerId;
+}
+
+function isCanonicalCredentialFreeUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0) return true;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (url.protocol === "http:" || url.protocol === "https:")
+    && url.username.length === 0
+    && url.password.length === 0
+    && url.search.length === 0
+    && url.hash.length === 0
+    && (value === url.href || `${value}/` === url.href);
+}
+
+function assertFrozenGeneratorAuthority(
+  agent: WorkspaceGenerationAgentSelection | undefined,
+  proposalId: string,
+  label: string,
+): string {
+  if (agent === undefined) {
+    compileError(
+      "invalid-reference",
+      `${label} must freeze one generating Agent and its exact non-secret execution authority`,
+      { proposalId },
+    );
+  }
+  const providerId = commandProvider(agent.command);
+  const authority = agent.executionAuthority;
+  if (providerId === null || providerId !== agent.providerId
+    || authority?.kind !== "generator"
+    || !isCanonicalCredentialFreeUrl(authority.baseUrl)
+    || typeof authority.organization !== "string"
+    || typeof authority.credentialProviderId !== "string"
+    || authority.credentialProviderId.length === 0
+    || (authority.credentialSource !== "provider-profile"
+      && authority.credentialSource !== "agent"
+      && authority.credentialSource !== "session")
+    || typeof authority.credentialRequired !== "boolean"
+    || authority.credentialProviderId !== generatorCredentialProviderId(providerId)
+    || (authority.credentialSource === "session"
+      && (authority.baseUrl !== ""
+        || authority.organization !== ""
+        || authority.credentialRequired))
+    || ((providerId === "codex" || providerId === "codebuddy")
+      && authority.credentialSource !== "session")) {
+    compileError(
+      "invalid-reference",
+      `${label} must freeze a supported command/provider identity and its exact non-secret generator execution authority`,
+      {
+        proposalId,
+        providerId: agent.providerId,
+        command: agent.command,
+      },
+    );
+  }
+  return providerId;
+}
+
+function assertFrozenReviewerAuthority(
+  generation: WorkspaceGenerationPayload,
+  proposalId: string,
+): string {
+  const reviewer = generation.reviewerAgent;
+  const reviewerProvider = reviewer === undefined ? null : commandProvider(reviewer.command);
+  const reviewerAuthority = reviewer?.executionAuthority;
+  const reviewerIdentityIsValid = reviewer !== undefined
+    && (reviewerProvider === "claude"
+      || reviewerProvider === "codebuddy"
+      || reviewerProvider === "codex")
+    && reviewerProvider === reviewer.providerId;
+  const reviewerAuthorityIsValid = reviewerAuthority?.kind === "reviewer"
+    && isCanonicalCredentialFreeUrl(reviewerAuthority.baseUrl)
+    && typeof reviewerAuthority.credentialRequired === "boolean"
+    && (reviewerAuthority.credentialSource === "anthropic-profile"
+      || reviewerAuthority.credentialSource === "agent"
+      || reviewerAuthority.credentialSource === "session")
+    && (reviewerProvider === "claude"
+      ? reviewerAuthority.credentialSource !== "agent"
+        || (generation.agent?.providerId === "claude"
+          && commandProvider(generation.agent.command) === "claude"
+          && generation.agent.executionAuthority?.kind === "generator"
+          && generation.agent.executionAuthority.credentialSource === "agent"
+          && reviewerAuthority.baseUrl === generation.agent.executionAuthority.baseUrl
+          && reviewerAuthority.credentialRequired
+            === generation.agent.executionAuthority.credentialRequired)
+      : reviewerAuthority.credentialSource === "session"
+        && reviewerAuthority.baseUrl === ""
+        && !reviewerAuthority.credentialRequired)
+    && (reviewerAuthority.credentialSource !== "session"
+      || (reviewerAuthority.baseUrl === "" && !reviewerAuthority.credentialRequired));
+  if (!reviewerIdentityIsValid || !reviewerAuthorityIsValid) {
+    compileError(
+      "invalid-reference",
+      "executable workspace generation must freeze one supported reviewer and its exact non-secret execution authority",
+      { proposalId },
+    );
+  }
+  return reviewerProvider;
+}
+
+/**
+ * Fail-closed authority preflight shared by HTTP approval and immutable Plan
+ * compilation. Historical payloads remain decodable, but no executable work can
+ * cross either boundary without exact generator and reviewer authority.
+ */
+export function assertWorkspaceGenerationExecutionAuthority(
+  generation: WorkspaceGenerationPayload,
+  proposalId: string,
+): void {
+  const hasExecutableAgentTask = generation.artifactPlans.length > 0
+    || generation.resourceOperations.some((operation) => operation.revisionPolicy.kind === "generate");
+  if (!hasExecutableAgentTask) return;
+  assertFrozenGeneratorAuthority(generation.agent, proposalId, "Executable workspace generation");
+  const reviewerProvider = assertFrozenReviewerAuthority(generation, proposalId);
+  const hasGeneratedResearch = generation.resourceOperations.some((operation) => (
+    operation.kind === "research" && operation.revisionPolicy.kind === "generate"
+  ));
+  if (hasGeneratedResearch) {
+    if (generation.researchAgent === undefined || generation.reviewerAgent === undefined) {
+      compileError(
+        "invalid-reference",
+        "generated Research split authority must freeze both its generator and independent reviewer",
+        { proposalId },
+      );
+    }
+    const researchCommandProvider = assertFrozenGeneratorAuthority(
+      generation.researchAgent,
+      proposalId,
+      "Generated Research",
+    );
+    if (generation.researchAgent.providerId !== "codex" || researchCommandProvider !== "codex") {
+      compileError(
+        "invalid-reference",
+        "generated Research requires the frozen Codex Research Agent",
+        {
+          proposalId,
+          providerId: generation.researchAgent.providerId,
+          command: generation.researchAgent.command,
+        },
+      );
+    }
+    const researchAuthority = generation.researchAgent.executionAuthority;
+    if (researchAuthority?.kind !== "generator"
+      || researchAuthority.baseUrl !== ""
+      || researchAuthority.organization !== ""
+      || researchAuthority.credentialProviderId !== "openai"
+      || researchAuthority.credentialRequired) {
+      compileError(
+        "invalid-reference",
+        "generated Research must freeze Codex host-login execution authority without a substituted endpoint or credential source",
+        { proposalId },
+      );
+    }
+    if (reviewerProvider === researchCommandProvider) {
+      compileError(
+        "invalid-reference",
+        "generated Research reviewer must use a supported provider principal distinct from its generator",
+        {
+          proposalId,
+          providerId: generation.reviewerAgent.providerId,
+          command: generation.reviewerAgent.command,
+        },
+      );
+    }
+  }
+  const hasGeneratedMoodboard = generation.resourceOperations.some((operation) => (
+    operation.kind === "moodboard" && operation.revisionPolicy.kind === "generate"
+  ));
+  const imageAuthority = generation.moodboardImageAuthority;
+  if (hasGeneratedMoodboard) {
+    if (imageAuthority?.kind !== "moodboard-image"
+      || imageAuthority.protocol !== "dezin.workspace-moodboard-image-authority.v1"
+      || typeof imageAuthority.providerId !== "string"
+      || imageAuthority.providerId.length === 0
+      || imageAuthority.providerId.trim() !== imageAuthority.providerId
+      || typeof imageAuthority.model !== "string"
+      || imageAuthority.model.length === 0
+      || imageAuthority.model.trim() !== imageAuthority.model
+      || typeof imageAuthority.apiVersion !== "string"
+      || imageAuthority.apiVersion.trim() !== imageAuthority.apiVersion
+      || !isCanonicalCredentialFreeUrl(imageAuthority.baseUrl)
+      || imageAuthority.baseUrl === ""
+      || (imageAuthority.credentialSource !== "provider-profile"
+        && imageAuthority.credentialSource !== "global-image")
+      || imageAuthority.credentialRequired !== true) {
+      compileError(
+        "invalid-reference",
+        "generated Moodboard must freeze one exact non-secret Moodboard image execution authority",
+        { proposalId },
+      );
+    }
+  } else if (imageAuthority !== undefined) {
+    compileError(
+      "invalid-reference",
+      "Moodboard image execution authority is valid only for generated Moodboard work",
+      { proposalId },
+    );
+  }
+}
+
 function validateGenerationPayload(
   generation: WorkspaceGenerationPayload,
   proposal: WorkspaceProposal,
 ): void {
-  const hasExecutableAgentTask = generation.artifactPlans.length > 0
-    || generation.resourceOperations.some((operation) => operation.revisionPolicy.kind === "generate");
-  if (hasExecutableAgentTask && generation.agent === undefined) {
-    compileError(
-      "invalid-reference",
-      "executable workspace generation must freeze an Agent selection before compilation",
-      { proposalId: proposal.id },
-    );
-  }
+  assertWorkspaceGenerationExecutionAuthority(generation, proposal.id);
   assertUnique(generation.resourceOperations, (operation) => operation.resourceId, "Resource operation id");
   assertUnique(generation.artifactPlans, (plan) => plan.artifactId, "Artifact plan id");
   assertUnique(generation.artifactPlans, (plan) => plan.trackId, "Artifact Track id");
@@ -773,6 +1000,9 @@ function taskPayloadForArtifact(
   return {
     version: 2,
     ...(generation.agent === undefined ? {} : { agent: { ...generation.agent } }),
+    ...(generation.reviewerAgent === undefined
+      ? {}
+      : { reviewer: { ...generation.reviewerAgent } }),
     artifactPlan,
     dependencyPlans: relevantDependencies(generation, plan.artifactId),
     responsiveFrames: sorted(
@@ -901,9 +1131,21 @@ export function compileGenerationPlan(input: {
     .map(({ target }) => stableTaskId(input.shell, "resource", target))
     .sort(compareBinary);
   const resourceTasks = generatedResourceTaskInputs.map(({ operation, target }, ordinal) => {
+    const frozenAgent = operation.kind === "research"
+      ? generation.researchAgent ?? generation.agent
+      : generation.agent;
     const payload: ResourceGenerationTaskPayloadV2 = {
       version: 2,
-      ...(generation.agent === undefined ? {} : { agent: { ...generation.agent } }),
+      ...(frozenAgent === undefined ? {} : { agent: { ...frozenAgent } }),
+      ...(operation.kind === "research" && generation.agent !== undefined
+        ? { reviewerAuthorityAgent: { ...generation.agent } }
+        : {}),
+      ...(generation.reviewerAgent === undefined
+        ? {}
+        : { reviewer: { ...generation.reviewerAgent } }),
+      ...(operation.kind === "moodboard"
+        ? { moodboardImageAuthority: { ...generation.moodboardImageAuthority! } }
+        : {}),
       operation,
       brief: {
         ...proposalBrief(input.proposal),

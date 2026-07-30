@@ -16,7 +16,10 @@ interface AgentsValue {
   scanning: boolean;
   /** Human-readable progress of the current rescan, e.g. "Scanning CodeBuddy…" ("" when idle). */
   status: string;
-  rescan: () => Promise<void>;
+  /** Last bounded load/scan failure; the last good agent list remains usable. */
+  error: string | null;
+  /** True only when either the streaming scan or its bounded fallback completed. */
+  rescan: () => Promise<boolean>;
   reload: () => Promise<void>;
 }
 
@@ -26,9 +29,13 @@ const AgentsContext = createContext<AgentsValue>({
   loading: true,
   scanning: false,
   status: "",
-  rescan: async () => {},
+  error: null,
+  rescan: async () => false,
   reload: async () => {},
 });
+
+export const AGENT_LOAD_ERROR = "Agent availability couldn't be checked. Use Rescan agents to try again.";
+export const AGENT_SCAN_ERROR = "Agent scan stopped before it completed. Use Rescan agents to try again.";
 
 export function AgentsProvider({ children }: { children: ReactNode }) {
   const api = useApi();
@@ -36,12 +43,16 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [status, setStatus] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
+    setError(null);
     try {
       setAgents(await api.listAgents());
+      setError(null);
     } catch {
       /* keep the last good list */
+      setError(AGENT_LOAD_ERROR);
     } finally {
       setLoading(false);
     }
@@ -52,6 +63,8 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   const rescan = useCallback(async () => {
     setScanning(true);
     setStatus("");
+    setError(null);
+    let succeeded = false;
     try {
       let done = false;
       for await (const ev of api.scanAgentsStream()) {
@@ -69,17 +82,22 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
         }
       }
       if (!done) setAgents(await api.rescanAgents());
+      succeeded = true;
     } catch {
       try {
         setAgents(await api.rescanAgents());
+        setError(null);
+        succeeded = true;
       } catch {
         /* keep the last good list */
+        setError(AGENT_SCAN_ERROR);
       }
     } finally {
       setScanning(false);
       setStatus("");
       setLoading(false);
     }
+    return succeeded;
   }, [api]);
 
   // The daemon uses persisted model metadata but refreshes fast presence/sign-in state before
@@ -88,7 +106,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
     void reload();
   }, [reload]);
 
-  return <AgentsContext.Provider value={{ provided: true, agents, loading, scanning, status, rescan, reload }}>{children}</AgentsContext.Provider>;
+  return <AgentsContext.Provider value={{ provided: true, agents, loading, scanning, status, error, rescan, reload }}>{children}</AgentsContext.Provider>;
 }
 
 export const useAgents = (): AgentsValue => useContext(AgentsContext);

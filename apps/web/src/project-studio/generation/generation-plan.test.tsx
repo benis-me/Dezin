@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 import { ApiProvider } from "../../lib/api-context.tsx";
+import { GenerationPlanStreamError } from "../../lib/api.ts";
 import type {
   GenerationPlan,
   GenerationPlanDetail,
@@ -35,7 +36,10 @@ async function chooseGenerationPlan(
   planId: string,
 ): Promise<void> {
   await user.click(screen.getByRole("combobox", { name: "Selected generation plan" }));
-  await user.click(await screen.findByRole("option", { name: new RegExp(planId) }));
+  const options = await screen.findAllByRole("option");
+  const option = options.find((candidate) => candidate.getAttribute("data-plan-id") === planId);
+  expect(option).toBeDefined();
+  await user.click(option!);
 }
 
 function plan(status: GenerationPlan["status"] = "running"): GenerationPlan {
@@ -112,6 +116,22 @@ function detail(overrides: Partial<GenerationPlanDetail> = {}): GenerationPlanDe
   };
 }
 
+function generationEvent(
+  sequence: number,
+  type: string,
+  taskId: string | null,
+  payload: Record<string, unknown> = {},
+): GenerationPlanEvent {
+  return {
+    planId: "plan-1",
+    sequence,
+    taskId,
+    type,
+    payload,
+    createdAt: 1_720_000_000_000 + sequence * 1_000,
+  };
+}
+
 test("GenerationPlanPanel presents a compact production docket with explicit state and retry choices", async () => {
   const user = userEvent.setup();
   const onRetry = vi.fn(async () => {});
@@ -170,6 +190,136 @@ test("GenerationPlanPanel presents a compact production docket with explicit sta
   expect(cancel).toHaveAttribute("data-slot", "button");
   await user.click(cancel);
   expect(onCancel).toHaveBeenCalledTimes(1);
+});
+
+test("GenerationPlanPanel renders durable activity and always-visible task output without exposing internal ids", async () => {
+  const user = userEvent.setup();
+  const onFocusTask = vi.fn();
+  const running = task("task-2", "component", "running", {
+    currentAttempt: 2,
+    target: {
+      type: "artifact",
+      workspaceId: "workspace-1",
+      id: "5b6e7f80-1234-4abc-8def-1234567890ab",
+      trackId: "track-component",
+    },
+  });
+  const events = [
+    generationEvent(1, "plan-queued", null, { taskCount: 1, dependencyCount: 0 }),
+    generationEvent(2, "task-materialized", running.id, { attempt: 2 }),
+    generationEvent(3, "task-running", running.id, {
+      attempt: 2,
+      ownerId: "1d2e3f40-1234-4abc-8def-1234567890ab",
+    }),
+    generationEvent(4, "task-progress", running.id, {
+      attempt: 2,
+      phase: "verifying-sources",
+    }),
+  ];
+
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({
+        tasks: [running],
+        dependencies: [],
+        events,
+        currentAttempts: [{
+          taskId: running.id,
+          attempt: 2,
+          status: "running",
+          candidateRevisionId: null,
+          candidateResourceRevisionId: null,
+          candidateEvidence: null,
+          candidateEvidenceHash: null,
+        }],
+      })}
+      connection="live"
+      busyAction={null}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+      onFocusTask={onFocusTask}
+    />,
+  );
+
+  const process = screen.getByRole("list", { name: "Generation process" });
+  expect(process).toHaveTextContent("Generation started");
+  expect(process).toHaveTextContent("Verifying sources");
+  expect(process).toHaveTextContent("Inputs prepared");
+  expect(process).toHaveTextContent("1 task queued");
+  expect(process.querySelectorAll("time")).toHaveLength(4);
+  expect(screen.queryByText("1d2e3f40-1234-4abc-8def-1234567890ab")).not.toBeInTheDocument();
+  expect(screen.queryByText("5b6e7f80-1234-4abc-8def-1234567890ab")).not.toBeInTheDocument();
+
+  expect(screen.getByText("Component 3", { selector: "strong" })).toBeInTheDocument();
+  expect(screen.getByText("Attempt 2 · 0 dependencies")).toBeInTheDocument();
+  expect(screen.getByText("Output · Verifying sources in progress")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /details for Component 3/ })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Show on canvas" }));
+  expect(onFocusTask).toHaveBeenCalledWith(running);
+});
+
+test("GenerationPlanPanel traces concurrent process events to semantic targets and canvas focus", async () => {
+  const user = userEvent.setup();
+  const onFocusTask = vi.fn();
+  const page = task("task-1", "page", "running", {
+    target: {
+      type: "artifact",
+      workspaceId: "workspace-1",
+      id: "11111111-1111-4111-8111-111111111111",
+      trackId: "track-page",
+    },
+  });
+  const component = task("task-2", "component", "candidate-ready", {
+    currentAttempt: 2,
+    target: {
+      type: "artifact",
+      workspaceId: "workspace-1",
+      id: "22222222-2222-4222-8222-222222222222",
+      trackId: "track-component",
+    },
+  });
+  render(
+    <GenerationPlanPanel
+      projectId="project-1"
+      plans={[plan()]}
+      detail={detail({
+        tasks: [page, component],
+        dependencies: [],
+        events: [
+          generationEvent(1, "task-running", page.id, { attempt: 1 }),
+          generationEvent(2, "task-candidate-ready", component.id, {
+            attempt: 2,
+            candidateRevisionId: "revision-internal-id",
+          }),
+        ],
+      })}
+      connection="live"
+      busyAction={null}
+      targetLabels={{
+        artifacts: new Map([
+          [page.target.id, "Checkout"],
+          [component.target.id, "Cart"],
+        ]),
+        resources: new Map(),
+      }}
+      onSelectPlan={() => {}}
+      onRetry={() => {}}
+      onCancel={() => {}}
+      onFocusTask={onFocusTask}
+    />,
+  );
+
+  const process = screen.getByRole("list", { name: "Generation process" });
+  expect(process).toHaveTextContent("Page · Checkout · Attempt 1");
+  expect(process).toHaveTextContent("Component · Cart · Attempt 2 · Artifact candidate ready");
+  expect(process).not.toHaveTextContent("11111111-1111-4111-8111-111111111111");
+  expect(process).not.toHaveTextContent("revision-internal-id");
+  await user.click(screen.getByRole("button", { name: "Show Cart on canvas" }));
+  expect(onFocusTask).toHaveBeenCalledWith(component);
 });
 
 test("GenerationPlanPanel keeps long target identities discoverable in a 23-task plan", () => {
@@ -400,7 +550,12 @@ test("GenerationPlanPanel keeps dependency failures on the owning Task instead o
   );
 
   expect(screen.getAllByText(failure)).toHaveLength(1);
-  expect(screen.getAllByText("Blocked by KITE Visual Directions Moodboard")).toHaveLength(2);
+  const blockedMessages = screen.getAllByText("Blocked by KITE Visual Directions Moodboard");
+  expect(blockedMessages).toHaveLength(2);
+  for (const blockedStatus of screen.getAllByText("Blocked")) {
+    expect(blockedStatus.closest("[data-tone]")).toHaveAttribute("data-tone", "neutral");
+  }
+  expect(screen.getByText("Failed").closest("[data-tone]")).toHaveAttribute("data-tone", "danger");
 });
 
 test("GenerationPlanPanel resolves owned Resource and Artifact names while preserving Workspace and stable fallbacks", () => {
@@ -936,6 +1091,132 @@ test("GenerationPlanInspector reconnects from the durable cursor and refreshes a
     source: "observation",
   });
   unmount();
+});
+
+test("GenerationPlanInspector follows an authoritative retry while a previously-live stream is stalled", async () => {
+  const attemptTwo = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "materialization-pending", { currentAttempt: 2 })],
+    dependencies: [],
+  });
+  const attemptFour = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "running", { currentAttempt: 4 })],
+    dependencies: [],
+  });
+  const getGenerationPlan = vi.fn(async () => attemptTwo);
+  const streamGenerationPlanEvents = vi.fn(async function* (
+    _projectId: string,
+    _planId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<GenerationPlanEvent> {
+    yield generationEvent(66, "task-materialized", "task-1", { attempt: 2 });
+    await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+  });
+  const api = makeFakeApi({
+    listGenerationPlans: async () => [attemptTwo.plan],
+    getGenerationPlan,
+    streamGenerationPlanEvents,
+  });
+  const rendered = render(
+    <ApiProvider client={api}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        authoritativeDetail={attemptTwo}
+      />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getGenerationPlan).toHaveBeenCalledTimes(2));
+  expect(screen.getByText(/Attempt 2/)).toBeInTheDocument();
+  expect(screen.getByText("Live updates")).toBeInTheDocument();
+
+  rendered.rerender(
+    <ApiProvider client={api}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        authoritativeDetail={attemptFour}
+      />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText(/Attempt 4/)).toBeInTheDocument());
+  expect(screen.queryByText(/Attempt 2/)).not.toBeInTheDocument();
+  expect(screen.getAllByText("Running")).toHaveLength(2);
+
+  rendered.rerender(
+    <ApiProvider client={api}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId="plan-1"
+        authoritativeDetail={attemptTwo}
+      />
+    </ApiProvider>,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(screen.getByText(/Attempt 4/)).toBeInTheDocument();
+  expect(screen.queryByText(/Attempt 2/)).not.toBeInTheDocument();
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector resumes an ordinary stream disconnect from its durable cursor", async () => {
+  const attemptTwo = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "materialization-pending", { currentAttempt: 2 })],
+    dependencies: [],
+  });
+  const attemptThree = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "running", { currentAttempt: 3 })],
+    dependencies: [],
+  });
+  const attemptFour = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "running", { currentAttempt: 4 })],
+    dependencies: [],
+  });
+  const disconnect = deferred<void>();
+  const cursors: number[] = [];
+  let streamCalls = 0;
+  const streamGenerationPlanEvents = vi.fn(async function* (
+    _projectId: string,
+    _planId: string,
+    signal?: AbortSignal,
+    options?: { after?: number },
+  ): AsyncGenerator<GenerationPlanEvent> {
+    streamCalls += 1;
+    cursors.push(options?.after ?? 0);
+    if (streamCalls === 1) {
+      yield generationEvent(66, "task-running", "task-1", { attempt: 3 });
+      await disconnect.promise;
+      throw new Error("daemon restarted");
+    }
+    yield generationEvent(69, "task-running", "task-1", { attempt: 4 });
+    await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+  });
+  const getGenerationPlan = vi.fn()
+    .mockResolvedValueOnce(attemptTwo)
+    .mockResolvedValueOnce(attemptThree)
+    .mockResolvedValue(attemptFour);
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({
+      listGenerationPlans: async () => [attemptTwo.plan],
+      getGenerationPlan,
+      streamGenerationPlanEvents,
+    })}>
+      <GenerationPlanInspector projectId="project-1" preferredPlanId="plan-1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText(/Attempt 3/)).toBeInTheDocument());
+  disconnect.resolve();
+  await waitFor(() => expect(screen.getByText(/Attempt 4/)).toBeInTheDocument());
+  expect(cursors.slice(0, 2)).toEqual([0, 66]);
+  expect(streamGenerationPlanEvents).toHaveBeenCalledTimes(2);
+  rendered.unmount();
 });
 
 test("GenerationPlanInspector requests one authoritative workspace reconciliation per published output identity", async () => {
@@ -1560,6 +1841,92 @@ test("GenerationPlanInspector can retry an initial detail read without reloading
   await screen.findByRole("alert");
   await user.click(screen.getByRole("button", { name: "Retry loading build plan" }));
   await waitFor(() => expect(screen.getAllByText("Page")).toHaveLength(2));
+  expect(getGenerationPlan).toHaveBeenCalledTimes(2);
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector can retry an initial Plan index failure without remounting", async () => {
+  const user = userEvent.setup();
+  const working = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "running")],
+    dependencies: [],
+  });
+  const listGenerationPlans = vi.fn()
+    .mockRejectedValueOnce(new Error("Plan index temporarily unavailable"))
+    .mockResolvedValue([working.plan]);
+  const rendered = render(
+    <ApiProvider client={makeFakeApi({
+      listGenerationPlans,
+      getGenerationPlan: async () => working,
+    })}>
+      <GenerationPlanInspector projectId="project-1" preferredPlanId={null} />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Plan index temporarily unavailable");
+  await user.click(screen.getByRole("button", { name: "Retry loading build plan" }));
+  await waitFor(() => expect(screen.getAllByText("Component")).toHaveLength(2));
+  expect(listGenerationPlans).toHaveBeenCalledTimes(2);
+  rendered.unmount();
+});
+
+test("GenerationPlanInspector follows authoritative detail after a fatal stream error and reconnects in place", async () => {
+  const user = userEvent.setup();
+  const initial = detail({
+    plan: plan("queued"),
+    tasks: [task("task-1", "component", "queued")],
+    dependencies: [],
+  });
+  const authoritative = detail({
+    plan: plan("running"),
+    tasks: [task("task-1", "component", "running")],
+    dependencies: [],
+  });
+  const getGenerationPlan = vi.fn()
+    .mockResolvedValueOnce(initial)
+    .mockResolvedValue(authoritative);
+  let streamCalls = 0;
+  const streamGenerationPlanEvents = vi.fn(async function* (
+    _projectId: string,
+    _planId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<GenerationPlanEvent> {
+    streamCalls += 1;
+    if (streamCalls === 1) {
+      throw new GenerationPlanStreamError("Plan update history must be reconnected");
+    }
+    await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+  });
+  const api = makeFakeApi({
+    listGenerationPlans: async () => [initial.plan],
+    getGenerationPlan,
+    streamGenerationPlanEvents,
+  });
+  const rendered = render(
+    <ApiProvider client={api}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId={initial.plan.id}
+        authoritativeDetail={initial}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("must be reconnected");
+  rendered.rerender(
+    <ApiProvider client={api}>
+      <GenerationPlanInspector
+        projectId="project-1"
+        preferredPlanId={initial.plan.id}
+        authoritativeDetail={authoritative}
+      />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(screen.getAllByText("Running")).toHaveLength(2));
+  await user.click(screen.getByRole("button", { name: "Reconnect build plan updates" }));
+  await waitFor(() => expect(streamGenerationPlanEvents).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText("Plan update history must be reconnected")).not.toBeInTheDocument();
   expect(getGenerationPlan).toHaveBeenCalledTimes(2);
   rendered.unmount();
 });

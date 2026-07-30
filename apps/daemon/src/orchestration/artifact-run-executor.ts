@@ -9,6 +9,7 @@ import type {
 import type {
   GenerationTaskAttemptClaim,
   GenerationTaskFailureClass,
+  GenerationTaskProgressPhase,
 } from "../../../../packages/core/src/index.ts";
 import type {
   ArtifactGenerationTaskLeafExecutor,
@@ -84,6 +85,14 @@ export interface ArtifactRunPreparationPort {
 
 export interface ArtifactRunExecutorOptions {
   readonly preparation: ArtifactRunPreparationPort;
+  /**
+   * Durable, fenced public progress. Unlike onEvent, failures must stop the
+   * Attempt so execution can never outrun its observable lease authority.
+   */
+  readonly progress?: (
+    claim: GenerationTaskAttemptClaim,
+    phase: GenerationTaskProgressPhase,
+  ) => void;
   /** Best-effort observation only; durable Task state is owned by TaskPublication. */
   readonly onEvent?: (
     claim: GenerationTaskAttemptClaim,
@@ -716,6 +725,7 @@ export class ArtifactRunExecutor implements ArtifactGenerationTaskLeafExecutor {
   constructor(options: ArtifactRunExecutorOptions) {
     this.options = Object.freeze({
       preparation: options.preparation,
+      progress: options.progress,
       onEvent: options.onEvent,
       reportError: options.reportError,
     });
@@ -756,6 +766,11 @@ export class ArtifactRunExecutor implements ArtifactGenerationTaskLeafExecutor {
         ),
         buildRepairPrompt: preparation.buildRepairPrompt,
         onEvent: (event) => {
+          if (event.type === "turn-start") {
+            this.options.progress?.(claim, event.isRepair === true ? "repairing" : "generating");
+          } else if (event.type === "quality-start") {
+            this.options.progress?.(claim, "reviewing");
+          }
           try {
             this.options.onEvent?.(claim, event);
           } catch (error) {
@@ -765,6 +780,8 @@ export class ArtifactRunExecutor implements ArtifactGenerationTaskLeafExecutor {
       });
       checkAbort(signal);
       await verifySharinganCapture(canonical.sharinganCapture, signal, "after Artifact execution");
+      checkAbort(signal);
+      this.options.progress?.(claim, "publishing");
       const selected = execution.selected;
       return {
         kind: "artifact-candidate",

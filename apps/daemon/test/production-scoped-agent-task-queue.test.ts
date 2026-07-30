@@ -318,6 +318,17 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
     layoutId: layout.layoutId,
     layoutChecksum: layout.checksum,
   });
+  const frozenTurnAgent = {
+    ...turn.agent,
+    executionAuthority: {
+      kind: "generator" as const,
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "codebuddy",
+      credentialSource: "session" as const,
+      credentialRequired: false,
+    },
+  };
 
   const receipt = await f.queue.enqueue({
     projectId: f.project.id,
@@ -334,7 +345,7 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
     trackId: "scoped-page-track",
   });
   assert.equal(receipt.task.status, "materialization-pending");
-  assert.deepEqual(receipt.task.payload.agent, turn.agent);
+  assert.deepEqual(receipt.task.payload.agent, frozenTurnAgent);
   assert.equal(
     (receipt.task.payload.artifactPlan as Record<string, unknown>).dispatchContextPackId,
     contextPack.id,
@@ -350,7 +361,7 @@ test("scoped Page Agent compiles exactly one target-owned immutable leaf and wak
   assert.equal(proposal.rationale, turn.message);
   assert.equal(proposal.generation.kind, "workspace-generation");
   if (proposal.generation.kind !== "workspace-generation") assert.fail("expected Workspace generation");
-  assert.deepEqual(proposal.generation.agent, turn.agent);
+  assert.deepEqual(proposal.generation.agent, frozenTurnAgent);
   assert.deepEqual(proposal.generation.artifactPlans.map((plan) => plan.artifactId), ["scoped-page"]);
   assert.equal(proposal.generation.artifactPlans[0]?.dispatchContextPackId, contextPack.id);
 });
@@ -452,6 +463,11 @@ test("scoped Agent queue replays a lost response after Store reopen without a se
 test("scoped Resource Agent creates one generated Resource leaf and rejects imported Resource kinds", async (t) => {
   const f = await fixture();
   t.after(() => f.close());
+  f.store.updateSettings({
+    ...f.store.getSettings(),
+    researchAgentCommand: "codex",
+    researchModel: "gpt-5.4-mini",
+  });
   const layout = f.store.workspace.getLayout(f.project.id);
   const researchTurn = request({
     workspaceId: f.workspace.id,
@@ -474,7 +490,19 @@ test("scoped Resource Agent creates one generated Resource leaf and rejects impo
   }, new AbortController().signal);
   assert.equal(receipt.task.kind, "resource");
   assert.equal(receipt.task.target.id, "scoped-research");
-  assert.deepEqual(receipt.task.payload.agent, researchTurn.agent);
+  assert.deepEqual(receipt.task.payload.agent, {
+    providerId: "codex",
+    command: "codex",
+    model: "gpt-5.4-mini",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session",
+      credentialRequired: false,
+    },
+  });
   assert.equal(
     (receipt.task.payload.operation as Record<string, unknown>).dispatchContextPackId,
     receipt.contextPackId,
@@ -498,6 +526,76 @@ test("scoped Resource Agent creates one generated Resource leaf and rejects impo
     /imported immutably|cannot be regenerated/i,
   );
   assert.equal(f.store.workspace.listProposals(f.project.id).length, proposalsBefore);
+});
+
+test("scoped Moodboard Agent rejects missing image authority before creating a Proposal or Plan", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const current = f.store.workspace.getWorkspace(f.project.id)!;
+  const added = f.store.workspace.applyGraphCommands(f.project.id, {
+    baseGraphRevision: current.graphRevision,
+    expectedSnapshotId: current.activeSnapshotId,
+    commands: [{
+      id: "add-scoped-moodboard",
+      type: "add-node",
+      node: {
+        id: "scoped-moodboard-node",
+        kind: "resource",
+        name: "Scoped visual direction",
+        resourceId: "scoped-moodboard",
+        createIdentity: { resourceKind: "moodboard", defaultPinPolicy: "pin-current" },
+      },
+    }],
+  });
+  const revision = f.store.workspace.createResourceRevisionCandidateForProject(
+    f.project.id,
+    "scoped-moodboard",
+    {
+      revisionId: "scoped-moodboard-revision-base",
+      parentRevisionId: null,
+      manifestPath: "resource-payloads/scoped-moodboard/fixture.json",
+      summary: "Existing scoped Moodboard",
+      metadata: { fixture: "missing-image-authority" },
+      checksum: "d".repeat(64),
+      provenance: { source: "production-scoped-agent-task-queue-test" },
+    },
+  );
+  const published = f.store.workspace.publishResourceRevisionForProject(
+    f.project.id,
+    "scoped-moodboard",
+    revision.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: added.snapshot.id,
+      reason: "Seed scoped Moodboard target",
+    },
+  );
+  const workspace = f.store.workspace.getWorkspace(f.project.id)!;
+  const layout = f.store.workspace.getLayout(f.project.id);
+  const turn = request({
+    workspaceId: workspace.id,
+    graphRevision: workspace.graphRevision,
+    type: "resource",
+    id: "scoped-moodboard",
+    intent: "generate",
+    baseRevisionId: revision.id,
+  });
+
+  await assert.rejects(
+    () => f.queue.enqueue({
+      projectId: f.project.id,
+      request: turn,
+      contextPack: persistPack(f, turn, {
+        snapshotId: published.id,
+        layoutId: layout.layoutId,
+        layoutChecksum: layout.checksum,
+      }),
+    }, new AbortController().signal),
+    /Moodboard image execution authority is invalid.*Settings/i,
+  );
+  assert.deepEqual(f.store.workspace.listProposals(f.project.id), []);
+  assert.deepEqual(f.store.workspace.listGenerationPlans(f.project.id), []);
+  assert.deepEqual(f.wakes, []);
 });
 
 test("scoped Agent queue never silently rebinds a stale Snapshot/layout anchor", async (t) => {

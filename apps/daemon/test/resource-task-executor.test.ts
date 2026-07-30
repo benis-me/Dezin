@@ -276,7 +276,7 @@ function rejectedResearchDecisionGradeMetadata(): Record<string, unknown> {
     version: 3,
     qualityState: "needs-review",
     decisionGradeGate: {
-      protocol: "dezin.research-decision-grade-gate.v1",
+      protocol: "dezin.research-decision-grade-gate.v2",
       criteria: {
         minimumVerifiedWebSourceCount: 2,
         minimumEvidenceFindingCount: 2,
@@ -304,15 +304,72 @@ function acceptedResearchDecisionGradeMetadata(): Record<string, unknown> {
   return metadata;
 }
 
+function researchRepairDiagnosticFixture(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    decision: "changed-unresolved",
+    optionCount: 1,
+    quoteCount: 3,
+    matchingOptionCount: 0,
+    candidateExcerptByteLength: 96,
+    candidateExcerptIdentityHash: "a".repeat(64),
+    sourceIdentityHash: "b".repeat(64),
+    requestedUrlHash: "c".repeat(64),
+    sourceIdSameAsFirstPass: true,
+    requestedUrlSameAsFirstPass: true,
+    selectedOptionIdentityHash: null,
+    canonicalUrlSameAsFirstPass: true,
+    canonicalTextChecksumSameAsFirstPass: true,
+    receiptReason: "excerpt-mismatch",
+    ...overrides,
+  };
+}
+
+function researchEvidenceCoverageFixture(): Record<string, unknown> {
+  return {
+    protocol: "dezin.research-evidence-coverage.v1",
+    repairMode: "full-replacement",
+    firstPassGate: {
+      observed: {
+        verifiedWebSourceCount: 0,
+        evidenceFindingCount: 2,
+        evidenceDirectionCount: 0,
+        groundednessVerifierAvailable: true,
+      },
+      blockers: [
+        "insufficient-verified-web-sources",
+        "insufficient-evidence-directions",
+      ],
+    },
+    finalPass: {
+      webSourceCount: 3,
+      verifiedWebReceiptCount: 2,
+      unverifiedWebReceiptCount: 1,
+      verifiedWebSupportReceiptCount: 3,
+      groundednessSelectedWebSupportReceiptCount: 2,
+      groundednessSelectedWebSourceCount: 2,
+      groundednessSelectedWebCanonicalComponentCount: 2,
+      evidenceFindingCount: 2,
+      evidenceDirectionCount: 1,
+      qualifyingDecisionGradeDirectionCount: 0,
+      maximumDirectionEvidenceFindingCount: 1,
+      maximumDirectionVerifiedWebComponentCount: 1,
+    },
+  };
+}
+
 test("selects the exact frozen adapter while the executor authors durable Resource identity", async () => {
   const claim = claimFixture();
   const adapterInputs: unknown[] = [];
   const stageInputs: ResourceTaskPayloadStageInput[] = [];
   const cleanupReceipts: ResourceTaskPayloadReceipt[] = [];
+  const progress: Array<{ claim: GenerationTaskAttemptClaim; phase: string }> = [];
   const adapters = new VersionedResourceGenerationAdapterRegistry([{
     identity: { id: "dezin.resource-adapter.asset", version: 1, kind: "asset" },
     async generate(input) {
       adapterInputs.push(input);
+      await input.reportProgress?.("generating");
       return {
         bytes: new TextEncoder().encode("generated hero"),
         mimeType: "text/plain",
@@ -336,11 +393,18 @@ test("selects the exact frozen adapter while the executor authors durable Resour
         return true;
       },
     },
+    progress: {
+      record(progressClaim, phase) {
+        progress.push({ claim: progressClaim, phase });
+      },
+    },
   });
 
   const result = await executor.execute(claim, new AbortController().signal);
 
   assert.equal(adapterInputs.length, 1);
+  assert.deepEqual(progress.map((entry) => entry.phase), ["generating", "publishing"]);
+  assert.ok(progress.every((entry) => entry.claim === claim));
   assert.equal(
     (adapterInputs[0] as { taskTimeoutMs?: number }).taskTimeoutMs,
     claim.task.resourceLimits.timeoutMs,
@@ -581,19 +645,53 @@ test("rejects substituted or oversized Resource instructions while reading exact
   assert.equal(legacy.brief.targetInstructions.instructions, undefined);
 });
 
-test("preserves legacy v2 payloads without Agent and bounds every present frozen Agent identity", () => {
+test("preserves legacy v2 payloads without Agent and strictly parses every present execution authority", () => {
   const base = taskFixture();
   assert.equal(parseResourceGenerationTaskPayloadV2(base).agent, undefined);
 
   const payload = structuredClone(base.payload) as Record<string, unknown>;
-  const agent = { providerId: "trae", command: "trae-cli", model: "doubao-seed-1.6" };
+  const agent = {
+    providerId: "trae",
+    command: "trae-cli",
+    model: "doubao-seed-1.6",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://agents.example.test/v1/",
+      organization: "dezin",
+      credentialProviderId: "trae",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
   assert.deepEqual(
     parseResourceGenerationTaskPayloadV2({ ...base, payload: { ...payload, agent } }).agent,
     agent,
   );
+  assert.throws(
+    () => parseResourceGenerationTaskPayloadV2({
+      ...base,
+      payload: { ...payload, agent, reviewerAuthorityAgent: agent },
+    }),
+    (error) => error instanceof ResourceTaskContractError
+      && error.code === "RESOURCE_TASK_PAYLOAD_INVALID"
+      && /valid only for generated Research/i.test(error.message),
+  );
 
   const invalidAgents: unknown[] = [
     { ...agent, extra: true },
+    { providerId: agent.providerId, command: agent.command, model: agent.model },
+    {
+      ...agent,
+      executionAuthority: { ...agent.executionAuthority, kind: "reviewer" },
+    },
+    {
+      ...agent,
+      executionAuthority: { ...agent.executionAuthority, credentialProviderId: "openai" },
+    },
+    {
+      ...agent,
+      executionAuthority: { ...agent.executionAuthority, baseUrl: "https://user:secret@example.test/" },
+    },
     { ...agent, providerId: "" },
     { ...agent, providerId: " trae" },
     { ...agent, providerId: `trae\0forged` },
@@ -630,6 +728,111 @@ test("preserves legacy v2 payloads without Agent and bounds every present frozen
     }),
     (error) => error instanceof ResourceTaskContractError
       && error.code === "RESOURCE_TASK_PAYLOAD_INVALID",
+  );
+
+  const reviewer = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-6",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "",
+      credentialSource: "session",
+      credentialRequired: false,
+    },
+  };
+  assert.deepEqual(
+    parseResourceGenerationTaskPayloadV2({
+      ...base,
+      payload: { ...payload, agent, reviewer },
+    }).reviewer,
+    reviewer,
+  );
+  for (const invalidReviewer of [
+    { providerId: reviewer.providerId, command: reviewer.command, model: reviewer.model },
+    {
+      ...reviewer,
+      executionAuthority: { ...reviewer.executionAuthority, credentialRequired: true },
+    },
+    {
+      ...reviewer,
+      executionAuthority: { ...reviewer.executionAuthority, credentialSource: "unknown" },
+    },
+  ]) {
+    assert.throws(
+      () => parseResourceGenerationTaskPayloadV2({
+        ...base,
+        payload: { ...payload, agent, reviewer: invalidReviewer },
+      }),
+      (error) => error instanceof ResourceTaskContractError
+        && error.code === "RESOURCE_TASK_PAYLOAD_INVALID",
+    );
+  }
+
+  const researchTask = researchClaimFixture().task;
+  const researchPayload = structuredClone(researchTask.payload) as Record<string, unknown>;
+  const researchAgent = {
+    providerId: "codex",
+    command: "codex",
+    model: "gpt-5.4-mini",
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "",
+      organization: "",
+      credentialProviderId: "openai",
+      credentialSource: "session",
+      credentialRequired: false,
+    },
+  };
+  const reviewerAuthorityAgent = {
+    providerId: "claude",
+    command: "claude",
+    model: null,
+    executionAuthority: {
+      kind: "generator",
+      baseUrl: "https://agent.example.test/",
+      organization: "dezin",
+      credentialProviderId: "anthropic",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  const agentSourceReviewer = {
+    providerId: "claude",
+    command: "claude",
+    model: "claude-opus-4-6",
+    executionAuthority: {
+      kind: "reviewer",
+      baseUrl: "https://agent.example.test/",
+      credentialSource: "agent",
+      credentialRequired: true,
+    },
+  };
+  const parsedResearch = parseResourceGenerationTaskPayloadV2({
+    ...researchTask,
+    payload: {
+      ...researchPayload,
+      agent: researchAgent,
+      reviewerAuthorityAgent,
+      reviewer: agentSourceReviewer,
+    },
+  });
+  assert.deepEqual(parsedResearch.agent, researchAgent);
+  assert.deepEqual(parsedResearch.reviewerAuthorityAgent, reviewerAuthorityAgent);
+  assert.deepEqual(parsedResearch.reviewer, agentSourceReviewer);
+
+  assert.throws(
+    () => parseResourceGenerationTaskPayloadV2({
+      ...researchTask,
+      payload: {
+        ...researchPayload,
+        agent: researchAgent,
+        reviewer: agentSourceReviewer,
+      },
+    }),
+    (error) => error instanceof ResourceTaskContractError
+      && error.code === "RESOURCE_TASK_PAYLOAD_INVALID"
+      && /must match the frozen Claude generator authority/i.test(error.message),
   );
 });
 
@@ -813,6 +1016,35 @@ test("rejects a Research candidate whose decision-grade gate has no evidence-bac
     mimeType: "application/json",
     bytes: new TextEncoder().encode(JSON.stringify({ format: "dezin-research-resource-bundle", version: 3 })),
     metadata: rejectedResearchDecisionGradeMetadata(),
+    evidence: {
+      receipts: [
+        { sourceKind: "web", verification: "unverified", reason: "excerpt-mismatch" },
+        { sourceKind: "web", verification: "unverified", reason: "network-failed" },
+        { sourceKind: "web", verification: "unverified", reason: "excerpt-mismatch" },
+        { sourceKind: "web", verification: "unverified", reason: "binding-unavailable" },
+        { sourceKind: "web", verification: "unverified", reason: "binding-rejected" },
+        { sourceKind: "web", verification: "unverified", reason: "binding-invalid" },
+        { sourceKind: "context", verification: "verified" },
+        { sourceKind: "web", verification: "verified" },
+      ],
+      canonicalExcerptRepairDiagnostics: [{
+        decision: "changed-unresolved",
+        optionCount: 1,
+        quoteCount: 3,
+        matchingOptionCount: 0,
+        candidateExcerptByteLength: 96,
+        candidateExcerptIdentityHash: "a".repeat(64),
+        sourceIdentityHash: "b".repeat(64),
+        requestedUrlHash: "c".repeat(64),
+        sourceIdSameAsFirstPass: true,
+        requestedUrlSameAsFirstPass: true,
+        selectedOptionIdentityHash: null,
+        canonicalUrlSameAsFirstPass: true,
+        canonicalTextChecksumSameAsFirstPass: true,
+        receiptReason: "excerpt-mismatch",
+      }],
+      researchEvidenceCoverage: researchEvidenceCoverageFixture(),
+    },
   });
   let staged = false;
   const executor = new ResourceTaskExecutor({
@@ -853,11 +1085,238 @@ test("rejects a Research candidate whose decision-grade gate has no evidence-bac
           groundednessVerifierAvailable: true,
         },
         blockers: ["insufficient-evidence-directions"],
+        webEvidenceFailureReasonCounts: {
+          "network-failed": 1,
+          "excerpt-mismatch": 2,
+          "binding-unavailable": 1,
+          "binding-rejected": 1,
+          "binding-invalid": 1,
+        },
+        canonicalExcerptRepairDiagnostics: [{
+          decision: "changed-unresolved",
+          optionCount: 1,
+          quoteCount: 3,
+          matchingOptionCount: 0,
+          candidateExcerptByteLength: 96,
+          candidateExcerptIdentityHash: "a".repeat(64),
+          sourceIdentityHash: "b".repeat(64),
+          requestedUrlHash: "c".repeat(64),
+          sourceIdSameAsFirstPass: true,
+          requestedUrlSameAsFirstPass: true,
+          selectedOptionIdentityHash: null,
+          canonicalUrlSameAsFirstPass: true,
+          canonicalTextChecksumSameAsFirstPass: true,
+          receiptReason: "excerpt-mismatch",
+        }],
+        researchEvidenceCoverage: researchEvidenceCoverageFixture(),
       });
+      assert.ok(Object.isFrozen(error.details?.researchEvidenceCoverage));
+      assert.ok(Object.isFrozen(
+        (error.details?.researchEvidenceCoverage as { finalPass: unknown }).finalPass,
+      ));
       return true;
     },
   );
   assert.equal(staged, false);
+});
+
+test("rejects rejection-only repair diagnostics on an accepted grounded Research candidate before staging", async () => {
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          mimeType: "application/json",
+          bytes: new TextEncoder().encode(JSON.stringify({
+            format: "dezin-research-resource-bundle",
+            version: 3,
+          })),
+          metadata: acceptedResearchDecisionGradeMetadata(),
+          evidence: {
+            canonicalExcerptRepairDiagnostics: [researchRepairDiagnosticFixture()],
+          },
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async validate() {},
+      async stage(input) { staged = true; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(researchClaimFixture(), new AbortController().signal),
+    (error) => error instanceof ResourceTaskAdapterError
+      && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID"
+      && /rejection-only.*diagnostic/i.test(error.message),
+  );
+  assert.equal(staged, false);
+});
+
+test("rejects rejection-only Research evidence coverage on an accepted grounded candidate", async () => {
+  const coverage = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  coverage.finalPass.evidenceDirectionCount = 1;
+  coverage.finalPass.qualifyingDecisionGradeDirectionCount = 1;
+  coverage.finalPass.maximumDirectionEvidenceFindingCount = 2;
+  coverage.finalPass.maximumDirectionVerifiedWebComponentCount = 2;
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          mimeType: "application/json",
+          bytes: new TextEncoder().encode(JSON.stringify({
+            format: "dezin-research-resource-bundle",
+            version: 3,
+          })),
+          metadata: acceptedResearchDecisionGradeMetadata(),
+          evidence: { researchEvidenceCoverage: coverage },
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async validate() {},
+      async stage(input) { staged = true; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(researchClaimFixture(), new AbortController().signal),
+    (error) => error instanceof ResourceTaskAdapterError
+      && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID"
+      && /accepted.*rejection-only/i.test(error.message),
+  );
+  assert.equal(staged, false);
+});
+
+test("rejects proxied Research evidence coverage before it can become a durable error detail", async () => {
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          mimeType: "application/json",
+          bytes: new TextEncoder().encode(JSON.stringify({
+            format: "dezin-research-resource-bundle",
+            version: 3,
+          })),
+          metadata: rejectedResearchDecisionGradeMetadata(),
+          evidence: {
+            researchEvidenceCoverage: new Proxy(researchEvidenceCoverageFixture(), {}),
+          },
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) { staged = true; return receiptFor(input); },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(researchClaimFixture(), new AbortController().signal),
+    (error) => error instanceof ResourceTaskAdapterError
+      && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID",
+  );
+  assert.equal(staged, false);
+});
+
+test("rejects malformed, extended, or unbounded Research evidence coverage", async () => {
+  const malformedProtocol = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  malformedProtocol.protocol = "dezin.research-evidence-coverage.v2";
+  const noneWithFirstPass = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  noneWithFirstPass.repairMode = "none";
+  const repairWithoutFirstPass = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  repairWithoutFirstPass.firstPassGate = null;
+  const unknownBlocker = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  unknownBlocker.firstPassGate.blockers = ["agent-authentication-secret"];
+  const negativeCount = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  negativeCount.finalPass.webSourceCount = -1;
+  const unboundedCount = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  unboundedCount.finalPass.webSourceCount = 1_000_001;
+  const extendedFinalPass = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  extendedFinalPass.finalPass.rawSourceUrls = ["https://secret.example.invalid"];
+  const inconsistentReceiptTotals = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  inconsistentReceiptTotals.finalPass.verifiedWebReceiptCount = 3;
+  const inconsistentFinalGate = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  inconsistentFinalGate.finalPass.groundednessSelectedWebCanonicalComponentCount = 1;
+  const inconsistentFirstPassGate = structuredClone(researchEvidenceCoverageFixture()) as Record<string, any>;
+  inconsistentFirstPassGate.firstPassGate.blockers = ["insufficient-evidence-directions"];
+  const cases = [
+    ["unsupported protocol", malformedProtocol],
+    ["none with first pass", noneWithFirstPass],
+    ["repair without first pass", repairWithoutFirstPass],
+    ["unknown blocker", unknownBlocker],
+    ["negative count", negativeCount],
+    ["unbounded count", unboundedCount],
+    ["extra field", extendedFinalPass],
+    ["inconsistent receipt totals", inconsistentReceiptTotals],
+    ["inconsistent final gate", inconsistentFinalGate],
+    ["inconsistent first-pass gate", inconsistentFirstPassGate],
+  ] as const;
+
+  for (const [label, researchEvidenceCoverage] of cases) {
+    let staged = false;
+    const executor = new ResourceTaskExecutor({
+      adapters: new VersionedResourceGenerationAdapterRegistry([{
+        identity: {
+          id: "dezin.resource-adapter.research",
+          version: 1,
+          kind: "research",
+        },
+        async generate() {
+          return outputFixture({
+            mimeType: "application/json",
+            bytes: new TextEncoder().encode(JSON.stringify({
+              format: "dezin-research-resource-bundle",
+              version: 3,
+            })),
+            metadata: rejectedResearchDecisionGradeMetadata(),
+            evidence: { researchEvidenceCoverage },
+          });
+        },
+      }]),
+      staging: {
+        async find() { return null; },
+        async stage(input) { staged = true; return receiptFor(input); },
+        async cleanupIfUnreferenced() { return false; },
+      },
+    });
+
+    await assert.rejects(
+      executor.execute(researchClaimFixture(), new AbortController().signal),
+      (error) => {
+        assert.ok(
+          error instanceof ResourceTaskAdapterError,
+          `${label}: ${error instanceof Error ? `${error.constructor.name}: ${error.message}` : String(error)}`,
+        );
+        assert.equal(error.code, "RESOURCE_ADAPTER_OUTPUT_INVALID", label);
+        assert.match(error.message, /evidence coverage/i, label);
+        return true;
+      },
+    );
+    assert.equal(staged, false, label);
+  }
 });
 
 test("rejects malformed Research decision-grade diagnostics before they can become durable details", async () => {
@@ -897,6 +1356,162 @@ test("rejects malformed Research decision-grade diagnostics before they can beco
   assert.equal(staged, false);
 });
 
+test("rejects unbounded or unknown Research Web failure diagnostics", async () => {
+  const malformedReceipts = [
+    Array.from({ length: 65 }, () => ({
+      sourceKind: "web",
+      verification: "unverified",
+      reason: "excerpt-mismatch",
+    })),
+    [{
+      sourceKind: "web",
+      verification: "unverified",
+      reason: "agent-authentication-secret",
+    }],
+  ];
+  for (const receipts of malformedReceipts) {
+    let staged = false;
+    const executor = new ResourceTaskExecutor({
+      adapters: new VersionedResourceGenerationAdapterRegistry([{
+        identity: {
+          id: "dezin.resource-adapter.research",
+          version: 1,
+          kind: "research",
+        },
+        async generate() {
+          return outputFixture({
+            mimeType: "application/json",
+            bytes: new TextEncoder().encode(JSON.stringify({
+              format: "dezin-research-resource-bundle",
+              version: 3,
+            })),
+            metadata: rejectedResearchDecisionGradeMetadata(),
+            evidence: { receipts },
+          });
+        },
+      }]),
+      staging: {
+        async find() { return null; },
+        async stage(input) { staged = true; return receiptFor(input); },
+        async cleanupIfUnreferenced() { return false; },
+      },
+    });
+
+    await assert.rejects(
+      executor.execute(researchClaimFixture(), new AbortController().signal),
+      (error) => error instanceof ResourceTaskAdapterError
+        && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID"
+        && /Web evidence failure diagnostics/i.test(error.message),
+    );
+    assert.equal(staged, false);
+  }
+});
+
+test("rejects raw, checksum-invalid, or unbounded canonical excerpt repair diagnostics", async () => {
+  const rawUrl = "https://secret.example.invalid/raw-evidence";
+  const malformedDiagnostics: Array<{ label: string; value: unknown }> = [
+    { label: "raw field", value: [researchRepairDiagnosticFixture({ rawUrl })] },
+    {
+      label: "invalid checksum",
+      value: [researchRepairDiagnosticFixture({ candidateExcerptIdentityHash: "a".repeat(63) })],
+    },
+    {
+      label: "unbounded count",
+      value: Array.from({ length: 17 }, () => researchRepairDiagnosticFixture()),
+    },
+  ];
+  for (const { label, value: canonicalExcerptRepairDiagnostics } of malformedDiagnostics) {
+    let staged = false;
+    const executor = new ResourceTaskExecutor({
+      adapters: new VersionedResourceGenerationAdapterRegistry([{
+        identity: {
+          id: "dezin.resource-adapter.research",
+          version: 1,
+          kind: "research",
+        },
+        async generate() {
+          return outputFixture({
+            mimeType: "application/json",
+            bytes: new TextEncoder().encode(JSON.stringify({
+              format: "dezin-research-resource-bundle",
+              version: 3,
+            })),
+            metadata: rejectedResearchDecisionGradeMetadata(),
+            evidence: { canonicalExcerptRepairDiagnostics },
+          });
+        },
+      }]),
+      staging: {
+        async find() { return null; },
+        async stage(input) { staged = true; return receiptFor(input); },
+        async cleanupIfUnreferenced() { return false; },
+      },
+    });
+
+    await assert.rejects(
+      executor.execute(researchClaimFixture(), new AbortController().signal),
+      (error) => {
+        assert.ok(
+          error instanceof ResourceTaskAdapterError,
+          `${label}: ${error instanceof Error ? `${error.constructor.name}: ${error.message}` : String(error)}`,
+        );
+        assert.equal(error.code, "RESOURCE_ADAPTER_OUTPUT_INVALID");
+        assert.match(error.message, /canonical excerpt repair diagnostic/i);
+        assert.equal(JSON.stringify(error).includes(rawUrl), false);
+        return true;
+      },
+    );
+    assert.equal(staged, false);
+  }
+});
+
+test("rejects a metadata-only Research v4 bundle without complete payload validation", async () => {
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({
+    format: "dezin-research-resource-bundle",
+    version: 4,
+  }));
+  const metadata = {
+    ...acceptedResearchDecisionGradeMetadata(),
+    version: 4,
+  };
+  let staged = false;
+  const executor = new ResourceTaskExecutor({
+    adapters: new VersionedResourceGenerationAdapterRegistry([{
+      identity: {
+        id: "dezin.resource-adapter.research",
+        version: 1,
+        kind: "research",
+      },
+      async generate() {
+        return outputFixture({
+          bytes: payloadBytes,
+          mimeType: "application/json",
+          summary: "KITE Research direction repair",
+          metadata,
+          provenance: { model: "gpt-5.4-mini" },
+          evidence: { accepted: true },
+        });
+      },
+    }]),
+    staging: {
+      async find() { return null; },
+      async stage(input) {
+        staged = true;
+        return receiptFor(input);
+      },
+      async cleanupIfUnreferenced() { return false; },
+    },
+  });
+
+  await assert.rejects(
+    executor.execute(researchClaimFixture(), new AbortController().signal),
+    (error) => error instanceof ResourceTaskAdapterError
+      && error.code === "RESOURCE_ADAPTER_OUTPUT_INVALID"
+      && /complete payload validation/i.test(error.message),
+  );
+  assert.equal(staged, false);
+});
+
 test("rejects a replayed Research payload whose rejected decision-grade gate was staged before publication", async () => {
   const claim = researchClaimFixture();
   const payloadBytes = new TextEncoder().encode(JSON.stringify({
@@ -924,6 +1539,7 @@ test("rejects a replayed Research payload whose rejected decision-grade gate was
     }]),
     staging: {
       async find() { return null; },
+      async validate() {},
       async stage(input) {
         replay = receiptFor(input);
         return replay;
@@ -934,6 +1550,11 @@ test("rejects a replayed Research payload whose rejected decision-grade gate was
   await setupExecutor.execute(claim, new AbortController().signal);
   assert.ok(replay);
   const stagedReplay = replay as unknown as ResourceTaskPayloadReceipt;
+  assert.equal(
+    "canonicalExcerptRepairDiagnostics" in stagedReplay.evidence,
+    false,
+    "accepted Research staging must not persist rejection-only diagnostics",
+  );
   replay = {
     ...stagedReplay,
     metadata: rejectedResearchDecisionGradeMetadata(),

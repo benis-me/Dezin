@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
+import { Group, Panel, Separator, useGroupRef, usePanelRef } from "react-resizable-panels";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { IconButton } from "../components/ui/index.ts";
 import { useMediaQuery } from "../hooks/useMediaQuery.ts";
@@ -22,6 +22,7 @@ export function ProjectStudioShell({
   main,
   inspector,
   inspectorOpen = false,
+  inspectorAvailable = inspectorOpen,
   inspectorLabel = "Inspector",
   inspectorToggleLabel = "inspector",
   narrowInspectorContentOwnsClose = false,
@@ -32,6 +33,7 @@ export function ProjectStudioShell({
   main: ReactNode;
   inspector: ReactNode;
   inspectorOpen?: boolean;
+  inspectorAvailable?: boolean;
   inspectorLabel?: string;
   inspectorToggleLabel?: string;
   narrowInspectorContentOwnsClose?: boolean;
@@ -42,24 +44,33 @@ export function ProjectStudioShell({
   const mobile = useMediaQuery("(max-width: 639px)");
   const wideDesktop = useMediaQuery("(min-width: 1280px)");
   const inspectorGroupRef = useGroupRef();
+  const inspectorPanelRef = usePanelRef();
   const showInspectorRef = useRef<HTMLButtonElement>(null);
   const hideInspectorRef = useRef<HTMLButtonElement>(null);
   const wasNarrowReachableRef = useRef(false);
+  const inspectorEverAvailableRef = useRef(inspectorAvailable);
+  if (inspectorAvailable) inspectorEverAvailableRef.current = true;
   const agentPercent = readPanelPercent(PROJECT_STUDIO_AGENT_WIDTH_KEY, 20, 12, 34);
-  const inspectorPercent = readPanelPercent(PROJECT_STUDIO_INSPECTOR_WIDTH_KEY, 25, 18, 38);
-  const wideInspectorMounted = wideDesktop && inspectorOpen;
+  const inspectorPercent = readPanelPercent(PROJECT_STUDIO_INSPECTOR_WIDTH_KEY, 22, 17, 34);
+  const inspectorMounted = inspectorEverAvailableRef.current;
+  const wideInspectorMounted = wideDesktop && inspectorMounted;
   const wideInspectorActive = wideDesktop && inspectorOpen && !presentation;
   const inspectorLayout = useMemo(
     () => (
-      wideInspectorMounted
+      wideInspectorMounted && wideInspectorActive
         ? twoPanelLayout(
             PROJECT_STUDIO_SURFACE_PANEL,
             100 - inspectorPercent,
             PROJECT_STUDIO_INSPECTOR_PANEL,
           )
-        : { [PROJECT_STUDIO_SURFACE_PANEL]: 100 }
+        : wideInspectorMounted
+          ? {
+              [PROJECT_STUDIO_SURFACE_PANEL]: 100,
+              [PROJECT_STUDIO_INSPECTOR_PANEL]: 0,
+            }
+          : { [PROJECT_STUDIO_SURFACE_PANEL]: 100 }
     ),
-    [inspectorPercent, wideInspectorMounted],
+    [inspectorPercent, wideInspectorActive, wideInspectorMounted],
   );
 
   useEffect(() => {
@@ -71,7 +82,10 @@ export function ProjectStudioShell({
 
   useLayoutEffect(() => {
     inspectorGroupRef.current?.setLayout(inspectorLayout);
-  }, [inspectorGroupRef, inspectorLayout]);
+    if (!wideInspectorMounted) return;
+    if (wideInspectorActive) inspectorPanelRef.current?.expand();
+    else inspectorPanelRef.current?.collapse();
+  }, [inspectorGroupRef, inspectorLayout, inspectorPanelRef, wideInspectorActive, wideInspectorMounted]);
 
   useEffect(() => {
     if (presentation) {
@@ -97,12 +111,12 @@ export function ProjectStudioShell({
     </aside>
   );
 
-  const inspectorAside = (narrow: boolean) => (
+  const inspectorAside = (narrow: boolean, concealed = false) => (
     <aside
       id="project-studio-inspector"
       aria-label={inspectorLabel}
-      inert={presentation ? true : undefined}
-      hidden={presentation}
+      inert={presentation || concealed ? true : undefined}
+      hidden={presentation || concealed}
       data-narrow-reachable={narrow || undefined}
       className={narrow
         ? "absolute inset-y-0 right-0 z-30 h-full min-h-0 w-[min(320px,100%)] max-w-[320px] overflow-hidden border-l border-border bg-background"
@@ -147,13 +161,16 @@ export function ProjectStudioShell({
         </IconButton>
       ) : null}
       <Group
-        key={wideInspectorMounted ? "with-inspector" : "surface-only"}
         id="dezin-project-studio-inspector-layout"
         groupRef={inspectorGroupRef}
         className="h-full min-w-0"
         defaultLayout={inspectorLayout}
         onLayoutChanged={(layout, meta) => {
           if (wideInspectorActive && meta.isUserInteraction) {
+            if ((layout[PROJECT_STUDIO_INSPECTOR_PANEL] ?? 0) <= 0) {
+              inspectorPanelRef.current?.expand();
+              return;
+            }
             savePanelFraction(
               PROJECT_STUDIO_INSPECTOR_WIDTH_KEY,
               layout,
@@ -182,17 +199,20 @@ export function ProjectStudioShell({
         {wideInspectorMounted ? (
           <Panel
             id={PROJECT_STUDIO_INSPECTOR_PANEL}
-            minSize="288px"
-            maxSize="400px"
+            minSize="272px"
+            maxSize="360px"
+            collapsible
+            collapsedSize="0px"
+            panelRef={inspectorPanelRef}
             groupResizeBehavior="preserve-pixel-size"
-            hidden={presentation}
+            aria-hidden={!wideInspectorActive}
             style={{ overflow: "hidden" }}
           >
-            {inspectorAside(false)}
+            {inspectorAside(false, !wideInspectorActive)}
           </Panel>
         ) : null}
       </Group>
-      {narrowInspectorEligible ? inspectorAside(true) : null}
+      {inspectorMounted && !wideDesktop ? inspectorAside(true, !narrowReachable) : null}
     </div>
   );
 

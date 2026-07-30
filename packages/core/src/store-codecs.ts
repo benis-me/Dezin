@@ -67,6 +67,7 @@ import type {
   GenerationPlanEvent,
   GenerationPlanEventType,
   ListGenerationPlanEventsInput,
+  RecordGenerationTaskProgressInput,
   RecordGenerationTaskMaterializationFailureInput,
   PublishGenerationTaskCandidateInput,
   PublishGenerationPlanCheckpointInput,
@@ -139,6 +140,7 @@ const GENERATION_PLAN_EVENT_TYPES = new Set<GenerationPlanEventType>([
   "task-blocked-context",
   "task-materialized",
   "task-running",
+  "task-progress",
   "task-candidate-ready",
   "task-needs-rebase",
   "task-rebase-disposition",
@@ -152,6 +154,14 @@ const GENERATION_PLAN_EVENT_TYPES = new Set<GenerationPlanEventType>([
   "plan-succeeded",
   "plan-failed",
   "plan-cancelled",
+]);
+const GENERATION_TASK_PROGRESS_PHASES = new Set<RecordGenerationTaskProgressInput["phase"]>([
+  "generating",
+  "verifying-sources",
+  "reviewing",
+  "repairing",
+  "generating-assets",
+  "publishing",
 ]);
 const GENERATION_JSON_MAX_DEPTH = 64;
 const GENERATION_JSON_MAX_NODES = 100_000;
@@ -1193,6 +1203,41 @@ export function normalizeHeartbeatGenerationTaskAttemptInput(
   };
 }
 
+function generationTaskProgressPhase(
+  value: unknown,
+  label: string,
+): RecordGenerationTaskProgressInput["phase"] {
+  if (typeof value !== "string"
+    || !GENERATION_TASK_PROGRESS_PHASES.has(value as RecordGenerationTaskProgressInput["phase"])) {
+    throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+  }
+  return value as RecordGenerationTaskProgressInput["phase"];
+}
+
+export function normalizeRecordGenerationTaskProgressInput(
+  value: unknown,
+): RecordGenerationTaskProgressInput {
+  const input = generationRecord(value, "record Generation Task progress input");
+  generationAllowFields(input, [
+    "taskId",
+    "workspaceId",
+    "attempt",
+    "ownerId",
+    "leaseToken",
+    "phase",
+  ], "record Generation Task progress input");
+  return {
+    ...normalizeGenerationTaskAttemptLease({
+      taskId: input.taskId,
+      workspaceId: input.workspaceId,
+      attempt: input.attempt,
+      ownerId: input.ownerId,
+      leaseToken: input.leaseToken,
+    }),
+    phase: generationTaskProgressPhase(input.phase, "Generation Task progress phase"),
+  };
+}
+
 function generationClaimIdHex(value: string, label: string): void {
   if (!/^(?:[0-9a-f]{2})+$/.test(value)) {
     throw new WorkspaceStoreCodecError(`${label} must be non-empty lowercase byte hex`);
@@ -2017,12 +2062,18 @@ export function asGenerationPlanEvent(rowValue: Row): GenerationPlanEvent {
     throw new WorkspaceStoreCodecError("Generation Task events must name a Task");
   }
   generationExactString(row.workspace_id, "Generation Plan event Workspace id");
+  const payload = generationCanonicalObjectText(row.payload_json, "Generation Plan event payload");
+  if (row.type === "task-progress") {
+    generationAllowFields(payload, ["attempt", "phase"], "Generation Task progress event payload");
+    generationSafeInteger(payload.attempt, "Generation Task progress event attempt", 1);
+    generationTaskProgressPhase(payload.phase, "Generation Task progress event phase");
+  }
   return {
     planId: generationExactString(row.plan_id, "Generation Plan event Plan id"),
     sequence: generationSafeInteger(row.sequence, "Generation Plan event sequence", 1),
     taskId,
     type: row.type as GenerationPlanEventType,
-    payload: generationCanonicalObjectText(row.payload_json, "Generation Plan event payload"),
+    payload,
     createdAt: generationSafeInteger(row.created_at, "Generation Plan event created at", 0),
   };
 }

@@ -12,8 +12,14 @@ import {
   type GenerationTaskAttempt,
   type GenerationTaskAttemptLease,
   type GenerationTaskClaim,
+  type GenerationPlanEvent,
   type StoreClock,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+  codexResearchGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 interface GenerationTaskAttemptClaim {
   task: GenerationTask;
@@ -36,6 +42,9 @@ interface GenerationTaskClaimStoreContract {
     now: number,
     leaseMs: number,
   ): GenerationTaskAttemptClaim;
+  recordGenerationTaskProgress(input: GenerationTaskAttemptLease & {
+    phase: "generating" | "verifying-sources" | "reviewing" | "repairing" | "generating-assets" | "publishing";
+  }): GenerationPlanEvent;
   releaseGenerationTaskAttemptClaims(lease: GenerationTaskAttemptLease): boolean;
 }
 
@@ -59,7 +68,9 @@ function checksum(value: string): string {
 function emptyGeneration() {
   return {
     kind: "workspace-generation" as const,
-    agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+    agent: codebuddyGeneratorAgent(),
+    researchAgent: codexResearchGeneratorAgent(),
+    reviewerAgent: claudeSessionReviewerAgent(),
     resourceOperations: [],
     artifactPlans: [],
     dependencyPlans: [],
@@ -569,6 +580,55 @@ test("claiming atomically commits Attempt running, Task running, Plan running, c
       claim_count: result.claims.length,
       event_count: 1,
     });
+  } finally {
+    store.close();
+  }
+});
+
+test("task progress appends only bounded phases behind the live Attempt lease fence", () => {
+  const store = new Store(":memory:", fakeClock("progress-fence"));
+  try {
+    const fixture = createQueuedValidationAttempt(store, "progress-fence");
+    const api = claimApi(store);
+    const running = claim(api, fixture.attempt, "progress-owner");
+    assert.ok(running);
+
+    const first = api.recordGenerationTaskProgress({
+      ...running.lease,
+      phase: "generating",
+    });
+    const second = api.recordGenerationTaskProgress({
+      ...running.lease,
+      phase: "reviewing",
+    });
+    assert.equal(first.type, "task-progress");
+    assert.equal(second.sequence, first.sequence + 1);
+    assert.deepEqual(first.payload, { attempt: running.attempt.attempt, phase: "generating" });
+    assert.deepEqual(second.payload, { attempt: running.attempt.attempt, phase: "reviewing" });
+    assert.equal("ownerId" in first.payload, false);
+    assert.equal("leaseToken" in first.payload, false);
+
+    const stale = {
+      ...running.lease,
+      leaseToken: "stale-progress-token",
+      phase: "repairing" as const,
+    };
+    assert.throws(
+      () => api.recordGenerationTaskProgress(stale),
+      /lease|token|stale|fence/i,
+    );
+    const history = store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 100 },
+    );
+    assert.deepEqual(
+      history.filter((event) => event.type === "task-progress").map((event) => event.payload),
+      [
+        { attempt: running.attempt.attempt, phase: "generating" },
+        { attempt: running.attempt.attempt, phase: "reviewing" },
+      ],
+    );
   } finally {
     store.close();
   }

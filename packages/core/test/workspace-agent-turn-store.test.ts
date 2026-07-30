@@ -14,6 +14,7 @@ import {
 } from "../src/index.ts";
 
 const TURN_ID = "turn-550e8400-e29b-41d4-a716-446655440010";
+const FRESH_TURN_ID = "turn-550e8400-e29b-41d4-a716-446655440011";
 const CONTEXT_HASH = "6".repeat(64);
 const REQUEST_CONTEXT_HASH = "7".repeat(64);
 
@@ -166,6 +167,69 @@ test("reusing a Workspace Agent turn id for divergent immutable request facts fa
       && error.actualRequestHash !== committed.receipt.requestHash,
   );
   assert.equal(store.workspace.listProposals(fixture.project.id).length, 1);
+  store.close();
+});
+
+test("a materially changed Workspace Agent request commits under a fresh turn id and exact replays", () => {
+  const store = new Store(":memory:", clock("fresh-turn"));
+  const fixture = seedWorkspaceTurn(store);
+  const original = store.workspace.commitWorkspaceAgentTurnForProject({
+    projectId: fixture.project.id,
+    turnId: TURN_ID,
+    request: fixture.request,
+    contextPackId: fixture.contextPack.id,
+    proposal: fixture.proposal,
+  });
+  const message = "Plan a materially different editorial discovery journey.";
+  const contextHash = "8".repeat(64);
+  const freshContextPack = store.workspace.persistContextPack({
+    id: `context-pack-${contextHash}`,
+    workspaceId: fixture.workspace.id,
+    graphRevision: fixture.request.graphRevision,
+    target: { type: "workspace", id: fixture.workspace.id },
+    intent: "plan",
+    messageChecksum: createHash("sha256").update(message).digest("hex"),
+    manifestPath: `context-packs/${contextHash}.json`,
+    tokenEstimate: 0,
+    omissions: [],
+    hash: contextHash,
+    items: [],
+  });
+  const freshRequest = {
+    ...fixture.request,
+    message,
+    requestContextHash: "9".repeat(64),
+  };
+  const freshInput = {
+    projectId: fixture.project.id,
+    turnId: FRESH_TURN_ID,
+    request: freshRequest,
+    contextPackId: freshContextPack.id,
+    proposal: {
+      ...fixture.proposal,
+      rationale: "A materially different editorial discovery direction.",
+    },
+  };
+
+  assert.throws(
+    () => store.workspace.commitWorkspaceAgentTurnForProject({
+      ...freshInput,
+      turnId: TURN_ID,
+    }),
+    (error: unknown) => error instanceof WorkspaceAgentTurnConflictError
+      && error.turnId === TURN_ID
+      && error.expectedRequestHash === original.receipt.requestHash
+      && error.actualRequestHash !== original.receipt.requestHash,
+  );
+
+  const committed = store.workspace.commitWorkspaceAgentTurnForProject(freshInput);
+  const replay = store.workspace.commitWorkspaceAgentTurnForProject(freshInput);
+
+  assert.equal(committed.created, true);
+  assert.equal(replay.created, false);
+  assert.deepEqual(replay.receipt, committed.receipt);
+  assert.notEqual(committed.receipt.requestHash, original.receipt.requestHash);
+  assert.equal(store.workspace.listProposals(fixture.project.id).length, 2);
   store.close();
 });
 
@@ -494,6 +558,10 @@ test("latest actionable Workspace Agent Plan discovery restores unresolved work 
     store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
     null,
   );
+  assert.equal(
+    store.workspace.getLatestWorkspaceAgentGenerationPlanForProject(fixture.project.id),
+    null,
+  );
 
   const approved = store.workspace.approveProposalForProject(
     fixture.project.id,
@@ -515,6 +583,10 @@ test("latest actionable Workspace Agent Plan discovery restores unresolved work 
 
   assert.equal(
     store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
+    approved.plan.id,
+  );
+  assert.equal(
+    store.workspace.getLatestWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
     approved.plan.id,
   );
 
@@ -556,28 +628,33 @@ test("latest actionable Workspace Agent Plan discovery restores unresolved work 
     approved.plan.id,
   );
 
-  store.db.exec("DROP TRIGGER generation_plan_terminal_state_guard");
-  store.db.prepare(
-    `UPDATE generation_plans
-     SET status = 'succeeded', finished_at = ?
-     WHERE id = ?`,
-  ).run(400_001, approved.plan.id);
+  const retried = store.workspace.retryGenerationTaskForProject(
+    fixture.project.id,
+    approved.plan.id,
+    rootTask.id,
+    { mode: "latest-context", now: 400_001 },
+  );
+  assert.equal(retried.plan.status, "queued");
+  const cancelled = store.workspace.cancelGenerationPlanForProject(
+    fixture.project.id,
+    approved.plan.id,
+    400_002,
+  );
+  assert.equal(cancelled.plan.status, "cancelled");
   assert.equal(
     store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
     null,
   );
-
-  store.db.prepare(
-    `UPDATE generation_plans
-     SET status = 'cancelled', finished_at = ?
-     WHERE id = ?`,
-  ).run(400_002, approved.plan.id);
   assert.equal(
-    store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject(fixture.project.id),
-    null,
+    store.workspace.getLatestWorkspaceAgentGenerationPlanForProject(fixture.project.id)?.id,
+    approved.plan.id,
   );
   assert.equal(
     store.workspace.getLatestActionableWorkspaceAgentGenerationPlanForProject("missing-project"),
+    null,
+  );
+  assert.equal(
+    store.workspace.getLatestWorkspaceAgentGenerationPlanForProject("missing-project"),
     null,
   );
   store.close();

@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, types as nodeUtilTypes } from "node:util";
 import {
   GenerationTaskQualityGateError,
   type GenerationTask,
   type GenerationTaskAttemptClaim,
   type GenerationTaskAttemptLease,
+  type GenerationTaskProgressPhase,
   type ResourceGenerationTaskPayloadV2,
   type ResourceKind,
   type WorkspaceGenerationCapability,
@@ -17,7 +18,9 @@ import type {
 import {
   GenerationTaskPayloadContractError,
   validateFrozenGenerationTaskAgent,
+  validateMoodboardImageExecutionAuthority,
 } from "./generation-task-contracts.ts";
+import type { ResearchRevisionTaskAuthority } from "../research-resource-revision.ts";
 
 const CONTEXT_PACK_ID = /^context-pack-([a-f0-9]{64})$/;
 
@@ -57,6 +60,8 @@ export interface ResourceGenerationAdapterInput {
   readonly maxRepairRounds: number;
   /** Exact frozen payload budget compiled into this immutable Task. */
   readonly maxOutputBytes: number;
+  /** Emits one bounded designer-facing phase; production binds it to this exact leased Attempt. */
+  readonly reportProgress?: (phase: GenerationTaskProgressPhase) => void | Promise<void>;
   readonly signal: AbortSignal;
 }
 
@@ -65,8 +70,17 @@ export interface ResourceGenerationAdapter {
   generate(input: ResourceGenerationAdapterInput): Promise<ResourceGenerationAdapterOutput>;
 }
 
+export interface ResourceTaskProgressPort {
+  record(
+    claim: GenerationTaskAttemptClaim,
+    phase: GenerationTaskProgressPhase,
+  ): void | Promise<void>;
+}
+
 export interface ResourceTaskPayloadScope {
   readonly taskId: string;
+  /** Exact immutable Plan owner. Required by Research payload validation. */
+  readonly planId?: string;
   readonly attempt: number;
   readonly inputHash: string;
   readonly workspaceId: string;
@@ -77,12 +91,15 @@ export interface ResourceTaskPayloadScope {
   readonly maxOutputBytes: number;
   readonly contextPackId?: string;
   readonly contextPackHash?: string;
+  readonly researchTaskAuthority?: ResearchRevisionTaskAuthority;
   readonly lease?: GenerationTaskAttemptLease;
   readonly signal: AbortSignal;
 }
 
 export interface ResourceTaskPayloadStageInput {
   readonly taskId: string;
+  /** Exact immutable Plan owner. Required by Research payload validation. */
+  readonly planId?: string;
   readonly attempt: number;
   readonly inputHash: string;
   readonly workspaceId: string;
@@ -93,6 +110,7 @@ export interface ResourceTaskPayloadStageInput {
   readonly maxOutputBytes: number;
   readonly contextPackId: string;
   readonly contextPackHash: string;
+  readonly researchTaskAuthority?: ResearchRevisionTaskAuthority;
   readonly lease: GenerationTaskAttemptLease;
   readonly bytes: Uint8Array;
   readonly mimeType: string;
@@ -127,6 +145,12 @@ export interface ResourceTaskPayloadReceipt {
 export interface ResourceTaskPayloadStagingPort {
   /** Finds a durable attempt-scoped receipt before invoking a nondeterministic adapter. */
   find(input: ResourceTaskPayloadScope): Promise<ResourceTaskPayloadReceipt | null>;
+  /**
+   * Validates the complete adapter-authored payload against daemon authority
+   * before any durable staging write. Research generation fails closed when
+   * this capability is unavailable.
+   */
+  validate?(input: ResourceTaskPayloadStageInput): Promise<void>;
   /** Seals bytes and the receipt atomically/idempotently for the exact scope. */
   stage(input: ResourceTaskPayloadStageInput): Promise<ResourceTaskPayloadReceipt>;
   /**
@@ -257,16 +281,19 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
   readonly options: {
     adapters: VersionedResourceGenerationAdapterRegistry;
     staging: ResourceTaskPayloadStagingPort;
+    progress?: ResourceTaskProgressPort;
   };
   readonly #receiptByCandidate = new WeakMap<ResourcePreparedCandidate, ResourceTaskPayloadReceipt>();
 
   constructor(options: {
     adapters: VersionedResourceGenerationAdapterRegistry;
     staging: ResourceTaskPayloadStagingPort;
+    progress?: ResourceTaskProgressPort;
   }) {
     this.options = Object.freeze({
       adapters: options.adapters,
       staging: options.staging,
+      ...(options.progress === undefined ? {} : { progress: options.progress }),
     });
   }
 
@@ -279,9 +306,13 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
     const contextPackId = claim.attempt.contextPackId as string;
     const contextPackHash = CONTEXT_PACK_ID.exec(contextPackId)![1]!;
     const payload = parseResourceGenerationTaskPayloadV2(claim.task);
+    const researchTaskAuthority = payload.operation.kind === "research"
+      ? buildResearchRevisionTaskAuthority(payload)
+      : undefined;
     const revisionId = attemptRevisionId(claim);
     const scope: ResourceTaskPayloadScope = {
       taskId: claim.task.id,
+      planId: claim.task.planId,
       attempt: claim.attempt.attempt,
       inputHash: claim.attempt.inputHash,
       workspaceId: claim.task.workspaceId,
@@ -292,6 +323,7 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
       maxOutputBytes: claim.task.resourceLimits.maxOutputBytes,
       contextPackId,
       contextPackHash,
+      ...(researchTaskAuthority === undefined ? {} : { researchTaskAuthority }),
       lease: claim.lease,
       signal,
     };
@@ -311,7 +343,13 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
     checkAbort(signal);
     if (replayReceipt !== null) {
       const normalized = validateResourceTaskPayloadReceipt(replayReceipt, scope);
-      enforceResearchDecisionGradeGate(payload.operation.kind, normalized.metadata);
+      enforceResearchDecisionGradeGate(
+        payload.operation.kind,
+        normalized.metadata,
+        normalized.evidence,
+      );
+      await this.options.progress?.record(claim, "publishing");
+      checkAbort(signal);
       return this.preparedCandidate(claim, payload, normalized);
     }
     const adapter = this.options.adapters.require(payload.adapter);
@@ -335,6 +373,11 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
         taskTimeoutMs: claim.task.resourceLimits.timeoutMs,
         maxRepairRounds: claim.task.resourceLimits.maxRepairRounds,
         maxOutputBytes: claim.task.resourceLimits.maxOutputBytes,
+        reportProgress: async (phase) => {
+          checkAbort(signal);
+          await this.options.progress?.record(claim, phase);
+          checkAbort(signal);
+        },
         signal,
       } satisfies ResourceGenerationAdapterInput));
     } catch (error) {
@@ -348,7 +391,16 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
     }
     checkAbort(signal);
     const output = normalizeAdapterOutput(rawOutput, outputBudget);
-    enforceResearchDecisionGradeGate(payload.operation.kind, output.metadata);
+    enforceResearchDecisionGradeGate(payload.operation.kind, output.metadata, output.evidence);
+    if (payload.operation.kind === "research"
+      && typeof this.options.staging.validate !== "function") {
+      throw new ResourceTaskAdapterError(
+        "RESOURCE_ADAPTER_OUTPUT_INVALID",
+        "Research adapter output cannot be published without complete payload validation",
+      );
+    }
+    checkAbort(signal);
+    await this.options.progress?.record(claim, "publishing");
     checkAbort(signal);
     let stagedReceipt: ResourceTaskPayloadReceipt;
     try {
@@ -410,6 +462,29 @@ export class ResourceTaskExecutor implements ResourceGenerationTaskLeafExecutor 
   }
 }
 
+function buildResearchRevisionTaskAuthority(
+  payload: ResourceGenerationTaskPayloadV2,
+): ResearchRevisionTaskAuthority {
+  const targetInstructions = payload.brief.targetInstructions;
+  return Object.freeze({
+    operation: payload.operation.operation,
+    nodeId: payload.operation.nodeId,
+    title: payload.operation.title,
+    brief: Object.freeze({
+      proposalRationale: payload.brief.proposalRationale,
+      assumptions: Object.freeze([...payload.brief.assumptions]),
+      targetInstructions: Object.freeze({
+        operation: targetInstructions.operation,
+        kind: "research" as const,
+        title: targetInstructions.title,
+        ...(targetInstructions.instructions === undefined
+          ? {}
+          : { instructions: targetInstructions.instructions }),
+      }),
+    }),
+  });
+}
+
 function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
 }
@@ -432,7 +507,94 @@ const RESEARCH_DECISION_GRADE_BLOCKERS = new Set([
   "insufficient-evidence-findings",
   "insufficient-evidence-directions",
 ]);
+const RESEARCH_WEB_EVIDENCE_FAILURE_REASONS = [
+  "retriever-unavailable",
+  "network-failed",
+  "http-status",
+  "unsupported-media-type",
+  "content-extraction-failed",
+  "excerpt-mismatch",
+  "representation-invalid",
+  "binding-unavailable",
+  "binding-rejected",
+  "binding-invalid",
+] as const;
+const RESEARCH_WEB_EVIDENCE_FAILURE_REASON_SET = new Set<string>(
+  RESEARCH_WEB_EVIDENCE_FAILURE_REASONS,
+);
+const MAX_RESEARCH_EVIDENCE_RECEIPTS = 64;
+const MAX_RESEARCH_EVIDENCE_RECEIPT_FIELDS = 32;
 const MAX_RESEARCH_DECISION_GRADE_COUNT = 1_000_000;
+const MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTICS = 16;
+const MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTICS_BYTES = 16 * 1_024;
+const MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_OPTION_COUNT = 4;
+const MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_QUOTE_COUNT = 256 * 8;
+const MAX_RESEARCH_CANONICAL_EXCERPT_BYTES = 8 * 1_024;
+const SHA256 = /^[a-f0-9]{64}$/;
+const RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTIC_FIELDS = [
+  "decision",
+  "optionCount",
+  "quoteCount",
+  "matchingOptionCount",
+  "candidateExcerptByteLength",
+  "candidateExcerptIdentityHash",
+  "sourceIdentityHash",
+  "requestedUrlHash",
+  "sourceIdSameAsFirstPass",
+  "requestedUrlSameAsFirstPass",
+  "selectedOptionIdentityHash",
+  "canonicalUrlSameAsFirstPass",
+  "canonicalTextChecksumSameAsFirstPass",
+  "receiptReason",
+] as const;
+const RESEARCH_CANONICAL_EXCERPT_REPAIR_DECISIONS = new Set([
+  "reference-hit",
+  "exact-option-hit",
+  "preserved-old-unique-hit",
+  "preserved-old-zero",
+  "preserved-old-ambiguous",
+  "changed-unresolved",
+]);
+const RESEARCH_CANONICAL_EXCERPT_REPAIR_RECEIPT_REASONS = new Set([
+  "verified",
+  ...RESEARCH_WEB_EVIDENCE_FAILURE_REASONS,
+]);
+const RESEARCH_EVIDENCE_COVERAGE_FIELDS = [
+  "protocol",
+  "repairMode",
+  "firstPassGate",
+  "finalPass",
+] as const;
+const RESEARCH_EVIDENCE_COVERAGE_FIRST_PASS_GATE_FIELDS = [
+  "observed",
+  "blockers",
+] as const;
+const RESEARCH_EVIDENCE_COVERAGE_FINAL_PASS_FIELDS = [
+  "webSourceCount",
+  "verifiedWebReceiptCount",
+  "unverifiedWebReceiptCount",
+  "verifiedWebSupportReceiptCount",
+  "groundednessSelectedWebSupportReceiptCount",
+  "groundednessSelectedWebSourceCount",
+  "groundednessSelectedWebCanonicalComponentCount",
+  "evidenceFindingCount",
+  "evidenceDirectionCount",
+  "qualifyingDecisionGradeDirectionCount",
+  "maximumDirectionEvidenceFindingCount",
+  "maximumDirectionVerifiedWebComponentCount",
+] as const;
+const RESEARCH_EVIDENCE_COVERAGE_REPAIR_MODES = new Set([
+  "none",
+  "full-replacement",
+  "direction-only",
+]);
+
+interface ResearchDecisionGradeObservation {
+  readonly verifiedWebSourceCount: number;
+  readonly evidenceFindingCount: number;
+  readonly evidenceDirectionCount: number;
+  readonly groundednessVerifierAvailable: boolean;
+}
 
 function invalidResearchDecisionGradeGate(message: string, cause?: unknown): never {
   throw new ResourceTaskAdapterError(
@@ -448,7 +610,8 @@ function researchDecisionGradeRecord(
   label: string,
 ): Record<string, unknown> {
   try {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)
+      || nodeUtilTypes.isProxy(value)) {
       return invalidResearchDecisionGradeGate(`${label} must be an exact object`);
     }
     const prototype = Object.getPrototypeOf(value);
@@ -484,10 +647,13 @@ function researchDecisionGradeCount(value: unknown, label: string): number {
   return value;
 }
 
-function researchDecisionGradeBlockers(value: unknown): string[] {
+function researchDecisionGradeBlockers(
+  value: unknown,
+  label = "Research adapter decision-grade blockers",
+): string[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype
     || value.length > RESEARCH_DECISION_GRADE_BLOCKERS.size) {
-    return invalidResearchDecisionGradeGate("Research adapter decision-grade blockers are invalid");
+    return invalidResearchDecisionGradeGate(`${label} are invalid`);
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const blockers: string[] = [];
@@ -496,23 +662,368 @@ function researchDecisionGradeBlockers(value: unknown): string[] {
     if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)
       || typeof descriptor.value !== "string"
       || !RESEARCH_DECISION_GRADE_BLOCKERS.has(descriptor.value)) {
-      return invalidResearchDecisionGradeGate("Research adapter decision-grade blockers are invalid");
+      return invalidResearchDecisionGradeGate(`${label} are invalid`);
     }
     blockers.push(descriptor.value);
   }
   if (new Set(blockers).size !== blockers.length) {
-    return invalidResearchDecisionGradeGate("Research adapter decision-grade blockers are invalid");
+    return invalidResearchDecisionGradeGate(`${label} are invalid`);
   }
   return blockers;
+}
+
+function expectedResearchDecisionGradeBlockers(
+  observed: ResearchDecisionGradeObservation,
+): string[] {
+  return [
+    ...(observed.groundednessVerifierAvailable ? [] : ["groundedness-verifier-unavailable"]),
+    ...(observed.verifiedWebSourceCount < 2 ? ["insufficient-verified-web-sources"] : []),
+    ...(observed.evidenceFindingCount < 2 ? ["insufficient-evidence-findings"] : []),
+    ...(observed.evidenceDirectionCount < 1 ? ["insufficient-evidence-directions"] : []),
+  ];
+}
+
+function researchCanonicalExcerptRepairDiagnostics(
+  evidence: Record<string, unknown>,
+): readonly Readonly<Record<string, unknown>>[] {
+  const rawDiagnostics = evidence.canonicalExcerptRepairDiagnostics;
+  if (rawDiagnostics === undefined) return Object.freeze([]);
+  try {
+    if (!Array.isArray(rawDiagnostics)
+      || nodeUtilTypes.isProxy(rawDiagnostics)
+      || Object.getPrototypeOf(rawDiagnostics) !== Array.prototype
+      || rawDiagnostics.length > MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTICS) {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter canonical excerpt repair diagnostics are invalid",
+      );
+    }
+    const keys = Reflect.ownKeys(rawDiagnostics);
+    const arrayDescriptors = Object.getOwnPropertyDescriptors(rawDiagnostics);
+    if (keys.some((key) => typeof key !== "string")
+      || keys.length !== rawDiagnostics.length + 1
+      || !keys.includes("length")) {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter canonical excerpt repair diagnostics are invalid",
+      );
+    }
+    const diagnostics: Readonly<Record<string, unknown>>[] = [];
+    for (let index = 0; index < rawDiagnostics.length; index += 1) {
+      const descriptor = arrayDescriptors[String(index)];
+      if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)
+        || descriptor.get !== undefined || descriptor.set !== undefined) {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter canonical excerpt repair diagnostics are invalid",
+        );
+      }
+      const exact = researchDecisionGradeRecord(
+        descriptor.value,
+        RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTIC_FIELDS,
+        `Research adapter canonical excerpt repair diagnostic ${index}`,
+      );
+      const optionCount = researchDecisionGradeCount(
+        exact.optionCount,
+        `Research adapter canonical excerpt repair diagnostic ${index} option count`,
+      );
+      const quoteCount = researchDecisionGradeCount(
+        exact.quoteCount,
+        `Research adapter canonical excerpt repair diagnostic ${index} quote count`,
+      );
+      const matchingOptionCount = researchDecisionGradeCount(
+        exact.matchingOptionCount,
+        `Research adapter canonical excerpt repair diagnostic ${index} matching option count`,
+      );
+      const candidateExcerptByteLength = researchDecisionGradeCount(
+        exact.candidateExcerptByteLength,
+        `Research adapter canonical excerpt repair diagnostic ${index} candidate excerpt byte length`,
+      );
+      const selectedOptionIdentityHash = exact.selectedOptionIdentityHash;
+      if (typeof exact.decision !== "string"
+        || !RESEARCH_CANONICAL_EXCERPT_REPAIR_DECISIONS.has(exact.decision)
+        || optionCount > MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_OPTION_COUNT
+        || quoteCount > MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_QUOTE_COUNT
+        || matchingOptionCount > optionCount
+        || candidateExcerptByteLength < 1
+        || candidateExcerptByteLength > MAX_RESEARCH_CANONICAL_EXCERPT_BYTES
+        || typeof exact.candidateExcerptIdentityHash !== "string"
+        || !SHA256.test(exact.candidateExcerptIdentityHash)
+        || typeof exact.sourceIdentityHash !== "string"
+        || !SHA256.test(exact.sourceIdentityHash)
+        || typeof exact.requestedUrlHash !== "string"
+        || !SHA256.test(exact.requestedUrlHash)
+        || typeof exact.sourceIdSameAsFirstPass !== "boolean"
+        || typeof exact.requestedUrlSameAsFirstPass !== "boolean"
+        || (selectedOptionIdentityHash !== null
+          && (typeof selectedOptionIdentityHash !== "string"
+            || !SHA256.test(selectedOptionIdentityHash)))
+        || typeof exact.canonicalUrlSameAsFirstPass !== "boolean"
+        || typeof exact.canonicalTextChecksumSameAsFirstPass !== "boolean"
+        || typeof exact.receiptReason !== "string"
+        || !RESEARCH_CANONICAL_EXCERPT_REPAIR_RECEIPT_REASONS.has(exact.receiptReason)) {
+        return invalidResearchDecisionGradeGate(
+          `Research adapter canonical excerpt repair diagnostic ${index} values are invalid`,
+        );
+      }
+      const selectedDecision = exact.decision === "reference-hit"
+        || exact.decision === "exact-option-hit"
+        || exact.decision === "preserved-old-unique-hit";
+      const ambiguousDecision = exact.decision === "preserved-old-ambiguous";
+      if ((selectedDecision && (matchingOptionCount !== 1 || selectedOptionIdentityHash === null))
+        || (ambiguousDecision && (matchingOptionCount < 2 || selectedOptionIdentityHash !== null))
+        || (!selectedDecision && !ambiguousDecision
+          && (matchingOptionCount !== 0 || selectedOptionIdentityHash !== null))) {
+        return invalidResearchDecisionGradeGate(
+          `Research adapter canonical excerpt repair diagnostic ${index} decision is inconsistent`,
+        );
+      }
+      diagnostics.push(Object.freeze({
+        decision: exact.decision,
+        optionCount,
+        quoteCount,
+        matchingOptionCount,
+        candidateExcerptByteLength,
+        candidateExcerptIdentityHash: exact.candidateExcerptIdentityHash,
+        sourceIdentityHash: exact.sourceIdentityHash,
+        requestedUrlHash: exact.requestedUrlHash,
+        sourceIdSameAsFirstPass: exact.sourceIdSameAsFirstPass,
+        requestedUrlSameAsFirstPass: exact.requestedUrlSameAsFirstPass,
+        selectedOptionIdentityHash,
+        canonicalUrlSameAsFirstPass: exact.canonicalUrlSameAsFirstPass,
+        canonicalTextChecksumSameAsFirstPass: exact.canonicalTextChecksumSameAsFirstPass,
+        receiptReason: exact.receiptReason,
+      }));
+    }
+    if (Buffer.byteLength(JSON.stringify(diagnostics), "utf8")
+      > MAX_RESEARCH_CANONICAL_EXCERPT_REPAIR_DIAGNOSTICS_BYTES) {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter canonical excerpt repair diagnostics exceed their bounded size",
+      );
+    }
+    return Object.freeze(diagnostics);
+  } catch (error) {
+    if (error instanceof ResourceTaskAdapterError) throw error;
+    return invalidResearchDecisionGradeGate(
+      "Research adapter canonical excerpt repair diagnostics could not be inspected",
+      error,
+    );
+  }
+}
+
+function researchWebEvidenceFailureReasonCounts(
+  evidence: Record<string, unknown>,
+): Readonly<Record<string, number>> {
+  const rawReceipts = evidence.receipts;
+  if (rawReceipts === undefined) return Object.freeze({});
+  try {
+    if (!Array.isArray(rawReceipts)
+      || Object.getPrototypeOf(rawReceipts) !== Array.prototype
+      || rawReceipts.length > MAX_RESEARCH_EVIDENCE_RECEIPTS) {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter Web evidence failure diagnostics are invalid",
+      );
+    }
+    const arrayDescriptors = Object.getOwnPropertyDescriptors(rawReceipts);
+    const counts = new Map<string, number>();
+    for (let index = 0; index < rawReceipts.length; index += 1) {
+      const itemDescriptor = arrayDescriptors[String(index)];
+      if (itemDescriptor === undefined || !itemDescriptor.enumerable
+        || !("value" in itemDescriptor)
+        || itemDescriptor.get !== undefined || itemDescriptor.set !== undefined) {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      const receipt = itemDescriptor.value;
+      if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      const prototype = Object.getPrototypeOf(receipt);
+      const keys = Reflect.ownKeys(receipt);
+      const descriptors = Object.getOwnPropertyDescriptors(receipt);
+      if ((prototype !== Object.prototype && prototype !== null)
+        || keys.length > MAX_RESEARCH_EVIDENCE_RECEIPT_FIELDS
+        || keys.some((key) => typeof key !== "string")
+        || keys.some((key) => {
+          const descriptor = descriptors[String(key)];
+          return descriptor === undefined || !descriptor.enumerable
+            || !("value" in descriptor)
+            || descriptor.get !== undefined || descriptor.set !== undefined;
+        })) {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      const sourceKind = descriptors.sourceKind?.value;
+      const verification = descriptors.verification?.value;
+      if (sourceKind !== "context" && sourceKind !== "web" && sourceKind !== "user") {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      if (verification !== "verified" && verification !== "unverified") {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      if (sourceKind !== "web" || verification === "verified") continue;
+      const reason = descriptors.reason?.value;
+      if (typeof reason !== "string" || !RESEARCH_WEB_EVIDENCE_FAILURE_REASON_SET.has(reason)) {
+        return invalidResearchDecisionGradeGate(
+          "Research adapter Web evidence failure diagnostics are invalid",
+        );
+      }
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    }
+    return Object.freeze(Object.fromEntries(
+      RESEARCH_WEB_EVIDENCE_FAILURE_REASONS.flatMap((reason) => {
+        const count = counts.get(reason);
+        return count === undefined ? [] : [[reason, count] as const];
+      }),
+    ));
+  } catch (error) {
+    if (error instanceof ResourceTaskAdapterError) throw error;
+    return invalidResearchDecisionGradeGate(
+      "Research adapter Web evidence failure diagnostics could not be inspected",
+      error,
+    );
+  }
+}
+
+function researchEvidenceCoverage(
+  evidence: Record<string, unknown>,
+  finalGateObserved: ResearchDecisionGradeObservation,
+): Readonly<Record<string, unknown>> | null {
+  const rawCoverage = evidence.researchEvidenceCoverage;
+  if (rawCoverage === undefined) return null;
+  const coverage = researchDecisionGradeRecord(
+    rawCoverage,
+    RESEARCH_EVIDENCE_COVERAGE_FIELDS,
+    "Research adapter evidence coverage",
+  );
+  if (coverage.protocol !== "dezin.research-evidence-coverage.v1"
+    || typeof coverage.repairMode !== "string"
+    || !RESEARCH_EVIDENCE_COVERAGE_REPAIR_MODES.has(coverage.repairMode)) {
+    return invalidResearchDecisionGradeGate(
+      "Research adapter evidence coverage identity is invalid",
+    );
+  }
+  const firstPassGate = coverage.firstPassGate === null
+    ? null
+    : researchDecisionGradeRecord(
+        coverage.firstPassGate,
+        RESEARCH_EVIDENCE_COVERAGE_FIRST_PASS_GATE_FIELDS,
+        "Research adapter evidence coverage first-pass gate",
+      );
+  if ((coverage.repairMode === "none") !== (firstPassGate === null)) {
+    return invalidResearchDecisionGradeGate(
+      "Research adapter evidence coverage repair mode is inconsistent",
+    );
+  }
+  let normalizedFirstPassGate: Readonly<Record<string, unknown>> | null = null;
+  if (firstPassGate !== null) {
+    const observed = researchDecisionGradeRecord(
+      firstPassGate.observed,
+      RESEARCH_DECISION_GRADE_OBSERVED_FIELDS,
+      "Research adapter evidence coverage first-pass observation",
+    );
+    if (typeof observed.groundednessVerifierAvailable !== "boolean") {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter evidence coverage first-pass observation is invalid",
+      );
+    }
+    const normalizedObserved: ResearchDecisionGradeObservation = Object.freeze({
+      verifiedWebSourceCount: researchDecisionGradeCount(
+        observed.verifiedWebSourceCount,
+        "Research adapter evidence coverage first-pass verified Web source count",
+      ),
+      evidenceFindingCount: researchDecisionGradeCount(
+        observed.evidenceFindingCount,
+        "Research adapter evidence coverage first-pass evidence finding count",
+      ),
+      evidenceDirectionCount: researchDecisionGradeCount(
+        observed.evidenceDirectionCount,
+        "Research adapter evidence coverage first-pass evidence direction count",
+      ),
+      groundednessVerifierAvailable: observed.groundednessVerifierAvailable,
+    });
+    const blockers = researchDecisionGradeBlockers(
+      firstPassGate.blockers,
+      "Research adapter evidence coverage first-pass blockers",
+    );
+    if (blockers.length === 0
+      || !isDeepStrictEqual(blockers, expectedResearchDecisionGradeBlockers(normalizedObserved))) {
+      return invalidResearchDecisionGradeGate(
+        "Research adapter evidence coverage first-pass gate is inconsistent",
+      );
+    }
+    normalizedFirstPassGate = Object.freeze({
+      observed: normalizedObserved,
+      blockers: Object.freeze(blockers),
+    });
+  }
+  const finalPass = researchDecisionGradeRecord(
+    coverage.finalPass,
+    RESEARCH_EVIDENCE_COVERAGE_FINAL_PASS_FIELDS,
+    "Research adapter evidence coverage final pass",
+  );
+  const normalizedFinalPass = Object.freeze(Object.fromEntries(
+    RESEARCH_EVIDENCE_COVERAGE_FINAL_PASS_FIELDS.map((field) => [
+      field,
+      researchDecisionGradeCount(
+        finalPass[field],
+        `Research adapter evidence coverage final-pass ${field}`,
+      ),
+    ]),
+  )) as Readonly<Record<(typeof RESEARCH_EVIDENCE_COVERAGE_FINAL_PASS_FIELDS)[number], number>>;
+  if (normalizedFinalPass.verifiedWebReceiptCount
+      + normalizedFinalPass.unverifiedWebReceiptCount !== normalizedFinalPass.webSourceCount
+    || normalizedFinalPass.groundednessSelectedWebSupportReceiptCount
+      > normalizedFinalPass.verifiedWebSupportReceiptCount
+    || normalizedFinalPass.groundednessSelectedWebSourceCount
+      > normalizedFinalPass.groundednessSelectedWebSupportReceiptCount
+    || normalizedFinalPass.groundednessSelectedWebSourceCount
+      > normalizedFinalPass.verifiedWebReceiptCount
+    || normalizedFinalPass.groundednessSelectedWebCanonicalComponentCount
+      > normalizedFinalPass.groundednessSelectedWebSourceCount
+    || normalizedFinalPass.evidenceFindingCount !== finalGateObserved.evidenceFindingCount
+    || normalizedFinalPass.qualifyingDecisionGradeDirectionCount
+      !== finalGateObserved.evidenceDirectionCount
+    || normalizedFinalPass.groundednessSelectedWebCanonicalComponentCount
+      !== finalGateObserved.verifiedWebSourceCount
+    || normalizedFinalPass.qualifyingDecisionGradeDirectionCount
+      > normalizedFinalPass.evidenceDirectionCount
+    || normalizedFinalPass.maximumDirectionEvidenceFindingCount
+      > normalizedFinalPass.evidenceFindingCount
+    || normalizedFinalPass.maximumDirectionVerifiedWebComponentCount
+      > normalizedFinalPass.groundednessSelectedWebCanonicalComponentCount
+    || (normalizedFinalPass.evidenceDirectionCount === 0
+      && (normalizedFinalPass.maximumDirectionEvidenceFindingCount !== 0
+        || normalizedFinalPass.maximumDirectionVerifiedWebComponentCount !== 0))
+    || (normalizedFinalPass.qualifyingDecisionGradeDirectionCount > 0
+      && (normalizedFinalPass.maximumDirectionEvidenceFindingCount < 2
+        || normalizedFinalPass.maximumDirectionVerifiedWebComponentCount < 2))) {
+    return invalidResearchDecisionGradeGate(
+      "Research adapter evidence coverage final pass is inconsistent",
+    );
+  }
+  return Object.freeze({
+    protocol: "dezin.research-evidence-coverage.v1",
+    repairMode: coverage.repairMode,
+    firstPassGate: normalizedFirstPassGate,
+    finalPass: normalizedFinalPass,
+  });
 }
 
 function enforceResearchDecisionGradeGate(
   resourceKind: ResourceKind,
   metadata: Record<string, unknown>,
+  evidence: Record<string, unknown>,
 ): void {
   if (resourceKind !== "research") return;
   const gate = metadata.decisionGradeGate;
-  if (metadata.format !== "dezin-research-resource-bundle" || metadata.version !== 3
+  if (metadata.format !== "dezin-research-resource-bundle"
+    || (metadata.version !== 3 && metadata.version !== 4)
     || (metadata.qualityState !== "grounded" && metadata.qualityState !== "needs-review")
     || gate === null || typeof gate !== "object" || Array.isArray(gate)
     || (Object.getPrototypeOf(gate) !== Object.prototype && Object.getPrototypeOf(gate) !== null)) {
@@ -551,7 +1062,19 @@ function enforceResearchDecisionGradeGate(
     ),
     requiresGroundednessVerifier: criteria.requiresGroundednessVerifier,
   };
-  const normalizedObserved = {
+  const groundednessVerifierAvailable = observed.groundednessVerifierAvailable;
+  if (exact.protocol !== "dezin.research-decision-grade-gate.v2"
+    || typeof exact.accepted !== "boolean"
+    || normalizedCriteria.minimumVerifiedWebSourceCount !== 2
+    || normalizedCriteria.minimumEvidenceFindingCount !== 2
+    || normalizedCriteria.minimumEvidenceDirectionCount !== 1
+    || normalizedCriteria.requiresGroundednessVerifier !== true
+    || typeof groundednessVerifierAvailable !== "boolean") {
+    return invalidResearchDecisionGradeGate(
+      "Research adapter decision-grade quality gate is invalid",
+    );
+  }
+  const normalizedObserved: ResearchDecisionGradeObservation = {
     verifiedWebSourceCount: researchDecisionGradeCount(
       observed.verifiedWebSourceCount,
       "Research adapter observed verified Web source count",
@@ -564,29 +1087,10 @@ function enforceResearchDecisionGradeGate(
       observed.evidenceDirectionCount,
       "Research adapter observed evidence direction count",
     ),
-    groundednessVerifierAvailable: observed.groundednessVerifierAvailable,
+    groundednessVerifierAvailable,
   };
-  if (exact.protocol !== "dezin.research-decision-grade-gate.v1"
-    || typeof exact.accepted !== "boolean"
-    || normalizedCriteria.minimumVerifiedWebSourceCount !== 2
-    || normalizedCriteria.minimumEvidenceFindingCount !== 2
-    || normalizedCriteria.minimumEvidenceDirectionCount !== 1
-    || normalizedCriteria.requiresGroundednessVerifier !== true
-    || typeof normalizedObserved.groundednessVerifierAvailable !== "boolean") {
-    return invalidResearchDecisionGradeGate(
-      "Research adapter decision-grade quality gate is invalid",
-    );
-  }
   const blockers = researchDecisionGradeBlockers(exact.blockers);
-  const expectedBlockers = [
-    ...(normalizedObserved.groundednessVerifierAvailable ? [] : ["groundedness-verifier-unavailable"]),
-    ...(normalizedObserved.verifiedWebSourceCount < normalizedCriteria.minimumVerifiedWebSourceCount
-      ? ["insufficient-verified-web-sources"] : []),
-    ...(normalizedObserved.evidenceFindingCount < normalizedCriteria.minimumEvidenceFindingCount
-      ? ["insufficient-evidence-findings"] : []),
-    ...(normalizedObserved.evidenceDirectionCount < normalizedCriteria.minimumEvidenceDirectionCount
-      ? ["insufficient-evidence-directions"] : []),
-  ];
+  const expectedBlockers = expectedResearchDecisionGradeBlockers(normalizedObserved);
   const accepted = exact.accepted === true;
   if (!isDeepStrictEqual(blockers, expectedBlockers)
     || accepted !== (expectedBlockers.length === 0)
@@ -595,7 +1099,20 @@ function enforceResearchDecisionGradeGate(
       "Research adapter decision-grade quality gate is inconsistent",
     );
   }
+  const canonicalExcerptRepairDiagnostics =
+    researchCanonicalExcerptRepairDiagnostics(evidence);
+  const normalizedResearchEvidenceCoverage = researchEvidenceCoverage(
+    evidence,
+    normalizedObserved,
+  );
+  if (accepted && (canonicalExcerptRepairDiagnostics.length > 0
+    || normalizedResearchEvidenceCoverage !== null)) {
+    return invalidResearchDecisionGradeGate(
+      "Accepted Research adapter output cannot expose rejection-only diagnostics",
+    );
+  }
   if (!accepted) {
+    const webEvidenceFailureReasonCounts = researchWebEvidenceFailureReasonCounts(evidence);
     throw new GenerationTaskQualityGateError(
       `Research decision-grade gate rejected this candidate: ${blockers.length > 0
         ? blockers.join(", ")
@@ -605,6 +1122,15 @@ function enforceResearchDecisionGradeGate(
         criteria: normalizedCriteria,
         observed: normalizedObserved,
         blockers,
+        ...(Object.keys(webEvidenceFailureReasonCounts).length === 0
+          ? {}
+          : { webEvidenceFailureReasonCounts }),
+        ...(canonicalExcerptRepairDiagnostics.length === 0
+          ? {}
+          : { canonicalExcerptRepairDiagnostics }),
+        ...(normalizedResearchEvidenceCoverage === null
+          ? {}
+          : { researchEvidenceCoverage: normalizedResearchEvidenceCoverage }),
       },
     );
   }
@@ -1115,6 +1641,9 @@ function portableAdapterValue(value: unknown, label: string, maxBytes: number): 
     if (typeof candidate !== "object") {
       return adapterOutputInvalid(`Resource generation adapter ${label} is not portable JSON`);
     }
+    if (nodeUtilTypes.isProxy(candidate)) {
+      return adapterOutputInvalid(`Resource generation adapter ${label} cannot contain a Proxy`);
+    }
     if (seen.has(candidate)) {
       return adapterOutputInvalid(`Resource generation adapter ${label} contains a cycle or alias`);
     }
@@ -1189,6 +1718,9 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   }
   let version: unknown;
   let hasAgent = false;
+  let hasReviewerAuthorityAgent = false;
+  let hasReviewer = false;
+  let hasMoodboardImageAuthority = false;
   try {
     if (task.payload === null || typeof task.payload !== "object") {
       return invalidPayload("Resource Task payload must be an object");
@@ -1200,6 +1732,15 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
     }
     version = descriptor.value;
     hasAgent = Object.getOwnPropertyDescriptor(task.payload, "agent") !== undefined;
+    hasReviewerAuthorityAgent = Object.getOwnPropertyDescriptor(
+      task.payload,
+      "reviewerAuthorityAgent",
+    ) !== undefined;
+    hasReviewer = Object.getOwnPropertyDescriptor(task.payload, "reviewer") !== undefined;
+    hasMoodboardImageAuthority = Object.getOwnPropertyDescriptor(
+      task.payload,
+      "moodboardImageAuthority",
+    ) !== undefined;
   } catch (error) {
     return invalidPayload("Resource Task payload version could not be inspected", error);
   }
@@ -1211,13 +1752,54 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   }
   const payload = exactRecord(
     task.payload,
-    ["version", "operation", "brief", "capabilityDescriptors", "adapter", ...(hasAgent ? ["agent"] : [])],
+    [
+      "version",
+      "operation",
+      "brief",
+      "capabilityDescriptors",
+      "adapter",
+      ...(hasAgent ? ["agent"] : []),
+      ...(hasReviewerAuthorityAgent ? ["reviewerAuthorityAgent"] : []),
+      ...(hasReviewer ? ["reviewer"] : []),
+      ...(hasMoodboardImageAuthority ? ["moodboardImageAuthority"] : []),
+    ],
     "Resource Task payload",
   );
   let agent: ResourceGenerationTaskPayloadV2["agent"];
   if (hasAgent) {
     try {
-      agent = validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent");
+      agent = validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent", "generator");
+    } catch (error) {
+      if (error instanceof GenerationTaskPayloadContractError) {
+        invalidPayload(error.message, error);
+      }
+      throw error;
+    }
+  }
+  let reviewerAuthorityAgent: ResourceGenerationTaskPayloadV2["reviewerAuthorityAgent"];
+  if (hasReviewerAuthorityAgent) {
+    try {
+      reviewerAuthorityAgent = validateFrozenGenerationTaskAgent(
+        payload.reviewerAuthorityAgent,
+        "Resource Task reviewer-authority Agent",
+        "generator",
+      );
+    } catch (error) {
+      if (error instanceof GenerationTaskPayloadContractError) {
+        invalidPayload(error.message, error);
+      }
+      throw error;
+    }
+  }
+  let reviewer: ResourceGenerationTaskPayloadV2["reviewer"];
+  if (hasReviewer) {
+    try {
+      reviewer = validateFrozenGenerationTaskAgent(
+        payload.reviewer,
+        "Resource Task reviewer",
+        "reviewer",
+        reviewerAuthorityAgent ?? agent,
+      );
     } catch (error) {
       if (error instanceof GenerationTaskPayloadContractError) {
         invalidPayload(error.message, error);
@@ -1264,6 +1846,30 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   }
   if (typeof operation.kind !== "string" || !RESOURCE_KINDS.has(operation.kind as ResourceKind)) {
     invalidPayload("Resource Task Resource kind is unsupported");
+  }
+  if (reviewerAuthorityAgent !== undefined && operation.kind !== "research") {
+    invalidPayload("Resource Task reviewer-authority Agent is valid only for generated Research");
+  }
+  let moodboardImageAuthority: ResourceGenerationTaskPayloadV2["moodboardImageAuthority"];
+  if (operation.kind === "moodboard") {
+    if (!hasMoodboardImageAuthority) {
+      invalidPayload("generated Moodboard Resource Task requires exact image execution authority");
+    }
+    try {
+      moodboardImageAuthority = validateMoodboardImageExecutionAuthority(
+        payload.moodboardImageAuthority,
+        "Resource Task Moodboard image execution authority",
+      );
+    } catch (error) {
+      if (error instanceof GenerationTaskPayloadContractError) {
+        invalidPayload(error.message, error);
+      }
+      throw error;
+    }
+  } else if (hasMoodboardImageAuthority) {
+    invalidPayload(
+      "Moodboard image execution authority is valid only for generated Moodboard Resource Tasks",
+    );
   }
   const revisionPolicy = exactRecord(
     operation.revisionPolicy,
@@ -1345,6 +1951,9 @@ export function parseResourceGenerationTaskPayloadV2(task: GenerationTask): Reso
   return Object.freeze({
     version: 2,
     ...(agent === undefined ? {} : { agent }),
+    ...(reviewerAuthorityAgent === undefined ? {} : { reviewerAuthorityAgent }),
+    ...(reviewer === undefined ? {} : { reviewer }),
+    ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
     adapter: Object.freeze({
       id,
       version: Number(adapter.version),

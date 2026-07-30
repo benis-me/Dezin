@@ -43,6 +43,8 @@ import type {
   WorkspaceGenerationArtifactPlan,
   WorkspaceGenerationCapability,
   WorkspaceGenerationDependencyPlan,
+  WorkspaceGenerationExecutionAuthority,
+  WorkspaceGenerationMoodboardImageAuthority,
   WorkspaceGenerationPayload,
   WorkspaceGenerationPrototypeIntent,
   WorkspaceGenerationResourceOperation,
@@ -1765,9 +1767,10 @@ function uniqueBy<T>(values: readonly T[], key: (value: T) => string, label: str
 export function normalizeWorkspaceGenerationAgentSelection(
   value: unknown,
   label = "Workspace generation Agent selection",
+  options: { allowLegacyGeneratorCredentialSource?: boolean } = {},
 ): WorkspaceGenerationAgentSelection {
   const input = boundaryRecord(value, label);
-  allowFields(input, ["providerId", "command", "model"], label);
+  allowFields(input, ["providerId", "command", "model", "executionAuthority"], label);
   const boundedIdentity = (entry: unknown, field: "provider" | "command"): string => {
     const fieldLabel = `${label} ${field}`;
     if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim() !== entry
@@ -1788,18 +1791,207 @@ export function normalizeWorkspaceGenerationAgentSelection(
       throw new WorkspaceStoreCodecError(`${label} model must be canonical and bounded to 256 bytes`);
     }
   }
+  let executionAuthority: WorkspaceGenerationExecutionAuthority | undefined;
+  if (input.executionAuthority !== undefined) {
+    const authorityLabel = `${label} execution authority`;
+    const authority = boundaryRecord(input.executionAuthority, authorityLabel);
+    const boundedAuthorityString = (
+      entry: unknown,
+      field: string,
+      maximumBytes: number,
+      allowEmpty: boolean,
+    ): string => {
+      if (typeof entry !== "string" || entry.trim() !== entry || !isWellFormedUtf16(entry)
+        || entry.includes("\0") || (!allowEmpty && entry.length === 0)
+        || Buffer.byteLength(entry, "utf8") > maximumBytes) {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} ${field} must be canonical and bounded to ${maximumBytes} bytes`,
+        );
+      }
+      return entry;
+    };
+    const baseUrl = (() => {
+      const raw = boundedAuthorityString(authority.baseUrl, "base URL", 2_048, true);
+      if (raw.length === 0) return "";
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch (error) {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} base URL is invalid: ${String(error)}`,
+        );
+      }
+      if ((url.protocol !== "http:" && url.protocol !== "https:")
+        || url.username.length > 0 || url.password.length > 0
+        || url.search.length > 0 || url.hash.length > 0
+        || (raw !== url.href && `${raw}/` !== url.href)) {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} base URL must be canonical and credential-free`,
+        );
+      }
+      return url.href;
+    })();
+    if (typeof authority.credentialRequired !== "boolean") {
+      throw new WorkspaceStoreCodecError(
+        `${authorityLabel} credential-required semantic must be boolean`,
+      );
+    }
+    if (authority.kind === "generator") {
+      allowFields(authority, [
+        "kind", "baseUrl", "organization", "credentialProviderId", "credentialSource",
+        "credentialRequired",
+      ], authorityLabel);
+      const legacyCredentialSourceMissing = authority.credentialSource === undefined
+        && options.allowLegacyGeneratorCredentialSource === true;
+      if (!legacyCredentialSourceMissing
+        && authority.credentialSource !== "provider-profile"
+        && authority.credentialSource !== "agent"
+        && authority.credentialSource !== "session") {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} credential source is unsupported`,
+        );
+      }
+      const organization = boundedAuthorityString(authority.organization, "organization", 512, true);
+      if (authority.credentialSource === "session"
+        && (baseUrl !== "" || organization !== "" || authority.credentialRequired)) {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} session source cannot carry an endpoint, organization, or require a credential`,
+        );
+      }
+      executionAuthority = {
+        kind: authority.kind,
+        baseUrl,
+        organization,
+        credentialProviderId: boundedAuthorityString(
+          authority.credentialProviderId,
+          "credential provider",
+          256,
+          false,
+        ),
+        // A previous durable authority protocol did not carry credentialSource.
+        // Preserve that absence only on the stored-record read path: do not
+        // infer which live secret/session namespace the old record intended.
+        ...(legacyCredentialSourceMissing ? {} : {
+          credentialSource: authority.credentialSource,
+        }),
+        credentialRequired: authority.credentialRequired,
+      } as WorkspaceGenerationExecutionAuthority;
+    } else if (authority.kind === "reviewer") {
+      allowFields(authority, [
+        "kind", "baseUrl", "credentialSource", "credentialRequired",
+      ], authorityLabel);
+      if (authority.credentialSource !== "anthropic-profile"
+        && authority.credentialSource !== "agent"
+        && authority.credentialSource !== "session") {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} credential source is unsupported`,
+        );
+      }
+      if (authority.credentialSource === "session"
+        && (baseUrl !== "" || authority.credentialRequired)) {
+        throw new WorkspaceStoreCodecError(
+          `${authorityLabel} session source cannot carry an endpoint or require a credential`,
+        );
+      }
+      executionAuthority = {
+        kind: authority.kind,
+        baseUrl,
+        credentialSource: authority.credentialSource,
+        credentialRequired: authority.credentialRequired,
+      };
+    } else {
+      throw new WorkspaceStoreCodecError(`${authorityLabel} kind is unsupported`);
+    }
+  }
   return {
     providerId,
     command,
     model,
+    ...(executionAuthority === undefined ? {} : { executionAuthority }),
   };
 }
 
-function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGenerationPayload {
+function normalizeWorkspaceGenerationMoodboardImageAuthority(
+  value: unknown,
+): WorkspaceGenerationMoodboardImageAuthority {
+  const label = "Workspace generation Moodboard image authority";
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "kind",
+    "protocol",
+    "providerId",
+    "baseUrl",
+    "model",
+    "apiVersion",
+    "credentialSource",
+    "credentialRequired",
+  ], label);
+  if (input.kind !== "moodboard-image"
+    || input.protocol !== "dezin.workspace-moodboard-image-authority.v1") {
+    throw new WorkspaceStoreCodecError(`${label} kind or protocol is unsupported`);
+  }
+  const boundedString = (
+    entry: unknown,
+    field: string,
+    maximumBytes: number,
+    allowEmpty: boolean,
+  ): string => {
+    if (typeof entry !== "string" || entry.trim() !== entry || !isWellFormedUtf16(entry)
+      || entry.includes("\0") || (!allowEmpty && entry.length === 0)
+      || Buffer.byteLength(entry, "utf8") > maximumBytes) {
+      throw new WorkspaceStoreCodecError(
+        `${label} ${field} must be canonical and bounded to ${maximumBytes} bytes`,
+      );
+    }
+    return entry;
+  };
+  const providerId = boundedString(input.providerId, "provider", 256, false);
+  const model = boundedString(input.model, "model", 256, false);
+  const apiVersion = boundedString(input.apiVersion, "API version", 512, true);
+  const rawBaseUrl = boundedString(input.baseUrl, "base URL", 2_048, false);
+  let url: URL;
+  try {
+    url = new URL(rawBaseUrl);
+  } catch (error) {
+    throw new WorkspaceStoreCodecError(`${label} base URL is invalid: ${String(error)}`);
+  }
+  const baseUrl = url.toString().replace(/\/+$/, "");
+  if ((url.protocol !== "http:" && url.protocol !== "https:")
+    || url.username.length > 0 || url.password.length > 0
+    || url.search.length > 0 || url.hash.length > 0
+    || rawBaseUrl !== baseUrl) {
+    throw new WorkspaceStoreCodecError(
+      `${label} base URL must be explicit, canonical, and credential-free`,
+    );
+  }
+  if (input.credentialSource !== "provider-profile"
+    && input.credentialSource !== "global-image") {
+    throw new WorkspaceStoreCodecError(`${label} credential source is unsupported`);
+  }
+  if (input.credentialRequired !== true) {
+    throw new WorkspaceStoreCodecError(`${label} must require its exact credential source`);
+  }
+  return {
+    kind: "moodboard-image",
+    protocol: "dezin.workspace-moodboard-image-authority.v1",
+    providerId,
+    baseUrl,
+    model,
+    apiVersion,
+    credentialSource: input.credentialSource,
+    credentialRequired: input.credentialRequired,
+  };
+}
+
+function normalizeWorkspaceGenerationPayload(
+  value: unknown,
+  options: { allowLegacyGeneratorCredentialSource?: boolean } = {},
+): WorkspaceGenerationPayload {
   const label = "Workspace generation payload";
   const input = boundaryRecord(value, label);
   allowFields(input, [
-    "kind", "version", "agent", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
+    "kind", "version", "agent", "researchAgent", "reviewerAgent", "moodboardImageAuthority",
+    "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
     "capabilities", "responsiveFrames", "qualityProfile",
   ], label);
   if (input.kind !== "workspace-generation") {
@@ -1859,7 +2051,31 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
     ...(generationVersion === 2 ? { version: 2 as const } : {}),
     ...(input.agent === undefined
       ? {}
-      : { agent: normalizeWorkspaceGenerationAgentSelection(input.agent) }),
+      : { agent: normalizeWorkspaceGenerationAgentSelection(input.agent, undefined, options) }),
+    ...(input.researchAgent === undefined
+      ? {}
+      : {
+          researchAgent: normalizeWorkspaceGenerationAgentSelection(
+            input.researchAgent,
+            "Workspace generation Research Agent selection",
+            options,
+          ),
+        }),
+    ...(input.reviewerAgent === undefined
+      ? {}
+      : {
+          reviewerAgent: normalizeWorkspaceGenerationAgentSelection(
+            input.reviewerAgent,
+            "Workspace generation reviewer Agent selection",
+          ),
+        }),
+    ...(input.moodboardImageAuthority === undefined
+      ? {}
+      : {
+          moodboardImageAuthority: normalizeWorkspaceGenerationMoodboardImageAuthority(
+            input.moodboardImageAuthority,
+          ),
+        }),
     resourceOperations,
     artifactPlans: quality.artifactPlans,
     dependencyPlans,
@@ -1910,10 +2126,13 @@ function normalizeComponentPropagationPayload(value: unknown): ComponentPropagat
   };
 }
 
-export function normalizeWorkspaceProposalGeneration(value: unknown): WorkspaceProposalGeneration {
+export function normalizeWorkspaceProposalGeneration(
+  value: unknown,
+  options: { allowLegacyGeneratorCredentialSource?: boolean } = {},
+): WorkspaceProposalGeneration {
   const input = boundaryRecord(value, "Workspace Proposal generation payload");
   return input.kind === "workspace-generation"
-    ? normalizeWorkspaceGenerationPayload(input)
+    ? normalizeWorkspaceGenerationPayload(input, options)
     : normalizeComponentPropagationPayload(input);
 }
 
@@ -2123,7 +2342,9 @@ export function asWorkspaceProposalValue(value: unknown): WorkspaceProposalRecor
   }
   const baseGraph = snapshotWorkspaceGraph(input.baseGraph);
   const baseLayout = asWorkspaceLayoutValue(input.baseLayout);
-  const generation = normalizeWorkspaceProposalGeneration(input.generation);
+  const generation = normalizeWorkspaceProposalGeneration(input.generation, {
+    allowLegacyGeneratorCredentialSource: true,
+  });
   if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");
   const proposal: WorkspaceProposalRecord = {
     id: exactStoredString(input.id, "Workspace Proposal id"),

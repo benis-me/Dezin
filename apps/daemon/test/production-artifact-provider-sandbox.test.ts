@@ -949,13 +949,21 @@ test("production Claude Artifact runner keeps a scoped cwd inside the candidate 
   mkdirSync(hostHome);
   writeFileSync(join(worktreeDir, "index.html"), "<main>safe</main>");
   writeFileSync(join(foreignDir, "index.html"), "<main>foreign</main>");
+  execFileSync("git", ["init", "-q"], { cwd: candidateWorktreeDir });
+  execFileSync("git", ["config", "user.name", "Fixture"], { cwd: candidateWorktreeDir });
+  execFileSync("git", ["config", "user.email", "fixture@dezin.local"], { cwd: candidateWorktreeDir });
+  execFileSync("git", ["add", "."], { cwd: candidateWorktreeDir });
+  execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: candidateWorktreeDir });
   let spawnCount = 0;
   const dependencies = {
     resolveExecutable: () => "/usr/bin/true",
     hostHome,
     spawner: {
-      async run() {
+      async run(input: SpawnInput) {
         spawnCount += 1;
+        assert.ok(input.env?.TMPDIR);
+        writeFileSync(join(input.env.TMPDIR, "provider-session.tmp"), "private runtime\n");
+        writeFileSync(join(worktreeDir, "generated.html"), "<main>generated</main>\n");
         return { stdout: "", stderr: "", exitCode: 0 };
       },
     },
@@ -975,6 +983,15 @@ test("production Claude Artifact runner keeps a scoped cwd inside the candidate 
   assert.equal(existsSync(join(transactionRoot, "provider-runtime")), true);
   assert.equal(existsSync(join(candidateWorktreeDir, "provider-runtime")), false);
   assert.equal(spawnCount, 1);
+  execFileSync("git", ["add", "."], { cwd: candidateWorktreeDir });
+  execFileSync("git", ["commit", "-q", "-m", "candidate"], { cwd: candidateWorktreeDir });
+  const candidateFiles = execFileSync(
+    "git",
+    ["ls-tree", "-r", "--name-only", "HEAD"],
+    { cwd: candidateWorktreeDir, encoding: "utf8" },
+  );
+  assert.match(candidateFiles, /generated\.html/);
+  assert.doesNotMatch(candidateFiles, /provider-runtime|provider-session\.tmp/);
 
   await assert.rejects(() => runner.runTurn({
     systemPrompt: "boundary",

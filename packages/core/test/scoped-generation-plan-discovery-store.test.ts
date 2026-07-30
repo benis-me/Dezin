@@ -6,6 +6,10 @@ import {
   type StoreClock,
   type WorkspaceGenerationArtifactPlan,
 } from "../src/index.ts";
+import {
+  claudeSessionReviewerAgent,
+  codebuddyGeneratorAgent,
+} from "./generation-authority-fixtures.ts";
 
 const DISPATCH_CONTEXT_PACK_ID = `context-pack-${"a".repeat(64)}`;
 
@@ -115,7 +119,8 @@ function compilePlan(
     layoutOperations: [],
     generation: {
       kind: "workspace-generation",
-      agent: { providerId: "codebuddy" as const, command: "codebuddy" as const, model: "gpt-5.6-sol" },
+      agent: codebuddyGeneratorAgent(),
+      reviewerAgent: claudeSessionReviewerAgent(),
       resourceOperations: [],
       artifactPlans: plans,
       dependencyPlans: [],

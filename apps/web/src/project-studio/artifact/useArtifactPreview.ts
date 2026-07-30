@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../../lib/api-context.tsx";
+import { withRequestDeadline } from "../../lib/request-deadline.ts";
 import {
   ApiError,
   type PreviewTarget,
@@ -330,9 +331,12 @@ export function useArtifactPreview({
 
     function acquire(retryIndex: number): void {
       if (!isCurrent()) return;
-      void api.resolvePreviewTarget(projectId, activeTarget, acquisitionController.signal)
-        .then(async (resolved) => {
-          if (!isCurrent()) return;
+      void withRequestDeadline(
+        acquisitionController.signal,
+        "Preview preparation timed out. Try again.",
+        async (signal) => {
+          const resolved = await api.resolvePreviewTarget(projectId, activeTarget, signal);
+          if (!isCurrent() || signal.aborted) return null;
           resolvedTarget = resolved;
           const mismatch = resolutionError(
             activeTarget,
@@ -345,11 +349,17 @@ export function useArtifactPreview({
           );
           if (mismatch) throw new Error(mismatch);
           commit({ status: "loading", resolved, lease: null, error: null });
-          const acquired = await api.acquirePreviewTargetLease(projectId, resolved, acquisitionController.signal);
-          if (!isCurrent()) {
+          const acquired = await api.acquirePreviewTargetLease(projectId, resolved, signal);
+          if (!isCurrent() || signal.aborted) {
             release(acquired);
-            return;
+            return null;
           }
+          return { acquired, resolved };
+        },
+      )
+        .then((result) => {
+          if (result === null || !isCurrent()) return;
+          const { acquired, resolved } = result;
           if (!sameResolvedIdentity(resolved, acquired.resolved)) {
             release(acquired);
             throw new Error("Acquired preview identity does not match the resolved target.");

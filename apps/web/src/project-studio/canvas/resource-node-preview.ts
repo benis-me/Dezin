@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApiClient, WorkspaceResourceKind } from "../../lib/api.ts";
 import { useApi } from "../../lib/api-context.tsx";
+import { withRequestDeadline } from "../../lib/request-deadline.ts";
 
 export interface ResourceNodeRevisionBinding {
   workspaceId: string;
@@ -16,6 +17,7 @@ export type ResourceNodeRevisionPreview =
       cover: {
         assetId: string;
         path: string;
+        blob: Blob;
         alt: string;
         width: number | null;
         height: number | null;
@@ -40,16 +42,18 @@ export interface ResourceNodeRevisionPreviewState {
 }
 
 export interface ResourceNodeRevisionPreviewsController {
-  previews: Readonly<Record<string, ResourceNodeRevisionPreview>>;
   states: Readonly<Record<string, ResourceNodeRevisionPreviewState>>;
   retry: (resourceId: string) => void;
 }
 
-type ResourceRevisionPreviewApi = Pick<ApiClient, "getResourceRevisionView">;
+type ResourceRevisionPreviewApi = Pick<
+  ApiClient,
+  "getResourceRevisionView" | "getResourceRevisionBlob"
+>;
 
 interface InternalResourceNodeRevisionPreviewState extends ResourceNodeRevisionPreviewState {
+  api: ResourceRevisionPreviewApi;
   projectId: string;
-  bindingKey: string;
   requestKey: string;
 }
 
@@ -85,10 +89,15 @@ export async function loadResourceNodeRevisionPreview(
   signal?: AbortSignal,
 ): Promise<ResourceNodeRevisionPreview | null> {
   signal?.throwIfAborted();
-  const view = await api.getResourceRevisionView(
-    projectId,
-    binding.resourceId,
-    binding.revisionId,
+  const view = await withRequestDeadline(
+    signal,
+    "Resource preview timed out. Try again.",
+    (requestSignal) => api.getResourceRevisionView(
+      projectId,
+      binding.resourceId,
+      binding.revisionId,
+      requestSignal,
+    ),
   );
   signal?.throwIfAborted();
   if (
@@ -117,15 +126,29 @@ export async function loadResourceNodeRevisionPreview(
   const coverAsset = coverAssetId === null
     ? null
     : view.content.assets.find((asset) => asset.id === coverAssetId) ?? null;
-  const cover = coverAsset?.url && coverAsset.mimeType.startsWith("image/")
-    ? {
-        assetId: coverAsset.id,
-        path: coverAsset.url,
-        alt: `${view.content.board.name} cover`,
-        width: coverAsset.width,
-        height: coverAsset.height,
-      }
-    : null;
+  let cover: Extract<ResourceNodeRevisionPreview, { kind: "moodboard" }>["cover"] = null;
+  if (coverAsset?.url && coverAsset.mimeType.startsWith("image/")) {
+    const blob = await withRequestDeadline(
+      signal,
+      "Moodboard cover preview timed out. Try again.",
+      (requestSignal) => api.getResourceRevisionBlob(coverAsset.url!, requestSignal),
+    );
+    signal?.throwIfAborted();
+    if (blob.size !== coverAsset.byteLength) {
+      throw new Error("Moodboard cover bytes do not match the exact Resource Revision.");
+    }
+    if (blob.type && blob.type.toLowerCase() !== coverAsset.mimeType.toLowerCase()) {
+      throw new Error("Moodboard cover MIME does not match the exact Resource Revision.");
+    }
+    cover = {
+      assetId: coverAsset.id,
+      path: coverAsset.url,
+      blob,
+      alt: `${view.content.board.name} cover`,
+      width: coverAsset.width,
+      height: coverAsset.height,
+    };
+  }
   return {
     kind: "moodboard",
     boardName: view.content.board.name,
@@ -143,10 +166,6 @@ export function useResourceNodeRevisionPreviewController(
   const entriesRef = useRef(entries);
   const [retryVersions, setRetryVersions] = useState<Record<string, number>>({});
   const activeRequestsRef = useRef(new Map<string, ActivePreviewRequest>());
-  const completedRequestsRef = useRef(new Map<string, {
-    api: ResourceRevisionPreviewApi;
-    requestKey: string;
-  }>());
 
   const commitEntries = useCallback((
     update: (
@@ -161,14 +180,16 @@ export function useResourceNodeRevisionPreviewController(
   }, []);
 
   useEffect(() => {
-    const desired = new Map(bindings.map((binding) => [
-      binding.resourceId,
-      {
-        binding,
-        bindingKey: resourcePreviewBindingKey(projectId, binding),
-        requestKey: `${resourcePreviewBindingKey(projectId, binding)}\u0000${retryVersions[binding.resourceId] ?? 0}`,
-      },
-    ]));
+    const desired = new Map(bindings.map((binding) => {
+      const bindingKey = resourcePreviewBindingKey(projectId, binding);
+      return [
+        binding.resourceId,
+        {
+          binding,
+          requestKey: `${bindingKey}\u0000${retryVersions[binding.resourceId] ?? 0}`,
+        },
+      ] as const;
+    }));
 
     for (const [resourceId, request] of activeRequestsRef.current) {
       const next = desired.get(resourceId);
@@ -176,27 +197,15 @@ export function useResourceNodeRevisionPreviewController(
       request.controller.abort();
       activeRequestsRef.current.delete(resourceId);
     }
-    for (const resourceId of completedRequestsRef.current.keys()) {
-      if (!desired.has(resourceId)) completedRequestsRef.current.delete(resourceId);
-    }
-
     commitEntries((current) => {
       let changed = Object.keys(current).length !== desired.size;
       const next: Record<string, InternalResourceNodeRevisionPreviewState> = {};
-      for (const [resourceId, { binding, bindingKey, requestKey }] of desired) {
+      for (const [resourceId, { binding, requestKey }] of desired) {
         const previous = current[resourceId];
-        const active = activeRequestsRef.current.get(resourceId);
-        const completed = completedRequestsRef.current.get(resourceId);
-        const hasCurrentLifecycle = (
-          active?.api === api && active.requestKey === requestKey
-        ) || (
-          completed?.api === api && completed.requestKey === requestKey
-        );
         if (
           previous !== undefined
-          && previous.bindingKey === bindingKey
+          && previous.api === api
           && previous.requestKey === requestKey
-          && hasCurrentLifecycle
         ) {
           next[resourceId] = previous;
           continue;
@@ -205,12 +214,14 @@ export function useResourceNodeRevisionPreviewController(
         const canPreserveLastGood = previous !== undefined
           && previous.projectId === projectId
           && previous.binding.workspaceId === binding.workspaceId
+          && previous.binding.resourceId === binding.resourceId
+          && previous.binding.revisionId === binding.revisionId
           && previous.binding.resourceKind === binding.resourceKind;
         const preview = canPreserveLastGood ? previous.preview : null;
         next[resourceId] = {
+          api,
           projectId,
           binding: { ...binding },
-          bindingKey,
           requestKey,
           status: preview === null ? "loading" : "refreshing",
           preview,
@@ -221,58 +232,42 @@ export function useResourceNodeRevisionPreviewController(
       return changed ? next : current as Record<string, InternalResourceNodeRevisionPreviewState>;
     });
 
-    for (const [resourceId, { binding, bindingKey, requestKey }] of desired) {
+    for (const [resourceId, { binding, requestKey }] of desired) {
       const active = activeRequestsRef.current.get(resourceId);
       if (active?.api === api && active.requestKey === requestKey) continue;
-      const completed = completedRequestsRef.current.get(resourceId);
-      if (completed?.api === api && completed.requestKey === requestKey) continue;
+      const current = entriesRef.current[resourceId];
+      if (
+        current?.api === api
+        && current.requestKey === requestKey
+        && (current.status === "ready" || current.status === "error")
+      ) continue;
 
       const controller = new AbortController();
       const request = { api, requestKey, controller };
       activeRequestsRef.current.set(resourceId, request);
+      const finish = (
+        patch: Pick<ResourceNodeRevisionPreviewState, "status">
+          & Partial<Pick<ResourceNodeRevisionPreviewState, "preview" | "error">>,
+      ): void => {
+        if (controller.signal.aborted || activeRequestsRef.current.get(resourceId) !== request) return;
+        activeRequestsRef.current.delete(resourceId);
+        commitEntries((current) => {
+          const existing = current[resourceId];
+          if (existing === undefined || existing.requestKey !== requestKey) {
+            return current as Record<string, InternalResourceNodeRevisionPreviewState>;
+          }
+          return {
+            ...current,
+            [resourceId]: { ...existing, ...patch },
+          };
+        });
+      };
       void loadResourceNodeRevisionPreview(api, projectId, binding, controller.signal)
         .then((preview) => {
-          if (controller.signal.aborted || activeRequestsRef.current.get(resourceId) !== request) return;
-          activeRequestsRef.current.delete(resourceId);
-          completedRequestsRef.current.set(resourceId, { api, requestKey });
-          commitEntries((current) => {
-            const existing = current[resourceId];
-            if (
-              existing === undefined
-              || existing.bindingKey !== bindingKey
-              || existing.requestKey !== requestKey
-            ) return current as Record<string, InternalResourceNodeRevisionPreviewState>;
-            return {
-              ...current,
-              [resourceId]: {
-                ...existing,
-                status: "ready",
-                preview,
-                error: null,
-              },
-            };
-          });
+          finish({ status: "ready", preview, error: null });
         })
         .catch((error: unknown) => {
-          if (controller.signal.aborted || activeRequestsRef.current.get(resourceId) !== request) return;
-          activeRequestsRef.current.delete(resourceId);
-          completedRequestsRef.current.set(resourceId, { api, requestKey });
-          commitEntries((current) => {
-            const existing = current[resourceId];
-            if (
-              existing === undefined
-              || existing.bindingKey !== bindingKey
-              || existing.requestKey !== requestKey
-            ) return current as Record<string, InternalResourceNodeRevisionPreviewState>;
-            return {
-              ...current,
-              [resourceId]: {
-                ...existing,
-                status: "error",
-                error: previewLoadError(error),
-              },
-            };
-          });
+          finish({ status: "error", error: previewLoadError(error) });
         });
     }
   }, [api, bindings, commitEntries, projectId, retryVersions]);
@@ -284,22 +279,6 @@ export function useResourceNodeRevisionPreviewController(
     activeRequestsRef.current.clear();
   }, []);
 
-  const states = useMemo(() => Object.fromEntries(
-    Object.entries(entries).map(([resourceId, entry]) => {
-      const {
-        projectId: _projectId,
-        bindingKey: _bindingKey,
-        requestKey: _requestKey,
-        ...state
-      } = entry;
-      return [resourceId, state];
-    }),
-  ), [entries]);
-  const previews = useMemo(() => Object.fromEntries(
-    Object.entries(entries).flatMap(([resourceId, entry]) => (
-      entry.preview === null ? [] : [[resourceId, entry.preview]]
-    )),
-  ), [entries]);
   const retry = useCallback((resourceId: string): void => {
     setRetryVersions((current) => ({
       ...current,
@@ -307,9 +286,39 @@ export function useResourceNodeRevisionPreviewController(
     }));
   }, []);
 
+  const visibleStates = useMemo<Readonly<Record<string, ResourceNodeRevisionPreviewState>>>(() => {
+    const next: Record<string, ResourceNodeRevisionPreviewState> = {};
+    for (const binding of bindings) {
+      const requestKey = `${resourcePreviewBindingKey(projectId, binding)}\u0000${retryVersions[binding.resourceId] ?? 0}`;
+      const current = entries[binding.resourceId];
+      if (
+        current !== undefined
+        && current.api === api
+        && current.projectId === projectId
+        && current.requestKey === requestKey
+      ) {
+        next[binding.resourceId] = current;
+        continue;
+      }
+      const sameImmutableBinding = current !== undefined
+        && current.projectId === projectId
+        && current.binding.workspaceId === binding.workspaceId
+        && current.binding.resourceId === binding.resourceId
+        && current.binding.revisionId === binding.revisionId
+        && current.binding.resourceKind === binding.resourceKind;
+      const preview = sameImmutableBinding ? current.preview : null;
+      next[binding.resourceId] = {
+        binding: { ...binding },
+        status: preview === null ? "loading" : "refreshing",
+        preview,
+        error: null,
+      };
+    }
+    return next;
+  }, [api, bindings, entries, projectId, retryVersions]);
+
   return {
-    previews,
-    states,
+    states: visibleStates,
     retry,
   };
 }
@@ -318,5 +327,10 @@ export function useResourceNodeRevisionPreviews(
   projectId: string,
   bindings: readonly ResourceNodeRevisionBinding[],
 ): Readonly<Record<string, ResourceNodeRevisionPreview>> {
-  return useResourceNodeRevisionPreviewController(projectId, bindings).previews;
+  const { states } = useResourceNodeRevisionPreviewController(projectId, bindings);
+  return useMemo(() => Object.fromEntries(
+    Object.entries(states).flatMap(([resourceId, state]) => (
+      state.preview === null ? [] : [[resourceId, state.preview]]
+    )),
+  ), [states]);
 }

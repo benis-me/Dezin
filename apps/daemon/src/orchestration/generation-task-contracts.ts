@@ -6,6 +6,9 @@ import {
   RENDER_FRAME_NAME_LIMIT,
   type GenerationTask,
   type WorkspaceGenerationAgentSelection,
+  type WorkspaceGenerationGeneratorExecutionAuthority,
+  type WorkspaceGenerationMoodboardImageAuthority,
+  type WorkspaceGenerationReviewerExecutionAuthority,
 } from "../../../../packages/core/src/index.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
@@ -30,6 +33,22 @@ const VIEWER_BRIDGE_FIXTURE_STRING_LIMIT = 8_192;
 const VIEWER_BRIDGE_FRAME_JSON_LIMIT = 65_536;
 const JSON_DEPTH_LIMIT = 64;
 const JSON_NODE_LIMIT = 100_000;
+const GENERATOR_COMMAND_PROVIDERS: Readonly<Record<string, string>> = Object.freeze({
+  claude: "claude",
+  codex: "codex",
+  gemini: "gemini",
+  codebuddy: "codebuddy",
+  "cursor-agent": "cursor-agent",
+  copilot: "copilot",
+  qwen: "qwen",
+  opencode: "opencode",
+  kimi: "kimi",
+  trae: "trae",
+  "trae-cli": "trae",
+  pi: "pi",
+  hermes: "hermes",
+});
+const REVIEWER_PROVIDERS = new Set(["claude", "codebuddy", "codex"]);
 
 export type GenerationTaskPayloadContractCode =
   | "GENERATION_TASK_PAYLOAD_INVALID"
@@ -230,8 +249,15 @@ function nullableCanonicalString(value: unknown, label: string): string | null {
 export function validateFrozenGenerationTaskAgent(
   value: unknown,
   label: string,
+  role: "generator" | "reviewer",
+  generator?: WorkspaceGenerationAgentSelection,
 ): WorkspaceGenerationAgentSelection {
-  const agent = exactObject(value, ["providerId", "command", "model"], [], label);
+  const agent = exactObject(
+    value,
+    ["providerId", "command", "model", "executionAuthority"],
+    [],
+    label,
+  );
   const boundedIdentity = (entry: unknown, field: "provider" | "command"): string => {
     if (typeof entry !== "string" || entry.trim().length === 0 || entry.trim() !== entry
       || !isWellFormedUtf16(entry) || entry.includes("\0")) {
@@ -249,10 +275,212 @@ export function validateFrozenGenerationTaskAgent(
   if (model !== null && Buffer.byteLength(model, "utf8") > 256) {
     fail(`${label} model cannot exceed 256 bytes`);
   }
+  const commandBase = command.split(/[\\/]/).pop()?.replace(/\.(?:exe|cmd|bat|ps1)$/i, "") ?? command;
+  const commandProvider = GENERATOR_COMMAND_PROVIDERS[commandBase];
+  if (commandProvider === undefined || commandProvider !== providerId) {
+    fail(`${label} command/provider identity is unsupported or mismatched`);
+  }
+  const boundedAuthorityString = (
+    entry: unknown,
+    field: string,
+    maximumBytes: number,
+    allowEmpty: boolean,
+  ): string => {
+    if (typeof entry !== "string" || entry.trim() !== entry || !isWellFormedUtf16(entry)
+      || entry.includes("\0") || (!allowEmpty && entry.length === 0)
+      || Buffer.byteLength(entry, "utf8") > maximumBytes) {
+      fail(`${label} execution authority ${field} must be canonical and bounded to ${maximumBytes} bytes`);
+    }
+    return entry;
+  };
+  const baseUrl = (entry: unknown): string => {
+    const raw = boundedAuthorityString(entry, "base URL", 2_048, true);
+    if (raw.length === 0) return raw;
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return fail(`${label} execution authority base URL is invalid`);
+    }
+    if ((url.protocol !== "http:" && url.protocol !== "https:")
+      || url.username.length > 0 || url.password.length > 0
+      || url.search.length > 0 || url.hash.length > 0
+      || (raw !== url.href && `${raw}/` !== url.href)) {
+      fail(`${label} execution authority base URL must be canonical and credential-free`);
+    }
+    return raw;
+  };
+  const credentialRequired = (entry: unknown): boolean => {
+    if (typeof entry !== "boolean") {
+      fail(`${label} execution authority credential-required semantic must be boolean`);
+    }
+    return entry;
+  };
+  let executionAuthority:
+    | WorkspaceGenerationGeneratorExecutionAuthority
+    | WorkspaceGenerationReviewerExecutionAuthority;
+  if (role === "generator") {
+    const authority = exactObject(
+      agent.executionAuthority,
+      ["kind", "baseUrl", "organization", "credentialProviderId", "credentialSource", "credentialRequired"],
+      [],
+      `${label} execution authority`,
+    );
+    if (authority.kind !== "generator") {
+      fail(`${label} execution authority kind must be generator`);
+    }
+    const frozenBaseUrl = baseUrl(authority.baseUrl);
+    const organization = boundedAuthorityString(authority.organization, "organization", 512, true);
+    const credentialProviderId = boundedAuthorityString(
+      authority.credentialProviderId,
+      "credential provider",
+      256,
+      false,
+    );
+    const requiresCredential = credentialRequired(authority.credentialRequired);
+    if (authority.credentialSource !== "provider-profile"
+      && authority.credentialSource !== "agent"
+      && authority.credentialSource !== "session") {
+      fail(`${label} execution authority credential source is unsupported`);
+    }
+    const credentialSource = authority.credentialSource;
+    const expectedCredentialProviderId = providerId === "codebuddy"
+      ? "codebuddy"
+      : providerId === "claude"
+        ? "anthropic"
+        : providerId === "codex" || providerId === "copilot"
+          ? "openai"
+          : providerId;
+    if (credentialProviderId !== expectedCredentialProviderId) {
+      fail(`${label} execution authority credential provider does not match its Agent provider`);
+    }
+    if ((providerId === "codex" || providerId === "codebuddy")
+      && credentialSource !== "session") {
+      fail(`${label} host-authenticated Agent must use session execution authority`);
+    }
+    if (credentialSource === "session"
+      && (frozenBaseUrl !== "" || organization !== "" || requiresCredential)) {
+      fail(`${label} session Agent cannot carry an endpoint, organization, or required credential`);
+    }
+    executionAuthority = Object.freeze({
+      kind: "generator",
+      baseUrl: frozenBaseUrl,
+      organization,
+      credentialProviderId,
+      credentialSource,
+      credentialRequired: requiresCredential,
+    });
+  } else {
+    const authority = exactObject(
+      agent.executionAuthority,
+      ["kind", "baseUrl", "credentialSource", "credentialRequired"],
+      [],
+      `${label} execution authority`,
+    );
+    if (authority.kind !== "reviewer") {
+      fail(`${label} execution authority kind must be reviewer`);
+    }
+    if (!REVIEWER_PROVIDERS.has(providerId)) {
+      fail(`${label} provider is unsupported for independent review`);
+    }
+    const frozenBaseUrl = baseUrl(authority.baseUrl);
+    if (authority.credentialSource !== "anthropic-profile"
+      && authority.credentialSource !== "agent"
+      && authority.credentialSource !== "session") {
+      fail(`${label} execution authority credential source is unsupported`);
+    }
+    const source = authority.credentialSource;
+    const requiresCredential = credentialRequired(authority.credentialRequired);
+    if (source === "session" && (frozenBaseUrl !== "" || requiresCredential)) {
+      fail(`${label} session reviewer cannot carry an endpoint or require a credential`);
+    }
+    if (providerId !== "claude" && source !== "session") {
+      fail(`${label} non-Claude reviewer must use session execution authority`);
+    }
+    if (providerId === "claude" && source === "agent") {
+      const generatorAuthority = generator?.executionAuthority;
+      if (generator?.providerId !== "claude"
+        || generatorAuthority?.kind !== "generator"
+        || generatorAuthority.credentialSource !== "agent"
+        || frozenBaseUrl !== generatorAuthority.baseUrl
+        || requiresCredential !== generatorAuthority.credentialRequired) {
+        fail(`${label} agent credential source must match the frozen Claude generator authority`);
+      }
+    }
+    executionAuthority = Object.freeze({
+      kind: "reviewer",
+      baseUrl: frozenBaseUrl,
+      credentialSource: source,
+      credentialRequired: requiresCredential,
+    });
+  }
   return Object.freeze({
     providerId,
     command,
     model,
+    executionAuthority,
+  });
+}
+
+export function validateMoodboardImageExecutionAuthority(
+  value: unknown,
+  label = "Moodboard image execution authority",
+): WorkspaceGenerationMoodboardImageAuthority {
+  const authority = exactObject(value, [
+    "kind",
+    "protocol",
+    "providerId",
+    "baseUrl",
+    "model",
+    "apiVersion",
+    "credentialSource",
+    "credentialRequired",
+  ], [], label);
+  if (authority.kind !== "moodboard-image"
+    || authority.protocol !== "dezin.workspace-moodboard-image-authority.v1") {
+    fail(`${label} kind or protocol is unsupported`);
+  }
+  const bounded = (entry: unknown, field: string, limit: number, allowEmpty: boolean): string => {
+    if (typeof entry !== "string" || entry.trim() !== entry || !isWellFormedUtf16(entry)
+      || entry.includes("\0") || (!allowEmpty && entry.length === 0)
+      || Buffer.byteLength(entry, "utf8") > limit) {
+      fail(`${label} ${field} must be canonical and bounded to ${limit} bytes`);
+    }
+    return entry;
+  };
+  const providerId = bounded(authority.providerId, "provider", 256, false);
+  const model = bounded(authority.model, "model", 256, false);
+  const apiVersion = bounded(authority.apiVersion, "API version", 512, true);
+  const rawBaseUrl = bounded(authority.baseUrl, "base URL", 2_048, false);
+  let url: URL;
+  try {
+    url = new URL(rawBaseUrl);
+  } catch {
+    return fail(`${label} base URL is invalid`);
+  }
+  const baseUrl = url.toString().replace(/\/+$/, "");
+  if ((url.protocol !== "http:" && url.protocol !== "https:")
+    || url.username.length > 0 || url.password.length > 0
+    || url.search.length > 0 || url.hash.length > 0
+    || rawBaseUrl !== baseUrl) {
+    fail(`${label} base URL must be explicit, canonical, and credential-free`);
+  }
+  if (authority.credentialSource !== "provider-profile"
+    && authority.credentialSource !== "global-image") {
+    fail(`${label} credential source is unsupported`);
+  }
+  if (authority.credentialRequired !== true) {
+    fail(`${label} must require its exact credential source`);
+  }
+  return Object.freeze({
+    kind: "moodboard-image",
+    protocol: "dezin.workspace-moodboard-image-authority.v1",
+    providerId,
+    baseUrl,
+    model,
+    apiVersion,
+    credentialSource: authority.credentialSource,
+    credentialRequired: true,
   });
 }
 
@@ -657,12 +885,21 @@ function validateArtifactPayload(task: GenerationTask): void {
       "brief",
       "capabilityDescriptors",
     ],
-    ["agent"],
+    ["agent", "reviewer"],
     `${task.kind} Task payload`,
   );
   if (payload.version !== 2) fail(`${task.kind} Task payload version is unsupported`);
+  let agent: WorkspaceGenerationAgentSelection | undefined;
   if (Object.hasOwn(payload, "agent")) {
-    validateFrozenGenerationTaskAgent(payload.agent, `${task.kind} Task Agent`);
+    agent = validateFrozenGenerationTaskAgent(payload.agent, `${task.kind} Task Agent`, "generator");
+  }
+  if (Object.hasOwn(payload, "reviewer")) {
+    validateFrozenGenerationTaskAgent(
+      payload.reviewer,
+      `${task.kind} Task reviewer`,
+      "reviewer",
+      agent,
+    );
   }
   const plan = exactObject(payload.artifactPlan, [
     "operation",
@@ -825,12 +1062,29 @@ function validateResourcePayload(task: GenerationTask): void {
   const payload = exactObject(
     task.payload,
     ["version", "operation", "brief", "capabilityDescriptors", "adapter"],
-    ["agent"],
+    ["agent", "reviewerAuthorityAgent", "reviewer", "moodboardImageAuthority"],
     "Resource Task payload",
   );
   if (payload.version !== 2) fail("Resource Task payload version is unsupported");
+  let agent: WorkspaceGenerationAgentSelection | undefined;
   if (Object.hasOwn(payload, "agent")) {
-    validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent");
+    agent = validateFrozenGenerationTaskAgent(payload.agent, "Resource Task Agent", "generator");
+  }
+  let reviewerAuthorityAgent: WorkspaceGenerationAgentSelection | undefined;
+  if (Object.hasOwn(payload, "reviewerAuthorityAgent")) {
+    reviewerAuthorityAgent = validateFrozenGenerationTaskAgent(
+      payload.reviewerAuthorityAgent,
+      "Resource Task reviewer-authority Agent",
+      "generator",
+    );
+  }
+  if (Object.hasOwn(payload, "reviewer")) {
+    validateFrozenGenerationTaskAgent(
+      payload.reviewer,
+      "Resource Task reviewer",
+      "reviewer",
+      reviewerAuthorityAgent ?? agent,
+    );
   }
   const operation = exactObject(payload.operation, [
     "operation",
@@ -849,6 +1103,21 @@ function validateResourcePayload(task: GenerationTask): void {
   }
   if (typeof operation.kind !== "string" || !RESOURCE_KINDS.has(operation.kind)) {
     fail("Resource operation Resource kind is unsupported");
+  }
+  if (reviewerAuthorityAgent !== undefined && operation.kind !== "research") {
+    fail("Resource Task reviewer-authority Agent is valid only for generated Research");
+  }
+  const hasMoodboardImageAuthority = Object.hasOwn(payload, "moodboardImageAuthority");
+  if (operation.kind === "moodboard") {
+    if (!hasMoodboardImageAuthority) {
+      fail("generated Moodboard Resource Task requires exact image execution authority");
+    }
+    validateMoodboardImageExecutionAuthority(
+      payload.moodboardImageAuthority,
+      "Resource Task Moodboard image execution authority",
+    );
+  } else if (hasMoodboardImageAuthority) {
+    fail("Moodboard image execution authority is valid only for generated Moodboard Resource Tasks");
   }
   const title = canonicalString(operation.title, "Resource operation title");
   const resourceInstructions = operation.instructions === undefined

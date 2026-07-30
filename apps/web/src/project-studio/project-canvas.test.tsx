@@ -707,6 +707,21 @@ test("canvas exposes truthful keyboard instructions for editable and derived rel
   expect(edgeDescription).toHaveTextContent("Uses relationships are derived and read-only");
 });
 
+test("a Page can be selected again after the canvas clears its previous selection", async () => {
+  const { container } = render(<CanvasHarness onSaveLayout={async () => layout} />);
+  const page = () => container.querySelector<HTMLElement>('.react-flow__node[data-id="page-1"]')!;
+  const card = () => page().querySelector<HTMLElement>(".dezin-flow-card")!;
+
+  fireEvent.click(page());
+  await waitFor(() => expect(card()).toHaveAttribute("data-selected", "true"));
+
+  fireEvent.keyDown(screen.getByRole("application", { name: "Project canvas" }), { key: "Escape" });
+  await waitFor(() => expect(card()).not.toHaveAttribute("data-selected"));
+
+  fireEvent.click(page());
+  await waitFor(() => expect(card()).toHaveAttribute("data-selected", "true"));
+});
+
 test.each(["prototype", "informs", "derives-from"] as const)(
   "toolbar removes a selected editable %s relationship and clears selection after success",
   async (kind) => {
@@ -1040,6 +1055,29 @@ test("an older move response cannot overwrite a newer optimistic node position",
   await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(3));
   expect(onSaveLayout.mock.calls[2]![0]).toEqual([
     { type: "move", objectId: "page-1", x: 43, y: 70 },
+  ]);
+});
+
+test("a normalized save becomes the next authoritative node position", async () => {
+  const onSaveLayout = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => {
+    const saved = applyWorkspaceLayoutCommands(layout, commands);
+    return {
+      ...saved,
+      objects: saved.objects.map((object) => (
+        object.id === "page-1" ? { ...object, x: 100 } : object
+      )),
+    };
+  });
+  render(<AuthoritativeCanvasHarness onSaveLayout={onSaveLayout} />);
+  const canvas = screen.getByRole("application", { name: "Project canvas" });
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(1));
+
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  await waitFor(() => expect(onSaveLayout).toHaveBeenCalledTimes(2));
+  expect(onSaveLayout.mock.calls[1]![0]).toEqual([
+    { type: "move", objectId: "page-1", x: 101, y: 70 },
   ]);
 });
 

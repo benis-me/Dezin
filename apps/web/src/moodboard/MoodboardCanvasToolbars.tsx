@@ -49,6 +49,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "../components/ui/index.ts";
+import { StudioToolButton as ToolButton } from "../components/ui/StudioToolButton.tsx";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { cn } from "../lib/utils.ts";
 import { generatorPrompt, referenceAssetIds as referenceAssetIdsFromNode, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
@@ -68,40 +69,6 @@ import {
   supportsImageSize,
 } from "./image-generation-params.ts";
 import { ImageModelPicker } from "./ImageModelPicker.tsx";
-
-const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
-
-export function ToolButton({
-  label,
-  active = false,
-  onClick,
-  children,
-  disabled = false,
-  className,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-  disabled?: boolean;
-  className?: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <IconButton
-          aria-label={label}
-          onClick={disabled ? undefined : onClick}
-          aria-disabled={disabled}
-          className={cn(className, active && ACTIVE_TOOL_BUTTON_CLASS, disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
-        >
-          {children}
-        </IconButton>
-      </TooltipTrigger>
-      <TooltipContent sideOffset={2}>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
 
 function stopToolbarEvent(event: { stopPropagation: () => void }) {
   event.stopPropagation();

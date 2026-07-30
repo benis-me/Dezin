@@ -249,6 +249,231 @@ test("useMoodboardBoard restores and persists the selected agent model", async (
   await waitFor(() => expect(currentSettings.model).toBe("gpt-5.1"));
 });
 
+test("useMoodboardBoard distinguishes an initial Agent detection failure from a successful empty catalog", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    listAgents: async () => {
+      throw new Error("agent catalog unavailable");
+    },
+    rescanAgents: async () => [],
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(board.loading).toBe(false));
+  await waitFor(() => expect(board.agentDetectionError).toBe(
+    "Agent availability couldn't be checked. Use Rescan agents to try again.",
+  ));
+  expect(board.agents).toEqual([]);
+
+  let succeeded = false;
+  await act(async () => {
+    succeeded = await board.rescanAgents();
+  });
+
+  expect(succeeded).toBe(true);
+  expect(board.agentDetectionError).toBeNull();
+  expect(board.agents).toEqual([]);
+});
+
+test("useMoodboardBoard preserves last-good Agents across repeated rescan failures and sends with the recovered Agent", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const codex = { id: "codex", command: "codex", available: true, models: ["gpt-5"] };
+  const claude = { id: "claude", command: "claude", available: true, models: ["sonnet"] };
+  const rescanAgents = vi.fn()
+    .mockRejectedValueOnce(new Error("first scan stopped"))
+    .mockRejectedValueOnce(new Error("second scan stopped"))
+    .mockResolvedValueOnce([claude]);
+  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  const api = makeFakeApi({
+    listAgents: async () => [codex],
+    rescanAgents,
+    getSettings: async () => settings({ agentCommand: "codex", model: "gpt-5" }),
+    postMoodboardMessage,
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.runAgent).toBe("codex"));
+  await waitFor(() => expect(board.runModel).toBe("gpt-5"));
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let succeeded = true;
+    await act(async () => {
+      succeeded = await board.rescanAgents();
+    });
+    expect(succeeded).toBe(false);
+    expect(board.agentDetectionError).toBe(
+      "Agent scan stopped before it completed. Use Rescan agents to try again.",
+    );
+    expect(board.agents).toEqual([codex]);
+  }
+
+  let recovered = false;
+  await act(async () => {
+    recovered = await board.rescanAgents();
+  });
+  expect(recovered).toBe(true);
+  expect(board.agentDetectionError).toBeNull();
+  expect(board.agents).toEqual([claude]);
+  expect(board.runAgent).toBe("claude");
+  expect(board.runModel).toBe("");
+  expect(rescanAgents).toHaveBeenCalledTimes(3);
+
+  await act(async () => {
+    await board.sendMessage("Use the recovered Agent");
+  });
+  expect(postMoodboardMessage).toHaveBeenCalledWith("board-1", "Use the recovered Agent", {
+    agentCommand: "claude",
+    model: undefined,
+    conversationId: undefined,
+  });
+});
+
+test("useMoodboardBoard clears stale Agent and model before sending after a successful empty rescan", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const codex = { id: "codex", command: "codex", available: true, models: ["gpt-5"] };
+  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  const api = makeFakeApi({
+    listAgents: async () => [codex],
+    rescanAgents: async () => [],
+    getSettings: async () => settings({ agentCommand: "codex", model: "gpt-5" }),
+    postMoodboardMessage,
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.runModel).toBe("gpt-5"));
+
+  await act(async () => {
+    expect(await board.rescanAgents()).toBe(true);
+  });
+  expect(board.runAgent).toBe("");
+  expect(board.runModel).toBe("");
+
+  await act(async () => {
+    await board.sendMessage("Use the authoritative empty catalog");
+  });
+  expect(postMoodboardMessage).toHaveBeenCalledWith("board-1", "Use the authoritative empty catalog", {
+    agentCommand: undefined,
+    model: undefined,
+    conversationId: undefined,
+  });
+});
+
+test("useMoodboardBoard preserves a still-available Agent and compatible model when rescanning", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const codex = { id: "codex", command: "codex", available: true, models: ["gpt-5"] };
+  const refreshedCodex = { ...codex, version: "2", models: ["gpt-5", "gpt-5.1"] };
+  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  const api = makeFakeApi({
+    listAgents: async () => [codex],
+    rescanAgents: async () => [refreshedCodex],
+    getSettings: async () => settings({ agentCommand: "codex", model: "gpt-5" }),
+    postMoodboardMessage,
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.runModel).toBe("gpt-5"));
+
+  await act(async () => {
+    expect(await board.rescanAgents()).toBe(true);
+  });
+  expect(board.runAgent).toBe("codex");
+  expect(board.runModel).toBe("gpt-5");
+
+  await act(async () => {
+    await board.sendMessage("Keep the compatible selection");
+  });
+  expect(postMoodboardMessage).toHaveBeenCalledWith("board-1", "Keep the compatible selection", {
+    agentCommand: "codex",
+    model: "gpt-5",
+    conversationId: undefined,
+  });
+});
+
 test("imageModelOptions still honors an explicitly configured legacy image endpoint", () => {
   expect(
     imageModelOptions(

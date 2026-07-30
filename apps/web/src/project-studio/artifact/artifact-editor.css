@@ -461,18 +461,6 @@
   font-size: 11px;
 }
 
-.artifact-versions__compare-loading {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: grid;
-  place-items: center;
-  background: color-mix(in oklch, var(--background) 72%, transparent);
-  color: var(--muted-foreground);
-  font-size: 11px;
-  backdrop-filter: blur(3px);
-}
-
 .artifact-tool:disabled {
   cursor: not-allowed;
   opacity: 0.42;

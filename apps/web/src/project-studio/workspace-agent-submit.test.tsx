@@ -36,6 +36,7 @@ import {
   takePendingRefs,
 } from "../lib/pending-brief.ts";
 import {
+  readAgentSession,
   WORKSPACE_AGENT_SCOPE,
   writeAgentSession,
 } from "./scoped-agent-session.ts";
@@ -493,6 +494,9 @@ function RecoveryReservationProbe() {
             const claim = await claimPendingTurnReplacement({
               projectId: "p-1",
               expectedActiveTurnId,
+              ...(studio.workspaceAgentOutbox?.turnId === expectedActiveTurnId
+                ? { activeRequestFingerprint: studio.workspaceAgentOutbox.fingerprint }
+                : {}),
               reservation: {
                 ...facts,
                 contextItems: facts.contextItems.map(({ previewUrl: _previewUrl, type: _type, ...item }) => item),
@@ -744,11 +748,15 @@ test("a successful scoped submission clears its attachment error and reveals que
   await waitFor(() => expect(resourceAgentTurn).toHaveBeenCalledTimes(1));
   expect(await screen.findByRole("heading", { name: "Build plan" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Open build plan" })).not.toBeInTheDocument();
+  const openBuildActivity = screen.getByLabelText("Build activity");
+  expect(openBuildActivity).toHaveTextContent("Queued");
+  expect(within(openBuildActivity).getByRole("button", { name: "Hide build details" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Close build plan" })).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "Close build plan" }));
-  const restorePlan = screen.getByRole("button", { name: "Open build plan" });
-  expect(restorePlan).toHaveTextContent("Queued build plan");
-  expect(restorePlan).not.toHaveTextContent("plan-resource-agent");
-  expect(restorePlan).toHaveAttribute("title", "Build plan plan-resource-agent");
+  const closedBuildActivity = screen.getByLabelText("Build activity");
+  expect(closedBuildActivity).toHaveTextContent("Queued");
+  expect(closedBuildActivity).not.toHaveTextContent("plan-resource-agent");
+  expect(within(closedBuildActivity).getByRole("button", { name: "Open build plan" })).toBeInTheDocument();
   expect(draft).not.toHaveAttribute("aria-invalid");
   expect(draft).not.toHaveAttribute("aria-describedby");
   expect(screen.getAllByRole("alert")).toHaveLength(1);
@@ -789,8 +797,18 @@ test("Workspace Agent submission creates a scoped draft and focuses Proposal rev
   expect(screen.getByRole("heading", { name: "Proposal ready" })).toBeInTheDocument();
   expect(screen.getByText("0 changes")).toBeInTheDocument();
   expect(screen.getByLabelText("Workspace Agent transcript")).not.toHaveTextContent(proposal.id);
+  expect(readAgentSession("p-1", WORKSPACE_AGENT_SCOPE).transcript.at(-1)).toEqual(
+    expect.objectContaining({
+      role: "assistant",
+      state: "proposal",
+      content: "Workspace proposal is ready for review.",
+      proposalId: proposal.id,
+    }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "Review proposal" }));
-  expect(screen.getByRole("heading", { name: "Workspace proposal" })).toHaveFocus();
+  await waitFor(() => expect(
+    screen.getByRole("heading", { name: "Workspace proposal" }),
+  ).toHaveFocus());
   expect(draft).toHaveValue("");
   expect(getWorkspace).toHaveBeenCalledTimes(1);
 });
@@ -1285,7 +1303,133 @@ test("an older Settings event cannot replace a newer local Agent write", async (
   expect(picker).toHaveTextContent("sonnet");
 });
 
-test("persistent Settings read failures toast once and keep recovering without changing composer layout", async () => {
+test("a completed Agent scan with no selectable Agent becomes unavailable and can recover through Rescan", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const unavailableAgent: AgentInfo = {
+    id: "codex",
+    command: "codex",
+    available: false,
+    availability: "not-installed",
+    unavailableReason: "Codex is not installed.",
+    models: [],
+  };
+  const rescanAgents = vi.fn(async (): Promise<AgentInfo[]> => [{
+    ...unavailableAgent,
+    available: true,
+    availability: "ready",
+    unavailableReason: undefined,
+    version: "1",
+    models: ["gpt-5.4-mini"],
+  }]);
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codex",
+          model: "gpt-5.4-mini",
+        }),
+        listAgents: async () => [unavailableAgent],
+        rescanAgents,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Create a traceable design direction." },
+  });
+
+  const unavailableReason = "No Agent is available. Install or sign in to one, then rescan agents.";
+  expect(await screen.findByRole("alert")).toHaveTextContent(unavailableReason);
+  expect(screen.queryByRole("status", { name: "Checking Agent availability…" })).not.toBeInTheDocument();
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit).toBeDisabled();
+  expect(submit.parentElement).toHaveAttribute("aria-label", unavailableReason);
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  expect(screen.getByText("No agents detected.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Rescan agents" }));
+
+  await screen.findByRole("button", { name: /^Codex/ });
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex"));
+  expect(rescanAgents).toHaveBeenCalledTimes(1);
+  expect(submit).toBeEnabled();
+});
+
+test("a failed Agent rescan is toasted without replacing the composer or discarding last-good Agents", async () => {
+  const user = userEvent.setup();
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const rescanAgents = vi.fn(async (): Promise<AgentInfo[]> => {
+    throw new Error("fallback stalled");
+  });
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codex",
+          model: "gpt-5.4-mini",
+        }),
+        listAgents: async () => [{
+          id: "codex",
+          command: "codex",
+          available: true,
+          availability: "ready",
+          version: "1",
+          models: ["gpt-5.4-mini"],
+        }],
+        scanAgentsStream: async function* () {
+          throw new Error("stream stalled");
+        },
+        rescanAgents,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  await screen.findByRole("region", { name: "Project canvas" });
+  fireEvent.change(screen.getByRole("textbox", { name: "Workspace Agent draft" }), {
+    target: { value: "Keep the last usable Agent selected." },
+  });
+  const composer = screen.getByRole("textbox", { name: "Workspace Agent draft" })
+    .closest("[data-workspace-agent-composer]");
+  expect(composer).not.toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "Agent and model" }));
+  await user.click(screen.getByRole("button", { name: "Rescan agents" }));
+  await user.keyboard("{Escape}");
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(
+    "Agent scan stopped before it completed. Use Rescan agents to try again.",
+  );
+  expect(alert.closest('[aria-label="Notifications"]')).not.toBeNull();
+  expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })
+    .closest("[data-workspace-agent-composer]")).toBe(composer);
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex");
+  expect(screen.getByRole("button", { name: "Create proposal" })).toBeEnabled();
+  expect(rescanAgents).toHaveBeenCalledTimes(1);
+});
+
+test("persistent Settings read failures become an explicit error and can retry without changing composer layout", async () => {
   const ready = readyWorkspace("p-1");
   const inheritedProject = { ...project("p-1"), designSystemId: null };
   const currentSettings = await makeFakeApi().getSettings();
@@ -1305,6 +1449,9 @@ test("persistent Settings read failures toast once and keep recovering without c
       model: "gpt-5.4-mini",
       defaultDesignSystemId: "modern-minimal",
     });
+  const rescanAgents = vi.fn(async (): Promise<AgentInfo[]> => [
+    { id: "codex", command: "codex", available: true, availability: "ready", version: "1", models: ["gpt-5.4-mini"] },
+  ]);
 
   render(
     <ToastProvider>
@@ -1315,6 +1462,7 @@ test("persistent Settings read failures toast once and keep recovering without c
         listAgents: async () => [
           { id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5.4-mini"] },
         ],
+        rescanAgents,
         listDesignSystems: async () => [
           { id: "modern-minimal", name: "Modern Minimal", category: "Modern", summary: "", origin: "built-in" },
         ],
@@ -1356,18 +1504,30 @@ test("persistent Settings read failures toast once and keep recovering without c
   await act(async () => {
     await vi.advanceTimersByTimeAsync(2_000);
   });
+  const settingsUnavailableReason = "Agent and Design System settings couldn't load after 5 tries. Dezin is retrying; use Rescan agents to retry now.";
   const loadError = screen.getByRole("alert");
-  expect(loadError).toHaveTextContent("Couldn't load Agent and Design System settings. Reconnecting…");
+  expect(loadError).toHaveTextContent(settingsUnavailableReason);
   expect(loadError.closest('[aria-label="Notifications"]')).not.toBeNull();
   expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })
     .closest("[data-workspace-agent-composer]")).toBe(composer);
   expect(screen.getByRole("button", { name: "Design system" }))
     .toHaveAccessibleDescription("Design system settings are unavailable; retrying");
+  expect(screen.queryByRole("status", { name: "Checking Agent availability…" })).not.toBeInTheDocument();
+  const submit = screen.getByRole("button", { name: "Create proposal" });
+  expect(submit.parentElement).toHaveAttribute("aria-label", settingsUnavailableReason);
 
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(4_000);
+    fireEvent.click(screen.getByRole("button", { name: "Agent and model" }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Rescan agents" }));
+    await vi.advanceTimersByTimeAsync(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
   });
   expect(getSettings).toHaveBeenCalledTimes(6);
+  expect(rescanAgents).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex");
   expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("gpt-5.4-mini");
   expect(screen.getByRole("button", { name: "Design system" }))
@@ -1703,9 +1863,10 @@ test("a new Standard project stages Home attachments before navigation and never
   }));
 });
 
-test("a failed Home attachment stage removes the incomplete project and keeps the composer intact", async () => {
+test("a failed Home attachment stage keeps the project-scoped recovery handoff and enters the workspace", async () => {
   const user = userEvent.setup();
   const createdProject = { ...project("p-incomplete"), name: "Incomplete workspace" };
+  const ready = readyWorkspace("p-incomplete");
   const currentSettings = await makeFakeApi().getSettings();
   const deleteProject = vi.fn(async () => {});
   window.history.pushState({}, "", "/");
@@ -1716,6 +1877,8 @@ test("a failed Home attachment stage removes the incomplete project and keeps th
       <ApiProvider client={makeFakeApi({
         createProject: async () => createdProject,
         deleteProject,
+        getProject: async () => createdProject,
+        getWorkspace: async () => ready,
         getSettings: async () => ({
           ...currentSettings,
           agentCommand: "codebuddy",
@@ -1746,19 +1909,28 @@ test("a failed Home attachment stage removes the incomplete project and keeps th
   });
   await user.click(screen.getByLabelText("Design"));
 
-  await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("p-incomplete"));
-  expect(window.location.pathname).toBe("/");
-  expect(screen.getByLabelText("Describe your design")).toHaveValue("Keep this draft recoverable");
-  expect(screen.getByLabelText("Remove direction.png")).toBeInTheDocument();
-  expect(peekPendingDesignWorkspaceTurn("p-incomplete")).toBeNull();
+  await waitFor(() => expect(window.location.pathname).toBe("/projects/p-incomplete"));
+  expect(deleteProject).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-incomplete")).toEqual(expect.objectContaining({
+    brief: "Keep this draft recoverable",
+    attachmentCount: 1,
+    attachmentsStaged: false,
+    attachments: [],
+  }));
+  expect(await screen.findByText("Project created. Add the missing attachments to continue.")).toBeInTheDocument();
 });
 
-test("a failed incomplete-project cleanup preserves its project-scoped recovery handoff", async () => {
+test("a later Home attachment failure preserves already staged attachments for recovery", async () => {
   const user = userEvent.setup();
-  const createdProject = { ...project("p-cleanup-failed"), name: "Recoverable incomplete workspace" };
+  const createdProject = { ...project("p-partial"), name: "Partially staged workspace" };
+  const ready = readyWorkspace("p-partial");
   const currentSettings = await makeFakeApi().getSettings();
-  const deleteProject = vi.fn(async () => {
-    throw new Error("Project deletion failed");
+  const deleteProject = vi.fn(async () => {});
+  const uploadRef = vi.fn(async (_projectId: string, name: string) => {
+    if (uploadRef.mock.calls.length === 1) {
+      return { name, path: `.refs/${name}` };
+    }
+    throw new Error("Second upload failed");
   });
   window.history.pushState({}, "", "/");
   localStorage.setItem("dezin.home.composer", JSON.stringify({ mode: "standard" }));
@@ -1768,6 +1940,8 @@ test("a failed incomplete-project cleanup preserves its project-scoped recovery 
       <ApiProvider client={makeFakeApi({
         createProject: async () => createdProject,
         deleteProject,
+        getProject: async () => createdProject,
+        getWorkspace: async () => ready,
         getSettings: async () => ({
           ...currentSettings,
           agentCommand: "codebuddy",
@@ -1776,9 +1950,7 @@ test("a failed incomplete-project cleanup preserves its project-scoped recovery 
         listAgents: async () => [
           { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: ["hunyuan"] },
         ],
-        uploadRef: async () => {
-          throw new Error("Upload failed");
-        },
+        uploadRef,
       })}>
         <AgentsProvider>
           <App />
@@ -1790,20 +1962,24 @@ test("a failed incomplete-project cleanup preserves its project-scoped recovery 
   await waitFor(() => expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard"));
   const imageInput = document.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
   fireEvent.change(imageInput!, {
-    target: { files: [validPngFile("direction.png")] },
+    target: { files: [validPngFile("direction-a.png"), validPngFile("direction-b.png")] },
   });
-  await screen.findByLabelText("Remove direction.png");
+  await screen.findByLabelText("Remove direction-b.png");
   fireEvent.change(screen.getByLabelText("Describe your design"), {
-    target: { value: "Recover this incomplete workspace" },
+    target: { value: "Recover this partially staged workspace" },
   });
   await user.click(screen.getByLabelText("Design"));
 
-  await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("p-cleanup-failed"));
-  expect(peekPendingDesignWorkspaceTurn("p-cleanup-failed")).toEqual(expect.objectContaining({
-    brief: "Recover this incomplete workspace",
-    attachmentCount: 1,
+  await waitFor(() => expect(window.location.pathname).toBe("/projects/p-partial"));
+  expect(uploadRef).toHaveBeenCalledTimes(2);
+  expect(deleteProject).not.toHaveBeenCalled();
+  expect(peekPendingDesignWorkspaceTurn("p-partial")).toEqual(expect.objectContaining({
+    brief: "Recover this partially staged workspace",
+    attachmentCount: 2,
     attachmentsStaged: false,
-    attachments: [],
+    attachments: [expect.objectContaining({
+      uploadedFileId: ".refs/home-image-1-direction-a.png",
+    })],
   }));
 });
 
@@ -2001,6 +2177,12 @@ test("a pending initial turn is acknowledged only after its Workspace Agent requ
 
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
   expect(peekPendingDesignWorkspaceTurn("p-1")).not.toBeNull();
+  const progress = screen.getByRole("status", { name: "Workspace Agent proposal progress" });
+  expect(progress).toHaveTextContent("Thinking");
+  expect(progress).toHaveTextContent("Creating a reviewable proposal…");
+  expect(screen.getByRole("button", { name: "Create proposal" }).querySelector(
+    "[data-agent-submit-icon]",
+  )).not.toBeNull();
 
   resolveTurn(draftProposal(ready));
 
@@ -2567,6 +2749,114 @@ test("a session quota failure cannot lose a replacement prompt or immutable Cont
   await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
 });
 
+test("editing a failed legacy replacement forks a fresh immutable turn before retry", async () => {
+  const ready = readyWorkspace("p-1");
+  const currentSettings = await makeFakeApi().getSettings();
+  const failedTurnId = "turn-00000000-0000-4000-8000-000000000002";
+  const failedRequest: WorkspaceAgentTurnInput = {
+    turnId: failedTurnId,
+    message: "Build the failed replacement facts",
+    agentCommand: "codebuddy",
+    explicitContext: [],
+    graphRevision: ready.graph.revision,
+    selection: [],
+  };
+  const failedFingerprint = workspaceAgentRequestFingerprint({
+    message: failedRequest.message,
+    agentCommand: failedRequest.agentCommand,
+    explicitContext: failedRequest.explicitContext,
+    graphRevision: failedRequest.graphRevision,
+    selection: failedRequest.selection,
+  });
+  expect(writeAgentSession("p-1", WORKSPACE_AGENT_SCOPE, {
+    draft: failedRequest.message,
+    contextItems: [],
+    transcript: [{
+      id: `user:${failedTurnId}`,
+      turnId: failedTurnId,
+      role: "user",
+      content: failedRequest.message,
+      createdAt: 1,
+      state: "submitted",
+    }],
+    outbox: {
+      kind: "workspace",
+      turnId: failedTurnId,
+      fingerprint: failedFingerprint,
+      request: failedRequest,
+      createdAt: 1,
+      delivery: {
+        status: "failed",
+        error: "Workspace Agent turn was already committed for different immutable request facts.",
+        failedAt: 2,
+      },
+    },
+    receipt: null,
+  })).toBe(true);
+  setPendingDesignWorkspaceTurn({
+    projectId: "p-1",
+    turnId: INITIAL_TURN_ID,
+    supersededByTurnId: failedTurnId,
+    brief: failedRequest.message,
+    agentCommand: "codebuddy",
+    attachmentCount: 0,
+    attachmentsStaged: true,
+  });
+  let pendingAtRetry!: NonNullable<ReturnType<typeof peekPendingDesignWorkspaceTurn>>;
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    pendingAtRetry = structuredClone(peekPendingDesignWorkspaceTurn("p-1"))!;
+    return draftProposal(ready);
+  });
+
+  render(
+    <ToastProvider>
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => project("p-1"),
+        getWorkspace: async () => ready,
+        getSettings: async () => ({
+          ...currentSettings,
+          agentCommand: "codebuddy",
+          model: "",
+        }),
+        listAgents: async () => [
+          { id: "codebuddy", command: "codebuddy", available: true, version: "1", models: [] },
+        ],
+        workspaceAgentTurn,
+      })}>
+        <AgentsProvider>
+          <App />
+        </AgentsProvider>
+      </ApiProvider>
+    </ToastProvider>,
+  );
+
+  const draft = await screen.findByRole("textbox", { name: "Workspace Agent draft" });
+  await waitFor(() => expect(draft).toHaveValue(failedRequest.message));
+  fireEvent.change(draft, { target: { value: "Build the edited retry facts" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  const retriedRequest = workspaceAgentTurn.mock.calls[0]![1];
+  expect(retriedRequest.turnId).toMatch(CANONICAL_TURN_ID);
+  expect(retriedRequest.turnId).not.toBe(failedTurnId);
+  expect(pendingAtRetry.recoveryRequest?.request).toEqual(retriedRequest);
+  expect(pendingAtRetry.supersessionLineage).toEqual([
+    {
+      turnId: failedTurnId,
+      parentTurnId: INITIAL_TURN_ID,
+      fingerprint: failedFingerprint,
+    },
+    expect.objectContaining({
+      turnId: retriedRequest.turnId,
+      parentTurnId: failedTurnId,
+    }),
+  ]);
+  await waitFor(() => expect(peekPendingDesignWorkspaceTurn("p-1")).toBeNull());
+});
+
 test("editing after a committed response fails client validation creates a new CAS child turn", async () => {
   const ready = readyWorkspace("p-1");
   const currentSettings = await makeFakeApi().getSettings();
@@ -2622,9 +2912,9 @@ test("editing after a committed response fails client validation creates a new C
   fireEvent.change(draft, { target: { value: "First replacement facts" } });
   fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
-  expect(await screen.findByText(
+  expect(await screen.findAllByText(
     "Workspace Agent returned a Proposal outside the current canvas Revision.",
-  )).toBeInTheDocument();
+  )).toHaveLength(2);
   const firstPending = structuredClone(peekPendingDesignWorkspaceTurn("p-1"));
   const firstReplacementId = firstPending?.supersededByTurnId;
   expect(firstReplacementId).toMatch(CANONICAL_TURN_ID);
@@ -3468,7 +3758,8 @@ test("Workspace Agent stays blocked until Agent discovery and Settings initializ
   expect(pendingStatus).toHaveAttribute("aria-atomic", "true");
   expect(submit).toHaveAttribute("aria-describedby", pendingStatus.id);
   expect(submit).toHaveAttribute("aria-busy", "true");
-  expect(submit.querySelector(".animate-spin")).not.toBeNull();
+  expect(submit.querySelector("[data-agent-submit-icon]")).not.toBeNull();
+  expect(submit.querySelector(".animate-spin")).toBeNull();
   expect(screen.queryByText("Checking Agent availability…", { selector: "p" })).not.toBeInTheDocument();
 
   await act(async () => {
@@ -3708,6 +3999,21 @@ test("Workspace Agent keeps an explicit Planner failure terminal across remount 
     "Workspace Planner is unavailable",
   );
   const firstTurnId = workspaceAgentTurn.mock.calls[0]![1].turnId;
+  expect(readAgentSession("p-1", WORKSPACE_AGENT_SCOPE).transcript).toEqual([
+    expect.objectContaining({
+      id: `user:${firstTurnId}`,
+      turnId: firstTurnId,
+      role: "user",
+      state: "submitted",
+    }),
+    expect.objectContaining({
+      id: `assistant:${firstTurnId}`,
+      turnId: firstTurnId,
+      role: "assistant",
+      content: "Workspace Planner is unavailable: structured Agent timed out",
+      state: "failed",
+    }),
+  ]);
   first.unmount();
 
   render(
@@ -3728,6 +4034,54 @@ test("Workspace Agent keeps an explicit Planner failure terminal across remount 
   fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
   await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
   expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(firstTurnId);
+});
+
+test("a successful retry replaces the durable Planner failure for the same turn", async () => {
+  const ready = readyWorkspace("p-1");
+  let attempt = 0;
+  const workspaceAgentTurn = vi.fn(async (
+    _projectId: string,
+    _input: WorkspaceAgentTurnInput,
+  ) => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new ApiError(500, "Workspace Planner is unavailable: structured Agent timed out");
+    }
+    return draftProposal(ready);
+  });
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => project("p-1"),
+      getWorkspace: async () => ready,
+      workspaceAgentTurn,
+    })}>
+      <AgentScopeProbe targetId={null} />
+    </ApiProvider>,
+  );
+
+  const prompt = await screen.findByRole("textbox", { name: "Current Agent prompt" });
+  fireEvent.change(prompt, { target: { value: "Build three complete visual directions" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(1));
+  const turnId = workspaceAgentTurn.mock.calls[0]![1].turnId;
+  await waitFor(() => expect(
+    readAgentSession("p-1", WORKSPACE_AGENT_SCOPE).transcript
+      .find((entry) => entry.id === `assistant:${turnId}`),
+  ).toEqual(expect.objectContaining({ state: "failed" })));
+
+  fireEvent.click(screen.getByRole("button", { name: "Submit current scope" }));
+  await waitFor(() => expect(workspaceAgentTurn).toHaveBeenCalledTimes(2));
+  expect(workspaceAgentTurn.mock.calls[1]![1].turnId).toBe(turnId);
+  await waitFor(() => {
+    const assistantEntries = readAgentSession("p-1", WORKSPACE_AGENT_SCOPE).transcript
+      .filter((entry) => entry.role === "assistant");
+    expect(assistantEntries).toEqual([expect.objectContaining({
+      id: `assistant:${turnId}`,
+      turnId,
+      state: "proposal",
+      proposalId: "proposal-agent-1",
+    })]);
+  });
 });
 
 test("Workspace Agent resumes an uncertain lost network response after remount", async () => {
@@ -3759,6 +4113,8 @@ test("Workspace Agent resumes an uncertain lost network response after remount",
     "Failed to fetch",
   );
   const firstTurnId = workspaceAgentTurn.mock.calls[0]![1].turnId;
+  expect(readAgentSession("p-1", WORKSPACE_AGENT_SCOPE).transcript)
+    .not.toContainEqual(expect.objectContaining({ id: `assistant:${firstTurnId}` }));
   first.unmount();
 
   render(
@@ -4426,11 +4782,13 @@ test("Artifact Agent keeps scoped errors and the draft without disturbing Worksp
 });
 
 test("Resource Agent submits its exact target Revision and daemon-owned Context refs", async () => {
+  const receipt = resourceReceipt();
+  receipt.task.resultResourceRevisionId = "resource-revision-output";
   const resourceAgentTurn = vi.fn(async (
     _projectId: string,
     _resourceId: string,
     _input: ScopedAgentTurnInput,
-  ) => resourceReceipt());
+  ) => receipt);
   render(
     <ApiProvider client={makeFakeApi({
       getProject: async () => project("p-1"),
@@ -4462,7 +4820,17 @@ test("Resource Agent submits its exact target Revision and daemon-owned Context 
     "Use this research to sharpen the checkout direction",
   );
   expect(screen.getByRole("status", { name: "Resource Agent transcript" })).toHaveTextContent(
-    "Queued Task task-resource-agent in Plan plan-resource-agent",
+    "Design work is queued in the build plan.",
+  );
+  expect(readAgentSession("p-1", "resource:resource-1").transcript.at(-1)).toEqual(
+    expect.objectContaining({
+      role: "assistant",
+      state: "queued",
+      content: "Design work is queued in the build plan.",
+      planId: "plan-resource-agent",
+      taskId: "task-resource-agent",
+      resultRevisionId: "resource-revision-output",
+    }),
   );
 });
 
@@ -4557,7 +4925,7 @@ test("Resource Agent reconciles a persisted outbox with the same turnId after re
   expect(await screen.findByRole("status", { name: "Resource Agent receipt" })).toHaveTextContent("plan-resource-agent");
   expect(screen.getByRole("textbox", { name: "Resource Agent prompt" })).toHaveValue("");
   expect(screen.getByRole("status", { name: "Resource Agent transcript" })).toHaveTextContent(
-    "Queued Task task-resource-agent in Plan plan-resource-agent",
+    "Design work is queued in the build plan.",
   );
 });
 

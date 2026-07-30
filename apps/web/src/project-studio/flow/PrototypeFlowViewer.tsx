@@ -18,6 +18,7 @@ import {
   type PreviewChannelMessage,
 } from "../../lib/preview-channel.ts";
 import { previewSandboxForSrc } from "../../lib/preview-sandbox.ts";
+import { REQUEST_DEADLINE_MS } from "../../lib/request-deadline.ts";
 import {
   Button,
   IconButton,
@@ -41,8 +42,13 @@ import {
 } from "./prototype-flow.ts";
 import "./prototype-flow-viewer.css";
 
-const PROTOTYPE_PREPARATION_DEADLINE_MS = 5_000;
-const PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE = "The exact Page did not become ready within 5 seconds.";
+const PROTOTYPE_BRIDGE_READY_TIMEOUT_MS = 5_000;
+const PROTOTYPE_PREPARATION_DEADLINE_MS = REQUEST_DEADLINE_MS
+  + PROTOTYPE_BRIDGE_READY_TIMEOUT_MS
+  + PREVIEW_FRAME_ACK_TIMEOUT_MS;
+const PROTOTYPE_ACQUISITION_TIMEOUT_MESSAGE = "Exact Page acquisition did not complete within 15 seconds.";
+const PROTOTYPE_BRIDGE_READY_TIMEOUT_MESSAGE = "The exact Page iframe and preview bridge did not become ready within 5 seconds after acquisition.";
+const PROTOTYPE_RESOLUTION_TIMEOUT_MESSAGE = "Exact Page state resolution did not complete within 15 seconds.";
 const DEFAULT_PROTOTYPE_VIEWPORT: Readonly<WorkspaceRenderFrameSpec> = Object.freeze({
   id: "fallback-desktop",
   name: "Desktop",
@@ -59,6 +65,7 @@ interface FlowLocation {
 interface FlowSlot {
   id: number;
   location: FlowLocation;
+  acquisitionDeadlineAt: number | null;
   deadlineAt: number | null;
 }
 
@@ -95,6 +102,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message
     : "The exact prototype destination could not be prepared.";
+}
+
+function preparationSlot(id: number, location: FlowLocation): FlowSlot {
+  const startedAt = Date.now();
+  return {
+    id,
+    location,
+    acquisitionDeadlineAt: startedAt + REQUEST_DEADLINE_MS,
+    deadlineAt: startedAt + PROTOTYPE_PREPARATION_DEADLINE_MS,
+  };
 }
 
 function canonicalJson(value: unknown): string {
@@ -292,7 +309,9 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     const timeoutMs = deadlineAt === null
       ? PREVIEW_FRAME_ACK_TIMEOUT_MS
       : Math.min(PREVIEW_FRAME_ACK_TIMEOUT_MS, deadlineAt - Date.now());
-    if (timeoutMs <= 0) return Promise.reject(new Error(PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE));
+    if (timeoutMs <= 0) {
+      return Promise.reject(new Error("The frame acknowledgement stage had no time remaining."));
+    }
     const id = generatePreviewBridgeNonce();
     const preparationKey = `${previewLeaseId}:${channel.generation}:${frame.id}:${stateKey ?? "default"}`;
     preparedKeyRef.current = null;
@@ -313,7 +332,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
       const timer = window.setTimeout(() => {
         if (attemptRef.current !== attempt) return;
         attemptRef.current = null;
-        const failure = `Prototype state ${frame.initialState ?? frame.id} was not acknowledged.`;
+        const failure = `Frame acknowledgement for prototype state ${frame.initialState ?? frame.id} did not arrive within 1.5 seconds.`;
         setFailedPreparation({ key: preparationKey, message: failure });
         reject(new Error(failure));
       }, timeoutMs);
@@ -373,24 +392,48 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
     attempt.reject(new Error(failure));
   }, [channel.generation, channel.ready, channel.send, previewLeaseId]);
 
-  const previewError = preview.status === "error" ? preview.error : null;
+  const previewError = preview.status === "error" ? `Exact Page acquisition failed. ${preview.error}` : null;
   useEffect(() => {
     if (previewError === null) return;
     onPreparationError(slot.id, previewError);
   }, [onPreparationError, previewError, slot.id]);
 
+  const bridgeDeadlineAt = useMemo(() => {
+    if (previewLeaseId === null || slot.deadlineAt === null) return null;
+    return Math.min(slot.deadlineAt, Date.now() + PROTOTYPE_BRIDGE_READY_TIMEOUT_MS);
+  }, [previewLeaseId, slot.deadlineAt]);
+
   useEffect(() => {
     if (slot.deadlineAt === null) return;
-    const remaining = Math.max(0, slot.deadlineAt - Date.now());
+    const acquisitionPending = preview.status === "idle" || preview.status === "loading";
+    const bridgePending = preview.status === "ready" && !channel.ready;
+    if (!acquisitionPending && !bridgePending) return;
+    const stageDeadlineAt = acquisitionPending
+      ? Math.min(slot.acquisitionDeadlineAt ?? slot.deadlineAt, slot.deadlineAt)
+      : bridgeDeadlineAt;
+    if (stageDeadlineAt === null) return;
+    const failure = acquisitionPending
+      ? PROTOTYPE_ACQUISITION_TIMEOUT_MESSAGE
+      : PROTOTYPE_BRIDGE_READY_TIMEOUT_MESSAGE;
+    const remaining = Math.max(0, stageDeadlineAt - Date.now());
     const timer = window.setTimeout(() => {
       if (desiredPreparationKey !== null) {
         setAppliedPreparationKey(null);
-        setFailedPreparation({ key: desiredPreparationKey, message: PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE });
+        setFailedPreparation({ key: desiredPreparationKey, message: failure });
       }
-      onPreparationError(slot.id, PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE);
+      onPreparationError(slot.id, failure);
     }, remaining);
     return () => window.clearTimeout(timer);
-  }, [desiredPreparationKey, onPreparationError, slot.deadlineAt, slot.id]);
+  }, [
+    bridgeDeadlineAt,
+    channel.ready,
+    desiredPreparationKey,
+    onPreparationError,
+    preview.status,
+    slot.acquisitionDeadlineAt,
+    slot.deadlineAt,
+    slot.id,
+  ]);
 
   useEffect(() => {
     if (preview.status !== "ready") return;
@@ -452,7 +495,7 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
         <div className="prototype-flow-viewer__message" role={active ? "status" : undefined} aria-label={active ? "Preparing prototype flow" : undefined}>
           <span className="prototype-flow-viewer__spinner" aria-hidden />
           <strong>Preparing exact Page</strong>
-          <p>Resolving {page.revisionId} inside {session.snapshotId}.</p>
+          <p>Loading the pinned revision from this frozen project snapshot.</p>
         </div>
       ) : preview.status === "error" ? (
         <div className="prototype-flow-viewer__message prototype-flow-viewer__message--error" role={active ? "status" : undefined}>
@@ -506,10 +549,12 @@ const PrototypeFlowFrame = forwardRef<PrototypeFlowFrameHandle, {
 function PrototypeFlowViewerSession({
   projectId,
   session,
+  activeSnapshotId,
   onClose,
 }: {
   projectId: string;
   session: PrototypeFlowSession;
+  activeSnapshotId: string;
   onClose: () => void;
 }) {
   const api = useApi();
@@ -525,11 +570,7 @@ function PrototypeFlowViewerSession({
     [session.startArtifactId, session.startFrameId],
   );
   const [history, setHistory] = useState<FlowLocation[]>([startLocation]);
-  const [slots, setSlots] = useState<FlowSlot[]>(() => [{
-    id: 0,
-    location: startLocation,
-    deadlineAt: Date.now() + PROTOTYPE_PREPARATION_DEADLINE_MS,
-  }]);
+  const [slots, setSlots] = useState<FlowSlot[]>(() => [preparationSlot(0, startLocation)]);
   const [activeSlotId, setActiveSlotId] = useState(0);
   const [pending, setPending] = useState<PendingNavigation | null>(null);
   const [failedNavigation, setFailedNavigation] = useState<FailedNavigation | null>(null);
@@ -549,6 +590,7 @@ function PrototypeFlowViewerSession({
   const currentFrame = currentLocation.frameId === null
     ? null
     : currentPage.frames?.find((frame) => frame.id === currentLocation.frameId) ?? null;
+  const sessionSnapshotIsActive = activeSnapshotId === session.snapshotId;
   const pageHealth = useMemo(
     () => prototypeFlowHealth(session, currentLocation.artifactId),
     [currentLocation.artifactId, session],
@@ -625,14 +667,14 @@ function PrototypeFlowViewerSession({
     samePageAbortRef.current?.abort();
     const controller = new AbortController();
     samePageAbortRef.current = controller;
-    const timeoutError = new Error(PROTOTYPE_PREPARATION_TIMEOUT_MESSAGE);
-    const deadlineAt = Date.now() + PROTOTYPE_PREPARATION_DEADLINE_MS;
+    const timeoutError = new Error(PROTOTYPE_RESOLUTION_TIMEOUT_MESSAGE);
+    const frameDeadlineAt = Date.now() + REQUEST_DEADLINE_MS + PREVIEW_FRAME_ACK_TIMEOUT_MS;
     let deadlineTimer = 0;
     const deadline = new Promise<never>((_resolve, reject) => {
       deadlineTimer = window.setTimeout(() => {
         controller.abort(timeoutError);
         reject(timeoutError);
-      }, PROTOTYPE_PREPARATION_DEADLINE_MS);
+      }, REQUEST_DEADLINE_MS);
     });
     setPending({ ...request, slotId: null });
     setFailedNavigation(null);
@@ -647,10 +689,9 @@ function PrototypeFlowViewerSession({
       ]);
       controller.signal.throwIfAborted();
       verifyExactFlowResolution(projectId, session, request.location, resolved);
-      await Promise.race([
-        handle.applyFrame(frame, request.location.stateKey, deadlineAt),
-        deadline,
-      ]);
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = 0;
+      await handle.applyFrame(frame, request.location.stateKey, frameDeadlineAt);
       controller.signal.throwIfAborted();
       setHistory(request.history);
       setTransition(request.transition);
@@ -678,14 +719,9 @@ function PrototypeFlowViewerSession({
     }
     const slotId = nextSlotIdRef.current;
     nextSlotIdRef.current += 1;
-    const deadlineAt = Date.now() + PROTOTYPE_PREPARATION_DEADLINE_MS;
     setSlots((current) => [
       ...current.filter((slot) => slot.id === activeSlotId),
-      {
-        id: slotId,
-        location: request.location,
-        deadlineAt,
-      },
+      preparationSlot(slotId, request.location),
     ]);
     setPending({ ...request, slotId });
   }, [activeSlotId, currentLocation.artifactId, pending, prepareSamePage]);
@@ -717,7 +753,9 @@ function PrototypeFlowViewerSession({
     const current = pendingRef.current;
     if (current?.slotId !== slotId) {
       if (slotId !== activeSlotId) return;
-      setSlots((all) => all.map((slot) => slot.id === slotId ? { ...slot, deadlineAt: null } : slot));
+      setSlots((all) => all.map((slot) => slot.id === slotId
+        ? { ...slot, acquisitionDeadlineAt: null, deadlineAt: null }
+        : slot));
       setActivePreparationFailure((failure) => failure?.slotId === slotId ? null : failure);
       return;
     }
@@ -731,7 +769,7 @@ function PrototypeFlowViewerSession({
     setTransition(current.transition);
     setSlots((all) => all
       .filter((slot) => slot.id === slotId)
-      .map((slot) => ({ ...slot, deadlineAt: null })));
+      .map((slot) => ({ ...slot, acquisitionDeadlineAt: null, deadlineAt: null })));
     setActivePreparationFailure(null);
     setFailedNavigation(null);
     setPending(null);
@@ -741,7 +779,9 @@ function PrototypeFlowViewerSession({
     const current = pendingRef.current;
     if (current?.slotId !== slotId) {
       if (slotId !== activeSlotId) return;
-      setSlots((all) => all.map((slot) => slot.id === slotId ? { ...slot, deadlineAt: null } : slot));
+      setSlots((all) => all.map((slot) => slot.id === slotId
+        ? { ...slot, acquisitionDeadlineAt: null, deadlineAt: null }
+        : slot));
       setActivePreparationFailure((failure) => (
         failure?.slotId === slotId && failure.error === error ? failure : { slotId, error }
       ));
@@ -761,11 +801,7 @@ function PrototypeFlowViewerSession({
     samePageAbortRef.current = null;
     pendingRef.current = null;
     setActiveSlotId(slotId);
-    setSlots([{
-      id: slotId,
-      location: currentLocation,
-      deadlineAt: Date.now() + PROTOTYPE_PREPARATION_DEADLINE_MS,
-    }]);
+    setSlots([preparationSlot(slotId, currentLocation)]);
     setTransition({ type: "none", durationMs: 0, easing: "ease" });
     setActivePreparationFailure(null);
     setFailedNavigation(null);
@@ -838,7 +874,7 @@ function PrototypeFlowViewerSession({
               >
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent align="end" className="z-[90]">
+              <SelectContent align="end" className="prototype-flow-viewer__page-menu">
                 {session.pages.map((page) => (
                   <SelectItem key={page.artifactId} value={page.artifactId}>{page.name}</SelectItem>
                 ))}
@@ -859,12 +895,24 @@ function PrototypeFlowViewerSession({
         <main className="prototype-flow-viewer__stage">
           <div className="prototype-flow-viewer__metadata" aria-label="Frozen prototype identity">
             <strong>{currentPage.name}</strong>
-            <span title={currentPage.revisionId}>Revision {currentPage.revisionId}</span>
+            <span className="prototype-flow-viewer__exact-id">
+              Revision
+              <code aria-label="Revision ID" title={currentPage.revisionId}>{currentPage.revisionId}</code>
+            </span>
             {currentLocation.stateKey === null ? null : <span title={currentLocation.stateKey}>State {currentLocation.stateKey}</span>}
             {currentFrame === null ? null : (
               <span title={currentFrame.id}>Frame {currentFrame.name} · {currentFrame.width} × {currentFrame.height}</span>
             )}
-            <span title={session.snapshotId}>Snapshot {session.snapshotId}</span>
+            <span className="prototype-flow-viewer__exact-id">
+              Snapshot
+              <code aria-label="Snapshot ID" title={session.snapshotId}>{session.snapshotId}</code>
+            </span>
+            <span
+              className="prototype-flow-viewer__snapshot-status"
+              data-status={sessionSnapshotIsActive ? "active" : "stale"}
+            >
+              {sessionSnapshotIsActive ? "Active snapshot" : "Frozen session · no longer active"}
+            </span>
           </div>
 
           {slots.map((slot) => (
@@ -968,8 +1016,8 @@ function PrototypeFlowViewerSession({
               </ol>
             )}
             <footer>
-              <span>Frozen</span>
-              <code title={session.snapshotId}>{session.snapshotId}</code>
+              <span>Playback source</span>
+              <strong>Frozen project snapshot</strong>
             </footer>
           </div>
         </details>
@@ -981,8 +1029,15 @@ function PrototypeFlowViewerSession({
 export function PrototypeFlowViewer(props: {
   projectId: string;
   session: PrototypeFlowSession;
+  activeSnapshotId?: string;
   onClose: () => void;
 }) {
   const identity = `${props.session.snapshotId}\u0000${props.session.graphRevision}\u0000${props.session.startArtifactId}`;
-  return <PrototypeFlowViewerSession key={identity} {...props} />;
+  return (
+    <PrototypeFlowViewerSession
+      key={identity}
+      {...props}
+      activeSnapshotId={props.activeSnapshotId ?? props.session.snapshotId}
+    />
+  );
 }

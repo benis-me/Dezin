@@ -82,9 +82,9 @@ describe("canvas visual interaction contract", () => {
     document.body.append(card);
 
     try {
-      expect(getComputedStyle(title).fontSize).toBe("30px");
-      expect(getComputedStyle(status).fontSize).toBe("17px");
-      expect(getComputedStyle(kind).fontSize).toBe("13px");
+      expect(getComputedStyle(title).fontSize).toBe("22px");
+      expect(getComputedStyle(status).fontSize).toBe("13px");
+      expect(getComputedStyle(kind).fontSize).toBe("12px");
     } finally {
       card.remove();
       style.remove();
@@ -117,21 +117,26 @@ describe("canvas visual interaction contract", () => {
     }
   });
 
-  test("narrow toolbars scroll stable, non-shrinking action clusters", () => {
+  test("toolbar islands stay fixed and clipped without changing the canvas layout", () => {
     expect(css).toMatch(
-      /\.dezin-canvas-toolbar__cluster\s*\{[^}]*flex:\s*none;/s,
+      /\.dezin-canvas-toolbar-layer\s*\{[^}]*position:\s*absolute;[^}]*overflow:\s*hidden;[^}]*pointer-events:\s*none;/s,
+    );
+    expect(css).toMatch(
+      /\.dezin-canvas-toolbar--tools\s*\{[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s,
     );
   });
 
-  test("floating canvas chrome relies on hairline borders instead of stacked card shadows", () => {
+  test("floating canvas chrome uses hairlines and only the same near-flat lift as Moodboard", () => {
     for (const selector of [
       ".dezin-flow-group__toolbar",
-      ".dezin-canvas-toolbar",
       ".dezin-workspace-outline",
     ]) {
       const escaped = selector.replaceAll(".", "\\.");
       expect(css).toMatch(new RegExp(`${escaped}\\s*\\{[^}]*box-shadow:\\s*none;`, "s"));
     }
+    expect(css).toMatch(
+      /\.dezin-canvas-toolbar\s*\{[^}]*border:\s*1px solid var\(--border\);[^}]*box-shadow:\s*0 1px 2px rgb\(0 0 0 \/ 3%\);/s,
+    );
   });
 
   test("new connections preview the same orthogonal language as committed canvas edges", () => {

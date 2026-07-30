@@ -57,6 +57,7 @@ import type {
   PersistContextPackInput,
   PersistContextPackItemInput,
   RecordContextPackItemUsageInput,
+  RecordGenerationTaskProgressInput,
   RecordGenerationTaskMaterializationFailureInput,
   RetryGenerationTaskInput,
   GenerationTaskRebaseDisposition,
@@ -195,6 +196,7 @@ import {
   normalizeCompleteGenerationTaskValidationInput,
   normalizeFinishGenerationTaskAttemptFailureInput,
   normalizeHeartbeatGenerationTaskAttemptInput,
+  normalizeRecordGenerationTaskProgressInput,
   normalizePublishGenerationTaskCandidateInput,
   normalizePublishGenerationPlanCheckpointInput,
   normalizeStageGenerationTaskCandidateInput,
@@ -230,6 +232,17 @@ const GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES = 1024 * 1024;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_REVISIONS = 256;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_DEPENDENCIES = 2_048;
 const SHALLOW_ARTIFACT_CLOSURE_MAX_RESOURCE_PINS = 2_048;
+const TERMINAL_RESOURCE_EXECUTION_ERROR_CODES = new Set([
+  "RESOURCE_GENERATOR_CONFIGURATION_INVALID",
+  "RESOURCE_AGENT_PROVIDER_UNAVAILABLE",
+  "RESOURCE_AGENT_CAPABILITY_UNAVAILABLE",
+  "RESOURCE_AGENT_REQUEST_INVALID",
+  "RESOURCE_REVIEW_PROVIDER_SUBSTITUTED",
+  "RESOURCE_GENERATOR_SCOPE_SUBSTITUTED",
+  "RESOURCE_ADAPTER_VERSION_UNAVAILABLE",
+  "RESOURCE_ADAPTER_KIND_UNAVAILABLE",
+  "RESOURCE_ADAPTER_UNAVAILABLE",
+]);
 
 function exactGenerationTaskPayloadRecord(
   value: unknown,
@@ -270,6 +283,7 @@ function generationTaskResourceAdapterKind(
   const payload = exactGenerationTaskPayloadRecord(
     task.payload,
     ["version", "agent", "operation", "brief", "capabilityDescriptors", "adapter"],
+    ["reviewer", "reviewerAuthorityAgent", "moodboardImageAuthority"],
   );
   const adapter = exactGenerationTaskPayloadRecord(
     payload?.adapter,
@@ -293,11 +307,17 @@ function generationTaskResourceAdapterKind(
   } catch {
     return null;
   }
+  const hasReviewerAuthorityAgent = payload !== null
+    && Object.hasOwn(payload, "reviewerAuthorityAgent");
+  const hasMoodboardImageAuthority = payload !== null
+    && Object.hasOwn(payload, "moodboardImageAuthority");
   if (payload?.version !== 2 || adapter?.version !== 1
     || !isDeepStrictEqual(payload.agent, agent)
     || (adapter?.kind !== "research" && adapter?.kind !== "moodboard"
       && adapter?.kind !== "sharingan-capture")
     || adapter.id !== `dezin.resource-adapter.${adapter.kind}`
+    || (adapter.kind === "research") !== hasReviewerAuthorityAgent
+    || (adapter.kind === "moodboard") !== hasMoodboardImageAuthority
     || operation?.kind !== adapter.kind
     || operation.resourceId !== task.target.id
     || (operation.operation !== "create" && operation.operation !== "revise")
@@ -950,6 +970,19 @@ function normalizeWorkspaceAgentTurnIdentity(
 }
 
 function sameWorkspaceGenerationAgentSelection(
+  first: WorkspaceGenerationAgentSelection | undefined,
+  second: WorkspaceGenerationAgentSelection | undefined,
+): boolean {
+  return first === undefined
+    ? second === undefined
+    : second !== undefined
+      && first.providerId === second.providerId
+      && first.command === second.command
+      && first.model === second.model
+      && isDeepStrictEqual(first.executionAuthority, second.executionAuthority);
+}
+
+function sameWorkspaceGenerationAgentIdentity(
   first: WorkspaceGenerationAgentSelection | undefined,
   second: WorkspaceGenerationAgentSelection | undefined,
 ): boolean {
@@ -4291,7 +4324,7 @@ export class WorkspaceStore {
       || proposalInput.generation.kind !== "workspace-generation") {
       throw new WorkspaceProposalValidationError("Workspace Agent turns require Workspace generation Proposals");
     }
-    if (!sameWorkspaceGenerationAgentSelection(proposalInput.generation.agent, identity.request.agent)) {
+    if (!sameWorkspaceGenerationAgentIdentity(proposalInput.generation.agent, identity.request.agent)) {
       throw new WorkspaceProposalValidationError(
         "Workspace Agent turn Proposal Agent selection does not match its immutable request",
       );
@@ -5715,6 +5748,28 @@ export class WorkspaceStore {
     });
   }
 
+  getLatestWorkspaceAgentGenerationPlanForProject(
+    projectId: string,
+  ): GenerationPlan | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const row = this.db.prepare(
+        `SELECT plan.id
+         FROM generation_plans plan
+         JOIN workspace_agent_turns turn
+           ON turn.proposal_id = plan.proposal_id
+          AND turn.workspace_id = plan.workspace_id
+         WHERE plan.workspace_id = ?
+         ORDER BY plan.created_at DESC, plan.id COLLATE BINARY DESC
+         LIMIT 1`,
+      ).get(workspace.id) as { id: string } | undefined;
+      return row === undefined
+        ? null
+        : this.readGenerationPlanDetailForProject(projectId, row.id).plan;
+    });
+  }
+
   listActiveGenerationPlanIdsForProject(projectId: string): string[] {
     return this.transactionRead(() => {
       const workspace = this.getWorkspace(projectId);
@@ -6847,6 +6902,52 @@ export class WorkspaceStore {
     });
   }
 
+  /**
+   * Appends one bounded, designer-facing execution phase while the exact
+   * Attempt still owns every durable claim. Only attempt + enum phase cross
+   * this boundary; provider prompts, output, paths, environment, and errors do
+   * not.
+   */
+  recordGenerationTaskProgress(
+    unsafeInput: RecordGenerationTaskProgressInput,
+  ): GenerationPlanEvent {
+    const input = normalizeRecordGenerationTaskProgressInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const task = this.readGenerationTaskForExecutionInTransaction(input.taskId);
+      if (!task || task.workspaceId !== input.workspaceId || task.currentAttempt !== input.attempt) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Task identity is stale");
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+      const now = this.clock.now();
+      if (!attempt || attempt.status !== "running" || !attempt.lease
+        || attempt.lease.ownerId !== input.ownerId
+        || attempt.lease.leaseToken !== input.leaseToken
+        || attempt.leaseExpiresAt === null
+        || attempt.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          input.taskId,
+          input.attempt,
+          "Attempt lease is stale, expired, or no longer running",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, input.attempt);
+      if (live.ownerId !== input.ownerId || live.leaseToken !== input.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Claim lease is stale or expired");
+      }
+      return this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-progress",
+        payload: {
+          attempt: input.attempt,
+          phase: input.phase,
+        },
+      });
+    });
+  }
+
   stageGenerationTaskCandidateForProject(
     projectId: string,
     planId: string,
@@ -7116,6 +7217,62 @@ export class WorkspaceStore {
     });
   }
 
+  private samePlanSiblingPublicationSnapshotInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+    snapshotId: string,
+  ): WorkspaceSnapshotRecord | null {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task sibling publication reconciliation requires a transaction");
+    }
+    if (snapshotId === attempt.expectedSnapshotId) return null;
+    const expected = this.requireSnapshot(task.workspaceId, attempt.expectedSnapshotId);
+    const current = this.requireSnapshot(task.workspaceId, snapshotId);
+    if (current.sequence <= expected.sequence || current.kernelRevisionId !== attempt.kernelRevisionId) {
+      return null;
+    }
+    if (attempt.target.type === "artifact") {
+      if (current.artifactTracks[attempt.target.id] !== attempt.target.trackId
+        || (current.artifactRevisions[attempt.target.id] ?? null) !== attempt.baseRevisionId) {
+        return null;
+      }
+    } else if (attempt.target.type === "resource") {
+      if ((current.resourceRevisions[attempt.target.id] ?? null) !== attempt.baseRevisionId) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    if (attempt.resourcePins.some((pin) => (
+      current.resourceRevisions[pin.resourceId] !== pin.revisionId
+    )) || attempt.componentPins.some((pin) => (
+      current.artifactRevisions[pin.componentArtifactId] !== pin.revisionId
+    ))) {
+      return null;
+    }
+
+    let cursor = current;
+    const maxDepth = current.sequence - expected.sequence;
+    // One Plan is bounded to far fewer leaves; fail closed instead of holding
+    // the publication transaction across an unexpectedly deep history walk.
+    if (maxDepth > 256) return null;
+    for (let depth = 0; depth < maxDepth && cursor.id !== expected.id; depth += 1) {
+      const provenance = cursor.provenance;
+      if ((provenance.kind !== "artifact-publication"
+        && provenance.kind !== "resource-publication")
+        || provenance.planId !== task.planId
+        || provenance.taskId === undefined
+        || provenance.taskId === task.id
+        || cursor.parentSnapshotId === null) {
+        return null;
+      }
+      const parent = this.requireSnapshot(task.workspaceId, cursor.parentSnapshotId);
+      if (parent.sequence >= cursor.sequence) return null;
+      cursor = parent;
+    }
+    return cursor.id === expected.id ? current : null;
+  }
+
   publishGenerationTaskCandidateForProject(
     projectId: string,
     planId: string,
@@ -7181,16 +7338,24 @@ export class WorkspaceStore {
       if (attempt.target.type === "artifact") {
         const artifactRevision = this.requireRecordedArtifactCandidateInTransaction(task, attempt);
         const track = this.requireTrack(artifactRevision.trackId);
+        const siblingSnapshot = track.headRevisionId === attempt.baseRevisionId
+          ? this.samePlanSiblingPublicationSnapshotInTransaction(
+              task,
+              attempt,
+              workspace.activeSnapshotId,
+            )
+          : null;
+        const expectedSnapshotId = siblingSnapshot?.id ?? attempt.expectedSnapshotId;
         const conflict = track.headRevisionId !== attempt.baseRevisionId
           ? {
               pointer: "artifact-head" as const,
               expectedId: attempt.baseRevisionId,
               actualId: track.headRevisionId,
             }
-          : workspace.activeSnapshotId !== attempt.expectedSnapshotId
+          : workspace.activeSnapshotId !== expectedSnapshotId
             ? {
                 pointer: "active-snapshot" as const,
-                expectedId: attempt.expectedSnapshotId,
+                expectedId: expectedSnapshotId,
                 actualId: workspace.activeSnapshotId,
               }
             : null;
@@ -7208,7 +7373,7 @@ export class WorkspaceStore {
           artifactRevision.id,
           {
             expectedHeadRevisionId: attempt.baseRevisionId,
-            expectedSnapshotId: attempt.expectedSnapshotId,
+            expectedSnapshotId,
           },
           { planId: task.planId, taskId: task.id },
         );
@@ -7228,16 +7393,24 @@ export class WorkspaceStore {
       }
       const resourceRevision = this.requireRecordedResourceCandidateInTransaction(task, attempt);
       const resource = this.requireResourceForProject(projectId, attempt.target.id);
+      const siblingSnapshot = resource.headRevisionId === attempt.baseRevisionId
+        ? this.samePlanSiblingPublicationSnapshotInTransaction(
+            task,
+            attempt,
+            workspace.activeSnapshotId,
+          )
+        : null;
+      const expectedSnapshotId = siblingSnapshot?.id ?? attempt.expectedSnapshotId;
       const conflict = resource.headRevisionId !== attempt.baseRevisionId
         ? {
             pointer: "resource-head" as const,
             expectedId: attempt.baseRevisionId,
             actualId: resource.headRevisionId,
           }
-        : workspace.activeSnapshotId !== attempt.expectedSnapshotId
+        : workspace.activeSnapshotId !== expectedSnapshotId
           ? {
               pointer: "active-snapshot" as const,
-              expectedId: attempt.expectedSnapshotId,
+              expectedId: expectedSnapshotId,
               actualId: workspace.activeSnapshotId,
             }
           : null;
@@ -7257,7 +7430,7 @@ export class WorkspaceStore {
         resourceRevision.id,
         {
           expectedHeadRevisionId: attempt.baseRevisionId,
-          expectedSnapshotId: attempt.expectedSnapshotId,
+          expectedSnapshotId,
           reason: "resource-published",
           planId: task.planId,
           taskId: task.id,
@@ -8124,8 +8297,12 @@ export class WorkspaceStore {
         && !Array.isArray(failureDetails)
         && "retryable" in failureDetails
         && failureDetails.retryable === false;
+      const terminalResourceConfiguration = task.kind === "resource"
+        && typeof input.failure.error.code === "string"
+        && TERMINAL_RESOURCE_EXECUTION_ERROR_CODES.has(input.failure.error.code);
       const terminalFailure = input.failure.error.code === "RESOURCE_AGENT_QUOTA_EXHAUSTED"
-        || terminalResourceAgentTransport;
+        || terminalResourceAgentTransport
+        || terminalResourceConfiguration;
       const transient = (transientFailure || qualityGateRetry)
         && !terminalFailure && !(source.target.type === "artifact"
         && (source.sourceCommitHash === null || source.sourceTreeHash === null));
@@ -10816,7 +10993,7 @@ export class WorkspaceStore {
           );
         }
       }
-      return { plan, tasks: [], dependencies: [] };
+      return { plan, tasks: [], dependencies: [], events };
     }
     if (plan.status === "approved" || plan.status === "compile-failed" || taskRows.length === 0) {
       throw new WorkspaceStoreCodecError(
@@ -10882,7 +11059,7 @@ export class WorkspaceStore {
     }
     assertAcyclicTaskGraph(tasks);
     this.assertGenerationPlanExecutionSummary(plan, tasks, events);
-    return { plan, tasks, dependencies };
+    return { plan, tasks, dependencies, events };
   }
 
   private generationTaskCanMaterialize(
@@ -14010,7 +14187,14 @@ export class WorkspaceStore {
           taskId: task.id,
         })
         && snapshot.resourceRevisions[resourceRevision.resourceId] === resourceRevision.id;
-      if (snapshot.parentSnapshotId !== attempt.expectedSnapshotId
+      const exactPublicationParent = snapshot.parentSnapshotId === attempt.expectedSnapshotId
+        || (snapshot.parentSnapshotId !== null
+          && this.samePlanSiblingPublicationSnapshotInTransaction(
+            task,
+            attempt,
+            snapshot.parentSnapshotId,
+          )?.id === snapshot.parentSnapshotId);
+      if (!exactPublicationParent
         || (!exactArtifactSnapshot && !exactResourceSnapshot)) {
         throw new WorkspaceStoreCodecError(
           `Generation Task ${task.id}/${attempt.attempt} publication Snapshot is not exact`,
@@ -14614,7 +14798,7 @@ export class WorkspaceStore {
       || proposal.workspaceId !== workspace.id
       || proposal.kind !== "workspace-generation"
       || (proposalAgent !== undefined
-        && !sameWorkspaceGenerationAgentSelection(proposalAgent, identity.request.agent))
+        && !sameWorkspaceGenerationAgentIdentity(proposalAgent, identity.request.agent))
       || proposal.baseGraphRevision !== identity.request.graphRevision
       || proposal.baseGraph.workspaceId !== workspace.id
       || proposal.baseGraph.revision !== identity.request.graphRevision
@@ -15036,6 +15220,7 @@ export class WorkspaceStore {
     if (proposal.kind === "component-propagation") {
       throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
+    this.assertProposalGeneratorCredentialSourcesBound(proposal);
     const workspace = this.requireWorkspaceById(proposal.workspaceId);
     const graph = this.getGraph(workspace.projectId);
     const layout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
@@ -15204,6 +15389,23 @@ export class WorkspaceStore {
     this.validateProposalResearchDirectionSelections(proposal);
     this.validateProposalPrototypeIntents(proposal, graph);
     return graph;
+  }
+
+  private assertProposalGeneratorCredentialSourcesBound(
+    proposal: WorkspaceProposalRecord,
+  ): void {
+    if (proposal.generation.kind !== "workspace-generation") return;
+    for (const selection of [
+      proposal.generation.agent,
+      proposal.generation.researchAgent,
+    ]) {
+      const authority = selection?.executionAuthority;
+      if (authority?.kind !== "generator" || authority.credentialSource !== undefined) continue;
+      throw new WorkspaceProposalValidationError(
+        `Workspace Proposal ${proposal.id} predates explicit generator credential-source binding `
+        + "and must be regenerated before approval",
+      );
+    }
   }
 
   private validateCanonicalGraphResourceIdentities(

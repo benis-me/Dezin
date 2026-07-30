@@ -847,6 +847,44 @@ test("exact Resource Revision view and paged history use strict browser decoders
   );
 });
 
+test("Resource and Research reads forward cancellation signals to fetch", () => {
+  const fetchImpl = vi.fn<FetchLike>(() => new Promise<Response>(() => {}));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const resourceController = new AbortController();
+  const revisionController = new AbortController();
+  const researchController = new AbortController();
+
+  void api.getResource("project /1", "resource /1", resourceController.signal);
+  void api.getResourceRevisionView(
+    "project /1",
+    "resource /1",
+    "revision /1",
+    revisionController.signal,
+  );
+  void api.getResearchResourceRevision(
+    "project /1",
+    "resource /1",
+    "revision /1",
+    researchController.signal,
+  );
+
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1",
+    { signal: resourceController.signal },
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/revisions/revision%20%2F1",
+    { signal: revisionController.signal },
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    3,
+    "http://d/api/projects/project%20%2F1/resources/resource%20%2F1/revisions/revision%20%2F1/research",
+    { signal: researchController.signal },
+  );
+});
+
 test("Moodboard Revision codec preserves v3 Asset-to-direction audit fields and rejects substituted assignments", async () => {
   const directionChecksum = "b".repeat(64);
   const directionContract = {
@@ -1240,6 +1278,65 @@ test("settings + agents + health endpoints", async () => {
   assert.equal((await api.updateSettings({ agentCommand: "codex", model: "o3" })).model, "o3");
   assert.equal((await api.listAgents())[0]?.available, true);
   assert.equal((await api.getHealth()).version, "0.0.0");
+});
+
+test("Agent requests abort and reject when fetch never settles", async () => {
+  vi.useFakeTimers();
+  try {
+    let signal: AbortSignal | null = null;
+    const api = createApiClient({
+      fetchImpl: vi.fn((_url, init) => {
+        signal = init?.signal ?? null;
+        return new Promise<Response>(() => {});
+      }),
+    });
+
+    const assertion = expect(api.listAgents()).rejects.toThrow(
+      "Agent request timed out. Rescan agents to try again.",
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    await assertion;
+    expect((signal ?? new AbortController().signal).aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("Agent scan stream aborts when it stalls after progress", async () => {
+  vi.useFakeTimers();
+  try {
+    let signal: AbortSignal | null = null;
+    const encoder = new TextEncoder();
+    const api = createApiClient({
+      fetchImpl: vi.fn(async (_url, init) => {
+        signal = init?.signal ?? null;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'data: {"type":"progress","id":"codex","label":"Codex","phase":"probe"}\n\n',
+            ));
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    const stream = api.scanAgentsStream();
+
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: "progress", id: "codex", label: "Codex", phase: "probe" },
+    });
+    const stalled = expect(stream.next()).rejects.toThrow(
+      "Agent scan stalled. Rescan agents to try again.",
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await stalled;
+    expect((signal ?? new AbortController().signal).aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("moodboard client methods hit first-class board endpoints", async () => {

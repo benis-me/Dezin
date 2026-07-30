@@ -14,8 +14,9 @@ import {
   type GenerationTaskTarget,
   type RecordGenerationTaskMaterializationFailureInput,
 } from "../../../packages/core/src/index.ts";
-import { BlockedContextError } from "../src/context/context-types.ts";
+import { BlockedContextError, ContextIntegrityError } from "../src/context/context-types.ts";
 import { GenerationPlanService } from "../src/orchestration/generation-plan-service.ts";
+import { ProductionResourceRuntimeError } from "../src/orchestration/production-resource-runtime.ts";
 
 const QUALITY_PROFILE: ArtifactQualityProfile = {
   requiredFrameIds: ["desktop"],
@@ -1190,6 +1191,22 @@ for (const contextFailure of [
     failureClass: "adapter",
     error: new Error("Context adapter timed out"),
   },
+  {
+    label: "static Moodboard image authority",
+    failureClass: "context",
+    error: new ContextIntegrityError(
+      "Current Settings do not match the frozen Moodboard image authority",
+    ),
+  },
+  {
+    label: "live Moodboard image Settings drift",
+    failureClass: "context",
+    error: new ProductionResourceRuntimeError(
+      "RESOURCE_RUNTIME_CONFIGURATION_INVALID",
+      "Frozen Moodboard image provider configuration is unavailable or drifted",
+      "context",
+    ),
+  },
 ] as const) {
   test(`GenerationPlanService durably records one ${contextFailure.label} Context failure and still materializes its sibling`, async () => {
     const plan = planFixture({ id: `plan-${contextFailure.label}`, workspaceId: "workspace-1" });
@@ -1258,7 +1275,7 @@ for (const contextFailure of [
     assert.equal(failures[0]?.input.failureClass, contextFailure.failureClass);
     assert.equal(failures[0]?.input.nextEligibleAt, null);
     assert.equal(failures[0]?.input.error.message, contextFailure.error.message);
-    if (contextFailure.error instanceof BlockedContextError) {
+    if (contextFailure.label === "blocked") {
       assert.deepEqual(failures[0]?.input.error.refs, ["resource-required"]);
     }
     assert.deepEqual(materialized, [{

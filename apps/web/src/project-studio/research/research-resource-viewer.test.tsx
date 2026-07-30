@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -18,7 +18,10 @@ import type {
 import { makeFakeApi } from "../../test/fake-api.ts";
 import { ResearchResourceViewer } from "./ResearchResourceViewer.tsx";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const READY_AGENT_PROPS = {
   agentCommand: "codebuddy",
@@ -389,6 +392,7 @@ test("Current Head Research retries once when the atomic view observes a newer H
     "project-1",
     resource.id,
     revision.id,
+    expect.any(AbortSignal),
   );
 });
 
@@ -418,6 +422,47 @@ test("a top-level Research load failure retries in place and preserves the exact
 
   expect(await screen.findByText(researchView.executiveSummary)).toBeInTheDocument();
   expect(getResource).toHaveBeenCalledTimes(2);
+});
+
+test("times out a stalled Research load and retries with a fresh abortable request", async () => {
+  vi.useFakeTimers();
+  const signals: AbortSignal[] = [];
+  const getResource = vi.fn((
+    _projectId: string,
+    _resourceId: string,
+    signal?: AbortSignal,
+  ) => {
+    if (signal !== undefined) signals.push(signal);
+    return new Promise<Resource>(() => {});
+  });
+  render(
+    <ApiProvider client={baseApi({ getResource })}>
+      <ResearchResourceViewer
+        projectId="project-1"
+        resourceId={resource.id}
+        requestedRevisionId={revision.id}
+        workspace={workspace()}
+        {...READY_AGENT_PROPS}
+        onBack={() => {}}
+        onOpenRevision={() => {}}
+        onPlanCreated={() => {}}
+        onWorkspaceChanged={() => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByText("Opening immutable Research")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+  expect(screen.getByRole("alert")).toHaveTextContent(/timed out/i);
+  expect(signals[0]?.aborted).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await act(async () => { await Promise.resolve(); });
+
+  expect(getResource).toHaveBeenCalledTimes(2);
+  expect(signals[1]).not.toBe(signals[0]);
+  expect(signals[1]?.aborted).toBe(false);
 });
 
 test("Research loading and ready states share one compact Studio header shell", async () => {
@@ -618,6 +663,7 @@ test("an archived exact Research Revision remains readable without write control
     "project-1",
     resource.id,
     revision.id,
+    expect.any(AbortSignal),
   );
 });
 
