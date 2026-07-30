@@ -1853,10 +1853,9 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
     visualQaAgentCommand: "claude",
     visualQaModel: "",
   });
-  expect(screen.queryByRole("combobox", { name: "Visual review agent" })).not.toBeInTheDocument();
-  expect(screen.getByText("Claude Code", { selector: "span" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Visual review agent" })).toHaveTextContent("Claude Code");
   expect(screen.getByText("Ready", { selector: "span" })).toBeInTheDocument();
-  expect(screen.getByRole("combobox", { name: "Visual review model" })).toHaveTextContent("Claude default");
+  expect(screen.getByRole("combobox", { name: "Visual review model" })).toHaveTextContent(/default/i);
   expect(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" })).toHaveValue(8);
 
   await user.click(screen.getByRole("switch", { name: "Auto-improve after review" }));
@@ -1865,12 +1864,18 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.blur(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" }));
   expect(updateSettings).toHaveBeenCalledWith({ autoImproveMaxRounds: 6 });
 
-  await user.click(screen.getByRole("combobox", { name: "Visual review model" }));
-  expect(screen.queryByRole("option", { name: "gpt-5" })).not.toBeInTheDocument();
-  await user.click(await screen.findByRole("option", { name: "claude-sonnet-4-6" }));
+  // Reviewer can switch to Codex independently of the project Agent.
+  await user.click(screen.getByRole("combobox", { name: "Visual review agent" }));
+  await user.click(await screen.findByRole("option", { name: "Codex" }));
   expect(updateSettings).toHaveBeenCalledWith({
-    visualQaAgentCommand: "claude",
-    visualQaModel: "claude-sonnet-4-6",
+    visualQaAgentCommand: "codex",
+    visualQaModel: "",
+  });
+  await user.click(screen.getByRole("combobox", { name: "Visual review model" }));
+  await user.click(await screen.findByRole("option", { name: "gpt-5" }));
+  expect(updateSettings).toHaveBeenCalledWith({
+    visualQaAgentCommand: "codex",
+    visualQaModel: "gpt-5",
   });
 
   // Design research has its own Agent/model selection, independent of Visual review.
@@ -1886,7 +1891,7 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   expect(updateSettings).toHaveBeenCalledWith({ researchModel: "gpt-5" });
 });
 
-test("SettingsScreen explains when the isolated Claude visual reviewer is unavailable", async () => {
+test("SettingsScreen keeps Codex available as a visual reviewer when Claude Code is offline", async () => {
   renderSettings({
     getSettings: async () => settingsFixture({
       agentCommand: "codex",
@@ -1901,12 +1906,35 @@ test("SettingsScreen explains when the isolated Claude visual reviewer is unavai
 
   fireEvent.click(screen.getByRole("button", { name: "Quality" }));
 
+  expect(await screen.findByRole("combobox", { name: "Visual review agent" })).toHaveTextContent("Codex");
+  expect(screen.getByText("Ready", { selector: "span" })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Agent visual review" })).toBeEnabled();
+  expect(screen.getByRole("combobox", { name: "Visual review model" })).toBeInTheDocument();
+  expect(screen.queryByText(/Install Claude Code first/i)).not.toBeInTheDocument();
+});
+
+test("SettingsScreen explains when no structured visual reviewer is available", async () => {
+  renderSettings({
+    getSettings: async () => settingsFixture({
+      agentCommand: "gemini",
+      model: "",
+      visualQaAgentCommand: "",
+      visualQaModel: "",
+    }),
+    listAgents: async () => AGENTS.map((agent) => (
+      agent.command === "claude" || agent.command === "codex"
+        ? { ...agent, available: false }
+        : agent
+    )),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+
   expect(await screen.findByText("Not available", { selector: "span" })).toBeInTheDocument();
-  expect(screen.getByText(/Install or sign in to Claude Code, then rescan Agents/i)).toBeInTheDocument();
+  expect(screen.getByText(/Install Claude Code, CodeBuddy, or Codex/i)).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Agent visual review" })).toBeDisabled();
   expect(screen.queryByRole("combobox", { name: "Visual review agent" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("combobox", { name: "Visual review model" })).not.toBeInTheDocument();
-  expect(screen.getByText("Install Claude Code first")).toBeInTheDocument();
+  expect(screen.getByText(/Install a structured reviewer first/i)).toBeInTheDocument();
 });
 
 test("SettingsScreen rolls back only the keys from a failed optimistic mutation", async () => {

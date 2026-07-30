@@ -628,6 +628,39 @@ form:has([aria-label="Project name"]) > div {
   animation: spin 1s linear infinite;
   color: color-mix(in oklch, var(--foreground) 70%, transparent);
 }
+/* AIcss-inspired thinking shimmer — signals processing without noise */
+[data-agent-thinking] {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--muted-foreground) 92%, transparent) 0%,
+    color-mix(in oklch, var(--muted-foreground) 92%, transparent) 30%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 45%,
+    color-mix(in oklch, var(--muted-foreground) 42%, transparent) 55%,
+    color-mix(in oklch, var(--muted-foreground) 92%, transparent) 70%,
+    color-mix(in oklch, var(--muted-foreground) 92%, transparent) 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: dezin-agent-thinking-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+@keyframes dezin-agent-thinking-shine {
+  0%, 18% { background-position: 100% 0; }
+  82%, 100% { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-agent-thinking] {
+    animation: none;
+    color: var(--muted-foreground);
+    -webkit-text-fill-color: var(--muted-foreground);
+    background: none;
+  }
+}
 [data-agent-proposal-progress] > div + h3 {
   margin-top: 0.5rem;
 }
@@ -1093,9 +1126,50 @@ form:has([aria-label="Project name"]) > div {
 }
 .dezin-agent-output {
   overflow-x: hidden;
+  /* AIcss text-response density: tight readable prose for agent turns */
+  font-size: 14px;
+  line-height: 19px;
+}
+.dezin-agent-output p {
+  margin-bottom: 10px;
+}
+.dezin-agent-output p:last-child {
+  margin-bottom: 0;
+}
+.dezin-agent-output code:not(pre code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  background: color-mix(in oklch, var(--muted) 88%, transparent);
+  padding: 3px 5px 1px;
+  border-radius: 5px;
 }
 .dezin-agent-output [data-sd-animate] {
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+/* Streaming caret: solid while tokens arrive, blink when idle */
+.dezin-agent-output [data-sd-animate]::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: color-mix(in oklch, var(--foreground) 88%, transparent);
+  animation: none;
+  opacity: 1;
+}
+.dezin-agent-output:not(:has([data-sd-animate])) .dezin-agent-stream-caret,
+.dezin-agent-output[data-stream-idle="true"]::after {
+  content: none;
+}
+@keyframes dezin-agent-caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dezin-agent-output [data-sd-animate]::after {
+    animation: none;
+  }
 }

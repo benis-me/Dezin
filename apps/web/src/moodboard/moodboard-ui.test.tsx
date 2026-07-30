@@ -2169,7 +2169,7 @@ test("MoodboardAgentPanel shows progress immediately for an empty active convers
     </ApiProvider>,
   );
 
-  expect(screen.getByText("Working...")).toBeInTheDocument();
+  expect(screen.getByText("Thinking")).toBeInTheDocument();
   expect(screen.queryByText(/Ask for visual direction/)).toBeNull();
   expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-auto");
 });

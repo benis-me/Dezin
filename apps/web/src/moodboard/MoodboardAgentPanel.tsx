@@ -272,8 +272,8 @@ export function MoodboardAgentPanel({
                 transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
               >
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
-                  <Loader2 size={14} className="animate-spin" />
-                  Working...
+                  <Loader2 size={14} className="animate-spin" aria-hidden />
+                  <span data-agent-thinking>Thinking</span>
                 </div>
               </motion.div>
             ) : null}

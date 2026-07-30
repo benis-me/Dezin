@@ -26,6 +26,7 @@ export function AgentOutputText({
           "dezin-markdown dezin-agent-output",
           className,
         )}
+        data-stream-idle={animate ? undefined : "true"}
         components={dezinMarkdownComponents}
         controls={false}
         isAnimating={animate}

@@ -298,14 +298,26 @@ export function SettingsScreen({
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
-  const visualReviewAgent = agents.find((agent) => agent.id === "claude" && agent.command === "claude");
-  const visualReviewerAvailable = visualReviewAgent?.available === true;
-  const visualReviewModelSource = settings?.visualQaAgentCommand.trim() || settings?.agentCommand.trim() || "";
-  const visualReviewModelValue = visualReviewModelSource === "claude" ? settings?.visualQaModel ?? "" : "";
+  /** Structured no-tools reviewers supported by daemon Visual QA / Workspace generation. */
+  const STRUCTURED_REVIEWER_IDS = new Set(["claude", "codebuddy", "codex"]);
+  const structuredReviewAgents = agents.filter((agent) => STRUCTURED_REVIEWER_IDS.has(agent.id));
+  const configuredReviewCommand = settings?.visualQaAgentCommand.trim() || "";
+  const visualReviewAgent = structuredReviewAgents.find((agent) => (
+    agent.command === configuredReviewCommand
+    || (configuredReviewCommand.length === 0 && agent.id === "claude")
+  )) ?? structuredReviewAgents.find((agent) => agent.available) ?? null;
+  const visualReviewerAvailable = structuredReviewAgents.some((agent) => agent.available);
+  const visualReviewAgentOptions = structuredReviewAgents
+    .filter((agent) => agent.available || agent.command === configuredReviewCommand)
+    .map((agent) => ({ value: agent.command, label: agentLabel(agent.id) }));
+  const visualReviewModelValue = settings?.visualQaModel ?? "";
   const visualReviewModelOptions = [
-    { value: "", label: "Claude default" },
+    { value: "", label: visualReviewAgent ? `${agentLabel(visualReviewAgent.id)} default` : "Reviewer default" },
     ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
   ];
+  const defaultVisualReviewCommand = visualReviewAgent?.command
+    ?? structuredReviewAgents.find((agent) => agent.available)?.command
+    ?? "claude";
   const researchAgent = settings?.researchAgentCommand ? agents.find((a) => a.command === settings.researchAgentCommand) : activeAgent;
   const researchAgentOptions = [
     { value: "", label: "Same as project agent" },
@@ -470,33 +482,55 @@ export function SettingsScreen({
                         disabled={agentsLoading || (!visualReviewerAvailable && !settings.visualQaEnabled)}
                         onCheckedChange={(checked) => savePatch({
                           visualQaEnabled: checked,
-                          visualQaAgentCommand: "claude",
-                          visualQaModel: visualReviewModelSource === "claude" ? settings.visualQaModel : "",
+                          ...(checked
+                            ? {
+                                visualQaAgentCommand: configuredReviewCommand || defaultVisualReviewCommand,
+                                visualQaModel: settings.visualQaModel,
+                              }
+                            : {}),
                         })}
                       />
                     </SettingRow>
                   <SettingRow
                     label="Review agent"
                     desc={visualReviewerAvailable
-                      ? "Claude Code runs in an isolated no-tools mode; the project Agent can remain Codex, Gemini, or another provider."
-                      : "Claude Code is required for isolated visual review. Install or sign in to Claude Code, then rescan Agents."}
+                      ? "Runs in isolated no-tools mode for Visual QA and Workspace generation review. Choose Claude Code, CodeBuddy, or Codex — independent from the project Agent."
+                      : "Install Claude Code, CodeBuddy, or Codex and rescan Agents to enable isolated visual review."}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Claude Code</span>
-                      <Badge variant={agentsLoading ? "outline" : visualReviewerAvailable ? "secondary" : "destructive"}>
-                        {agentsLoading ? "Checking…" : visualReviewerAvailable ? "Ready" : "Not available"}
-                      </Badge>
-                    </div>
+                    {!visualReviewerAvailable && visualReviewAgentOptions.length === 0 ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-muted-foreground">No reviewer available</span>
+                        <Badge variant={agentsLoading ? "outline" : "destructive"}>
+                          {agentsLoading ? "Checking…" : "Not available"}
+                        </Badge>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Picker
+                          ariaLabel="Visual review agent"
+                          className="w-52"
+                          value={configuredReviewCommand || defaultVisualReviewCommand}
+                          onChange={(value) => savePatch({ visualQaAgentCommand: value, visualQaModel: "" })}
+                          options={visualReviewAgentOptions}
+                        />
+                        <Badge variant={agentsLoading ? "outline" : visualReviewerAvailable ? "secondary" : "destructive"}>
+                          {agentsLoading ? "Checking…" : visualReviewerAvailable ? "Ready" : "Not available"}
+                        </Badge>
+                      </div>
+                    )}
                   </SettingRow>
-                  <SettingRow label="Review model" desc="Blank uses Claude Code's own default; it never inherits a model from another provider.">
-                    {!visualReviewerAvailable ? (
-                      <span className="text-xs text-muted-foreground">Install Claude Code first</span>
+                  <SettingRow label="Review model" desc="Blank uses the reviewer's own default; it never inherits a model from another provider.">
+                    {!visualReviewerAvailable && visualReviewAgentOptions.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">Install a structured reviewer first</span>
                     ) : visualReviewModelOptions.length > 1 ? (
                       <Picker
                         ariaLabel="Visual review model"
                         className="w-52"
                         value={visualReviewModelValue}
-                        onChange={(value) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: value })}
+                        onChange={(value) => savePatch({
+                          visualQaAgentCommand: configuredReviewCommand || defaultVisualReviewCommand,
+                          visualQaModel: value,
+                        })}
                         options={visualReviewModelOptions}
                       />
                     ) : (
@@ -504,9 +538,15 @@ export function SettingsScreen({
                         aria-label="Visual review model"
                         className="w-52"
                         value={visualReviewModelValue}
-                        placeholder="Claude default"
-                        onChange={(event) => setLocalPatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
-                        onBlur={(event) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
+                        placeholder="Reviewer default"
+                        onChange={(event) => setLocalPatch({
+                          visualQaAgentCommand: configuredReviewCommand || defaultVisualReviewCommand,
+                          visualQaModel: event.target.value,
+                        })}
+                        onBlur={(event) => savePatch({
+                          visualQaAgentCommand: configuredReviewCommand || defaultVisualReviewCommand,
+                          visualQaModel: event.target.value,
+                        })}
                       />
                     )}
                   </SettingRow>

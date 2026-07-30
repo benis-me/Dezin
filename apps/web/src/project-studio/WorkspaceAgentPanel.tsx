@@ -537,7 +537,7 @@ export function WorkspaceAgentPanel({
               <div>
                 <LoaderCircle aria-hidden />
                 <strong>Dezin Agent</strong>
-                <span>Thinking</span>
+                <span data-agent-thinking>Thinking</span>
               </div>
               <h3>{submittingLabel}</h3>
               <p>Reviewing the brief and exact context before the next design action.</p>
