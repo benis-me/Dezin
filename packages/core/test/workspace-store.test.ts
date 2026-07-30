@@ -7610,6 +7610,7 @@ test("Workspace Proposal creation and edits cannot weaken their immutable base K
   ));
   if (proposal.generation.kind !== "workspace-generation") assert.fail("quality Proposal kind changed");
   const proposalGeneration = proposal.generation;
+  // Kernel elevated P2, so the floor is P0+P1 plus the kernel's P2.
   assert.deepEqual(proposalGeneration.qualityProfile.blockingSeverities, ["P0", "P1", "P2"]);
   assert.ok(proposalGeneration.responsiveFrames.some(
     (frame) => frame.width >= 320 && frame.width <= 480 && frame.height >= 640,
@@ -7638,7 +7639,7 @@ test("Workspace Proposal creation and edits cannot weaken their immutable base K
   store.close();
 });
 
-test("Workspace Artifact generation applies a high-craft P2-blocking quality floor", () => {
+test("Workspace Artifact generation applies a blocking P0/P1 quality floor without forcing P2", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Workspace Artifact craft floor", mode: "standard" });
   store.workspace.ensureWorkspaceRecord(project.id);
@@ -7674,8 +7675,8 @@ test("Workspace Artifact generation applies a high-craft P2-blocking quality flo
   }
   assert.deepEqual(
     proposal.generation.qualityProfile.blockingSeverities,
-    ["P0", "P1", "P2"],
-    "Workspace design generation must repair active craft findings instead of publishing a low-fidelity needs-attention Revision",
+    ["P0", "P1"],
+    "Workspace design generation blocks on P0/P1; P2 stays advisory unless the Kernel elevates it",
   );
   store.close();
 });

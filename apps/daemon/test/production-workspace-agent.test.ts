@@ -5307,7 +5307,7 @@ test("production Workspace Agent compiles a generic resource-only intent into a 
   );
 });
 
-test("production Workspace Agent rejects invalid Research split authority before persisting a Proposal", async (t) => {
+test("production Workspace Agent allows configured non-Codex Research agents and rejects same-principal reviewers", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "dezin-production-workspace-agent-research-authority-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new Store(join(root, "store.db"));
@@ -5355,13 +5355,13 @@ test("production Workspace Agent rejects invalid Research split authority before
     graphRevision: workspace.graphRevision,
   } as const;
 
-  await assert.rejects(
-    orchestrator.turn({
-      ...request,
-      turnId: "turn-00000000-0000-4000-8000-000000000052",
-    }, new AbortController().signal),
-    /Research generation requires Codex.*Settings > Quality > Research agent/i,
-  );
+  // Settings-selected CodeBuddy Research + independent Claude reviewer is valid.
+  await assert.doesNotReject(() => orchestrator.turn({
+    ...request,
+    turnId: "turn-00000000-0000-4000-8000-000000000052",
+  }, new AbortController().signal));
+  assert.equal(store.workspace.listProposals(project.id).length, 1);
+
   store.updateSettings({
     researchAgentCommand: "codex",
     researchModel: "gpt-5.4-mini",
@@ -5373,9 +5373,9 @@ test("production Workspace Agent rejects invalid Research split authority before
       ...request,
       turnId: "turn-00000000-0000-4000-8000-000000000053",
     }, new AbortController().signal),
-    /independent reviewer.*non-Codex reviewer.*Settings > Quality/i,
+    /independent reviewer principal distinct from the Research agent/i,
   );
-  assert.deepEqual(store.workspace.listProposals(project.id), []);
+  assert.equal(store.workspace.listProposals(project.id).length, 1);
 });
 
 test("production Workspace Agent rejects generated Moodboard intent without image authority before persisting a Proposal", async (t) => {

@@ -876,6 +876,8 @@ function frozenResourceReviewerProfile(
           owner: "proposal-generator" as const,
           providerId: "claude" as const,
           baseUrl: authority.baseUrl,
+          // Reviewer authority does not carry organization; keep empty and bind
+          // only the credential-free endpoint + required flag for hydration.
           organization: "",
           credentialProviderId: "anthropic" as const,
           credentialSource: "agent" as const,
@@ -1855,6 +1857,11 @@ export function hydrateResourceReviewerExecution(
   }
   let apiKey = "";
   if (exact.credentialSource === "anthropic-profile") {
+    if (exact.credentialAuthority !== null) {
+      throw new ContextIntegrityError(
+        "Frozen Resource reviewer anthropic-profile source cannot carry agent credential authority",
+      );
+    }
     const credential = resolveAgentProviderCredential(liveSettings, "claude");
     if (credential?.source !== "provider-profile"
       || credentialFreeAgentBaseUrl(credential.baseUrl) !== exact.baseUrl
@@ -1873,8 +1880,33 @@ export function hydrateResourceReviewerExecution(
         "Current Agent credential source for the frozen Resource reviewer is unavailable or incompatible",
       );
     }
+    if (exact.credentialAuthority !== null) {
+      if (exact.credentialAuthority.owner !== "resource-agent"
+        && exact.credentialAuthority.owner !== "proposal-generator") {
+        throw new ContextIntegrityError(
+          "Frozen Resource reviewer credential authority owner is invalid",
+        );
+      }
+      if (exact.credentialAuthority.baseUrl !== exact.baseUrl
+        || exact.credentialAuthority.credentialRequired !== exact.credentialRequired
+        || exact.credentialAuthority.credentialSource !== "agent"
+        || exact.credentialAuthority.providerId !== "claude"
+        || exact.credentialAuthority.credentialProviderId !== "anthropic") {
+        throw new ContextIntegrityError(
+          "Frozen Resource reviewer credential authority does not match its public route",
+        );
+      }
+      // organization may be empty on proposal-generator freezes; when present it
+      // must still match the live agent binding.
+      if (exact.credentialAuthority.organization !== ""
+        && exact.credentialAuthority.organization !== credential.organization) {
+        throw new ContextIntegrityError(
+          "Frozen Resource reviewer credential authority organization drifted",
+        );
+      }
+    }
     apiKey = credential.apiKey;
-  } else if (exact.baseUrl !== "" || exact.credentialRequired) {
+  } else if (exact.baseUrl !== "" || exact.credentialRequired || exact.credentialAuthority !== null) {
     throw new ContextIntegrityError("Frozen Resource reviewer session credential semantics are invalid");
   }
   if (exact.credentialRequired && !apiKey) {

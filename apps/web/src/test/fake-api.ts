@@ -114,6 +114,7 @@ export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
     streamGenerationPlanEvents: notImpl as ApiClient["streamGenerationPlanEvents"],
     cancelGenerationPlan: notImpl as ApiClient["cancelGenerationPlan"],
     retryGenerationTask: notImpl as ApiClient["retryGenerationTask"],
+    retryFailedGenerationTasks: notImpl as ApiClient["retryFailedGenerationTasks"],
     applyWorkspaceGraphCommands: notImpl as ApiClient["applyWorkspaceGraphCommands"],
     saveWorkspaceLayout: notImpl as ApiClient["saveWorkspaceLayout"],
     listResources: async () => [],

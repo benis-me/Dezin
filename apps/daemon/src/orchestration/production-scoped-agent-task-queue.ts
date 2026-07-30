@@ -165,14 +165,14 @@ function frozenScopedGenerationAuthorities(input: {
 
   const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
   const researchProvider = getProvider(researchCommand);
-  if (!researchProvider || researchProvider.id !== "codex") {
+  if (!researchProvider) {
     throw new ContextIntegrityError(
-      "Scoped Research generation requires Codex as its frozen Research Agent",
+      "Scoped Research generation Agent is unavailable",
     );
   }
   if (researchProvider.id === reviewerProvider.id) {
     throw new ContextIntegrityError(
-      "Scoped Research generation requires a reviewer independent from its Codex generator",
+      "Scoped Research generation requires a reviewer principal independent from its generator",
     );
   }
   const researchSelection: WorkspaceGenerationAgentSelection = {

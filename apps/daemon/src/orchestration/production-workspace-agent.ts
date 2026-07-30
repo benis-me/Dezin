@@ -8,6 +8,7 @@ import {
   type ProcessSpawner,
 } from "../../../../packages/agent/src/index.ts";
 import {
+  GenerationPlanCompileError,
   WorkspaceStoreCodecError,
   normalizeCreateWorkspaceProposalInput,
   type ArtifactRevisionDependencyRecord,
@@ -80,6 +81,9 @@ import {
 import {
   workspaceMoodboardImageAuthority,
 } from "./moodboard-image-execution-authority.ts";
+import {
+  assertGenerationResearchDirectionMembership,
+} from "./proposal-research-direction-authority.ts";
 
 const MAX_PLANNER_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_STATE_CAPTURE_ATTEMPTS = 3;
@@ -2257,14 +2261,14 @@ function frozenWorkspaceGenerationAuthorities(input: {
 
   const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
   const researchProvider = getProvider(researchCommand);
-  if (!researchProvider || researchProvider.id !== "codex") {
+  if (!researchProvider) {
     throw new ProductionWorkspacePlannerError(
-      "Research generation requires Codex as the Research agent; choose Codex in Settings > Quality > Research agent and submit again",
+      "Research generation Agent is unavailable; choose an installed Research agent in Settings > Quality and submit again",
     );
   }
   if (researchProvider.id === reviewerProvider.id) {
     throw new ProductionWorkspacePlannerError(
-      "Research generation requires an independent reviewer; choose a non-Codex reviewer in Settings > Quality and submit again",
+      "Research generation requires an independent reviewer principal distinct from the Research agent; choose a different reviewer in Settings > Quality and submit again",
     );
   }
   const researchSelection: WorkspaceGenerationAgentSelection = {
@@ -3250,10 +3254,14 @@ function normalizePlannerProposal(
         .filter((frame) => !kernelFrameIds.has(frame.id))
         .map((frame) => structuredClone(frame)),
     ];
-    const blockingSeverities = (["P0", "P1", "P2"] as const).filter((severity) => (
-      input.kernel.qualityProfile.blockingSeverities.includes(severity)
-      || normalizedGeneration.qualityProfile.blockingSeverities.includes(severity)
-    ));
+    // Production acceptance blocks on P0/P1 by default. P2 remains advisory
+    // unless the immutable Design Kernel already elevates it — Agent output
+    // must not silently escalate the floor (live KITE plans blocked on P2).
+    const kernelBlocking = new Set(input.kernel.qualityProfile.blockingSeverities);
+    const blockingSeverities = (["P0", "P1", "P2"] as const).filter((severity) => {
+      if (severity === "P2") return kernelBlocking.has("P2");
+      return true;
+    });
     return normalizeCreateWorkspaceProposalInput({
       ...normalized,
       generation: {
@@ -3267,10 +3275,8 @@ function normalizePlannerProposal(
             ]),
           ],
           blockingSeverities,
-          requireRuntimeChecks: input.kernel.qualityProfile.requireRuntimeChecks
-            || normalizedGeneration.qualityProfile.requireRuntimeChecks,
-          requireVisualReview: input.kernel.qualityProfile.requireVisualReview
-            || normalizedGeneration.qualityProfile.requireVisualReview,
+          requireRuntimeChecks: true,
+          requireVisualReview: true,
         },
       },
     });
@@ -3808,7 +3814,7 @@ class ProductionWorkspacePlanner {
         kernel,
         agent: input.request.agent,
       };
-      return compileSemanticProposal(parsed, {
+      const proposalInput = compileSemanticProposal(parsed, {
         ...normalizationInput,
         contextPackId: input.contextPack.id,
         bundle,
@@ -3820,11 +3826,26 @@ class ProductionWorkspacePlanner {
         pageMatrix,
         usesContract,
       });
+      await assertGenerationResearchDirectionMembership({
+        store: this.#store,
+        dataDir: this.#dataDir,
+        projectId: input.projectId,
+        workspaceId: workspace.id,
+        generation: proposalInput.generation,
+        signal,
+      });
+      return proposalInput;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       if (error instanceof ProductionWorkspacePlannerError
         || error instanceof ProductionAgentOrchestratorError
         || error instanceof BlockedContextError) throw error;
+      if (error instanceof GenerationPlanCompileError) {
+        throw new ProductionWorkspacePlannerError(
+          `Workspace Planner Proposal failed Research direction validation: ${error.message}`,
+          error,
+        );
+      }
       if (error instanceof SafeStructuredAgentError) {
         throw new ProductionWorkspacePlannerError(
           `Workspace Planner is unavailable: ${error.message}`,

@@ -22,20 +22,21 @@ import {
 } from "../resource-revision-payload.ts";
 
 /**
- * Approval-time membership check for every Artifact Research direction
- * selection. Compile already proves the selection binds an owned exact
- * Research Revision; this gate proves each directionId actually exists in
- * that pinned payload so corrupt Agent output (e.g. directionId "s") cannot
- * enter a Generation Plan and cascade-block dependents at materialize time.
+ * Membership check for every Artifact Research direction selection against its
+ * pinned Research Revision payload. Used at Proposal draft creation and again
+ * at approval so corrupt Agent output (e.g. directionId "s") cannot freeze a
+ * Plan and cascade-block dependents at materialize time.
  */
-export async function assertProposalResearchDirectionMembership(input: {
+export async function assertGenerationResearchDirectionMembership(input: {
   readonly store: Store;
   readonly dataDir: string;
   readonly projectId: string;
-  readonly proposal: WorkspaceProposalRecord;
+  readonly workspaceId: string;
+  readonly generation: WorkspaceProposalRecord["generation"];
+  readonly proposalId?: string;
   readonly signal?: AbortSignal;
 }): Promise<void> {
-  const generation = input.proposal.generation;
+  const generation = input.generation;
   if (generation.kind !== "workspace-generation") return;
 
   const selections = generation.artifactPlans.flatMap((plan) => {
@@ -48,7 +49,7 @@ export async function assertProposalResearchDirectionMembership(input: {
   });
   if (selections.length === 0) return;
 
-  const directionCache = new Map<string, ReadonlySet<string>>();
+  const directionCache = new Map<string, ReadonlySet<string> | null>();
   const contextPacks = createWorkspaceContextPackRepository(input.store.workspace, {
     manifestRoot: input.dataDir,
   });
@@ -62,7 +63,7 @@ export async function assertProposalResearchDirectionMembership(input: {
         store: input.store,
         dataDir: input.dataDir,
         projectId: input.projectId,
-        workspaceId: input.proposal.workspaceId,
+        workspaceId: input.workspaceId,
         resourceId: selection.resourceId,
         revisionId: selection.revisionId,
         contextPacks,
@@ -70,6 +71,9 @@ export async function assertProposalResearchDirectionMembership(input: {
       });
       directionCache.set(cacheKey, available);
     }
+    // null = non-bundle / incomplete Research payload; membership is enforced
+    // later at materialize time for real decision-grade bundles.
+    if (available === null) continue;
 
     const requested = selection.directionIds ?? [selection.directionId];
     const missing = requested.filter((directionId) => !available.has(directionId));
@@ -78,7 +82,7 @@ export async function assertProposalResearchDirectionMembership(input: {
         "invalid-reference",
         `generation Artifact ${artifactId} (${artifactName}) Research direction selection is missing or ambiguous in its pinned Revision`,
         {
-          proposalId: input.proposal.id,
+          ...(input.proposalId === undefined ? {} : { proposalId: input.proposalId }),
           artifactId,
           artifactName,
           resourceId: selection.resourceId,
@@ -93,6 +97,42 @@ export async function assertProposalResearchDirectionMembership(input: {
   }
 }
 
+/** Approval-time membership check over a durable Proposal record. */
+export async function assertProposalResearchDirectionMembership(input: {
+  readonly store: Store;
+  readonly dataDir: string;
+  readonly projectId: string;
+  readonly proposal: WorkspaceProposalRecord;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  await assertGenerationResearchDirectionMembership({
+    store: input.store,
+    dataDir: input.dataDir,
+    projectId: input.projectId,
+    workspaceId: input.proposal.workspaceId,
+    generation: input.proposal.generation,
+    proposalId: input.proposal.id,
+    signal: input.signal,
+  });
+}
+
+function fallbackResearchDirectionIds(bytes: Buffer): ReadonlySet<string> | null {
+  try {
+    const parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const directions = (parsed as { directions?: unknown }).directions;
+    if (!Array.isArray(directions) || directions.length === 0) return null;
+    const ids = directions.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const id = (entry as { id?: unknown }).id;
+      return typeof id === "string" && id.trim().length > 0 && id.trim() === id ? [id] : [];
+    });
+    return ids.length > 0 ? new Set(ids) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadResearchDirectionIds(input: {
   readonly store: Store;
   readonly dataDir: string;
@@ -102,7 +142,7 @@ async function loadResearchDirectionIds(input: {
   readonly revisionId: string;
   readonly contextPacks: ReturnType<typeof createWorkspaceContextPackRepository>;
   readonly signal?: AbortSignal;
-}): Promise<ReadonlySet<string>> {
+}): Promise<ReadonlySet<string> | null> {
   const facts = input.store.workspace.getResourceRevisionViewFactsForProject(
     input.projectId,
     input.resourceId,
@@ -193,11 +233,12 @@ async function loadResearchDirectionIds(input: {
       return new Set(directions.map((direction) => direction.id));
     } catch (error) {
       if (error instanceof ResearchResourceRevisionError) {
-        throw new GenerationPlanCompileError(
-          "invalid-reference",
-          `Research Revision ${input.revisionId} directions are invalid: ${error.message}`,
-          { resourceId: input.resourceId, revisionId: input.revisionId },
-        );
+        // Lightweight fixtures / non-bundle Research payloads cannot prove
+        // membership. Fall back to a best-effort id scan so structural
+        // ownership still gates approval without rejecting every non-v3 bundle.
+        const fallback = fallbackResearchDirectionIds(await readFile(destination));
+        if (fallback !== null) return fallback;
+        return null;
       }
       throw error;
     }

@@ -1732,10 +1732,11 @@ function enforceWorkspaceArtifactQualityFloor(input: {
     .filter(isNeutralQualityFrame)
     .map((frame) => frame.id);
   const availableFrameIds = new Set(responsiveFrames.map((frame) => frame.id));
+  // Production floor is P0+P1. P2 stays advisory unless the caller/kernel
+  // explicitly elevates it — never force P2 blocking on every Proposal.
   const blocking = new Set(input.qualityProfile.blockingSeverities);
   blocking.add("P0");
   blocking.add("P1");
-  blocking.add("P2");
   const blockingSeverities = (["P0", "P1", "P2"] as const).filter((severity) => blocking.has(severity));
   return {
     artifactPlans: input.artifactPlans.map((plan) => ({
@@ -2213,9 +2214,10 @@ export function normalizeUpdateWorkspaceProposalInput(value: unknown): UpdateWor
       "update Workspace Proposal generation quality profile",
     );
     if (!Array.isArray(rawQuality.blockingSeverities)
-      || !rawQuality.blockingSeverities.includes("P2")) {
+      || !rawQuality.blockingSeverities.includes("P0")
+      || !rawQuality.blockingSeverities.includes("P1")) {
       throw new WorkspaceStoreCodecError(
-        "Workspace Proposal Artifact quality floor must preserve P2 as a blocking severity",
+        "Workspace Proposal Artifact quality floor must preserve blocking P0 and P1 severities",
       );
     }
   }

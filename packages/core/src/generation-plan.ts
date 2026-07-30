@@ -493,8 +493,8 @@ function assertFrozenGeneratorAuthority(
   if (agent === undefined) {
     compileError(
       "invalid-reference",
-      `${label} must freeze one generating Agent and its exact non-secret execution authority`,
-      { proposalId },
+      `${label} must freeze one generating Agent and its exact non-secret execution authority. Historical Proposals without frozen authority cannot be approved for generate — ask the Workspace Agent for a new Proposal.`,
+      { proposalId, historicalMissingAuthority: true },
     );
   }
   const providerId = commandProvider(agent.command);
@@ -516,13 +516,17 @@ function assertFrozenGeneratorAuthority(
         || authority.credentialRequired))
     || ((providerId === "codex" || providerId === "codebuddy")
       && authority.credentialSource !== "session")) {
+    const historicalHint = authority === undefined
+      ? " This Proposal predates frozen execution authority — ask the Workspace Agent for a new Proposal before approving generate."
+      : "";
     compileError(
       "invalid-reference",
-      `${label} must freeze a supported command/provider identity and its exact non-secret generator execution authority`,
+      `${label} must freeze a supported command/provider identity and its exact non-secret generator execution authority.${historicalHint}`,
       {
         proposalId,
         providerId: agent.providerId,
         command: agent.command,
+        historicalMissingAuthority: authority === undefined,
       },
     );
   }
@@ -562,10 +566,16 @@ function assertFrozenReviewerAuthority(
     && (reviewerAuthority.credentialSource !== "session"
       || (reviewerAuthority.baseUrl === "" && !reviewerAuthority.credentialRequired));
   if (!reviewerIdentityIsValid || !reviewerAuthorityIsValid) {
+    const historicalHint = reviewer === undefined || reviewerAuthority === undefined
+      ? " This Proposal predates frozen reviewer authority — ask the Workspace Agent for a new Proposal before approving generate."
+      : "";
     compileError(
       "invalid-reference",
-      "executable workspace generation must freeze one supported reviewer and its exact non-secret execution authority",
-      { proposalId },
+      `executable workspace generation must freeze one supported reviewer and its exact non-secret execution authority.${historicalHint}`,
+      {
+        proposalId,
+        historicalMissingAuthority: reviewer === undefined || reviewerAuthority === undefined,
+      },
     );
   }
   return reviewerProvider;
@@ -601,26 +611,37 @@ export function assertWorkspaceGenerationExecutionAuthority(
       proposalId,
       "Generated Research",
     );
-    if (generation.researchAgent.providerId !== "codex" || researchCommandProvider !== "codex") {
+    const researchAuthority = generation.researchAgent.executionAuthority;
+    if (researchAuthority?.kind !== "generator") {
       compileError(
         "invalid-reference",
-        "generated Research requires the frozen Codex Research Agent",
-        {
-          proposalId,
-          providerId: generation.researchAgent.providerId,
-          command: generation.researchAgent.command,
-        },
+        "generated Research must freeze exact non-secret generator execution authority",
+        { proposalId },
       );
     }
-    const researchAuthority = generation.researchAgent.executionAuthority;
-    if (researchAuthority?.kind !== "generator"
-      || researchAuthority.baseUrl !== ""
-      || researchAuthority.organization !== ""
-      || researchAuthority.credentialProviderId !== "openai"
-      || researchAuthority.credentialRequired) {
+    // Host-authenticated CLIs freeze session authority. BYOK CLIs freeze their
+    // exact provider credential route. Either is valid — Research is not locked
+    // to Codex; Settings > Quality > Research agent remains the source of truth.
+    const hostAuthenticatedResearch = researchCommandProvider === "codex"
+      || researchCommandProvider === "codebuddy";
+    if (hostAuthenticatedResearch) {
+      if (researchAuthority.baseUrl !== ""
+        || researchAuthority.organization !== ""
+        || researchAuthority.credentialRequired
+        || researchAuthority.credentialSource !== "session") {
+        compileError(
+          "invalid-reference",
+          `generated Research must freeze ${researchCommandProvider} host-login execution authority without a substituted endpoint or credential source`,
+          { proposalId },
+        );
+      }
+    } else if (researchAuthority.credentialSource === "session"
+      && (researchAuthority.baseUrl !== ""
+        || researchAuthority.organization !== ""
+        || researchAuthority.credentialRequired)) {
       compileError(
         "invalid-reference",
-        "generated Research must freeze Codex host-login execution authority without a substituted endpoint or credential source",
+        "generated Research session authority cannot carry an endpoint or credential requirement",
         { proposalId },
       );
     }

@@ -606,7 +606,7 @@ async function withStore(
   }
 }
 
-test("production Research Agent fails closed before spawn when the frozen provider cannot supply Web Search", async () => {
+test("production Research Agent may use a non-Codex provider without native Web Search", async () => {
   await withStore(async ({ root, store }) => {
     store.updateSettings({
       agentCommand: "claude",
@@ -616,7 +616,15 @@ test("production Research Agent fails closed before spawn when the frozen provid
       aiProviderId: "",
       aiProviderProfiles: "",
     });
-    const spawner = new RecordingSpawner({ stdout: "{}", stderr: "", exitCode: 0 });
+    const spawner = new RecordingSpawner({
+      stdout: JSON.stringify({
+        format: "dezin-research-resource-bundle",
+        version: 3,
+        directions: [],
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
     const ports = createProductionResourceRuntimePorts({
       store,
       dataDir: root,
@@ -624,16 +632,15 @@ test("production Research Agent fails closed before spawn when the frozen provid
       createSpawner: () => spawner,
     });
 
-    await assert.rejects(
-      () => ports.agent.generateStructured(
-        agentRequest(new AbortController().signal, store.getSettings()),
-      ),
-      (error: unknown) => error instanceof ProductionResourceRuntimeError
-        && error.code === "RESOURCE_AGENT_CAPABILITY_UNAVAILABLE"
-        && error.failureClass === "adapter"
-        && /only configured Resource transport with Web Search/.test(error.message),
-    );
-    assert.equal(spawner.inputs.length, 0);
+    // Non-Codex Research agents still run; they simply omit Codex Web Search
+    // and output-schema flags while keeping the same prompt contract.
+    await assert.doesNotReject(() => ports.agent.generateStructured(
+      agentRequest(new AbortController().signal, store.getSettings()),
+    ));
+    assert.equal(spawner.inputs.length, 1);
+    assert.ok(!spawner.inputs[0]?.args.includes("--enable"));
+    assert.ok(!spawner.inputs[0]?.args.includes("standalone_web_search"));
+    assert.ok(!spawner.inputs[0]?.args.includes("--output-schema"));
   });
 });
 

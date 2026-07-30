@@ -85,11 +85,11 @@ const MAX_MOODBOARD_IMAGE_BYTES = 8 * 1024 * 1024;
 // payload budget and leaves an explicit 20% reserve for JSON and metadata.
 const MOODBOARD_RAW_IMAGE_BUDGET_RATIO = 0.6;
 const MIN_MOODBOARD_IMAGE_EDGE = 512;
-const MAX_MOODBOARD_REPAIR_ROUNDS = 1;
+const MAX_MOODBOARD_REPAIR_ROUNDS = 2;
 const MIN_LEGACY_MOODBOARD_AGENT_TIMEOUT_MS = 5 * 60_000;
 const MAX_MOODBOARD_REPAIR_PROMPT_BYTES = 32 * 1024;
 const MOODBOARD_STANDALONE_COMPOSITION_CONTRACT =
-  "Composition contract: render one uninterrupted reference image suitable to place on a Moodboard. Do not depict a Moodboard, reference board, presentation board, design-spec sheet, contact sheet, collage, split layout, comparison, triptych, multi-panel composition, component gallery, or collection of screens. Use one dominant scene, key-art or poster motif, photographic or material study, or abstract composition as appropriate to the frozen direction.";
+  "Composition contract: render exactly one uninterrupted reference image suitable to place on a Moodboard as a single full-bleed frame. Forbidden: Moodboard, reference board, presentation board, design-spec sheet, contact sheet, collage, split layout, comparison, triptych, multi-panel composition, comic panels, storyboard frames, component gallery, landing-page montage, or any collection of screens/zones. The entire canvas must be one continuous scene, key-art, poster motif, photographic study, material study, or abstract field for the frozen direction only.";
 const MOODBOARD_NON_UI_CONTRACT =
   "Surface contract: this is a visual-direction reference, not a product UI deliverable. Do not render an app, website, dashboard, checkout, ticketing interface, wireframe, device mockup, browser chrome, card grid, or separately labeled UI zones.";
 export {
@@ -4958,28 +4958,49 @@ async function moodboardOutput(
         || (quality.decision === "pass") !== (quality.semanticMatch === true && quality.visualQuality === "pass")) {
         return fail("RESOURCE_QUALITY_REVIEW_FAILED", `Moodboard quality review identity is invalid for ${asset.id}`, "context");
       }
+      // Belt-and-suspenders: if the reviewer admits a multi-panel/composite
+      // structure in findings, never accept a pass (live KITE acceptance).
+      const multiPanelFinding = findings.find((finding) => (
+        /\b(multi[- ]?panel|triptych|collage|contact sheet|split layout|side[- ]by[- ]side|comparison columns?|overview board|presentation board|spec(?:ification)? sheet|component gallery|collection of screens)\b/i
+          .test(finding)
+      ));
+      const decision = multiPanelFinding !== undefined ? "fail" as const : quality.decision;
+      const semanticMatch = multiPanelFinding !== undefined ? false : quality.semanticMatch;
+      const enforcedFindings = multiPanelFinding !== undefined && !findings.includes(multiPanelFinding)
+        ? findings
+        : multiPanelFinding !== undefined && quality.decision === "pass"
+          ? Object.freeze([
+              ...findings,
+              "Enforced fail: image is a multi-panel or composite board rather than one uninterrupted reference image.",
+            ])
+          : findings;
       qualityReviewHistory.push(Object.freeze({
         reviewer: Object.freeze(reviewer),
         promptChecksum: createHash("sha256").update(requestAsset.prompt).digest("hex"),
         imageChecksum: checksum,
-        decision: quality.decision,
-        semanticMatch: quality.semanticMatch,
+        decision,
+        semanticMatch,
         visualQuality: quality.visualQuality,
-        findings: Object.freeze([...findings]),
+        findings: Object.freeze([...enforcedFindings]),
       }));
-      if (quality.decision === "pass" && quality.semanticMatch === true && quality.visualQuality === "pass") {
+      if (decision === "pass" && semanticMatch === true && quality.visualQuality === "pass") {
         accepted = {
           asset: requestAsset,
           inspected,
           checksum,
-          qualityReview: cloneAndFreeze(qualityRaw),
+          qualityReview: cloneAndFreeze({
+            ...qualityRaw,
+            decision,
+            semanticMatch,
+            findings: [...enforcedFindings],
+          }),
         };
         break;
       }
       if (repairRoundsApplied >= maxRepairRounds) {
         return fail(
           "RESOURCE_QUALITY_REVIEW_FAILED",
-          `Moodboard Asset ${asset.id} did not pass independent visual and semantic review${findings.length ? `: ${findings.join("; ")}` : ""}`,
+          `Moodboard Asset ${asset.id} did not pass independent visual and semantic review${enforcedFindings.length ? `: ${enforcedFindings.join("; ")}` : ""}`,
           "design",
         );
       }
@@ -4991,7 +5012,7 @@ async function moodboardOutput(
         draft,
         asset,
         assignedDirection,
-        findings,
+        [...enforcedFindings],
         assetRepairRoundsApplied,
       );
     }

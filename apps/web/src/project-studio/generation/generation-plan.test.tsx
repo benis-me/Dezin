@@ -719,7 +719,7 @@ test("GenerationPlanPanel offers only refreshed context when no immutable Attemp
   expect(screen.getByRole("button", { name: /refreshed context/i })).toBeEnabled();
 });
 
-test("GenerationPlanPanel never offers retry controls for a cancelled Plan", () => {
+test("GenerationPlanPanel reopens unfinished work on a cancelled Plan without wiping succeeded Tasks", () => {
   const cancelled = { ...plan("cancelled"), finishedAt: 40 };
   render(
     <GenerationPlanPanel
@@ -727,7 +727,10 @@ test("GenerationPlanPanel never offers retry controls for a cancelled Plan", () 
       plans={[cancelled]}
       detail={{
         plan: cancelled,
-        tasks: [task("task-1", "page", "failed", { error: { message: "Failed before cancellation" } })],
+        tasks: [
+          task("task-ok", "component", "succeeded"),
+          task("task-1", "page", "failed", { error: { message: "Failed before cancellation" } }),
+        ],
         dependencies: [],
         currentAttempts: [],
       }}
@@ -735,12 +738,14 @@ test("GenerationPlanPanel never offers retry controls for a cancelled Plan", () 
       busyAction={null}
       onSelectPlan={() => {}}
       onRetry={() => {}}
+      onRetryFailed={() => {}}
       onCancel={() => {}}
     />,
   );
 
   expect(screen.getByText("Failed before cancellation")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /Retry Page/i })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Retry all unfinished root tasks/i })).toBeEnabled();
+  expect(screen.getByRole("button", { name: /refreshed context/i })).toBeEnabled();
 });
 
 test("GenerationPlanPanel links only exact candidate and published Revisions without a mutable Head fallback", () => {

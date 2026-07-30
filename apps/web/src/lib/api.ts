@@ -3483,6 +3483,11 @@ export interface ApiClient {
     taskId: string,
     mode: GenerationTaskRetryMode,
   ): Promise<GenerationPlanDetail>;
+  retryFailedGenerationTasks(
+    projectId: string,
+    planId: string,
+    mode: GenerationTaskRetryMode,
+  ): Promise<GenerationPlanDetail>;
   applyWorkspaceGraphCommands(projectId: string, input: GraphCommandRequest): Promise<WorkspaceGraphMutationResult>;
   saveWorkspaceLayout(projectId: string, input: WorkspaceLayoutPatch): Promise<WorkspaceLayout>;
   listResources(projectId: string): Promise<Resource[]>;
@@ -3987,6 +3992,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     retryGenerationTask: (projectId, planId, taskId, mode) =>
       json<GenerationPlanDetail>(
         `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/tasks/${enc(taskId)}/retry`,
+        jsonInit("POST", { mode }),
+      ),
+    retryFailedGenerationTasks: (projectId, planId, mode) =>
+      json<GenerationPlanDetail>(
+        `/api/projects/${enc(projectId)}/workspace/plans/${enc(planId)}/retry-failed`,
         jsonInit("POST", { mode }),
       ),
     applyWorkspaceGraphCommands: (projectId, input) =>

@@ -4805,9 +4805,12 @@ export class WorkspaceStore {
     );
     return this.transactionImmediate(() => {
       const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      // Cancelled Plans keep succeeded Tasks and may reopen the unfinished
+      // subgraph. In-flight cancellation (queued/running + cancel-requested)
+      // still refuses retries until the Plan settles.
       if (!detail.plan.constructionSealed
         || (detail.plan.status !== "queued" && detail.plan.status !== "running"
-          && detail.plan.status !== "failed")) {
+          && detail.plan.status !== "failed" && detail.plan.status !== "cancelled")) {
         throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
       }
       const task = detail.tasks.find((candidate) => candidate.id === taskId);
@@ -4821,22 +4824,29 @@ export class WorkspaceStore {
       const retryRequests = requestRows.map(asGenerationPlanEvent);
       const latestRequest = retryRequests.filter((event) => event.taskId === task.id).at(-1) ?? null;
       const currentExecutionEpoch = detail.plan.executionEpoch ?? 0;
-      const activeCancellation = this.db.prepare(
-        `SELECT 1 FROM generation_plan_events
-         WHERE plan_id = ? AND workspace_id = ? AND type = 'plan-cancel-requested'
-           AND json_extract(payload_json, '$.executionEpoch') = ?
-         LIMIT 1`,
-      ).get(detail.plan.id, detail.plan.workspaceId, currentExecutionEpoch);
+      const planIsTerminalCancelled = detail.plan.status === "cancelled";
+      const activeCancellation = planIsTerminalCancelled
+        ? undefined
+        : this.db.prepare(
+          `SELECT 1 FROM generation_plan_events
+           WHERE plan_id = ? AND workspace_id = ? AND type = 'plan-cancel-requested'
+             AND json_extract(payload_json, '$.executionEpoch') = ?
+           LIMIT 1`,
+        ).get(detail.plan.id, detail.plan.workspaceId, currentExecutionEpoch);
       if (activeCancellation) {
         throw new GenerationTaskMaterializationConflictError(
           task.id,
           "Generation Plan cancellation is active",
         );
       }
+      const retryableTaskStatuses = new Set([
+        "failed",
+        "blocked-context",
+        "cancelled",
+      ]);
       const requestStillActive = latestRequest !== null
         && latestRequest.payload.executionEpoch === currentExecutionEpoch
-        && task.status !== "failed"
-        && task.status !== "blocked-context";
+        && !retryableTaskStatuses.has(task.status);
       if (requestStillActive) {
         if (latestRequest.payload.mode !== mode) {
           throw new GenerationTaskMaterializationConflictError(
@@ -4847,10 +4857,17 @@ export class WorkspaceStore {
         return detail;
       }
 
-      if (task.status !== "failed" && task.status !== "blocked-context") {
+      if (!retryableTaskStatuses.has(task.status)) {
         throw new GenerationTaskMaterializationConflictError(
           task.id,
-          `Task is ${task.status}, expected failed or blocked-context`,
+          `Task is ${task.status}, expected failed, blocked-context, or cancelled`,
+        );
+      }
+      // Cancelled Tasks with no completed Attempt cannot replay same-context.
+      if (task.status === "cancelled" && mode === "same-context" && task.currentAttempt === 0) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "same-context retry requires one complete immutable Attempt; use latest-context",
         );
       }
       const retryWindowStart = retryRequests.find((event) => (
@@ -4905,7 +4922,8 @@ export class WorkspaceStore {
         }
       }
       const remainingFailedRoots = detail.tasks.filter((candidate) => (
-        candidate.id !== task.id && candidate.status === "failed"
+        candidate.id !== task.id
+        && (candidate.status === "failed" || candidate.status === "cancelled")
       ));
       const blockingRootIdsByTask = new Map<string, Set<string>>();
       for (const root of remainingFailedRoots) {
@@ -4926,11 +4944,19 @@ export class WorkspaceStore {
         }
       }
       const blockedDescendants = detail.tasks.filter((candidate) => (
-        candidate.status === "blocked" && selectedDescendantIds.has(candidate.id)
+        (candidate.status === "blocked" || candidate.status === "cancelled")
+        && selectedDescendantIds.has(candidate.id)
+        && candidate.id !== task.id
       ));
       const reopened: GenerationTask[] = [];
       const retained = new Map<string, GenerationTask>();
       for (const descendant of blockedDescendants) {
+        if (descendant.status === "cancelled") {
+          // Cancelled dependents reopen with the root; they were never durable
+          // failures of their own.
+          reopened.push(descendant);
+          continue;
+        }
         const blockingIds = blockingRootIdsByTask.get(descendant.id) ?? new Set<string>();
         const blocker = remainingFailedRoots.find((candidate) => blockingIds.has(candidate.id));
         if (blocker === undefined) reopened.push(descendant);
@@ -4958,20 +4984,35 @@ export class WorkspaceStore {
         );
       }
       for (const descendant of reopened) {
-        const movedDescendant = this.db.prepare(
-          `UPDATE generation_tasks
-           SET status = 'materialization-pending', blocked_reason = NULL, blocked_by_task_id = NULL,
-               pending_context_policy = NULL, rebase_count = 0, failure_class = NULL,
-               error_json = NULL, next_eligible_at = NULL, finished_at = NULL
-           WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = 'blocked'
-             AND blocked_by_task_id IS ? AND current_attempt = ?`,
-        ).run(
-          descendant.id,
-          descendant.planId,
-          descendant.workspaceId,
-          descendant.blockedByTaskId,
-          descendant.currentAttempt,
-        );
+        const movedDescendant = descendant.status === "cancelled"
+          ? this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = 'materialization-pending', blocked_reason = NULL, blocked_by_task_id = NULL,
+                 pending_context_policy = ?, rebase_count = 0, failure_class = NULL,
+                 error_json = NULL, next_eligible_at = NULL, finished_at = NULL
+             WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = 'cancelled'
+               AND current_attempt = ?`,
+          ).run(
+            mode,
+            descendant.id,
+            descendant.planId,
+            descendant.workspaceId,
+            descendant.currentAttempt,
+          )
+          : this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = 'materialization-pending', blocked_reason = NULL, blocked_by_task_id = NULL,
+                 pending_context_policy = NULL, rebase_count = 0, failure_class = NULL,
+                 error_json = NULL, next_eligible_at = NULL, finished_at = NULL
+             WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = 'blocked'
+               AND blocked_by_task_id IS ? AND current_attempt = ?`,
+          ).run(
+            descendant.id,
+            descendant.planId,
+            descendant.workspaceId,
+            descendant.blockedByTaskId,
+            descendant.currentAttempt,
+          );
         if (Number(movedDescendant.changes) !== 1) {
           throw new WorkspaceStoreCodecError(
             `Generation Task descendant ${descendant.id} changed while reopening`,
@@ -5041,13 +5082,16 @@ export class WorkspaceStore {
           reopenedTaskIds: reopened.map((candidate) => candidate.id),
         },
       });
+      const nextPlanStatus = detail.plan.status === "failed" || detail.plan.status === "cancelled"
+        ? "queued"
+        : detail.plan.status;
       const movedPlan = this.db.prepare(
         `UPDATE generation_plans
          SET execution_epoch = ?, status = ?, finished_at = NULL
          WHERE id = ? AND workspace_id = ? AND execution_epoch = ? AND status = ?`,
       ).run(
         executionEpoch,
-        detail.plan.status === "failed" ? "queued" : detail.plan.status,
+        nextPlanStatus,
         detail.plan.id,
         detail.plan.workspaceId,
         detail.plan.executionEpoch ?? 0,
@@ -5060,6 +5104,59 @@ export class WorkspaceStore {
       }
       return this.readGenerationPlanDetailForProject(projectId, planId);
     });
+  }
+
+  /**
+   * Reopens every unfinished root Task (failed / blocked-context / cancelled
+   * with satisfied dependencies) so a partially-succeeded Plan can finish its
+   * remaining subgraph without redoing succeeded work.
+   */
+  retryFailedGenerationTasksForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: RetryGenerationTaskInput,
+  ): GenerationPlanDetail {
+    const input = boundaryObject(
+      unsafeInput,
+      "Generation Plan failed-task retry request",
+      ["mode"],
+      ["now"],
+    );
+    if (input.mode !== "same-context" && input.mode !== "latest-context") {
+      throw new WorkspaceStoreCodecError("Generation Task retry mode is unsupported");
+    }
+    let detail = this.readGenerationPlanDetailForProject(projectId, planId);
+    const tasksById = new Map(detail.tasks.map((task) => [task.id, task] as const));
+    const roots = detail.tasks.filter((task) => {
+      if (task.status !== "failed"
+        && task.status !== "blocked-context"
+        && task.status !== "cancelled") {
+        return false;
+      }
+      return task.dependencyIds.every((dependencyId) => {
+        const dependency = tasksById.get(dependencyId);
+        return dependency === undefined || dependency.status === "succeeded";
+      });
+    });
+    if (roots.length === 0) {
+      throw new GenerationTaskMaterializationConflictError(
+        planId,
+        "No failed, blocked-context, or cancelled root Tasks are available to retry",
+      );
+    }
+    // Prefer latest-context for cancelled Tasks with no attempt; callers may still
+    // request same-context for roots that already completed an Attempt.
+    for (const root of roots) {
+      const mode = root.status === "cancelled" && root.currentAttempt === 0
+        ? "latest-context" as const
+        : input.mode;
+      const now = typeof input.now === "number" ? input.now : undefined;
+      detail = this.retryGenerationTaskForProject(projectId, planId, root.id, {
+        mode,
+        ...(now === undefined ? {} : { now }),
+      });
+    }
+    return detail;
   }
 
   reconcileGenerationTaskNeedsRebaseForProject(

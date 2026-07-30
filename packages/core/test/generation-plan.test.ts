@@ -638,7 +638,7 @@ test("freezes split Research generator and reviewer authority into every executa
   }));
 });
 
-test("rejects incomplete, non-Codex, or same-principal generated Research authority", () => {
+test("rejects incomplete or same-principal generated Research authority while allowing configured non-Codex Research agents", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
   const reviewerAgent = {
@@ -652,28 +652,36 @@ test("rejects incomplete, non-Codex, or same-principal generated Research author
       credentialRequired: true,
     },
   };
+  // Settings-selected CodeBuddy Research + independent Claude reviewer is valid.
+  assert.doesNotThrow(() => compileGenerationPlan({
+    shell: fixture.shell,
+    proposal: {
+      ...fixture.proposal,
+      generation: {
+        ...generation,
+        researchAgent: {
+          providerId: "codebuddy",
+          command: "codebuddy",
+          model: "gpt-5.6-sol",
+          executionAuthority: {
+            kind: "generator",
+            baseUrl: "",
+            organization: "",
+            credentialProviderId: "codebuddy",
+            credentialSource: "session",
+            credentialRequired: false,
+          },
+        },
+        reviewerAgent,
+      },
+    },
+  }));
   for (const authority of [
     {
       researchAgent: undefined,
       reviewerAgent: undefined,
     },
     { researchAgent: undefined, reviewerAgent },
-    {
-      researchAgent: {
-        providerId: "codebuddy" as const,
-        command: "codebuddy" as const,
-        model: "gpt-5.6-sol",
-        executionAuthority: {
-          kind: "generator" as const,
-          baseUrl: "",
-          organization: "",
-          credentialProviderId: "codebuddy",
-          credentialSource: "session" as const,
-          credentialRequired: false,
-        },
-      },
-      reviewerAgent,
-    },
     {
       researchAgent: {
         providerId: "codex" as const,

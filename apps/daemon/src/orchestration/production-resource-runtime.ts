@@ -694,13 +694,9 @@ class StoreBackedResourceAgent implements ProductionResourceAgentPort {
     }
     const command = execution.command;
     const model = execution.model ?? undefined;
-    if (request.kind === "research" && execution.providerId !== "codex") {
-      return fail(
-        "RESOURCE_AGENT_CAPABILITY_UNAVAILABLE",
-        "Research generation requires the Codex provider because it is the only configured Resource transport with Web Search",
-        "adapter",
-      );
-    }
+    // Research may use any configured Research agent. Codex keeps native Web
+    // Search + output-schema; other providers still produce structured JSON from
+    // the same prompt contract using their normal structured transports.
     const cwd = await mkdtemp(join(tmpdir(), "dezin-resource-agent-"));
     await chmod(cwd, 0o700);
     try {

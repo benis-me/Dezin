@@ -309,6 +309,29 @@ export async function handleRetryGenerationTask(
   }
 }
 
+export async function handleRetryFailedGenerationTasks(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const planId = params.planId!;
+  requireProject(deps, projectId);
+  const mode = await parseRetryBody(req);
+  try {
+    const detail = deps.store.workspace.retryFailedGenerationTasksForProject(
+      projectId,
+      planId,
+      { mode },
+    );
+    wakeGenerationPlan(deps.generationPlanEvents, deps.generationPlanRuntime, planId);
+    sendJson(res, 200, generationPlanHttpDetail(projectId, detail, deps.store.workspace));
+  } catch (error) {
+    controlError(error);
+  }
+}
+
 export async function handleGenerationPlanEvents(
   req: IncomingMessage,
   res: ServerResponse,

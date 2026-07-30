@@ -224,11 +224,16 @@ function dependencyLabel(task: GenerationTask): string {
 }
 
 function canRetry(task: GenerationTask): boolean {
-  return task.status === "failed" || task.status === "blocked-context";
+  return task.status === "failed"
+    || task.status === "blocked-context"
+    || task.status === "cancelled";
 }
 
 function immutablePlan(plan: GenerationPlan): boolean {
-  return plan.status !== "failed" && TERMINAL_PLAN_STATUSES.has(plan.status);
+  // Cancelled Plans keep succeeded work and can reopen the unfinished subgraph.
+  return plan.status !== "failed"
+    && plan.status !== "cancelled"
+    && TERMINAL_PLAN_STATUSES.has(plan.status);
 }
 
 export function terminalGenerationPlan(detail: GenerationPlanDetail): boolean {
@@ -531,6 +536,7 @@ export function GenerationPlanPanel({
   targetLabels,
   onSelectPlan,
   onRetry,
+  onRetryFailed,
   onCancel,
   onFocusTask,
   onClose,
@@ -544,6 +550,7 @@ export function GenerationPlanPanel({
   targetLabels?: GenerationPlanTargetLabels;
   onSelectPlan: (planId: string) => void;
   onRetry: (taskId: string, mode: GenerationTaskRetryMode) => void | Promise<void>;
+  onRetryFailed?: (mode: GenerationTaskRetryMode) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
   onFocusTask?: (task: GenerationTask) => void;
   onClose?: () => void;
@@ -557,8 +564,16 @@ export function GenerationPlanPanel({
   }
   const directionSelections = detail.tasks.map((task) => researchSelectionDestinations(projectId, task));
   const retryable = detail.plan.status === "failed"
+    || detail.plan.status === "cancelled"
     || detail.plan.status === "queued"
     || detail.plan.status === "running";
+  const retryableRootCount = detail.tasks.filter((task) => {
+    if (!canRetry(task)) return false;
+    return task.dependencyIds.every((dependencyId) => {
+      const dependency = detail.tasks.find((candidate) => candidate.id === dependencyId);
+      return dependency === undefined || dependency.status === "succeeded";
+    });
+  }).length;
   const events = detail.events ?? [];
   const failureMessage = generationPlanFailureMessage(detail.plan);
   return (
@@ -709,6 +724,19 @@ export function GenerationPlanPanel({
       </StudioInspectorSection>
 
       <footer className="dezin-generation-plan__footer">
+        {retryable && retryableRootCount > 0 && onRetryFailed ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={busyAction !== null}
+            aria-label="Retry all unfinished root tasks"
+            onClick={() => void onRetryFailed("latest-context")}
+          >
+            <RefreshCw aria-hidden />
+            Retry unfinished ({retryableRootCount})
+          </Button>
+        ) : null}
         {canCancel(detail.plan) ? (
           <Button
             type="button"
@@ -721,12 +749,12 @@ export function GenerationPlanPanel({
           >
             Stop
           </Button>
-        ) : (
+        ) : retryableRootCount === 0 ? (
           <span className="dezin-generation-plan__settled">
             <Check aria-hidden />
             Settled
           </span>
-        )}
+        ) : null}
       </footer>
     </section>
   );
@@ -1061,7 +1089,7 @@ export function GenerationPlanInspector({
   }, [authoritativeDetail, busyAction, commitDetail, detail, loadState, selectedPlanId]);
 
   const runAction = useCallback(async (
-    source: Extract<GenerationPlanDetailChangeSource, "retry" | "cancel">,
+    source: Extract<GenerationPlanDetailChangeSource, "retry" | "cancel"> | "retry-failed",
     taskId?: string,
     mode?: GenerationTaskRetryMode,
   ) => {
@@ -1075,18 +1103,20 @@ export function GenerationPlanInspector({
     try {
       const next = source === "retry"
         ? await api.retryGenerationTask(projectId, planId, taskId!, mode!)
-        : await api.cancelGenerationPlan(projectId, planId);
+        : source === "retry-failed"
+          ? await api.retryFailedGenerationTasks(projectId, planId, mode ?? "latest-context")
+          : await api.cancelGenerationPlan(projectId, planId);
       if (epoch !== selectionEpoch.current
         || mutationEpoch !== detailMutationEpoch.current
         || next.plan.id !== planId) return;
-      commitDetail(next, source);
-      if (source === "retry") setConnection("connecting");
+      commitDetail(next, source === "retry-failed" ? "retry" : source);
+      if (source === "retry" || source === "retry-failed") setConnection("connecting");
     } catch (error) {
       if (epoch === selectionEpoch.current) {
         setMessage(error instanceof Error
           ? error.message
-          : source === "retry"
-            ? "The task could not be retried."
+          : source === "retry" || source === "retry-failed"
+            ? "The unfinished work could not be retried."
             : "The Generation Plan could not be stopped.");
       }
     } finally {
@@ -1099,6 +1129,11 @@ export function GenerationPlanInspector({
 
   const retry = useCallback(
     (taskId: string, mode: GenerationTaskRetryMode) => runAction("retry", taskId, mode),
+    [runAction],
+  );
+
+  const retryFailed = useCallback(
+    (mode: GenerationTaskRetryMode) => runAction("retry-failed", undefined, mode),
     [runAction],
   );
 
@@ -1162,6 +1197,7 @@ export function GenerationPlanInspector({
             targetLabels={targetLabels}
             onSelectPlan={selectPlan}
             onRetry={retry}
+            onRetryFailed={retryFailed}
             onCancel={cancel}
             onFocusTask={onFocusTask}
             showHeader={false}

@@ -1321,7 +1321,7 @@ export interface ResourceGenerationTaskPayloadV2 extends Record<string, unknown>
   /**
    * For split-authority Research, the Proposal's normal generator is retained
    * separately so the shared reviewer credential source can be revalidated
-   * without relabeling the Codex Research Agent.
+   * without relabeling the configured Research Agent.
    */
   reviewerAuthorityAgent?: WorkspaceGenerationAgentSelection;
   /** Absent only on legacy Tasks compiled before reviewer selection was durable. */

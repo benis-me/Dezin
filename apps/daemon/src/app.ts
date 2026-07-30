@@ -168,6 +168,7 @@ import {
   handleGetLatestScopedArtifactGenerationPlan,
   handleListGenerationPlans,
   handleRetryGenerationTask,
+  handleRetryFailedGenerationTasks,
 } from "./generation-plan-handler.ts";
 import {
   GenerationPlanEventBroker,
@@ -580,6 +581,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/:id/workspace/plans/:planId/tasks/:taskId/retry",
     handler: handleRetryGenerationTask,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/plans/:planId/retry-failed",
+    handler: handleRetryFailedGenerationTasks,
   },
   {
     method: "GET",
