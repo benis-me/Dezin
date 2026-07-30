@@ -78,6 +78,30 @@ test("visual review policy inherits the frozen built-in CodeBuddy Agent and mode
   );
 });
 
+test("visual review policy avoids the Research principal when visualQaAgentCommand is empty", () => {
+  const settings = {
+    agentCommand: "codebuddy",
+    model: "hy3-ioa",
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    researchAgentCommand: "",
+    researchModel: "",
+  } as Settings;
+
+  // Live failure mode: Research falls back to CodeBuddy and an empty reviewer
+  // used to collapse onto CodeBuddy too, failing the first Home turn.
+  assert.equal(reviewerAgentCommand(settings, "codebuddy", "codebuddy"), "claude");
+  assert.equal(reviewerAgentCommand(settings, "codebuddy", "claude"), "codebuddy");
+  assert.equal(
+    reviewerAgentCommand(
+      { ...settings, visualQaAgentCommand: "codebuddy" },
+      "claude",
+      "codebuddy",
+    ),
+    "claude",
+  );
+});
+
 test("standardRepairPrompt constrains visual-source findings to measured local patches", () => {
   const findings: QualityFinding[] = [
     {

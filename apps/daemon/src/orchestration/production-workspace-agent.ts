@@ -2194,38 +2194,6 @@ function frozenWorkspaceGenerationAuthorities(input: {
       "Workspace generation Agent selection is unavailable or no longer matches its provider; choose an available Project Agent and submit again",
     );
   }
-  const reviewerCommand = reviewerAgentCommand(input.settings, input.taskAgent.command);
-  const reviewerProvider = getProvider(reviewerCommand);
-  if (!reviewerProvider
-    || (reviewerProvider.id !== "claude"
-      && reviewerProvider.id !== "codebuddy"
-      && reviewerProvider.id !== "codex")) {
-    throw new ProductionWorkspacePlannerError(
-      "Workspace generation reviewer is unavailable; choose Claude Code, CodeBuddy, or Codex in Settings > Quality and submit again",
-    );
-  }
-  const reviewerSelection: WorkspaceGenerationAgentSelection = {
-    providerId: reviewerProvider.id,
-    command: reviewerCommand,
-    model: reviewerModel(
-      input.settings,
-      input.taskAgent.model ?? undefined,
-      input.taskAgent.command,
-    ) ?? null,
-  };
-  let reviewerAgent: WorkspaceGenerationAgentSelection;
-  try {
-    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
-      input.settings,
-      reviewerSelection,
-      input.taskAgent,
-    );
-  } catch (error) {
-    throw new ProductionWorkspacePlannerError(
-      "Workspace generation reviewer execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
-      error,
-    );
-  }
   const agentSelection: WorkspaceGenerationAgentSelection = {
     providerId: taskProvider.id,
     command: input.taskAgent.command,
@@ -2251,51 +2219,89 @@ function frozenWorkspaceGenerationAuthorities(input: {
       );
     }
   }
-  if (!input.hasGeneratedResearch) {
-    return {
-      agent,
-      reviewerAgent,
-      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+
+  let researchAgent: WorkspaceGenerationAgentSelection | undefined;
+  let avoidReviewerProviderId: string | null = null;
+  if (input.hasGeneratedResearch) {
+    const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
+    const researchProvider = getProvider(researchCommand);
+    if (!researchProvider) {
+      throw new ProductionWorkspacePlannerError(
+        "Research generation Agent is unavailable; choose an installed Research agent in Settings > Quality and submit again",
+      );
+    }
+    const researchSelection: WorkspaceGenerationAgentSelection = {
+      providerId: researchProvider.id,
+      command: researchCommand,
+      model: researchModel(
+        input.settings,
+        input.taskAgent.model ?? undefined,
+        input.taskAgent.command,
+      ) ?? null,
     };
+    try {
+      researchAgent = freezeWorkspaceGeneratorAgentSelection(
+        input.settings,
+        researchSelection,
+      );
+    } catch (error) {
+      throw new ProductionWorkspacePlannerError(
+        "Workspace generation Research execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
+        error,
+      );
+    }
+    avoidReviewerProviderId = researchProvider.id;
   }
 
-  const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
-  const researchProvider = getProvider(researchCommand);
-  if (!researchProvider) {
+  // Resolve reviewer after Research so empty visualQaAgentCommand does not
+  // collapse onto the same CodeBuddy principal as Research (live first-turn fail).
+  const reviewerCommand = reviewerAgentCommand(
+    input.settings,
+    input.taskAgent.command,
+    avoidReviewerProviderId,
+  );
+  const reviewerProvider = getProvider(reviewerCommand);
+  if (!reviewerProvider
+    || (reviewerProvider.id !== "claude"
+      && reviewerProvider.id !== "codebuddy"
+      && reviewerProvider.id !== "codex")) {
     throw new ProductionWorkspacePlannerError(
-      "Research generation Agent is unavailable; choose an installed Research agent in Settings > Quality and submit again",
+      "Workspace generation reviewer is unavailable; choose Claude Code, CodeBuddy, or Codex in Settings > Quality and submit again",
     );
   }
-  if (researchProvider.id === reviewerProvider.id) {
+  if (avoidReviewerProviderId !== null && reviewerProvider.id === avoidReviewerProviderId) {
     throw new ProductionWorkspacePlannerError(
-      "Research generation requires an independent reviewer principal distinct from the Research agent; choose a different reviewer in Settings > Quality and submit again",
+      "Research generation requires an independent reviewer principal distinct from the Research agent; install Claude Code or Codex, or choose a different reviewer in Settings > Quality",
     );
   }
-  const researchSelection: WorkspaceGenerationAgentSelection = {
-    providerId: researchProvider.id,
-    command: researchCommand,
-    model: researchModel(
+  const reviewerSelection: WorkspaceGenerationAgentSelection = {
+    providerId: reviewerProvider.id,
+    command: reviewerCommand,
+    model: reviewerModel(
       input.settings,
       input.taskAgent.model ?? undefined,
       input.taskAgent.command,
+      avoidReviewerProviderId,
     ) ?? null,
   };
-  let researchAgent: WorkspaceGenerationAgentSelection;
+  let reviewerAgent: WorkspaceGenerationAgentSelection;
   try {
-    researchAgent = freezeWorkspaceGeneratorAgentSelection(
+    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
       input.settings,
-      researchSelection,
+      reviewerSelection,
+      input.taskAgent,
     );
   } catch (error) {
     throw new ProductionWorkspacePlannerError(
-      "Workspace generation Research execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
+      "Workspace generation reviewer execution authority is invalid; repair its endpoint or credential source in Settings and submit again",
       error,
     );
   }
+
   return {
     agent,
     reviewerAgent,
-    researchAgent,
+    ...(researchAgent === undefined ? {} : { researchAgent }),
     ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
   };
 }

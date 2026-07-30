@@ -5365,17 +5365,27 @@ test("production Workspace Agent allows configured non-Codex Research agents and
   store.updateSettings({
     researchAgentCommand: "codex",
     researchModel: "gpt-5.4-mini",
+    // Collides with Research — planner must auto-pick an independent reviewer.
     visualQaAgentCommand: "codex",
     visualQaModel: "gpt-5.4-mini",
   });
-  await assert.rejects(
-    orchestrator.turn({
-      ...request,
-      turnId: "turn-00000000-0000-4000-8000-000000000053",
-    }, new AbortController().signal),
-    /independent reviewer principal distinct from the Research agent/i,
+  await assert.doesNotReject(() => orchestrator.turn({
+    ...request,
+    turnId: "turn-00000000-0000-4000-8000-000000000053",
+  }, new AbortController().signal));
+  const proposals = store.workspace.listProposals(project.id);
+  assert.equal(proposals.length, 2);
+  const diverted = proposals.find((proposal) => (
+    proposal.generation.kind === "workspace-generation"
+    && proposal.generation.researchAgent?.providerId === "codex"
+  ));
+  assert.ok(diverted, "expected a Proposal with Codex Research");
+  if (diverted.generation.kind !== "workspace-generation") assert.fail("expected workspace generation");
+  assert.notEqual(
+    diverted.generation.reviewerAgent?.providerId,
+    "codex",
+    "reviewer must auto-divert off the Research principal",
   );
-  assert.equal(store.workspace.listProposals(project.id).length, 1);
 });
 
 test("production Workspace Agent rejects generated Moodboard intent without image authority before persisting a Proposal", async (t) => {

@@ -112,34 +112,9 @@ function frozenScopedGenerationAuthorities(input: {
     command: input.taskAgent.command,
     model: input.taskAgent.model,
   };
-  const reviewerCommand = reviewerAgentCommand(input.settings, input.taskAgent.command);
-  const reviewerProvider = getProvider(reviewerCommand);
-  if (!reviewerProvider
-    || (reviewerProvider.id !== "claude"
-      && reviewerProvider.id !== "codebuddy"
-      && reviewerProvider.id !== "codex")) {
-    throw new ContextIntegrityError(
-      "Scoped generation reviewer must be Claude Code, CodeBuddy, or Codex",
-    );
-  }
-  const reviewerSelection: WorkspaceGenerationAgentSelection = {
-    providerId: reviewerProvider.id,
-    command: reviewerCommand,
-    model: reviewerModel(
-      input.settings,
-      input.taskAgent.model ?? undefined,
-      input.taskAgent.command,
-    ) ?? null,
-  };
   let agent: WorkspaceGenerationAgentSelection;
-  let reviewerAgent: WorkspaceGenerationAgentSelection;
   try {
     agent = freezeWorkspaceGeneratorAgentSelection(input.settings, taskSelection);
-    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
-      input.settings,
-      reviewerSelection,
-      taskSelection,
-    );
   } catch (error) {
     throw new ContextIntegrityError(
       `Scoped generation execution authority is invalid: ${String(error)}`,
@@ -155,47 +130,81 @@ function frozenScopedGenerationAuthorities(input: {
       );
     }
   }
-  if (!input.hasGeneratedResearch) {
-    return {
-      agent,
-      reviewerAgent,
-      ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
+
+  let researchAgent: WorkspaceGenerationAgentSelection | undefined;
+  let avoidReviewerProviderId: string | null = null;
+  if (input.hasGeneratedResearch) {
+    const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
+    const researchProvider = getProvider(researchCommand);
+    if (!researchProvider) {
+      throw new ContextIntegrityError(
+        "Scoped Research generation Agent is unavailable",
+      );
+    }
+    const researchSelection: WorkspaceGenerationAgentSelection = {
+      providerId: researchProvider.id,
+      command: researchCommand,
+      model: researchModel(
+        input.settings,
+        input.taskAgent.model ?? undefined,
+        input.taskAgent.command,
+      ) ?? null,
     };
+    try {
+      researchAgent = freezeWorkspaceGeneratorAgentSelection(input.settings, researchSelection);
+    } catch (error) {
+      throw new ContextIntegrityError(
+        `Scoped Research execution authority is invalid: ${String(error)}`,
+      );
+    }
+    avoidReviewerProviderId = researchProvider.id;
   }
 
-  const researchCommand = researchAgentCommand(input.settings, input.taskAgent.command);
-  const researchProvider = getProvider(researchCommand);
-  if (!researchProvider) {
+  const reviewerCommand = reviewerAgentCommand(
+    input.settings,
+    input.taskAgent.command,
+    avoidReviewerProviderId,
+  );
+  const reviewerProvider = getProvider(reviewerCommand);
+  if (!reviewerProvider
+    || (reviewerProvider.id !== "claude"
+      && reviewerProvider.id !== "codebuddy"
+      && reviewerProvider.id !== "codex")) {
     throw new ContextIntegrityError(
-      "Scoped Research generation Agent is unavailable",
+      "Scoped generation reviewer must be Claude Code, CodeBuddy, or Codex",
     );
   }
-  if (researchProvider.id === reviewerProvider.id) {
+  if (avoidReviewerProviderId !== null && reviewerProvider.id === avoidReviewerProviderId) {
     throw new ContextIntegrityError(
       "Scoped Research generation requires a reviewer principal independent from its generator",
     );
   }
-  const researchSelection: WorkspaceGenerationAgentSelection = {
-    providerId: researchProvider.id,
-    command: researchCommand,
-    model: researchModel(
+  const reviewerSelection: WorkspaceGenerationAgentSelection = {
+    providerId: reviewerProvider.id,
+    command: reviewerCommand,
+    model: reviewerModel(
       input.settings,
       input.taskAgent.model ?? undefined,
       input.taskAgent.command,
+      avoidReviewerProviderId,
     ) ?? null,
   };
-  let researchAgent: WorkspaceGenerationAgentSelection;
+  let reviewerAgent: WorkspaceGenerationAgentSelection;
   try {
-    researchAgent = freezeWorkspaceGeneratorAgentSelection(input.settings, researchSelection);
+    reviewerAgent = freezeWorkspaceReviewerAgentSelection(
+      input.settings,
+      reviewerSelection,
+      taskSelection,
+    );
   } catch (error) {
     throw new ContextIntegrityError(
-      `Scoped Research execution authority is invalid: ${String(error)}`,
+      `Scoped generation reviewer execution authority is invalid: ${String(error)}`,
     );
   }
   return {
     agent,
     reviewerAgent,
-    researchAgent,
+    ...(researchAgent === undefined ? {} : { researchAgent }),
     ...(moodboardImageAuthority === undefined ? {} : { moodboardImageAuthority }),
   };
 }

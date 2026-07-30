@@ -111,9 +111,31 @@ function builtInStructuredReviewer(command: string): "claude" | "codebuddy" | "c
     : null;
 }
 
-export function reviewerAgentCommand(settings: Settings, fallback: string): string {
-  return builtInStructuredReviewer(settings.visualQaAgentCommand.trim())
-    ?? builtInStructuredReviewer(fallback)
+const STRUCTURED_REVIEWER_FALLBACKS = ["claude", "codex", "codebuddy"] as const;
+
+/**
+ * Resolves the structured Visual QA / Workspace reviewer command.
+ *
+ * When `avoidProviderId` is set (generated Research), never return that same
+ * principal — CodeBuddy project agents previously collided with an empty
+ * visualQaAgentCommand fallback and failed the whole first turn.
+ */
+export function reviewerAgentCommand(
+  settings: Settings,
+  fallback: string,
+  avoidProviderId: string | null = null,
+): string {
+  const tryCommand = (command: string): string | null => {
+    const trimmed = command.trim();
+    if (!trimmed) return null;
+    const providerId = builtInStructuredReviewer(trimmed);
+    if (providerId === null) return null;
+    if (avoidProviderId !== null && providerId === avoidProviderId) return null;
+    return trimmed;
+  };
+  return tryCommand(settings.visualQaAgentCommand)
+    ?? tryCommand(fallback)
+    ?? STRUCTURED_REVIEWER_FALLBACKS.map((command) => tryCommand(command)).find((command) => command !== null)
     ?? "claude";
 }
 
@@ -121,12 +143,20 @@ export function reviewerModel(
   settings: Settings,
   fallback?: string,
   fallbackCommand: string = settings.agentCommand,
+  avoidProviderId: string | null = null,
 ): string | undefined {
-  const command = reviewerAgentCommand(settings, fallbackCommand);
-  const configuredCommand = builtInStructuredReviewer(settings.visualQaAgentCommand.trim());
+  const command = reviewerAgentCommand(settings, fallbackCommand, avoidProviderId);
+  const configuredCommand = settings.visualQaAgentCommand.trim();
   const configuredModel = settings.visualQaModel.trim();
-  if (configuredCommand === command && configuredModel) return configuredModel;
-  if (builtInStructuredReviewer(fallbackCommand) !== command) return undefined;
+  const configuredProvider = builtInStructuredReviewer(configuredCommand);
+  const resolvedProvider = builtInStructuredReviewer(command);
+  if (configuredProvider !== null
+    && configuredProvider === resolvedProvider
+    && configuredCommand === command
+    && configuredModel) {
+    return configuredModel;
+  }
+  if (builtInStructuredReviewer(fallbackCommand) !== resolvedProvider) return undefined;
   return fallback || settings.model || undefined;
 }
 

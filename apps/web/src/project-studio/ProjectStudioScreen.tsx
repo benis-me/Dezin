@@ -843,6 +843,10 @@ export function ProjectStudioScreen({
         initialTurnAttemptedRef.current = true;
         if (pendingTurn.supersededByTurnId === undefined) {
           studio.setWorkspaceAgentDraft((current) => current.trim() ? current : pendingTurn.brief);
+          const deliveryError = studio.workspaceAgentOutbox.delivery.error?.trim()
+            || studio.workspaceAgentError?.trim()
+            || "The first Workspace Agent turn failed before a Proposal was created.";
+          recordAttachmentError("workspace", deliveryError);
         }
       }
       return;
@@ -1015,6 +1019,7 @@ export function ProjectStudioScreen({
     studio.setWorkspaceAgentDraft,
     studio.submitWorkspaceAgentPrompt,
     studio.workspaceAgentDraft,
+    studio.workspaceAgentError,
     studio.workspaceAgentOutbox,
   ]);
 
