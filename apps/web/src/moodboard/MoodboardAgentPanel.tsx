@@ -531,9 +531,6 @@ function serializeMoodboardComposerContext(items: AgentComposerContextItem[]): s
         sections.push(`Reference moodboards: ${moodboards.map((board) => `${board.name ?? board.title} (${board.moodboardId})`).join(", ")}`);
         break;
       }
-      case "preview-target":
-        sections.push(`Selected preview element: ${item.title}${item.subtitle ? ` (${item.subtitle})` : ""}`);
-        break;
       case "text-context":
         sections.push(`${item.title}:\n${item.body}`);
         break;

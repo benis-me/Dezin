@@ -1,44 +1,12 @@
 #!/usr/bin/env node
-// dezin-probe — a dedicated CLI the Sharingan build Agent uses to drive the capture browser and read
-// the captured bundle, INSTEAD of hand-writing curl/python. `BASE` is baked in when this file is
-// copied into a project's .sharingan/ ; the daemon token comes from the environment. Run as:
-//   node .sharingan/probe.mjs <command> [args]
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+// dezin-probe — an offline-only reader embedded in immutable Sharingan capture revisions.
+import { readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const BASE = "__BASE__";
-const RUN_ID = "__RUN_ID__";
-const IMMUTABLE_CAPTURE = "__IMMUTABLE_CAPTURE__";
-const TOKEN = process.env.DEZIN_DAEMON_TOKEN || "";
-
-function fail(msg) {
-  console.error(msg);
+function fail(message) {
+  console.error(message);
   process.exit(1);
-}
-
-async function api(method, endpoint, body) {
-  const res = await fetch(BASE + endpoint, {
-    method,
-    headers: {
-      "x-dezin-daemon-token": TOKEN,
-      ...(RUN_ID ? { "x-dezin-run-id": RUN_ID } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = text;
-  }
-  return { status: res.status, body: parsed };
-}
-
-function print(result) {
-  console.log(typeof result.body === "string" ? result.body : JSON.stringify(result.body, null, 2));
 }
 
 // Condense a captured nested dom.json into a compact indented tree, so the Agent reads THIS instead
@@ -750,13 +718,7 @@ function sourceRegionPlan(page, manifest, data, captureIdentity) {
   };
 }
 
-function sourceScaffold(outputMode = ".sharingan") {
-  if (IMMUTABLE_CAPTURE && outputMode !== "--stdout") {
-    fail("immutable source-scaffold requires exactly --stdout and cannot write either pinned root");
-  }
-  if (outputMode !== ".sharingan" && outputMode !== "--stdout") {
-    fail("source-scaffold accepts only --stdout for immutable Tasks (omit it only for legacy mutable Runs)");
-  }
+function sourceScaffold() {
   const pagesSnapshot = capturedJsonSnapshot(join(".sharingan", "pages.json"), "captured pages manifest");
   const manifest = pagesSnapshot.value;
   const page = manifestEntryPage(manifest);
@@ -894,294 +856,48 @@ function sourceScaffold(outputMode = ".sharingan") {
     assetsSnapshot,
     ...screenshotSnapshots,
   ]);
-  if (outputMode === "--stdout") {
-    const output = JSON.stringify({
-      protocol: "dezin.sharingan-source-scaffold.v1",
-      source: data,
-      regionPlan,
-    });
-    if (Buffer.byteLength(output, "utf8") > 8 * 1024 * 1024) {
-      fail("source-scaffold output exceeds the immutable 8 MiB bound");
-    }
-    process.stdout.write(`${output}\n`);
-    return;
+  const output = JSON.stringify({
+    protocol: "dezin.sharingan-source-scaffold.v1",
+    source: data,
+    regionPlan,
+  });
+  if (Buffer.byteLength(output, "utf8") > 8 * 1024 * 1024) {
+    fail("source-scaffold output exceeds the immutable 8 MiB bound");
   }
-
-  const outputRoot = ".sharingan";
-  const scaffoldDir = join(outputRoot, "source-scaffold");
-  mkdirSync(scaffoldDir, { recursive: true });
-  writeFileSync(join(outputRoot, "region-plan.json"), JSON.stringify(regionPlan, null, 2));
-  writeFileSync(
-    join(scaffoldDir, "App.jsx"),
-    `// SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY.
-// This measured replay is source material for rebuilding the real Standard app in src/.
-// Do not submit this replay unchanged as the final Standard app.
-const SOURCE = ${JSON.stringify(data, null, 2)};
-
-function boxStyle(item) {
-  return {
-    left: item.box.x,
-    top: item.box.y,
-    width: item.box.w,
-    height: item.box.h,
-    backgroundColor: item.backgroundColor,
-    backgroundImage: item.backgroundImage && item.backgroundImage !== "none" ? item.backgroundImage : undefined,
-    borderRadius: item.borderRadius,
-    boxShadow: item.boxShadow,
-    opacity: Number(item.opacity || 1),
-  };
+  process.stdout.write(`${output}\n`);
 }
 
-function imageStyle(item) {
-  return {
-    left: item.box.x,
-    top: item.box.y,
-    width: item.box.w,
-    height: item.box.h,
-    objectFit: item.objectFit || "cover",
-    borderRadius: item.borderRadius,
-    opacity: Number(item.opacity || 1),
-  };
-}
-
-function vectorStyle(item) {
-  return {
-    left: item.box.x,
-    top: item.box.y,
-    width: item.box.w,
-    height: item.box.h,
-    opacity: Number(item.opacity || 1),
-  };
-}
-
-function textJustify(value) {
-  if (value === "center") return "center";
-  if (value === "right" || value === "end") return "flex-end";
-  return "flex-start";
-}
-
-function textStyle(item) {
-  const lines = Math.max(1, Number(item.lines || 1));
-  return {
-    left: item.box.x,
-    top: item.box.y,
-    width: item.box.w,
-    height: item.box.h,
-    color: item.color,
-    fontSize: item.fontSize,
-    fontWeight: item.fontWeight,
-    lineHeight: item.lineHeight,
-    letterSpacing: item.letterSpacing,
-    textAlign: item.textAlign,
-    "--source-lines": lines,
-    ...(lines <= 1 ? { justifyContent: textJustify(item.textAlign) } : {}),
-  };
-}
-
-export default function App() {
-  return (
-    <main className="sharingan-root" aria-label={SOURCE.pageUrl}>
-      <div className="sharingan-stage" style={{ width: SOURCE.document.width, height: SOURCE.document.height }}>
-        {SOURCE.boxes.map((item, index) => (
-          <div key={"box-" + index} className="source-box" style={boxStyle(item)} />
-        ))}
-        {SOURCE.images.map((item, index) =>
-          item.src ? (
-            <img key={"img-" + index} className="source-image" src={item.src} alt={item.alt || ""} style={imageStyle(item)} />
-          ) : (
-            <div key={"img-" + index} className="source-image source-missing" style={imageStyle(item)} />
-          ),
-        )}
-        {(SOURCE.vectors || []).map((item, index) => (
-          <div key={"vector-" + index} className="source-vector" style={vectorStyle(item)} dangerouslySetInnerHTML={{ __html: item.html }} />
-        ))}
-        {SOURCE.texts.map((item, index) => (
-          <div key={"text-" + index} className="source-text" data-lines={item.lines || 1} style={textStyle(item)}>
-            {item.text}
-          </div>
-        ))}
-      </div>
-    </main>
-  );
-}
-`,
-  );
-  writeFileSync(
-    join(scaffoldDir, "index.css"),
-    `:root {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: rgb(245, 245, 245);
-  background: rgb(0, 0, 0);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  width: 100%;
-  min-height: 100%;
-  margin: 0;
-  background: rgb(0, 0, 0);
-}
-
-body {
-  overflow-x: auto;
-}
-
-.sharingan-root {
-  width: 100%;
-  min-height: 100vh;
-  background: rgb(0, 0, 0);
-}
-
-.sharingan-stage {
-  position: relative;
-  overflow: hidden;
-  background: rgb(15, 15, 15);
-  transform-origin: top left;
-}
-
-.source-box,
-.source-image,
-.source-text {
-  position: absolute;
-}
-
-.source-image {
-  display: block;
-  overflow: hidden;
-}
-
-.source-vector {
-  position: absolute;
-  overflow: visible;
-  pointer-events: none;
-}
-
-.source-vector svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.source-missing {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.source-text {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: var(--source-lines, 1);
-  white-space: normal;
-  overflow-wrap: anywhere;
-  text-overflow: ellipsis;
-}
-
-.source-text[data-lines="1"] {
-  display: flex;
-  align-items: center;
-  white-space: nowrap;
-  overflow-wrap: normal;
-}
-
-@media (max-width: 700px) {
-  body {
-    overflow-x: hidden;
-  }
-
-  .sharingan-stage {
-    transform: scale(0.27);
-  }
-}
-`,
-  );
-  console.log(`SOURCE SCAFFOLD wrote ${outputRoot}/source-scaffold/App.jsx and ${outputRoot}/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes, plus ${outputRoot}/region-plan.json.`);
-}
-
-const HELP = `dezin-probe — drive the Sharingan capture browser + read the capture (no curl/python needed).
+const HELP = `dezin-probe — read an immutable Sharingan capture offline.
 Usage: node .sharingan/probe.mjs <command> [args]
 
   source-summary        one bounded source digest: component inventory + tokens + key text + assets
   source-scaffold --stdout
-                        immutable: print bounded measured SOURCE + region-plan JSON without writes
-                        omit --stdout only for legacy mutable Runs
-  navigate <url>        open a URL in the live capture browser
-  read-dom              visible DOM nodes (tag/role/text/box) as JSON
-  styles                computed style tokens (colors / fonts / radii / shadows)
-  links                 same-origin links discovered on the current page
-  click <selector>      click an element
-  scroll <y>            scroll to a Y offset (px)
-  capture [url]         capture the current (or given) page into .sharingan/
-  outline [dom.json]    condensed indented tree of a captured page — READ THIS instead of parsing dom.json
+                        print bounded measured SOURCE + region-plan JSON without writes
+  outline [dom.json]    condensed indented tree of a captured page
   render-map [render-map.json] browser-measured layout rows from a captured page`;
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
-  if (IMMUTABLE_CAPTURE) {
-    if (cmd === "source-summary" || cmd === "summary") {
-      if (args.length !== 0) fail("immutable source-summary accepts no arguments");
-      return sourceSummary();
-    }
-    if (cmd === "source-scaffold" || cmd === "scaffold") {
-      if (args.length !== 1 || args[0] !== "--stdout") {
-        fail("immutable source-scaffold requires exactly --stdout and cannot write either pinned root");
-      }
-      return sourceScaffold("--stdout");
-    }
-    if (cmd === "outline") {
-      if (args.length > 1) fail("immutable outline accepts at most one captured DOM path");
-      return outline(args[0]);
-    }
-    if (cmd === "render-map") {
-      if (args.length > 1) fail("immutable render-map accepts at most one captured render-map path");
-      return renderMap(args[0]);
-    }
-    if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return void console.log(HELP);
-    fail("immutable Sharingan probe allows only offline source-summary, source-scaffold --stdout, outline, and render-map reads");
+  if (cmd === "source-summary" || cmd === "summary") {
+    if (args.length !== 0) fail("immutable source-summary accepts no arguments");
+    return sourceSummary();
   }
-  if (cmd === "source-summary" || cmd === "summary") return sourceSummary();
-  if (cmd === "source-scaffold" || cmd === "scaffold") return sourceScaffold(args[0]);
-  if (cmd === "outline") return outline(args[0]);
-  if (cmd === "render-map") return renderMap(args[0]);
+  if (cmd === "source-scaffold" || cmd === "scaffold") {
+    if (args.length !== 1 || args[0] !== "--stdout") {
+      fail("immutable source-scaffold requires exactly --stdout and cannot write captured files");
+    }
+    return sourceScaffold();
+  }
+  if (cmd === "outline") {
+    if (args.length > 1) fail("immutable outline accepts at most one captured DOM path");
+    return outline(args[0]);
+  }
+  if (cmd === "render-map") {
+    if (args.length > 1) fail("immutable render-map accepts at most one captured render-map path");
+    return renderMap(args[0]);
+  }
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return void console.log(HELP);
-  if (!BASE || BASE === "__BASE__" || !TOKEN) fail("dezin-probe: not in a Sharingan run (base/token missing).");
-  switch (cmd) {
-    case "navigate":
-      if (!args[0]) fail("usage: navigate <url>");
-      print(await api("POST", "/navigate", { url: args[0] }));
-      break;
-    case "read-dom":
-      print(await api("GET", "/read-dom"));
-      break;
-    case "styles":
-    case "computed-styles":
-      print(await api("GET", "/computed-styles"));
-      break;
-    case "links":
-      print(await api("GET", "/links"));
-      break;
-    case "click":
-      if (!args[0]) fail("usage: click <selector>");
-      print(await api("POST", "/click", { selector: args[0] }));
-      break;
-    case "scroll": {
-      const y = Number(args[0]);
-      if (!Number.isFinite(y)) fail("usage: scroll <y-offset-number>");
-      print(await api("POST", "/scroll", { y }));
-      break;
-    }
-    case "capture":
-      if (args[0] && !/^https?:\/\//i.test(args[0])) fail("capture: url must start with http(s):// (or omit it to capture the current page)");
-      print(await api("POST", "/capture", args[0] ? { url: args[0] } : undefined));
-      break;
-    default:
-      fail(`unknown command: ${cmd}\n\n${HELP}`);
-  }
+  fail("immutable Sharingan probe allows only offline source-summary, source-scaffold --stdout, outline, and render-map reads");
 }
 
 main().catch((e) => fail("dezin-probe error: " + (e && e.message ? e.message : e)));

@@ -12,10 +12,10 @@ test("bundle module policy allows editor code only behind dynamic imports", () =
       modules: ["src/screens/SettingsScreen.tsx"],
     },
     {
-      file: "assets/workspace.js",
+      file: "assets/design-canvas.js",
       isEntry: false,
       imports: ["assets/index.js"],
-      modules: ["src/screens/WorkspaceScreen.tsx"],
+      modules: ["src/design-canvas/DesignCanvasScreen.tsx"],
     },
   ]));
 });
@@ -27,10 +27,10 @@ test("bundle module policy catches editor source folded into an initial chunk", 
         file: "assets/index.js",
         isEntry: true,
         imports: [],
-        modules: ["src/main.tsx", "src/screens/WorkspaceScreen.tsx"],
+        modules: ["src/main.tsx", "src/design-canvas/DesignCanvasScreen.tsx"],
       },
     ]),
-    /HomeScreen.*contains.*WorkspaceScreen/i,
+    /HomeScreen.*contains.*DesignCanvasScreen/i,
   );
 });
 
@@ -73,13 +73,12 @@ test("bundle module policy keeps React Flow outside Home and Settings dependency
   assert.throws(() => assertLazyEditorModulesStayLazy(graph), /SettingsScreen.*xyflow/i);
 });
 
-test("bundle module policy keeps every Project Studio capability outside Home and Settings", () => {
+test("bundle module policy keeps every Design Canvas capability outside Home and Settings", () => {
   for (const moduleId of [
-    "src/project-studio/ProjectStudioScreen.tsx",
-    "src/project-studio/resource/ResourceEditorSurface.tsx",
-    "src/project-studio/research/ResearchResourceViewer.tsx",
-    "src/project-studio/flow/PrototypeFlowViewer.tsx",
-    "src/project-studio/artifact/ArtifactVersions.tsx",
+    "src/design-canvas/DesignCanvasScreen.tsx",
+    "src/design-canvas/DesignCanvasNode.tsx",
+    "src/design-canvas/FloatingNodeAgent.tsx",
+    "src/design-canvas/useDesignCanvas.ts",
   ]) {
     assert.throws(
       () => assertLazyEditorModulesStayLazy([
@@ -90,7 +89,7 @@ test("bundle module policy keeps every Project Studio capability outside Home an
           modules: ["src/main.tsx", moduleId],
         },
       ]),
-      /HomeScreen.*project-studio/i,
+      /HomeScreen.*design-canvas/i,
     );
 
     assert.throws(
@@ -103,7 +102,7 @@ test("bundle module policy keeps every Project Studio capability outside Home an
           modules: ["src/screens/SettingsScreen.tsx", moduleId],
         },
       ]),
-      /SettingsScreen.*project-studio/i,
+      /SettingsScreen.*design-canvas/i,
     );
   }
 });

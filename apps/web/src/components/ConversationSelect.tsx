@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { Check, ChevronDown, MessageSquare, Pencil, Plus, Trash2 } from "lucide-react";
-import type { Conversation } from "../lib/api.ts";
 import { Input, Popover, PopoverContent, PopoverTrigger, ScrollArea } from "./ui/index.ts";
 
-type ConversationOption = Pick<Conversation, "id" | "title" | "createdAt" | "turns">;
+interface ConversationOption {
+  id: string;
+  title: string;
+  createdAt: number;
+  turns?: number;
+}
 
 function relTime(ts: number): string {
   const diff = Date.now() - ts;

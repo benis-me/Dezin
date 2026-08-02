@@ -32,19 +32,16 @@ test("POST /api/prompts/optimize returns an optimized prompt from the injected o
           prompt: "make a cool shader site",
           agentCommand: "codebuddy",
           model: "hunyuan",
-          mode: "standard",
-          skillId: "frontend-design",
-          designSystemId: "modern-minimal",
         }),
       });
 
       assert.equal(res.status, 200);
-      assert.deepEqual(await res.json(), { prompt: "Create a finished Standard-mode shader microsite..." });
+      assert.deepEqual(await res.json(), { prompt: "Create a finished shader canvas node..." });
     },
     {
       promptOptimizer: async (input) => {
         calls.push(input);
-        return "Create a finished Standard-mode shader microsite...";
+        return "Create a finished shader canvas node...";
       },
     } as Partial<AppDeps>,
   );
@@ -54,9 +51,9 @@ test("POST /api/prompts/optimize returns an optimized prompt from the injected o
   assert.equal(call.prompt, "make a cool shader site");
   assert.equal(call.agentCommand, "codebuddy");
   assert.equal(call.model, "hunyuan");
-  assert.equal(call.mode, "standard");
-  assert.equal(call.skillId, "frontend-design");
-  assert.equal(call.designSystemId, "modern-minimal");
+  assert.equal("mode" in call, false);
+  assert.equal("skillId" in call, false);
+  assert.equal("designSystemId" in call, false);
   assert.equal(typeof call.cwd, "string");
 });
 
@@ -82,9 +79,6 @@ test("optimizePrompt asset rules allow real local, open-source, and sourced onli
   const prompt = await optimizePrompt({
     prompt: "Use shadcn, @fontsource, lucide icons, and my local ./refs/home.png screenshot.",
     agentCommand: command,
-    mode: "standard",
-    skillId: "frontend-design",
-    designSystemId: "modern-minimal",
     cwd: dir,
   });
 

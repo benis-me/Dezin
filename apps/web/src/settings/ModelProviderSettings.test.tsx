@@ -13,7 +13,6 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     apiBaseUrl: "",
     apiKey: "",
     apiKeyConfigured: false,
-    defaultDesignSystemId: "clean",
     customInstructions: "",
     imageApiBaseUrl: "",
     imageApiKey: "",
@@ -46,13 +45,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
         organization: "",
       },
     }),
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
     ...overrides,
   };
 }

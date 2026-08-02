@@ -1,21 +1,20 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { test } from "node:test";
+
 import { Store, type StoreClock } from "../src/store.ts";
 import { asProject } from "../src/store-codecs.ts";
-import { STORE_SCHEMA, migrateStoreSchema } from "../src/store-schema.ts";
 
-/** Deterministic clock so tests don't depend on wall time / random uuids. */
 function fakeClock(): StoreClock {
-  let t = 1_000;
-  let n = 0;
+  let time = 1_000;
+  let id = 0;
   return {
-    now: () => (t += 1),
-    id: () => `id-${++n}`,
+    now: () => ++time,
+    id: () => `id-${++id}`,
   };
 }
 
@@ -23,541 +22,214 @@ function freshStore(): Store {
   return new Store(":memory:", fakeClock());
 }
 
-test("store schema and codecs are independently reusable", () => {
-  const db = new DatabaseSync(":memory:");
-  db.exec(STORE_SCHEMA);
-  migrateStoreSchema(db);
-  const runColumns = db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
-  assert.ok(runColumns.some((column) => column.name === "owner_id"));
-  assert.deepEqual(
-    asProject({
-      id: "p1",
-      name: "Project",
-      skill_id: null,
-      design_system_id: "modern-minimal",
-      mode: "standard",
-      sharingan: 1,
-      source_url: "https://example.com",
-      created_at: 1,
-      updated_at: 2,
-      archived_at: null,
-    }),
-    {
-      id: "p1",
-      name: "Project",
-      skillId: null,
-      designSystemId: "modern-minimal",
-      mode: "standard",
-      sharingan: true,
-      sourceUrl: "https://example.com",
-      createdAt: 1,
-      updatedAt: 2,
-      archivedAt: null,
-    },
-  );
-  db.close();
-});
-
-test("project CRUD round-trips", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "Landing", designSystemId: "modern-minimal" });
-  assert.equal(p.id, "id-1");
-  assert.equal(p.name, "Landing");
-  assert.equal(p.designSystemId, "modern-minimal");
-  assert.equal(p.skillId, null);
-
-  assert.deepEqual(s.getProject(p.id), p);
-  assert.equal(s.listProjects().length, 1);
-
-  const updated = s.updateProject(p.id, { name: "Landing v2", skillId: "frontend-design" });
-  assert.equal(updated.name, "Landing v2");
-  assert.equal(updated.skillId, "frontend-design");
-  assert.ok(updated.updatedAt > p.updatedAt);
-
-  s.deleteProject(p.id);
-  assert.equal(s.getProject(p.id), null);
-  assert.equal(s.listProjects().length, 0);
-  s.close();
-});
-
-test("updateMessage replaces a message's content in place (not a new row)", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id, "Chat");
-  const m = s.addMessage(c.id, "system", JSON.stringify({ research: { status: "running", activities: [] } }));
-  s.updateMessage(m.id, JSON.stringify({ research: { status: "running", activities: [{ kind: "search", text: "x", track: "product" }] } }));
-  const msgs = s.listMessages(c.id);
-  assert.equal(msgs.length, 1);
-  assert.match(msgs[0]!.content, /"text":"x"/);
-});
-
-test("conversations + messages preserve order", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id, "Chat");
-  assert.equal(c.projectId, p.id);
-
-  s.addMessage(c.id, "user", "make me a pricing page");
-  s.addMessage(c.id, "assistant", "on it");
-  const msgs = s.listMessages(c.id);
-  assert.equal(msgs.length, 2);
-  assert.equal(msgs[0]?.role, "user");
-  assert.equal(msgs[1]?.content, "on it");
-  assert.deepEqual(
-    s.listConversations(p.id).map((x) => x.id),
-    [c.id],
-  );
-  s.close();
-});
-
-test("run lifecycle: pending → running → succeeded", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const run = s.createRun(p.id, c.id);
-  assert.equal(run.status, "pending");
-  assert.equal(run.lintPassed, false);
-  assert.equal(run.finishedAt, null);
-
-  s.updateRun(run.id, { status: "running" });
-  assert.equal(s.getRun(run.id)?.status, "running");
-
-  const done = s.updateRun(run.id, {
-    status: "succeeded",
-    repairRounds: 1,
-    lintPassed: true,
-    finishedAt: 9_999,
-  });
-  assert.equal(done.status, "succeeded");
-  assert.equal(done.repairRounds, 1);
-  assert.equal(done.lintPassed, true);
-  assert.equal(done.finishedAt, 9_999);
-  assert.equal(done.score, null);
-  s.close();
-});
-
-test("terminalizeRun preserves the first terminal status and patch", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const run = s.createRun(p.id, c.id);
-  s.updateRun(run.id, { status: "running" });
-
-  const cancelled = s.terminalizeRun(run.id, "cancelled", {
-    repairRounds: 2,
-    finishedAt: 2_000,
-  });
-  const lateSuccess = s.terminalizeRun(run.id, "succeeded", {
-    repairRounds: 3,
-    lintPassed: true,
-    score: 100,
-    finishedAt: 3_000,
-  });
-
-  assert.equal(cancelled.changed, true);
-  assert.equal(cancelled.run.status, "cancelled");
-  assert.equal(cancelled.run.repairRounds, 2);
-  assert.equal(cancelled.run.finishedAt, 2_000);
-  assert.equal(lateSuccess.changed, false);
-  assert.equal(lateSuccess.run.status, "cancelled");
-  assert.equal(lateSuccess.run.repairRounds, 2);
-  assert.equal(lateSuccess.run.lintPassed, false);
-  assert.equal(lateSuccess.run.score, null);
-  assert.equal(lateSuccess.run.finishedAt, 2_000);
-  s.close();
-});
-
-test("Store configures a busy timeout for concurrent sqlite writers", () => {
-  const s = freshStore();
-  const row = s.db.prepare("PRAGMA busy_timeout").get() as Record<string, unknown>;
-  assert.equal(Number(Object.values(row)[0]), 5000);
-  s.close();
-});
-
-test("markInterruptedRuns only sweeps runs owned by this daemon", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const own = s.createRun(p.id, c.id, undefined, undefined, "daemon-a");
-  const other = s.createRun(p.id, c.id, undefined, undefined, "daemon-b");
-  s.updateRun(own.id, { status: "running" });
-  s.updateRun(other.id, { status: "running" });
-
-  const swept = s.markInterruptedRuns("daemon-a");
-  assert.equal(swept.length, 1);
-  assert.equal(swept[0]?.id, own.id);
-  assert.equal(swept[0]?.conversationId, c.id); // caller persists a terminal message for these
-  assert.equal(s.getRun(own.id)?.status, "cancelled");
-  assert.equal(s.getRun(other.id)?.status, "running");
-  s.close();
-});
-
-test("Store migrates a pre-existing runs table that lacks the score column", () => {
-  const file = join(mkdtempSync(join(tmpdir(), "dezin-mig-")), "old.db");
-  const old = new DatabaseSync(file);
-  old.exec(`
-    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, skill_id TEXT, design_system_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-    CREATE TABLE conversations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT, created_at INTEGER NOT NULL);
-    CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, conversation_id TEXT NOT NULL, status TEXT NOT NULL, repair_rounds INTEGER NOT NULL DEFAULT 0, lint_passed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, finished_at INTEGER);
-  `);
-  old.close();
-
-  const s = new Store(file); // constructor runs the migration
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const r = s.createRun(p.id, c.id);
-  const done = s.updateRun(r.id, { status: "succeeded", score: 88 });
-  assert.equal(done.score, 88);
-  s.close();
-});
-
-test("updateRun persists a quality score; listRuns is newest-first", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const r1 = s.createRun(p.id, c.id);
-  s.updateRun(r1.id, { status: "succeeded", score: 92, lintPassed: true });
-  const r2 = s.createRun(p.id, c.id);
-  s.updateRun(r2.id, { status: "succeeded", score: 100 });
-
-  assert.equal(s.getRun(r1.id)?.score, 92);
-  const runs = s.listRuns(p.id);
-  assert.equal(runs.length, 2);
-  assert.equal(runs[0]?.id, r2.id); // newest first
-  assert.equal(runs[0]?.score, 100);
-  assert.equal(runs[1]?.score, 92);
-  s.close();
-});
-
-test("updateRun persists final quality findings", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  const r = s.createRun(p.id, c.id);
-  s.updateRun(r.id, {
-    status: "succeeded",
-    score: 94,
-    lintPassed: true,
-    findings: [{ severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." }],
-  });
-
-  const run = s.getRun(r.id)!;
-  assert.equal(run.findings.length, 1);
-  assert.equal(run.findings[0]?.id, "raw-hex");
-  assert.equal(s.listRuns(p.id)[0]?.findings[0]?.message, "2 raw hex values outside :root.");
-  s.close();
-});
-
-test("artifacts record per project, newest first", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  s.recordArtifact(p.id, "index.html", true);
-  s.recordArtifact(p.id, "about.html", false);
-  const arts = s.listArtifacts(p.id);
-  assert.equal(arts.length, 2);
-  assert.equal(arts[0]?.path, "about.html"); // newest first
-  assert.equal(arts[0]?.lintPassed, false);
-  assert.equal(arts[1]?.lintPassed, true);
-  s.close();
-});
-
-test("foreign key cascade deletes children with the project", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  s.addMessage(c.id, "user", "hi");
-  s.createRun(p.id, c.id);
-  s.recordArtifact(p.id, "index.html", true);
-
-  s.deleteProject(p.id);
-  assert.equal(s.listConversations(p.id).length, 0);
-  assert.equal(s.listMessages(c.id).length, 0);
-  assert.equal(s.listArtifacts(p.id).length, 0);
-  s.close();
-});
-
-test("listMessages keeps insertion order when created_at ties (rowid tiebreak)", () => {
-  // ids that sort OPPOSITE to insertion order — only a rowid tiebreak yields insertion order.
-  let n = 0;
-  const s = new Store(":memory:", { now: () => 1000, id: () => `z-${(1000 - ++n).toString().padStart(4, "0")}` });
-  const p = s.createProject({ name: "P" });
-  const c = s.createConversation(p.id);
-  ["a", "b", "c"].forEach((t) => s.addMessage(c.id, "user", t));
-  assert.deepEqual(
-    s.listMessages(c.id).map((m) => m.content),
-    ["a", "b", "c"],
-  );
-  s.close();
-});
-
-test("settings: defaults, round-trip, and partial merge", () => {
-  const s = freshStore();
-  const d = s.getSettings();
-  assert.equal(d.agentCommand, "claude");
-  assert.equal(d.defaultDesignSystemId, "modern-minimal");
-  assert.equal(d.model, "");
-  assert.equal(d.visualQaEnabled, false);
-  assert.equal(d.visualQaAgentCommand, "");
-  assert.equal(d.visualQaModel, "");
-  assert.equal(d.researchAgentCommand, "");
-  assert.equal(d.researchModel, "");
-  assert.equal(d.autoImproveEnabled, true);
-  assert.equal(d.autoImproveMaxRounds, 8);
-  assert.equal(d.videoModel, "");
-
-  const u = s.updateSettings({
-    agentCommand: "codex",
-    model: "o3",
-    customInstructions: "be terse",
-    videoModel: "sora",
-    visualQaEnabled: true,
-    visualQaAgentCommand: "codebuddy",
-    visualQaModel: "hunyuan",
-    researchAgentCommand: "codex",
-    researchModel: "o4",
-    autoImproveEnabled: false,
-    autoImproveMaxRounds: 5,
-  });
-  assert.equal(u.agentCommand, "codex");
-  assert.equal(u.model, "o3");
-  assert.equal(s.getSettings().customInstructions, "be terse");
-  assert.equal(s.getSettings().videoModel, "sora");
-  assert.equal(s.getSettings().visualQaEnabled, true);
-  assert.equal(s.getSettings().visualQaAgentCommand, "codebuddy");
-  assert.equal(s.getSettings().visualQaModel, "hunyuan");
-  assert.equal(s.getSettings().researchAgentCommand, "codex");
-  assert.equal(s.getSettings().researchModel, "o4");
-  assert.equal(s.getSettings().autoImproveEnabled, false);
-  assert.equal(s.getSettings().autoImproveMaxRounds, 5);
-
-  // a partial update only changes the given fields
-  s.updateSettings({ model: "o4" });
-  const after = s.getSettings();
-  assert.equal(after.model, "o4");
-  assert.equal(after.agentCommand, "codex");
-  assert.equal(after.customInstructions, "be terse");
-  assert.equal(after.videoModel, "sora");
-  assert.equal(after.visualQaEnabled, true);
-  assert.equal(after.visualQaAgentCommand, "codebuddy");
-  assert.equal(after.visualQaModel, "hunyuan");
-  assert.equal(after.autoImproveEnabled, false);
-  assert.equal(after.autoImproveMaxRounds, 5);
-  s.close();
-});
-
-test("autoFixLiveRuntimeErrors round-trips through settings", () => {
-  const s = freshStore();
-  assert.equal(s.getSettings().autoFixLiveRuntimeErrors, false);
-  s.updateSettings({ autoFixLiveRuntimeErrors: true });
-  assert.equal(s.getSettings().autoFixLiveRuntimeErrors, true);
-  s.close();
-});
-
-test("settings persist the sharinganAffirmed flag (default false)", () => {
-  const store = new Store(":memory:");
-  try {
-    assert.equal(store.getSettings().sharinganAffirmed, false);
-    const updated = store.updateSettings({ sharinganAffirmed: true });
-    assert.equal(updated.sharinganAffirmed, true);
-    assert.equal(store.getSettings().sharinganAffirmed, true);
-  } finally {
-    store.close();
+test("SQLite schema has no retired Design proposal, task, run, artifact, or variant families", () => {
+  const store = freshStore();
+  const tables = new Set((store.db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table'",
+  ).all() as Array<{ name: string }>).map((row) => row.name));
+  for (const retired of [
+    "artifacts",
+    "artifact_revisions",
+    "artifact_tracks",
+    "context_packs",
+    "conversations",
+    "generation_plans",
+    "generation_tasks",
+    "messages",
+    "runs",
+    "variants",
+    "workspace_artifacts",
+    "workspace_proposals",
+  ]) {
+    assert.equal(tables.has(retired), false, `${retired} must not survive the rebuild`);
   }
-});
-
-test("moodboards persist nodes, assets, and messages", () => {
-  const s = freshStore();
-  const board = s.createMoodboard({ name: "Launch references" });
-  assert.equal(board.id, "id-1");
-  assert.equal(s.listMoodboards().length, 1);
-
-  const asset = s.createMoodboardAsset(board.id, {
-    kind: "image",
-    fileName: "hero.png",
-    mimeType: "image/png",
-    width: 1200,
-    height: 800,
-    source: "upload",
-  });
-  assert.equal(asset.boardId, board.id);
-  assert.equal(s.getMoodboard(board.id)?.coverAssetId, asset.id);
-
-  const nodes = s.replaceMoodboardNodes(board.id, [
-    { type: "section", x: 0, y: 0, width: 400, height: 260, data: { title: "Direction" } },
-    {
-      type: "image-generator",
-      x: 16,
-      y: 24,
-      width: 360,
-      height: 240,
-      zIndex: 1,
-      data: { generatorPrompt: "Soft studio references", generatorStatus: "ready" },
-    },
-    { type: "image", x: 24, y: 48, width: 320, height: 213, zIndex: 2, data: { assetId: asset.id } },
-  ]);
-  assert.equal(nodes.length, 3);
-  assert.equal(nodes[0]?.type, "section");
-  assert.equal(nodes[1]?.type, "image-generator");
-  assert.equal(nodes[1]?.data.generatorStatus, "ready");
-  assert.equal(nodes[2]?.data.assetId, asset.id);
-
-  const msg = s.addMoodboardMessage(board.id, "user", "Collect softer references");
-  assert.equal(msg.content, "Collect softer references");
-  assert.equal(s.listMoodboardMessages(board.id).length, 1);
-  assert.equal(s.listMoodboardConversations(board.id).length, 1);
-
-  s.setMoodboardArchived(board.id, true);
-  assert.ok(s.getMoodboard(board.id)?.archivedAt);
-  s.deleteMoodboard(board.id);
-  assert.equal(s.getMoodboard(board.id), null);
-  assert.equal(s.listMoodboardNodes(board.id).length, 0);
-  s.close();
-});
-
-test("custom effects persist editable code, parameters, and presets", () => {
-  const s = freshStore();
-  const effect = s.createEffect({
-    name: "Glass ribbon",
-    code: "function renderEffect(ctx, params) { ctx.clearRect(0, 0, params.width, params.height); }",
-    parameters: [{ id: "strength", label: "Strength", type: "number", min: 0, max: 1, step: 0.01, defaultValue: 0.5 }],
-    presets: [{ id: "default", name: "Default", values: { strength: 0.5 } }],
-  });
-
-  assert.equal(effect.id, "id-1");
-  assert.equal(effect.origin, "custom");
-  assert.equal(s.listEffects().length, 1);
-  assert.equal(s.getEffect(effect.id)?.parameters[0]?.id, "strength");
-
-  const updated = s.updateEffect(effect.id, {
-    name: "Glass ribbon v2",
-    code: "function renderEffect(ctx, params) { ctx.fillRect(0, 0, params.width, params.height); }",
-    presets: [
-      { id: "default", name: "Default", values: { strength: 0.5 } },
-      { id: "dense", name: "Dense", values: { strength: 0.9 } },
-    ],
-  });
-  assert.equal(updated.name, "Glass ribbon v2");
-  assert.equal(updated.presets.length, 2);
-  assert.ok(updated.updatedAt > effect.updatedAt);
-
-  s.deleteEffect(effect.id);
-  assert.equal(s.getEffect(effect.id), null);
-  s.close();
-});
-
-test("moodboard conversations isolate messages per board conversation", () => {
-  const s = freshStore();
-  const board = s.createMoodboard({ name: "Material board" });
-  const first = s.ensureMoodboardConversation(board.id);
-  const second = s.createMoodboardConversation(board.id, "Alternate direction");
-
-  s.addMoodboardMessage(board.id, "user", "Explore warm references", first.id);
-  s.addMoodboardMessage(board.id, "assistant", "Use amber lighting.", first.id);
-  s.addMoodboardMessage(board.id, "user", "Explore cooler references", second.id);
-
-  assert.deepEqual(
-    s.listMoodboardMessages(board.id, first.id).map((message) => message.content),
-    ["Explore warm references", "Use amber lighting."],
-  );
-  assert.deepEqual(
-    s.listMoodboardMessages(board.id, second.id).map((message) => message.content),
-    ["Explore cooler references"],
-  );
-  assert.deepEqual(
-    s.listMoodboardConversations(board.id).map((conversation) => [conversation.title, conversation.turns]),
-    [
-      ["Conversation 1", 1],
-      ["Alternate direction", 1],
-    ],
-  );
-  assert.throws(() => s.addMoodboardMessage(board.id, "user", "wrong board", "missing"), /moodboard conversation not found/);
-  s.close();
-});
-
-test("updateRun throws on unknown id", () => {
-  const s = freshStore();
-  assert.throws(() => s.updateRun("nope", { status: "failed" }), /run not found/);
-  s.close();
-});
-
-test("a project persists the sharingan flag and sourceUrl", () => {
-  const store = new Store(":memory:");
-  const p = store.createProject({ name: "clone", mode: "standard", sharingan: true, sourceUrl: "https://example.com" });
-  const read = store.getProject(p.id);
-  assert.equal(read?.sharingan, true);
-  assert.equal(read?.sourceUrl, "https://example.com");
-  const plain = store.createProject({ name: "normal" });
-  assert.equal(store.getProject(plain.id)?.sharingan, false);
+  for (const retained of [
+    "projects",
+    "project_workspaces",
+    "resources",
+    "resource_revisions",
+    "workspace_snapshots",
+    "moodboards",
+    "custom_effects",
+    "settings",
+  ]) assert.equal(tables.has(retained), true);
   store.close();
 });
 
-test("quality ignores: add, list, and remove persist per project", () => {
-  const s = freshStore();
-  const p = s.createProject({ name: "P" });
-  const a = s.addQualityIgnore(p.id, "low-contrast", "p.muted");
-  s.addQualityIgnore(p.id, "cream-palette", null);
-  const list = s.listQualityIgnores(p.id);
-  assert.equal(list.length, 2);
-  assert.ok(list.some((i) => i.ruleId === "low-contrast" && i.selector === "p.muted"));
-  assert.ok(list.some((i) => i.ruleId === "cream-palette" && i.selector === null));
-  s.removeQualityIgnore(a.id);
-  const after = s.listQualityIgnores(p.id);
-  assert.equal(after.length, 1);
-  assert.equal(after[0]!.ruleId, "cream-palette");
-});
-
-test("extension credentials persist only SHA-256 token hashes", () => {
-  const s = freshStore();
-  const rawToken = "dezin_ext_raw-token-must-never-be-persisted";
-  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-
+test("Project codec and CRUD accept Sharingan identities only", () => {
+  const store = freshStore();
   assert.throws(
-    () =>
-      s.createExtensionCredential({
-        tokenHash: rawToken,
-        extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        scopes: ["capture:write"],
-      }),
-    /SHA-256 token hash/,
+    () => (store.createProject as (input: unknown) => unknown)({ name: "ordinary" }),
+    /Sharingan Projects only/,
   );
-
-  const credential = s.createExtensionCredential({
-    tokenHash,
-    extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    scopes: ["capture:write", "image:analyze"],
+  const project = store.createProject({
+    name: " Capture ",
+    sharingan: true,
+    sourceUrl: "https://example.com",
   });
-  const row = s.db.prepare("SELECT * FROM extension_credentials WHERE id = ?").get(credential.id) as Record<string, unknown>;
-  const columns = s.db.prepare("PRAGMA table_info(extension_credentials)").all() as Array<{ name: string }>;
-
-  assert.equal(row.token_hash, tokenHash);
-  assert.equal(JSON.stringify(row).includes(rawToken), false);
-  assert.ok(columns.some((column) => column.name === "token_hash"));
-  assert.ok(!columns.some((column) => column.name === "token"));
-  assert.deepEqual(credential.scopes, ["capture:write", "image:analyze"]);
-  s.close();
+  assert.deepEqual(project, {
+    id: "id-1",
+    name: "Capture",
+    mode: "standard",
+    sharingan: true,
+    sourceUrl: "https://example.com/",
+    createdAt: 1_001,
+    updatedAt: 1_001,
+    archivedAt: null,
+  });
+  assert.deepEqual(asProject({
+    id: "p1",
+    name: "Clone",
+    mode: "standard",
+    sharingan: 1,
+    source_url: "https://source.test/",
+    created_at: 1,
+    updated_at: 2,
+    archived_at: null,
+  }).sourceUrl, "https://source.test/");
+  assert.equal(store.updateProject(project.id, { name: "Capture renamed" }).name, "Capture renamed");
+  assert.notEqual(store.setArchived(project.id, true)?.archivedAt, null);
+  store.deleteProject(project.id);
+  assert.deepEqual(store.listProjects(), []);
+  store.close();
 });
 
-test("extension credential migration and lifecycle work on an existing database", () => {
-  const dir = mkdtempSync(join(tmpdir(), "dezin-extension-migration-"));
-  const path = join(dir, "existing.db");
-  const existing = new DatabaseSync(path);
-  existing.exec("CREATE TABLE existing_data (value TEXT NOT NULL); INSERT INTO existing_data VALUES ('kept')");
-  existing.close();
+test("Moodboard nodes, edited assets, conversations, and messages round-trip", () => {
+  const store = freshStore();
+  const board = store.createMoodboard({ name: "References" });
+  const asset = store.createMoodboardAsset(board.id, {
+    kind: "image",
+    fileName: "edited.png",
+    mimeType: "image/png",
+    width: 320,
+    height: 200,
+    source: "edited",
+  });
+  assert.equal(asset.source, "edited");
+  const [node] = store.replaceMoodboardNodes(board.id, [{
+    type: "image",
+    x: 10,
+    y: 20,
+    width: 100,
+    height: 80,
+    data: { assetId: asset.id },
+  }]);
+  assert.equal(node?.data.assetId, asset.id);
+  const conversation = store.ensureMoodboardConversation(board.id);
+  store.addMoodboardMessage(board.id, "user", "Use this", conversation.id);
+  store.addMoodboardMessage(board.id, "assistant", "Got it", conversation.id);
+  assert.equal(store.listMoodboardConversations(board.id)[0]?.turns, 1);
+  assert.deepEqual(
+    store.listMoodboardMessages(board.id, conversation.id).map((message) => message.role),
+    ["user", "assistant"],
+  );
+  store.close();
+});
 
-  const s = new Store(path, fakeClock());
-  const tokenHash = createHash("sha256").update("issued-token").digest("hex");
-  const created = s.createExtensionCredential({
+test("Custom effect image parameters and presets round-trip", () => {
+  const store = freshStore();
+  const effect = store.createEffect({
+    name: "Texture",
+    parameters: [{ id: "image", label: "Image", type: "image", defaultValue: "" }],
+    presets: [{ id: "soft", name: "Soft", values: { image: "asset.png" } }],
+  });
+  assert.equal(effect.parameters[0]?.type, "image");
+  assert.equal(effect.presets[0]?.values.image, "asset.png");
+  assert.equal(store.updateEffect(effect.id, { summary: "Updated" }).summary, "Updated");
+  store.deleteEffect(effect.id);
+  assert.deepEqual(store.listEffects(), []);
+  store.close();
+});
+
+test("Settings and extension credentials remain independent store domains", () => {
+  const store = freshStore();
+  assert.equal(store.updateSettings({ model: "test-model", customInstructions: "Keep the craft high." }).model, "test-model");
+  assert.equal(store.getSettings().customInstructions, "Keep the craft high.");
+  assert.equal(Object.hasOwn(store.getSettings(), "visualQaEnabled"), false);
+
+  const tokenHash = createHash("sha256").update("token").digest("hex");
+  const credential = store.createExtensionCredential({
     tokenHash,
-    extensionId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    extensionId: "extension.test",
+    scopes: ["capture:write", "capture:write"],
+  });
+  assert.deepEqual(credential.scopes, ["capture:write"]);
+  assert.equal(store.touchExtensionCredential(credential.id), true);
+  assert.notEqual(store.listExtensionCredentials()[0]?.lastUsedAt, null);
+  assert.equal(store.revokeExtensionCredential(credential.id), true);
+  assert.deepEqual(store.listExtensionCredentials(), []);
+  assert.equal(store.listExtensionCredentials({ includeRevoked: true }).length, 1);
+  store.close();
+});
+
+test("opening a legacy store atomically removes retired Design tables while preserving independent domains", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dezin-current-store-"));
+  const path = join(directory, "app.sqlite");
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const original = new Store(path, fakeClock());
+  original.updateSettings({ model: "preserved-model", customInstructions: "Preserve me" });
+  const board = original.createMoodboard({ name: "Preserved board" });
+  original.createEffect({ name: "Preserved effect" });
+  const tokenHash = createHash("sha256").update("preserved-token").digest("hex");
+  original.createExtensionCredential({
+    tokenHash,
+    extensionId: "preserved.extension",
     scopes: ["capture:write"],
   });
+  const project = original.createProject({
+    name: "Preserved Sharingan",
+    sharingan: true,
+    sourceUrl: "https://example.com/preserved",
+  });
+  original.workspace.ensureSharinganWorkspaceFoundation(project.id);
+  original.close();
 
-  assert.deepEqual(s.listExtensionCredentials(), [created]);
-  assert.equal(s.touchExtensionCredential(created.id), true);
-  assert.ok((s.listExtensionCredentials()[0]?.lastUsedAt ?? 0) > created.createdAt);
-  assert.equal(s.revokeExtensionCredential(created.id), true);
-  assert.ok(s.listExtensionCredentials({ includeRevoked: true })[0]?.revokedAt);
-  assert.equal(s.revokeExtensionCredential("missing"), false);
-  assert.equal((s.db.prepare("SELECT value FROM existing_data").get() as { value: string }).value, "kept");
-  s.close();
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE runs (id TEXT PRIMARY KEY, project_id TEXT, status TEXT);
+    INSERT INTO runs (id, project_id, status) VALUES ('legacy-run', '${project.id}', 'succeeded');
+    CREATE TABLE artifacts (id TEXT PRIMARY KEY, project_id TEXT);
+    INSERT INTO artifacts (id, project_id) VALUES ('legacy-artifact', '${project.id}');
+    CREATE TABLE quality_ignores (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      rule_id TEXT NOT NULL,
+      selector TEXT,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO quality_ignores (id, project_id, rule_id, selector, created_at)
+      VALUES ('legacy-ignore', '${project.id}', 'legacy-rule', '.legacy', 1);
+  `);
+  legacy.close();
+
+  const rebuilt = new Store(path, fakeClock());
+  const tables = new Set((rebuilt.db.prepare(
+    "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+  ).all() as Array<{ name: string }>).map((row) => row.name));
+  assert.equal(tables.size, 16);
+  assert.equal(tables.has("runs"), false);
+  assert.equal(tables.has("artifacts"), false);
+  assert.equal(tables.has("quality_ignores"), false);
+  assert.equal(rebuilt.getSettings().model, "preserved-model");
+  assert.equal(rebuilt.getSettings().customInstructions, "Preserve me");
+  assert.equal(rebuilt.getMoodboard(board.id)?.name, "Preserved board");
+  assert.equal(rebuilt.listEffects()[0]?.name, "Preserved effect");
+  assert.equal(rebuilt.listExtensionCredentials()[0]?.extensionId, "preserved.extension");
+  assert.equal(rebuilt.getProject(project.id)?.sourceUrl, "https://example.com/preserved");
+  assert.notEqual(rebuilt.workspace.getWorkspace(project.id), null);
+  const revisionColumns = (rebuilt.db.prepare("PRAGMA table_info(resource_revisions)").all() as Array<{ name: string }>)
+    .map((row) => row.name);
+  const snapshotColumns = (rebuilt.db.prepare("PRAGMA table_info(workspace_snapshots)").all() as Array<{ name: string }>)
+    .map((row) => row.name);
+  assert.equal(revisionColumns.includes("created_by_run_id"), false);
+  assert.equal(snapshotColumns.includes("created_by_run_id"), false);
+  rebuilt.close();
+});
+
+test("Store configures a bounded busy timeout", () => {
+  const store = freshStore();
+  const row = store.db.prepare("PRAGMA busy_timeout").get() as Record<string, unknown>;
+  assert.equal(Number(Object.values(row)[0]), 5_000);
+  store.close();
 });

@@ -62,6 +62,9 @@ importers:
       undici:
         specifier: ^7.28.0
         version: 7.28.0
+      vite:
+        specifier: ^8.0.16
+        version: 8.1.0(@types/node@26.0.1)(jiti@2.7.0)
 
   apps/desktop:
     devDependencies:

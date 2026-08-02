@@ -6,13 +6,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
 import { capturePage, captureCurrentPage, invalidateSharinganDerivedArtifacts, writePagesManifest, upsertPage, readCapturedPages, readCapturedSourceUrl, readCapturedRequestedSourceUrl, captureUrlKey, isAllowedCaptureRedirect, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
-import { projectDir, safeJoin } from "./serve-static.ts";
+import { projectDir } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
 type Phase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing" | "cancelled";
@@ -32,8 +32,6 @@ interface Capture {
   error?: string;
   probeTimer?: ReturnType<typeof setTimeout>;
   keepForProbe?: boolean;
-  /** Run-scoped Standard transactions redirect every capture/probe write here. */
-  artifactDir?: string;
   profileDir?: string;
   profileCleanup?: { dataDir: string; scope: "capture" | "project" };
 }
@@ -57,7 +55,6 @@ export const SHARINGAN_STEP_LIMIT = 500;
 
 const captures = new Map<string, Capture>();
 let nextCaptureGeneration = 1;
-const SHARINGAN_RUN_CAPTURE_SEPARATOR = "--run-";
 
 /** Test-only observability for proving read-only status requests do not allocate capture ownership. */
 export function sharinganCaptureRegistrySizeForTests(): number {
@@ -105,27 +102,18 @@ function probeNavigationError(entryUrl: string | undefined, requestedUrl: string
 }
 
 function captureArtifactDir(id: string, dataDir: string): string {
-  return captures.get(id)?.artifactDir ?? projectDir(dataDir, id);
+  return projectDir(dataDir, id);
 }
 
 function sharinganProfileDir(id: string, dataDir: string): string {
-  const owner = sharinganProfileOwnerDir(sharinganProjectCaptureId(id), dataDir);
+  const owner = sharinganProfileOwnerDir(id, dataDir);
   const scope = createHash("sha256").update(id).digest("hex");
   return join(owner, scope);
-}
-
-function sharinganProjectCaptureId(id: string): string {
-  const separator = id.indexOf(SHARINGAN_RUN_CAPTURE_SEPARATOR);
-  return separator > 0 ? id.slice(0, separator) : id;
 }
 
 function sharinganProfileOwnerDir(projectId: string, dataDir: string): string {
   const owner = createHash("sha256").update(projectId).digest("hex");
   return join(dataDir, ".sharingan-profiles", owner);
-}
-
-function isSharinganRunCaptureId(id: string): boolean {
-  return id.indexOf(SHARINGAN_RUN_CAPTURE_SEPARATOR) > 0;
 }
 
 export async function removeSharinganProfile(id: string, dataDir: string): Promise<void> {
@@ -143,23 +131,14 @@ function requestProfileCleanup(c: Capture, dataDir: string, scope: "capture" | "
 async function cleanupReleasedProfile(id: string, c: Capture, profileDir = c.profileDir): Promise<void> {
   const cleanup = c.profileCleanup;
   if (!cleanup) return;
-  const projectId = sharinganProjectCaptureId(id);
   if (cleanup.scope === "project") {
-    const anotherOwner = [...captures.entries()].some(
-      ([captureId, current]) => current !== c && !current.released && sharinganProjectCaptureId(captureId) === projectId,
-    );
-    if (anotherOwner) return;
-    await removeSharinganProjectProfiles(projectId, cleanup.dataDir);
+    await removeSharinganProjectProfiles(id, cleanup.dataDir);
     return;
   }
   if (!profileDir) profileDir = sharinganProfileDir(id, cleanup.dataDir);
   const current = captures.get(id);
   if (current && current !== c && !current.released && current.profileDir === profileDir) return;
   await rm(profileDir, { recursive: true, force: true });
-}
-
-export function sharinganRunCaptureId(projectId: string, runId: string): string {
-  return `${projectId}${SHARINGAN_RUN_CAPTURE_SEPARATOR}${runId}`;
 }
 
 function isActive(id: string, c: Capture, generation: number): boolean {
@@ -417,16 +396,12 @@ export async function ensureCaptured(
   id: string,
   dataDir: string,
   url: string,
-  opts: { signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; artifactDir?: string; open?: SharinganOpen } = {},
+  opts: { signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; open?: SharinganOpen } = {},
 ): Promise<Phase> {
   throwIfAborted(opts.signal);
   const maxWaitMs = opts.maxWaitMs ?? 300_000;
   const pollMs = opts.pollMs ?? 500;
   const c = get(id);
-  if (opts.artifactDir) {
-    if (c.artifactDir && c.artifactDir !== opts.artifactDir) throw new Error("capture scope already targets another artifact directory");
-    c.artifactDir = opts.artifactDir;
-  }
   if (opts.keepSessionForProbe) c.keepForProbe = true;
   if (c.phase === "captured") return c.phase;
   // Kick the entry capture if nothing is in flight (idle, or retry after a prior error).
@@ -697,9 +672,11 @@ export function handleSharinganStatus(res: ServerResponse, id: string, dataDir: 
  */
 export function handleSharinganShot(res: ServerResponse, id: string, relPath: string, dataDir: string): void {
   const base = captureArtifactDir(id, dataDir);
-  const shotRoot = join(base, ".sharingan");
-  const abs = safeJoin(base, relPath);
-  if (!abs || !(abs === shotRoot || abs.startsWith(shotRoot + sep))) { sendJson(res, 400, { error: "bad path" }); return; }
+  const resolvedBase = resolve(base);
+  const shotRoot = resolve(resolvedBase, ".sharingan");
+  const abs = resolve(base, relPath);
+  const insideBase = abs === resolvedBase || abs.startsWith(resolvedBase + sep);
+  if (!insideBase || !(abs === shotRoot || abs.startsWith(shotRoot + sep))) { sendJson(res, 400, { error: "bad path" }); return; }
   if (!existsSync(abs) || !statSync(abs).isFile()) { sendJson(res, 404, { error: "not found" }); return; }
   res.writeHead(200, { "content-type": "image/png", "cache-control": "no-cache" });
   createReadStream(abs).pipe(res);
@@ -718,7 +695,7 @@ export async function releaseSharinganProject(
   const c = captures.get(id);
   if (!c) {
     if (options.dataDir && options.profileCleanup && !options.deferProfileCleanup) {
-      if (options.profileCleanup === "project") await removeSharinganProjectProfiles(sharinganProjectCaptureId(id), options.dataDir);
+      if (options.profileCleanup === "project") await removeSharinganProjectProfiles(id, options.dataDir);
       else await removeSharinganProfile(id, options.dataDir);
     }
     return;
@@ -759,7 +736,6 @@ export async function releaseSharinganProject(
   c.url = undefined;
   c.opening = undefined;
   c.keepForProbe = undefined;
-  c.artifactDir = undefined;
   // Removing the registry entry permits a fresh generation for this id. The released `c` remains
   // a tombstone captured by any in-flight opener, whose isActive() check closes a late session.
   if (captures.get(id) === c) captures.delete(id);
@@ -780,12 +756,9 @@ export async function handleSharinganCancel(res: ServerResponse, id: string, dat
   sendJson(res, 200, { ok: true });
 }
 
-export async function closeAllSharinganSessions(dataDir?: string): Promise<void> {
+export async function closeAllSharinganSessions(_dataDir?: string): Promise<void> {
   const ids = [...captures.keys()];
-  await Promise.allSettled(ids.map((id) => releaseSharinganProject(
-    id,
-    dataDir && isSharinganRunCaptureId(id) ? { dataDir, profileCleanup: "capture" } : {},
-  )));
+  await Promise.allSettled(ids.map((id) => releaseSharinganProject(id)));
 }
 
 export function handleSharinganEvents(res: ServerResponse, id: string): void {

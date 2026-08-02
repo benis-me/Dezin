@@ -10,7 +10,6 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     apiBaseUrl: "https://api.openai.com/v1",
     apiKey: "openai-global",
     apiKeyConfigured: true,
-    defaultDesignSystemId: "clean",
     customInstructions: "",
     imageApiBaseUrl: "https://api.openai.com/v1",
     imageApiKey: "openai-global",
@@ -35,13 +34,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
         organization: "",
       },
     }),
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
     ...overrides,
   };
 }

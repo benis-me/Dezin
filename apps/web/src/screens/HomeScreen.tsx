@@ -15,18 +15,14 @@ import {
   Boxes,
   Check,
   FileText,
-  FolderInput,
   Image as ImageIcon,
-  Palette,
   LayoutGrid,
   List,
   Pencil,
-  PenLine,
-  Presentation,
+  Plus,
   Sparkles,
   Trash2,
   X,
-  Zap,
 } from "lucide-react";
 import {
   Button,
@@ -45,16 +41,12 @@ import {
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-  type PickerOption,
 } from "../components/ui/index.ts";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import {
   AgentComposerContextCards,
-  upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
-import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
-import { FieldSelect } from "../components/FieldSelect.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -66,47 +58,32 @@ import {
 } from "../lib/agent-availability.ts";
 import { isCloneUrl } from "../lib/clone-url.ts";
 import sharinganEyeUrl from "../assets/sharingan-eye.png";
-import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
+import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { native } from "../lib/native.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import {
-  discardPendingDesignWorkspaceTurn,
-  type PendingProjectAttachments,
-  type PendingProjectReferenceIdentity,
-} from "../lib/pending-brief.ts";
+  type DesignProjectAttachments,
+  type DesignProjectReferenceIdentity,
+} from "../lib/design-attachments.ts";
+import { discardPendingDesignCanvasIntent } from "../lib/pending-design-canvas.ts";
 import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
-import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { cn } from "../lib/utils.ts";
 import { beginResourceLoad, idleResource, readyResource, rejectResource, resolveResource } from "../lib/async-resource.ts";
+import type { DesignCanvas, DesignNodeKind } from "../design-canvas/types.ts";
 import {
-  RUN_CONTEXT_MAX_ITEMS,
-  type DesignSystemCard,
   type Project,
-  type ProjectMode,
-  type ProjectWorkspacePayload,
   type Settings,
-  type SkillCard,
 } from "../lib/api.ts";
 
-const DEFAULT_SKILL = "frontend-design";
-const DEFAULT_DS = "modern-minimal";
-const HOME_COMPOSER_KEY = "dezin.home.composer";
 const MAX_HOME_IMAGE_ATTACHMENTS = 2;
 const MAX_HOME_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_HOME_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
-const HOME_VISUAL_ATTACHMENT_AGENTS = new Set(["claude", "codebuddy", "codex"]);
+const MAX_HOME_CONTEXT_ITEMS = 32;
 const AgentModelSelect = lazy(() => import("../components/AgentModelSelect.tsx").then((module) => ({
   default: module.AgentModelSelect,
 })));
 
-interface HomeComposerPrefs {
-  skillId?: string;
-  designSystemId?: string;
-  mode?: ProjectMode;
-}
-
-type HomeContextItem = Extract<AgentComposerContextItem, { type: "local-path" | "text-context" }>;
 type HomeImageMimeType = "image/png" | "image/jpeg";
 type HomeImageAttachment = {
   name: string;
@@ -120,7 +97,7 @@ type HomeProjectReference = {
   projectId: string;
   name: string;
   base64: string;
-  projectReference?: PendingProjectReferenceIdentity;
+  projectReference?: DesignProjectReferenceIdentity;
 };
 
 interface HomeAttachments {
@@ -128,58 +105,33 @@ interface HomeAttachments {
   refs: HomeProjectReference[];
 }
 
-function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
-  return paths.map((path) => ({
-    id: `home-local-path:${path}`,
-    type: "local-path",
-    title: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path,
-    subtitle: path,
-    path,
-  }));
+interface ExactCanvasProjectReferenceSelection {
+  identity: DesignProjectReferenceIdentity;
+  nodeName: string;
+  nodeKind: DesignNodeKind;
 }
 
-function isProjectMode(value: unknown): value is ProjectMode {
-  return value === "prototype" || value === "standard";
-}
-
-interface ExactStandardProjectReferenceSelection {
-  identity: PendingProjectReferenceIdentity;
-  artifactName: string;
-  artifactKind: "page" | "component";
-}
-
-function exactStandardProjectReferences(
+function exactCanvasProjectReferences(
   projectId: string,
-  payload: ProjectWorkspacePayload,
-): ExactStandardProjectReferenceSelection[] {
-  if (payload.status !== "ready" || payload.workspace.projectId !== projectId) return [];
-  return [
-    ...payload.artifacts.filter((candidate) => candidate.archivedAt === null && candidate.kind === "page"),
-    ...payload.artifacts.filter((candidate) => candidate.archivedAt === null && candidate.kind !== "page"),
-  ]
-    .filter((candidate) => {
-      const revisionId = payload.activeSnapshot.artifactRevisions[candidate.id] ?? null;
-      return revisionId !== null && payload.revisions.some((revision) => (
-        revision.id === revisionId && revision.artifactId === candidate.id
-      ));
-    })
+  canvas: DesignCanvas,
+): ExactCanvasProjectReferenceSelection[] {
+  if (canvas.projectId !== projectId) return [];
+  return canvas.nodes
+    .filter((node) => node.currentVersionId !== null)
     .sort((left, right) => {
       const kind = Number(left.kind !== "page") - Number(right.kind !== "page");
       return kind || left.createdAt - right.createdAt || left.id.localeCompare(right.id);
     })
-    .flatMap((artifact): ExactStandardProjectReferenceSelection[] => {
-      const revisionId = payload.activeSnapshot.artifactRevisions[artifact.id];
-      if (!revisionId) return [];
+    .flatMap((node): ExactCanvasProjectReferenceSelection[] => {
+      if (!node.currentVersionId) return [];
       return [{
         identity: {
           sourceProjectId: projectId,
-          sourceWorkspaceId: payload.workspace.id,
-          sourceSnapshotId: payload.activeSnapshot.id,
-          sourceArtifactId: artifact.id,
-          sourceArtifactRevisionId: revisionId,
+          sourceNodeId: node.id,
+          sourceVersionId: node.currentVersionId,
         },
-        artifactName: artifact.name,
-        artifactKind: artifact.kind,
+        nodeName: node.name,
+        nodeKind: node.kind,
       }];
     });
 }
@@ -188,12 +140,6 @@ function exactHomeImageMimeType(file: File): HomeImageMimeType | null {
   const normalizedType = file.type.trim().toLowerCase();
   return normalizedType === "image/png" || normalizedType === "image/jpeg"
     ? normalizedType
-    : null;
-}
-
-function homeVisualAttachmentBlockedReason(command: string): string | null {
-  return command && !HOME_VISUAL_ATTACHMENT_AGENTS.has(command)
-    ? `${command} can't receive visual attachments for Workspace planning. Choose Claude Code, CodeBuddy, or Codex, or remove the images.`
     : null;
 }
 
@@ -226,78 +172,10 @@ function decodedHomeImage(
   return valid ? { base64: match[2]!, byteSize: bytes.length } : null;
 }
 
-function readHomeComposerPrefs(): HomeComposerPrefs {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(HOME_COMPOSER_KEY) ?? "{}") as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const record = parsed as Record<string, unknown>;
-    return {
-      skillId: typeof record.skillId === "string" ? record.skillId : undefined,
-      designSystemId: typeof record.designSystemId === "string" ? record.designSystemId : undefined,
-      mode: isProjectMode(record.mode) ? record.mode : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
-function writeHomeComposerPrefs(patch: HomeComposerPrefs): void {
-  try {
-    const next = { ...readHomeComposerPrefs(), ...patch };
-    localStorage.setItem(HOME_COMPOSER_KEY, JSON.stringify(next));
-  } catch {
-    /* localStorage may be unavailable */
-  }
-}
-
-interface Template {
-  label: string;
-  brief: string;
-  skillId: string;
-  designSystemId: string;
-}
-const TEMPLATES: Template[] = [
-  {
-    label: "SaaS pricing",
-    brief: "A SaaS pricing page with three plans, the middle one recommended, monthly/annual toggle.",
-    skillId: "frontend-design",
-    designSystemId: "stripe",
-  },
-  {
-    label: "Dev-tool landing",
-    brief: "A developer-tool landing page: hero with a code sample, a feature grid, and one CTA.",
-    skillId: "frontend-design",
-    designSystemId: "vercel",
-  },
-  {
-    label: "Analytics dashboard",
-    brief: "An analytics dashboard with four KPI cards, a line chart, and a recent-activity table.",
-    skillId: "frontend-design",
-    designSystemId: "linear",
-  },
-  {
-    label: "Pitch deck cover",
-    brief: "A pitch deck cover slide: a bold product title, a one-line subhead, and a subtle backdrop.",
-    skillId: "deck",
-    designSystemId: "editorial",
-  },
-];
-
 /**
  * The project cover: a real screenshot of the design when one exists, else a clean
  * placeholder (no abstract swatch art, no glyph overlay).
  */
-function ActiveRunBadge({ status }: { status?: Project["runStatus"] }) {
-  if (status !== "running" && status !== "pending") return null;
-  const label = status === "pending" ? "Queued" : "Generating";
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-1.5 py-0.5 text-[11px] font-medium text-foreground backdrop-blur">
-      <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-      <span className={status === "running" ? "shiny-text" : undefined}>{label}</span>
-    </span>
-  );
-}
-
 function formatUpdatedAt(value: number): string {
   const diff = Math.max(0, Date.now() - value);
   const minute = 60_000;
@@ -309,7 +187,7 @@ function formatUpdatedAt(value: number): string {
   return `Updated ${Math.floor(diff / day)}d ago`;
 }
 
-function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runStatus?: Project["runStatus"] }) {
+function ProjectThumb({ coverUrl }: { coverUrl?: string | null }) {
   return (
     <div className="relative aspect-[16/10] overflow-hidden border-b border-border bg-surface-2">
       {coverUrl ? (
@@ -319,43 +197,7 @@ function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runSt
           <ImageIcon size={22} strokeWidth={1.5} />
         </div>
       )}
-      <div className="absolute left-2 top-2">
-        <ActiveRunBadge status={runStatus} />
-      </div>
     </div>
-  );
-}
-
-/** A capsule toggle whose background tint AND indicator light both signal on/off. Must be
- *  rendered inside a TooltipProvider. */
-function PillToggle({ on, label, tip, onToggle }: { on: boolean; label: string; tip: string; onToggle: () => void }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={on}
-          aria-label={label}
-          onClick={onToggle}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
-            on
-              ? "border-foreground/25 bg-foreground/5 text-foreground"
-              : "border-border bg-surface-2 text-muted-foreground hover:border-border-strong hover:text-foreground",
-          )}
-        >
-          <span
-            aria-hidden
-            className={cn("size-1.5 rounded-full transition-all", on ? "bg-foreground ring-2 ring-foreground/20" : "bg-muted-foreground/40")}
-          />
-          {label}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-64 text-pretty">
-        {tip}
-      </TooltipContent>
-    </Tooltip>
   );
 }
 
@@ -367,43 +209,28 @@ export function HomeScreen({
   projects?: Project[];
   onNewProject?: (
     brief: string,
-    skillId: string,
-    designSystemId: string | null,
-    mode: ProjectMode,
     sharingan?: { sourceUrl: string },
     agentSelection?: { agentCommand: string; model?: string },
-    attachments?: PendingProjectAttachments,
+    attachments?: DesignProjectAttachments,
   ) => void | Promise<void>;
   onOpenProject?: (id: string) => void;
 }) {
   const api = useApi();
   const { toast } = useToast();
-  const [initialComposerPrefs] = useState<HomeComposerPrefs>(() => readHomeComposerPrefs());
   const [brief, setBrief] = useState("");
   const [optimizingPrompt, setOptimizingPrompt] = useState(false);
   const [optimizedOriginalPrompt, setOptimizedOriginalPrompt] = useState<string | null>(null);
-  const [skills, setSkills] = useState<SkillCard[]>([]);
-  const [skillId, setSkillIdState] = useState(initialComposerPrefs.skillId ?? DEFAULT_SKILL);
-  const [systems, setSystems] = useState<DesignSystemCard[]>([]);
-  const [systemsStatus, setSystemsStatus] = useState<"loading" | "ready" | "error">("loading");
-  const designSystemRequestRef = useRef(0);
   const { agents, loading: agentsLoading, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
-  // The two feature toggles surfaced on the home header — they ARE the global Settings values
-  // (researchEnabled / visualQaEnabled), kept in sync via the settings-updated event bus.
-  const [researchOn, setResearchOn] = useState(false);
-  const [visualReviewOn, setVisualReviewOn] = useState(false);
   const [homeAgent, setHomeAgent] = useState("");
   const [homeModel, setHomeModel] = useState("");
-  const [designSystemId, setDesignSystemIdState] = useState(initialComposerPrefs.designSystemId ?? DEFAULT_DS);
-  const [mode, setModeState] = useState<ProjectMode>(initialComposerPrefs.mode ?? "prototype");
   const selectedHomeAgent = agents.find((candidate) => candidate.command === homeAgent);
   const homeAgentBlockedReason = homeAgent
     ? agentAvailabilityReason(selectedHomeAgent)
     : null;
-  // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading; forces mode to
-  // "standard" and swaps the composer's textarea for a URL input (desktop-only entry).
+  // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading and swaps the
+  // composer's textarea for a URL input (desktop-only entry).
   const [sharingan, setSharingan] = useState(false);
   // First-run authorized-use affirmation: gates the very first Sharingan submit until the user
   // confirms they have the right to reproduce the target site. Persisted in Settings so it only
@@ -423,9 +250,9 @@ export function HomeScreen({
   const [view, setView] = useState<"active" | "archived">("active");
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [homeAttachments, setHomeAttachments] = useState<HomeAttachments>({ images: [], refs: [] });
-  const [standardReferencePicker, setStandardReferencePicker] = useState<{
+  const [canvasReferencePicker, setCanvasReferencePicker] = useState<{
     project: Project;
-    selections: ExactStandardProjectReferenceSelection[];
+    selections: ExactCanvasProjectReferenceSelection[];
   } | null>(null);
   const homeAttachmentsRef = useRef(homeAttachments);
   const homeAttachmentReservationsRef = useRef(0);
@@ -436,11 +263,8 @@ export function HomeScreen({
   const [pendingAttachmentOperations, setPendingAttachmentOperations] = useState(0);
   const images = homeAttachments.images;
   const refs = homeAttachments.refs;
-  const [homeContextItems, setHomeContextItems] = useState<HomeContextItem[]>([]);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
-  const importInputRef = useRef<HTMLInputElement>(null);
-  const [importing, setImporting] = useState(false);
 
   const commitHomeAttachments = useCallback((next: HomeAttachments): void => {
     homeAttachmentsRef.current = next;
@@ -451,7 +275,7 @@ export function HomeScreen({
     const current = homeAttachmentsRef.current;
     const available = Math.max(
       0,
-      RUN_CONTEXT_MAX_ITEMS
+      MAX_HOME_CONTEXT_ITEMS
         - current.images.length
         - current.refs.length
         - homeAttachmentReservationsRef.current,
@@ -481,7 +305,7 @@ export function HomeScreen({
     (omitted: number): void => {
       if (omitted <= 0) return;
       toast(
-        `You can attach up to ${RUN_CONTEXT_MAX_ITEMS} images and project references. ${omitted} ${
+        `You can attach up to ${MAX_HOME_CONTEXT_ITEMS} images and project references. ${omitted} ${
           omitted === 1 ? "item was" : "items were"
         } not added.`,
         { variant: "error" },
@@ -509,7 +333,7 @@ export function HomeScreen({
       const current = homeAttachmentsRef.current;
       const availableItems = Math.max(
         0,
-        RUN_CONTEXT_MAX_ITEMS
+        MAX_HOME_CONTEXT_ITEMS
           - current.images.length
           - current.refs.length
           - homeAttachmentReservationsRef.current,
@@ -546,7 +370,7 @@ export function HomeScreen({
       if (current.refs.some((ref) => ref.id === incoming.id)) return false;
       if (
         current.images.length + current.refs.length + homeAttachmentReservationsRef.current
-        >= RUN_CONTEXT_MAX_ITEMS
+        >= MAX_HOME_CONTEXT_ITEMS
       ) {
         notifyHomeAttachmentLimit(1);
         return false;
@@ -576,44 +400,11 @@ export function HomeScreen({
         projectId: ref.projectId,
         name: ref.name,
       })),
-      ...homeContextItems,
     ],
-    [homeContextItems, images, refs],
+    [images, refs],
   );
 
-  const setSkillId = useCallback((value: string) => {
-    setSkillIdState(value);
-    writeHomeComposerPrefs({ skillId: value });
-  }, []);
-
-  const setDesignSystemId = useCallback((value: string) => {
-    setDesignSystemIdState(value);
-    writeHomeComposerPrefs({ designSystemId: value });
-  }, []);
-
-  const setMode = useCallback((value: ProjectMode) => {
-    setModeState(value);
-    writeHomeComposerPrefs({ mode: value });
-  }, []);
-
-  const refreshDesignSystems = useCallback(() => {
-    const request = ++designSystemRequestRef.current;
-    setSystemsStatus("loading");
-    void api
-      .listDesignSystems()
-      .then((next) => {
-        if (request !== designSystemRequestRef.current) return;
-        setSystems(next);
-        setSystemsStatus("ready");
-        if (next.length && !next.some((system) => system.id === DEFAULT_DS)) setDesignSystemId(next[0]!.id);
-      })
-      .catch(() => {
-        if (request === designSystemRequestRef.current) setSystemsStatus("error");
-      });
-  }, [api, setDesignSystemId]);
-
   // Sharingan is desktop-only (it drives a real browser session in the Electron main process).
-  // Entering it forces mode to "standard"; exiting just clears the flag and leaves mode as-is.
   const toggleSharingan = useCallback(() => {
     if (sharingan) {
       setSharingan(false);
@@ -624,8 +415,7 @@ export function HomeScreen({
       return;
     }
     setSharingan(true);
-    setMode("standard");
-  }, [sharingan, setMode, toast]);
+  }, [sharingan, toast]);
 
   const refresh = useCallback(() => {
     if (projectsOverride) return;
@@ -641,30 +431,11 @@ export function HomeScreen({
       });
   }, [api, projectsOverride]);
 
-  // The home feature toggles write straight to global Settings (optimistic), then broadcast so
-  // the Settings screen (and anything else listening) stays in lock-step.
-  const toggleFeature = useCallback(
-    (key: "researchEnabled" | "visualQaEnabled", next: boolean) => {
-      const set = key === "researchEnabled" ? setResearchOn : setVisualReviewOn;
-      set(next);
-      api
-        .updateSettings({ [key]: next } as Partial<Settings>)
-        .then((s) => publishSettingsUpdated(s))
-        .catch(() => {
-          set(!next);
-          toast("Couldn't save that setting.", { variant: "error" });
-        });
-    },
-    [api, toast],
-  );
-
-  // Reflect changes made from the Settings screen (or another surface) without a refetch.
+  // Reflect Sharingan authorization changes made from another settings surface.
   useEffect(() => {
     const onSettings = (e: Event): void => {
       const s = (e as CustomEvent<Settings>).detail;
       if (!s) return;
-      setResearchOn(!!s.researchEnabled);
-      setVisualReviewOn(!!s.visualQaEnabled);
       setAffirmed(!!s.sharinganAffirmed);
     };
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettings);
@@ -687,8 +458,6 @@ export function HomeScreen({
     const p = takePendingComposer();
     if (!p) return;
     if (p.brief !== undefined) setBrief(p.brief);
-    if (p.skillId) setSkillId(p.skillId);
-    if (p.designSystemId) setDesignSystemId(p.designSystemId);
   }, []);
 
   // Consume a one-shot capture handed off by the browser extension. Polled on mount and
@@ -745,22 +514,12 @@ export function HomeScreen({
 
   useEffect(() => {
     let alive = true;
-    api
-      .listSkills()
-      .then((s) => {
-        if (!alive) return;
-        setSkills(s);
-        if (s.length && !s.some((x) => x.id === DEFAULT_SKILL)) setSkillId(s[0]!.id);
-      })
-      .catch(() => {});
     void api
       .getSettings()
       .then((s) => {
         if (!alive) return;
         setSettingsAgent(s?.agentCommand ?? "");
         setSettingsModel(s?.model ?? "");
-        setResearchOn(!!s?.researchEnabled);
-        setVisualReviewOn(!!s?.visualQaEnabled);
         setAffirmed(!!s?.sharinganAffirmed);
       })
       .catch(() => alive && setSettingsAgent(""));
@@ -768,13 +527,6 @@ export function HomeScreen({
       alive = false;
     };
   }, [api]);
-
-  useEffect(() => {
-    refreshDesignSystems();
-    return () => {
-      designSystemRequestRef.current += 1;
-    };
-  }, [refreshDesignSystems]);
 
   // Default the composer to the saved agent + model — but only once settings have loaded, so
   // the scan resolving first doesn't lock it onto the first available agent. A manual pick
@@ -824,11 +576,6 @@ export function HomeScreen({
 
   const addImages = async (files: FileList | File[] | null): Promise<void> => {
     if (!files) return;
-    const visualAttachmentBlockedReason = homeVisualAttachmentBlockedReason(homeAgent);
-    if (visualAttachmentBlockedReason) {
-      toast(visualAttachmentBlockedReason, { variant: "error" });
-      return;
-    }
     const supplied = Array.from(files);
     const typed = supplied.flatMap((file): Array<{ file: File; mimeType: HomeImageMimeType }> => {
       const mimeType = exactHomeImageMimeType(file);
@@ -958,10 +705,6 @@ export function HomeScreen({
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
     const dataTransfer = event.dataTransfer;
-    const paths = localPathsFromDataTransfer(dataTransfer);
-    if (paths.length) {
-      setHomeContextItems((current) => upsertContextItems(current, homeContextItemsForPaths(paths)));
-    }
     const finishAttachmentOperation = beginAttachmentOperation();
     void filesFromDataTransfer(dataTransfer)
       .then(addImages)
@@ -969,23 +712,6 @@ export function HomeScreen({
         toast("Couldn't read the dropped context.", { variant: "error" });
       })
       .finally(finishAttachmentOperation);
-  };
-
-  const addHomePaths = (paths: string[]): void => {
-    setHomeContextItems((current) => upsertContextItems(current, homeContextItemsForPaths(paths)));
-  };
-
-  const addHomeTextContext = (body: string): void => {
-    setHomeContextItems((current) => [
-      ...current,
-      {
-        id: `home-text-context:${Date.now()}:${current.length}`,
-        type: "text-context",
-        title: "Design context",
-        subtitle: "Imported .fig",
-        body,
-      },
-    ]);
   };
 
   const focusPromptEnd = useCallback(() => {
@@ -1006,8 +732,6 @@ export function HomeScreen({
       const current = homeAttachmentsRef.current;
       const nextRefs = current.refs.filter((ref) => ref.id !== projectId);
       if (nextRefs.length !== current.refs.length) commitHomeAttachments({ ...current, refs: nextRefs });
-    } else {
-      setHomeContextItems((current) => current.filter((item) => item.id !== id));
     }
     window.requestAnimationFrame(focusPromptEnd);
   };
@@ -1027,32 +751,13 @@ export function HomeScreen({
     const finishAttachmentOperation = beginAttachmentOperation();
     let reservationHeld = true;
     try {
-      if (project.mode === "standard") {
-        const selections = exactStandardProjectReferences(project.id, await api.getWorkspace(project.id));
-        if (selections.length === 0) {
-          toast(
-            "That Standard project has no current immutable Page or Component Revision to reference yet.",
-            { variant: "error" },
-          );
-          return;
-        }
-        setStandardReferencePicker({ project, selections });
+      const selections = exactCanvasProjectReferences(project.id, await api.getDesignCanvas(project.id));
+      if (selections.length === 0) {
+        toast("That project has no generated Node version to reference yet.", { variant: "error" });
         return;
       }
-      const html = await fetchProjectArtifact(api, project.id);
-      if (!html) {
-        toast("That project has no design to reference yet.", { variant: "error" });
-        return;
-      }
-      const incoming: HomeProjectReference = {
-        id: project.id,
-        projectId: project.id,
-        name: project.name,
-        base64: toBase64(html),
-      };
-      releaseHomeAttachmentSlots(reserved);
-      reservationHeld = false;
-      appendHomeProjectReference(incoming);
+      setCanvasReferencePicker({ project, selections });
+      return;
     } catch {
       toast("Couldn't reference that project.", { variant: "error" });
     } finally {
@@ -1062,31 +767,31 @@ export function HomeScreen({
     }
   };
 
-  const attachStandardProjectReference = (
+  const attachCanvasProjectReference = (
     project: Project,
-    selection: ExactStandardProjectReferenceSelection,
+    selection: ExactCanvasProjectReferenceSelection,
   ): void => {
     const attached = appendHomeProjectReference({
-      id: `${project.id}:${selection.identity.sourceArtifactId}`,
+      id: `${project.id}:${selection.identity.sourceNodeId}:${selection.identity.sourceVersionId}`,
       projectId: project.id,
-      name: `${project.name} / ${selection.artifactName}`,
+      name: `${project.name} / ${selection.nodeName}`,
       base64: "",
       projectReference: selection.identity,
     });
-    if (attached) setStandardReferencePicker(null);
+    if (attached) setCanvasReferencePicker(null);
   };
 
   const creatingRef = useRef(false);
   const [creating, setCreating] = useState(false);
   // Guard against a double-click creating two projects (one empty orphan): the ref blocks a same-tick
   // second click synchronously; `creating` disables the button and is reset when the create settles.
-  const startCreate = async (text: string, projectMode: ProjectMode, sharinganArg?: { sourceUrl: string }) => {
+  const startCreate = async (text: string, sharinganArg?: { sourceUrl: string }) => {
     if (creatingRef.current) return;
     creatingRef.current = true;
     setCreating(true);
     try {
       const currentAttachments = homeAttachmentsRef.current;
-      const attachments: PendingProjectAttachments | undefined = currentAttachments.images.length || currentAttachments.refs.length
+      const attachments: DesignProjectAttachments | undefined = currentAttachments.images.length || currentAttachments.refs.length
         ? {
             images: currentAttachments.images.map(({ name, base64, mimeType }) => ({ name, base64, mimeType })),
             refs: currentAttachments.refs.map(({ name, base64, projectReference }) => ({
@@ -1096,38 +801,22 @@ export function HomeScreen({
             })),
           }
         : undefined;
-      // Keep the legacy four-argument call when no Agent is selected. A normal Agent-backed
-      // creation carries its immutable command/model separately from the Sharingan option.
       const agentSelection = homeAgent
         ? { agentCommand: homeAgent, ...(homeModel ? { model: homeModel } : {}) }
         : undefined;
-      if (sharinganArg && (agentSelection || attachments)) {
-        await onNewProject?.(text, skillId, null, projectMode, sharinganArg, agentSelection, attachments);
-      } else if (sharinganArg) await onNewProject?.(text, skillId, null, projectMode, sharinganArg);
-      else if (agentSelection && attachments) {
-        await onNewProject?.(
-          text,
-          skillId,
-          designSystemId,
-          projectMode,
-          undefined,
-          agentSelection,
-          attachments,
-        );
-      } else if (agentSelection) {
-        await onNewProject?.(
-          text,
-          skillId,
-          designSystemId,
-          projectMode,
-          undefined,
-          agentSelection,
-        );
-      } else if (attachments) {
-        await onNewProject?.(text, skillId, designSystemId, projectMode, undefined, undefined, attachments);
-      } else {
-        await onNewProject?.(text, skillId, designSystemId, projectMode);
-      }
+      await onNewProject?.(text, sharinganArg, agentSelection, attachments);
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
+  };
+
+  const startBlankCanvas = async (): Promise<void> => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    try {
+      await onNewProject?.("");
     } finally {
       creatingRef.current = false;
       setCreating(false);
@@ -1143,29 +832,14 @@ export function HomeScreen({
       toast(homeAgentBlockedReason, { variant: "error" });
       return;
     }
-    const visualAttachmentBlockedReason = images.length
-      ? homeVisualAttachmentBlockedReason(homeAgent)
-      : null;
-    if (visualAttachmentBlockedReason) {
-      toast(visualAttachmentBlockedReason, { variant: "error" });
-      return;
-    }
-    const pathItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "local-path" }> => item.type === "local-path");
-    const textItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "text-context" }> => item.type === "text-context");
-    const contextSuffix = [
-      pathItems.length ? `Reference local paths: ${pathItems.map((item) => item.path).join(", ")}` : "",
-      ...textItems.map((item) => `${item.title}:\n${item.body}`),
-    ]
-      .filter(Boolean)
-      .join("\n\n");
     const base =
       brief.trim() ||
       (images.length
         ? "Recreate the reference screenshot faithfully."
         : refs.length
           ? "Build on the referenced design."
-          : "Use the attached context to design the artifact.");
-    const text = sharingan ? brief.trim() : [base, contextSuffix].filter(Boolean).join("\n\n");
+          : "Use the attached context to create Canvas Nodes.");
+    const text = sharingan ? brief.trim() : base;
     if (sharingan) {
       if (!isCloneUrl(text)) {
         toast("Enter a valid http(s) URL to clone.", { variant: "error" });
@@ -1175,11 +849,11 @@ export function HomeScreen({
         setAffirmPending({ url: text });
         return;
       }
-      void startCreate(text, "standard", { sourceUrl: text });
+      void startCreate(text, { sourceUrl: text });
       return;
     }
     if (!text) return;
-    void startCreate(text, mode);
+    void startCreate(text);
   };
 
   // Confirms the one-time authorized-use affirmation for Sharingan, persists it so it never
@@ -1193,7 +867,7 @@ export function HomeScreen({
       .updateSettings({ sharinganAffirmed: true })
       .then((s) => publishSettingsUpdated(s))
       .catch(() => {});
-    void startCreate(pending.url, "standard", { sourceUrl: pending.url }); // same double-submit guard as the Build button
+    void startCreate(pending.url, { sourceUrl: pending.url }); // same double-submit guard as the Build button
   }, [affirmPending, api, startCreate]);
 
   const updateBrief = (value: string): void => {
@@ -1214,9 +888,6 @@ export function HomeScreen({
         prompt: original,
         agentCommand: homeAgent || undefined,
         model: homeModel || undefined,
-        mode,
-        skillId,
-        designSystemId,
       });
       const next = result.prompt.trim();
       if (!next) throw new Error("empty optimized prompt");
@@ -1233,7 +904,7 @@ export function HomeScreen({
     if (!window.confirm("Delete this project permanently? This can't be undone.")) return;
     try {
       await api.deleteProject(id);
-      discardPendingDesignWorkspaceTurn(id);
+      discardPendingDesignCanvasIntent(id);
       refresh();
     } catch {
       toast("Couldn't delete the project.", { variant: "error" });
@@ -1256,22 +927,6 @@ export function HomeScreen({
       toast("Couldn't restore the project.", { variant: "error" });
     }
   };
-  const importProject = async (files: FileList | null): Promise<void> => {
-    const file = files?.[0];
-    if (!file) return;
-    setImporting(true);
-    try {
-      const project = await api.importProject(file);
-      refresh();
-      toast(`Imported ${project.name}.`);
-    } catch {
-      toast("Couldn't import that project.", { variant: "error" });
-    } finally {
-      setImporting(false);
-      if (importInputRef.current) importInputRef.current.value = "";
-    }
-  };
-
   const startRename = (p: Project) => {
     setEditingId(p.id);
     setDraft(p.name);
@@ -1287,10 +942,6 @@ export function HomeScreen({
       toast("Couldn't rename the project.", { variant: "error" });
     }
   };
-
-  const skillName = (id?: string | null) => skills.find((s) => s.id === id)?.name;
-  const dsName = (id?: string | null) => systems.find((s) => s.id === id)?.name ?? id ?? "";
-  const modeLabel = (m?: ProjectMode) => (m === "standard" ? "Standard" : "Prototype");
 
   const archivedCount = projects.filter((p) => p.archivedAt).length;
   const activeCount = projects.length - archivedCount;
@@ -1329,15 +980,6 @@ export function HomeScreen({
     return sorted;
   }, [projects, q, sort, view]);
 
-  // Five high-level template types (mapped to the underlying skills).
-  const skillOptions: PickerOption[] = [
-    { value: "frontend-design", label: "Design", icon: <Palette size={15} strokeWidth={1.75} /> },
-    { value: "deck", label: "Slides", icon: <Presentation size={15} strokeWidth={1.75} /> },
-    { value: "doc", label: "Document", icon: <FileText size={15} strokeWidth={1.75} /> },
-    { value: "wireframe", label: "Wireframe", icon: <PenLine size={15} strokeWidth={1.75} /> },
-    { value: "motion-landing", label: "Animation", icon: <Sparkles size={15} strokeWidth={1.75} /> },
-  ];
-
   return (
     <div className="relative h-full w-full overflow-auto">
       {/* one restrained top glow — atmosphere, not a marketing mesh */}
@@ -1370,27 +1012,24 @@ export function HomeScreen({
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 {sharingan
                   ? "Paste a URL to clone it into an editable project."
-                  : "Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules."}
+                  : "Start empty or describe the system you need. Every reference, page, component, and decision stays visible on one canvas."}
               </p>
             </div>
-            <TooltipProvider>
-              <div className="flex flex-wrap items-center gap-2 pb-0.5 sm:shrink-0">
-                {!sharingan && (
-                  <PillToggle
-                    on={researchOn}
-                    label="Design Research"
-                    tip="Before designing, study real competitors, audience & references into .research/, then build grounded in it. Adds time + agent tokens."
-                    onToggle={() => toggleFeature("researchEnabled", !researchOn)}
-                  />
-                )}
-                <PillToggle
-                  on={visualReviewOn}
-                  label="Visual Review"
-                  tip="After each build, a reviewer agent inspects the rendered screenshot & signals and drives design fixes."
-                  onToggle={() => toggleFeature("visualQaEnabled", !visualReviewOn)}
-                />
-              </div>
-            </TooltipProvider>
+            <div className="flex flex-wrap items-center gap-2 pb-0.5 sm:shrink-0">
+              {!sharingan && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={creating}
+                  onClick={() => void startBlankCanvas()}
+                  className="gap-1.5 rounded-full bg-background/70 px-3 shadow-none backdrop-blur"
+                >
+                  <Plus size={13} strokeWidth={1.9} />
+                  Blank canvas
+                </Button>
+              )}
+            </div>
           </div>
 
           <div
@@ -1442,7 +1081,7 @@ export function HomeScreen({
                       ? "Paste a URL to clone…"
                       : images.length
                         ? "Add notes, or just build to recreate the screenshot…"
-                        : refs.length || homeContextItems.length
+                        : refs.length
                           ? "Add notes, or just build from the attached context…"
                           : "A pricing page with three plans, the middle one recommended…"
                   }
@@ -1510,42 +1149,10 @@ export function HomeScreen({
                 <div className="flex flex-wrap items-center gap-2">
                   <AttachMenu
                     onAttachFile={() => imgInputRef.current?.click()}
-                    onPickPaths={addHomePaths}
-                    onContext={addHomeTextContext}
                     onReference={(p) => void referenceProject(p)}
+                    allowLocalPaths={false}
+                    allowFigImport={false}
                   />
-                  <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
-                  {!sharingan ? (
-                    <DesignSystemSelect
-                      systems={systems}
-                      value={designSystemId}
-                      onChange={setDesignSystemId}
-                      defaultId={DEFAULT_DS}
-                      catalogStatus={systemsStatus}
-                      onRetry={refreshDesignSystems}
-                    />
-                  ) : null}
-                  {!sharingan && (
-                    <FieldSelect
-                      label="Mode"
-                      value={mode}
-                      onChange={setMode}
-                      options={[
-                        {
-                          value: "prototype",
-                          label: "Prototype",
-                          icon: <Zap size={15} strokeWidth={1.75} />,
-                          description: "One self-contained HTML file — fastest to iterate.",
-                        },
-                        {
-                          value: "standard",
-                          label: "Standard",
-                          icon: <Boxes size={15} strokeWidth={1.75} />,
-                          description: "A real Vite + React project with components and routing.",
-                        },
-                      ]}
-                    />
-                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Suspense fallback={<div aria-hidden className="h-7 w-28 rounded-md bg-surface-2" />}>
@@ -1561,7 +1168,7 @@ export function HomeScreen({
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={creating || optimizingPrompt || pendingAttachmentOperations > 0 || homeAgentBlockedReason !== null || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
+                    disabled={creating || optimizingPrompt || pendingAttachmentOperations > 0 || homeAgentBlockedReason !== null || (brief.trim().length === 0 && images.length === 0 && refs.length === 0)}
                     aria-busy={pendingAttachmentOperations > 0 || undefined}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
@@ -1574,36 +1181,11 @@ export function HomeScreen({
             </div>
           </div>
 
-          <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
-            <span className="label-mono">Start from</span>
-            {TEMPLATES.map((t) => (
-              <button
-                key={t.label}
-                type="button"
-                onClick={() => {
-                  updateBrief(t.brief);
-                  setSkillId(t.skillId);
-                  setDesignSystemId(t.designSystemId);
-                }}
-                className="rounded-full border border-border bg-card/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
         </div>
 
         {/* Project gallery */}
         <div className="mt-14">
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".zip,application/zip"
-            aria-label="Import project zip"
-            className="hidden"
-            onChange={(e) => void importProject(e.target.files)}
-          />
           <Tabs
             aria-label="Project view"
             value={view}
@@ -1620,20 +1202,6 @@ export function HomeScreen({
               },
             ]}
           />
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <IconButton
-                  aria-label="Import full project ZIP"
-                  disabled={importing}
-                  onClick={() => importInputRef.current?.click()}
-                >
-                  <FolderInput size={14} strokeWidth={1.75} />
-                </IconButton>
-              </TooltipTrigger>
-              <TooltipContent sideOffset={2}>Import full project ZIP</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
           <div className="ml-auto flex items-center gap-1.5">
             <Picker
               ariaLabel="Sort projects"
@@ -1718,18 +1286,10 @@ export function HomeScreen({
                     }}
                     className="block rounded-[inherit] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
                   >
-                    <ProjectThumb coverUrl={p.coverUrl} runStatus={p.runStatus} />
+                    <ProjectThumb coverUrl={p.coverUrl} />
                     <div className="min-w-0 p-3 pr-20">
                       <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
-                      <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                        <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
-                        {skillName(p.skillId) ? (
-                          <>
-                            <span className="text-border-strong">·</span>
-                            <span className="truncate">{skillName(p.skillId)}</span>
-                          </>
-                        ) : null}
-                      </p>
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">Design canvas</p>
                     </div>
                   </a>
                   <div className="absolute bottom-2 right-2 z-10 flex shrink-0 gap-0.5 rounded-md bg-card/90 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
@@ -1772,17 +1332,8 @@ export function HomeScreen({
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
                           <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
-                          <ActiveRunBadge status={p.runStatus} />
                         </div>
-                        <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                          <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
-                          {skillName(p.skillId) ? (
-                            <>
-                              <span className="text-border-strong">·</span>
-                              <span className="truncate">{skillName(p.skillId)}</span>
-                            </>
-                          ) : null}
-                        </p>
+                        <p className="truncate text-xs text-muted-foreground">Design canvas</p>
                       </div>
                     </a>
                     <div className="relative mr-3 flex min-w-[7rem] shrink-0 justify-end">
@@ -1806,35 +1357,35 @@ export function HomeScreen({
       </div>
 
       <Dialog
-        open={standardReferencePicker !== null}
-        onClose={() => setStandardReferencePicker(null)}
-        label="Choose a versioned design"
+        open={canvasReferencePicker !== null}
+        onClose={() => setCanvasReferencePicker(null)}
+        label="Choose a Node version"
         className="max-w-lg"
       >
         <div className="p-5">
-          <h2 className="text-base font-semibold tracking-tight">Choose a versioned design</h2>
+          <h2 className="text-base font-semibold tracking-tight">Choose a Node version</h2>
           <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-            Select the exact Page or Component from {standardReferencePicker?.project.name ?? "this project"}.
-            Dezin will pin its current immutable Revision.
+            Select an exact generated Node from {canvasReferencePicker?.project.name ?? "this project"}.
+            Dezin will pin its current immutable version.
           </p>
-          <ul aria-label="Versioned designs" className="mt-4 grid max-h-80 gap-2 overflow-y-auto">
-            {standardReferencePicker?.selections.map((selection) => (
-              <li key={selection.identity.sourceArtifactId}>
+          <ul aria-label="Node versions" className="mt-4 grid max-h-80 gap-2 overflow-y-auto">
+            {canvasReferencePicker?.selections.map((selection) => (
+              <li key={`${selection.identity.sourceNodeId}:${selection.identity.sourceVersionId}`}>
                 <button
                   type="button"
-                  aria-label={`Reference ${selection.artifactName}`}
-                  onClick={() => attachStandardProjectReference(standardReferencePicker.project, selection)}
+                  aria-label={`Reference ${selection.nodeName}`}
+                  onClick={() => attachCanvasProjectReference(canvasReferencePicker.project, selection)}
                   className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-3 py-3 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                 >
                   <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-surface-2 text-muted-foreground">
-                    {selection.artifactKind === "page"
+                    {selection.nodeKind === "page"
                       ? <FileText size={16} strokeWidth={1.75} />
                       : <Boxes size={16} strokeWidth={1.75} />}
                   </span>
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-foreground">{selection.artifactName}</span>
+                    <span className="block truncate text-sm font-medium text-foreground">{selection.nodeName}</span>
                     <span className="mt-0.5 block text-xs capitalize text-muted-foreground">
-                      {selection.artifactKind} · Current immutable Revision
+                      {selection.nodeKind} · Current immutable version
                     </span>
                   </span>
                   <ArrowRight size={14} className="ml-auto shrink-0 text-muted-foreground" />

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
-import type { SharinganCaptureBundleFileInput } from "../../src/orchestration/sharingan-capture-resource-bundle.ts";
+import type { SharinganCaptureBundleFileInput } from "../../src/sharingan-capture-resource-bundle.ts";
 
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffff_ffff;

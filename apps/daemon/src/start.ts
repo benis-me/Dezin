@@ -14,17 +14,9 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "./app.ts";
-import { startDaemonAfterGenerationRecovery } from "./daemon-startup.ts";
 import { shutdownDaemon } from "./daemon-shutdown.ts";
 import { watchElectronParent } from "./electron-parent-lifecycle.ts";
-import { createProductionGenerationBootstrap } from "./orchestration/production-generation-bootstrap.ts";
-import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snapshot.ts";
-import { createProductionPublicAddressResolver } from "./production-public-address-resolver.ts";
-import { createProductionSafeBoundedExternalFetcher } from "./production-safe-external-fetch.ts";
-import { projectDir } from "./serve-static.ts";
-import { resumeStandardProjectSetup } from "./project-runtime.ts";
 import {
-  SharinganBootstrapError,
   createProductionSharinganBootstrapCapturePort,
   createSharinganBootstrapService,
 } from "./sharingan-bootstrap.ts";
@@ -94,7 +86,6 @@ async function main(): Promise<void> {
     lockReleased = true;
     releaseDaemonLock();
   };
-  cleanupPrototypeVersionSnapshotResidue(DATA_DIR);
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
   const startupController = new AbortController();
@@ -104,63 +95,16 @@ async function main(): Promise<void> {
     storeClosed = true;
     store.close();
   };
-  // A prior process died mid-run → sweep those to cancelled AND leave a terminal message: finished
-  // runs are no longer reattached/replayed on re-entry (that double-rendered them), so an interrupted
-  // run needs a persisted terminal or its last turn looks unanswered.
-  for (const r of store.markInterruptedRuns()) {
-    store.addMessage(r.conversationId, "system", JSON.stringify({ result: { text: "Stopped — the app restarted before this run finished.", meta: {} } }));
-  }
   if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
   const runtimeSupervisor = createRuntimeSupervisor({ store, dataDir: DATA_DIR });
-  // One network boundary is shared by direct Resource imports and generated
-  // Research. Both paths therefore use identical DNS pinning, redirect
-  // revalidation, deadline, and response-size enforcement.
-  const resourceExternalFetch = createProductionSafeBoundedExternalFetcher({
-    // Surge and similar TUN proxies deliberately return RFC 2544 Fake-IP
-    // answers. Replace only that exact signal through bounded DoH, then keep
-    // the normal public-only and per-hop pinned-address boundary.
-    resolveAddresses: createProductionPublicAddressResolver(),
-  });
-  const repositoryDirForWorkspace = (workspaceId: string): string => {
-    for (const project of store.listProjects()) {
-      if (store.workspace.getWorkspace(project.id)?.id === workspaceId) {
-        return projectDir(DATA_DIR, project.id);
-      }
-    }
-    throw new Error(`Generation Workspace has no owning Project: ${workspaceId}`);
-  };
-  const generationSystem = createProductionGenerationBootstrap({
-    store,
-    dataDir: DATA_DIR,
-    designRegistry,
-    runtimeSupervisor,
-    daemonOwnerId: DAEMON_OWNER_ID,
-    repositoryDirForWorkspace,
-    resourceExternalFetch,
-    onError(error) {
-      console.warn("Generation runtime operation failed", error);
-    },
-  });
-  const generationRecovery = generationSystem.runtime;
   const sharinganBootstrap = createSharinganBootstrapService({
     store,
     dataDir: DATA_DIR,
     capture: createProductionSharinganBootstrapCapturePort({
       store,
       dataDir: DATA_DIR,
-    }),
-    beforeCapture: (projectId, signal) => resumeStandardProjectSetup(
-      projectId,
-      projectDir(DATA_DIR, projectId),
-      signal,
-    ).catch((error) => {
-      throw new SharinganBootstrapError(
-        "SHARINGAN_BOOTSTRAP_SETUP_FAILED",
-        error instanceof Error ? error.message : "Standard Project setup recovery failed",
-        { cause: error },
-      );
     }),
     operationSignal: startupController.signal,
   });
@@ -170,12 +114,7 @@ async function main(): Promise<void> {
     version: VERSION,
     designRegistry,
     security: { token: DAEMON_TOKEN },
-    daemonOwnerId: DAEMON_OWNER_ID,
     runtimeSupervisor,
-    resourceExternalFetch,
-    generationPlanEvents: generationSystem.events,
-    generationPlanRuntime: generationSystem.control,
-    workspaceAgent: generationSystem.workspaceAgent,
     sharinganBootstrap,
   });
 
@@ -194,7 +133,6 @@ async function main(): Promise<void> {
     }
     void shutdownDaemon({
       server,
-      generationRuntime: generationRecovery,
       runtimeSupervisor,
       closeStore,
     }).catch(() => false).finally(() => {
@@ -230,21 +168,17 @@ async function main(): Promise<void> {
   };
 
   try {
-    await startDaemonAfterGenerationRecovery({
-      generationRecovery,
-      signal: startupController.signal,
-      listen: () => server.listen(PORT, HOST, () => {
-        const { port } = server.address() as AddressInfo;
-        const url = `http://${HOST}:${port}`;
-        try {
-          mkdirSync(dirname(PORT_FILE), { recursive: true });
-          writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid, ownerId: DAEMON_OWNER_ID, token: DAEMON_TOKEN })}\n`, "utf8");
-        } catch {
-          // discovery file is best-effort
-        }
-        console.log(`Dezin daemon listening on ${url}  (data: ${DATA_DIR})`);
-      }),
-      rollback: rollbackStartup,
+    startupController.signal.throwIfAborted();
+    server.listen(PORT, HOST, () => {
+      const { port } = server.address() as AddressInfo;
+      const url = `http://${HOST}:${port}`;
+      try {
+        mkdirSync(dirname(PORT_FILE), { recursive: true });
+        writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid, ownerId: DAEMON_OWNER_ID, token: DAEMON_TOKEN })}\n`, "utf8");
+      } catch {
+        // discovery file is best-effort
+      }
+      console.log(`Dezin daemon listening on ${url}  (data: ${DATA_DIR})`);
     });
   } catch (error) {
     // A failed Electron-owned startup must release its IPC disconnect listener
@@ -256,7 +190,6 @@ async function main(): Promise<void> {
       && typeof process.disconnect === "function") {
       process.disconnect();
     }
-    await generationRecovery.stop();
     await rollbackStartup();
     if (shuttingDown) return;
     throw error;

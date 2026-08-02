@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
-import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput, Tabs } from "./ui/index.ts";
+import { Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput, Tabs } from "./ui/index.ts";
 import { DesignSystemMark } from "./design-system-logos.tsx";
 import DesignSystemPreview from "./DesignSystemPreview.tsx";
 import { navigate } from "../router.tsx";
@@ -12,9 +12,6 @@ export function DesignSystemSelect({
   systems,
   value,
   onChange,
-  defaultId,
-  inherited = false,
-  onUseDefault,
   compact = false,
   catalogStatus = "ready",
   selectionStatus = "ready",
@@ -23,9 +20,6 @@ export function DesignSystemSelect({
   systems: DesignSystemCard[];
   value: string;
   onChange: (id: string) => void;
-  defaultId?: string;
-  inherited?: boolean;
-  onUseDefault?: () => void;
   compact?: boolean;
   catalogStatus?: "loading" | "ready" | "error";
   selectionStatus?: "loading" | "ready" | "error";
@@ -75,15 +69,12 @@ export function DesignSystemSelect({
   };
 
   const current = systems.find((s) => s.id === value);
-  const defaultSystem = systems.find((s) => s.id === defaultId);
   const selectionPending = selectionStatus !== "ready";
   const label = selectionPending
     ? "Design system"
-    : inherited
-      ? `Org default${defaultSystem ? ` · ${defaultSystem.name}` : ""}`
-      : value === ""
-        ? "None"
-        : (current?.name ?? "Select");
+    : value === ""
+      ? "None"
+      : (current?.name ?? "Select");
   const selectionDescription = selectionStatus === "loading"
     ? "Design system settings are loading"
     : selectionStatus === "error"
@@ -210,8 +201,8 @@ export function DesignSystemSelect({
                 <li key={s.id}>
                   <button
                     type="button"
-                    aria-pressed={!inherited && s.id === value}
-                    ref={!inherited && s.id === value ? selectedRef : undefined}
+                    aria-pressed={s.id === value}
+                    ref={s.id === value ? selectedRef : undefined}
                     onMouseEnter={(e) => showPreview(e, s)}
                     onClick={() => {
                       onChange(s.id);
@@ -224,8 +215,7 @@ export function DesignSystemSelect({
                       <span className="block truncate text-sm font-medium leading-tight">{s.name}</span>
                       <span className="block truncate text-xs text-muted-foreground">{s.category}</span>
                     </span>
-                    {s.id === defaultId ? <Badge variant="secondary">Org default</Badge> : null}
-                    {!inherited && s.id === value
+                    {s.id === value
                       ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-foreground" />
                       : null}
                   </button>
@@ -235,33 +225,9 @@ export function DesignSystemSelect({
           </ul>
           </ScrollArea>
           <div className="flex shrink-0 flex-col border-t border-border/60 px-2 py-1">
-            {onUseDefault ? (
-              <button
-                type="button"
-                aria-pressed={inherited}
-                onClick={() => {
-                  onUseDefault();
-                  setOpen(false);
-                }}
-                className="flex w-full items-center gap-2.5 rounded-lg px-1 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-card">
-                  {defaultSystem
-                    ? <DesignSystemMark id={defaultSystem.id} swatch={defaultSystem.swatch} className="size-5" />
-                    : <Shapes size={13} strokeWidth={1.75} />}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium text-foreground">Use org default</span>
-                  <span className="block truncate text-xs">
-                    {defaultSystem?.name ?? "Follow the default in Settings"}
-                  </span>
-                </span>
-                {inherited ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-foreground" /> : null}
-              </button>
-            ) : null}
             <button
               type="button"
-              aria-pressed={!inherited && value === ""}
+              aria-pressed={value === ""}
               onClick={() => {
                 onChange("");
                 setOpen(false);
@@ -272,7 +238,7 @@ export function DesignSystemSelect({
                 <Shapes size={13} strokeWidth={1.75} />
               </span>
               No design system
-              {!inherited && value === ""
+              {value === ""
                 ? <Check size={14} strokeWidth={2.5} className="ml-auto text-foreground" />
                 : null}
             </button>

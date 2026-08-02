@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ChevronLeft, Check, Wand2, Palette, Type as TypeIcon, Ruler, Component, BookOpen } from "lucide-react";
+import { ChevronLeft, Wand2, Palette, Type as TypeIcon, Ruler, Component, BookOpen } from "lucide-react";
 import { Badge, Button, Loading } from "../components/ui/index.ts";
 import { Markdown } from "../components/Markdown.tsx";
 import { useApi } from "../lib/api-context.tsx";
-import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { setPendingComposer } from "../lib/pending-composer.ts";
 import { groupTokens, scopedTokens, tokenScope, type Token } from "../lib/ds-tokens.ts";
@@ -52,7 +51,6 @@ function Section({ id, label, icon: Icon, children }: { id: string; label: strin
 
 export function DesignSystemDetailScreen({ id, embedded = false }: { id: string; embedded?: boolean }) {
   const api = useApi();
-  const { toast } = useToast();
   const [detail, setDetail] = useState<DesignSystemDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState("overview");
@@ -73,6 +71,13 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
 
   const scope = useMemo(() => (detail ? tokenScope(detail.id) : ""), [detail]);
   const groups = useMemo(() => (detail ? groupTokens(detail.tokensCss) : null), [detail]);
+  const generationBrief = useMemo(() => {
+    if (!detail) return null;
+    const direction = detail.summary.trim();
+    return direction
+      ? `Create and generate a Design System Node for “${detail.name}”. Use this core direction: ${direction}`
+      : null;
+  }, [detail]);
 
   // Scroll-spy: highlight the nav item for the section in view.
   useEffect(() => {
@@ -91,19 +96,8 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
     return () => obs.disconnect();
   }, [detail]);
 
-  const setDefault = async (): Promise<void> => {
-    if (!detail) return;
-    try {
-      await api.updateSettings({ defaultDesignSystemId: detail.id });
-      toast(`Set ${detail.name} as the default style.`);
-    } catch {
-      toast("Couldn't update the default.", { variant: "error" });
-    }
-  };
-
   const generateWith = (): void => {
-    if (!detail) return;
-    setPendingComposer({ designSystemId: detail.id });
+    if (generationBrief) setPendingComposer({ brief: generationBrief });
     navigate("/");
   };
 
@@ -145,13 +139,9 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
           <Badge variant="outline">{detail.category}</Badge>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void setDefault()}>
-            <Check size={14} strokeWidth={2} />
-            Set default
-          </Button>
           <Button size="sm" onClick={generateWith}>
             <Wand2 size={14} strokeWidth={2} />
-            Generate with this
+            {generationBrief ? "Generate with this" : "Start blank project"}
           </Button>
         </div>
       </div>

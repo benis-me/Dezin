@@ -11,7 +11,6 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     model: "",
     apiBaseUrl: "https://api.openai.com/v1",
     apiKey: "",
-    defaultDesignSystemId: "clean",
     customInstructions: "",
     imageApiBaseUrl: "https://api.openai.com/v1",
     imageApiKey: "",
@@ -27,13 +26,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderModels: serializeModelEntries(MODEL_PROVIDERS[0]!.models),
     aiProviderOrganization: "",
     aiProviderProfiles: "",
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
     ...overrides,
   };
 }

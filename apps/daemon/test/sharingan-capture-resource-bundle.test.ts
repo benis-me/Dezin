@@ -9,7 +9,7 @@ import {
   SharinganCaptureResourceBundleError,
   validateSharinganCaptureResourceBundleSemantics,
   type SharinganCaptureBundleFileInput,
-} from "../src/orchestration/sharingan-capture-resource-bundle.ts";
+} from "../src/sharingan-capture-resource-bundle.ts";
 import {
   semanticSharinganCaptureFiles,
   sharinganFixturePng,
@@ -41,15 +41,11 @@ async function validateSemantics(exportedFiles: SharinganCaptureBundleFileInput[
 function encode(exportedFiles = files(), maxOutputBytes = 1024 * 1024) {
   return encodeSharinganCaptureResourceBundle({
     scope: {
-      taskId: "task-1",
-      planId: "plan-1",
-      attempt: 1,
+      projectId: "project-1",
+      captureId: "capture-operation-1",
       inputHash: "a".repeat(64),
       workspaceId: "workspace-1",
       resourceId: "capture-1",
-      parentRevisionId: null,
-      contextPackId: "context-pack-1",
-      operation: "create",
       nodeId: "capture-node",
       title: "Exact capture",
       resourceKind: "sharingan-capture",
@@ -65,11 +61,11 @@ function encode(exportedFiles = files(), maxOutputBytes = 1024 * 1024) {
   });
 }
 
-test("Sharingan Capture bundle v2 round-trips both immutable roots canonically", () => {
+test("Sharingan Capture bundle v3 round-trips both immutable roots canonically", () => {
   const encoded = encode();
   const decoded = decodeSharinganCaptureResourceBundle(encoded.bytes);
 
-  assert.equal(decoded.protocol, "dezin.sharingan-capture-resource-bundle.v2");
+  assert.equal(decoded.protocol, "dezin.sharingan-capture-resource-bundle.v3");
   assert.deepEqual(decoded.roots, [".sharingan", "public/_assets"]);
   assert.deepEqual(decoded.files.map((item) => item.path), [
     ".sharingan/entry/assets.json",

@@ -81,10 +81,10 @@ test("Home and Settings initial graphs cannot pull lazy editor or canvas chunks"
   const settingsDistDir = await fixture(
     {
       "index.html": { file: "assets/index.js", isEntry: true },
-      "src/screens/SettingsScreen.tsx": { file: "assets/settings.js", isDynamicEntry: true, imports: ["src/screens/WorkspaceScreen.tsx"] },
-      "src/screens/WorkspaceScreen.tsx": { file: "assets/workspace.js" },
+      "src/screens/SettingsScreen.tsx": { file: "assets/settings.js", isDynamicEntry: true, imports: ["src/design-canvas/DesignCanvasScreen.tsx"] },
+      "src/design-canvas/DesignCanvasScreen.tsx": { file: "assets/design-canvas.js" },
     },
-    { "index.js": "export{}", "settings.js": "export{}", "workspace.js": "export{}" },
+    { "index.js": "export{}", "settings.js": "export{}", "design-canvas.js": "export{}" },
   );
-  await assert.rejects(checkBundle({ distDir: settingsDistDir }), /SettingsScreen.*WorkspaceScreen/i);
+  await assert.rejects(checkBundle({ distDir: settingsDistDir }), /SettingsScreen.*DesignCanvasScreen/i);
 });

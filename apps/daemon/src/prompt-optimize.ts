@@ -5,9 +5,6 @@ export interface PromptOptimizeInput {
   prompt: string;
   agentCommand: string;
   model?: string;
-  mode?: "prototype" | "standard";
-  skillId?: string;
-  designSystemId?: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -15,10 +12,9 @@ export interface PromptOptimizeInput {
 export type PromptOptimizer = (input: PromptOptimizeInput) => Promise<string>;
 
 function buildPrompt(input: PromptOptimizeInput): string {
-  const mode = input.mode === "standard" ? "Standard Vite/React project" : input.mode === "prototype" ? "Prototype single-file artifact" : "the selected Dezin mode";
   return `You optimize user prompts for Dezin, a local-first design generation app.
 
-Rewrite the user's prompt into a stronger launch prompt for ${mode}.
+Rewrite the user's prompt into a stronger brief for Dezin's node-based Design Canvas.
 
 Rules:
 - Return ONLY the improved prompt text. No preamble, no markdown fence, no explanation.
@@ -29,11 +25,8 @@ Rules:
 - When requesting external or generated assets, ask for source notes only for concrete third-party materials; never rewrite this as a blanket ban on local files, online assets, external dependencies, open-source libraries, fonts, or component libraries.
 - Keep it concise enough to paste into Dezin: normally 250-650 words.
 - Prefer decisive instructions over optional suggestions.
-
-Context:
-- mode: ${input.mode ?? "selected"}
-- skillId: ${input.skillId ?? "selected"}
-- designSystemId: ${input.designSystemId ?? "selected"}
+- Keep the brief compatible with canvas context shared across independent Node Agents.
+- When the request targets a generated visual Node, describe the intended single-HTML result and observable acceptance criteria without prescribing a Vite project.
 
 User prompt:
 ${input.prompt.trim()}`;

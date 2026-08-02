@@ -1,12 +1,9 @@
 /**
- * A one-shot hand-off for prefilling the Home composer — set by "Generate with
- * this design system" (remix) and the template gallery, consumed by HomeScreen on
- * mount. Kept out of the URL so briefs with newlines/quotes stay intact.
+ * A one-shot hand-off for prefilling the Home composer with an explicit Main
+ * Agent brief. Kept out of the URL so briefs with newlines/quotes stay intact.
  */
 export interface PendingComposer {
-  brief?: string;
-  skillId?: string;
-  designSystemId?: string;
+  brief: string;
 }
 
 let pending: PendingComposer | null = null;

@@ -14,8 +14,7 @@ vi.mock("../lib/native.ts", () => ({
 
 function renderHome(onNewProject = vi.fn()) {
   const api = makeFakeApi({
-    // getSettings is used to init research/visual toggles; affirmed=true so this task's
-    // submit path calls onNewProject directly (the not-affirmed gate arrives in Task 5).
+    // affirmed=true makes this task's submit path call onNewProject directly.
     getSettings: async () => ({ ...(await makeFakeApi().getSettings()), sharinganAffirmed: true }),
   });
   render(
@@ -31,19 +30,19 @@ function renderHome(onNewProject = vi.fn()) {
 }
 
 describe("HomeScreen Sharingan mode", () => {
-  it("double-clicking the heading enters Sharingan mode: URL placeholder shown, Research hidden", async () => {
+  it("double-clicking the heading enters Sharingan mode", () => {
     renderHome();
     expect(screen.queryByPlaceholderText("Paste a URL to clone…")).not.toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Design system" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Blank canvas" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Design system" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
     fireEvent.doubleClick(screen.getByText("Start a design"));
     expect(screen.getByPlaceholderText("Paste a URL to clone…")).toBeInTheDocument();
-    expect(screen.queryByText("Design Research")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Design system" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Blank canvas" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Sharingan" })).toBeInTheDocument();
   });
 
-  it("submitting a valid URL calls onNewProject with the sourceUrl and standard mode", async () => {
+  it("submitting a valid URL calls onNewProject with the sourceUrl", async () => {
     const onNewProject = renderHome();
     // Let the mount-time getSettings() resolve (it carries sharinganAffirmed: true here) before
     // submitting — otherwise the affirmation gate would still see the initial `affirmed=false`.
@@ -54,10 +53,9 @@ describe("HomeScreen Sharingan mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Design" }));
     expect(onNewProject).toHaveBeenCalledWith(
       "https://example.com",
-      expect.any(String),
-      null,
-      "standard",
       { sourceUrl: "https://example.com" },
+      undefined,
+      undefined,
     );
   });
 
@@ -78,9 +76,6 @@ describe("HomeScreen Sharingan mode", () => {
 
     expect(onNewProject).toHaveBeenCalledWith(
       "https://example.com",
-      expect.any(String),
-      null,
-      "standard",
       { sourceUrl: "https://example.com" },
       undefined,
       {
@@ -132,7 +127,12 @@ describe("HomeScreen Sharingan mode", () => {
 
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ sharinganAffirmed: true }));
     await waitFor(() =>
-      expect(onNewProject).toHaveBeenCalledWith("https://example.com", expect.any(String), null, "standard", { sourceUrl: "https://example.com" }),
+      expect(onNewProject).toHaveBeenCalledWith(
+        "https://example.com",
+        { sourceUrl: "https://example.com" },
+        undefined,
+        undefined,
+      ),
     );
   });
 });

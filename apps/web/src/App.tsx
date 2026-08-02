@@ -1,28 +1,24 @@
-import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { Shell } from "./components/Shell.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
-import type { ApiClient } from "./lib/api.ts";
+import type { ApiClient, DesignCanvasAssetImportItem, Project } from "./lib/api.ts";
+import { type DesignProjectAttachments } from "./lib/design-attachments.ts";
 import {
-  setPendingAgent,
-  discardPendingDesignWorkspaceTurn,
-  setPendingBrief,
-  setPendingDesignWorkspaceTurn,
-  setPendingImages,
-  setPendingRefs,
-  type PendingDesignWorkspaceAttachment,
-  type PendingProjectAttachments,
-} from "./lib/pending-brief.ts";
-import { persistedDesignSystemId } from "./lib/design-system-selection.ts";
-import { slugify } from "./lib/project-ref.ts";
+  discardPendingDesignCanvasIntent,
+  setPendingDesignCanvasIntent,
+} from "./lib/pending-design-canvas.ts";
+import { createDesignCanvasApi } from "./lib/design-canvas-api.ts";
+import { revealDesignExport } from "./lib/design-export.ts";
+import { native } from "./lib/native.ts";
+import { useAgents } from "./lib/agents-context.tsx";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
-const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
-const ProjectStudioScreen = lazy(() =>
-  import("./project-studio/ProjectStudioScreen.tsx").then((module) => ({ default: module.ProjectStudioScreen })),
+const DesignCanvasScreen = lazy(() =>
+  import("./design-canvas/index.ts").then((module) => ({ default: module.DesignCanvasScreen })),
 );
 const DesignSystemsScreen = lazy(() => import("./screens/DesignSystemsScreen.tsx").then((module) => ({ default: module.DesignSystemsScreen })));
 const DesignSystemDetailScreen = lazy(() =>
@@ -39,80 +35,108 @@ const MoodboardScreen = lazy(() =>
   import("./screens/MoodboardScreen.tsx").then((module) => ({ default: module.MoodboardScreen })),
 );
 
+function DesignProjectScreen({ projectId, api }: { projectId: string; api: ApiClient }) {
+  const [project, setProject] = useState<Project | null>(null);
+  const canvasApi = useMemo(() => createDesignCanvasApi(api), [api]);
+  const { agents, rescan: rescanAgents } = useAgents();
+
+  useEffect(() => {
+    let active = true;
+    void api.getProject(projectId).then((next) => {
+      if (active) setProject(next);
+    }).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [api, projectId]);
+
+  const revealExport = useCallback((exportId: string) => revealDesignExport({
+    projectPath: project?.projectPath,
+    exportId,
+    openPath: native?.openPath,
+    writeClipboard: typeof navigator !== "undefined" && navigator.clipboard?.writeText
+      ? (value) => navigator.clipboard.writeText(value)
+      : undefined,
+  }), [project?.projectPath]);
+
+  return (
+    <DesignCanvasScreen
+      key={projectId}
+      projectId={projectId}
+      projectName={project?.name ?? "Untitled"}
+      api={canvasApi}
+      agents={agents}
+      onRescanAgents={rescanAgents}
+      onBackHome={() => navigate("/")}
+      projectPath={project?.projectPath}
+      onRevealExport={revealExport}
+    />
+  );
+}
+
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
-}
-
-function stagedImageName(
-  name: string,
-  index: number,
-  mimeType: "image/png" | "image/jpeg" | undefined,
-): string {
-  const safe = (name.split(/[/\\]/).pop() ?? "image")
-    .replace(/[^a-zA-Z0-9._-]/g, "_");
-  const dot = safe.lastIndexOf(".");
-  const suppliedExtension = dot > 0 && safe.length - dot <= 12 ? safe.slice(dot) : "";
-  const extension = mimeType === "image/png"
-    ? ".png"
-    : mimeType === "image/jpeg"
-      ? ".jpg"
-      : suppliedExtension;
-  const stem = (dot > 0 && suppliedExtension ? safe.slice(0, dot) : safe)
-    .replace(/^\.+/, "")
-    .slice(0, 48) || "image";
-  return `home-image-${index + 1}-${stem}${extension}`;
 }
 
 function stagedAttachmentTitle(value: string, fallback: string): string {
   return value.trim().slice(0, 256) || fallback;
 }
 
-async function stageDesignWorkspaceAttachments(
-  api: Pick<ApiClient, "uploadRef">,
-  projectId: string,
-  attachments: PendingProjectAttachments | undefined,
-  onStaged: (attachments: PendingDesignWorkspaceAttachment[]) => void,
-): Promise<PendingDesignWorkspaceAttachment[]> {
-  const staged: PendingDesignWorkspaceAttachment[] = [];
+export function designCanvasAttachmentItems(
+  attachments: DesignProjectAttachments | undefined,
+): DesignCanvasAssetImportItem[] {
+  const items: DesignCanvasAssetImportItem[] = [];
   for (const [index, image] of (attachments?.images ?? []).entries()) {
-    const uploaded = await api.uploadRef(
-      projectId,
-      stagedImageName(image.name, index, image.mimeType),
-      image.base64,
-    );
-    staged.push({
-      title: stagedAttachmentTitle(image.name, `Image ${index + 1}`),
-      uploadedFileId: uploaded.path,
-      preview: true,
+    const title = stagedAttachmentTitle(image.name, `Image ${index + 1}`);
+    items.push({
+      asset: {
+        name: title,
+        mimeType: image.mimeType ?? (image.base64.startsWith("iVBOR") ? "image/png" : "image/jpeg"),
+        base64: image.base64,
+      },
+      node: {
+        id: `node-home-image-${index + 1}`,
+        kind: "image",
+        name: title,
+        geometry: { x: 100 + index * 390, y: 100, width: 360, height: 260 },
+      },
     });
-    onStaged([...staged]);
   }
   for (const [index, ref] of (attachments?.refs ?? []).entries()) {
+    const itemIndex = (attachments?.images.length ?? 0) + index;
+    const title = stagedAttachmentTitle(ref.name, `Reference ${index + 1}`);
     if (ref.projectReference !== undefined) {
-      staged.push({
-        title: stagedAttachmentTitle(ref.name, `Reference ${index + 1}`),
-        projectReference: ref.projectReference,
+      items.push({
+        asset: {
+          name: `${title}.html`,
+          mimeType: "text/html",
+          sourceVersion: {
+            projectId: ref.projectReference.sourceProjectId,
+            nodeId: ref.projectReference.sourceNodeId,
+            versionId: ref.projectReference.sourceVersionId,
+          },
+        },
+        node: {
+          id: `node-home-reference-${index + 1}`,
+          kind: "document",
+          name: title,
+          geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+        },
       });
-      onStaged([...staged]);
       continue;
     }
-    const uploaded = await api.uploadRef(
-      projectId,
-      `home-reference-${index + 1}-${slugify(ref.name)}.html`,
-      ref.base64,
-    );
-    staged.push({
-      title: stagedAttachmentTitle(ref.name, `Reference ${index + 1}`),
-      uploadedFileId: uploaded.path,
+    items.push({
+      asset: { name: `${title}.html`, mimeType: "text/html", base64: ref.base64 },
+      node: {
+        id: `node-home-reference-${index + 1}`,
+        kind: "document",
+        name: title,
+        geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+      },
     });
-    onStaged([...staged]);
   }
-  return staged;
-}
-
-function pendingWorkspaceTurnId(): string {
-  return `turn-${globalThis.crypto.randomUUID().toLowerCase()}`;
+  return items;
 }
 
 function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (section?: string) => void }) {
@@ -120,47 +144,8 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   const { toast } = useToast();
   switch (route.name) {
     case "project":
-      if (route.id === "new") {
-        return <WorkspaceScreen key={route.id} projectId={route.id} onOpenSettings={onOpenSettings} />;
-      }
-      return (
-        <ProjectStudioScreen
-          key={route.id}
-          projectId={route.id}
-          artifactId={null}
-          artifactRevisionId={null}
-          resourceId={null}
-          resourceRevisionId={null}
-          legacyFallback={WorkspaceScreen}
-          onOpenSettings={onOpenSettings}
-        />
-      );
     case "project-canvas":
-    case "project-artifact":
-    case "project-artifact-revision":
-    case "project-artifact-candidate":
-    case "project-resource":
-    case "project-resource-revision":
-      // key by projectId: switching projects must give a FRESH instance (full state reset), not reuse
-      // one component whose refs (activeConv, abortRef, running/queue) leak from the previous project.
-      return (
-        <ProjectStudioScreen
-          key={route.id}
-          projectId={route.id}
-          artifactId={route.name === "project-artifact" || route.name === "project-artifact-revision"
-            || route.name === "project-artifact-candidate" ? route.artifactId : null}
-          artifactRevisionId={route.name === "project-artifact-revision" ? route.revisionId : null}
-          artifactCandidate={route.name === "project-artifact-candidate"
-            ? { planId: route.planId, taskId: route.taskId, attempt: route.attempt }
-            : null}
-          resourceId={route.name === "project-resource" || route.name === "project-resource-revision"
-            ? route.resourceId
-            : null}
-          resourceRevisionId={route.name === "project-resource-revision" ? route.revisionId : null}
-          legacyFallback={WorkspaceScreen}
-          onOpenSettings={onOpenSettings}
-        />
-      );
+      return <DesignProjectScreen key={route.id} projectId={route.id} api={api} />;
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":
@@ -183,71 +168,44 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     default:
       return (
         <HomeScreen
-          onNewProject={async (brief, skillId, designSystemId, mode, sharingan, agentSelection, attachments) => {
+          onNewProject={async (brief, sharingan, agentSelection, attachments) => {
             let createdProjectId: string | null = null;
             try {
-              const initialTurnId = mode === "standard" ? pendingWorkspaceTurnId() : undefined;
               const project = await api.createProject({
                 name: briefToName(brief),
-                skillId,
-                designSystemId: sharingan
-                  ? null
-                  : persistedDesignSystemId(designSystemId ?? ""),
-                mode,
-                sharingan: !!sharingan,
-                sourceUrl: sharingan?.sourceUrl,
-                ...(sharingan && initialTurnId ? { initialTurnId } : {}),
+                ...(sharingan ? { sharingan: true, sourceUrl: sharingan.sourceUrl } : {}),
               });
               createdProjectId = project.id;
-              if (mode === "standard") {
-                const attachmentCount = (attachments?.images.length ?? 0) + (attachments?.refs.length ?? 0);
-                const pendingTurn = {
-                  projectId: project.id,
-                  turnId: initialTurnId!,
-                  brief,
-                  ...(agentSelection?.agentCommand ? { agentCommand: agentSelection.agentCommand } : {}),
-                  ...(agentSelection?.model ? { model: agentSelection.model } : {}),
-                  attachmentCount,
-                  attachmentsStaged: attachmentCount === 0,
-                  attachments: [] as PendingDesignWorkspaceAttachment[],
-                };
-                if (!setPendingDesignWorkspaceTurn(pendingTurn)) {
-                  throw new Error("Initial project context could not be saved for recovery");
-                }
-                await stageDesignWorkspaceAttachments(
-                  api,
-                  project.id,
-                  attachments,
-                  (currentAttachments) => {
-                    if (!setPendingDesignWorkspaceTurn({
-                      ...pendingTurn,
-                      attachmentsStaged: currentAttachments.length === attachmentCount,
-                      attachments: currentAttachments,
-                    })) {
-                      throw new Error("Initial project attachments could not be saved for recovery");
-                    }
-                  },
-                );
-                setPendingImages([]);
-                setPendingRefs([]);
-              } else {
-                setPendingImages(attachments?.images ?? []);
-                setPendingRefs(attachments?.refs ?? []);
-                setPendingBrief(brief);
-                if (agentSelection?.agentCommand) {
-                  setPendingAgent(agentSelection.agentCommand, agentSelection.model);
-                }
+              const attachmentCount = (attachments?.images.length ?? 0) + (attachments?.refs.length ?? 0);
+              const importItems = designCanvasAttachmentItems(attachments);
+              if (importItems.length > 0) {
+                const canvas = await api.getDesignCanvas(project.id);
+                await api.importDesignCanvasAssets(project.id, {
+                  expectedRevision: canvas.revision,
+                  items: importItems,
+                });
               }
-              void api
-                .generateProjectTitle(project.id, brief)
-                .then((updated) => window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated })))
-                .catch(() => {});
+              if ((brief.trim() || attachmentCount > 0) && !setPendingDesignCanvasIntent({
+                projectId: project.id,
+                prompt: brief,
+                ...(agentSelection?.agentCommand ? { agentCommand: agentSelection.agentCommand } : {}),
+                ...(agentSelection?.model ? { model: agentSelection.model } : {}),
+                context: [],
+              })) {
+                throw new Error("Initial Design Canvas intent could not be saved");
+              }
+              if (brief.trim()) {
+                void api
+                  .generateProjectTitle(project.id, brief)
+                  .then((updated) => window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated })))
+                  .catch(() => {});
+              }
               navigate(`/projects/${project.id}`);
             } catch {
               if (createdProjectId !== null) {
                 try {
                   await api.deleteProject(createdProjectId);
-                  discardPendingDesignWorkspaceTurn(createdProjectId);
+                  discardPendingDesignCanvasIntent(createdProjectId);
                 } catch {
                   // Keep the project-scoped handoff if cleanup fails so the
                   // incomplete project remains diagnosable and recoverable.
@@ -263,10 +221,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
 }
 
 function routeLifetimeKey(route: Route): string {
-  if (route.name === "project" || route.name === "project-canvas" || route.name === "project-artifact"
-    || route.name === "project-artifact-revision" || route.name === "project-artifact-candidate"
-    || route.name === "project-resource"
-    || route.name === "project-resource-revision") {
+  if (route.name === "project" || route.name === "project-canvas") {
     return `project:${route.id}`;
   }
   return routeToPath(route);

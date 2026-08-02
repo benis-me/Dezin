@@ -11,8 +11,7 @@ import {
   type SharinganBootstrapState,
   type Store,
 } from "../../../packages/core/src/index.ts";
-import { cloneAndFreeze, ContextIntegrityError } from "./context/context-types.ts";
-import { snapshotBytes } from "./context/adapters/file.ts";
+import { cloneAndFreeze } from "./canonical-json.ts";
 import {
   decodeSharinganCaptureResourceBundle,
   encodeSharinganCaptureResourceBundle,
@@ -21,19 +20,21 @@ import {
   type SharinganCaptureBundleScope,
   type SharinganCaptureBundleSourceIdentity,
   type SharinganCaptureBundleExporterIdentity,
-} from "./orchestration/sharingan-capture-resource-bundle.ts";
+} from "./sharingan-capture-resource-bundle.ts";
 import {
   exportExactSharinganProjectCapture,
-} from "./orchestration/production-resource-runtime.ts";
+} from "./sharingan-exact-capture-export.ts";
 import {
   ensureCaptured,
   capturedPageCount,
   type SharinganOpen,
 } from "./sharingan-handler.ts";
-import { ensureStandardProjectWorkspace } from "./workspace-migration.ts";
 import {
   readVerifiedExactResourceRevisionPayload,
-} from "./resource-revision-view.ts";
+} from "./sharingan-resource-revision-payload.ts";
+import {
+  writeSharinganResourceRevisionPayload,
+} from "./sharingan-resource-revision-writer.ts";
 import {
   beginResourceMaterializationPayloadIntent,
   completeResourceMaterializationPayloadIntent,
@@ -230,15 +231,11 @@ function bootstrapScope(input: {
     input.sourceUrl,
   ].join("\0"));
   return Object.freeze({
-    taskId: `sharingan-bootstrap-task-${inputHash.slice(0, 32)}`,
-    planId: `sharingan-bootstrap-plan-${inputHash.slice(0, 32)}`,
-    attempt: 1,
+    projectId: input.projectId,
+    captureId: `sharingan-capture-${inputHash.slice(0, 32)}`,
     inputHash,
     workspaceId: input.workspaceId,
     resourceId: input.resourceId,
-    parentRevisionId: null,
-    contextPackId: `context-pack-${sha256(`sharingan-bootstrap-context\0${inputHash}`)}`,
-    operation: "create",
     nodeId: input.nodeId,
     title: "Source capture",
     resourceKind: "sharingan-capture",
@@ -474,13 +471,7 @@ export function createSharinganBootstrapService(options: {
     try {
       await options.beforeCapture?.(projectId, signal);
       signal.throwIfAborted();
-      const ready = await ensureStandardProjectWorkspace(options, projectId, { readMode: "compact" });
-      if (ready.status !== "ready") {
-        throw new SharinganBootstrapError(
-          "SHARINGAN_BOOTSTRAP_WORKSPACE_UNAVAILABLE",
-          "Sharingan bootstrap requires a Standard Workspace",
-        );
-      }
+      options.store.workspace.ensureSharinganWorkspaceFoundation(projectId);
 
       const activeCaptures = options.store.workspace.listResources(projectId)
         .filter((resource) => resource.kind === "sharingan-capture" && resource.archivedAt === null);
@@ -654,7 +645,11 @@ export function createSharinganBootstrapService(options: {
         candidate.kind === "resource" && candidate.resourceId === resource!.id
       ));
       if (!node) {
-        throw new ContextIntegrityError("Sharingan bootstrap Resource node is unavailable");
+        throw new SharinganBootstrapError(
+          "SHARINGAN_BOOTSTRAP_RESOURCE_INVALID",
+          "Sharingan bootstrap Resource node is unavailable",
+          { retryable: false },
+        );
       }
 
       const scope = bootstrapScope({
@@ -702,31 +697,16 @@ export function createSharinganBootstrapService(options: {
         idempotencyKey: null,
         createdAt: now(),
       });
-      let snapshot: Awaited<ReturnType<typeof snapshotBytes>> | null = null;
+      let snapshot: Awaited<ReturnType<typeof writeSharinganResourceRevisionPayload>> | null = null;
       try {
-        snapshot = await snapshotBytes({
+        snapshot = await writeSharinganResourceRevisionPayload({
+          dataDir: options.dataDir,
           workspaceId: resource.workspaceId,
           resourceId: resource.id,
           revisionId,
-          kind: "sharingan-capture",
-          workspaceRoot: options.dataDir,
-          snapshotRoot: options.dataDir,
-          source: {
-            type: "bounded-external",
-            url: `dezin://sharingan-bootstrap/${encodeURIComponent(projectId)}`,
-            finalUrl: project.sourceUrl,
-            status: 200,
-            mimeType: "application/json",
-            bytes: encoded.bytes,
-          },
-          provenance: {
-            kind: "sharingan-project-bootstrap",
-            protocol: BOOTSTRAP_PROTOCOL,
-            projectId,
-            sourceUrl: project.sourceUrl,
-          },
-          createdAt: now(),
-        }, encoded.bytes, "application/json");
+          bytes: encoded.bytes,
+          signal,
+        });
         const revision = options.store.workspace.createResourceRevisionCandidateForProject(
           projectId,
           resource.id,
@@ -737,7 +717,7 @@ export function createSharinganBootstrapService(options: {
             summary: `Sharingan Capture: ${project.sourceUrl} — ${decoded.files.length} exact files`,
             metadata: {
               format: encoded.bundle.protocol,
-              version: 2,
+              version: 3,
               fileCount: decoded.files.length,
               sourceUrl: capture.source.finalUrl,
               mimeType: snapshot.mimeType,

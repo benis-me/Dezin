@@ -31,7 +31,6 @@ function startApp(options: { sharinganBootstrap?: SharinganBootstrapPort } = {})
   const app = createApp({
     store,
     dataDir,
-    standardProjectSetup: async () => {},
     ...(options.sharinganBootstrap === undefined
       ? {}
       : { sharinganBootstrap: options.sharinganBootstrap }),
@@ -39,7 +38,7 @@ function startApp(options: { sharinganBootstrap?: SharinganBootstrapPort } = {})
   return { store, app, dataDir };
 }
 
-test("POST /api/projects persists sharingan + sourceUrl and forces standard mode", async () => {
+test("POST /api/projects persists Sharingan source identity without retired Project fields", async () => {
   const { store, app } = startApp({ sharinganBootstrap: noopSharinganBootstrap() });
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -47,14 +46,15 @@ test("POST /api/projects persists sharingan + sourceUrl and forces standard mode
     const res = await fetch(`${base}/api/projects`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "clone", mode: "prototype", designSystemId: "modern-minimal", sharingan: true, sourceUrl: "https://example.test/" }),
+      body: JSON.stringify({ name: "clone", sharingan: true, sourceUrl: "https://example.test/" }),
     });
     assert.equal(res.status, 201);
-    const proj = (await res.json()) as { sharingan: boolean; sourceUrl?: string; mode: string; designSystemId: string | null };
+    const proj = (await res.json()) as Record<string, unknown>;
     assert.equal(proj.sharingan, true);
     assert.equal(proj.sourceUrl, "https://example.test/");
-    assert.equal(proj.mode, "standard", "sharingan forces standard even when prototype was requested");
-    assert.equal(proj.designSystemId, null, "sharingan ignores any requested design system");
+    assert.equal("mode" in proj, false);
+    assert.equal("designSystemId" in proj, false);
+    assert.equal("skillId" in proj, false);
   } finally {
     await new Promise<void>((r) => app.close(() => r()));
     store.close();
@@ -115,7 +115,7 @@ test("POST /api/projects rejects sharingan without a valid http(s) sourceUrl", a
   }
 });
 
-test("POST /api/projects still creates a normal (non-sharingan) project", async () => {
+test("POST /api/projects creates a blank Design Canvas Project", async () => {
   const { store, app } = startApp();
   await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -123,7 +123,7 @@ test("POST /api/projects still creates a normal (non-sharingan) project", async 
     const res = await fetch(`${base}/api/projects`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "normal", mode: "standard" }),
+      body: JSON.stringify({ name: "normal" }),
     });
     assert.equal(res.status, 201);
     const proj = (await res.json()) as { sharingan: boolean; sourceUrl?: string };

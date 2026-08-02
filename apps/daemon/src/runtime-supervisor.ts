@@ -1,22 +1,9 @@
 import type { Store } from "../../../packages/core/src/index.ts";
-import { existsSync, lstatSync } from "node:fs";
-import { lstat, rm } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { PreviewLeaseManager } from "./preview-lease.ts";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 
 export type RuntimeScope = {
   projectId: string;
-  variantId?: string;
-  runId?: string;
-  artifactId?: string;
-  planId?: string;
-  taskId?: string;
-};
-
-export type RegisteredRun = RuntimeScope & {
-  runId: string;
-  controller: AbortController;
-  settled: Promise<void>;
 };
 
 type RegisteredOperation = RuntimeScope & {
@@ -25,51 +12,28 @@ type RegisteredOperation = RuntimeScope & {
   settled: Promise<void>;
 };
 
-export type RuntimeReleaseScope = Required<Pick<RuntimeScope, "projectId">> & {
-  variantId?: string;
-  runIds: string[];
-};
+export type RuntimeReleaseScope = Required<Pick<RuntimeScope, "projectId">>;
 
 export interface RuntimeSupervisorOptions {
   dataDir: string;
   store: Store;
   releaseProjectResources?: (scope: RuntimeReleaseScope) => void | Promise<void>;
-  releaseVariantResources?: (scope: RuntimeReleaseScope & { variantId: string }) => void | Promise<void>;
   shutdownResources?: () => void | Promise<void>;
-  previewLeaseManager?: PreviewLeaseManager;
   shutdownWaitMs?: number;
 }
 
 export class RuntimeScopeUnavailableError extends Error {
   constructor(scope: RuntimeScope) {
-    super(`Runtime scope is unavailable: ${scope.projectId}${scope.variantId ? `:${scope.variantId}` : ""}`);
+    super(`Runtime scope is unavailable: ${scope.projectId}`);
     this.name = "RuntimeScopeUnavailableError";
   }
 }
 
-function matchesScope(run: RuntimeScope, scope: RuntimeScope): boolean {
-  return run.projectId === scope.projectId
-    && (scope.variantId === undefined || run.variantId === scope.variantId)
-    && (scope.runId === undefined || run.runId === scope.runId)
-    && (scope.artifactId === undefined || run.artifactId === scope.artifactId)
-    && (scope.planId === undefined || run.planId === scope.planId)
-    && (scope.taskId === undefined || run.taskId === scope.taskId);
-}
-
 function matchesOperationScope(operation: RuntimeScope, scope: RuntimeScope): boolean {
-  return operation.projectId === scope.projectId
-    && (scope.variantId === undefined || operation.variantId === scope.variantId)
-    && (scope.runId === undefined || operation.runId === scope.runId)
-    && (scope.artifactId === undefined || operation.artifactId === scope.artifactId)
-    && (scope.planId === undefined || operation.planId === scope.planId)
-    && (scope.taskId === undefined || operation.taskId === scope.taskId);
+  return operation.projectId === scope.projectId;
 }
 
-function missingPath(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
-function projectEvidencePath(dataDir: string, projectId: string): string {
+function assertProjectIdSegment(projectId: string): void {
   if (
     projectId.length === 0
     || projectId === "."
@@ -78,78 +42,14 @@ function projectEvidencePath(dataDir: string, projectId: string): string {
     || projectId.includes("\\")
     || projectId.includes("\0")
   ) {
-    throw new Error(`Generation evidence path requires one project id segment: ${projectId}`);
-  }
-  const root = resolve(dataDir, "generation-task-evidence");
-  const target = resolve(root, projectId);
-  const ownedRelativePath = relative(root, target);
-  if (
-    ownedRelativePath.length === 0
-    || ownedRelativePath === ".."
-    || ownedRelativePath.startsWith(`..${sep}`)
-    || isAbsolute(ownedRelativePath)
-  ) {
-    throw new Error(`Generation evidence path escapes its data directory: ${projectId}`);
-  }
-  return target;
-}
-
-async function removeProjectGenerationEvidence(dataDir: string, projectId: string): Promise<void> {
-  const root = resolve(dataDir, "generation-task-evidence");
-  const target = projectEvidencePath(dataDir, projectId);
-  let rootStats;
-  try {
-    rootStats = await lstat(root);
-  } catch (error) {
-    if (missingPath(error)) return;
-    throw error;
-  }
-  if (rootStats.isSymbolicLink()) {
-    throw new Error(`Refusing to traverse a symbolic link as the Generation evidence root: ${root}`);
-  }
-  if (!rootStats.isDirectory()) {
-    throw new Error(`Generation evidence root is not a directory: ${root}`);
-  }
-  let targetStats;
-  try {
-    targetStats = await lstat(target);
-  } catch (error) {
-    if (missingPath(error)) return;
-    throw error;
-  }
-  if (targetStats.isSymbolicLink()) {
-    throw new Error(`Refusing to remove a symbolic link as project Generation evidence: ${target}`);
-  }
-  await rm(target, { recursive: true, force: true });
-}
-
-function assertProjectGenerationEvidenceRemovable(
-  dataDir: string,
-  projectId: string,
-): void {
-  const root = resolve(dataDir, "generation-task-evidence");
-  const target = projectEvidencePath(dataDir, projectId);
-  if (!existsSync(root)) return;
-  const rootStats = lstatSync(root);
-  if (rootStats.isSymbolicLink()) {
-    throw new Error(`Refusing to traverse a symbolic link as the Generation evidence root: ${root}`);
-  }
-  if (!rootStats.isDirectory()) {
-    throw new Error(`Generation evidence root is not a directory: ${root}`);
-  }
-  if (!existsSync(target)) return;
-  const targetStats = lstatSync(target);
-  if (targetStats.isSymbolicLink()) {
-    throw new Error(`Refusing to remove a symbolic link as project Generation evidence: ${target}`);
+    throw new Error(`Project deletion requires one project id segment: ${projectId}`);
   }
 }
 
 export class RuntimeSupervisor {
-  private readonly runs = new Map<string, RegisteredRun>();
   private readonly operations = new Map<number, RegisteredOperation>();
   private readonly blockedProjects = new Set<string>();
   private readonly projectReleaseOwners = new Map<string, symbol>();
-  private readonly blockedVariants = new Set<string>();
   private shuttingDown = false;
   private shutdownPromise?: Promise<boolean>;
   private readonly options: RuntimeSupervisorOptions;
@@ -159,21 +59,10 @@ export class RuntimeSupervisor {
     this.options = options;
   }
 
-  registerRun(run: RegisteredRun): () => void {
-    this.assertAdmission(run);
-    this.runs.set(run.runId, run);
-    const unregister = (): void => {
-      if (this.runs.get(run.runId) === run) this.runs.delete(run.runId);
-    };
-    void run.settled.then(unregister, unregister);
-    return unregister;
-  }
-
   assertAdmission(scope: RuntimeScope): void {
     if (
       this.shuttingDown
       || this.blockedProjects.has(scope.projectId)
-      || (scope.variantId !== undefined && this.blockedVariants.has(this.variantKey(scope.projectId, scope.variantId)))
     ) {
       throw new RuntimeScopeUnavailableError(scope);
     }
@@ -204,6 +93,55 @@ export class RuntimeSupervisor {
     return operation;
   }
 
+  /**
+   * Transfer an already-started operation from an admitted request (or one of
+   * its supervised descendants) into daemon ownership. This deliberately does
+   * not re-run admission: Project deletion may close admission while an
+   * admitted Main Agent is in the middle of creating a child Node Agent. Such
+   * a late child is registered and immediately cancelled instead of escaping
+   * supervision.
+   *
+   * Both the operation rejection and the asynchronous cancellation hook are
+   * observed here, so callers may safely return HTTP 202 without retaining the
+   * completion Promise.
+   */
+  superviseDetachedOperation<T>(
+    scope: RuntimeScope,
+    completion: Promise<T>,
+    cancel: () => void | Promise<unknown>,
+  ): void {
+    const id = this.nextOperationId++;
+    const controller = new AbortController();
+    let cancelTask = Promise.resolve();
+    let cancellationRequested = false;
+    const requestCancellation = (): void => {
+      if (cancellationRequested) return;
+      cancellationRequested = true;
+      try {
+        cancelTask = Promise.resolve(cancel()).then(() => {}, () => {});
+      } catch {
+        cancelTask = Promise.resolve();
+      }
+    };
+    controller.signal.addEventListener("abort", requestCancellation, { once: true });
+
+    const completionSettled = Promise.resolve(completion).then(() => {}, () => {});
+    const settled = completionSettled.then(() => cancelTask);
+    const entry: RegisteredOperation = { ...scope, id, controller, settled };
+    this.operations.set(id, entry);
+    void settled.finally(() => {
+      controller.signal.removeEventListener("abort", requestCancellation);
+      if (this.operations.get(id) === entry) this.operations.delete(id);
+    });
+
+    // A descendant may be adopted after deletion/shutdown closed admission but
+    // before its parent settles. It remains part of the drain and is cancelled
+    // immediately rather than becoming an unowned background task.
+    if (this.shuttingDown || this.blockedProjects.has(scope.projectId)) {
+      controller.abort(new RuntimeScopeUnavailableError(scope));
+    }
+  }
+
   acquireOperationLease(scope: RuntimeScope): { release: () => void } {
     this.assertAdmission(scope);
     const id = this.nextOperationId++;
@@ -226,17 +164,6 @@ export class RuntimeSupervisor {
     return { release };
   }
 
-  cancelRuns(scope: RuntimeScope): void {
-    for (const run of this.runs.values()) {
-      if (matchesScope(run, scope)) run.controller.abort();
-    }
-  }
-
-  async waitForRuns(scope: RuntimeScope): Promise<void> {
-    const matching = [...this.runs.values()].filter((run) => matchesScope(run, scope));
-    await Promise.allSettled(matching.map((run) => run.settled));
-  }
-
   cancelOperations(scope: RuntimeScope): void {
     for (const operation of this.operations.values()) {
       if (matchesOperationScope(operation, scope)) operation.controller.abort();
@@ -244,65 +171,23 @@ export class RuntimeSupervisor {
   }
 
   async waitForOperations(scope: RuntimeScope): Promise<void> {
-    const matching = [...this.operations.values()].filter((operation) => matchesOperationScope(operation, scope));
-    await Promise.allSettled(matching.map((operation) => operation.settled));
-  }
-
-  async releaseVariant(projectId: string, variantId: string): Promise<void> {
-    const scope = { projectId, variantId };
-    this.blockedVariants.add(this.variantKey(projectId, variantId));
-    this.cancelRuns(scope);
-    this.cancelOperations(scope);
-    await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
-    const runIds = this.options.store
-      .listRuns(projectId)
-      .filter((run) => run.variantId === variantId)
-      .map((run) => run.id);
-    await Promise.all([
-      this.options.previewLeaseManager?.stopScope({ projectId, variantId }),
-      ...runIds.map((runId) => this.options.previewLeaseManager?.stopScope({ projectId, runId })),
-    ]);
-    await this.options.releaseVariantResources?.({ projectId, variantId, runIds });
-    await Promise.all([
-      rm(join(this.options.dataDir, "worktrees", projectId, variantId), { recursive: true, force: true }),
-      rm(join(this.options.dataDir, "projects", projectId, ".variants", variantId), { recursive: true, force: true }),
-      ...runIds.flatMap((runId) => [
-        rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "run-worktrees", projectId, runId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "version-worktrees", projectId, runId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "version-evidence", projectId, runId), { recursive: true, force: true }),
-        rm(
-          join(
-            this.options.dataDir,
-            "projects",
-            projectId,
-            ".versions",
-            `${runId.replace(/[^a-zA-Z0-9-]/g, "")}.html`,
-          ),
-          { recursive: true, force: true },
-        ),
-        rm(
-          join(
-            this.options.dataDir,
-            "projects",
-            projectId,
-            ".versions",
-            `${runId.replace(/[^a-zA-Z0-9-]/g, "")}.files`,
-          ),
-          { recursive: true, force: true },
-        ),
-      ]),
-    ]);
-    this.options.store.deleteVariant(variantId);
+    // An admitted operation (notably Main Agent) can create a supervised child
+    // while cancellation is propagating. Drain until no matching owner remains
+    // instead of waiting only for the first snapshot.
+    while (true) {
+      const matching = [...this.operations.values()].filter((operation) => matchesOperationScope(operation, scope));
+      if (matching.length === 0) return;
+      await Promise.allSettled(matching.map((operation) => operation.settled));
+    }
   }
 
   async releaseProject(
     projectId: string,
     options: {
+      /** Sharingan owns a SQLite identity; ordinary Design Projects do not. */
+      deleteProjectRecord?: boolean;
       /** Runs after this deletion owns admission, before any live work is cancelled. */
       afterBlock?: () => void | Promise<void>;
-      beforeDelete?: () => void | Promise<void>;
       /**
        * Restore caller-owned pre-commit state before admission is reopened.
        * If this rollback fails, admission remains closed.
@@ -312,8 +197,7 @@ export class RuntimeSupervisor {
       afterDelete?: () => void | Promise<void>;
     } = {},
   ): Promise<void> {
-    projectEvidencePath(this.options.dataDir, projectId);
-    assertProjectGenerationEvidenceRemovable(this.options.dataDir, projectId);
+    assertProjectIdSegment(projectId);
     if (this.projectReleaseOwners.has(projectId)) {
       throw new RuntimeScopeUnavailableError({ projectId });
     }
@@ -325,39 +209,15 @@ export class RuntimeSupervisor {
     let preserveAdmissionBlock = false;
     try {
       if (options.afterBlock) await options.afterBlock();
-      this.cancelRuns(scope);
       this.cancelOperations(scope);
-      await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
-      // A tracked import may create Runs/log paths while unwinding after abort. Re-read ownership
-      // only after every project operation settles so cleanup cannot use a stale pre-import snapshot.
-      const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
-      await this.options.previewLeaseManager?.stopScope({ projectId });
-      await this.options.releaseProjectResources?.({ projectId, runIds });
-      // The project is admission-blocked and all owned work has settled here.
-      // This is the only safe point to durably capture cleanup identities before
-      // the final database cascade removes their ownership rows.
-      await options.beforeDelete?.();
-      // The SQLite cascade is the sole destructive commit point. Before it, a
-      // durable cleanup journal can be rolled back because all source paths still
-      // exist. After it, startup recovery owns every deterministic path captured
-      // by that journal, so a crash can only complete deletion, never resurrect a
-      // Project whose source was already removed.
-      this.options.store.deleteProject(projectId);
-      databaseDeleted = true;
+      await this.waitForOperations(scope);
+      await this.options.releaseProjectResources?.({ projectId });
+      if (options.deleteProjectRecord !== false) {
+        this.options.store.deleteProject(projectId);
+        databaseDeleted = true;
+      }
       await options.afterDelete?.();
-      await Promise.all([
-        rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "version-evidence", projectId), { recursive: true, force: true }),
-        rm(join(this.options.dataDir, "render-assemblies", projectId), { recursive: true, force: true }),
-        removeProjectGenerationEvidence(this.options.dataDir, projectId),
-        rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
-        ...runIds.flatMap((runId) => [
-          rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
-          rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
-        ]),
-      ]);
+      await rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true });
     } catch (error) {
       if (databaseDeleted) {
         preserveAdmissionBlock = true;
@@ -382,7 +242,6 @@ export class RuntimeSupervisor {
   }
 
   cancelAll(): void {
-    for (const run of this.runs.values()) run.controller.abort();
     for (const operation of this.operations.values()) operation.controller.abort();
   }
 
@@ -396,16 +255,9 @@ export class RuntimeSupervisor {
   private async performShutdown(deadlineAt: number): Promise<boolean> {
     this.shuttingDown = true;
     this.cancelAll();
-    const settled = await this.waitForSettlements(
-      [
-        ...[...this.runs.values()].map((run) => run.settled),
-        ...[...this.operations.values()].map((operation) => operation.settled),
-      ],
-      deadlineAt,
-    );
+    const settled = await this.waitForOperationDrain(deadlineAt);
     const resourcesSettled = await this.waitForSettlements(
       [
-        Promise.resolve().then(() => this.options.previewLeaseManager?.stopAll()).then(() => {}),
         Promise.resolve().then(() => this.options.shutdownResources?.()).then(() => {}),
       ],
       deadlineAt,
@@ -413,8 +265,12 @@ export class RuntimeSupervisor {
     return settled && resourcesSettled;
   }
 
-  private variantKey(projectId: string, variantId: string): string {
-    return `${projectId}:${variantId}`;
+  private async waitForOperationDrain(deadlineAt: number): Promise<boolean> {
+    while (true) {
+      const settlements = [...this.operations.values()].map((operation) => operation.settled);
+      if (settlements.length === 0) return true;
+      if (!(await this.waitForSettlements(settlements, deadlineAt))) return false;
+    }
   }
 
   private waitForSettlements(settlements: Promise<void>[], deadlineAt: number): Promise<boolean> {

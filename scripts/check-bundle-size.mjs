@@ -10,12 +10,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const DEFAULT_BUNDLE_BUDGETS = {
   maxInitialMinified: 500 * KIB,
   maxInitialGzip: 180 * KIB,
-  // 2026-07-22 multi-artifact Studio initial closure. ProjectStudio, Canvas,
-  // Resource/Research viewers, Versions, and Flow remain outside Home/Settings.
+  // Keep the full Design Canvas and Moodboard surfaces outside Home/Settings.
   initialJsGzipBaseline: 324_676,
-  // 2026-07-22 multi-artifact Studio baseline: versioned Resource/Research
-  // viewers, Artifact Versions, and prototype Flow. Studio, Canvas, and Flow
-  // remain outside the Home/Settings dependency closures.
+  // Bound aggregate drift while allowing the current lazy Canvas and media tools.
   totalJsGzipBaseline: 931_282,
 };
 

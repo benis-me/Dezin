@@ -117,8 +117,8 @@ export default defineConfig({
     port: webPort,
     proxy: {
       "/api": { target, changeOrigin: true, router, configure: configureDaemonProxy },
-      // Only the daemon's artifact-serving paths (/projects/:id/preview/*) go to the
-      // daemon. Client routes like /projects/:id are SPA routes → serve index.html.
+      // Only daemon-owned preview paths under /projects/:id go to the daemon.
+      // Client routes like /projects/:id are SPA routes → serve index.html.
       "/projects": {
         target,
         changeOrigin: true,
@@ -134,7 +134,7 @@ export default defineConfig({
       output: {
         // Keep the initial shell below the per-chunk budget without fragmenting it
         // into a large request fan-out. This seam is stable across the pre-canvas
-        // baseline and the workspace-canvas build.
+        // baseline and the full-canvas build.
         codeSplitting: {
           groups: [{
             name: "ui-core",

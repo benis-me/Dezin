@@ -81,22 +81,3 @@ test("GET /api/design-systems/:id returns the full system; 404 on unknown", asyn
     assert.equal(miss.status, 404);
   });
 });
-
-test("GET /api/skills returns a light list (no body)", async () => {
-  await withServer(async (base) => {
-    const res = await fetch(`${base}/api/skills`);
-    assert.equal(res.status, 200);
-    const list = (await res.json()) as Array<Record<string, unknown>>;
-    assert.equal(list.length, 21);
-    const ids = list.map((s) => s.id);
-    for (const id of ["frontend-design", "deck", "pricing-page", "blog-post", "faq", "component-library", "design-tokens", "settings-page", "status-page", "onboarding-flow"]) {
-      assert.ok(ids.includes(id), `expected /api/skills to include ${id}`);
-    }
-    for (const s of list) {
-      assert.ok(typeof s.id === "string" && typeof s.name === "string");
-      assert.ok(typeof s.mode === "string");
-      assert.ok(Array.isArray(s.triggers));
-      assert.ok(!("body" in s), "must not include the skill body");
-    }
-  });
-});

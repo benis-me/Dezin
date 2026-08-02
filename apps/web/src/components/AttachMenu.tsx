@@ -30,8 +30,6 @@ export function AttachMenu({
   onReference,
   onReferenceMoodboard,
   onReferenceEffect,
-  workspaceReferences = [],
-  onReferenceWorkspaceItem,
   allowLocalPaths = true,
   allowProjectReference = true,
   allowFigImport = true,
@@ -43,8 +41,6 @@ export function AttachMenu({
   onReference?: (project: Project) => void;
   onReferenceMoodboard?: (board: Moodboard) => void;
   onReferenceEffect?: (effect: EffectCard) => void;
-  workspaceReferences?: Array<{ id: string; label: string; detail?: string }>;
-  onReferenceWorkspaceItem?: (id: string) => void;
   allowLocalPaths?: boolean;
   allowProjectReference?: boolean;
   allowFigImport?: boolean;
@@ -168,26 +164,6 @@ export function AttachMenu({
         ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Designs</DropdownMenuLabel>
-        {onReferenceWorkspaceItem ? (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger className="whitespace-nowrap">
-              <Layers size={15} strokeWidth={1.75} />
-              Reference a workspace item
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="max-h-72 w-64 overflow-y-auto">
-              {workspaceReferences.length === 0 ? (
-                <DropdownMenuItem disabled>No versioned workspace items</DropdownMenuItem>
-              ) : workspaceReferences.map((item) => (
-                <DropdownMenuItem key={item.id} onClick={() => onReferenceWorkspaceItem(item.id)}>
-                  <span className="min-w-0">
-                    <span className="block truncate">{item.label}</span>
-                    {item.detail ? <span className="block truncate text-[10px] text-muted-foreground">{item.detail}</span> : null}
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        ) : null}
         {onReferenceMoodboard ? (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger className="whitespace-nowrap">

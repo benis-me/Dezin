@@ -1,293 +1,247 @@
-import type { ApiClient, Conversation, ConversationScope } from "../lib/api.ts";
+import type { ApiClient, Project, Settings } from "../lib/api.ts";
+import type {
+  DesignCanvas,
+  DesignJob,
+  DesignThread,
+} from "../design-canvas/types.ts";
 
-const FAKE_BRIDGE_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+export type FakeApiOverrides = Partial<ApiClient>;
 
-/** Build a fake ApiClient for tests; override only the methods a test needs. */
-type FakeConversation = Omit<Conversation, "scope"> & { scope?: ConversationScope };
-type FakeApiOverrides = Omit<Partial<ApiClient>, "listConversations" | "createConversation" | "getConversation" | "renameConversation"> & {
-  listConversations?: (id: string, scope?: ConversationScope) => Promise<FakeConversation[]>;
-  createConversation?: (id: string, title?: string, scope?: ConversationScope) => Promise<FakeConversation>;
-  getConversation?: (projectId: string, conversationId: string) => Promise<FakeConversation>;
-  renameConversation?: (projectId: string, conversationId: string, title: string) => Promise<FakeConversation>;
-};
+const NOW = 1_700_000_000_000;
 
-function normalizeFakeConversation(conversation: FakeConversation): Conversation {
-  return { ...conversation, scope: conversation.scope ?? { type: "workspace", id: conversation.projectId } };
+function fakeProject(id: string, patch: Partial<Project> = {}): Project {
+  return {
+    id,
+    name: "Untitled design",
+    createdAt: NOW,
+    updatedAt: NOW,
+    archivedAt: null,
+    coverUrl: null,
+    ...patch,
+  };
 }
 
-export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
-  const {
-    listConversations: listConversationsOverride,
-    createConversation: createConversationOverride,
-    getConversation: getConversationOverride,
-    renameConversation: renameConversationOverride,
-    ...apiOverrides
-  } = over;
-  const notImpl = () => {
-    throw new Error("not implemented in fake");
-  };
+function emptyCanvas(projectId: string): DesignCanvas {
   return {
+    schemaVersion: 1,
+    projectId,
+    revision: 0,
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodeOrder: [],
+    nodes: [],
+    undoDepth: 0,
+    redoDepth: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+function emptyThread(scope: DesignThread["scope"]): DesignThread {
+  return {
+    id: scope.type === "main" ? "thread-main" : `thread-node-${scope.nodeId}`,
+    scope,
+    messages: [],
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+function fakeJob(id: string, patch: Partial<DesignJob> = {}): DesignJob {
+  return {
+    id,
+    kind: "node-generation",
+    status: "queued",
+    nodeId: null,
+    parentJobId: null,
+    contextHash: null,
+    versionId: null,
+    exportId: null,
+    error: null,
+    activity: [],
+    createdAt: NOW,
+    updatedAt: NOW,
+    finishedAt: null,
+    ...patch,
+  };
+}
+
+const defaultSettings: Settings = {
+  agentCommand: "claude",
+  model: "",
+  apiBaseUrl: "",
+  apiKey: "",
+  customInstructions: "",
+  imageApiBaseUrl: "",
+  imageApiKey: "",
+  imageModel: "",
+  removeBackgroundModel: "",
+  editRegionModel: "",
+  extractLayerModel: "",
+  videoApiBaseUrl: "",
+  videoApiKey: "",
+  videoModel: "",
+  aiProviderId: "openai",
+  aiProviderEnabled: false,
+  aiProviderModels: "gpt-image-1",
+  aiProviderOrganization: "",
+  aiProviderProfiles: "",
+  sharinganAffirmed: false,
+};
+
+/** Build a current ApiClient fake; tests override only the behavior they exercise. */
+export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
+  const api: ApiClient = {
     listProjects: async () => [],
-    createProject: notImpl as ApiClient["createProject"],
-    generateProjectTitle: async (id: string) => (apiOverrides.getProject ? apiOverrides.getProject(id) : notImpl()),
-    getSetup: async () => ({ phase: "ready" as const }),
-    getDevServerUrl: async (id: string) => ({
-      leaseId: `lease-${id}`,
-      url: `http://127.0.0.1:5300/${id}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
-      bridgeNonce: FAKE_BRIDGE_NONCE,
-      expiresAt: Date.now() + 60_000,
+    createProject: async (input) => fakeProject("project-new", {
+      name: input.name,
+      sharingan: input.sharingan,
+      sourceUrl: input.sourceUrl,
     }),
-    releaseDevServer: async () => {},
-    renewPreviewLease: async (leaseId: string) => ({
-      leaseId,
-      url: `http://127.0.0.1:5300/#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
-      bridgeNonce: FAKE_BRIDGE_NONCE,
-      expiresAt: Date.now() + 60_000,
+    generateProjectTitle: async (id) => fakeProject(id),
+    getProject: async (id) => fakeProject(id),
+    patchProject: async (id, patch) => fakeProject(id, patch),
+    deleteProject: async () => {},
+    getDesignCanvas: async (projectId) => emptyCanvas(projectId),
+    mutateDesignCanvas: async (projectId, input) => ({ ...emptyCanvas(projectId), revision: input.expectedRevision + 1 }),
+    undoDesignCanvas: async (projectId, expectedRevision) => ({ ...emptyCanvas(projectId), revision: expectedRevision + 1 }),
+    redoDesignCanvas: async (projectId, expectedRevision) => ({ ...emptyCanvas(projectId), revision: expectedRevision + 1 }),
+    listDesignCanvasAssets: async () => [],
+    createDesignCanvasAsset: async (_projectId, input) => ({
+      id: "asset-fake",
+      name: input.name,
+      mimeType: input.mimeType,
+      checksum: "0".repeat(64),
+      bytes: 0,
+      createdAt: NOW,
     }),
-    releasePreviewLease: async () => {},
-    resolvePreviewTarget: async (projectId, target) => {
-      const artifactId = target.kind === "artifact-current"
-        ? target.artifactId
-        : target.kind === "workspace-flow"
-          ? target.startArtifactId
-          : "artifact-test";
-      const revisionId = target.kind === "artifact-revision" || target.kind === "component-state"
-        ? target.revisionId
-        : "revision-test";
-      return {
-        version: 1,
-        targetKey: `${target.kind}:${revisionId}`,
-        requestedKind: target.kind,
-        projectId,
-        workspaceId: `workspace-${projectId}`,
-        artifactId,
-        artifactKind: "page",
-        revisionId,
-        trackId: target.kind === "artifact-current" ? target.trackId ?? "track-test" : "track-test",
-        snapshotId: target.kind === "workspace-flow" ? target.snapshotId : null,
-        sourceCommitHash: `commit-${revisionId}`,
-        sourceTreeHash: `tree-${revisionId}`,
-        dependencyLockHash: `dependencies-${revisionId}`,
-        assemblyHash: `assembly-${revisionId}`,
-        artifactRoot: artifactId === "artifact-test" ? "." : `artifacts/${artifactId}`,
-        renderSpec: {},
-        variantKey: target.kind === "component-state" ? target.variantKey : null,
-        stateKey: target.kind === "component-state" ? target.stateKey : null,
-        runId: target.kind === "run-candidate" ? target.runId : null,
-      };
-    },
-    acquirePreviewTargetLease: async (_projectId, resolved) => ({
-      leaseId: `lease-${resolved.revisionId}`,
-      url: `http://127.0.0.1:5300/${resolved.revisionId}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
-      bridgeNonce: FAKE_BRIDGE_NONCE,
-      expiresAt: Date.now() + 60_000,
-      resolved,
+    importDesignCanvasAssets: async (projectId, input) => ({
+      ...emptyCanvas(projectId),
+      revision: input.expectedRevision + 1,
     }),
-    renewPreviewTargetLease: async (leaseId: string) => ({
-      leaseId,
-      url: `http://127.0.0.1:5300/#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
-      bridgeNonce: FAKE_BRIDGE_NONCE,
-      expiresAt: Date.now() + 60_000,
+    designCanvasAssetUrl: (projectId, assetId) =>
+      `/api/projects/${projectId}/design-canvas/assets/${assetId}/content`,
+    listDesignNodeVersions: async () => [],
+    designNodeVersionPreviewUrl: (projectId, nodeId, versionId) =>
+      `/api/projects/${projectId}/design-canvas/nodes/${nodeId}/versions/${versionId}/preview/`,
+    getDesignThread: async (_projectId, scope) => emptyThread(scope),
+    submitDesignAgentTurn: async (projectId, scope, input) => ({
+      thread: {
+        ...emptyThread(scope),
+        messages: [{
+          id: "message-user",
+          role: "user",
+          content: input.message,
+          jobId: "job-fake",
+          createdAt: NOW,
+        }],
+      },
+      job: fakeJob("job-fake", {
+        kind: scope.type === "main" ? "main-agent" : "node-generation",
+        nodeId: scope.type === "node" ? scope.nodeId : null,
+      }),
+      canvas: emptyCanvas(projectId),
     }),
-    releasePreviewTargetLease: async () => {},
-    captureProjectCover: async () => ({ captured: false }),
-    getProject: notImpl as ApiClient["getProject"],
-    getWorkspace: async (projectId) => ({
-      status: "unsupported",
-      code: "workspace_requires_standard_project",
-      projectId,
-      projectMode: "prototype",
+    listDesignJobs: async () => [],
+    cancelDesignJob: async (_projectId, jobId) => fakeJob(jobId, {
+      status: "cancelled",
+      finishedAt: NOW,
     }),
-    workspaceAgentTurn: notImpl as ApiClient["workspaceAgentTurn"],
-    artifactAgentTurn: notImpl as ApiClient["artifactAgentTurn"],
-    resourceAgentTurn: notImpl as ApiClient["resourceAgentTurn"],
-    listWorkspaceProposals: async () => [],
-    getWorkspaceProposal: notImpl as ApiClient["getWorkspaceProposal"],
-    createWorkspaceProposal: notImpl as ApiClient["createWorkspaceProposal"],
-    updateWorkspaceProposal: notImpl as ApiClient["updateWorkspaceProposal"],
-    approveWorkspaceProposal: notImpl as ApiClient["approveWorkspaceProposal"],
-    rejectWorkspaceProposal: notImpl as ApiClient["rejectWorkspaceProposal"],
-    listGenerationPlans: async () => [],
-    getLatestWorkspaceAgentPlanId: async () => null,
-    getLatestScopedArtifactPlanId: async () => null,
-    getGenerationPlan: notImpl as ApiClient["getGenerationPlan"],
-    streamGenerationPlanEvents: notImpl as ApiClient["streamGenerationPlanEvents"],
-    cancelGenerationPlan: notImpl as ApiClient["cancelGenerationPlan"],
-    retryGenerationTask: notImpl as ApiClient["retryGenerationTask"],
-    applyWorkspaceGraphCommands: notImpl as ApiClient["applyWorkspaceGraphCommands"],
-    saveWorkspaceLayout: notImpl as ApiClient["saveWorkspaceLayout"],
-    listResources: async () => [],
-    createResource: notImpl as ApiClient["createResource"],
-    materializeResource: notImpl as ApiClient["materializeResource"],
-    getResource: notImpl as ApiClient["getResource"],
-    updateResource: notImpl as ApiClient["updateResource"],
-    listResourceRevisions: async () => [],
-    listResourceRevisionHistory: async () => ({ items: [], nextCursor: null }),
-    getResourceRevisionView: notImpl as ApiClient["getResourceRevisionView"],
-    getResourceRevisionBlob: notImpl as ApiClient["getResourceRevisionBlob"],
-    getResearchResourceRevision: notImpl as ApiClient["getResearchResourceRevision"],
-    createResearchDirectionArtifactIntent: notImpl as ApiClient["createResearchDirectionArtifactIntent"],
-    createResourceRevision: notImpl as ApiClient["createResourceRevision"],
-    publishResourceRevision: notImpl as ApiClient["publishResourceRevision"],
-    getArtifact: notImpl as ApiClient["getArtifact"],
-    listArtifactTracks: async () => [],
-    listArtifactRevisions: async () => [],
-    getArtifactRevision: notImpl as ApiClient["getArtifactRevision"],
-    listArtifactRevisionHistory: async () => ({ items: [], nextCursor: null }),
-    restoreArtifactRevision: notImpl as ApiClient["restoreArtifactRevision"],
-    forkArtifactTrack: notImpl as ApiClient["forkArtifactTrack"],
-    applyArtifactMutation: notImpl as ApiClient["applyArtifactMutation"],
-    resolveArtifactElementProvenance: notImpl as ApiClient["resolveArtifactElementProvenance"],
-    getArtifactThumbnail: async () => new Blob(),
-    artifactThumbnailUrl: (projectId, artifactId, revisionId) =>
-      `/api/projects/${projectId}/artifacts/${artifactId}/revisions/${revisionId}/thumbnail`,
-    listWorkspaceSnapshots: async () => [],
-    getWorkspaceSnapshot: notImpl as ApiClient["getWorkspaceSnapshot"],
-    patchProject: notImpl as ApiClient["patchProject"],
-    saveCover: async () => {},
-    deleteProject: notImpl as ApiClient["deleteProject"],
-    listConversations: async (id, scope) =>
-      (await (listConversationsOverride
-        ? scope === undefined
-          ? listConversationsOverride(id)
-          : listConversationsOverride(id, scope)
-        : Promise.resolve([]))).map(normalizeFakeConversation),
-    createConversation: async (id, title, scope) =>
-      normalizeFakeConversation(createConversationOverride
-        ? await (scope !== undefined
-          ? createConversationOverride(id, title, scope)
-          : title !== undefined
-            ? createConversationOverride(id, title)
-            : createConversationOverride(id))
-        : notImpl()),
-    getConversation: async (projectId, conversationId) =>
-      normalizeFakeConversation(getConversationOverride ? await getConversationOverride(projectId, conversationId) : notImpl()),
-    renameConversation: async (projectId, conversationId, title) =>
-      normalizeFakeConversation(renameConversationOverride ? await renameConversationOverride(projectId, conversationId, title) : notImpl()),
-    deleteConversation: async () => {},
-    listVariants: async () => [],
-    createVariant: async () => [],
-    fanoutVariants: async () => ({ plan: { count: 3 }, created: [], variants: [] }),
-    forkMessage: async () => ({ conversationId: "c1", variantId: "v1", variants: [] }),
-    activateVariant: async () => [],
-    renameVariant: async () => [],
-    deleteVariant: async () => [],
-    listMessages: async () => [],
+    startDesignImplementationExport: async () => ({
+      exportId: "export-fake",
+      job: fakeJob("job-export", { kind: "implementation-export", exportId: "export-fake" }),
+    }),
+
     listDesignSystems: async () => [],
-    getDesignSystem: notImpl as ApiClient["getDesignSystem"],
-    importBrand: notImpl as ApiClient["importBrand"],
+    getDesignSystem: async (id) => ({ id, name: id, category: "design", summary: "", designMd: "", tokensCss: "" }),
+    importBrand: async () => ({ id: "brand-import", name: "Imported brand", category: "design", summary: "" }),
     listEffects: async () => [],
-    getEffect: notImpl as ApiClient["getEffect"],
-    createEffect: notImpl as ApiClient["createEffect"],
-    updateEffect: notImpl as ApiClient["updateEffect"],
-    listSkills: async () => [],
-    createExtensionPairingCode: notImpl as ApiClient["createExtensionPairingCode"],
+    getEffect: async (id) => ({ id, name: id, origin: "built-in", category: "visual", summary: "", parameters: [], presets: [], code: "" }),
+    createEffect: async (input) => ({ id: "effect-new", ...input, origin: "custom", category: "visual", summary: "", parameters: [], presets: [], code: "" }),
+    updateEffect: async (id, patch) => ({ id, name: patch.name ?? id, origin: "custom", category: patch.category ?? "visual", summary: patch.summary ?? "", parameters: patch.parameters ?? [], presets: patch.presets ?? [], code: patch.code ?? "" }),
+
+    createExtensionPairingCode: async () => ({ code: "123456", expiresAt: NOW + 60_000 }),
     listExtensionCredentials: async () => [],
     revokeExtensionCredential: async () => {},
-    getSettings: async () => ({
-      agentCommand: "claude",
-      model: "",
-      apiBaseUrl: "",
-      apiKey: "",
-      defaultDesignSystemId: "modern-minimal",
-      customInstructions: "",
-      imageApiBaseUrl: "",
-      imageApiKey: "",
-      imageModel: "",
-      removeBackgroundModel: "",
-      editRegionModel: "",
-      extractLayerModel: "",
-      videoApiBaseUrl: "",
-      videoApiKey: "",
-      videoModel: "",
-      aiProviderId: "openai",
-      aiProviderEnabled: false,
-      aiProviderModels: "gpt-image-1",
-      aiProviderOrganization: "",
-      aiProviderProfiles: "",
-      visualQaEnabled: false,
-      autoFixLiveRuntimeErrors: false,
-      sharinganAffirmed: false,
-      researchEnabled: false,
-      researchAgentCommand: "",
-      researchModel: "",
-      visualQaAgentCommand: "",
-      visualQaModel: "",
-      autoImproveEnabled: true,
-      autoImproveMaxRounds: 8,
-    }),
-    updateSettings: notImpl as ApiClient["updateSettings"],
+    getSettings: async () => defaultSettings,
+    updateSettings: async (patch) => ({ ...defaultSettings, ...patch }),
     testModelProvider: async () => ({ ok: true, message: "Connected." }),
     listModelProviderModels: async () => ({ models: [] }),
     listAgents: async () => [],
     rescanAgents: async () => [],
     async *scanAgentsStream() {
-      yield { type: "done" as const, agents: await (apiOverrides.rescanAgents ?? (async () => []))() };
+      yield { type: "done", agents: [] };
     },
     getHealth: async () => ({ ok: true, version: "0.0.0" }),
     optimizePrompt: async (input) => ({ prompt: input.prompt }),
-    listFiles: async () => [],
-    getFileText: async () => "",
-    listRuns: async () => [],
-    versionPreviewUrl: (id: string, runId: string) => `/api/projects/${id}/versions/${runId}`,
-    getVersionPreview: async (id: string, runId: string) => ({
-      url: `/api/projects/${id}/versions/${runId}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
-      bridgeNonce: FAKE_BRIDGE_NONCE,
-      mode: "prototype" as const,
-    }),
-    getVersionText: async () => "",
-    getVersionDiff: async () => [],
-    restoreVersion: notImpl as ApiClient["restoreVersion"],
-    setVersionCover: async () => ({ captured: true }),
-    uploadRef: async (_id: string, name: string) => ({ name, path: `.refs/${name}` }),
-    parseFig: async (_file, name: string) => ({ name, summary: "" }),
+
+    parseFig: async (_file, name) => ({ name, summary: "" }),
     getCapture: async () => ({ images: [], note: "", source: "" }),
-    previewUrl: (id: string) => `/projects/${id}/preview/`,
-    refUrl: (id: string, refPath: string) => `/api/projects/${id}/refs/${refPath.replace(/^\.refs\//, "")}`,
-    getResearch: async () => ({ exists: false }),
-    researchAssetUrl: (id: string, assetPath: string) => `/api/projects/${id}/research/assets/${assetPath.replace(/^assets\//, "")}`,
-    researchVisualAssetUrl: (_id: string, p: string) => `/v/${p}`,
-    variantPreviewUrl: (id: string, vid: string) => `/api/projects/${id}/variants/${vid}/preview/`,
-    exportUrl: (id: string, scope = "source") => `/api/projects/${id}/export${scope === "full" ? "?scope=full" : ""}`,
-    importProject: notImpl as ApiClient["importProject"],
+
     listMoodboards: async () => [],
-    createMoodboard: notImpl as ApiClient["createMoodboard"],
-    startMoodboard: notImpl as ApiClient["startMoodboard"],
-    getMoodboard: notImpl as ApiClient["getMoodboard"],
-    patchMoodboard: notImpl as ApiClient["patchMoodboard"],
-    deleteMoodboard: notImpl as ApiClient["deleteMoodboard"],
+    createMoodboard: async (input) => ({ id: "moodboard-new", name: input.name, coverAssetId: null, createdAt: NOW, updatedAt: NOW }),
+    startMoodboard: async (input) => ({ id: "moodboard-new", name: input.name, coverAssetId: null, createdAt: NOW, updatedAt: NOW }),
+    getMoodboard: async (id) => ({
+      id,
+      name: "Moodboard",
+      coverAssetId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      nodes: [],
+      assets: [],
+      messages: [],
+    }),
+    patchMoodboard: async (id, patch) => ({ id, name: patch.name ?? "Moodboard", coverAssetId: patch.coverAssetId ?? null, createdAt: NOW, updatedAt: NOW }),
+    deleteMoodboard: async () => {},
     listMoodboardNodes: async () => [],
-    saveMoodboardNodes: async (_id, nodes) =>
-      nodes.map((node, index) => ({
-        id: node.id ?? `n${index}`,
-        boardId: _id,
-        type: node.type,
-        x: node.x,
-        y: node.y,
-        width: node.width,
-        height: node.height,
-        rotation: node.rotation ?? 0,
-        zIndex: node.zIndex ?? index,
-        data: node.data ?? {},
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      })),
+    saveMoodboardNodes: async (id, nodes) => nodes.map((node, index) => ({
+      id: node.id ?? `node-${index}`,
+      boardId: id,
+      type: node.type,
+      x: node.x,
+      y: node.y,
+      width: node.width,
+      height: node.height,
+      rotation: node.rotation ?? 0,
+      zIndex: node.zIndex ?? index,
+      data: node.data ?? {},
+      createdAt: NOW,
+      updatedAt: NOW,
+    })),
     listMoodboardConversations: async () => [],
-    createMoodboardConversation: notImpl as ApiClient["createMoodboardConversation"],
-    renameMoodboardConversation: notImpl as ApiClient["renameMoodboardConversation"],
-    deleteMoodboardConversation: notImpl as ApiClient["deleteMoodboardConversation"],
+    createMoodboardConversation: async (id, title) => ({ id: "conversation-new", boardId: id, title: title ?? "New conversation", createdAt: NOW }),
+    renameMoodboardConversation: async (id, conversationId, title) => ({ id: conversationId, boardId: id, title, createdAt: NOW }),
+    deleteMoodboardConversation: async () => ({ ok: true, conversations: [] }),
     listMoodboardMessages: async () => [],
     postMoodboardMessage: async () => ({ messages: [] }),
-    uploadMoodboardAsset: notImpl as ApiClient["uploadMoodboardAsset"],
-    generateMoodboardImage: notImpl as ApiClient["generateMoodboardImage"],
-    // eslint-disable-next-line require-yield
-    streamRun: async function* () {},
-    // eslint-disable-next-line require-yield
-    reattachRun: async function* () {},
-    cancelRun: async () => ({ cancelled: true }),
-    setRunFeedback: async (runId, feedback) => ({
-      run: { id: runId, status: "succeeded", score: 100, repairRounds: 0, lintPassed: true, feedback: feedback ?? null, createdAt: 0, finishedAt: 0 },
+    uploadMoodboardAsset: async (_id, input) => ({
+      id: "asset-moodboard",
+      boardId: _id,
+      kind: input.mimeType?.startsWith("video/") ? "video" : "image",
+      fileName: input.name,
+      mimeType: input.mimeType ?? "application/octet-stream",
+      width: input.width ?? null,
+      height: input.height ?? null,
+      source: "upload",
+      createdAt: NOW,
+      url: "/asset-moodboard",
     }),
+    generateMoodboardImage: async () => ({
+      asset: {
+        id: "asset-generated",
+        boardId: "moodboard",
+        kind: "image",
+        fileName: "generated.png",
+        mimeType: "image/png",
+        width: null,
+        height: null,
+        source: "generated",
+        createdAt: NOW,
+        url: "/asset-generated",
+      },
+      nodes: [],
+      messages: [],
+    }),
+
     suggestPreferences: async () => ({ suggestion: "", signals: 0 }),
     startSharingan: async () => {},
     cancelSharingan: async () => {},
@@ -296,7 +250,7 @@ export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
     focusSharingan: async () => {},
     // eslint-disable-next-line require-yield
     streamSharinganEvents: async function* () {},
-    sharinganShotUrl: (id: string, relPath: string) => `/shot/${id}/${relPath}`,
-    ...apiOverrides,
+    sharinganShotUrl: (id, relPath) => `/shot/${id}/${relPath}`,
   };
+  return { ...api, ...overrides };
 }

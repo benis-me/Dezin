@@ -46,6 +46,7 @@ export interface AgentProvider {
     enforceArtifactUpdate?: boolean;
     spawner?: ProcessSpawner;
     buildArgs?: (systemPrompt: string) => string[];
+    viaStdin?: boolean;
   }): AgentRunner;
   /** Argv for a one-shot prompt that reads files in cwd (used by the image analyzer). */
   oneShotArgs(model: string | undefined, prompt: string): string[];

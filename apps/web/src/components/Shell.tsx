@@ -28,7 +28,7 @@ const SHELL_CONTENT_PANEL = "content";
 
 /**
  * App shell — a tool layout: a slim left sidebar (nav + controls) beside the main
- * content. Inside a project the sidebar is hidden so the workspace is full-bleed.
+ * content. Inside a project the sidebar is hidden so the canvas is full-bleed.
  */
 export function Shell({
   children,
@@ -47,11 +47,6 @@ export function Shell({
   const route = routeOverride ?? currentRoute;
   const inProject = route.name === "project"
     || route.name === "project-canvas"
-    || route.name === "project-artifact"
-    || route.name === "project-artifact-revision"
-    || route.name === "project-artifact-candidate"
-    || route.name === "project-resource"
-    || route.name === "project-resource-revision"
     || route.name === "moodboard";
   const mobile = useMediaQuery("(max-width: 639px)");
   const sidebarPercent = readPanelPercent(SHELL_SIDEBAR_WIDTH_KEY, 18, 12, 28);

@@ -1,19 +1,10 @@
 import type { ReactNode } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
-import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, MousePointerClick, Paperclip, Sparkles, X } from "lucide-react";
+import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, Paperclip, Sparkles, X } from "lucide-react";
 import { cn } from "../lib/utils.ts";
-import {
-  RUN_CONTEXT_MAX_ITEMS,
-  decodeContextItemRef,
-  decodeRunContextRefs,
-  decodeRunSelectionRefs,
-  type ContextItemRef,
-  type RunContextRef,
-  type RunSelectionRef,
-} from "../lib/api.ts";
 
-export type AgentComposerContextItem<PreviewTarget = unknown> =
+export type AgentComposerContextItem =
   | {
       id: string;
       type: "file";
@@ -21,7 +12,7 @@ export type AgentComposerContextItem<PreviewTarget = unknown> =
       subtitle?: string;
       name: string;
       path: string;
-      /** Daemon-owned upload identity; legacy upload endpoints currently return the stored path as this identity. */
+      /** Daemon-owned upload identity; upload endpoints currently return the stored path as this identity. */
       uploadedFileId?: string;
       previewUrl?: string;
       mimeType?: string;
@@ -31,210 +22,8 @@ export type AgentComposerContextItem<PreviewTarget = unknown> =
   | { id: string; type: "project"; title: string; subtitle?: string; projectId: string; name: string; referencePath?: string }
   | { id: string; type: "moodboard"; title: string; subtitle?: string; moodboardId: string; name?: string }
   | { id: string; type: "effect"; title: string; subtitle?: string; effectId: string; name?: string }
-  | { id: string; type: "preview-target"; title: string; subtitle?: string; selector: string; note?: string; target: PreviewTarget }
   | { id: string; type: "canvas-node"; title: string; subtitle?: string; nodeId: string; nodeType: string; body: string }
-  | {
-      id: string;
-      type: "context-ref";
-      title: string;
-      subtitle?: string;
-      ref: ContextItemRef;
-      previewUrl?: string;
-      projectId?: string;
-      artifactId?: string;
-      revisionId?: string;
-      targetKey?: string;
-      assemblyHash?: string;
-      frameId?: string;
-      designNodeId?: string;
-    }
   | { id: string; type: "text-context"; title: string; subtitle?: string; body: string };
-
-export interface StructuredComposerContext {
-  contextRefs: RunContextRef[];
-  selection: RunSelectionRef[];
-}
-
-/**
- * Scoped Workspace/Artifact/Resource Agent turns accept only daemon-owned immutable identities.
- * This deliberately rejects legacy paths and inline cards instead of flattening them into prompt
- * text. Upload/reference affordances must first materialize a Resource Revision.
- */
-export function serializeDaemonOwnedComposerContext(
-  items: readonly AgentComposerContextItem[],
-): ContextItemRef[] {
-  if (items.length > RUN_CONTEXT_MAX_ITEMS) {
-    throw new TypeError(`Scoped Agent context exceeds ${RUN_CONTEXT_MAX_ITEMS} items`);
-  }
-  const unsupported = items.filter((item) => item.type !== "context-ref");
-  if (unsupported.length) throw new UnsupportedComposerContextError(unsupported);
-  const refs = items.map((item) => {
-    const ref = decodeContextItemRef(
-      (item as Extract<AgentComposerContextItem, { type: "context-ref" }>).ref,
-    );
-    if (ref.kind !== "inline" && ref.revisionId === undefined) {
-      throw new TypeError(`${ref.kind} Agent Context must name an immutable Revision`);
-    }
-    return ref;
-  });
-  const seen = new Set<string>();
-  return refs.filter((ref) => {
-    const key = JSON.stringify(ref);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-export class UnsupportedComposerContextError extends Error {
-  readonly itemIds: string[];
-
-  constructor(items: readonly AgentComposerContextItem[]) {
-    super(`Standard context cannot safely resolve: ${items.map((item) => item.title).join(", ")}`);
-    this.name = "UnsupportedComposerContextError";
-    this.itemIds = items.map((item) => item.id);
-  }
-}
-
-/**
- * Convert UI cards to bounded, structured Standard context. The daemon snapshots owned identities
- * and persists untrusted inline content; none of it is copied into the visible user message.
- */
-export function serializeStructuredComposerContext<PreviewTarget>(
-  items: readonly AgentComposerContextItem<PreviewTarget>[],
-  previewSelection: (
-    item: Extract<AgentComposerContextItem<PreviewTarget>, { type: "preview-target" }>,
-  ) => RunSelectionRef,
-): StructuredComposerContext {
-  if (items.length > RUN_CONTEXT_MAX_ITEMS) {
-    throw new TypeError(`Standard context exceeds ${RUN_CONTEXT_MAX_ITEMS} items`);
-  }
-  const unsupported = items.filter((item) => item.type === "local-path" || item.type === "project");
-  if (unsupported.length) throw new UnsupportedComposerContextError(unsupported);
-  const contextRefs: RunContextRef[] = [];
-  const selection: RunSelectionRef[] = [];
-  for (const item of items) {
-    switch (item.type) {
-      case "moodboard":
-        contextRefs.push({
-          kind: "owned-source",
-          id: item.id,
-          title: item.title,
-          resourceKind: "moodboard",
-          source: { type: "moodboard", moodboardId: item.moodboardId },
-        });
-        break;
-      case "effect":
-        contextRefs.push({
-          kind: "owned-source",
-          id: item.id,
-          title: item.title,
-          resourceKind: "effect",
-          source: { type: "effect", effectId: item.effectId },
-        });
-        break;
-      case "preview-target": {
-        const resolvedSelection = previewSelection(item);
-        if (!resolvedSelection.locator) throw new TypeError("Preview selection must include its full stable locator");
-        selection.push(resolvedSelection);
-        break;
-      }
-      case "canvas-node":
-        contextRefs.push({ kind: "inline", id: item.id, title: item.title, content: item.body, trustLevel: "untrusted" });
-        selection.push({ kind: "node", id: item.nodeId, locator: { nodeType: item.nodeType } });
-        break;
-      case "context-ref":
-        contextRefs.push(item.ref);
-        break;
-      case "file":
-        contextRefs.push({
-          kind: "owned-source",
-          id: item.id,
-          title: item.title,
-          resourceKind: "file",
-          source: { type: "uploaded-file", uploadedFileId: item.uploadedFileId ?? item.path },
-        });
-        break;
-      case "text-context":
-        contextRefs.push({ kind: "inline", id: item.id, title: item.title, content: item.body, trustLevel: "untrusted" });
-        break;
-      case "local-path":
-      case "project":
-        throw new UnsupportedComposerContextError([item]);
-    }
-  }
-  return {
-    contextRefs: decodeRunContextRefs(contextRefs),
-    selection: decodeRunSelectionRefs(selection),
-  };
-}
-
-export interface LegacyPrototypeComposerSerialization {
-  brief: string;
-  moodboardRefs: Array<{ id: string; name?: string }>;
-  effectRefs: Array<{ id: string; name?: string }>;
-}
-
-/**
- * Compatibility bridge for legacy Prototype runs, whose daemon contract still consumes one
- * flattened brief. Standard runs must use serializeStructuredComposerContext instead.
- */
-export function serializeLegacyPrototypeComposerContext<PreviewTarget>(
-  message: string,
-  items: readonly AgentComposerContextItem<PreviewTarget>[],
-  formatPreviewTarget: (target: PreviewTarget) => string,
-): LegacyPrototypeComposerSerialization {
-  const moodboardRefs = items
-    .filter((item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "moodboard" }> => item.type === "moodboard")
-    .map((item) => ({ id: item.moodboardId, name: item.name }));
-  const effectRefs = items
-    .filter((item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "effect" }> => item.type === "effect")
-    .map((item) => ({ id: item.effectId, name: item.name }));
-  const previewTargets = items.filter(
-    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "preview-target" }> => item.type === "preview-target",
-  );
-  const fileReferencePaths = items.flatMap((item) => {
-    if (item.type === "file") return [item.path];
-    if (item.type === "project" && item.referencePath) return [item.referencePath];
-    return [];
-  });
-  const localPathItems = items.filter(
-    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "local-path" }> => item.type === "local-path",
-  );
-  const textContextItems = items.filter(
-    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "text-context" }> => item.type === "text-context",
-  );
-  const base = message.trim() || (previewTargets.length ? "Refine the marked element(s) per the notes." : "");
-  const targets = previewTargets.length
-    ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${previewTargets
-        .map((item) => formatPreviewTarget(item.target))
-        .join("\n")}`
-    : "";
-  const fileRefs = fileReferencePaths.length
-    ? `\n\nReference files (read them from disk): ${fileReferencePaths.join(", ")}`
-    : "";
-  const localPathRefs = localPathItems.length
-    ? `\n\nReference local paths: ${localPathItems.map((item) => item.path).join(", ")}`
-    : "";
-  const textContextRefs = textContextItems.length
-    ? `\n\n${textContextItems.map((item) => `${item.title}:\n${item.body}`).join("\n\n")}`
-    : "";
-  const boardRefs = moodboardRefs.length
-    ? `\n\nMoodboard references (available to the Agent at run time): ${moodboardRefs
-        .map((ref) => `${ref.name?.trim() || "Untitled moodboard"} (${ref.id})`)
-        .join(", ")}`
-    : "";
-  const renderedEffectRefs = effectRefs.length
-    ? `\n\nEffect references (available to the Agent at run time): ${effectRefs
-        .map((ref) => `${ref.name?.trim() || "Untitled effect"} (${ref.id})`)
-        .join(", ")}`
-    : "";
-  return {
-    brief: base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs + renderedEffectRefs,
-    moodboardRefs,
-    effectRefs,
-  };
-}
 
 export function upsertContextItems<T extends AgentComposerContextItem>(items: T[], incoming: T[]): T[] {
   const next = [...items];
@@ -262,7 +51,7 @@ export function moveContextItem<T extends AgentComposerContextItem>(items: T[], 
   return next;
 }
 
-type ContextIconKind = "file" | "folder" | "image" | "project" | "moodboard" | "effect" | "preview-target" | "canvas-node" | "text-context";
+type ContextIconKind = "file" | "folder" | "image" | "project" | "moodboard" | "effect" | "canvas-node" | "text-context";
 
 const IMAGE_FILE_EXTENSIONS = new Set(["avif", "gif", "heic", "jpeg", "jpg", "png", "svg", "webp"]);
 
@@ -288,20 +77,8 @@ function contextIconKind(item: AgentComposerContextItem): ContextIconKind {
       return "moodboard";
     case "effect":
       return "effect";
-    case "preview-target":
-      return "preview-target";
     case "canvas-node":
       return "canvas-node";
-    case "context-ref":
-      return item.previewUrl
-        ? "image"
-        : item.ref.kind === "resource" && item.ref.resourceKind === "moodboard"
-          ? "moodboard"
-          : item.ref.kind === "resource" && item.ref.resourceKind === "effect"
-            ? "effect"
-            : item.ref.kind === "artifact"
-              ? "project"
-              : "file";
     case "text-context":
       return "text-context";
   }
@@ -327,18 +104,8 @@ function contextTypeLabel(item: AgentComposerContextItem, iconKind: ContextIconK
       return "Moodboard";
     case "effect":
       return "Effect";
-    case "preview-target":
-      return "Selected element";
     case "canvas-node":
       return "Canvas selection";
-    case "context-ref":
-      return item.ref.kind === "artifact"
-        ? "Artifact Revision"
-        : item.ref.kind === "resource"
-          ? `${item.ref.resourceKind} Resource`
-          : item.ref.kind === "kernel"
-            ? "Design Kernel"
-            : "Saved Context";
     case "text-context":
       return "Imported context";
   }
@@ -347,7 +114,6 @@ function contextTypeLabel(item: AgentComposerContextItem, iconKind: ContextIconK
 function contextMeta(item: AgentComposerContextItem): string | undefined {
   if (item.type === "file" && typeof item.size === "number") return formatFileSize(item.size);
   if (item.type === "canvas-node") return item.nodeType;
-  if (item.type === "context-ref") return ("revisionId" in item.ref ? item.ref.revisionId : undefined) ?? item.subtitle;
   return item.subtitle;
 }
 
@@ -365,8 +131,6 @@ function contextIcon(kind: ContextIconKind, size = 12): ReactNode {
       return <Images size={size} strokeWidth={1.75} />;
     case "effect":
       return <Sparkles size={size} strokeWidth={1.75} />;
-    case "preview-target":
-      return <MousePointerClick size={size} strokeWidth={1.75} />;
     case "canvas-node":
       return <Images size={size} strokeWidth={1.75} />;
     case "text-context":
@@ -481,13 +245,6 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
       role="listitem"
       data-testid={`agent-context-card-${item.id}`}
       data-context-icon={iconKind}
-      data-context-project-id={item.type === "context-ref" ? item.projectId : undefined}
-      data-context-artifact-id={item.type === "context-ref" ? item.artifactId : undefined}
-      data-context-revision-id={item.type === "context-ref" ? item.revisionId : undefined}
-      data-context-target-key={item.type === "context-ref" ? item.targetKey : undefined}
-      data-context-assembly-hash={item.type === "context-ref" ? item.assemblyHash : undefined}
-      data-context-frame-id={item.type === "context-ref" ? item.frameId : undefined}
-      data-context-design-node-id={item.type === "context-ref" ? item.designNodeId : undefined}
       title={tooltipMeta ? `${item.title}: ${tooltipMeta}` : item.title}
       className={cn(
         "group flex h-9 w-fit min-w-28 max-w-[184px] shrink-0 select-none items-center gap-1.5 overflow-hidden rounded-lg border border-border bg-card px-1.5 text-xs text-foreground-2 transition-[opacity,border-color,background-color] duration-150 ease-out motion-reduce:transition-none",
@@ -496,7 +253,7 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
       )}
     >
       <span className="grid size-6 shrink-0 place-items-center overflow-hidden rounded-md border border-border/70 bg-surface-2 text-brand">
-        {(item.type === "file" || item.type === "context-ref") && item.previewUrl ? (
+        {item.type === "file" && item.previewUrl ? (
           <img className="size-full object-cover" src={item.previewUrl} alt={item.title} />
         ) : (
           contextIcon(iconKind, 12)

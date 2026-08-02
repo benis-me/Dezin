@@ -1,20 +1,19 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch, Input } from "../components/ui/index.ts";
+import { Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
+import { Button, Picker, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
-import type { DesignSystemCard, ExtensionCredential, Settings } from "../lib/api.ts";
-import { agentLabel } from "../components/agent-logos.tsx";
+import type { ExtensionCredential, Settings } from "../lib/api.ts";
 import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
-import { SettingRow, SettingsGroup, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
+import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
 import { IMAGE_ACTION_DEFAULTS, IMAGE_ACTION_MODEL_FIELDS, type ImageActionModelField } from "../lib/image-action-defaults.ts";
 import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 
-type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
+type SectionId = "appearance" | "provider" | "models" | "defaults" | "instructions" | "extension" | "about";
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
 
@@ -33,7 +32,6 @@ const SECTION_GROUPS: { id: SectionId; label: string; icon: typeof Palette }[][]
     { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   ],
   [
-    { id: "quality", label: "Quality", icon: Eye },
     { id: "instructions", label: "Custom instructions", icon: Type },
   ],
   [
@@ -119,7 +117,6 @@ export function SettingsScreen({
   const mutationQueuesRef = useRef(new Map<keyof Settings, Promise<void>>());
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
   const agentsLoading = agentsInitial || scanning;
-  const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
   const [extensionCredentials, setExtensionCredentials] = useState<ExtensionCredential[]>([]);
   const [pairingCode, setPairingCode] = useState<{ code: string; expiresAt: number } | null>(null);
@@ -138,7 +135,6 @@ export function SettingsScreen({
         setSettings(s);
       })
       .catch(() => {});
-    void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
     void api.getHealth().then((h) => alive && setVersion(h.version)).catch(() => {});
     return () => {
       alive = false;
@@ -291,25 +287,6 @@ export function SettingsScreen({
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
-  const visualReviewAgent = agents.find((agent) => agent.id === "claude" && agent.command === "claude");
-  const visualReviewerAvailable = visualReviewAgent?.available === true;
-  const visualReviewModelSource = settings?.visualQaAgentCommand.trim() || settings?.agentCommand.trim() || "";
-  const visualReviewModelValue = visualReviewModelSource === "claude" ? settings?.visualQaModel ?? "" : "";
-  const visualReviewModelOptions = [
-    { value: "", label: "Claude default" },
-    ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
-  ];
-  const researchAgent = settings?.researchAgentCommand ? agents.find((a) => a.command === settings.researchAgentCommand) : activeAgent;
-  const researchAgentOptions = [
-    { value: "", label: "Same as project agent" },
-    ...agents
-      .filter((agent) => agent.available || agent.command === settings?.researchAgentCommand)
-      .map((agent) => ({ value: agent.command, label: agentLabel(agent.id) })),
-  ];
-  const researchModelOptions = [
-    { value: "", label: "Same as project model" },
-    ...((researchAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
-  ];
   const imageActionModelOptions = useMemo(() => {
     if (!settings) return [{ value: "", label: "None" }];
     const models = new Set(imageModelOptions(settings));
@@ -321,11 +298,6 @@ export function SettingsScreen({
     }
     return [{ value: "", label: "None" }, ...[...models].map((model) => ({ value: model, label: model }))];
   }, [settings]);
-  const clampRounds = (value: string | number) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? Math.max(0, Math.min(20, Math.trunc(n))) : 0;
-  };
-
   return (
     <div className="flex h-[clamp(460px,72vh,660px)]">
       {/* Sidebar */}
@@ -400,156 +372,9 @@ export function SettingsScreen({
             )}
             {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
-            {section === "quality" && (
-              <SettingsPanel title="Quality" desc="How Dezin generates: optional research before designing, plus checks on the finished result.">
-                <div className="space-y-8">
-                  <SettingsGroup
-                    title="Design research"
-                    desc="Before designing, an Agent researches competitors, audience, and references into .research/, then builds from it. Adds time and uses the research Agent's tokens."
-                  >
-                    <SettingRow label="Enable" desc="Run the pre-design research phase before building.">
-                      <Switch
-                        aria-label="Design research"
-                        checked={settings.researchEnabled}
-                        onCheckedChange={(checked) => save("researchEnabled", checked)}
-                      />
-                    </SettingRow>
-                    <SettingRow
-                      label="Research agent"
-                      desc="Blank inherits the project run Agent. Pick a vision-capable Agent so research can actually study reference images."
-                    >
-                      <Picker
-                        ariaLabel="Research agent"
-                        className="w-52"
-                        value={settings.researchAgentCommand}
-                        onChange={(value) => savePatch({ researchAgentCommand: value, researchModel: "" })}
-                        options={researchAgentOptions}
-                      />
-                    </SettingRow>
-                    <SettingRow label="Research model" desc="Blank inherits the model used for the current project run.">
-                      {researchAgentOptions.length > 0 && researchModelOptions.length > 1 ? (
-                        <Picker
-                          ariaLabel="Research model"
-                          className="w-52"
-                          value={settings.researchModel}
-                          onChange={(value) => save("researchModel", value)}
-                          options={researchModelOptions}
-                        />
-                      ) : (
-                        <Input
-                          aria-label="Research model"
-                          className="w-52"
-                          value={settings.researchModel}
-                          placeholder="Same as project model"
-                          onChange={(event) => setLocal("researchModel", event.target.value)}
-                          onBlur={(event) => save("researchModel", event.target.value)}
-                        />
-                      )}
-                    </SettingRow>
-                  </SettingsGroup>
-                  <SettingsGroup
-                    title="Visual review"
-                    desc="After generation, a reviewer Agent/model inspects the screenshot, conversation, and runtime signals — and can auto-repair blocking issues."
-                  >
-                    <SettingRow label="Enable" desc="Review the rendered result after generation.">
-                      <Switch
-                        aria-label="Agent visual review"
-                        checked={settings.visualQaEnabled}
-                        disabled={agentsLoading || (!visualReviewerAvailable && !settings.visualQaEnabled)}
-                        onCheckedChange={(checked) => savePatch({
-                          visualQaEnabled: checked,
-                          visualQaAgentCommand: "claude",
-                          visualQaModel: visualReviewModelSource === "claude" ? settings.visualQaModel : "",
-                        })}
-                      />
-                    </SettingRow>
-                  <SettingRow
-                    label="Review agent"
-                    desc={visualReviewerAvailable
-                      ? "Claude Code runs in an isolated no-tools mode; the project Agent can remain Codex, Gemini, or another provider."
-                      : "Claude Code is required for isolated visual review. Install or sign in to Claude Code, then rescan Agents."}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Claude Code</span>
-                      <Badge variant={agentsLoading ? "outline" : visualReviewerAvailable ? "secondary" : "destructive"}>
-                        {agentsLoading ? "Checking…" : visualReviewerAvailable ? "Ready" : "Not available"}
-                      </Badge>
-                    </div>
-                  </SettingRow>
-                  <SettingRow label="Review model" desc="Blank uses Claude Code's own default; it never inherits a model from another provider.">
-                    {!visualReviewerAvailable ? (
-                      <span className="text-xs text-muted-foreground">Install Claude Code first</span>
-                    ) : visualReviewModelOptions.length > 1 ? (
-                      <Picker
-                        ariaLabel="Visual review model"
-                        className="w-52"
-                        value={visualReviewModelValue}
-                        onChange={(value) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: value })}
-                        options={visualReviewModelOptions}
-                      />
-                    ) : (
-                      <Input
-                        aria-label="Visual review model"
-                        className="w-52"
-                        value={visualReviewModelValue}
-                        placeholder="Claude default"
-                        onChange={(event) => setLocalPatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
-                        onBlur={(event) => savePatch({ visualQaAgentCommand: "claude", visualQaModel: event.target.value })}
-                      />
-                    )}
-                  </SettingRow>
-                  <SettingRow
-                    label="Auto-improve after review"
-                    desc="When quality checks find P0/P1 issues, Dezin sends a repair prompt back to the project Agent automatically."
-                  >
-                    <Switch
-                      aria-label="Auto-improve after review"
-                      checked={settings.autoImproveEnabled}
-                      onCheckedChange={(checked) => save("autoImproveEnabled", checked)}
-                    />
-                  </SettingRow>
-                  <SettingRow label="Max rounds" desc="Maximum automatic repair turns after the initial generation.">
-                    <Input
-                      aria-label="Max auto-improve rounds"
-                      className="w-24"
-                      type="number"
-                      min={0}
-                      max={20}
-                      value={settings.autoImproveMaxRounds}
-                      onChange={(event) => setLocal("autoImproveMaxRounds", clampRounds(event.target.value))}
-                      onBlur={(event) => save("autoImproveMaxRounds", clampRounds(event.target.value))}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label="Auto-fix live preview errors"
-                    desc="Automatically send a repair run when the live preview crashes."
-                  >
-                    <Switch
-                      aria-label="Auto-fix live preview errors"
-                      checked={settings.autoFixLiveRuntimeErrors}
-                      onCheckedChange={(checked) => save("autoFixLiveRuntimeErrors", checked)}
-                    />
-                  </SettingRow>
-                  </SettingsGroup>
-                </div>
-              </SettingsPanel>
-            )}
-
             {section === "defaults" && (
-              <SettingsPanel title="Defaults" desc="Applied when projects and moodboard tools do not override their own defaults.">
+              <SettingsPanel title="Defaults" desc="Function-specific models used by Moodboard image tools.">
                 <SettingsRows>
-                  <SettingRow label="Design system" desc="The brand new projects start from.">
-                    <Picker
-                      ariaLabel="Default design system"
-                      className="w-44"
-                      value={settings.defaultDesignSystemId}
-                      onChange={(v) => save("defaultDesignSystemId", v)}
-                      options={(systems.length
-                        ? systems
-                        : [{ id: settings.defaultDesignSystemId, name: settings.defaultDesignSystemId, category: "", summary: "" }]
-                      ).map((s) => ({ value: s.id, label: s.name }))}
-                    />
-                  </SettingRow>
                   {IMAGE_ACTION_DEFAULTS.map((item) => (
                     <SettingRow key={item.field} label={item.label} desc={item.desc}>
                       <div

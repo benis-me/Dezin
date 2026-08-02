@@ -17,15 +17,8 @@ import {
 } from "../../../packages/design/src/index.ts";
 
 const BUILT_IN_IDS = new Set(BUNDLED_DESIGN_SYSTEMS.map((s) => s.id));
-import { loadSkills, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { readJsonBody, sendJson, sendError } from "./http-util.ts";
 import type { AppDeps } from "./app.ts";
-
-let cachedSkills: SkillInfo[] | null = null;
-function skills(): SkillInfo[] {
-  if (!cachedSkills) cachedSkills = loadSkills();
-  return cachedSkills;
-}
 
 interface Swatch {
   bg: string;
@@ -125,16 +118,4 @@ export async function handleImportBrand(req: IncomingMessage, res: ServerRespons
   });
 
   sendJson(res, 201, { id: brand.id, name: brand.name, category: brand.category, summary: brand.summary, swatch: parseSwatch(brand.tokensCss), origin: "custom" });
-}
-
-export function handleListSkills(res: ServerResponse): void {
-  const list = skills().map((s) => ({
-    id: s.id,
-    name: s.name,
-    description: s.description,
-    mode: s.mode,
-    triggers: s.triggers,
-    designSystem: s.designSystem,
-  }));
-  sendJson(res, 200, list);
 }

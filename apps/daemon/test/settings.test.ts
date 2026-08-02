@@ -35,16 +35,22 @@ test("GET /api/settings returns defaults", async () => {
   await withServer(async (base) => {
     const s = await getSettings(base);
     assert.equal(s.agentCommand, "claude");
-    assert.equal(s.defaultDesignSystemId, "modern-minimal");
     assert.equal(s.model, "");
-    assert.equal(s.visualQaEnabled, false);
-    assert.equal(s.visualQaAgentCommand, "");
-    assert.equal(s.visualQaModel, "");
-    assert.equal(s.researchAgentCommand, "");
-    assert.equal(s.researchModel, "");
-    assert.equal(s.autoImproveEnabled, true);
-    assert.equal(s.autoImproveMaxRounds, 8);
     assert.equal(s.videoModel, "");
+    for (const retiredKey of [
+      "defaultDesignSystemId",
+      "visualQaEnabled",
+      "autoFixLiveRuntimeErrors",
+      "visualQaAgentCommand",
+      "visualQaModel",
+      "researchEnabled",
+      "researchAgentCommand",
+      "researchModel",
+      "autoImproveEnabled",
+      "autoImproveMaxRounds",
+    ]) {
+      assert.equal(Object.hasOwn(s, retiredKey), false, `${retiredKey} must not leak through the current settings API`);
+    }
   });
 });
 
@@ -55,39 +61,20 @@ test("PUT /api/settings merges and persists", async () => {
       model: "o3",
       apiKey: "sk-local",
       videoModel: "sora",
-      visualQaEnabled: true,
-      visualQaAgentCommand: "codebuddy",
-      visualQaModel: "hunyuan",
-      researchAgentCommand: "codex",
-      researchModel: "o4",
-      autoImproveEnabled: false,
-      autoImproveMaxRounds: 6,
+      customInstructions: "Keep node output concise.",
     });
     assert.equal(res.status, 200);
     const updated = (await res.json()) as Record<string, unknown>;
     assert.equal(updated.agentCommand, "codex");
     assert.equal(updated.model, "o3");
     assert.equal(updated.videoModel, "sora");
-    assert.equal(updated.visualQaEnabled, true);
-    assert.equal(updated.visualQaAgentCommand, "codebuddy");
-    assert.equal(updated.visualQaModel, "hunyuan");
-    assert.equal(updated.researchAgentCommand, "codex");
-    assert.equal(updated.researchModel, "o4");
-    assert.equal(updated.autoImproveEnabled, false);
-    assert.equal(updated.autoImproveMaxRounds, 6);
+    assert.equal(updated.customInstructions, "Keep node output concise.");
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
     assert.equal(fetched.apiKey, "");
     assert.equal(fetched.videoModel, "sora");
-    assert.equal(fetched.visualQaEnabled, true);
-    assert.equal(fetched.visualQaAgentCommand, "codebuddy");
-    assert.equal(fetched.visualQaModel, "hunyuan");
-    assert.equal(fetched.researchAgentCommand, "codex");
-    assert.equal(fetched.researchModel, "o4");
-    assert.equal(fetched.autoImproveEnabled, false);
-    assert.equal(fetched.autoImproveMaxRounds, 6);
-    assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
+    assert.equal(fetched.customInstructions, "Keep node output concise.");
   });
 });
 

@@ -11,18 +11,6 @@ export type Route =
   | { name: "home" }
   | { name: "project"; id: string }
   | { name: "project-canvas"; id: string }
-  | { name: "project-artifact"; id: string; artifactId: string }
-  | { name: "project-artifact-revision"; id: string; artifactId: string; revisionId: string }
-  | {
-    name: "project-artifact-candidate";
-    id: string;
-    artifactId: string;
-    planId: string;
-    taskId: string;
-    attempt: number;
-  }
-  | { name: "project-resource"; id: string; resourceId: string }
-  | { name: "project-resource-revision"; id: string; resourceId: string; revisionId: string }
   | { name: "effects" }
   | { name: "effect-new" }
   | { name: "effect"; id: string }
@@ -46,52 +34,6 @@ function decodeSegment(value: string): string | null {
 export function parsePath(pathname: string): Route {
   const segs = pathname.split("/").filter(Boolean);
   if (segs.length === 0) return { name: "home" };
-  if (segs[0] === "projects" && segs.length === 6 && segs[1]
-    && segs[2] === "artifacts" && segs[3] && segs[4] === "revisions" && segs[5]) {
-    const id = decodeSegment(segs[1]);
-    const artifactId = decodeSegment(segs[3]);
-    const revisionId = decodeSegment(segs[5]);
-    if (id !== null && artifactId !== null && revisionId !== null) {
-      return { name: "project-artifact-revision", id, artifactId, revisionId };
-    }
-    return { name: "home" };
-  }
-  if (segs[0] === "projects" && segs.length === 8 && segs[1]
-    && segs[2] === "artifacts" && segs[3] && segs[4] === "candidates"
-    && segs[5] && segs[6] && segs[7]) {
-    const id = decodeSegment(segs[1]);
-    const artifactId = decodeSegment(segs[3]);
-    const planId = decodeSegment(segs[5]);
-    const taskId = decodeSegment(segs[6]);
-    const attempt = Number(segs[7]);
-    if (id !== null && artifactId !== null && planId !== null && taskId !== null
-      && Number.isSafeInteger(attempt) && attempt > 0) {
-      return { name: "project-artifact-candidate", id, artifactId, planId, taskId, attempt };
-    }
-    return { name: "home" };
-  }
-  if (segs[0] === "projects" && segs.length === 6 && segs[1]
-    && segs[2] === "resources" && segs[3] && segs[4] === "revisions" && segs[5]) {
-    const id = decodeSegment(segs[1]);
-    const resourceId = decodeSegment(segs[3]);
-    const revisionId = decodeSegment(segs[5]);
-    if (id !== null && resourceId !== null && revisionId !== null) {
-      return { name: "project-resource-revision", id, resourceId, revisionId };
-    }
-    return { name: "home" };
-  }
-  if (segs[0] === "projects" && segs.length === 4 && segs[1] && segs[2] === "artifacts" && segs[3]) {
-    const id = decodeSegment(segs[1]);
-    const artifactId = decodeSegment(segs[3]);
-    if (id !== null && artifactId !== null) return { name: "project-artifact", id, artifactId };
-    return { name: "home" };
-  }
-  if (segs[0] === "projects" && segs.length === 4 && segs[1] && segs[2] === "resources" && segs[3]) {
-    const id = decodeSegment(segs[1]);
-    const resourceId = decodeSegment(segs[3]);
-    if (id !== null && resourceId !== null) return { name: "project-resource", id, resourceId };
-    return { name: "home" };
-  }
   if (segs[0] === "projects" && segs.length === 3 && segs[1] && segs[2] === "canvas") {
     const id = decodeSegment(segs[1]);
     return id === null ? { name: "home" } : { name: "project-canvas", id };
@@ -118,16 +60,6 @@ export function routeToPath(route: Route): string {
       return `/projects/${encodeURIComponent(route.id)}`;
     case "project-canvas":
       return `/projects/${encodeURIComponent(route.id)}/canvas`;
-    case "project-artifact":
-      return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}`;
-    case "project-artifact-revision":
-      return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}/revisions/${encodeURIComponent(route.revisionId)}`;
-    case "project-artifact-candidate":
-      return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}/candidates/${encodeURIComponent(route.planId)}/${encodeURIComponent(route.taskId)}/${route.attempt}`;
-    case "project-resource":
-      return `/projects/${encodeURIComponent(route.id)}/resources/${encodeURIComponent(route.resourceId)}`;
-    case "project-resource-revision":
-      return `/projects/${encodeURIComponent(route.id)}/resources/${encodeURIComponent(route.resourceId)}/revisions/${encodeURIComponent(route.revisionId)}`;
     case "effects":
       return "/effects";
     case "effect-new":

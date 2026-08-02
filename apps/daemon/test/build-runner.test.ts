@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRunner } from "../src/run-handler.ts";
+import { buildAgentRunner as buildRunner } from "../src/agent-runner.ts";
 import { ClaudeCodeRunner, GenericCliRunner } from "../../../packages/agent/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 
@@ -10,7 +10,6 @@ function settings(over: Partial<Settings>): Settings {
     model: "",
     apiBaseUrl: "",
     apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
     customInstructions: "",
     imageApiBaseUrl: "",
     imageApiKey: "",
@@ -26,13 +25,7 @@ function settings(over: Partial<Settings>): Settings {
     aiProviderModels: "gpt-image-1",
     aiProviderOrganization: "",
     aiProviderProfiles: "",
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
     ...over,
   };
 }
@@ -60,21 +53,13 @@ test("buildRunner falls back to claude with no model", () => {
   assert.ok(!r.buildArgs("X").includes("--model"));
 });
 
-test("buildRunner can disable artifact update enforcement for standard projects", () => {
-  const claude = buildRunner(
-    settings({ agentCommand: "codebuddy", model: "claude-opus-4.8" }),
-    {},
-    { enforceArtifactUpdate: false },
-  );
+test("buildRunner supports analysis-only turns without requiring an HTML output", () => {
+  const claude = buildRunner(settings({ agentCommand: "codebuddy", model: "claude-opus-4.8" }));
   assert.ok(claude instanceof ClaudeCodeRunner);
   assert.equal(claude.command, "codebuddy");
   assert.equal(claude.enforceArtifactUpdate, false);
 
-  const generic = buildRunner(
-    settings({ agentCommand: "codex", model: "gpt-5-codex" }),
-    {},
-    { enforceArtifactUpdate: false },
-  );
+  const generic = buildRunner(settings({ agentCommand: "codex", model: "gpt-5-codex" }));
   assert.ok(generic instanceof GenericCliRunner);
   assert.equal(generic.enforceArtifactUpdate, false);
 });

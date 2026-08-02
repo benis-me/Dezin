@@ -15,24 +15,16 @@ import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { type Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
-import { takePendingAgent, takePendingImages, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { VALID_PNG_BASE64, validPngFile } from "../test/image-fixtures.ts";
+import type { DesignCanvas } from "../design-canvas/types.ts";
+import { takePendingComposer } from "../lib/pending-composer.ts";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
   localStorage.removeItem("dezin.home.composer");
-  takePendingAgent();
-  takePendingImages();
-  takePendingModel();
-  takePendingRefs();
   cleanup();
 });
-
-const SKILLS = [
-  { id: "frontend-design", name: "Frontend design", description: "d", mode: "prototype", triggers: [], designSystem: true },
-  { id: "dashboard", name: "Dashboard", description: "d", mode: "prototype", triggers: [], designSystem: true },
-];
 
 function renderWithApi(ui: React.ReactElement, over = {}) {
   return render(<ApiProvider client={makeFakeApi(over)}>{ui}</ApiProvider>);
@@ -62,7 +54,6 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     model: "",
     apiBaseUrl: "",
     apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
     customInstructions: "",
     imageApiBaseUrl: "",
     imageApiKey: "",
@@ -78,13 +69,7 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     aiProviderModels: "gpt-image-1",
     aiProviderOrganization: "",
     aiProviderProfiles: "",
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
     ...patch,
   };
 }
@@ -100,45 +85,8 @@ function deferred<T>() {
 }
 
 test("HomeScreen shows an empty state with no projects", () => {
-  renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
+  renderWithApi(<HomeScreen projects={[]} />);
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
-});
-
-test("HomeScreen distinguishes a pending design-system catalog from an empty search result", async () => {
-  const user = userEvent.setup();
-  const catalog = deferred<typeof DSYS>();
-  renderWithApi(<HomeScreen projects={[]} />, {
-    listSkills: async () => SKILLS,
-    listDesignSystems: () => catalog.promise,
-  });
-
-  await user.click(await screen.findByRole("button", { name: "Design system" }));
-
-  expect(screen.getByRole("status")).toHaveTextContent("Loading design systems");
-  expect(screen.queryByText(/^No matches$/)).toBeNull();
-
-  catalog.resolve(DSYS);
-  expect(await screen.findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
-});
-
-test("HomeScreen lets the user retry a failed design-system catalog load", async () => {
-  const user = userEvent.setup();
-  const listDesignSystems = vi
-    .fn()
-    .mockRejectedValueOnce(new Error("catalog offline"))
-    .mockResolvedValueOnce(DSYS);
-  renderWithApi(<HomeScreen projects={[]} />, {
-    listSkills: async () => SKILLS,
-    listDesignSystems,
-  });
-
-  await user.click(await screen.findByRole("button", { name: "Design system" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load design systems");
-
-  await user.click(screen.getByRole("button", { name: "Retry loading design systems" }));
-
-  expect(await screen.findByRole("button", { name: /Modern Minimal/ })).toBeInTheDocument();
-  expect(listDesignSystems).toHaveBeenCalledTimes(2);
 });
 
 test("HomeScreen exposes a retryable alert after the first project load fails", async () => {
@@ -148,7 +96,7 @@ test("HomeScreen exposes a retryable alert after the first project load fails", 
     .mockRejectedValueOnce(new Error("offline"))
     .mockRejectedValueOnce(new Error("offline"))
     .mockResolvedValue([saved]);
-  renderWithApi(<HomeScreen />, { listProjects, listSkills: async () => SKILLS });
+  renderWithApi(<HomeScreen />, { listProjects });
 
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent("Couldn't load projects");
@@ -164,7 +112,7 @@ test("HomeScreen keeps last-good project cards when a background refresh fails",
     .mockResolvedValueOnce([saved])
     .mockResolvedValueOnce([saved])
     .mockRejectedValueOnce(new Error("background offline"));
-  renderWithApi(<HomeScreen />, { listProjects, listSkills: async () => SKILLS });
+  renderWithApi(<HomeScreen />, { listProjects });
   expect(await screen.findByText("Retained project")).toBeInTheDocument();
 
   act(() => window.dispatchEvent(new Event("focus")));
@@ -178,8 +126,7 @@ test("HomeScreen allows a project reference to be the only design input", async 
   const onNewProject = vi.fn();
   renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
     listProjects: async () => [source],
-    listSkills: async () => SKILLS,
-    getFileText: async () => "<main>Reference artifact</main>",
+    getDesignCanvas: async () => generatedCanvas(source.id),
   });
 
   const design = screen.getByRole("button", { name: "Design" });
@@ -187,6 +134,7 @@ test("HomeScreen allows a project reference to be the only design input", async 
   await user.click(screen.getByRole("button", { name: "Add files and context" }));
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Reference source" }));
+  await user.click(await screen.findByRole("button", { name: "Reference Checkout" }));
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
   const textarea = screen.getByRole("textbox", { name: "Describe your design" });
@@ -195,25 +143,29 @@ test("HomeScreen allows a project reference to be the only design input", async 
   expect(rail).toHaveAttribute("data-context-layout", "top-rail");
   expect(rail.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(rail.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveClass("h-9");
-  expect(within(rail).getByText("Reference source")).toBeInTheDocument();
-  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveAttribute("title", "Reference source: Project");
-  await screen.findByLabelText("Remove Reference source");
+  expect(screen.getByTestId("agent-context-card-project:p-source:node-page:version-1")).toHaveClass("h-9");
+  expect(within(rail).getByText("Reference source / Checkout")).toBeInTheDocument();
+  expect(screen.getByTestId("agent-context-card-project:p-source:node-page:version-1")).toHaveAttribute("title", "Reference source / Checkout: Project");
+  await screen.findByLabelText("Remove Reference source / Checkout");
   await waitFor(() => expect(design).toBeEnabled());
   fireEvent.click(design);
   expect(onNewProject).toHaveBeenCalledWith(
     "Build on the referenced design.",
-    "frontend-design",
-    "modern-minimal",
-    "prototype",
     undefined,
     undefined,
     {
       images: [],
-      refs: [{ name: "Reference source", base64: expect.any(String) }],
+      refs: [{
+        name: "Reference source / Checkout",
+        base64: "",
+        projectReference: {
+          sourceProjectId: "p-source",
+          sourceNodeId: "node-page",
+          sourceVersionId: "version-1",
+        },
+      }],
     },
   );
-  expect(takePendingRefs()).toEqual([]);
 });
 
 test("HomeScreen persists the selected agent model as the next default", async () => {
@@ -224,7 +176,6 @@ test("HomeScreen persists the selected agent model as the next default", async (
     return current;
   });
   const overrides = {
-    listSkills: async () => SKILLS,
     listAgents: async () => AGENTS,
     getSettings: async () => current,
     updateSettings,
@@ -301,7 +252,6 @@ test("Shell uses a mobile navigation layout at 390px without a resizable sidebar
 test("HomeScreen lists projects and opens them", () => {
   const onOpenProject = vi.fn();
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} onOpenProject={onOpenProject} />, {
-    listSkills: async () => SKILLS,
   });
   fireEvent.click(screen.getByText("Pricing page"));
   expect(onOpenProject).toHaveBeenCalledWith("p1");
@@ -310,7 +260,6 @@ test("HomeScreen lists projects and opens them", () => {
 test("HomeScreen project cards are keyboard reachable and activate on Enter", () => {
   const onOpenProject = vi.fn();
   renderWithApi(<HomeScreen projects={[project("p-keyboard", "Keyboard project")]} onOpenProject={onOpenProject} />, {
-    listSkills: async () => SKILLS,
   });
   const card = screen.getByRole("link", { name: "Open Keyboard project" });
   expect(card).toHaveAttribute("tabindex", "0");
@@ -322,7 +271,7 @@ test("HomeScreen project cards are keyboard reachable and activate on Enter", ()
 });
 
 test("HomeScreen keeps Sharingan hidden behind the heading gesture", () => {
-  renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
+  renderWithApi(<HomeScreen projects={[]} />);
 
   expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
   expect(screen.getByRole("heading", { name: "Start a design" })).toHaveAttribute(
@@ -331,17 +280,9 @@ test("HomeScreen keeps Sharingan hidden behind the heading gesture", () => {
   );
 });
 
-test("HomeScreen marks projects with an active generation", () => {
-  renderWithApi(<HomeScreen projects={[{ ...project("p1", "Pricing page"), runStatus: "running" }]} />, {
-    listSkills: async () => SKILLS,
-  });
-  expect(screen.getByText("Generating")).toHaveClass("shiny-text");
-});
-
 test("HomeScreen list view shows updated time until row actions are hovered", async () => {
   const user = userEvent.setup();
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
-    listSkills: async () => SKILLS,
   });
 
   await user.click(screen.getByRole("button", { name: "List" }));
@@ -356,7 +297,6 @@ test("HomeScreen list view shows updated time until row actions are hovered", as
 
 test("HomeScreen project toolbar orders sort, layout, then search", () => {
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
-    listSkills: async () => SKILLS,
   });
   const sort = screen.getByRole("combobox", { name: "Sort projects" });
   const layout = screen.getByRole("group", { name: "Layout" });
@@ -365,49 +305,35 @@ test("HomeScreen project toolbar orders sort, layout, then search", () => {
   expect(layout.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
-test("HomeScreen imports a full project zip from beside the project tabs", async () => {
-  const user = userEvent.setup();
-  let projects = [] as ReturnType<typeof project>[];
-  const imported = project("p2", "Imported project");
-  const importProject = vi.fn(async () => {
-    projects = [imported];
-    return imported;
-  });
-  renderWithApi(<HomeScreen />, {
-    listProjects: async () => projects,
-    listSkills: async () => SKILLS,
-    importProject,
-  });
-
-  const all = await screen.findByRole("tab", { name: /All/ });
-  const importButton = screen.getByRole("button", { name: "Import full project ZIP" });
-  expect(all.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(importButton.querySelector(".lucide-folder-input")).not.toBeNull();
-  await user.hover(importButton);
-  expect(await screen.findByRole("tooltip")).toHaveTextContent("Import full project ZIP");
-
-  const input = screen.getByLabelText("Import project zip");
-  const file = new File(["zip"], "dezin-full-project.zip", { type: "application/zip" });
-  fireEvent.change(input, { target: { files: [file] } });
-
-  await waitFor(() => expect(importProject).toHaveBeenCalledWith(file));
-  expect(await screen.findByText("Imported project")).toBeInTheDocument();
-});
-
-test("HomeScreen Build passes the brief, skillId, and designSystemId", async () => {
-  const user = userEvent.setup();
-  const onNewProject = vi.fn();
-  renderWithApi(<HomeScreen onNewProject={onNewProject} />, {
-    listSkills: async () => SKILLS,
+test("HomeScreen starts a blank canvas without submitting the current composer", async () => {
+  const onNewProject = vi.fn(async () => {});
+  renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
     listDesignSystems: async () => DSYS,
   });
 
-  // Template selector offers the five high-level types
-  await user.click(await screen.findByRole("button", { name: "Template" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Slides" }));
-  // Design-system selector loads systems from the daemon
-  await user.click(screen.getByRole("button", { name: "Design system" }));
-  await user.click(await screen.findByText("Editorial"));
+  fireEvent.change(screen.getByLabelText("Describe your design"), {
+    target: { value: "Keep this composer draft" },
+  });
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+    dataTransfer: { types: ["Files"], files: [validPngFile("composer-reference.png")] },
+  });
+  const context = await screen.findByRole("list", { name: "Attached context" });
+  expect(within(context).getByRole("img", { name: "composer-reference.png" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Blank canvas" }));
+
+  await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
+  expect(onNewProject.mock.calls[0]).toEqual([""]);
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("Keep this composer draft");
+  expect(within(context).getByRole("img", { name: "composer-reference.png" })).toBeInTheDocument();
+});
+
+test("HomeScreen Design passes the brief without legacy template or design-system choices", async () => {
+  const onNewProject = vi.fn();
+  renderWithApi(<HomeScreen onNewProject={onNewProject} />);
+
+  expect(screen.queryByRole("button", { name: "Template" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Design system" })).toBeNull();
 
   const build = screen.getByLabelText("Design");
   expect(build).toHaveClass("rounded-lg");
@@ -416,30 +342,7 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   fireEvent.change(screen.getByLabelText("Describe your design"), { target: { value: "a dashboard" } });
   expect(build).not.toBeDisabled();
   fireEvent.click(build);
-  expect(onNewProject).toHaveBeenCalledWith("a dashboard", "deck", "editorial", "prototype");
-});
-
-test("HomeScreen remembers the selected input parameters after remount", async () => {
-  const user = userEvent.setup();
-  const overrides = {
-    listSkills: async () => SKILLS,
-    listDesignSystems: async () => DSYS,
-  };
-
-  const { unmount } = renderWithApi(<HomeScreen projects={[]} />, overrides);
-  await user.click(await screen.findByRole("button", { name: "Template" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Slides" }));
-  await user.click(screen.getByRole("button", { name: "Design system" }));
-  await user.click(await screen.findByText("Editorial"));
-  await user.click(screen.getByRole("button", { name: "Mode" }));
-  await user.click(await screen.findByRole("menuitem", { name: /^Standard/ }));
-
-  unmount();
-  renderWithApi(<HomeScreen projects={[]} />, overrides);
-
-  await waitFor(() => expect(screen.getByRole("button", { name: "Template" })).toHaveTextContent("Slides"));
-  expect(screen.getByRole("button", { name: "Design system" })).toHaveTextContent("Editorial");
-  expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard");
+  expect(onNewProject).toHaveBeenCalledWith("a dashboard", undefined, undefined, undefined);
 });
 
 test("HomeScreen optimizes the prompt with the selected agent and lets the user reject or accept it", async () => {
@@ -457,7 +360,6 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
   const { container } = renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
     listAgents: async () => [{ id: "codebuddy", command: "codebuddy", available: true, models: ["hunyuan"] }],
     getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "hunyuan" }),
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
     optimizePrompt,
   });
@@ -473,9 +375,6 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
         prompt: "make a shader site",
         agentCommand: "codebuddy",
         model: "hunyuan",
-        mode: "prototype",
-        skillId: "frontend-design",
-        designSystemId: "modern-minimal",
       }),
     ),
   );
@@ -500,11 +399,9 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
   fireEvent.click(screen.getByLabelText("Design"));
   expect(onNewProject).toHaveBeenCalledWith(
     "Create a finished shader microsite with sourced assets.",
-    "frontend-design",
-    "modern-minimal",
-    "prototype",
     undefined,
     { agentCommand: "codebuddy", model: "hunyuan" },
+    undefined,
   );
 
   await user.click(screen.getByRole("button", { name: "Reject optimized prompt" }));
@@ -521,7 +418,6 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
 test("HomeScreen prompt presents dropped image references as rich context without mutating the brief", async () => {
   const onNewProject = vi.fn();
   renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
@@ -538,9 +434,6 @@ test("HomeScreen prompt presents dropped image references as rich context withou
   fireEvent.click(screen.getByLabelText("Design"));
   expect(onNewProject).toHaveBeenCalledWith(
     "Recreate the reference screenshot faithfully.",
-    "frontend-design",
-    "modern-minimal",
-    "prototype",
     undefined,
     undefined,
     {
@@ -548,15 +441,13 @@ test("HomeScreen prompt presents dropped image references as rich context withou
       refs: [],
     },
   );
-  expect(takePendingImages()).toEqual([]);
 });
 
-test("HomeScreen caps dropped image references at two provider-supported images", async () => {
+test("HomeScreen caps dropped image references at two validated images", async () => {
   const onNewProject = vi.fn();
   const readAsDataUrl = vi.spyOn(FileReader.prototype, "readAsDataURL");
   try {
     renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
-      listSkills: async () => SKILLS,
       listDesignSystems: async () => DSYS,
     });
 
@@ -573,7 +464,7 @@ test("HomeScreen caps dropped image references at two provider-supported images"
     );
 
     fireEvent.click(screen.getByLabelText("Design"));
-    const attachments = onNewProject.mock.calls[0]?.[6];
+    const attachments = onNewProject.mock.calls[0]?.[3];
     expect(attachments.images).toHaveLength(2);
     expect(attachments.refs).toEqual([]);
   } finally {
@@ -584,10 +475,9 @@ test("HomeScreen caps dropped image references at two provider-supported images"
 test("HomeScreen caps browser captures without blocking a project reference", async () => {
   const user = userEvent.setup();
   const source = project("p-cap-source", "Capacity source");
-  const getFileText = vi.fn(async () => "<main>Reference artifact</main>");
+  const getDesignCanvas = vi.fn(async () => generatedCanvas(source.id));
   renderWithApiToastAndAgents(<HomeScreen />, {
     listProjects: async () => [source],
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
     getCapture: async () => ({
       images: Array.from({ length: 3 }, (_, index) => ({
@@ -597,7 +487,7 @@ test("HomeScreen caps browser captures without blocking a project reference", as
       note: "",
       source: "browser extension",
     }),
-    getFileText,
+    getDesignCanvas,
   });
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
@@ -623,10 +513,11 @@ test("HomeScreen caps browser captures without blocking a project reference", as
   await user.click(screen.getByRole("button", { name: "Add files and context" }));
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Capacity source" }));
+  await user.click(await screen.findByRole("button", { name: "Reference Checkout" }));
 
-  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(getDesignCanvas).toHaveBeenCalledTimes(1));
   expect(within(rail).getAllByRole("listitem")).toHaveLength(3);
-  expect(within(rail).getByText("Capacity source")).toBeInTheDocument();
+  expect(within(rail).getByText("Capacity source / Checkout")).toBeInTheDocument();
 });
 
 test("HomeScreen reserves image slots before overlapping FileReader work begins", async () => {
@@ -635,7 +526,6 @@ test("HomeScreen reserves image slots before overlapping FileReader work begins"
     .mockImplementation(function (_blob: Blob): void {});
   try {
     renderWithApiToastAndAgents(<HomeScreen projects={[]} />, {
-      listSkills: async () => SKILLS,
       listDesignSystems: async () => DSYS,
     });
 
@@ -666,24 +556,23 @@ test("HomeScreen reserves image slots before overlapping FileReader work begins"
 test("HomeScreen reserves a project reference before an overlapping duplicate fetch", async () => {
   const user = userEvent.setup();
   const first = project("p-reserved-first", "First reserved source");
-  const getFileText = vi.fn(() => new Promise<string>(() => {}));
+  const getDesignCanvas = vi.fn(() => new Promise<DesignCanvas>(() => {}));
   renderWithApiToastAndAgents(<HomeScreen />, {
     listProjects: async () => [first],
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
-    getFileText,
+    getDesignCanvas,
   });
 
   await user.click(screen.getByRole("button", { name: "Add files and context" }));
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "First reserved source" }));
-  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(getDesignCanvas).toHaveBeenCalledTimes(1));
 
   await user.click(screen.getByRole("button", { name: "Add files and context" }));
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "First reserved source" }));
 
-  expect(getFileText).toHaveBeenCalledTimes(1);
+  expect(getDesignCanvas).toHaveBeenCalledTimes(1);
 });
 
 test("HomeScreen waits for an in-flight image read before creating the project", async () => {
@@ -696,7 +585,6 @@ test("HomeScreen waits for an in-flight image read before creating the project",
   const onNewProject = vi.fn();
   try {
     renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
-      listSkills: async () => SKILLS,
       listDesignSystems: async () => DSYS,
     });
     fireEvent.change(screen.getByLabelText("Describe your design"), {
@@ -729,7 +617,7 @@ test("HomeScreen waits for an in-flight image read before creating the project",
     fireEvent.click(design);
 
     await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
-    expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+    expect(onNewProject.mock.calls[0]?.[3]).toEqual({
       images: [{
         name: "pending-direction.png",
         base64: VALID_PNG_BASE64,
@@ -750,7 +638,6 @@ test("HomeScreen starts its create barrier before asynchronous drop traversal fi
   });
   const onNewProject = vi.fn();
   renderWithApiToastAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
   fireEvent.change(screen.getByLabelText("Describe your design"), {
@@ -790,7 +677,7 @@ test("HomeScreen starts its create barrier before asynchronous drop traversal fi
   expect(design).not.toHaveAttribute("aria-busy");
   fireEvent.click(design);
   await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
-  expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+  expect(onNewProject.mock.calls[0]?.[3]).toEqual({
     images: [{
       name: "nested-direction.png",
       base64: expect.any(String),
@@ -803,16 +690,15 @@ test("HomeScreen starts its create barrier before asynchronous drop traversal fi
 test("HomeScreen waits for an in-flight project reference before creating the project", async () => {
   const user = userEvent.setup();
   const source = project("p-pending-reference", "Pending reference");
-  let resolveReference!: (value: string) => void;
-  const getFileText = vi.fn(() => new Promise<string>((resolve) => {
+  let resolveReference!: (value: DesignCanvas) => void;
+  const getDesignCanvas = vi.fn(() => new Promise<DesignCanvas>((resolve) => {
     resolveReference = resolve;
   }));
   const onNewProject = vi.fn();
   renderWithApiToastAndAgents(<HomeScreen onNewProject={onNewProject} />, {
     listProjects: async () => [source],
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
-    getFileText,
+    getDesignCanvas,
   });
   fireEvent.change(screen.getByLabelText("Describe your design"), {
     target: { value: "Wait for the referenced project" },
@@ -821,7 +707,7 @@ test("HomeScreen waits for an in-flight project reference before creating the pr
   await user.click(screen.getByRole("button", { name: "Add files and context" }));
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Pending reference" }));
-  await waitFor(() => expect(getFileText).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(getDesignCanvas).toHaveBeenCalledTimes(1));
 
   const design = screen.getByLabelText("Design");
   expect(design).toBeDisabled();
@@ -830,25 +716,33 @@ test("HomeScreen waits for an in-flight project reference before creating the pr
   expect(onNewProject).not.toHaveBeenCalled();
 
   await act(async () => {
-    resolveReference("<main>Pending reference artifact</main>");
+    resolveReference(generatedCanvas(source.id));
     await Promise.resolve();
   });
 
-  await screen.findByLabelText("Remove Pending reference");
+  await user.click(await screen.findByRole("button", { name: "Reference Checkout" }));
+  await screen.findByLabelText("Remove Pending reference / Checkout");
   await waitFor(() => expect(design).toBeEnabled());
   expect(design).not.toHaveAttribute("aria-busy");
   fireEvent.click(design);
 
   await waitFor(() => expect(onNewProject).toHaveBeenCalledTimes(1));
-  expect(onNewProject.mock.calls[0]?.[6]).toEqual({
+  expect(onNewProject.mock.calls[0]?.[3]).toEqual({
     images: [],
-    refs: [{ name: "Pending reference", base64: expect.any(String) }],
+    refs: [{
+      name: "Pending reference / Checkout",
+      base64: "",
+      projectReference: {
+        sourceProjectId: "p-pending-reference",
+        sourceNodeId: "node-page",
+        sourceVersionId: "version-1",
+      },
+    }],
   });
 });
 
 test("HomeScreen restores prompt focus and its end caret after removing context", async () => {
   renderWithApi(<HomeScreen projects={[]} />, {
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
@@ -871,14 +765,14 @@ test("HomeScreen restores prompt focus and its end caret after removing context"
   expect(textarea.selectionEnd).toBe(draft.length);
 });
 
-test("HomeScreen keeps local paths and imported fig context structured until Design", async () => {
-  const onNewProject = vi.fn();
-  const parseFig = vi.fn(async (_file: Blob, name: string) => ({ name, summary: "Palette: #123456\nFonts: Geist" }));
-  const { container } = renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
-    listSkills: async () => SKILLS,
-    listDesignSystems: async () => DSYS,
-    parseFig,
-  });
+test("HomeScreen does not expose prompt-only local-path or fig context", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  expect(screen.queryByRole("menuitem", { name: "Attach folder" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Link local code…" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Upload .fig file" })).toBeNull();
 
   const folder = new File([], "source-app", { type: "" });
   Object.defineProperty(folder, "path", { value: "/Users/ben/Projects/source-app" });
@@ -886,32 +780,8 @@ test("HomeScreen keeps local paths and imported fig context structured until Des
     dataTransfer: { types: ["Files"], files: [folder] },
   });
 
-  const rail = await screen.findByRole("list", { name: "Attached context" });
-  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
-  expect(rail.compareDocumentPosition(screen.getByLabelText("Describe your design")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(within(rail).getByText("source-app")).toBeInTheDocument();
-  expect(within(rail).queryByText("Folder")).toBeNull();
-  expect(screen.getByLabelText("Describe your design")).toHaveValue("");
-
-  const figInput = container.querySelector<HTMLInputElement>('input[accept=".fig"]');
-  expect(figInput).not.toBeNull();
-  const fig = new File(["fig"], "brand.fig", { type: "application/octet-stream" });
-  fireEvent.change(figInput!, { target: { files: [fig] } });
-
-  await waitFor(() => expect(parseFig).toHaveBeenCalledWith(fig, "brand.fig"));
-  expect(await within(rail).findByTitle("Design context: Imported context · Imported .fig")).toBeInTheDocument();
-  expect(screen.getByLabelText("Describe your design")).toHaveValue("");
-  expect(screen.getByLabelText("Design")).toBeEnabled();
-
-  fireEvent.click(screen.getByLabelText("Design"));
-  expect(onNewProject).toHaveBeenCalledWith(
-    expect.stringContaining("Reference local paths: /Users/ben/Projects/source-app"),
-    "frontend-design",
-    "modern-minimal",
-    "prototype",
-  );
-  expect(onNewProject.mock.calls[0]?.[0]).toContain("Use the attached context to design the artifact.");
-  expect(onNewProject.mock.calls[0]?.[0]).toContain("Palette: #123456\nFonts: Geist");
+  await waitFor(() => expect(screen.getByLabelText("Design")).toBeDisabled());
+  expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
 });
 
 test("MoodboardsScreen uses a Home-like prompt to start a board with initial direction", async () => {
@@ -1021,7 +891,6 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       model: "",
       apiBaseUrl: "",
       apiKey: "",
-      defaultDesignSystemId: "modern-minimal",
       customInstructions: "",
       imageApiBaseUrl: "",
       imageApiKey: "",
@@ -1037,13 +906,7 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       aiProviderModels: "gpt-image-1",
       aiProviderOrganization: "",
       aiProviderProfiles: "",
-      visualQaEnabled: false,
-      autoFixLiveRuntimeErrors: false,
       sharinganAffirmed: false,
-      researchEnabled: false, researchAgentCommand: "", researchModel: "",      visualQaAgentCommand: "",
-      visualQaModel: "",
-      autoImproveEnabled: true,
-      autoImproveMaxRounds: 8,
     }),
     startMoodboard,
   });
@@ -1295,30 +1158,26 @@ test("EffectScreen renders the playground with agent, preview, parameters, prese
   expect(screen.queryByText("Image Filter")).toBeNull();
 });
 
-test("DesignSystemDetailScreen loads a system and sets it as default", async () => {
-  const updateSettings = vi.fn(async () => ({
-    agentCommand: "claude",
-    model: "",
-    apiBaseUrl: "",
-    apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
-    customInstructions: "",
-  }));
+test("DesignSystemDetailScreen hands the selected direction to the new Main Agent as an explicit brief", async () => {
+  takePendingComposer();
   const getDesignSystem = vi.fn(async (id: string) => ({
     id,
     name: "Modern Minimal",
     category: "Modern & Minimal",
-    summary: "neutral grayscale",
+    summary: "Neutral grayscale, quiet typography, and restrained spacing.",
     swatch: { bg: "#fff", surface: "#eee", fg: "#111", accent: "#3656ff" },
     designMd: "# Modern Minimal\n## 1. Visual Theme\nClean and quiet.",
     tokensCss: ":root{--bg:#fff;--fg:#111;--accent:#3656ff;--font-display:Inter}",
   }));
-  renderWithApi(<DesignSystemDetailScreen id="modern-minimal" />, { getDesignSystem, updateSettings });
+
+  renderWithApi(<DesignSystemDetailScreen id="modern-minimal" />, { getDesignSystem });
   await screen.findByRole("heading", { name: "Modern Minimal" });
-  expect(screen.getByRole("separator", { name: "Resize spec navigation" })).toHaveAttribute("data-separator");
-  expect(getDesignSystem).toHaveBeenCalledWith("modern-minimal");
-  fireEvent.click(await screen.findByRole("button", { name: /Set default/ }));
-  await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ defaultDesignSystemId: "modern-minimal" }));
+  fireEvent.click(screen.getByRole("button", { name: /Generate with this/ }));
+
+  const handoff = takePendingComposer();
+  expect(handoff).toEqual({
+    brief: "Create and generate a Design System Node for “Modern Minimal”. Use this core direction: Neutral grayscale, quiet typography, and restrained spacing.",
+  });
 });
 
 test("DesignSystemNewScreen uses the saved agent/model as a local default without saving changes globally", async () => {
@@ -1400,7 +1259,36 @@ test("DesignSystemNewScreen shows the fig parser error detail", async () => {
 });
 
 function project(id: string, name: string) {
-  return { id, name, skillId: null, designSystemId: "modern-minimal", mode: "prototype" as const, createdAt: 1, updatedAt: 2 };
+  return { id, name, createdAt: 1, updatedAt: 2 };
+}
+
+function generatedCanvas(projectId: string, nodeName = "Checkout"): DesignCanvas {
+  return {
+    schemaVersion: 1,
+    projectId,
+    revision: 1,
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodeOrder: ["node-page"],
+    nodes: [{
+      id: "node-page",
+      kind: "page",
+      name: nodeName,
+      geometry: { x: 0, y: 0, width: 600, height: 400 },
+      state: "ready",
+      currentVersionId: "version-1",
+      selectedVersionId: null,
+      versionCount: 1,
+      assetId: null,
+      activeJobId: null,
+      error: null,
+      createdAt: 1,
+      updatedAt: 1,
+    }],
+    undoDepth: 0,
+    redoDepth: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
 }
 
 function moodboard(id: string, name: string) {
@@ -1414,7 +1302,7 @@ test("HomeScreen loads projects from the daemon and archives one", async () => {
     return projects.find((p) => p.id === id)!;
   });
   render(
-    <ApiProvider client={makeFakeApi({ listProjects: async () => projects, patchProject, listSkills: async () => SKILLS })}>
+    <ApiProvider client={makeFakeApi({ listProjects: async () => projects, patchProject })}>
       <HomeScreen />
     </ApiProvider>,
   );
@@ -1428,7 +1316,7 @@ test("HomeScreen loads projects from the daemon and archives one", async () => {
 test("HomeScreen renames a project via the dialog", async () => {
   const patchProject = vi.fn(async () => project("p1", "Pricing v2"));
   render(
-    <ApiProvider client={makeFakeApi({ listProjects: async () => [project("p1", "Pricing page")], patchProject, listSkills: async () => SKILLS })}>
+    <ApiProvider client={makeFakeApi({ listProjects: async () => [project("p1", "Pricing page")], patchProject })}>
       <HomeScreen />
     </ApiProvider>,
   );
@@ -1455,7 +1343,6 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     model: "gpt-5",
     apiBaseUrl: "",
     apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
     customInstructions: "",
     imageApiBaseUrl: "",
     imageApiKey: "",
@@ -1471,13 +1358,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     aiProviderModels: "gpt-image-1",
     aiProviderOrganization: "",
     aiProviderProfiles: "",
-    visualQaEnabled: false,
-    autoFixLiveRuntimeErrors: false,
     sharinganAffirmed: false,
-    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
-    visualQaModel: "",
-    autoImproveEnabled: true,
-    autoImproveMaxRounds: 8,
   };
   render(
     <ApiProvider
@@ -1485,7 +1366,6 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
         listAgents: async () => AGENTS,
         rescanAgents: async () => AGENTS,
         getSettings: async () => settings,
-        listSkills: async () => SKILLS,
         listDesignSystems: async () => DSYS,
       })}
     >
@@ -1506,7 +1386,6 @@ test("HomeScreen drops a saved model that the restored agent no longer advertise
     listAgents: async () => AGENTS,
     rescanAgents: async () => AGENTS,
     getSettings: async () => settingsFixture({ agentCommand: "codex", model: "retired-codex-model" }),
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
@@ -1520,15 +1399,13 @@ test("HomeScreen drops a saved model that the restored agent no longer advertise
 
   expect(onNewProject).toHaveBeenCalledWith(
     "Design a travel planner",
-    "frontend-design",
-    "modern-minimal",
-    "prototype",
     undefined,
     { agentCommand: "codex" },
+    undefined,
   );
 });
 
-test("HomeScreen keeps every ready Agent selectable in Prototype and Standard", async () => {
+test("HomeScreen keeps every ready Agent selectable for the Design Canvas", async () => {
   const user = userEvent.setup();
   const onNewProject = vi.fn(async () => {});
   const agents = [
@@ -1540,7 +1417,6 @@ test("HomeScreen keeps every ready Agent selectable in Prototype and Standard", 
     listAgents: async () => agents,
     rescanAgents: async () => agents,
     getSettings: async () => settingsFixture({ agentCommand: "codex", model: "gpt-5" }),
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
@@ -1551,25 +1427,15 @@ test("HomeScreen keeps every ready Agent selectable in Prototype and Standard", 
   expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
   await user.keyboard("{Escape}");
 
-  await user.click(screen.getByRole("button", { name: "Mode" }));
-  await user.click(await screen.findByRole("menuitem", { name: /^Standard/ }));
-  await user.click(picker);
-  const codex = await screen.findByRole("button", { name: /^Codex/ });
-  expect(codex).toBeEnabled();
-  expect(screen.getByRole("button", { name: /^CodeBuddy/ })).toBeEnabled();
-  await user.keyboard("{Escape}");
-
   await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
   const design = screen.getByRole("button", { name: "Design" });
   await waitFor(() => expect(design).toBeEnabled());
   await user.click(design);
   await waitFor(() => expect(onNewProject).toHaveBeenCalledWith(
     "Design a travel planner",
-    "frontend-design",
-    "modern-minimal",
-    "standard",
     undefined,
     { agentCommand: "codex", model: "gpt-5" },
+    undefined,
   ));
 });
 
@@ -1592,7 +1458,6 @@ test("HomeScreen keeps a signed-out saved CodeBuddy visible and blocks Design un
     listAgents: async () => agents,
     rescanAgents: async () => agents,
     getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "gpt-5.5" }),
-    listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
@@ -1624,7 +1489,7 @@ function renderSettings(over = {}) {
 
 test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data", async () => {
   renderSettings();
-  for (const name of ["Appearance", "Agents", "Providers", "Quality", "Defaults", "Custom instructions", "About"]) {
+  for (const name of ["Appearance", "Agents", "Providers", "Defaults", "Custom instructions", "About"]) {
     expect(screen.getByRole("button", { name })).toBeInTheDocument();
   }
   fireEvent.click(screen.getByRole("button", { name: "Agents" }));
@@ -1633,7 +1498,7 @@ test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data"
   // an uninstalled agent is shown but disabled (not selectable)
   expect(screen.getByRole("button", { name: /Gemini/ })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
-  expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
+  expect(await screen.findByRole("combobox", { name: "Remove background model" })).toHaveTextContent("None");
 });
 
 test("SettingsScreen distinguishes a signed-out CodeBuddy from a missing CLI", async () => {
@@ -1798,107 +1663,6 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.change(ci, { target: { value: "be terse" } });
   fireEvent.blur(ci);
   expect(updateSettings).toHaveBeenCalledWith({ customInstructions: "be terse" });
-
-  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
-  await user.click(await screen.findByRole("switch", { name: "Agent visual review" }));
-  expect(updateSettings).toHaveBeenCalledWith({
-    visualQaEnabled: true,
-    visualQaAgentCommand: "claude",
-    visualQaModel: "",
-  });
-  expect(screen.queryByRole("combobox", { name: "Visual review agent" })).not.toBeInTheDocument();
-  expect(screen.getByText("Claude Code", { selector: "span" })).toBeInTheDocument();
-  expect(screen.getByText("Ready", { selector: "span" })).toBeInTheDocument();
-  expect(screen.getByRole("combobox", { name: "Visual review model" })).toHaveTextContent("Claude default");
-  expect(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" })).toHaveValue(8);
-
-  await user.click(screen.getByRole("switch", { name: "Auto-improve after review" }));
-  expect(updateSettings).toHaveBeenCalledWith({ autoImproveEnabled: false });
-  fireEvent.change(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" }), { target: { value: "6" } });
-  fireEvent.blur(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" }));
-  expect(updateSettings).toHaveBeenCalledWith({ autoImproveMaxRounds: 6 });
-
-  await user.click(screen.getByRole("combobox", { name: "Visual review model" }));
-  expect(screen.queryByRole("option", { name: "gpt-5" })).not.toBeInTheDocument();
-  await user.click(await screen.findByRole("option", { name: "claude-sonnet-4-6" }));
-  expect(updateSettings).toHaveBeenCalledWith({
-    visualQaAgentCommand: "claude",
-    visualQaModel: "claude-sonnet-4-6",
-  });
-
-  // Design research has its own Agent/model selection, independent of Visual review.
-  expect(screen.getByRole("combobox", { name: "Research agent" })).toHaveTextContent("Same as project agent");
-  expect(screen.getByRole("combobox", { name: "Research model" })).toHaveTextContent("Same as project model");
-  await user.click(screen.getByRole("switch", { name: "Design research" }));
-  expect(updateSettings).toHaveBeenCalledWith({ researchEnabled: true });
-  await user.click(screen.getByRole("combobox", { name: "Research agent" }));
-  await user.click(await screen.findByRole("option", { name: "Codex" }));
-  expect(updateSettings).toHaveBeenCalledWith({ researchAgentCommand: "codex", researchModel: "" });
-  await user.click(screen.getByRole("combobox", { name: "Research model" }));
-  await user.click(await screen.findByRole("option", { name: "gpt-5" }));
-  expect(updateSettings).toHaveBeenCalledWith({ researchModel: "gpt-5" });
-});
-
-test("SettingsScreen explains when the isolated Claude visual reviewer is unavailable", async () => {
-  renderSettings({
-    getSettings: async () => settingsFixture({
-      agentCommand: "codex",
-      model: "gpt-5",
-      visualQaAgentCommand: "codex",
-      visualQaModel: "gpt-5",
-    }),
-    listAgents: async () => AGENTS.map((agent) => (
-      agent.command === "claude" ? { ...agent, available: false } : agent
-    )),
-  });
-
-  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
-
-  expect(await screen.findByText("Not available", { selector: "span" })).toBeInTheDocument();
-  expect(screen.getByText(/Install or sign in to Claude Code, then rescan Agents/i)).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "Agent visual review" })).toBeDisabled();
-  expect(screen.queryByRole("combobox", { name: "Visual review agent" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("combobox", { name: "Visual review model" })).not.toBeInTheDocument();
-  expect(screen.getByText("Install Claude Code first")).toBeInTheDocument();
-});
-
-test("SettingsScreen rolls back only the keys from a failed optimistic mutation", async () => {
-  const visual = deferred<Settings>();
-  const research = deferred<Settings>();
-  const updateSettings = vi.fn((patch: Partial<Settings>) =>
-    "visualQaEnabled" in patch ? visual.promise : "researchEnabled" in patch ? research.promise : Promise.resolve(settingsFixture(patch)),
-  );
-  renderSettings({ updateSettings });
-  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
-  const visualSwitch = await screen.findByRole("switch", { name: "Agent visual review" });
-  const researchSwitch = screen.getByRole("switch", { name: "Design research" });
-
-  fireEvent.click(visualSwitch);
-  fireEvent.click(researchSwitch);
-  await act(async () => research.resolve(settingsFixture({ researchEnabled: true })));
-  await act(async () => visual.reject(new Error("write failed")));
-
-  await waitFor(() => expect(visualSwitch).not.toBeChecked());
-  expect(researchSwitch).toBeChecked();
-});
-
-test("SettingsScreen ignores stale full responses that arrive after a newer edit", async () => {
-  const researchAgent = deferred<Settings>();
-  const visual = deferred<Settings>();
-  const updateSettings = vi.fn((patch: Partial<Settings>) =>
-    "researchAgentCommand" in patch ? researchAgent.promise : "visualQaEnabled" in patch ? visual.promise : Promise.resolve(settingsFixture(patch)),
-  );
-  renderSettings({ updateSettings });
-  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
-  await userEvent.click(await screen.findByRole("combobox", { name: "Research agent" }));
-  await userEvent.click(await screen.findByRole("option", { name: "Codex" }));
-  const visualSwitch = screen.getByRole("switch", { name: "Agent visual review" });
-  fireEvent.click(visualSwitch);
-
-  await act(async () => visual.resolve(settingsFixture({ visualQaEnabled: true })));
-  await act(async () => researchAgent.resolve(settingsFixture({ researchAgentCommand: "codex", visualQaEnabled: false })));
-
-  await waitFor(() => expect(visualSwitch).toBeChecked());
 });
 
 test("SettingsScreen does not replace a newer unsaved draft with an older save response", async () => {

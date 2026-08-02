@@ -1,23 +1,10 @@
-/**
- * Image/media generation, woven into the run. The agent emits placeholder images
- * with a `data-gen-prompt` describing what to draw; after generation we call an
- * AI SDK image model, save each result under assets/, and rewrite the <img src>.
- * No key configured -> artifact passes through untouched.
- */
-
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+/** Provider-neutral image generation used by the Moodboard canvas. */
 import { createAzure } from "@ai-sdk/azure";
 import { createFal } from "@ai-sdk/fal";
 import { createGoogle } from "@ai-sdk/google";
 import { createVertex } from "@ai-sdk/google-vertex";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateImage, type GenerateImageResult, type ImageModel } from "ai";
-
-export const MAX_GENERATED_IMAGE_PLACEHOLDERS = 16;
-export const MAX_GENERATED_IMAGE_PROMPT_BYTES = 8 * 1024;
-export const MAX_GENERATED_IMAGE_TOTAL_PROMPT_BYTES = 64 * 1024;
-export const MAX_GENERATED_IMAGE_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 export type ImageGenerationParams = {
   quality?: "auto" | "low" | "medium" | "high";
@@ -48,40 +35,6 @@ export type SourceImageInput = {
 
 export type FetchLike = typeof fetch;
 
-export interface GenerateImagesOptions {
-  readonly signal?: AbortSignal;
-  readonly stopOnFailure?: boolean;
-  /** Test/legacy seam that may lower, but never raise, the production output ceiling. */
-  readonly maxOutputBytes?: number;
-  readonly validateImage?: (
-    bytes: Uint8Array,
-    signal?: AbortSignal,
-  ) => void | Promise<void>;
-  readonly writeAsset?: (
-    asset: Readonly<{
-      index: number;
-      fileName: string;
-      relativeSrc: string;
-      bytes: Uint8Array;
-    }>,
-    signal?: AbortSignal,
-  ) => void | Promise<void>;
-}
-
-export interface GenerateImagesFailure {
-  readonly index: number;
-  readonly stage: "prompt" | "provider" | "validation" | "output" | "write";
-  readonly message: string;
-  readonly cause?: unknown;
-}
-
-export interface GenerateImagesResult {
-  readonly html: string;
-  readonly generated: number;
-  readonly failed: number;
-  readonly failures: readonly GenerateImagesFailure[];
-}
-
 type ImageOperation = "generate" | "edit";
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | { [key: string]: JsonValue | undefined } | JsonValue[];
@@ -93,34 +46,6 @@ interface ImageRequestLogContext {
   imageField?: string;
   sourceMimeType?: string;
   sourceFileName?: string;
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-function boundedOutputLimit(value: number | undefined): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? Math.min(value, MAX_GENERATED_IMAGE_OUTPUT_BYTES)
-    : MAX_GENERATED_IMAGE_OUTPUT_BYTES;
-}
-
-function boundedBase64Image(value: string, remainingBytes: number): Buffer {
-  const maximumEncodedLength = Math.ceil(remainingBytes / 3) * 4 + 4;
-  if (value.length === 0 || value.length > maximumEncodedLength
-    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new Error("image provider output is invalid or exceeds the output byte limit");
-  }
-  const bytes = Buffer.from(value, "base64");
-  if (bytes.length === 0 || bytes.length > remainingBytes) {
-    throw new Error("image provider output exceeds the output byte limit");
-  }
-  return bytes;
 }
 
 function withoutTrailingSlash(value: string): string {
@@ -406,117 +331,4 @@ export async function requestImageEdit(
   } catch (err) {
     throw imageApiError(err);
   }
-}
-
-/**
- * Replace every `<img ... data-gen-prompt="...">` in html with a generated asset.
- * Returns the rewritten html and the number of images generated.
- */
-export async function generateImages(
-  html: string,
-  opts: ImageGenOpts,
-  assetsDir: string,
-  fetchImpl: FetchLike,
-  options: GenerateImagesOptions = {},
-): Promise<GenerateImagesResult> {
-  options.signal?.throwIfAborted();
-  if (!opts.apiKey || !opts.baseUrl) return { html, generated: 0, failed: 0, failures: [] };
-  const re = /<img\b[^>]*?\bdata-gen-prompt\s*=\s*(["'])(.*?)\1[^>]*?>/gi;
-  const matches = [...html.matchAll(re)];
-  if (!matches.length) return { html, generated: 0, failed: 0, failures: [] };
-  if (matches.length > MAX_GENERATED_IMAGE_PLACEHOLDERS) {
-    return {
-      html,
-      generated: 0,
-      failed: 1,
-      failures: [{
-        index: -1,
-        stage: "prompt",
-        message: `image placeholder count exceeds the ${MAX_GENERATED_IMAGE_PLACEHOLDERS}-placeholder limit`,
-      }],
-    };
-  }
-  const prompts: string[] = [];
-  let totalPromptBytes = 0;
-  for (let index = 0; index < matches.length; index += 1) {
-    const match = matches[index]!;
-    const prompt = decodeEntities(match[2] ?? "");
-    const promptBytes = Buffer.byteLength(prompt, "utf8");
-    if (!prompt.trim() || promptBytes > MAX_GENERATED_IMAGE_PROMPT_BYTES) {
-      return {
-        html,
-        generated: 0,
-        failed: 1,
-        failures: [{
-          index,
-          stage: "prompt",
-          message: `image prompt must be non-empty and stay within the ${MAX_GENERATED_IMAGE_PROMPT_BYTES}-byte limit`,
-        }],
-      };
-    }
-    prompts.push(prompt);
-    totalPromptBytes += promptBytes;
-  }
-  if (totalPromptBytes > MAX_GENERATED_IMAGE_TOTAL_PROMPT_BYTES) {
-    return {
-      html,
-      generated: 0,
-      failed: 1,
-      failures: [{
-        index: -1,
-        stage: "prompt",
-        message: `aggregate prompt exceeds the ${MAX_GENERATED_IMAGE_TOTAL_PROMPT_BYTES}-byte limit`,
-      }],
-    };
-  }
-
-  if (!options.writeAsset) await mkdir(assetsDir, { recursive: true });
-  let out = html;
-  let generated = 0;
-  const outputLimit = boundedOutputLimit(options.maxOutputBytes);
-  let outputBytes = 0;
-  const failures: GenerateImagesFailure[] = [];
-  for (let i = 0; i < matches.length; i++) {
-    options.signal?.throwIfAborted();
-    const tag = matches[i]![0];
-    const prompt = prompts[i]!;
-    let stage: GenerateImagesFailure["stage"] = "provider";
-    try {
-      const b64 = await requestImage(opts, prompt, fetchImpl, options.signal);
-      const rel = `assets/gen-${i + 1}.png`;
-      stage = "output";
-      const bytes = boundedBase64Image(b64, outputLimit - outputBytes);
-      outputBytes += bytes.length;
-      stage = "validation";
-      await options.validateImage?.(bytes, options.signal);
-      options.signal?.throwIfAborted();
-      stage = "write";
-      const fileName = `gen-${i + 1}.png`;
-      if (options.writeAsset) {
-        await options.writeAsset({ index: i, fileName, relativeSrc: rel, bytes }, options.signal);
-      } else {
-        await writeFile(join(assetsDir, fileName), bytes);
-      }
-      const srcAttribute = /\bsrc\s*=\s*(["'])(.*?)\1/i;
-      let newTag = srcAttribute.test(tag)
-        ? tag.replace(srcAttribute, `src="${rel}"`)
-        : tag.replace(/<img\b/i, `<img src="${rel}"`);
-      newTag = newTag.replace(/\s*data-gen-prompt\s*=\s*(["'])(.*?)\1/i, "");
-      out = out.replace(tag, () => newTag);
-      generated++;
-    } catch (error) {
-      if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
-      // Leave the placeholder in place on failure (the run still succeeds).
-      failures.push({
-        index: i,
-        stage,
-        message: error instanceof Error && error.message.trim()
-          ? error.message.trim()
-          : "image provider failed",
-        cause: error,
-      });
-      if (options.stopOnFailure) break;
-    }
-  }
-  return { html: out, generated, failed: failures.length, failures };
 }

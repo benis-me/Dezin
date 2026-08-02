@@ -51,7 +51,7 @@ async function fixture(t: test.TestContext) {
     sharingan: true,
     sourceUrl: SOURCE_URL,
   });
-  const initial = store.workspace.ensureWorkspaceRecord(project.id);
+  const initial = store.workspace.ensureSharinganWorkspaceFoundation(project.id);
   t.after(async () => {
     store.close();
     await rm(dataDir, { recursive: true, force: true });
@@ -86,10 +86,17 @@ test("Sharingan bootstrap publishes one immutable exact capture and reload reuse
   );
   assert.equal(
     f.store.workspace.getWorkspace(f.project.id)
-      && f.store.workspace.getCompactOverviewByProjectId(f.project.id)!
-        .activeSnapshot.resourceRevisions[ready.resourceId],
+      && f.store.workspace.listSnapshots(f.project.id)
+        .find((snapshot) => snapshot.id === ready.readySnapshotId)!
+        .resourceRevisions[ready.resourceId],
     ready.revisionId,
   );
+  const tables = new Set((f.store.db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table'",
+  ).all() as Array<{ name: string }>).map((row) => row.name));
+  for (const retired of ["workspace_artifacts", "artifact_tracks", "variants", "runs"]) {
+    assert.equal(tables.has(retired), false, `${retired} must be physically absent`);
+  }
 
   const noRecapture = capturePort(() => {
     throw new Error("reload must not recapture");

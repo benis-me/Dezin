@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../../../packages/core/src/index.ts";
-import { createRuntimeSupervisor } from "../src/app.ts";
-import { ensureDevServer } from "../src/project-runtime.ts";
-import { ensureProbeSession, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId } from "../src/sharingan-handler.ts";
+import {
+  closeAllSharinganSessions,
+  ensureProbeSession,
+  releaseSharinganProject,
+} from "../src/sharingan-handler.ts";
 
 async function beforeDeadline<T>(promise: Promise<T>, deadlineMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -22,18 +23,6 @@ async function beforeDeadline<T>(promise: Promise<T>, deadlineMs: number): Promi
   }
 }
 
-async function waitForPortDown(url: string): Promise<void> {
-  for (let i = 0; i < 30; i++) {
-    try {
-      await fetch(url, { signal: AbortSignal.timeout(200) });
-    } catch {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error("preview child remained reachable after runtime shutdown");
-}
-
 test("closeAllSharinganSessions closes every live session in the capture registry", async () => {
   const id = "shutdown-guard";
   const dataDir = mkdtempSync(join(tmpdir(), "shar-shutdown-"));
@@ -41,7 +30,6 @@ test("closeAllSharinganSessions closes every live session in the capture registr
   const fake = { close: async () => { closed += 1; } } as unknown as import("../src/sharingan-browser.ts").SharinganSession;
   const open = async () => fake;
 
-  // Open a probe session (phase -> "probing", c.session live, c.probeTimer armed).
   await ensureProbeSession(id, dataDir, open);
   assert.equal(closed, 0);
 
@@ -83,104 +71,4 @@ test("project release aborts a stuck opener, meets its deadline, and closes a la
   await releaseSharinganProject(id);
   assert.equal(freshCloses, 1, "a new generation for the same project owns its session independently");
   assert.equal(lateCloses, 1, "the late old-generation session is never closed twice");
-});
-
-test("shutdown removes a Run profile recreated by an opener that resolves after the detach deadline", async () => {
-  const id = sharinganRunCaptureId("late-profile-project", `run-${Date.now()}`);
-  const dataDir = mkdtempSync(join(tmpdir(), "shar-late-profile-"));
-  let profileDir = "";
-  let resolveOpen!: (session: import("../src/sharingan-browser.ts").SharinganSession) => void;
-  const opening = ensureProbeSession(id, dataDir, (_url, options) => {
-    profileDir = options.userDataDir ?? "";
-    return new Promise((resolve) => { resolveOpen = resolve; });
-  });
-  await Promise.resolve();
-
-  await beforeDeadline(closeAllSharinganSessions(dataDir), 750);
-  mkdirSync(profileDir, { recursive: true });
-  writeFileSync(join(profileDir, "late-marker"), "created after shutdown cleanup returned");
-  resolveOpen({ close: async () => {} } as unknown as import("../src/sharingan-browser.ts").SharinganSession);
-  await assert.rejects(opening, /capture scope released/);
-
-  assert.equal(existsSync(profileDir), false, "the old generation removes profile bytes written by its late opener");
-});
-
-test("shutdown removes a Run profile recreated by an opener that rejects after the detach deadline", async () => {
-  const id = sharinganRunCaptureId("late-reject-project", `run-${Date.now()}`);
-  const dataDir = mkdtempSync(join(tmpdir(), "shar-late-reject-"));
-  let profileDir = "";
-  let rejectOpen!: (error: Error) => void;
-  const opening = ensureProbeSession(id, dataDir, (_url, options) => {
-    profileDir = options.userDataDir ?? "";
-    return new Promise((_resolve, reject) => { rejectOpen = reject; });
-  });
-  await Promise.resolve();
-
-  await beforeDeadline(closeAllSharinganSessions(dataDir), 750);
-  mkdirSync(profileDir, { recursive: true });
-  writeFileSync(join(profileDir, "late-marker"), "created before a late opener rejection");
-  rejectOpen(new Error("late opener failed"));
-  await assert.rejects(opening, /late opener failed/);
-
-  assert.equal(existsSync(profileDir), false, "late opener rejection settles the old generation's profile cleanup");
-});
-
-test("production shutdown waits for Runs before closing preview and Sharingan children", async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-shutdown-"));
-  const store = new Store(":memory:");
-  const project = store.createProject({ name: "Shutdown", mode: "standard" });
-  const variant = store.ensureMainVariant(project.id);
-  const projectPath = join(dataDir, "projects", project.id);
-  mkdirSync(join(projectPath, "node_modules"), { recursive: true });
-  writeFileSync(join(projectPath, "package.json"), JSON.stringify({ type: "module", scripts: { dev: "node server.mjs" } }));
-  writeFileSync(
-    join(projectPath, "server.mjs"),
-    `import http from "node:http";
-const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
-http.createServer((_req, res) => res.end("alive")).listen(port, "127.0.0.1");
-setInterval(() => {}, 1000);
-`,
-  );
-  let sharinganClosed = 0;
-  await ensureProbeSession(
-    project.id,
-    dataDir,
-    async () => ({ close: async () => { sharinganClosed += 1; } }) as unknown as import("../src/sharingan-browser.ts").SharinganSession,
-  );
-  const preview = await ensureDevServer(project.id, projectPath, `${project.id}:${variant.id}`);
-  assert.equal(await (await fetch(preview.url)).text(), "alive");
-  const supervisor = createRuntimeSupervisor({ dataDir, store });
-  const controller = new AbortController();
-  let settle!: () => void;
-  const settled = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
-  supervisor.registerRun({
-    projectId: project.id,
-    variantId: variant.id,
-    runId: "shutdown-run",
-    controller,
-    settled,
-  });
-
-  let shutdownFinished = false;
-  const shuttingDown = supervisor.shutdown().then((allSettled) => {
-    shutdownFinished = true;
-    return allSettled;
-  });
-  assert.equal(controller.signal.aborted, true);
-  await Promise.resolve();
-  assert.equal(shutdownFinished, false);
-  assert.equal(sharinganClosed, 0, "children remain owned until Run settlement");
-  assert.ok(store.getProject(project.id), "Store remains open while runtime settlement is pending");
-  assert.equal(await (await fetch(preview.url)).text(), "alive");
-
-  settle();
-  assert.equal(await shuttingDown, true);
-  assert.equal(sharinganClosed, 1);
-  await waitForPortDown(preview.url);
-  assert.equal(existsSync(projectPath), true, "shutdown releases children without deleting project data");
-
-  store.close();
-  rmSync(dataDir, { recursive: true, force: true });
 });

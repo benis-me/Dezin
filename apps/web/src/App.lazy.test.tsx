@@ -2,19 +2,17 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App.tsx";
 import { ApiProvider } from "./lib/api-context.tsx";
-import type { ReadyProjectWorkspacePayload } from "./lib/api.ts";
 import { makeFakeApi } from "./test/fake-api.ts";
 
-const loaded = vi.hoisted(() => ({ studio: 0, workspace: 0, settings: 0, canvas: 0 }));
+const loaded = vi.hoisted(() => ({ designCanvas: 0, settings: 0, moodboardCanvas: 0 }));
 
-vi.mock("./project-studio/ProjectStudioScreen.tsx", async (importOriginal) => {
-  loaded.studio += 1;
-  return importOriginal<typeof import("./project-studio/ProjectStudioScreen.tsx")>();
-});
-
-vi.mock("./screens/WorkspaceScreen.tsx", () => {
-  loaded.workspace += 1;
-  return { WorkspaceScreen: () => <div>Lazy workspace</div> };
+vi.mock("./design-canvas/index.ts", () => {
+  loaded.designCanvas += 1;
+  return {
+    DesignCanvasScreen: ({ projectName }: { projectName: string }) => (
+      <main aria-label="Design canvas">{projectName}</main>
+    ),
+  };
 });
 
 vi.mock("./screens/SettingsScreen.tsx", () => {
@@ -23,7 +21,7 @@ vi.mock("./screens/SettingsScreen.tsx", () => {
 });
 
 vi.mock("./moodboard/MoodboardCanvas.tsx", () => {
-  loaded.canvas += 1;
+  loaded.moodboardCanvas += 1;
   return { MoodboardCanvas: () => <div>Lazy canvas</div> };
 });
 
@@ -34,81 +32,14 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-function readyWorkspace(projectId: string): ReadyProjectWorkspacePayload {
-  const workspaceId = `w-${projectId}`;
-  const graph = { workspaceId, revision: 1, nodes: [], edges: [] };
-  const activeSnapshot = {
-    id: "s1",
-    workspaceId,
-    sequence: 1,
-    parentSnapshotId: null,
-    graphRevision: 1,
-    kernelRevisionId: "k1",
-    reason: "workspace-created",
-    provenance: { kind: "workspace-created" as const },
-    createdByRunId: null,
-    createdAt: 1,
-    graph,
-    artifactTracks: {},
-    artifactRevisions: {},
-    resourceRevisions: {},
-  };
-  return {
-    status: "ready",
-    workspace: {
-      id: workspaceId,
-      projectId,
-      mode: "standard",
-      graphRevision: 1,
-      activeSnapshotId: activeSnapshot.id,
-      activeKernelRevisionId: "k1",
-      createdAt: 1,
-      updatedAt: 1,
-    },
-    graph,
-    activeSnapshot,
-    activeKernelRevision: {
-      id: "k1",
-      workspaceId,
-      sequence: 1,
-      parentRevisionId: null,
-      tokens: {},
-      typography: {},
-      sharedAssetRevisionIds: [],
-      brief: "",
-      terminology: {},
-      exclusions: [],
-      responsiveFrames: [],
-      qualityProfile: {
-        requiredFrameIds: [],
-        blockingSeverities: [],
-        requireRuntimeChecks: false,
-        requireVisualReview: false,
-      },
-      checksum: "kernel-checksum",
-      createdAt: 1,
-    },
-    artifacts: [],
-    tracks: [],
-    revisions: [],
-    snapshots: [activeSnapshot],
-    layout: { workspaceId, layoutId: "default", objects: [], viewport: { x: 0, y: 0, zoom: 1 }, checksum: "layout-checksum" },
-  };
-}
-
 const api = makeFakeApi({
-  listSkills: async () => [],
   listDesignSystems: async () => [],
   getProject: async (id) => ({
     id,
     name: "Standard project",
-    skillId: null,
-    designSystemId: "modern-minimal",
-    mode: "standard",
     createdAt: 1,
     updatedAt: 1,
   }),
-  getWorkspace: async (id) => readyWorkspace(id),
   getMoodboard: async (id) => ({
     id,
     name: "Lazy board",
@@ -134,23 +65,21 @@ function renderApp() {
 test("Home keeps route modules unloaded until each route is entered", async () => {
   renderApp();
   expect(screen.getByRole("heading", { name: "Start a design" })).toBeInTheDocument();
-  expect(loaded).toEqual({ studio: 0, workspace: 0, settings: 0, canvas: 0 });
+  expect(loaded).toEqual({ designCanvas: 0, settings: 0, moodboardCanvas: 0 });
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   await waitFor(() => expect(loaded.settings).toBe(1));
-  expect(loaded.studio).toBe(0);
-  expect(loaded.workspace).toBe(0);
-  expect(loaded.canvas).toBe(0);
+  expect(loaded.designCanvas).toBe(0);
+  expect(loaded.moodboardCanvas).toBe(0);
 
   cleanup();
   window.history.pushState({}, "", "/projects/p1");
   renderApp();
-  expect(await screen.findByRole("region", { name: "Project canvas" })).toBeInTheDocument();
-  expect(loaded.studio).toBe(1);
-  expect(loaded.workspace).toBe(0);
-  expect(loaded.canvas).toBe(0);
+  expect(await screen.findByRole("main", { name: "Design canvas" })).toBeInTheDocument();
+  expect(loaded.designCanvas).toBe(1);
+  expect(loaded.moodboardCanvas).toBe(0);
 
   cleanup();
   window.history.pushState({}, "", "/moodboards/b1");
   renderApp();
-  await waitFor(() => expect(loaded.canvas).toBe(1));
+  await waitFor(() => expect(loaded.moodboardCanvas).toBe(1));
 });
