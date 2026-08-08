@@ -15,10 +15,12 @@ import {
   type ReactFlowInstance,
   type Viewport,
 } from "@xyflow/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowLeft,
   Bot,
   Code2,
+  FileUp,
   Hand,
   LayoutGrid,
   LoaderCircle,
@@ -26,10 +28,10 @@ import {
   Minus,
   MousePointer2,
   Plus,
-  Redo2,
   RotateCcw,
+  Settings2,
   Sparkles,
-  Undo2,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -39,17 +41,37 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 
-import { Button } from "../components/ui/Button.tsx";
+import {
+  Button,
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/index.ts";
 import { StudioToolbarHeader } from "../components/ui/StudioHeader.tsx";
 import type { AgentInfo } from "../lib/api.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { arrangeDesignNodes } from "./auto-layout.ts";
-import type { DesignCanvasApi } from "./api.ts";
+import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import { DesignCanvasNode, type DesignFlowNode } from "./DesignCanvasNode.tsx";
-import { CanvasAgentPanel, useFloatingNodePanel } from "./FloatingNodeAgent.tsx";
+import {
+  CanvasAgentPanel,
+  useFloatingNodePanel,
+  type CanvasAgentSelection,
+} from "./FloatingNodeAgent.tsx";
 import { NodeCatalogMenu } from "./NodeCatalogMenu.tsx";
 import { QuickStart } from "./QuickStart.tsx";
 import type { DesignExportResult, DesignJobStatus, DesignNode, DesignNodeKind, DesignNodeVersion } from "./types.ts";
@@ -57,19 +79,19 @@ import { useDesignCanvasController } from "./useDesignCanvasController.ts";
 
 const NODE_TYPES = { design: DesignCanvasNode } as const;
 const EMPTY_EDGES: Edge[] = [];
-const SELECT_PAN_BUTTONS = [1, 2];
+const SELECT_PAN_BUTTONS = [1];
 const MULTI_SELECTION_KEYS = ["Meta", "Control", "Shift"];
 const PRO_OPTIONS = { hideAttribution: true } as const;
+const CANVAS_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 function isLiveJobStatus(status: DesignJobStatus): boolean {
   return status === "queued" || status === "running" || status === "validating";
 }
 
 interface ContextMenuState {
-  clientX: number;
-  clientY: number;
   canvasX: number;
   canvasY: number;
+  targetNode: DesignNode | null;
 }
 
 export interface DesignCanvasScreenProps {
@@ -81,6 +103,8 @@ export interface DesignCanvasScreenProps {
   initialModel?: string;
   onRescanAgents?: () => Promise<void>;
   onBackHome?: () => void;
+  onRenameProject?: (name: string) => Promise<void>;
+  onOpenSettings?: () => void;
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onExportReady?: (result: DesignExportResult) => void;
@@ -95,22 +119,29 @@ export function DesignCanvasScreen({
   initialModel,
   onRescanAgents,
   onBackHome,
+  onRenameProject,
+  onOpenSettings,
   projectPath,
   onRevealExport,
   onExportReady,
 }: DesignCanvasScreenProps) {
+  const reduceMotion = useReducedMotion();
   const controller = useDesignCanvasController({ projectId, api, onExportReady });
   const { canvas } = controller;
   const surfaceRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const revisionInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingRevisionNodeIdRef = useRef<string | null>(null);
+  const pendingContextTargetRef = useRef<string | null>(null);
   const nodePanelRef = useRef<HTMLElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<DesignFlowNode> | null>(null);
   const flowNodesRef = useRef<DesignFlowNode[]>([]);
   const draggingNodeIdsRef = useRef(new Set<string>());
+  const pendingNodeGeometriesRef = useRef(new Map<string, DesignNode["geometry"]>());
   const viewportSaveTimerRef = useRef<number | null>(null);
   const localViewportTargetRef = useRef<Viewport | null>(null);
-  const viewportSyncTargetRef = useRef<Viewport | null>(null);
   const authoritativeViewportRef = useRef<Viewport | null>(null);
+  const mountedViewportProjectRef = useRef<string | null>(null);
   const layoutFrameRef = useRef<number | null>(null);
   const pendingImportPositionRef = useRef({ x: 120, y: 120 });
   const selectionGuardRef = useRef<string | null>(null);
@@ -118,6 +149,15 @@ export function DesignCanvasScreen({
   const [flowNodes, setFlowNodes] = useState<DesignFlowNode[]>([]);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [mainAgentOpen, setMainAgentOpen] = useState(false);
+  const [mainAgentSelection, setMainAgentSelection] = useState<CanvasAgentSelection>(() => ({
+    agentCommand: isDesignAgentCommand(initialAgentCommand) ? initialAgentCommand : "",
+    model: isDesignAgentCommand(initialAgentCommand) ? initialModel ?? "" : "",
+  }));
+  const mainAgentSelectionTouchedRef = useRef(false);
+  const updateMainAgentSelection = useCallback((selection: CanvasAgentSelection) => {
+    mainAgentSelectionTouchedRef.current = true;
+    setMainAgentSelection(selection);
+  }, []);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [tool, setTool] = useState<"select" | "hand">("select");
@@ -125,6 +165,34 @@ export function DesignCanvasScreen({
   const [layoutNonce, setLayoutNonce] = useState(0);
   const [versions, setVersions] = useState<DesignNodeVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const availableDesignAgents = useMemo(
+    () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
+    [agents],
+  );
+  const canvasAvailable = controller.loadState === "ready" && canvas !== null;
+
+  useEffect(() => {
+    setMainAgentSelection((current) => {
+      const settingsAgent = isDesignAgentCommand(initialAgentCommand)
+        ? availableDesignAgents.find((agent) => agent.command === initialAgentCommand) ?? null
+        : null;
+      if (!mainAgentSelectionTouchedRef.current && settingsAgent) {
+        const settingsModel = initialModel && settingsAgent.models.includes(initialModel) ? initialModel : "";
+        if (current.agentCommand === settingsAgent.command && current.model === settingsModel) return current;
+        return { agentCommand: settingsAgent.command, model: settingsModel };
+      }
+      const active = availableDesignAgents.find((agent) => agent.command === current.agentCommand) ?? null;
+      if (active && (!current.model || active.models.includes(current.model))) return current;
+      const preferred = settingsAgent ?? availableDesignAgents[0] ?? null;
+      if (!preferred) return current.agentCommand || current.model ? { agentCommand: "", model: "" } : current;
+      const preferredModel = preferred.command === initialAgentCommand
+        && initialModel
+        && preferred.models.includes(initialModel)
+        ? initialModel
+        : "";
+      return { agentCommand: preferred.command, model: preferredModel };
+    });
+  }, [availableDesignAgents, initialAgentCommand, initialModel]);
 
   const selectedNode = useMemo(() => (
     canvas?.nodes.find((node) => node.id === selectedNodeIds[0]) ?? null
@@ -147,7 +215,7 @@ export function DesignCanvasScreen({
     }).catch(() => undefined);
   }, [controller.applyIntents]);
 
-  const openNodeAgent = useCallback((nodeId: string) => {
+  const openNodeAgent = useCallback((nodeId: string, focusComposer = false) => {
     if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
     selectionGuardRef.current = nodeId;
     selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
@@ -158,15 +226,48 @@ export function DesignCanvasScreen({
     });
     setSelectedNodeIds([nodeId]);
     replaceFlowNodes((current) => current.map((node) => ({ ...node, selected: node.id === nodeId })));
+    if (focusComposer) {
+      window.requestAnimationFrame(() => {
+        const selector = `[data-agent-scope="node:${nodeId}"] textarea`;
+        surfaceRef.current?.querySelector<HTMLTextAreaElement>(selector)?.focus();
+      });
+    }
   }, [replaceFlowNodes]);
 
+  const persistNodeGeometries = useCallback((updates: ReadonlyArray<{
+    nodeId: string;
+    geometry: DesignNode["geometry"];
+  }>) => {
+    if (updates.length === 0) return;
+    for (const update of updates) {
+      pendingNodeGeometriesRef.current.set(update.nodeId, { ...update.geometry });
+    }
+    void controller.applyIntents(updates.map((update) => ({
+      type: "update-node" as const,
+      nodeId: update.nodeId,
+      patch: { geometry: update.geometry },
+    }))).then((next) => {
+      for (const update of updates) {
+        const pending = pendingNodeGeometriesRef.current.get(update.nodeId);
+        const canonical = next.nodes.find((node) => node.id === update.nodeId)?.geometry;
+        if (pending && canonical && sameGeometry(pending, update.geometry) && sameGeometry(canonical, update.geometry)) {
+          pendingNodeGeometriesRef.current.delete(update.nodeId);
+        }
+      }
+    }).catch(() => {
+      for (const update of updates) {
+        const pending = pendingNodeGeometriesRef.current.get(update.nodeId);
+        if (pending && sameGeometry(pending, update.geometry)) {
+          pendingNodeGeometriesRef.current.delete(update.nodeId);
+        }
+      }
+      void controller.refresh();
+    });
+  }, [controller.applyIntents, controller.refresh]);
+
   const persistNodeResize = useCallback((nodeId: string, geometry: DesignNode["geometry"]) => {
-    void controller.applyIntents([{
-      type: "update-node",
-      nodeId,
-      patch: { geometry },
-    }]).catch(() => undefined);
-  }, [controller.applyIntents]);
+    persistNodeGeometries([{ nodeId, geometry }]);
+  }, [persistNodeGeometries]);
 
   useEffect(() => {
     if (!selectedNode) {
@@ -193,58 +294,102 @@ export function DesignCanvasScreen({
     });
   }, []);
 
-  const syncMountedViewport = useCallback((instance: ReactFlowInstance<DesignFlowNode>, target: Viewport) => {
+  const applyInitialViewport = useCallback((instance: ReactFlowInstance<DesignFlowNode>, target: Viewport) => {
+    mountedViewportProjectRef.current = projectId;
     const mounted = instance.getViewport();
     if (sameViewport(mounted, target)) {
-      if (sameViewport(viewportSyncTargetRef.current, target)) viewportSyncTargetRef.current = null;
       setZoom(mounted.zoom);
       return;
     }
-    if (sameViewport(viewportSyncTargetRef.current, target)) return;
-    const syncTarget = { ...target };
-    viewportSyncTargetRef.current = syncTarget;
-    void instance.setViewport(syncTarget, { duration: 0 }).then(() => {
-      if (flowRef.current !== instance) return;
-      const actual = instance.getViewport();
-      setZoom(actual.zoom);
-      if (sameViewport(viewportSyncTargetRef.current, syncTarget)) viewportSyncTargetRef.current = null;
-      bumpLayout();
-    }).catch(() => {
+    void instance.setViewport({ ...target }, { duration: 0 }).then(() => {
       if (flowRef.current !== instance) return;
       setZoom(instance.getZoom());
-      if (sameViewport(viewportSyncTargetRef.current, syncTarget)) viewportSyncTargetRef.current = null;
+      bumpLayout();
+    }).catch(() => {
+      if (flowRef.current === instance) setZoom(instance.getZoom());
     });
-  }, [bumpLayout]);
+  }, [bumpLayout, projectId]);
 
   useEffect(() => {
     if (!canvas) return;
     authoritativeViewportRef.current = canvas.viewport;
-    const selected = new Set(selectedNodeIds.filter((id) => canvas.nodes.some((node) => node.id === id)));
+    const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
+    const selected = new Set(selectedNodeIds.filter((id) => canvasNodeIds.has(id)));
     if (selected.size !== selectedNodeIds.length) setSelectedNodeIds([...selected]);
-    const nextFlowNodes = canvasToFlowNodes(canvas.nodes, projectId, api, openNodeAgent, removeNode, persistNodeResize, selected);
-    flowNodesRef.current = nextFlowNodes;
-    setFlowNodes(nextFlowNodes);
     for (const nodeId of draggingNodeIdsRef.current) {
-      if (!canvas.nodes.some((node) => node.id === nodeId)) draggingNodeIdsRef.current.delete(nodeId);
+      if (!canvasNodeIds.has(nodeId)) draggingNodeIdsRef.current.delete(nodeId);
+    }
+    for (const [nodeId, pending] of pendingNodeGeometriesRef.current) {
+      const canonical = canvas.nodes.find((node) => node.id === nodeId)?.geometry;
+      if (!canonical || sameGeometry(canonical, pending)) pendingNodeGeometriesRef.current.delete(nodeId);
+    }
+
+    const currentById = new Map(flowNodesRef.current.map((node) => [node.id, node]));
+    const canonicalFlowNodes = canvasToFlowNodes(
+      canvas.nodes,
+      projectId,
+      api,
+      persistNodeResize,
+      selected,
+    );
+    const nextFlowNodes = canonicalFlowNodes.map((canonicalNode) => {
+      const existing = currentById.get(canonicalNode.id);
+      const authoritativeNode = canonicalNode.data.node;
+      const pending = pendingNodeGeometriesRef.current.get(canonicalNode.id);
+      const localGeometry = existing && draggingNodeIdsRef.current.has(canonicalNode.id)
+        ? flowNodeGeometry(existing, authoritativeNode.geometry)
+        : pending ?? authoritativeNode.geometry;
+      const displayedNode = sameGeometry(localGeometry, authoritativeNode.geometry)
+        ? authoritativeNode
+        : { ...authoritativeNode, geometry: { ...localGeometry } };
+      if (existing
+        && existing.selected === canonicalNode.selected
+        && existing.position.x === localGeometry.x
+        && existing.position.y === localGeometry.y
+        && (existing.width ?? authoritativeNode.geometry.width) === localGeometry.width
+        && (existing.height ?? authoritativeNode.geometry.height) === localGeometry.height
+        && sameDesignNode(existing.data.node, displayedNode)
+        && existing.data.api === api
+        && existing.data.onResize === persistNodeResize) {
+        return existing;
+      }
+      return {
+        ...existing,
+        ...canonicalNode,
+        position: { x: localGeometry.x, y: localGeometry.y },
+        width: localGeometry.width,
+        height: localGeometry.height,
+        data: { ...canonicalNode.data, node: displayedNode },
+      };
+    });
+    if (nextFlowNodes.length !== flowNodesRef.current.length
+      || nextFlowNodes.some((node, index) => node !== flowNodesRef.current[index])) {
+      flowNodesRef.current = nextFlowNodes;
+      setFlowNodes(nextFlowNodes);
     }
 
     const instance = flowRef.current;
-    if (instance) syncMountedViewport(instance, canvas.viewport);
-    else setZoom(canvas.viewport.zoom);
-  }, [api, canvas, openNodeAgent, persistNodeResize, projectId, removeNode, selectedNodeIds.length, syncMountedViewport]);
+    if (instance && mountedViewportProjectRef.current !== projectId) {
+      applyInitialViewport(instance, canvas.viewport);
+    } else if (!instance && mountedViewportProjectRef.current !== projectId) {
+      setZoom(canvas.viewport.zoom);
+    }
+  }, [api, applyInitialViewport, canvas, persistNodeResize, projectId, selectedNodeIds]);
 
   const onFlowInit = useCallback((instance: ReactFlowInstance<DesignFlowNode>) => {
     flowRef.current = instance;
     const target = authoritativeViewportRef.current;
-    if (target) syncMountedViewport(instance, target);
+    if (target) applyInitialViewport(instance, target);
     else setZoom(instance.getZoom());
     bumpLayout();
-  }, [bumpLayout, syncMountedViewport]);
+  }, [applyInitialViewport, bumpLayout]);
 
   useEffect(() => () => {
     if (layoutFrameRef.current !== null) window.cancelAnimationFrame(layoutFrameRef.current);
     if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
     if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
+    pendingNodeGeometriesRef.current.clear();
+    mountedViewportProjectRef.current = null;
     flowRef.current = null;
   }, []);
 
@@ -266,7 +411,6 @@ export function DesignCanvasScreen({
 
   const addNode = useCallback(async (kind: DesignNodeKind, position = canvasCenter()) => {
     setAddMenuOpen(false);
-    setContextMenu(null);
     if (isMaterialNodeKind(kind)) {
       pendingImportPositionRef.current = position;
       if (fileInputRef.current) {
@@ -303,6 +447,14 @@ export function DesignCanvasScreen({
     }
   }, [controller.importLocalFiles]);
 
+  const requestMaterialRevision = useCallback((node: DesignNode) => {
+    pendingRevisionNodeIdRef.current = node.id;
+    if (revisionInputRef.current) {
+      revisionInputRef.current.accept = catalogItem(node.kind).accepts ?? "*/*";
+      revisionInputRef.current.click();
+    }
+  }, []);
+
   const onSelectionChange = useCallback(({ nodes }: { nodes: DesignFlowNode[] }) => {
     const next = nodes.map((node) => node.id);
     const guardedNodeId = selectionGuardRef.current;
@@ -326,21 +478,16 @@ export function DesignCanvasScreen({
   const persistNodePositions = useCallback((nodeIds: readonly string[], nextFlowNodes: readonly DesignFlowNode[]) => {
     const authoritativeById = new Map((canvas?.nodes ?? []).map((node) => [node.id, node]));
     const flowById = new Map(nextFlowNodes.map((node) => [node.id, node]));
-    const intents = [...new Set(nodeIds)].flatMap((nodeId) => {
+    const updates = [...new Set(nodeIds)].flatMap((nodeId) => {
       const authoritative = authoritativeById.get(nodeId);
       const flowNode = flowById.get(nodeId);
       if (!authoritative || !flowNode) return [];
-      const geometry = {
-        x: flowNode.position.x,
-        y: flowNode.position.y,
-        width: flowNode.measured?.width ?? authoritative.geometry.width,
-        height: flowNode.measured?.height ?? authoritative.geometry.height,
-      };
+      const geometry = flowNodeGeometry(flowNode, authoritative.geometry);
       if (sameGeometry(geometry, authoritative.geometry)) return [];
-      return [{ type: "update-node" as const, nodeId, patch: { geometry } }];
+      return [{ nodeId, geometry }];
     });
-    if (intents.length > 0) void controller.applyIntents(intents).catch(() => undefined);
-  }, [canvas?.nodes, controller.applyIntents]);
+    persistNodeGeometries(updates);
+  }, [canvas?.nodes, persistNodeGeometries]);
 
   const onNodesChange = useCallback((changes: NodeChange<DesignFlowNode>[]) => {
     const next = replaceFlowNodes((current) => applyNodeChanges(changes, current));
@@ -382,7 +529,7 @@ export function DesignCanvasScreen({
       }).finally(() => {
         if (sameViewport(localViewportTargetRef.current, intendedViewport)) localViewportTargetRef.current = null;
       });
-    }, 180);
+    }, 500);
   }, [controller.applyIntents, controller.refresh]);
 
   const onMove = useCallback<OnMove>((_event, viewport) => {
@@ -392,7 +539,6 @@ export function DesignCanvasScreen({
 
   const onMoveEnd = useCallback<OnMoveEnd>((_event, viewport) => {
     setZoom(viewport.zoom);
-    if (sameViewport(viewportSyncTargetRef.current, viewport)) return;
     persistViewport(viewport);
   }, [persistViewport]);
 
@@ -415,27 +561,54 @@ export function DesignCanvasScreen({
   }, [replaceFlowNodes]);
 
   const onPaneClick = useCallback(() => {
-    setContextMenu(null);
     clearSelection();
   }, [clearSelection]);
 
-  const onPaneContextMenu = useCallback((event: ReactMouseEvent | MouseEvent) => {
+  const dispatchSurfaceContextMenu = useCallback((event: ReactMouseEvent | MouseEvent, targetNodeId: string | null) => {
     event.preventDefault();
-    const position = flowRef.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? canvasCenter();
-    setContextMenu({ clientX: event.clientX, clientY: event.clientY, canvasX: position.x, canvasY: position.y });
-  }, [canvasCenter]);
+    event.stopPropagation();
+    pendingContextTargetRef.current = targetNodeId;
+    surfaceRef.current?.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      buttons: 2,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    }));
+  }, []);
+
+  const onPaneContextMenu = useCallback((event: ReactMouseEvent | MouseEvent) => {
+    dispatchSurfaceContextMenu(event, null);
+  }, [dispatchSurfaceContextMenu]);
+
+  const onNodeContextMenu = useCallback<NodeMouseHandler<DesignFlowNode>>((event, node) => {
+    openNodeAgent(node.id);
+    dispatchSurfaceContextMenu(event, node.id);
+  }, [dispatchSurfaceContextMenu, openNodeAgent]);
 
   const onSurfaceContextMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
-    if (event.defaultPrevented) return;
-    event.preventDefault();
-    const viewport = canvas?.viewport ?? { x: 0, y: 0, zoom: 1 };
-    const bounds = surfaceRef.current?.getBoundingClientRect();
-    const position = {
-      x: (event.clientX - (bounds?.left ?? 0) - viewport.x) / viewport.zoom,
-      y: (event.clientY - (bounds?.top ?? 0) - viewport.y) / viewport.zoom,
-    };
-    setContextMenu({ clientX: event.clientX, clientY: event.clientY, canvasX: position.x, canvasY: position.y });
-  }, [canvas?.viewport]);
+    if (!canvasAvailable) {
+      event.preventDefault();
+      return;
+    }
+    const domNodeId = event.target instanceof Element
+      ? event.target.closest<HTMLElement>("[data-design-node-id]")?.dataset.designNodeId ?? null
+      : null;
+    const targetNodeId = pendingContextTargetRef.current ?? domNodeId;
+    pendingContextTargetRef.current = null;
+    const position = flowRef.current?.screenToFlowPosition({
+      x: event.clientX,
+      y: event.clientY,
+    }) ?? canvasCenter();
+    setContextMenu({
+      canvasX: position.x,
+      canvasY: position.y,
+      targetNode: targetNodeId === null
+        ? null
+        : canvas?.nodes.find((node) => node.id === targetNodeId) ?? null,
+    });
+  }, [canvas?.nodes, canvasAvailable, canvasCenter]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -460,7 +633,6 @@ export function DesignCanvasScreen({
         void controller.applyIntents(ids.map((nodeId) => ({ type: "remove-node" as const, nodeId }))).then(clearSelection).catch(() => undefined);
       }
       if (event.key === "Escape") {
-        setContextMenu(null);
         setAddMenuOpen(false);
       }
     };
@@ -479,7 +651,7 @@ export function DesignCanvasScreen({
       nodesConnectable={false}
       selectionMode={SelectionMode.Partial}
       selectionOnDrag={tool === "select"}
-      panOnDrag={tool === "hand" ? true : SELECT_PAN_BUTTONS}
+      panOnDrag={tool === "hand" ? [0, 1] : SELECT_PAN_BUTTONS}
       panOnScroll
       zoomOnScroll
       zoomOnPinch
@@ -489,6 +661,7 @@ export function DesignCanvasScreen({
       onNodesChange={onNodesChange}
       onNodeDrag={bumpLayout}
       onNodeClick={onNodeClick}
+      onNodeContextMenu={onNodeContextMenu}
       onSelectionChange={onSelectionChange}
       onMove={onMove}
       onMoveEnd={onMoveEnd}
@@ -496,7 +669,7 @@ export function DesignCanvasScreen({
       onPaneContextMenu={onPaneContextMenu}
       proOptions={PRO_OPTIONS}
     >
-      <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="color-mix(in srgb, var(--foreground) 15%, transparent)" />
+      <Background variant={BackgroundVariant.Dots} gap={24} size={0.8} color="color-mix(in srgb, var(--foreground) 10%, transparent)" />
     </ReactFlow>
   ) : null, [
     bumpLayout,
@@ -506,6 +679,7 @@ export function DesignCanvasScreen({
     onMove,
     onMoveEnd,
     onNodeClick,
+    onNodeContextMenu,
     onNodesChange,
     onPaneClick,
     onPaneContextMenu,
@@ -513,7 +687,6 @@ export function DesignCanvasScreen({
     tool,
   ]);
 
-  const contextPosition = contextMenu ? clampContextMenu(contextMenu, surfaceRef.current) : null;
   const exporting = controller.jobs.some((job) => job.kind === "implementation-export" && isLiveJobStatus(job.status));
   const generativeNodes = canvas?.nodes.filter((node) => !isMaterialNodeKind(node.kind)) ?? [];
   const liveNodeJobIds = new Set(controller.jobs
@@ -521,14 +694,25 @@ export function DesignCanvasScreen({
     .map((job) => job.nodeId));
   const generatingNodes = generativeNodes.filter((node) => node.activeJobId !== null || liveNodeJobIds.has(node.id));
   const ungeneratedNodes = generativeNodes.filter((node) => (node.selectedVersionId ?? node.currentVersionId) === null);
-  const canExport = generativeNodes.length > 0 && ungeneratedNodes.length === 0 && generatingNodes.length === 0;
-  const exportTitle = generativeNodes.length === 0
+  const designReadyForExport = generativeNodes.length > 0 && ungeneratedNodes.length === 0 && generatingNodes.length === 0;
+  const executionAgent = availableDesignAgents.find((agent) => agent.command === mainAgentSelection.agentCommand) ?? null;
+  const contextMenuNode = contextMenu?.targetNode ?? null;
+  const canExport = canvasAvailable && designReadyForExport && executionAgent !== null;
+  const exportModel = executionAgent
+    && (!mainAgentSelection.model || executionAgent.models.includes(mainAgentSelection.model))
+    ? mainAgentSelection.model || null
+    : null;
+  const exportTitle = !canvasAvailable
+    ? "Canvas unavailable"
+    : generativeNodes.length === 0
     ? "Add and generate at least one design Node before exporting"
     : generatingNodes.length > 0
       ? `Wait for Node generation to finish before exporting: ${generatingNodes.map((node) => node.name).join(", ")}`
       : ungeneratedNodes.length > 0
       ? `Generate every design Node before exporting: ${ungeneratedNodes.map((node) => node.name).join(", ")}`
-      : "Reimplement selected Node versions as Vite + TypeScript";
+      : !executionAgent
+        ? "No compatible Design Agent is currently available for export"
+        : "Reimplement selected Node versions as Vite + TypeScript";
 
   return (
     <main aria-label="Design canvas" className="design-canvas-root">
@@ -543,71 +727,86 @@ export function DesignCanvasScreen({
           void importFiles(files);
         }}
       />
+      <input
+        ref={revisionInputRef}
+        type="file"
+        className="hidden"
+        aria-label="Add material Node revision"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          const nodeId = pendingRevisionNodeIdRef.current;
+          event.target.value = "";
+          pendingRevisionNodeIdRef.current = null;
+          if (file && nodeId) void controller.appendMaterialVersion(nodeId, file).catch(() => undefined);
+        }}
+      />
 
-      <StudioToolbarHeader className="design-canvas-topbar app-drag px-2.5">
-        <div className="app-no-drag flex min-w-0 items-center gap-1.5">
-          {onBackHome ? <Button variant="ghost" size="icon-xs" aria-label="Back to projects" onClick={onBackHome}><ArrowLeft aria-hidden /></Button> : null}
-          <div className="design-canvas-topbar__identity">
-            <span>Design</span><span aria-hidden>/</span><strong>{projectName}</strong>
+      <StudioToolbarHeader className="design-canvas-topbar app-drag">
+        <TooltipProvider delayDuration={120}>
+          <div className="app-no-drag design-canvas-topbar__leading">
+            {onBackHome ? (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon-sm" aria-label="Back to projects" onClick={onBackHome}><ArrowLeft aria-hidden /></Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={4}>Back to projects</TooltipContent>
+                </Tooltip>
+                <span className="design-canvas-topbar__divider" aria-hidden />
+              </>
+            ) : null}
+            <div className="design-canvas-topbar__identity">
+              <EditableProjectName name={projectName} onRename={onRenameProject} />
+              <span className="design-canvas-topbar__view"><LayoutGrid aria-hidden />Canvas</span>
+            </div>
           </div>
-        </div>
-        <div className="app-no-drag design-canvas-topbar__center">
-          <div className="design-canvas-add-control">
-            <Button
-              id="design-canvas-add"
-              variant="outline"
-              size="xs"
-              aria-label="Add Design node"
-              aria-expanded={addMenuOpen}
-              onClick={() => setAddMenuOpen((current) => !current)}
+          <div className="app-no-drag design-canvas-topbar__actions" role="toolbar" aria-label="Project actions">
+            <HeaderIconAction
+              label="Main Agent"
+              active={mainAgentOpen}
+              disabled={!canvasAvailable}
+              onClick={() => setMainAgentOpen((current) => !current)}
             >
-              <Plus aria-hidden />Add
-            </Button>
-            {addMenuOpen ? <NodeCatalogMenu className="design-node-catalog--toolbar" labelledBy="design-canvas-add" onChoose={(kind) => void addNode(kind)} /> : null}
+              <Bot aria-hidden />
+            </HeaderIconAction>
+            <HeaderIconAction
+              label="Export code"
+              tooltip={exportTitle}
+              disabled={exporting || controller.mutating || !canExport}
+              onClick={() => {
+                setMainAgentOpen(true);
+                if (executionAgent && isDesignAgentCommand(executionAgent.command)) {
+                  void controller.startExport({ agentCommand: executionAgent.command, model: exportModel }).catch(() => undefined);
+                }
+              }}
+            >
+              {exporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Code2 aria-hidden />}
+            </HeaderIconAction>
+            <HeaderIconAction label="Settings" disabled={!onOpenSettings} onClick={() => onOpenSettings?.()}>
+              <Settings2 aria-hidden />
+            </HeaderIconAction>
           </div>
-          <div className="design-canvas-topbar__separator" />
-          <Button variant="ghost" size="icon-xs" aria-label="Undo" title={historyLocked ? "Cancel active Node generation before using history" : "Undo (⌘Z)"} disabled={!canvas?.undoDepth || controller.mutating || historyLocked} onClick={() => void controller.undo().catch(() => undefined)}><Undo2 aria-hidden /></Button>
-          <Button variant="ghost" size="icon-xs" aria-label="Redo" title={historyLocked ? "Cancel active Node generation before using history" : "Redo (⇧⌘Z)"} disabled={!canvas?.redoDepth || controller.mutating || historyLocked} onClick={() => void controller.redo().catch(() => undefined)}><Redo2 aria-hidden /></Button>
-          <Button variant="ghost" size="xs" aria-label="Auto arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}><LayoutGrid aria-hidden />Arrange</Button>
-        </div>
-        <div className="app-no-drag ml-auto flex min-w-0 items-center gap-1.5">
-          <div className="design-canvas-topbar__zoom">
-            <Button variant="ghost" size="icon-xs" aria-label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: 120 })}><Minus aria-hidden /></Button>
-            <span>{Math.round(zoom * 100)}%</span>
-            <Button variant="ghost" size="icon-xs" aria-label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: 120 })}><Plus aria-hidden /></Button>
-          </div>
-          <Button variant={mainAgentOpen ? "secondary" : "outline"} size="xs" aria-label="Main Agent" aria-pressed={mainAgentOpen} onClick={() => setMainAgentOpen((current) => !current)}><Bot aria-hidden />Main Agent</Button>
-          <Button
-            size="xs"
-            aria-label="Export code"
-            title={exportTitle}
-            disabled={exporting || controller.mutating || !canExport}
-            onClick={() => {
-              setMainAgentOpen(true);
-              void controller.startExport().catch(() => undefined);
-            }}
-          >
-            {exporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Code2 aria-hidden />}Export code
-          </Button>
-        </div>
+        </TooltipProvider>
       </StudioToolbarHeader>
 
-      <section
-        ref={surfaceRef}
-        className="design-canvas-surface"
-        data-tool={tool}
-        aria-label="Infinite Design canvas"
-        onDragOver={(event) => {
-          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
-        }}
-        onContextMenu={onSurfaceContextMenu}
-        onDrop={(event) => {
-          if (!event.dataTransfer.files.length) return;
-          event.preventDefault();
-          const position = flowRef.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? canvasCenter();
-          void importFiles([...event.dataTransfer.files], position);
-        }}
-      >
+      <ContextMenu modal={false}>
+        <ContextMenuTrigger asChild disabled={!canvasAvailable}>
+          <section
+            ref={surfaceRef}
+            className="design-canvas-surface"
+            data-tool={tool}
+            aria-label="Infinite Design canvas"
+            onDragOver={(event) => {
+              if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+            }}
+            onContextMenu={onSurfaceContextMenu}
+            onDrop={(event) => {
+              if (!event.dataTransfer.files.length || !canvasAvailable) return;
+              event.preventDefault();
+              const position = flowRef.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? canvasCenter();
+              void importFiles([...event.dataTransfer.files], position);
+            }}
+          >
         {flowCanvas}
 
         {canvas && canvas.nodes.length === 0 && controller.loadState === "ready" ? (
@@ -619,19 +818,61 @@ export function DesignCanvasScreen({
           />
         ) : null}
 
-        <div className="design-canvas-tools" role="toolbar" aria-label="Canvas tools">
-          <Button variant={tool === "select" ? "secondary" : "ghost"} size="icon-xs" aria-label="Select tool" aria-pressed={tool === "select"} onClick={() => setTool("select")}><MousePointer2 aria-hidden /></Button>
-          <Button variant={tool === "hand" ? "secondary" : "ghost"} size="icon-xs" aria-label="Hand tool" aria-pressed={tool === "hand"} onClick={() => setTool("hand")}><Hand aria-hidden /></Button>
-          <span />
-          <Button variant="ghost" size="icon-xs" aria-label="Fit canvas" onClick={() => void flowRef.current?.fitView({ padding: 0.16, duration: 240 })}><LocateFixed aria-hidden /></Button>
-        </div>
+        {canvasAvailable ? (
+          <TooltipProvider delayDuration={120}>
+            <div className="design-canvas-tools" role="toolbar" aria-label="Canvas tools" onContextMenu={(event) => event.stopPropagation()}>
+              <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen} modal={false}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        id="design-canvas-add"
+                        variant="default"
+                        size="sm"
+                        aria-label="Add Design node"
+                      >
+                        <Plus aria-hidden />Add
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={5}>Add Node</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent
+                  side="top"
+                  align="start"
+                  sideOffset={9}
+                  aria-label="Add Design node"
+                  className="design-node-catalog"
+                >
+                  <NodeCatalogMenu menuType="dropdown" onChoose={(kind) => void addNode(kind)} />
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <span className="design-canvas-tools__divider" aria-hidden />
+              <CanvasToolButton label="Select tool" active={tool === "select"} onClick={() => setTool("select")}>
+                <MousePointer2 aria-hidden />
+              </CanvasToolButton>
+              <CanvasToolButton label="Hand tool" active={tool === "hand"} onClick={() => setTool("hand")}>
+                <Hand aria-hidden />
+              </CanvasToolButton>
+            </div>
 
-        {contextMenu && contextPosition ? (
-          <NodeCatalogMenu
-            className="design-node-catalog--context"
-            style={{ left: contextPosition.left, top: contextPosition.top }}
-            onChoose={(kind) => void addNode(kind, { x: contextMenu.canvasX, y: contextMenu.canvasY })}
-          />
+            <div className="design-canvas-zoom" role="toolbar" aria-label="Canvas view controls" onContextMenu={(event) => event.stopPropagation()}>
+              <CanvasToolButton compact label="Arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}>
+                <LayoutGrid aria-hidden />
+              </CanvasToolButton>
+              <CanvasToolButton compact label="Fit canvas" onClick={() => void flowRef.current?.fitView({ padding: 0.16, duration: 240 })}>
+                <LocateFixed aria-hidden />
+              </CanvasToolButton>
+              <span className="design-canvas-tools__divider" aria-hidden />
+              <CanvasToolButton compact label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: 140 })}>
+                <Minus aria-hidden />
+              </CanvasToolButton>
+              <output aria-label="Canvas zoom">{Math.round(zoom * 100)}%</output>
+              <CanvasToolButton compact label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: 140 })}>
+                <Plus aria-hidden />
+              </CanvasToolButton>
+            </div>
+          </TooltipProvider>
         ) : null}
 
         {selectedNode ? (
@@ -643,12 +884,17 @@ export function DesignCanvasScreen({
             api={api}
             scope={{ type: "node", nodeId: selectedNode.id }}
             title={`${selectedNode.name} Agent`}
-            subtitle={`${catalogItem(selectedNode.kind).label} · reads the complete canvas`}
+            subtitle=""
             nodes={canvas?.nodes ?? []}
             jobs={controller.jobs}
             versions={versions}
             selectedVersionId={selectedNode.selectedVersionId ?? selectedNode.currentVersionId}
-            assetRevision={isMaterialNodeKind(selectedNode.kind) ? shortAssetRevision(selectedNode.assetId) : null}
+            onAppendMaterialVersion={isMaterialNodeKind(selectedNode.kind)
+              ? async (file) => {
+                  await controller.appendMaterialVersion(selectedNode.id, file);
+                }
+              : undefined}
+            materialRevisionAccept={catalogItem(selectedNode.kind).accepts}
             agents={agents}
             initialAgentCommand={initialAgentCommand}
             initialModel={initialModel}
@@ -664,35 +910,45 @@ export function DesignCanvasScreen({
               left: floatingPosition.left,
               top: floatingPosition.top,
               visibility: floatingPosition.visible ? "visible" : "hidden",
-              opacity: floatingPosition.visible ? 1 : 0,
               pointerEvents: floatingPosition.visible ? "auto" : "none",
             }}
           />
         ) : null}
 
-        {mainAgentOpen ? (
-          <div className="design-canvas-main-agent">
-            <CanvasAgentPanel
-              projectId={projectId}
-              api={api}
-              scope={{ type: "main" }}
-              title="Main Agent"
-              subtitle="Coordinates the canvas and node Agents"
-              nodes={canvas?.nodes ?? []}
-              jobs={controller.jobs}
-              agents={agents}
-              initialAgentCommand={initialAgentCommand}
-              initialModel={initialModel}
-              onRescanAgents={onRescanAgents}
-              onCancelJob={controller.cancelJob}
-              onSubmit={(prompt, nodeIds, selection) => controller.submitAgentTurn({ type: "main" }, prompt, nodeIds, selection)}
-              onAttachFiles={(files) => importFiles(files, canvasCenter())}
-              projectPath={projectPath}
-              onRevealExport={onRevealExport}
-              onClose={() => setMainAgentOpen(false)}
-            />
-          </div>
-        ) : null}
+        <AnimatePresence initial={false}>
+          {mainAgentOpen ? (
+            <motion.div
+              key="main-agent"
+              className="design-canvas-main-agent"
+              initial={reduceMotion ? false : { opacity: 0, x: 12, y: 4, scale: 0.992, filter: "blur(2px)" }}
+              animate={{ opacity: 1, x: 0, y: 0, scale: 1, filter: "blur(0px)" }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 8, scale: 0.995, filter: "blur(2px)" }}
+              transition={{ duration: reduceMotion ? 0 : 0.24, ease: CANVAS_MOTION_EASE }}
+            >
+              <CanvasAgentPanel
+                projectId={projectId}
+                api={api}
+                scope={{ type: "main" }}
+                title="Main Agent"
+                subtitle=""
+                nodes={canvas?.nodes ?? []}
+                jobs={controller.jobs}
+                agents={agents}
+                initialAgentCommand={initialAgentCommand}
+                initialModel={initialModel}
+                agentSelection={mainAgentSelection}
+                onAgentSelectionChange={updateMainAgentSelection}
+                onRescanAgents={onRescanAgents}
+                onCancelJob={controller.cancelJob}
+                onSubmit={(prompt, nodeIds, selection) => controller.submitAgentTurn({ type: "main" }, prompt, nodeIds, selection)}
+                onAttachFiles={(files) => importFiles(files, canvasCenter())}
+                projectPath={projectPath}
+                onRevealExport={onRevealExport}
+                onClose={() => setMainAgentOpen(false)}
+              />
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
 
         {controller.loadState === "loading" ? (
           <div className="design-canvas-loading" role="status"><LoaderCircle aria-hidden className="animate-spin" />Loading Design canvas…</div>
@@ -709,10 +965,255 @@ export function DesignCanvasScreen({
             <Button size="icon-xs" variant="ghost" aria-label="Dismiss canvas error" onClick={controller.clearError}><X aria-hidden /></Button>
           </div>
         ) : null}
-        {controller.mutating ? <div className="design-canvas-saving" role="status"><Sparkles aria-hidden />Updating canvas</div> : null}
         {versionsLoading && selectedNode ? <span className="sr-only" role="status">Loading {selectedNode.name} versions</span> : null}
-      </section>
+          </section>
+        </ContextMenuTrigger>
+        {canvasAvailable ? contextMenuNode ? (
+          <ContextMenuContent
+            aria-label={`${catalogItem(contextMenuNode.kind).label} Node actions`}
+            className="design-node-context-menu"
+          >
+            <DesignNodeContextMenu
+              node={contextMenuNode}
+              onOpenAgent={() => openNodeAgent(contextMenuNode.id, true)}
+              onAddRevision={() => requestMaterialRevision(contextMenuNode)}
+              onFit={() => void flowRef.current?.fitView({
+                nodes: flowNodesRef.current.filter((node) => node.id === contextMenuNode.id),
+                padding: 0.24,
+                duration: 220,
+                maxZoom: 1.35,
+              })}
+              onDelete={() => removeNode(contextMenuNode.id)}
+            />
+          </ContextMenuContent>
+        ) : (
+          <ContextMenuContent aria-label="Add Design node" className="design-node-catalog design-node-catalog--context">
+            <NodeCatalogMenu
+              menuType="context"
+              onChoose={(kind) => void addNode(
+                kind,
+                contextMenu
+                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
+                  : canvasCenter(),
+              )}
+            />
+          </ContextMenuContent>
+        ) : null}
+      </ContextMenu>
     </main>
+  );
+}
+
+function DesignNodeContextMenu({
+  node,
+  onOpenAgent,
+  onAddRevision,
+  onFit,
+  onDelete,
+}: {
+  node: DesignNode;
+  onOpenAgent: () => void;
+  onAddRevision: () => void;
+  onFit: () => void;
+  onDelete: () => void;
+}) {
+  const item = catalogItem(node.kind);
+  const material = isMaterialNodeKind(node.kind);
+  return (
+    <>
+      <ContextMenuLabel className="design-node-context-menu__label">
+        <span>{node.name}</span>
+        <small>{item.label}{node.versionCount > 0 ? ` · v${node.versionCount}` : ""}</small>
+      </ContextMenuLabel>
+      <ContextMenuSeparator />
+      <ContextMenuItem onSelect={onOpenAgent}>
+        <Sparkles aria-hidden />
+        {material
+          ? `Inspect ${item.label.toLocaleLowerCase()} with Agent`
+          : node.versionCount > 0
+            ? `Create new ${item.label.toLocaleLowerCase()} version`
+            : `Create ${item.label.toLocaleLowerCase()} with Agent`}
+      </ContextMenuItem>
+      {material ? (
+        <ContextMenuItem onSelect={onAddRevision}>
+          <FileUp aria-hidden />
+          Add {item.label.toLocaleLowerCase()} revision…
+        </ContextMenuItem>
+      ) : null}
+      <ContextMenuItem onSelect={onFit}>
+        <LocateFixed aria-hidden />
+        Fit this Node
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem className="design-node-context-menu__danger" onSelect={onDelete}>
+        <Trash2 aria-hidden />
+        Delete {item.label.toLocaleLowerCase()}
+      </ContextMenuItem>
+    </>
+  );
+}
+
+function EditableProjectName({
+  name,
+  onRename,
+}: {
+  name: string;
+  onRename?: (name: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(name);
+  const [displayName, setDisplayName] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    setDisplayName(name);
+    setValue(name);
+  }, [name]);
+
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+
+  const commit = useCallback(async () => {
+    if (cancelledRef.current) {
+      cancelledRef.current = false;
+      return;
+    }
+    const nextName = value.trim();
+    if (!nextName || nextName === displayName || !onRename) {
+      setValue(displayName);
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onRename(nextName);
+      setDisplayName(nextName);
+      setValue(nextName);
+    } catch {
+      setValue(displayName);
+    } finally {
+      setSaving(false);
+      setEditing(false);
+    }
+  }, [displayName, onRename, value]);
+
+  return (
+    <h1 className="design-canvas-topbar__project-name" title={displayName} data-editing={editing || undefined}>
+      {editing ? (
+        <input
+          ref={inputRef}
+          aria-label="Project name"
+          value={value}
+          maxLength={160}
+          disabled={saving}
+          onChange={(event) => setValue(event.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelledRef.current = true;
+              setValue(displayName);
+              setEditing(false);
+            }
+          }}
+        />
+      ) : onRename ? (
+        <button
+          type="button"
+          aria-label={`Rename project: ${displayName}`}
+          title="Rename project"
+          onClick={() => {
+            cancelledRef.current = false;
+            setValue(displayName);
+            setEditing(true);
+          }}
+        >
+          {displayName}
+        </button>
+      ) : displayName}
+    </h1>
+  );
+}
+
+function HeaderIconAction({
+  label,
+  tooltip = label,
+  active,
+  disabled = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  tooltip?: string;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="design-canvas-topbar__action-trigger" tabIndex={disabled ? 0 : undefined}>
+          <Button
+            type="button"
+            variant={active ? "secondary" : "ghost"}
+            size="icon-sm"
+            className="design-canvas-topbar__icon-action"
+            aria-label={label}
+            aria-pressed={active === undefined ? undefined : active}
+            title={tooltip}
+            disabled={disabled}
+            onClick={onClick}
+          >
+            {children}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" sideOffset={5}>{tooltip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function CanvasToolButton({
+  label,
+  active,
+  compact = false,
+  disabled = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  active?: boolean;
+  compact?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant={active ? "secondary" : "ghost"}
+          size={compact ? "icon-xs" : "icon-sm"}
+          aria-label={label}
+          aria-pressed={active === undefined ? undefined : active}
+          disabled={disabled}
+          onClick={onClick}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={5}>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -720,8 +1221,6 @@ function canvasToFlowNodes(
   nodes: readonly DesignNode[],
   projectId: string,
   api: DesignCanvasApi,
-  onGenerate: (nodeId: string) => void,
-  onDelete: (nodeId: string) => void,
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void,
   selectedIds: ReadonlySet<string>,
 ): DesignFlowNode[] {
@@ -732,19 +1231,8 @@ function canvasToFlowNodes(
     width: node.geometry.width,
     height: node.geometry.height,
     selected: selectedIds.has(node.id),
-    data: { node, projectId, api, onGenerate, onDelete, onResize },
+    data: { node, projectId, api, onResize },
   }));
-}
-
-function clampContextMenu(menu: ContextMenuState, host: HTMLElement | null): { left: number; top: number } | null {
-  if (!host) return null;
-  const rect = host.getBoundingClientRect();
-  const width = Math.min(420, Math.max(280, rect.width - 16));
-  const height = Math.min(480, Math.max(260, rect.height - 16));
-  return {
-    left: Math.max(8, Math.min(menu.clientX - rect.left, rect.width - width - 8)),
-    top: Math.max(8, Math.min(menu.clientY - rect.top, rect.height - height - 8)),
-  };
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -752,13 +1240,37 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target.isContentEditable || target.matches("input, textarea, select, [role='textbox']") || target.closest("iframe") !== null;
 }
 
-function shortAssetRevision(assetId: string | null): string {
-  if (!assetId) return "unavailable";
-  return assetId.length > 18 ? `${assetId.slice(0, 18)}…` : assetId;
-}
-
 function createDesignNodeId(kind: DesignNodeKind): string {
   return `${kind}-${globalThis.crypto.randomUUID()}`;
+}
+
+function flowNodeGeometry(
+  node: DesignFlowNode,
+  fallback: DesignNode["geometry"],
+): DesignNode["geometry"] {
+  return {
+    x: node.position.x,
+    y: node.position.y,
+    width: node.measured?.width ?? node.width ?? fallback.width,
+    height: node.measured?.height ?? node.height ?? fallback.height,
+  };
+}
+
+function sameDesignNode(left: DesignNode, right: DesignNode): boolean {
+  return left.id === right.id
+    && left.kind === right.kind
+    && left.name === right.name
+    && sameGeometry(left.geometry, right.geometry)
+    && left.state === right.state
+    && left.currentVersionId === right.currentVersionId
+    && left.selectedVersionId === right.selectedVersionId
+    && (left.lastReadyVersionId ?? null) === (right.lastReadyVersionId ?? null)
+    && left.versionCount === right.versionCount
+    && left.assetId === right.assetId
+    && left.activeJobId === right.activeJobId
+    && left.error === right.error
+    && left.createdAt === right.createdAt
+    && left.updatedAt === right.updatedAt;
 }
 
 function sameViewport(left: Viewport | null, right: Viewport | null): boolean {

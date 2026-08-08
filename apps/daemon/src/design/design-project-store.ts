@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { DesignStorageError, initializeDesignProject } from "./design-storage.ts";
+import { DESIGN_SCHEMA_VERSION } from "./design-types.ts";
 
 const DESIGN_PROJECT_METADATA_SCHEMA_VERSION = 1;
 const SAFE_PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -151,13 +152,17 @@ async function readMetadata(dataDir: string, projectId: string): Promise<DesignP
   }
 }
 
-async function readCanvasActivityTimestamp(dataDir: string, projectId: string): Promise<number> {
+async function readCanvasActivityTimestamp(dataDir: string, projectId: string): Promise<number | null> {
   try {
     const value = JSON.parse(await readFile(canvasPath(dataDir, projectId), "utf8")) as unknown;
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       throw new DesignStorageError("corrupt", "Design Canvas manifest must be an object");
     }
     const record = value as Record<string, unknown>;
+    // This rebuild intentionally has no migration path. An older Canvas root is
+    // not a current Project and must not make startup recovery unavailable for
+    // every newly-created Project.
+    if (record.schemaVersion !== DESIGN_SCHEMA_VERSION) return null;
     if (record.projectId !== projectId || !Number.isSafeInteger(record.updatedAt) || (record.updatedAt as number) < 0) {
       throw new DesignStorageError("corrupt", "Design Canvas activity timestamp is invalid");
     }
@@ -224,7 +229,7 @@ export async function getDesignProject(dataDir: string, projectId: string): Prom
     readMetadata(dataDir, projectId),
     readCanvasActivityTimestamp(dataDir, projectId),
   ]);
-  if (!metadata) return null;
+  if (!metadata || canvasUpdatedAt === null) return null;
   return { ...metadata, updatedAt: Math.max(metadata.updatedAt, canvasUpdatedAt) };
 }
 
@@ -256,9 +261,10 @@ export async function listInitializedDesignProjectIds(dataDir: string): Promise<
   const candidates = entries.filter((entry) => entry.isDirectory() && SAFE_PROJECT_ID.test(entry.name));
   const initialized = await Promise.all(candidates.map(async (entry) => ({
     id: entry.name,
-    exists: await regularFile(canvasPath(dataDir, entry.name)),
+    current: await regularFile(canvasPath(dataDir, entry.name))
+      && await readCanvasActivityTimestamp(dataDir, entry.name) !== null,
   })));
-  return initialized.filter((entry) => entry.exists).map((entry) => entry.id).sort();
+  return initialized.filter((entry) => entry.current).map((entry) => entry.id).sort();
 }
 
 export async function updateDesignProject(
@@ -274,6 +280,7 @@ export async function updateDesignProject(
     const current = await readMetadata(dataDir, projectId);
     if (!current) throw new DesignStorageError("not-found", "Design Project not found");
     const canvasUpdatedAt = await readCanvasActivityTimestamp(dataDir, projectId);
+    if (canvasUpdatedAt === null) throw new DesignStorageError("not-found", "Design Project not found");
     const updatedAt = Math.max(timestamp(now, "updatedAt"), current.updatedAt, canvasUpdatedAt);
     const next: DesignProjectMetadata = {
       ...current,

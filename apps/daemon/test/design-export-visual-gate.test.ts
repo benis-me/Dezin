@@ -13,6 +13,7 @@ import {
   runDesignExportVisualGate,
   type DesignExportVisualCaptureSession,
 } from "../src/design/design-export-visual-gate.ts";
+import { DESIGN_EXPORT_CONTENT_SECURITY_POLICY } from "../src/design/design-export-policy.ts";
 import type { DesignFrozenContext } from "../src/design/design-types.ts";
 
 function solidPng(width: number, height: number, color: string): Buffer {
@@ -61,7 +62,7 @@ function smallControlPng(includeControl: boolean): Buffer {
 
 function visualContext(): DesignFrozenContext {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: "project-visual",
     canvasRevision: 7,
     targetNodeId: null,
@@ -74,9 +75,13 @@ function visualContext(): DesignFrozenContext {
       state: "ready",
       geometry: { x: 0, y: 0, width: 1280, height: 800 },
       selectedVersionId: "version-one",
+      selectedVersionContentKind: "html",
       selectedVersionChecksum: "b".repeat(64),
       selectedVersionBytes: 128,
       selectedVersionPath: "nodes/node-page/versions/version-one/index.html",
+      selectedVersionJobId: "job-source",
+      selectedVersionRunnerId: "codebuddy",
+      selectedVersionModel: "hy3-ioa",
       selectedVersionAssetPins: [],
       assetId: null,
       assetChecksum: null,
@@ -86,6 +91,34 @@ function visualContext(): DesignFrozenContext {
     }],
   };
 }
+
+function visualProvenance() {
+  return {
+    execution: { jobId: "job-export", providerId: "codebuddy", model: "hy3-ioa" },
+    sources: [{
+      nodeId: "node-page",
+      nodeKind: "page" as const,
+      versionId: "version-one",
+      checksum: "b".repeat(64),
+      sourceJobId: "job-source",
+      sourceProviderId: "codebuddy",
+      sourceModel: "hy3-ioa",
+    }],
+  };
+}
+
+test("Design Export runtime CSP forbids every network connection", () => {
+  const directives = new Map(DESIGN_EXPORT_CONTENT_SECURITY_POLICY
+    .split("; ")
+    .map((directive) => {
+      const [name, ...values] = directive.split(" ");
+      return [name, values.join(" ")] as const;
+    }));
+
+  assert.equal(directives.get("connect-src"), "'none'");
+  assert.equal(directives.get("script-src"), "'self'");
+  assert.equal(directives.get("style-src"), "'self'");
+});
 
 test("Design Export visual comparison accepts byte-distinct PNGs with identical pixels", async () => {
   const source = solidPng(96, 64, "#f6f1e8");
@@ -142,7 +175,7 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
     outputOrigin: "http://127.0.0.1:45678",
     async capture(input) {
       assert.match(input.sourceUrl, /version-one\/preview\/$/);
-      assert.match(input.outputUrl, /\?dezin-node=node-page$/);
+      assert.match(input.outputUrl, input.outputUrl.endsWith("/") ? /\/$/ : /\?dezin-node=node-page$/);
       return {
         sourcePng: screenshot,
         outputPng: screenshot,
@@ -158,6 +191,7 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
     const result = await runDesignExportVisualGate({
       stagingDir,
       exportId: "export-visual",
+      ...visualProvenance(),
       sourcePreviewOrigin: "http://127.0.0.1:34567",
       context,
       signal: new AbortController().signal,
@@ -168,14 +202,56 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
 
     assert.equal(closed, true);
     assert.equal(result.visualValidation.passed, true);
-    assert.equal(result.visualValidation.caseCount, 2);
+    assert.equal(result.visualValidation.caseCount, 4);
     const receiptBytes = await readFile(join(stagingDir, result.visualValidation.receiptPath));
     assert.equal(result.visualValidation.receiptChecksum.length, 64);
     assert.equal(result.visualValidation.receiptChecksum, result.receiptChecksum);
     const receipt = JSON.parse(receiptBytes.toString("utf8"));
+    assert.equal(receipt.jobId, "job-export");
+    assert.equal(receipt.providerId, "codebuddy");
+    assert.equal(receipt.model, "hy3-ioa");
+    assert.deepEqual(receipt.rootChecks.map((entry: { viewport: { name: string } }) => entry.viewport.name), ["desktop", "mobile"]);
+    assert.equal(receipt.rootChecks.every((entry: { passed: boolean }) => entry.passed), true);
+    assert.equal(receipt.rootChecks.every((entry: { nodeId: string }) => entry.nodeId === "node-page"), true);
+    assert.equal(receipt.rootChecks.every((entry: { versionId: string }) => entry.versionId === "version-one"), true);
+    assert.equal(receipt.rootChecks.every((entry: { sourceJobId: string }) => entry.sourceJobId === "job-source"), true);
+    assert.equal(receipt.rootChecks.every((entry: { metrics: { meanSsim: number } }) => entry.metrics.meanSsim === 1), true);
+    for (const rootCheck of receipt.rootChecks as Array<{ evidence: Record<string, { path: string; checksum: string; bytes: number }> }>) {
+      assert.deepEqual(Object.keys(rootCheck.evidence), ["source", "output", "diff"]);
+      for (const evidence of Object.values(rootCheck.evidence)) {
+        const bytes = await readFile(join(stagingDir, evidence.path));
+        assert.equal(bytes.length, evidence.bytes);
+        assert.equal(sha256(bytes), evidence.checksum);
+      }
+    }
     assert.deepEqual(receipt.cases.map((entry: { viewport: { name: string } }) => entry.viewport.name), ["desktop", "mobile"]);
     assert.equal(receipt.cases.every((entry: { passed: boolean }) => entry.passed), true);
+    assert.equal(receipt.cases.every((entry: { sourceJobId: string }) => entry.sourceJobId === "job-source"), true);
+    assert.equal(receipt.cases.every((entry: { sourceProviderId: string }) => entry.sourceProviderId === "codebuddy"), true);
+    assert.equal(receipt.cases.every((entry: { sourceModel: string }) => entry.sourceModel === "hy3-ioa"), true);
     assert.equal(receipt.createdAt, 123_456);
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects source provenance outside the frozen context", async () => {
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-provenance-"));
+  try {
+    await mkdir(join(stagingDir, "dist"));
+    const provenance = visualProvenance();
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-forged-provenance",
+        ...provenance,
+        sources: provenance.sources.map((source) => ({ ...source, sourceModel: "forged-model" })),
+        sourcePreviewOrigin: "http://127.0.0.1:34567",
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /source Version provenance is invalid/i,
+    );
   } finally {
     await rm(stagingDir, { recursive: true, force: true });
   }
@@ -191,6 +267,7 @@ test("Design Export visual gate rejects a missing route marker and removes parti
       runDesignExportVisualGate({
         stagingDir,
         exportId: "export-marker-failure",
+        ...visualProvenance(),
         sourcePreviewOrigin: "http://127.0.0.1:34567",
         context: visualContext(),
         signal: new AbortController().signal,
@@ -198,12 +275,13 @@ test("Design Export visual gate rejects a missing route marker and removes parti
         openCaptureSession: async () => ({
           browserVersion: "Chrome/fixture",
           outputOrigin: "http://127.0.0.1:45678",
-          async capture() {
+          async capture(input) {
+            const root = input.outputUrl.endsWith("/");
             return {
               sourcePng: screenshot,
               outputPng: screenshot,
-              markerNodeIds: [],
-              markerVisible: false,
+              markerNodeIds: root ? ["node-page"] : [],
+              markerVisible: root,
               blockedRequests: [],
             };
           },
@@ -228,6 +306,7 @@ test("Design Export visual gate rejects a screenshot mismatch with Node and view
       runDesignExportVisualGate({
         stagingDir,
         exportId: "export-visual-mismatch",
+        ...visualProvenance(),
         sourcePreviewOrigin: "http://127.0.0.1:34567",
         context: visualContext(),
         signal: new AbortController().signal,
@@ -235,10 +314,11 @@ test("Design Export visual gate rejects a screenshot mismatch with Node and view
         openCaptureSession: async () => ({
           browserVersion: "Chrome/fixture",
           outputOrigin: "http://127.0.0.1:45678",
-          async capture() {
+          async capture(input) {
+            const root = input.outputUrl.endsWith("/");
             return {
               sourcePng: smallControlPng(true),
-              outputPng: smallControlPng(false),
+              outputPng: root ? smallControlPng(true) : smallControlPng(false),
               markerNodeIds: ["node-page"],
               markerVisible: true,
               blockedRequests: [],
@@ -262,15 +342,15 @@ test("Design Export visual gate renders the exact source and built route in real
     return;
   }
   const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-chrome-"));
-  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
-    :root{background:#f6f1e8;color:#17202a;font-family:Arial,sans-serif}
+  const css = `:root{background:#f6f1e8;color:#17202a;font-family:Arial,sans-serif}
     *{box-sizing:border-box}body{margin:0}.page{min-height:100vh;display:grid;place-items:center;padding:48px}
-    h1{margin:0;max-width:9ch;font-size:clamp(48px,9vw,112px);line-height:.88;letter-spacing:-.07em}
-  </style></head><body><main class="page" data-dezin-export-node-id="node-page"><h1>Exact visual route</h1></main></body></html>`;
+    h1{margin:0;max-width:9ch;font-size:clamp(48px,9vw,112px);line-height:.88;letter-spacing:-.07em}`;
+  const sourceHtml = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body><main class="page" data-dezin-export-node-id="node-page"><h1>Exact visual route</h1></main></body></html>`;
+  const outputHtml = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body><main class="page" data-dezin-export-node-id="node-page"><h1>Exact visual route</h1></main></body></html>`;
   const sourceServer = createServer((request, response) => {
     if (request.url === "/api/projects/project-visual/design-canvas/nodes/node-page/versions/version-one/preview/") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(html);
+      response.end(sourceHtml);
       return;
     }
     response.writeHead(404).end();
@@ -279,25 +359,42 @@ test("Design Export visual gate renders the exact source and built route in real
   const { port } = sourceServer.address() as AddressInfo;
   try {
     await mkdir(join(stagingDir, "dist"), { recursive: true });
-    await writeFile(join(stagingDir, "dist", "index.html"), html);
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(join(stagingDir, "dist", "style.css"), css),
+    ]);
     const result = await runDesignExportVisualGate({
       stagingDir,
       exportId: "export-real-chrome",
+      ...visualProvenance(),
       sourcePreviewOrigin: `http://127.0.0.1:${port}`,
       context: visualContext(),
       signal: new AbortController().signal,
     });
     assert.equal(result.visualValidation.passed, true);
-    assert.equal(result.visualValidation.caseCount, 2);
+    assert.equal(result.visualValidation.caseCount, 4);
     const receiptBytes = await readFile(join(stagingDir, result.visualValidation.receiptPath));
     assert.equal(result.visualValidation.receiptChecksum, sha256(receiptBytes));
     const receipt = JSON.parse(receiptBytes.toString("utf8")) as {
+      rootChecks: Array<{
+        passed: boolean;
+        nodeId: string;
+        viewport: { name: string };
+        metrics: { meanSsim: number };
+        evidence: Record<string, { path: string; checksum: string; bytes: number }>;
+      }>;
       cases: Array<{
         passed: boolean;
         viewport: { name: string };
         evidence: Record<string, { path: string; checksum: string; bytes: number }>;
       }>;
     };
+    assert.deepEqual(receipt.rootChecks.map((entry) => entry.viewport.name), ["desktop", "mobile"]);
+    assert.equal(receipt.rootChecks.every((entry) => entry.passed && entry.nodeId === "node-page"), true);
+    for (const entry of receipt.rootChecks) {
+      assert.ok(entry.metrics.meanSsim >= 0.95);
+      assert.deepEqual(Object.keys(entry.evidence), ["source", "output", "diff"]);
+    }
     assert.deepEqual(receipt.cases.map((entry) => entry.viewport.name), ["desktop", "mobile"]);
     for (const entry of receipt.cases) {
       assert.equal(entry.passed, true);
@@ -319,7 +416,7 @@ test("Design Export visual gate rejects a built route without its runtime marker
     return;
   }
   const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-real-marker-"));
-  const html = "<!doctype html><html><body style=\"margin:0\"><main style=\"min-height:100vh\">Markerless route</main></body></html>";
+  const html = "<!doctype html><html><body><main>Markerless route</main></body></html>";
   const sourceServer = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(html);
@@ -333,13 +430,95 @@ test("Design Export visual gate rejects a built route without its runtime marker
       runDesignExportVisualGate({
         stagingDir,
         exportId: "export-real-marker-failure",
+        ...visualProvenance(),
         sourcePreviewOrigin: `http://127.0.0.1:${port}`,
         context: visualContext(),
         signal: new AbortController().signal,
       }),
-      /Home \(node-page\).*desktop 1280x800.*exactly one visible.*marker/i,
+      /root application.*desktop 1280x800.*exactly one visible.*marker/i,
     );
     await assert.rejects(readFile(join(stagingDir, "validation", "visual", "receipt.json")));
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects a runtime marker occluded at its center point", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-occluded-marker-"));
+  const css = `html,body{margin:0;min-height:100%;background:#f6f1e8;color:#17202a}
+    main,.cover{position:fixed;inset:0;display:grid;place-items:center;background:#f6f1e8}
+    .cover{z-index:2}`;
+  const body = `<main data-dezin-export-node-id="node-page">Occluded marker</main><div class="cover">Occluded marker</div>`;
+  const sourceHtml = `<!doctype html><html><head><style>${css}</style></head><body>${body}</body></html>`;
+  const outputHtml = `<!doctype html><html><head><link rel="stylesheet" href="/style.css"></head><body>${body}</body></html>`;
+  const sourceServer = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(sourceHtml);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(join(stagingDir, "dist", "style.css"), css),
+    ]);
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-occluded-marker-failure",
+        ...visualProvenance(),
+        sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /root application.*desktop 1280x800.*exactly one visible.*marker/i,
+    );
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects a runtime marker below the minimum visible area", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-tiny-marker-"));
+  const css = `html,body{margin:0;min-height:100%;background:#f6f1e8}
+    main{position:fixed;left:50px;top:50px;width:1px;height:1px;background:#17202a}`;
+  const body = `<main data-dezin-export-node-id="node-page"></main>`;
+  const sourceHtml = `<!doctype html><html><head><style>${css}</style></head><body>${body}</body></html>`;
+  const outputHtml = `<!doctype html><html><head><link rel="stylesheet" href="/style.css"></head><body>${body}</body></html>`;
+  const sourceServer = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(sourceHtml);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(join(stagingDir, "dist", "style.css"), css),
+    ]);
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-tiny-marker-failure",
+        ...visualProvenance(),
+        sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /root application.*desktop 1280x800.*exactly one visible.*marker/i,
+    );
   } finally {
     await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
     await rm(stagingDir, { recursive: true, force: true });
@@ -366,13 +545,138 @@ test("Design Export visual gate blocks external network in real Chrome", async (
       runDesignExportVisualGate({
         stagingDir,
         exportId: "export-network-failure",
+        ...visualProvenance(),
         sourcePreviewOrigin: `http://127.0.0.1:${port}`,
         context: visualContext(),
         signal: new AbortController().signal,
       }),
-      /Home \(node-page\).*desktop 1280x800.*blocked external request.*network\.invalid/i,
+      /root application.*desktop 1280x800.*blocked external request.*network\.invalid/i,
     );
     await assert.rejects(readFile(join(stagingDir, "validation", "visual", "receipt.json")));
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate validates the ordinary root route in real Chrome", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-root-route-"));
+  const sourceHtml = "<!doctype html><html><body><main data-dezin-export-node-id=\"node-page\">Root route boundary</main></body></html>";
+  const outputHtml = "<!doctype html><html><body><main data-dezin-export-node-id=\"node-page\">Root route boundary</main><script src=\"/app.js\"></script></body></html>";
+  const sourceServer = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(sourceHtml);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(
+        join(stagingDir, "dist", "app.js"),
+        "if (!location.search) { const image = new Image(); image.src = ['ht', 'tps:', '//network.invalid/root.png'].join(''); }\n",
+      ),
+    ]);
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-root-route-network-failure",
+        ...visualProvenance(),
+        sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /root application.*desktop 1280x800.*blocked external request.*network\.invalid/i,
+    );
+    await assert.rejects(readFile(join(stagingDir, "validation", "visual", "receipt.json")));
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects a blank ordinary root route in real Chrome", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-blank-root-"));
+  const sourceHtml = "<!doctype html><html><body><main data-dezin-export-node-id=\"node-page\">Root content</main></body></html>";
+  const outputHtml = "<!doctype html><html><body><div id=\"app\"></div><script src=\"/app.js\"></script></body></html>";
+  const sourceServer = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(sourceHtml);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(join(stagingDir, "dist", "app.js"), `
+        if (location.search) {
+          const main = document.createElement("main");
+          main.dataset.dezinExportNodeId = "node-page";
+          main.textContent = "Root content";
+          document.querySelector("#app")?.append(main);
+        }
+      `),
+    ]);
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-blank-root-failure",
+        ...visualProvenance(),
+        sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /root application.*desktop 1280x800.*exactly one visible.*marker/i,
+    );
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects a mismatched ordinary root route in real Chrome", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-root-mismatch-"));
+  const sourceHtml = "<!doctype html><html><body><main data-dezin-export-node-id=\"node-page\">Exact root content</main></body></html>";
+  const outputHtml = "<!doctype html><html><body><main data-dezin-export-node-id=\"node-page\">Wrong root content</main><script src=\"/app.js\"></script></body></html>";
+  const sourceServer = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(sourceHtml);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), outputHtml),
+      writeFile(join(stagingDir, "dist", "app.js"), `
+        if (location.search) document.querySelector("main").textContent = "Exact root content";
+      `),
+    ]);
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-root-mismatch-failure",
+        ...visualProvenance(),
+        sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /root application.*desktop 1280x800.*MAE .*changed .*SSIM .*p05 .*min /i,
+    );
   } finally {
     await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
     await rm(stagingDir, { recursive: true, force: true });
@@ -401,11 +705,12 @@ test("Design Export built route cannot read the trusted source preview origin", 
       runDesignExportVisualGate({
         stagingDir,
         exportId: "export-phase-network-failure",
+        ...visualProvenance(),
         sourcePreviewOrigin: sourceOrigin,
         context: visualContext(),
         signal: new AbortController().signal,
       }),
-      /Home \(node-page\).*desktop 1280x800.*blocked external request.*forbidden-output-read/i,
+      /root application.*desktop 1280x800.*blocked external request.*forbidden-output-read/i,
     );
   } finally {
     await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
@@ -436,6 +741,7 @@ test("Design Export visual gate abort closes Chrome and its loopback server with
     const gate = runDesignExportVisualGate({
       stagingDir,
       exportId: "export-aborted",
+      ...visualProvenance(),
       sourcePreviewOrigin: `http://127.0.0.1:${port}`,
       context: visualContext(),
       signal: controller.signal,

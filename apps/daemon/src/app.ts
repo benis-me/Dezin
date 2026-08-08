@@ -130,6 +130,8 @@ export interface AppDeps {
   runtimeSupervisor?: RuntimeSupervisor;
   /** Daemon-owned immutable source capture required before a Sharingan project becomes usable. */
   sharinganBootstrap?: SharinganBootstrapPort;
+  /** Deterministic startup-recovery seam; production enumerates every initialized Design Canvas. */
+  designStartupRecovery?: () => Promise<void>;
 }
 
 type Handler = (
@@ -953,10 +955,19 @@ export function createApp(deps: AppDeps): http.Server {
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
   recoverIncompleteMoodboards(appDeps);
-  void listInitializedDesignProjectIds(appDeps.dataDir)
-    .then((projectIds) => Promise.all(projectIds.map((projectId) =>
-      recoverInterruptedDesignJobs(appDeps.dataDir, projectId).catch(() => []))))
-    .catch(() => {});
+  const designStartupRecovery = Promise.resolve()
+    .then(async () => {
+      if (appDeps.designStartupRecovery) return appDeps.designStartupRecovery();
+      const projectIds = await listInitializedDesignProjectIds(appDeps.dataDir);
+      await Promise.all(projectIds.map((projectId) => recoverInterruptedDesignJobs(appDeps.dataDir, projectId)));
+    })
+    .then(
+      () => ({ ok: true as const }),
+      (error: unknown) => {
+        console.error("Design startup recovery failed; Design routes will remain unavailable", error);
+        return { ok: false as const, error };
+      },
+    );
   warmAgents(appDeps.agentProber, appDeps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -979,6 +990,20 @@ export function createApp(deps: AppDeps): http.Server {
         validateRouteParams(m.params);
         if (route.extensionPairing) requireExtensionPairingRequest(req);
         else requireDaemonRequest(req, { ...appDeps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
+        const needsDesignRecovery = route.pattern.includes("/design-canvas")
+          || route.pattern === "/api/projects"
+          || route.pattern === "/api/projects/:id"
+          || route.pattern === "/api/projects/:id/title";
+        if (needsDesignRecovery) {
+          const recovery = await designStartupRecovery;
+          if (!recovery.ok) {
+            sendJson(res, 503, {
+              error: "Design startup recovery did not complete; Design routes are unavailable",
+              code: "design-recovery-unavailable",
+            });
+            return;
+          }
+        }
         const projectId = route.projectAdmission !== "skip"
           && (route.pattern.startsWith("/api/projects/:id")
             || route.pattern.startsWith("/api/sharingan/:id"))

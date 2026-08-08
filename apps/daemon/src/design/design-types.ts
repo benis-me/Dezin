@@ -1,4 +1,4 @@
-export const DESIGN_SCHEMA_VERSION = 1 as const;
+export const DESIGN_SCHEMA_VERSION = 2 as const;
 
 export const DESIGN_GENERATIVE_NODE_KINDS = [
   "component",
@@ -83,7 +83,20 @@ export interface DesignProjectFile {
   retiredNodeIds: string[];
   undo: DesignCanvasSnapshot[];
   redo: DesignCanvasSnapshot[];
-  turnReceipts: Record<string, { jobId: string; kind: DesignJobKind; nodeId: string | null; createdAt: number }>;
+  turnReceipts: Record<string, {
+    jobId: string;
+    kind: DesignJobKind;
+    nodeId: string | null;
+    /** Hash of the normalized caller request (provider, model, parent, prompt, and priority context). */
+    requestHash?: string;
+    /** Hash of the exact frozen Canvas/Version/Asset authority used by this attempt. */
+    authorityHash?: string;
+    /** Immutable Main Agent plan bound to this idempotent request, when one was produced. */
+    mainPlanHash?: string;
+    /** Canvas revision committed atomically with this Main Agent plan application. */
+    mainPlanAppliedRevision?: number;
+    createdAt: number;
+  }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -168,10 +181,15 @@ export interface DesignFrozenAssetPin {
   bundleFiles: DesignAssetBundleFile[];
 }
 
+export type DesignVersionContentKind = "html" | "asset";
+
 export interface DesignVersionManifest {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
   id: string;
   nodeId: string;
+  contentKind: DesignVersionContentKind;
+  /** Asset payload identity for material Versions; HTML Versions keep this null. */
+  assetId: string | null;
   sequence: number;
   checksum: string;
   bytes: number;
@@ -184,6 +202,24 @@ export interface DesignVersionManifest {
   runnerId: string | null;
   model: string | null;
   createdAt: number;
+}
+
+export type DesignVersionPublicationPhase = "marker" | "pending" | "target" | "canvas" | "job";
+
+export interface DesignVersionPublicationTransaction {
+  schemaVersion: typeof DESIGN_SCHEMA_VERSION;
+  projectId: string;
+  jobId: string;
+  nodeId: string;
+  manifest: DesignVersionManifest;
+  terminalStatus: "ready" | "superseded";
+  projectRevisionBefore: number;
+  previousVersionCount: number;
+  currentVersionIdBefore: string | null;
+  selectedVersionIdBefore: string | null;
+  followsHead: boolean;
+  createdAt: number;
+  checksum: string;
 }
 
 export type DesignThreadRole = "user" | "assistant" | "system" | "tool";
@@ -226,6 +262,8 @@ export interface DesignJob {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
   id: string;
   kind: DesignJobKind;
+  runnerId: string;
+  model: string | null;
   status: DesignJobStatus;
   nodeId: string | null;
   parentJobId: string | null;
@@ -256,9 +294,13 @@ export interface DesignFrozenContext {
     state: DesignNodeState;
     geometry: DesignNodeGeometry;
     selectedVersionId: string | null;
+    selectedVersionContentKind: DesignVersionContentKind | null;
     selectedVersionChecksum: string | null;
     selectedVersionBytes: number | null;
     selectedVersionPath: string | null;
+    selectedVersionJobId: string | null;
+    selectedVersionRunnerId: string | null;
+    selectedVersionModel: string | null;
     selectedVersionAssetPins: DesignFrozenAssetPin[];
     assetId: string | null;
     assetChecksum: string | null;
@@ -272,6 +314,9 @@ export interface DesignExportManifest {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
   id: string;
   projectId: string;
+  jobId: string;
+  providerId: string;
+  model: string | null;
   canvasRevision: number;
   inputHash: string;
   nodes: Array<{
@@ -279,6 +324,9 @@ export interface DesignExportManifest {
     nodeKind: DesignNodeKind;
     versionId: string;
     checksum: string;
+    sourceJobId: string | null;
+    sourceProviderId: string | null;
+    sourceModel: string | null;
   }>;
   assets: Array<{ assetId: string; checksum: string }>;
   visualValidation: {

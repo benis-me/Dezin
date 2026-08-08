@@ -31,6 +31,8 @@ function canvas(revision = 1, undoDepth = 0, redoDepth = 0): DesignCanvas {
 const readyJob: DesignJob = {
   id: "job-1",
   kind: "main-agent",
+  runnerId: "fixture",
+  model: null,
   status: "ready",
   nodeId: null,
   parentJobId: null,
@@ -59,10 +61,10 @@ function fakeApi(overrides: Partial<DesignCanvasApi> = {}): DesignCanvasApi {
     undo: vi.fn(async (_projectId, revision) => canvas(revision + 1)),
     redo: vi.fn(async (_projectId, revision) => canvas(revision + 1)),
     importLocalFiles: vi.fn(async () => canvas(2, 1)),
+    appendMaterialVersion: vi.fn(async () => canvas(2, 1)),
     importProjectVersion: vi.fn(async () => canvas(2, 1)),
     listNodeVersions: vi.fn(async () => []),
     getExactVersionPreview: vi.fn(async (_projectId, nodeId, versionId) => ({ nodeId, versionId, url: `/preview/${versionId}` })),
-    getAssetPreviewUrl: vi.fn((_projectId, assetId) => `/asset/${assetId}`),
     getThread: vi.fn(async () => mainThread),
     submitAgentTurn: vi.fn(async () => ({ thread: mainThread, job: readyJob, canvas: canvas(3, 2) })),
     listJobs: vi.fn(async () => []),
@@ -82,6 +84,7 @@ function Harness({ api }: { api: DesignCanvasApi }) {
       <span data-testid="revision">{controller.canvas?.revision ?? "loading"}</span>
       <span data-testid="error">{controller.error ?? ""}</span>
       <button type="button" onClick={() => void controller.applyIntents([{ type: "add-node", node: { kind: "page" } }])}>mutate</button>
+      <button type="button" onClick={() => void controller.appendMaterialVersion("image-1", new File(["v2"], "v2.png", { type: "image/png" }))}>append material version</button>
       <button type="button" onClick={() => void controller.cancelJob("job-live")}>cancel</button>
       <button type="button" onClick={() => void controller.refresh()}>refresh</button>
       {controller.pendingIntentRetryAvailable ? <button type="button" onClick={controller.retryPendingIntent}>retry handoff</button> : null}
@@ -112,9 +115,11 @@ test("StrictMode claims and completes the initial canvas handoff exactly once", 
 
   await waitFor(() => expect(api.importProjectVersion).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(api.submitAgentTurn).toHaveBeenCalledTimes(1));
-  expect(api.submitAgentTurn).toHaveBeenCalledWith(PROJECT_ID, { type: "main" }, expect.objectContaining({
+  expect(api.submitAgentTurn).toHaveBeenCalledWith(PROJECT_ID, { type: "main" }, {
+    prompt: "Create the launch page",
+    context: { nodeIds: [] },
     idempotencyKey: `initial-design-canvas-${PROJECT_ID}`,
-  }));
+  });
   expect(peekPendingDesignCanvasIntent(PROJECT_ID)).toBeNull();
 });
 
@@ -161,6 +166,18 @@ test("a CAS conflict refreshes canonical revision and replays an absolute mutati
   await screen.findByText("5");
   expect(applyIntents).toHaveBeenNthCalledWith(1, PROJECT_ID, expect.objectContaining({ baseRevision: 1 }));
   expect(applyIntents).toHaveBeenNthCalledWith(2, PROJECT_ID, expect.objectContaining({ baseRevision: 4 }));
+});
+
+test("material revision imports flow through the mutation queue and update the canonical Canvas", async () => {
+  const appendMaterialVersion = vi.fn(async () => canvas(6, 2));
+  const api = fakeApi({ appendMaterialVersion });
+  render(<Harness api={api} />);
+  await screen.findByText("1");
+
+  fireEvent.click(screen.getByRole("button", { name: "append material version" }));
+
+  await screen.findByText("6");
+  expect(appendMaterialVersion).toHaveBeenCalledWith(PROJECT_ID, "image-1", expect.objectContaining({ name: "v2.png" }));
 });
 
 test("cancelling a live job refreshes the canvas projection before polling can stop", async () => {

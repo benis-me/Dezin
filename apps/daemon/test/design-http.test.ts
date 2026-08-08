@@ -8,9 +8,17 @@ import test from "node:test";
 import { Store } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
+import {
+  DESIGN_EXPORT_TYPESCRIPT_VERSION,
+  DESIGN_EXPORT_VITE_VERSION,
+} from "../src/design/design-global-agents.ts";
 import { trustedDesignPreviewOrigin } from "../src/design/design-http-handler.ts";
 import { findDesignExportChrome } from "../src/design/design-export-visual-gate.ts";
-import { publishDesignVersion } from "../src/design/design-storage.ts";
+import {
+  getDesignCanvas,
+  initializeDesignProject,
+  publishDesignVersion,
+} from "../src/design/design-storage.ts";
 
 interface AbortGate {
   entered: Promise<void>;
@@ -88,6 +96,271 @@ test("ordinary Project creation initializes an empty Design canvas without scaff
     assert.equal(designProject.projectId, project.id);
     assert.deepEqual(designProject.nodes, []);
     await assert.rejects(readFile(join(root, "package.json")));
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Design HTTP routes wait for startup recovery and fail closed when it cannot complete", async (t) => {
+  await t.test("a Canvas mutation cannot overtake startup recovery", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-recovery-gate-"));
+    const projectId = "project-recovery-gate";
+    await initializeDesignProject(dataDir, projectId);
+    const store = new Store(":memory:");
+    const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+    let markRecoveryStarted!: () => void;
+    let releaseRecovery!: () => void;
+    const recoveryStarted = new Promise<void>((resolve) => { markRecoveryStarted = resolve; });
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const server = createApp({
+      dataDir,
+      store,
+      runtimeSupervisor,
+      designStartupRecovery: async () => {
+        markRecoveryStarted();
+        await recoveryGate;
+      },
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      await recoveryStarted;
+      let settled = false;
+      const responsePromise = fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/design-canvas`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: 0,
+          intents: [{ type: "add-node", node: { id: "node-after-recovery", kind: "page" } }],
+        }),
+      }).then((response) => {
+        settled = true;
+        return response;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(settled, false);
+      assert.equal((await getDesignCanvas(dataDir, projectId)).revision, 0);
+
+      releaseRecovery();
+      const response = await responsePromise;
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.id, "node-after-recovery");
+    } finally {
+      releaseRecovery();
+      await runtimeSupervisor.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("a failed recovery returns 503 without invoking the Design handler", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-recovery-failed-"));
+    const projectId = "project-recovery-failed";
+    await initializeDesignProject(dataDir, projectId);
+    const store = new Store(":memory:");
+    const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+    const server = createApp({
+      dataDir,
+      store,
+      runtimeSupervisor,
+      designStartupRecovery: async () => { throw new Error("corrupt publication marker"); },
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/design-canvas`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: 0,
+          intents: [{ type: "add-node", node: { id: "node-must-not-exist", kind: "page" } }],
+        }),
+      });
+      assert.equal(response.status, 503, await response.clone().text());
+      assert.match(await response.text(), /recovery/i);
+      assert.deepEqual((await getDesignCanvas(dataDir, projectId)).nodes, []);
+    } finally {
+      await runtimeSupervisor.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Main Agent request inherits the settings model only when its command stays on the configured provider", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-agent-override-"));
+  const store = new Store(":memory:");
+  store.updateSettings({ agentCommand: "codebuddy", model: "settings-codebuddy-model" });
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const runner: AgentRunner = {
+    id: "http-effective-agent-fixture",
+    async runTurn() {
+      return {
+        text: JSON.stringify({ reply: "No canvas changes.", canvasIntents: [], dispatches: [] }),
+        artifactHtml: "",
+      };
+    },
+  };
+  const server = createApp({ dataDir, store, runtimeSupervisor, designRunner: runner });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const created = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Agent override" }),
+    });
+    assert.equal(created.status, 201, await created.clone().text());
+    const project = await created.json() as { id: string };
+    const started = await fetch(`http://127.0.0.1:${port}/api/projects/${project.id}/design-canvas/agent/turns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Inspect the canvas.", agentCommand: "claude" }),
+    });
+    assert.equal(started.status, 202, await started.clone().text());
+    const body = await started.json() as { job: { model: string | null } };
+    assert.equal(body.job.model, null);
+
+    const sameProviderProjectResponse = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Agent settings inheritance" }),
+    });
+    assert.equal(sameProviderProjectResponse.status, 201, await sameProviderProjectResponse.clone().text());
+    const sameProviderProject = await sameProviderProjectResponse.json() as { id: string };
+    const inherited = await fetch(
+      `http://127.0.0.1:${port}/api/projects/${sameProviderProject.id}/design-canvas/agent/turns`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "Inspect the canvas.", agentCommand: "codebuddy" }),
+      },
+    );
+    assert.equal(inherited.status, 202, await inherited.clone().text());
+    const inheritedBody = await inherited.json() as { job: { model: string | null } };
+    assert.equal(inheritedBody.job.model, "settings-codebuddy-model");
+
+    const explicitDefaultProjectResponse = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Agent explicit provider default" }),
+    });
+    assert.equal(explicitDefaultProjectResponse.status, 201, await explicitDefaultProjectResponse.clone().text());
+    const explicitDefaultProject = await explicitDefaultProjectResponse.json() as { id: string };
+    const explicitDefault = await fetch(
+      `http://127.0.0.1:${port}/api/projects/${explicitDefaultProject.id}/design-canvas/agent/turns`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "Inspect the canvas.", agentCommand: "codebuddy", model: null }),
+      },
+    );
+    assert.equal(explicitDefault.status, 202, await explicitDefault.clone().text());
+    const explicitDefaultBody = await explicitDefault.json() as { job: { model: string | null } };
+    assert.equal(explicitDefaultBody.job.model, null);
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Main Agent request identity is inherited by its child Job and published Version", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-main-identity-"));
+  const store = new Store(":memory:");
+  store.updateSettings({ agentCommand: "codebuddy", model: "settings-main-model" });
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const plan = JSON.stringify({
+    reply: "Created and delegated the page.",
+    canvasIntents: [{ type: "add-node", node: { id: "node-page", kind: "page", name: "Home" } }],
+    dispatches: [{ nodeId: "node-page", message: "Generate Home.", contextNodeIds: [] }],
+  });
+  const runner: AgentRunner = {
+    id: "http-main-child-fixture",
+    async runTurn(input) {
+      if (input.projectDir.includes("/exports/.pending/main-job-")) {
+        return { text: plan, artifactHtml: "" };
+      }
+      const html = "<!doctype html><html><head><style>body{margin:0}</style></head><body>Main child generated</body></html>";
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "Published the delegated page.", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  const server = createApp({ dataDir, store, runtimeSupervisor, designRunner: runner });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+  const json = (path: string, method = "GET", body?: unknown) => fetch(`${base}${path}`, {
+    method,
+    ...(body === undefined ? {} : {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  });
+  try {
+    const created = await json("/api/projects", "POST", { name: "Main identity" });
+    assert.equal(created.status, 201, await created.clone().text());
+    const project = await created.json() as { id: string };
+    const root = `/api/projects/${project.id}/design-canvas`;
+    const startedResponse = await json(`${root}/agent/turns`, "POST", {
+      message: "Create and delegate a page.",
+      agentCommand: "claude",
+      model: "request-main-model",
+    });
+    assert.equal(startedResponse.status, 202, await startedResponse.clone().text());
+    const started = await startedResponse.json() as {
+      job: { id: string; runnerId: string; model: string | null };
+    };
+    assert.deepEqual(
+      { runnerId: started.job.runnerId, model: started.job.model },
+      { runnerId: "http-main-child-fixture", model: "request-main-model" },
+    );
+
+    type Job = {
+      id: string;
+      kind: string;
+      status: string;
+      parentJobId: string | null;
+      runnerId: string;
+      model: string | null;
+      versionId: string | null;
+    };
+    const deadline = Date.now() + 2_000;
+    let parent: Job | undefined;
+    let child: Job | undefined;
+    while (Date.now() < deadline) {
+      const jobs = await (await json(`${root}/jobs`)).json() as Job[];
+      parent = jobs.find((job) => job.id === started.job.id);
+      child = jobs.find((job) => job.parentJobId === started.job.id);
+      if (parent?.status === "ready" && child?.status === "ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(parent?.status, "ready");
+    assert.equal(parent?.kind, "main-agent");
+    assert.equal(parent?.runnerId, started.job.runnerId);
+    assert.equal(parent?.model, started.job.model);
+    assert.equal(child?.kind, "node-generation");
+    assert.equal(child?.runnerId, started.job.runnerId);
+    assert.equal(child?.model, started.job.model);
+    assert.ok(child?.versionId);
+
+    const versions = await (await json(`${root}/nodes/node-page/versions`)).json() as Array<{
+      id: string;
+      jobId: string | null;
+      runnerId: string | null;
+      model: string | null;
+    }>;
+    const version = versions.find((candidate) => candidate.id === child?.versionId);
+    assert.equal(version?.jobId, child?.id);
+    assert.equal(version?.runnerId, child?.runnerId);
+    assert.equal(version?.model, child?.model);
   } finally {
     await runtimeSupervisor.shutdown();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -212,14 +485,14 @@ test("Design Export HTTP publishes only after the real desktop and mobile visual
         private: true,
         type: "module",
         scripts: { dev: "vite", build: "vite build", preview: "vite preview" },
-        devDependencies: { typescript: "^6.0.3", vite: "^8.0.16" },
+        devDependencies: { typescript: DESIGN_EXPORT_TYPESCRIPT_VERSION, vite: DESIGN_EXPORT_VITE_VERSION },
       };
       const index = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><div id=\"app\"></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>";
       const main = `import "./styles.css";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
 const nodeId = new URLSearchParams(window.location.search).get("dezin-node");
-if (nodeId !== "node-page") throw new Error("Unknown Design Node route");
+if (nodeId !== null && nodeId !== "node-page") throw new Error("Unknown Design Node route");
 const page = document.createElement("main");
 page.className = "page";
 page.dataset.dezinExportNodeId = "node-page";
@@ -288,8 +561,8 @@ body{margin:0}.page{min-height:100vh;display:grid;place-items:center;padding:48p
     const finalDir = join(dataDir, "projects", project.id, "design", "exports", started.exportId);
     const manifest = JSON.parse(await readFile(join(finalDir, "dezin-export.json"), "utf8"));
     assert.equal(manifest.visualValidation.passed, true);
-    assert.equal(manifest.visualValidation.caseCount, 2);
-    assert.ok(terminal?.activity.some((entry) => entry.kind === "status" && /Visual gate passed 2.*receipt [a-f0-9]{64}/.test(entry.text)));
+    assert.equal(manifest.visualValidation.caseCount, 4);
+    assert.ok(terminal?.activity.some((entry) => entry.kind === "status" && /Visual gate passed 4.*receipt [a-f0-9]{64}/.test(entry.text)));
     const receiptBytes = await readFile(join(finalDir, manifest.visualValidation.receiptPath));
     assert.equal(createHash("sha256").update(receiptBytes).digest("hex"), manifest.visualValidation.receiptChecksum);
     const receipt = JSON.parse(receiptBytes.toString("utf8")) as {
@@ -359,7 +632,10 @@ test("Design Asset batch import commits one Canvas revision and rolls back the w
     ]).toString("base64");
     const item = (id: string, name: string, base64: string, x: number) => ({
       asset: { name, mimeType: "image/png", base64 },
-      node: { id, kind: "image", name, geometry: { x, y: 24, width: 360, height: 260 } },
+      binding: {
+        type: "create-node",
+        node: { id, kind: "image", name, geometry: { x, y: 24, width: 360, height: 260 } },
+      },
     });
 
     const invalid = await json(`${root}/assets/import`, "POST", {
@@ -387,12 +663,24 @@ test("Design Asset batch import commits one Canvas revision and rolls back the w
       revision: number;
       undoDepth: number;
       nodeOrder: string[];
-      nodes: Array<{ id: string; assetId: string | null; state: string }>;
+      nodes: Array<{
+        id: string;
+        assetId: string | null;
+        state: string;
+        currentVersionId: string | null;
+        selectedVersionId: string | null;
+        versionCount: number;
+      }>;
     };
     assert.equal(canvas.revision, 1);
     assert.equal(canvas.undoDepth, 1);
     assert.deepEqual(canvas.nodeOrder, ["node-one", "node-two"]);
     assert.ok(canvas.nodes.every((node) => node.assetId !== null && node.state === "ready"));
+    assert.ok(canvas.nodes.every((node) => (
+      node.currentVersionId !== null
+      && node.selectedVersionId === node.currentVersionId
+      && node.versionCount === 1
+    )));
     const assets = await (await json(`${root}/assets`)).json() as Array<{ id: string }>;
     assert.equal(assets.length, 2);
   } finally {
@@ -406,6 +694,7 @@ test("Design Asset batch import commits one Canvas revision and rolls back the w
 test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, and Node Agent Jobs", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-slice-"));
   const store = new Store(":memory:");
+  store.updateSettings({ agentCommand: "codebuddy", model: "hy3-ioa" });
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
   const runner: AgentRunner = {
     id: "http-writing-fake",
@@ -435,19 +724,38 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       Buffer.from("rangeable-image"),
     ]);
-    const assetResponse = await json(`${root}/assets`, "POST", {
-      name: "hero.png",
-      mimeType: "image/png",
-      base64: imageBytes.toString("base64"),
-    });
-    assert.equal(assetResponse.status, 201);
-    const asset = await assetResponse.json() as { id: string; checksum: string; fileName: string };
-    const mutatedResponse = await json(root, "PUT", {
+    const importedResponse = await json(`${root}/assets/import`, "POST", {
       expectedRevision: 0,
-      intents: [
-        { type: "add-node", node: { id: "node-image", kind: "image", assetId: asset.id } },
-        { type: "add-node", node: { id: "node-page", kind: "page" } },
-      ],
+      items: [{
+        asset: {
+          name: "hero.png",
+          mimeType: "image/png",
+          base64: imageBytes.toString("base64"),
+        },
+        binding: {
+          type: "create-node",
+          node: { id: "node-image", kind: "image", name: "Hero" },
+        },
+      }],
+    });
+    assert.equal(importedResponse.status, 200, await importedResponse.clone().text());
+    const imported = await importedResponse.json() as {
+      revision: number;
+      nodes: Array<{ id: string; assetId: string | null; currentVersionId: string | null }>;
+    };
+    const imageNode = imported.nodes.find((node) => node.id === "node-image");
+    assert.ok(imageNode?.assetId);
+    assert.ok(imageNode.currentVersionId);
+    const assets = await (await json(`${root}/assets`)).json() as Array<{
+      id: string;
+      checksum: string;
+      fileName: string;
+    }>;
+    const asset = assets.find((candidate) => candidate.id === imageNode.assetId);
+    assert.ok(asset);
+    const mutatedResponse = await json(root, "PUT", {
+      expectedRevision: imported.revision,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
     });
     assert.equal(mutatedResponse.status, 200);
     assert.equal((await json(root, "PUT", { expectedRevision: 0, intents: [{ type: "set-viewport", viewport: { x: 0, y: 0, zoom: 1 } }] })).status, 409);
@@ -465,11 +773,78 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(headed.headers.get("content-length"), "4");
     assert.equal((await headed.arrayBuffer()).byteLength, 0);
 
+    const materialVersions = await (await json(`${root}/nodes/node-image/versions`)).json() as Array<{
+      id: string;
+      contentKind: string;
+      assetId: string | null;
+      checksum: string;
+    }>;
+    assert.deepEqual(materialVersions.map((version) => ({
+      id: version.id,
+      contentKind: version.contentKind,
+      assetId: version.assetId,
+    })), [{
+      id: imageNode.currentVersionId,
+      contentKind: "asset",
+      assetId: asset.id,
+    }]);
+    assert.equal(materialVersions[0]?.checksum, asset.checksum);
+    const materialPreview = await fetch(
+      `${base}${root}/nodes/node-image/versions/${imageNode.currentVersionId}/preview/`,
+    );
+    assert.equal(materialPreview.status, 200, await materialPreview.clone().text());
+    assert.equal(materialPreview.headers.get("content-type"), "image/png");
+    assert.equal(materialPreview.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(Buffer.from(await materialPreview.arrayBuffer()), imageBytes);
+
+    const revisedImageBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("rangeable-image-v2"),
+    ]);
+    const beforeAppend = await (await json(root)).json() as { revision: number };
+    const appendedResponse = await json(`${root}/assets/import`, "POST", {
+      expectedRevision: beforeAppend.revision,
+      items: [{
+        asset: {
+          name: "hero-v2.png",
+          mimeType: "image/png",
+          base64: revisedImageBytes.toString("base64"),
+        },
+        binding: { type: "append-version", nodeId: "node-image" },
+      }],
+    });
+    assert.equal(appendedResponse.status, 200, await appendedResponse.clone().text());
+    const appendedCanvas = await appendedResponse.json() as {
+      nodes: Array<{
+        id: string;
+        assetId: string | null;
+        currentVersionId: string | null;
+        selectedVersionId: string | null;
+        versionCount: number;
+      }>;
+    };
+    const appendedNode = appendedCanvas.nodes.find((node) => node.id === "node-image");
+    assert.ok(appendedNode?.currentVersionId);
+    assert.notEqual(appendedNode.currentVersionId, imageNode.currentVersionId);
+    assert.equal(appendedNode.selectedVersionId, appendedNode.currentVersionId);
+    assert.equal(appendedNode.versionCount, 2);
+    assert.notEqual(appendedNode.assetId, asset.id);
+    const revisedPreview = await fetch(
+      `${base}${root}/nodes/node-image/versions/${appendedNode.currentVersionId}/preview/`,
+    );
+    assert.equal(revisedPreview.status, 200, await revisedPreview.clone().text());
+    assert.deepEqual(Buffer.from(await revisedPreview.arrayBuffer()), revisedImageBytes);
+    const originalPreviewAgain = await fetch(
+      `${base}${root}/nodes/node-image/versions/${imageNode.currentVersionId}/preview/`,
+    );
+    assert.deepEqual(Buffer.from(await originalPreviewAgain.arrayBuffer()), imageBytes);
+
+    const beforePublish = await (await json(root)).json() as { revision: number };
     const published = await publishDesignVersion(dataDir, project.id, {
       nodeId: "node-page",
       html: `<!doctype html><html><head><style>body{margin:0}</style></head><body><img src="dezin-asset://${asset.id}"></body></html>`,
       contextHash: "a".repeat(64),
-      canvasRevision: 1,
+      canvasRevision: beforePublish.revision,
       expectedHeadVersionId: null,
       jobId: null,
       runnerId: "fixture",
@@ -514,18 +889,72 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
       idempotencyKey: "http-node-turn",
     });
     assert.equal(turn.status, 202);
-    const turnBody = await turn.json() as { job: { id: string } };
+    const turnBody = await turn.json() as { job: { id: string; runnerId: string; model: string | null } };
+    assert.equal(turnBody.job.runnerId, "http-writing-fake");
+    assert.equal(turnBody.job.model, "hy3-ioa");
     const deadline = Date.now() + 2_000;
-    let terminal: { status: string } | undefined;
+    let terminal: { status: string; runnerId: string; model: string | null } | undefined;
     while (Date.now() < deadline) {
-      const jobs = await (await json(`${root}/jobs`)).json() as Array<{ id: string; status: string }>;
+      const jobs = await (await json(`${root}/jobs`)).json() as Array<{
+        id: string;
+        status: string;
+        runnerId: string;
+        model: string | null;
+      }>;
       terminal = jobs.find((job) => job.id === turnBody.job.id);
       if (terminal && !["queued", "running", "validating"].includes(terminal.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(terminal?.status, "ready");
+    assert.equal(terminal?.runnerId, turnBody.job.runnerId);
+    assert.equal(terminal?.model, turnBody.job.model);
+    const versions = await (await json(`${root}/nodes/node-page/versions`)).json() as Array<{
+      jobId: string | null;
+      runnerId: string | null;
+      model: string | null;
+    }>;
+    const generated = versions.find((version) => version.jobId === turnBody.job.id);
+    assert.equal(generated?.runnerId, turnBody.job.runnerId);
+    assert.equal(generated?.model, turnBody.job.model);
     const thread = await (await json(`${root}/nodes/node-page/agent/thread`)).json() as { messages: Array<{ role: string }> };
     assert.deepEqual(thread.messages.map((message) => message.role), ["user", "assistant"]);
+
+    const overrideTurn = await json(`${root}/nodes/node-page/agent/turns`, "POST", {
+      message: "Generate with the request model",
+      agentCommand: "claude",
+      model: "request-model",
+      idempotencyKey: "http-node-turn-override",
+    });
+    assert.equal(overrideTurn.status, 202);
+    const overrideBody = await overrideTurn.json() as {
+      job: { id: string; runnerId: string; model: string | null };
+    };
+    assert.equal(overrideBody.job.runnerId, "http-writing-fake");
+    assert.equal(overrideBody.job.model, "request-model");
+    const overrideDeadline = Date.now() + 2_000;
+    let overrideTerminal: { status: string; runnerId: string; model: string | null } | undefined;
+    while (Date.now() < overrideDeadline) {
+      const jobs = await (await json(`${root}/jobs`)).json() as Array<{
+        id: string;
+        status: string;
+        runnerId: string;
+        model: string | null;
+      }>;
+      overrideTerminal = jobs.find((job) => job.id === overrideBody.job.id);
+      if (overrideTerminal && !["queued", "running", "validating"].includes(overrideTerminal.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(overrideTerminal?.status, "ready");
+    assert.equal(overrideTerminal?.runnerId, overrideBody.job.runnerId);
+    assert.equal(overrideTerminal?.model, overrideBody.job.model);
+    const overrideVersions = await (await json(`${root}/nodes/node-page/versions`)).json() as Array<{
+      jobId: string | null;
+      runnerId: string | null;
+      model: string | null;
+    }>;
+    const overrideVersion = overrideVersions.find((version) => version.jobId === overrideBody.job.id);
+    assert.equal(overrideVersion?.runnerId, overrideBody.job.runnerId);
+    assert.equal(overrideVersion?.model, overrideBody.job.model);
 
     assert.equal((await json(`${root}/nodes/node-page/agent/turns`, "POST", { message: "ok", unknown: true })).status, 400);
   } finally {

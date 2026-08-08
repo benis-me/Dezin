@@ -6,10 +6,12 @@ export function AgentMessageBody({
   role,
   content,
   className,
+  animate = false,
 }: {
   role: "user" | "assistant";
   content: string;
   className?: string;
+  animate?: boolean;
 }) {
   if (role === "user") {
     return (
@@ -17,7 +19,7 @@ export function AgentMessageBody({
         data-agent-message-body="user"
         data-message-kind="user"
         className={cn(
-          "dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground",
+          "agent-user-message dz-selectable max-w-[88%] text-foreground",
           className,
         )}
       >
@@ -30,9 +32,9 @@ export function AgentMessageBody({
     <div
       data-agent-message-body="assistant"
       data-message-kind="assistant"
-      className={cn("dz-selectable min-w-0 text-sm leading-relaxed text-foreground", className)}
+      className={cn("agent-assistant-message dz-selectable min-w-0 text-foreground", className)}
     >
-      <AgentOutputText text={content} />
+      <AgentOutputText text={content} animate={animate} />
     </div>
   );
 }

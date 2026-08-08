@@ -23,7 +23,10 @@ import {
   productionDesignAgentEnvironment,
   startDesignNodeTurn,
 } from "./design-node-agent.ts";
-import { DesignAgentProviderUnsupportedError } from "./design-agent-confinement.ts";
+import {
+  DesignAgentConfinementError,
+  DesignAgentProviderUnsupportedError,
+} from "./design-agent-confinement.ts";
 import {
   getDesignAssetManifest,
   getDesignCanvas,
@@ -36,7 +39,7 @@ import {
   mutateDesignCanvas,
   redoDesignCanvas,
   resolveDesignAssetFile,
-  resolveDesignVersionFile,
+  resolveDesignVersionPreview,
   resolvePinnedDesignAssetFile,
   storeDesignAsset,
   undoDesignCanvas,
@@ -104,17 +107,22 @@ function productionDesignRunner(input: {
   projectId: string;
   settings: Settings;
   agentCommand: string;
-  model?: string;
+  model: string | null;
   artifactOutput: boolean;
 }): AgentRunner {
   try {
     const confinement = { dataDir: input.deps.dataDir, projectId: input.projectId };
-    const override = { agentCommand: input.agentCommand, model: input.model };
+    // A null effective model is intentional (for example after switching away
+    // from the configured provider), so remove the settings fallback before
+    // constructing the confined runner.
+    const runnerSettings = input.model === null ? { ...input.settings, model: "" } : input.settings;
+    const override = { agentCommand: input.agentCommand, model: input.model ?? undefined };
     return input.artifactOutput
-      ? createProductionDesignNodeRunner(input.settings, confinement, override)
-      : createProductionDesignAnalysisRunner(input.settings, confinement, override);
+      ? createProductionDesignNodeRunner(runnerSettings, confinement, override)
+      : createProductionDesignAnalysisRunner(runnerSettings, confinement, override);
   } catch (error) {
-    if (error instanceof DesignAgentProviderUnsupportedError) {
+    if (error instanceof DesignAgentProviderUnsupportedError
+      || error instanceof DesignAgentConfinementError) {
       throw new HttpError(400, error.message);
     }
     throw error;
@@ -127,6 +135,27 @@ function boundedString(value: unknown, label: string, maximum: number, optional 
     throw new HttpError(400, `${label} is invalid`);
   }
   return value.trim();
+}
+
+/** Undefined inherits Settings; null explicitly requests the provider's default model. */
+function optionalDesignModel(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return boundedString(value, "model", 512);
+}
+
+function effectiveDesignAgent(
+  settings: Settings,
+  override: { agentCommand?: string; model?: string | null },
+): { agentCommand: string; model: string | null } {
+  const settingsAgentCommand = settings.agentCommand.trim() || "claude";
+  const agentCommand = (override.agentCommand ?? settingsAgentCommand).trim() || "claude";
+  const settingsModel = settings.model.trim();
+  return {
+    agentCommand,
+    model: override.model !== undefined
+      ? override.model
+      : (agentCommand === settingsAgentCommand ? settingsModel || null : null),
+  };
 }
 
 function superviseDesignExecution(
@@ -171,9 +200,15 @@ function activeDocument(mimeType: string): boolean {
 }
 
 function inlineAsset(mimeType: string): boolean {
-  return ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(mimeType)
+  return (mimeType.startsWith("image/") && mimeType !== "image/svg+xml")
     || mimeType.startsWith("video/") || mimeType.startsWith("audio/") || mimeType.startsWith("font/")
-    || ["application/font-woff", "application/font-woff2", "application/vnd.ms-fontobject"].includes(mimeType);
+    || (mimeType.startsWith("text/") && mimeType !== "text/html")
+    || [
+      "application/pdf",
+      "application/font-woff",
+      "application/font-woff2",
+      "application/vnd.ms-fontobject",
+    ].includes(mimeType);
 }
 
 function contentDisposition(name: string): string {
@@ -331,7 +366,7 @@ export async function handleImportDesignAssets(req: IncomingMessage, res: Server
     throw new HttpError(400, "Design Asset import is invalid");
   }
   const items = body.items.map((value, index) => {
-    const item = exactRecord(value, `Design Asset import item ${index}`, ["asset", "node"]);
+    const item = exactRecord(value, `Design Asset import item ${index}`, ["asset", "binding"]);
     const asset = exactRecord(item.asset, `Design Asset import item ${index}.asset`, [
       "name", "mimeType", "base64", "sourceVersion",
     ]);
@@ -351,16 +386,51 @@ export async function handleImportDesignAssets(req: IncomingMessage, res: Server
         versionId: boundedString(source.versionId, "Source Version id", 128)!,
       };
     }
-    const node = exactRecord(item.node, `Design Asset import item ${index}.node`, ["id", "kind", "name", "geometry"]);
-    let geometry: Partial<DesignNodeGeometry> | undefined;
-    if (node.geometry !== undefined) {
-      const raw = exactRecord(node.geometry, `Design Asset import item ${index}.node.geometry`, ["x", "y", "width", "height"]);
-      for (const [key, coordinate] of Object.entries(raw)) {
-        if (typeof coordinate !== "number" || !Number.isFinite(coordinate)) {
-          throw new HttpError(400, `Design Asset import item ${index}.node.geometry.${key} is invalid`);
-        }
+    const binding = exactRecord(item.binding, `Design Asset import item ${index}.binding`, ["type", "node", "nodeId"]);
+    const bindingType = boundedString(binding.type, `Design Asset import item ${index}.binding.type`, 32)!;
+    let parsedBinding;
+    if (bindingType === "create-node") {
+      if (binding.nodeId !== undefined) {
+        throw new HttpError(400, `Design Asset import item ${index}.binding.nodeId is only valid for append-version`);
       }
-      geometry = raw as Partial<DesignNodeGeometry>;
+      const node = exactRecord(
+        binding.node,
+        `Design Asset import item ${index}.binding.node`,
+        ["id", "kind", "name", "geometry"],
+      );
+      let geometry: Partial<DesignNodeGeometry> | undefined;
+      if (node.geometry !== undefined) {
+        const raw = exactRecord(
+          node.geometry,
+          `Design Asset import item ${index}.binding.node.geometry`,
+          ["x", "y", "width", "height"],
+        );
+        for (const [key, coordinate] of Object.entries(raw)) {
+          if (typeof coordinate !== "number" || !Number.isFinite(coordinate)) {
+            throw new HttpError(400, `Design Asset import item ${index}.binding.node.geometry.${key} is invalid`);
+          }
+        }
+        geometry = raw as Partial<DesignNodeGeometry>;
+      }
+      parsedBinding = {
+        type: "create-node" as const,
+        node: {
+          ...(node.id === undefined ? {} : { id: boundedString(node.id, "Node id", 128)! }),
+          kind: boundedString(node.kind, "Node kind", 64)! as DesignNodeKind,
+          ...(node.name === undefined ? {} : { name: boundedString(node.name, "Node name", 240)! }),
+          ...(geometry === undefined ? {} : { geometry }),
+        },
+      };
+    } else if (bindingType === "append-version") {
+      if (binding.node !== undefined) {
+        throw new HttpError(400, `Design Asset import item ${index}.binding.node is only valid for create-node`);
+      }
+      parsedBinding = {
+        type: "append-version" as const,
+        nodeId: boundedString(binding.nodeId, "Node id", 128)!,
+      };
+    } else {
+      throw new HttpError(400, `Design Asset import item ${index}.binding.type is unsupported`);
     }
     return {
       asset: {
@@ -372,12 +442,7 @@ export async function handleImportDesignAssets(req: IncomingMessage, res: Server
           base64: boundedString(asset.base64, "Asset base64", Math.ceil(MAX_DESIGN_ASSET_BYTES * 4 / 3) + 4)!,
         } : { sourceVersion: sourceVersion! }),
       },
-      node: {
-        ...(node.id === undefined ? {} : { id: boundedString(node.id, "Node id", 128)! }),
-        kind: boundedString(node.kind, "Node kind", 64)! as DesignNodeKind,
-        ...(node.name === undefined ? {} : { name: boundedString(node.name, "Node name", 240)! }),
-        ...(geometry === undefined ? {} : { geometry }),
-      },
+      binding: parsedBinding,
     };
   });
   sendJson(res, 200, await importDesignCanvasAssetBatch(d.dataDir, p.id!, {
@@ -412,7 +477,11 @@ export async function handleListDesignVersions(_req: IncomingMessage, res: Serve
 }
 
 export async function handleServeDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
-  const resolved = await resolveDesignVersionFile(d.dataDir, p.id!, p.nodeId!, p.versionId!, "index.html");
+  const resolved = await resolveDesignVersionPreview(d.dataDir, p.id!, p.nodeId!, p.versionId!);
+  if (resolved.kind === "asset") {
+    await sendAsset(req, res, { path: resolved.path, manifest: resolved.assetManifest });
+    return;
+  }
   const html = await readFile(resolved.path);
   if (html.length !== resolved.manifest.bytes
     || createHash("sha256").update(html).digest("hex") !== resolved.manifest.checksum) {
@@ -450,16 +519,18 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     throw new HttpError(400, "Node Agent context references a Node outside the canvas");
   }
   const settings = d.store.getSettings();
-  const agentCommand = (boundedString(body.agentCommand, "agentCommand", 512, true) ?? settings.agentCommand) || "claude";
-  const model = boundedString(body.model, "model", 512, true);
+  const execution = effectiveDesignAgent(settings, {
+    agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
+    model: optionalDesignModel(body.model),
+  });
   const idempotencyKey = boundedString(body.idempotencyKey, "idempotencyKey", 160, true);
   const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
   const runner = d.designRunner ?? productionDesignRunner({
     deps: d,
     projectId: p.id!,
     settings,
-    agentCommand,
-    model,
+    agentCommand: execution.agentCommand,
+    model: execution.model,
     artifactOutput: generative,
   });
   const systemPrompt = generative
@@ -474,8 +545,8 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     systemPrompt,
     contextNodeIds,
     idempotencyKey: idempotencyKey ?? null,
-    env: productionDesignAgentEnvironment(settings, agentCommand, d.security?.token),
-    model: model ?? null,
+    env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+    model: execution.model,
   });
   if (!started.reused) superviseDesignExecution(d, p.id!, started);
   sendJson(res, started.reused ? 200 : 202, { thread: started.thread, job: started.job, canvas: await getDesignCanvas(d.dataDir, p.id!) });
@@ -488,7 +559,7 @@ function designAgentTurnBody(
   message: string;
   contextNodeIds: string[];
   agentCommand?: string;
-  model?: string;
+  model?: string | null;
   idempotencyKey?: string;
 } {
   const message = boundedString(body.message, `${label} message`, 256 * 1024)!;
@@ -505,7 +576,7 @@ function designAgentTurnBody(
     message,
     contextNodeIds,
     agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
-    model: boundedString(body.model, "model", 512, true),
+    model: optionalDesignModel(body.model),
     idempotencyKey: boundedString(body.idempotencyKey, "idempotencyKey", 160, true),
   };
 }
@@ -520,21 +591,24 @@ export async function handleDesignMainTurn(
     "message", "context", "agentCommand", "model", "idempotencyKey",
   ]);
   const parsed = designAgentTurnBody(body, "Main Agent");
-  const canvas = await getDesignCanvas(d.dataDir, p.id!);
-  if (parsed.contextNodeIds.some((nodeId) => !canvas.nodeOrder.includes(nodeId))) {
-    throw new HttpError(400, "Main Agent context references a Node outside the canvas");
-  }
   const settings = d.store.getSettings();
-  const agentCommand = (parsed.agentCommand ?? settings.agentCommand) || "claude";
+  const execution = effectiveDesignAgent(settings, {
+    agentCommand: parsed.agentCommand,
+    model: parsed.model,
+  });
   const mainRunner = d.designRunner ?? productionDesignRunner({
     deps: d,
     projectId: p.id!,
     settings,
-    agentCommand,
-    model: parsed.model,
+    agentCommand: execution.agentCommand,
+    model: execution.model,
     artifactOutput: false,
   });
-  const dispatchNode = async (dispatch: DesignMainDispatch, parentJobId: string) => {
+  const dispatchNode = async (
+    dispatch: DesignMainDispatch,
+    parentJobId: string,
+    idempotencyKey?: string | null,
+  ) => {
     const canvas = await getDesignCanvas(d.dataDir, p.id!);
     const node = canvas.nodes.find((candidate) => candidate.id === dispatch.nodeId);
     if (!node) throw new HttpError(409, `Main Agent dispatch target ${dispatch.nodeId} no longer exists`);
@@ -543,8 +617,8 @@ export async function handleDesignMainTurn(
       deps: d,
       projectId: p.id!,
       settings,
-      agentCommand,
-      model: parsed.model,
+      agentCommand: execution.agentCommand,
+      model: execution.model,
       artifactOutput: generative,
     });
     const systemPrompt = generative
@@ -558,9 +632,10 @@ export async function handleDesignMainTurn(
       runner,
       systemPrompt,
       contextNodeIds: dispatch.contextNodeIds,
+      idempotencyKey: idempotencyKey ?? null,
       parentJobId,
-      env: productionDesignAgentEnvironment(settings, agentCommand, d.security?.token),
-      model: parsed.model ?? null,
+      env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+      model: execution.model,
     });
     if (!child.reused) superviseDesignExecution(d, p.id!, child);
     return child.job;
@@ -573,7 +648,8 @@ export async function handleDesignMainTurn(
     systemPrompt: buildDesignMainSystemPrompt(),
     contextNodeIds: parsed.contextNodeIds,
     idempotencyKey: parsed.idempotencyKey ?? null,
-    env: productionDesignAgentEnvironment(settings, agentCommand, d.security?.token),
+    env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+    model: execution.model,
     dispatchNode,
   });
   if (!started.reused) superviseDesignExecution(d, p.id!, started);
@@ -613,14 +689,16 @@ export async function handleStartDesignImplementationExport(
     throw new HttpError(409, `Wait for Node generation to finish before exporting: ${generating.map((node) => node.name).join(", ")}`);
   }
   const settings = d.store.getSettings();
-  const agentCommand = (boundedString(body.agentCommand, "agentCommand", 512, true) ?? settings.agentCommand) || "claude";
-  const model = boundedString(body.model, "model", 512, true);
+  const execution = effectiveDesignAgent(settings, {
+    agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
+    model: optionalDesignModel(body.model),
+  });
   const runner = d.designRunner ?? productionDesignRunner({
     deps: d,
     projectId: p.id!,
     settings,
-    agentCommand,
-    model,
+    agentCommand: execution.agentCommand,
+    model: execution.model,
     artifactOutput: true,
   });
   const started = await startDesignImplementationExport({
@@ -633,8 +711,8 @@ export async function handleStartDesignImplementationExport(
       settings,
       brief: "Reimplement every selected Canvas Version as one coherent production application.",
     }),
-    env: productionDesignAgentEnvironment(settings, agentCommand, d.security?.token),
-    model: model ?? null,
+    env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+    model: execution.model,
   });
   superviseDesignExecution(d, p.id!, started);
   sendJson(res, 202, { exportId: started.exportId, job: started.job });

@@ -5,6 +5,8 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  AgentExecutionIdentityError,
+  AgentTurnError,
   ClaudeCodeRunner,
   NodeSpawner,
   OUTPUT_TRUNCATION_MARKER,
@@ -32,13 +34,13 @@ class FakeSpawner implements ProcessSpawner {
 }
 
 const STREAM = [
-  `{"type":"system","subtype":"init","session_id":"s1"}`,
+  `{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-4-6","apiKeySource":"user","claude_code_version":"2.1.32"}`,
   `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Wrote the hero."}]}}`,
   `{"type":"result","subtype":"success","result":"done","is_error":false}`,
 ].join("\n");
 
 const ERROR_STREAM = [
-  `{"type":"system","subtype":"init","session_id":"s1"}`,
+  `{"type":"system","subtype":"init","session_id":"s1","model":"claude-sonnet-4-6","apiKeySource":"user","claude_code_version":"2.1.32"}`,
   `{"type":"result","subtype":"error_during_execution","result":"authentication expired","is_error":true}`,
 ].join("\n");
 
@@ -52,18 +54,31 @@ test("ClaudeCodeRunner assembles args/stdin, runs, and reads back the artifact",
     systemPrompt: "SYSTEM-PROMPT",
     message: "make me a hero",
     projectDir: dir,
+    timeoutMs: 12_345,
   });
 
   // reads back the written artifact
   assert.equal(result.artifactHtml, html);
   assert.equal(result.artifactPath, "index.html");
   assert.equal(result.text, "Wrote the hero.");
+  assert.deepEqual(result.executionIdentity, {
+    requested: { providerId: "claude-code", model: null },
+    observed: {
+      providerId: "claude-code",
+      model: "claude-sonnet-4-6",
+      command: "claude",
+      cliVersion: "2.1.32",
+      apiKeySource: "user",
+      protocol: "claude-stream-json-init-v1",
+    },
+  });
   // the file is actually on disk
   assert.equal(readFileSync(join(dir, "index.html"), "utf8"), html);
 
   // correct command/cwd
   assert.equal(spawner.last?.command, "claude");
   assert.equal(spawner.last?.cwd, dir);
+  assert.equal(spawner.last?.timeoutMs, 12_345);
   // flags present
   const args = spawner.last?.args ?? [];
   assert.ok(args.includes("--output-format") && args.includes("stream-json"));
@@ -103,6 +118,155 @@ test("model option adds --model", () => {
   const args = runner.buildArgs("SYS");
   const i = args.indexOf("--model");
   assert.ok(i >= 0 && args[i + 1] === "claude-opus-4-8");
+});
+
+test("ClaudeCodeRunner accepts Claude family aliases resolved to canonical runtime models", async () => {
+  for (const [alias, observed] of [
+    ["opus", "claude-opus-5"],
+    ["sonnet", "claude-sonnet-5"],
+    ["haiku", "claude-haiku-4-5"],
+  ] as const) {
+    const dir = mkdtempSync(join(tmpdir(), `dezin-claude-${alias}-alias-identity-`));
+    const runner = new ClaudeCodeRunner({
+      id: "claude",
+      command: "claude",
+      model: alias,
+      spawner: new FakeSpawner(
+        STREAM.replace("claude-sonnet-4-6", observed),
+        "<main>resolved alias</main>",
+      ),
+    });
+
+    const result = await runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir });
+
+    assert.equal(result.executionIdentity?.requested.model, alias);
+    assert.equal(result.executionIdentity?.observed.model, observed);
+  }
+});
+
+test("ClaudeCodeRunner still fails closed when a canonical Claude model resolves differently", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-canonical-identity-mismatch-"));
+  const runner = new ClaudeCodeRunner({
+    id: "claude",
+    command: "claude",
+    model: "claude-sonnet-4-6",
+    spawner: new FakeSpawner(
+      STREAM.replace("claude-sonnet-4-6", "claude-sonnet-5"),
+      "<main>must not publish</main>",
+    ),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => error instanceof AgentExecutionIdentityError
+      && error.requested.model === "claude-sonnet-4-6"
+      && error.observed?.model === "claude-sonnet-5",
+  );
+});
+
+test("ClaudeCodeRunner fails closed when system/init reports a different explicit model", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-identity-mismatch-"));
+  const stream = STREAM.replace("claude-sonnet-4-6", "claude-opus-4-8");
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    model: "hy3-ioa",
+    spawner: new FakeSpawner(stream, "<main>must not publish</main>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentExecutionIdentityError);
+      assert.deepEqual(error.requested, { providerId: "codebuddy", model: "hy3-ioa" });
+      assert.equal(error.observed?.providerId, "codebuddy");
+      assert.equal(error.observed?.model, "claude-opus-4-8");
+      return true;
+    },
+  );
+});
+
+test("ClaudeCodeRunner validates an explicit model before reporting the provider error result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-error-identity-mismatch-"));
+  const stream = ERROR_STREAM.replace("claude-sonnet-4-6", "claude-opus-4-8");
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    model: "hy3-ioa",
+    spawner: new FakeSpawner(stream, "<main>must not publish</main>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentExecutionIdentityError);
+      assert.match(error.message, /reported model.*claude-opus-4-8.*requested model.*hy3-ioa/i);
+      assert.deepEqual(error.requested, { providerId: "codebuddy", model: "hy3-ioa" });
+      assert.equal(error.observed?.providerId, "codebuddy");
+      assert.equal(error.observed?.model, "claude-opus-4-8");
+      return true;
+    },
+  );
+});
+
+test("ClaudeCodeRunner fails closed when a successful stream omits its system/init identity", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-missing-identity-"));
+  const stream = STREAM.split("\n").slice(1).join("\n");
+  const runner = new ClaudeCodeRunner({
+    spawner: new FakeSpawner(stream, "<main>must not publish</main>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => error instanceof AgentExecutionIdentityError
+      && error.observed === null
+      && /system\/init execution identity/i.test(error.message),
+  );
+});
+
+test("ClaudeCodeRunner accepts CodeBuddy re-announcing one execution identity after an unavailable tool", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-codebuddy-repeated-identity-"));
+  const lines = STREAM.split("\n");
+  const baseInit = {
+    ...JSON.parse(lines[0]!),
+    uuid: "s1",
+    model: "hy3-ioa",
+    _requestId: "request-1",
+  };
+  const stream = [
+    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:08.307Z" }),
+    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:13.048Z" }),
+    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:13.051Z" }),
+    `{"type":"assistant","message":{"role":"assistant","model":"hy3-ioa","content":[{"type":"text","text":"Tool Bash not found in agent cli."}]}}`,
+    ...lines.slice(1),
+  ].join("\n");
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    model: "hy3-ioa",
+    spawner: new FakeSpawner(stream, "<main>published safely</main>"),
+  });
+
+  const result = await runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir });
+  assert.equal(result.executionIdentity?.observed.model, "hy3-ioa");
+  assert.equal(result.artifactHtml, "<main>published safely</main>");
+});
+
+test("ClaudeCodeRunner fails closed when repeated system/init envelopes identify different executions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-ambiguous-identity-"));
+  const lines = STREAM.split("\n");
+  const secondInit = { ...JSON.parse(lines[0]!), session_id: "s2", uuid: "s2" };
+  const stream = [lines[0]!, JSON.stringify(secondInit), ...lines.slice(1)].join("\n");
+  const runner = new ClaudeCodeRunner({
+    spawner: new FakeSpawner(stream, "<main>must not publish</main>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => error instanceof AgentExecutionIdentityError
+      && error.observed === null
+      && /one consistent system\/init execution identity/i.test(error.message),
+  );
 });
 
 test("NodeSpawner uses the augmented agent environment", async () => {
@@ -358,7 +522,7 @@ test("NodeSpawner waits until an overflowing descendant process is gone", async 
   );
 });
 
-test("ClaudeCodeRunner rejects when the CLI exits nonzero", async () => {
+test("ClaudeCodeRunner preserves an attested execution identity when the CLI exits nonzero", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-exit-"));
   const spawner: ProcessSpawner = {
     run: async () => ({ stdout: STREAM, stderr: "authentication expired", exitCode: 1 }),
@@ -367,18 +531,76 @@ test("ClaudeCodeRunner rejects when the CLI exits nonzero", async () => {
 
   await assert.rejects(
     () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
-    /claude.*exit code 1.*authentication expired/i,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentTurnError);
+      assert.match(error.message, /claude.*exit code 1.*authentication expired/i);
+      assert.deepEqual(error.executionIdentity, {
+        requested: { providerId: "claude-code", model: null },
+        observed: {
+          providerId: "claude-code",
+          model: "claude-sonnet-4-6",
+          command: "claude",
+          cliVersion: "2.1.32",
+          apiKeySource: "user",
+          protocol: "claude-stream-json-init-v1",
+        },
+      });
+      return true;
+    },
   );
 });
 
-test("ClaudeCodeRunner rejects Claude stream-json error results", async () => {
+test("ClaudeCodeRunner validates an explicit model before reporting a nonzero exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-exit-identity-mismatch-"));
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    model: "hy3-ioa",
+    spawner: {
+      run: async () => ({
+        stdout: STREAM.replace("claude-sonnet-4-6", "claude-opus-4-8"),
+        stderr: "provider crashed",
+        exitCode: 1,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentExecutionIdentityError);
+      assert.match(error.message, /reported model.*claude-opus-4-8.*requested model.*hy3-ioa/i);
+      assert.deepEqual(error.requested, { providerId: "codebuddy", model: "hy3-ioa" });
+      assert.equal(error.observed?.providerId, "codebuddy");
+      assert.equal(error.observed?.model, "claude-opus-4-8");
+      return true;
+    },
+  );
+});
+
+test("ClaudeCodeRunner preserves the observed default model when the provider reports an error result", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-is-error-"));
   const spawner = new FakeSpawner(ERROR_STREAM, "<h1>old</h1>");
   const runner = new ClaudeCodeRunner({ spawner });
 
   await assert.rejects(
     () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
-    /claude.*error.*authentication expired/i,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentTurnError);
+      assert.match(error.message, /claude.*error.*authentication expired/i);
+      assert.deepEqual(error.executionIdentity, {
+        requested: { providerId: "claude-code", model: null },
+        observed: {
+          providerId: "claude-code",
+          model: "claude-sonnet-4-6",
+          command: "claude",
+          cliVersion: "2.1.32",
+          apiKeySource: "user",
+          protocol: "claude-stream-json-init-v1",
+        },
+      });
+      return true;
+    },
   );
 });
 
@@ -391,7 +613,28 @@ test("ClaudeCodeRunner rejects when the agent writes no artifact", async () => {
 
   await assert.rejects(
     () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
-    /artifact.*missing/i,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentTurnError);
+      assert.match(error.message, /artifact.*missing/i);
+      assert.equal(error.executionIdentity.observed.providerId, "claude-code");
+      assert.equal(error.executionIdentity.observed.model, "claude-sonnet-4-6");
+      return true;
+    },
+  );
+});
+
+test("ClaudeCodeRunner preserves the attested identity when artifact validation finds an empty file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-empty-artifact-"));
+  const runner = new ClaudeCodeRunner({ spawner: new FakeSpawner(STREAM, "   ") });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentTurnError);
+      assert.match(error.message, /artifact.*empty/i);
+      assert.equal(error.executionIdentity.observed.model, "claude-sonnet-4-6");
+      return true;
+    },
   );
 });
 
@@ -405,7 +648,12 @@ test("ClaudeCodeRunner rejects stale artifacts from a successful no-op turn", as
 
   await assert.rejects(
     () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
-    /artifact.*not updated/i,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentTurnError);
+      assert.match(error.message, /artifact.*not updated/i);
+      assert.equal(error.executionIdentity.observed.model, "claude-sonnet-4-6");
+      return true;
+    },
   );
 });
 

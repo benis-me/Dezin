@@ -31,6 +31,14 @@ export {
 } from "./dropdown-menu.tsx";
 export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "./tooltip.tsx";
 export {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "./context-menu.tsx";
+export {
   Select,
   SelectContent,
   SelectGroup,

@@ -15,7 +15,7 @@ test("parseClaudeLine surfaces live text + meaningful tool steps", () => {
 });
 
 const SAMPLE = [
-  `{"type":"system","subtype":"init","session_id":"sess-1","tools":["Write"]}`,
+  `{"type":"system","subtype":"init","session_id":"sess-1","tools":["Write"],"model":"claude-opus-4.8-1m","apiKeySource":"copilot.tencent.com","claude_code_version":"2.132.0"}`,
   `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Writing the hero. "},{"type":"tool_use","name":"Write","input":{"file_path":"index.html","content":"<h1>hi</h1>"}}]},"session_id":"sess-1"}`,
   `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}`,
   `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"session_id":"sess-1"}`,
@@ -31,6 +31,11 @@ test("parses assistant text, tool uses, result, session id", () => {
   assert.equal(p.result, "Wrote index.html.");
   assert.equal(p.isError, false);
   assert.equal(p.sessionId, "sess-1");
+  assert.deepEqual(p.init, {
+    model: "claude-opus-4.8-1m",
+    apiKeySource: "copilot.tencent.com",
+    cliVersion: "2.132.0",
+  });
 });
 
 test("falls back to result text when there is no assistant text", () => {

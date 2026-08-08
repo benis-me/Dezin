@@ -1,33 +1,39 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import type {
-  ProcessSpawner,
-  SpawnInput,
-  SpawnOutput,
+import {
+  getProvider,
+  type ProcessSpawner,
+  type SpawnInput,
+  type SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 import {
   DesignAgentProviderUnsupportedError,
   DesignConfinedSpawner,
+  designClaudeArgs,
+  designCodeBuddyArgs,
 } from "../src/design/design-agent-confinement.ts";
 import {
   createProductionDesignAnalysisRunner,
   createProductionDesignNodeRunner,
+  productionDesignAgentEnvironment,
 } from "../src/design/design-node-agent.ts";
 import {
   designExportStagingDirectory,
   designNodeJobStagingDirectory,
 } from "../src/design/design-storage.ts";
 
-const CLAUDE_STREAM = [
-  '{"type":"system","subtype":"init","session_id":"design-test"}',
+function claudeStream(model: string): string {
+  return [
+  `{"type":"system","subtype":"init","session_id":"design-test","model":${JSON.stringify(model)}}`,
   '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}',
   '{"type":"result","subtype":"success","result":"done","is_error":false}',
-].join("\n");
+  ].join("\n");
+}
 
 function settings(agentCommand: string, model = ""): Settings {
   return { agentCommand, model } as Settings;
@@ -49,7 +55,9 @@ class RecordingSpawner implements ProcessSpawner {
       await writeFile(join(input.cwd, "index.html"), "<!doctype html><html><body>confined</body></html>", "utf8");
     }
     return {
-      stdout: this.#structuredOutput ? CLAUDE_STREAM : "done",
+      stdout: this.#structuredOutput
+        ? claudeStream(input.args[input.args.indexOf("--model") + 1] || "runtime-default-model")
+        : "done",
       stderr: "",
       exitCode: 0,
     };
@@ -69,89 +77,183 @@ async function fixture(t: TestContext) {
   return { dataDir, projectId, nodeStaging, exportStaging };
 }
 
-test("Claude and CodeBuddy Design runners use the exact no-Bash confined policy and job cwd", async (t) => {
-  const f = await fixture(t);
+test("Design Agent production environment excludes daemon authority and unrelated secrets", () => {
+  const env = productionDesignAgentEnvironment({
+    ...settings("claude"),
+    apiKey: "anthropic-test-key",
+    apiBaseUrl: "https://provider.example.test",
+  }, "claude", "daemon-bearer-token");
 
-  for (const command of ["claude", "codebuddy"] as const) {
-    const staging = command === "claude"
-      ? f.nodeStaging
-      : designNodeJobStagingDirectory(f.dataDir, f.projectId, "node-test", "job-codebuddy");
-    await mkdir(staging, { recursive: true });
-    const spawner = new RecordingSpawner();
-    const runner = createProductionDesignNodeRunner(
-      settings(command, "design-model"),
-      { dataDir: f.dataDir, projectId: f.projectId, spawner },
-    );
-
-    const result = await runner.runTurn({
-      systemPrompt: "confined system",
-      message: "create the node",
-      projectDir: staging,
-      env: { DEZIN_TEST_LOCAL_AUTH: "preserved" },
-    });
-
-    assert.equal(result.artifactPath, "index.html");
-    assert.equal(spawner.calls.length, 1);
-    const call = spawner.calls[0]!;
-    assert.equal(call.command, command);
-    assert.equal(call.cwd, await realpath(staging));
-    assert.equal(call.env?.DEZIN_TEST_LOCAL_AUTH, "preserved");
-    assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
-    assert.equal(call.args[call.args.indexOf("--tools") + 1], "Read,Write,Edit,Glob,Grep");
-    assert.equal(call.args[call.args.indexOf("--append-system-prompt") + 1], "confined system");
-    assert.equal(call.args[call.args.indexOf("--model") + 1], "design-model");
-    assert.equal(call.args.includes("bypassPermissions"), false);
-    assert.equal(call.args.includes("danger-full-access"), false);
-    assert.equal(call.args.some((argument) => /^(Bash|Web|Task|Agent)$/i.test(argument)), false);
-    assert.match(call.stdin, /create the node/);
-    assert.equal(call.args.includes("--strict-mcp-config"), true);
-    assert.equal(call.args[call.args.indexOf("--mcp-config") + 1], '{"mcpServers":{}}');
-
-    if (command === "claude") {
-      assert.equal(call.args.includes("--safe-mode"), true);
-      assert.equal(call.args.includes("--no-chrome"), true);
-      assert.equal(call.args.includes("--disable-slash-commands"), true);
-    } else {
-      assert.equal(call.args[call.args.indexOf("--setting-sources") + 1], "");
-    }
-    assert.equal(call.args.includes("--no-session-persistence"), true);
-  }
+  assert.equal(env.DEZIN_DAEMON_TOKEN, undefined);
+  assert.deepEqual(env, {
+    ANTHROPIC_API_KEY: "anthropic-test-key",
+    ANTHROPIC_BASE_URL: "https://provider.example.test",
+  });
 });
 
-test("Codex Design runner uses workspace-write, stdin, and the exact Export staging cwd", async (t) => {
+test("the real Design process receives only the confined environment", async (t) => {
   const f = await fixture(t);
-  const spawner = new RecordingSpawner({ structuredOutput: false });
-  const runner = createProductionDesignNodeRunner(
-    settings("codex", "gpt-design"),
-    { dataDir: f.dataDir, projectId: f.projectId, spawner },
-  );
+  const binDir = await mkdtemp(join(tmpdir(), "dezin-design-env-bin-"));
+  t.after(() => rm(binDir, { recursive: true, force: true }));
+  const executable = join(binDir, ".local", "bin", "claude");
+  await mkdir(join(binDir, ".local", "bin"), { recursive: true });
+  await writeFile(executable, `#!/bin/sh
+printf '%s|%s\n' "\${DEZIN_TEST_DAEMON_SECRET-unset}" "\${DEZIN_DAEMON_TOKEN-unset}"
+`, "utf8");
+  await chmod(executable, 0o755);
 
-  await runner.runTurn({
-    systemPrompt: "confined export system",
-    message: "build the export",
-    projectDir: f.exportStaging,
+  const priorSecret = process.env.DEZIN_TEST_DAEMON_SECRET;
+  const priorToken = process.env.DEZIN_DAEMON_TOKEN;
+  process.env.DEZIN_TEST_DAEMON_SECRET = "ambient-secret";
+  process.env.DEZIN_DAEMON_TOKEN = "ambient-daemon-token";
+  t.after(() => {
+    if (priorSecret === undefined) delete process.env.DEZIN_TEST_DAEMON_SECRET;
+    else process.env.DEZIN_TEST_DAEMON_SECRET = priorSecret;
+    if (priorToken === undefined) delete process.env.DEZIN_DAEMON_TOKEN;
+    else process.env.DEZIN_DAEMON_TOKEN = priorToken;
   });
 
+  const output = await new DesignConfinedSpawner({
+    dataDir: f.dataDir,
+    projectId: f.projectId,
+    provider: "claude",
+    command: "claude",
+    runtimeEnvironment: { HOME: binDir, TMPDIR: tmpdir(), LANG: "C" },
+  }).run({
+    command: "claude",
+    args: designClaudeArgs(undefined, "system"),
+    cwd: f.nodeStaging,
+    stdin: "prompt",
+    env: {
+      PATH: "/tmp/agent-controlled-path-must-be-ignored",
+      DEZIN_DAEMON_TOKEN: "explicit-daemon-token",
+      DEZIN_TEST_DAEMON_SECRET: "explicit-secret",
+      NODE_OPTIONS: "--require=/tmp/escape.cjs",
+    },
+  });
+
+  assert.equal(output.exitCode, 0, output.stderr ?? "");
+  assert.equal(output.stdout.trim(), "unset|unset");
+});
+
+test("Claude Design runners use the exact no-Bash confined policy and job cwd", async (t) => {
+  const f = await fixture(t);
+  const spawner = new RecordingSpawner();
+  const runner = createProductionDesignNodeRunner(
+    settings("claude", "design-model"),
+    { dataDir: f.dataDir, projectId: f.projectId, spawner },
+  );
+  assert.equal(runner.id, "claude");
+
+  const result = await runner.runTurn({
+    systemPrompt: "confined system",
+    message: "create the node",
+    projectDir: f.nodeStaging,
+    env: { PATH: process.env.PATH, DEZIN_TEST_LOCAL_AUTH: "must-be-removed" },
+  });
+
+  assert.equal(result.artifactPath, "index.html");
   assert.equal(spawner.calls.length, 1);
   const call = spawner.calls[0]!;
-  assert.equal(call.command, "codex");
-  assert.equal(call.cwd, await realpath(f.exportStaging));
-  assert.deepEqual(call.args, [
-    "exec",
-    "--skip-git-repo-check",
-    "--sandbox",
-    "workspace-write",
-    "--ephemeral",
-    "--ignore-user-config",
-    "--ignore-rules",
-    "-m",
-    "gpt-design",
-    "-",
-  ]);
-  assert.equal(call.args.includes("danger-full-access"), false);
+  assert.equal(call.command, "claude");
+  assert.equal(call.cwd, await realpath(f.nodeStaging));
+  assert.equal(call.env?.DEZIN_TEST_LOCAL_AUTH, undefined);
+  assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(call.args[call.args.indexOf("--tools") + 1], "Read,Write,Edit,Glob,Grep");
+  assert.equal(call.args[call.args.indexOf("--append-system-prompt") + 1], "confined system");
+  assert.equal(call.args[call.args.indexOf("--model") + 1], "design-model");
   assert.equal(call.args.includes("bypassPermissions"), false);
-  assert.match(call.stdin, /confined export system/);
-  assert.match(call.stdin, /build the export/);
+  assert.equal(call.args.includes("danger-full-access"), false);
+  assert.equal(call.args.some((argument) => /^(Bash|Web|Task|Agent)$/i.test(argument)), false);
+  assert.match(call.stdin, /create the node/);
+  assert.equal(call.args.includes("--safe-mode"), true);
+  assert.equal(call.args.includes("--strict-mcp-config"), true);
+  assert.equal(call.args[call.args.indexOf("--mcp-config") + 1], '{"mcpServers":{}}');
+  assert.equal(call.args.includes("--no-chrome"), true);
+  assert.equal(call.args.includes("--disable-slash-commands"), true);
+  assert.equal(call.args.includes("--no-session-persistence"), true);
+});
+
+test("Design confinement fails closed on Windows before shell metacharacters reach a delegate", async (t) => {
+  const f = await fixture(t);
+  const attack = "& powershell -NoProfile -Command Write-Output escaped & rem";
+  const delegate = new RecordingSpawner();
+  const spawner = new DesignConfinedSpawner({
+    dataDir: f.dataDir,
+    projectId: f.projectId,
+    provider: "claude",
+    command: "claude",
+    delegate,
+    platform: "win32",
+  });
+  await assert.rejects(
+    spawner.run({
+      command: "claude",
+      args: designClaudeArgs(undefined, attack),
+      cwd: f.nodeStaging,
+      stdin: attack,
+    }),
+    /Windows.*not.*verified|not.*available.*Windows/i,
+  );
+  assert.equal(delegate.calls.length, 0);
+});
+
+test("CodeBuddy Design runners use their verified no-Bash policy and exact job cwd", async (t) => {
+  const f = await fixture(t);
+  const spawner = new RecordingSpawner();
+  const runner = createProductionDesignNodeRunner(
+    settings("codebuddy", "design-model"),
+    { dataDir: f.dataDir, projectId: f.projectId, spawner },
+  );
+  assert.equal(runner.id, "codebuddy");
+
+  const result = await runner.runTurn({
+    systemPrompt: "confined system",
+    message: "create the node",
+    projectDir: f.nodeStaging,
+    env: { DEZIN_TEST_LOCAL_AUTH: "must-be-removed" },
+  });
+
+  assert.equal(result.artifactPath, "index.html");
+  assert.equal(spawner.calls.length, 1);
+  const call = spawner.calls[0]!;
+  assert.equal(call.command, "codebuddy");
+  assert.equal(call.cwd, await realpath(f.nodeStaging));
+  assert.equal(call.env?.DEZIN_TEST_LOCAL_AUTH, undefined);
+  assert.deepEqual(call.args, designCodeBuddyArgs("design-model", "confined system"));
+  assert.equal(call.args[call.args.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.equal(call.args[call.args.indexOf("--tools") + 1], "Read,Write,Edit,Glob,Grep");
+  assert.equal(call.args[call.args.indexOf("--setting-sources") + 1], "");
+  const confinedSettings = JSON.parse(call.args[call.args.indexOf("--settings") + 1]!);
+  assert.equal(confinedSettings.disableAllHooks, true);
+  assert.equal(confinedSettings.memory.autoMemoryEnabled, false);
+  assert.equal(confinedSettings.permissions.disableBypassPermissionsMode, "disable");
+  assert.equal(call.args.includes("bypassPermissions"), false);
+  assert.equal(call.args.some((argument) => /^(Bash|Web|Task|Agent)$/i.test(argument)), false);
+});
+
+test("Agents without verified project-only confinement fail closed with provider-neutral guidance", async (t) => {
+  const f = await fixture(t);
+  const delegate = new RecordingSpawner();
+  assert.equal(getProvider("codex")?.id, "codex");
+  assert.throws(
+    () => createProductionDesignNodeRunner(
+      settings("codex", "gpt-design"),
+      { dataDir: f.dataDir, projectId: f.projectId, spawner: delegate },
+    ),
+    /selected Agent.*verified project-only confinement/i,
+  );
+  assert.throws(
+    () => new DesignConfinedSpawner({
+      dataDir: f.dataDir,
+      projectId: f.projectId,
+      provider: "codex",
+      command: "codex",
+      delegate,
+    }),
+    /selected Agent.*verified project-only confinement/i,
+  );
+  assert.equal(delegate.calls.length, 0);
 });
 
 test("Main Agent analysis uses the same confined policy without requiring an artifact mutation", async (t) => {
@@ -183,7 +285,7 @@ test("Design runners fail closed for every provider without a verified confineme
       { dataDir: "/tmp/design-test", projectId: "project-test" },
     ),
     (error) => error instanceof DesignAgentProviderUnsupportedError
-      && /no verified Design sandbox/i.test(error.message),
+      && /does not expose a verified Design execution contract/i.test(error.message),
   );
   assert.throws(
     () => createProductionDesignAnalysisRunner(
@@ -198,7 +300,7 @@ test("Design runners fail closed for every provider without a verified confineme
       { dataDir: "/tmp/design-test", projectId: "project-test" },
     ),
     (error) => error instanceof DesignAgentProviderUnsupportedError
-      && /exact confined commands/i.test(error.message),
+      && /does not expose a verified Design execution contract/i.test(error.message),
   );
 });
 
@@ -223,6 +325,7 @@ test("the last-mile spawner rejects unsafe argv drift before the delegated proce
     /arguments do not match the confined policy/i,
   );
   assert.equal(delegate.calls.length, 0);
+
 });
 
 test("a Design runner cannot use another Project's otherwise valid pending directory", async (t) => {

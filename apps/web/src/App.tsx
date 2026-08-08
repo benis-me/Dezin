@@ -5,7 +5,7 @@ import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
-import type { ApiClient, DesignCanvasAssetImportItem, Project } from "./lib/api.ts";
+import type { ApiClient, DesignCanvasAssetImportItem, Project, Settings } from "./lib/api.ts";
 import { type DesignProjectAttachments } from "./lib/design-attachments.ts";
 import {
   discardPendingDesignCanvasIntent,
@@ -35,16 +35,32 @@ const MoodboardScreen = lazy(() =>
   import("./screens/MoodboardScreen.tsx").then((module) => ({ default: module.MoodboardScreen })),
 );
 
-function DesignProjectScreen({ projectId, api }: { projectId: string; api: ApiClient }) {
+function DesignProjectScreen({
+  projectId,
+  api,
+  onOpenSettings,
+}: {
+  projectId: string;
+  api: ApiClient;
+  onOpenSettings: (section?: string) => void;
+}) {
   const [project, setProject] = useState<Project | null>(null);
+  const [agentDefaults, setAgentDefaults] = useState<Pick<Settings, "agentCommand" | "model"> | null>(null);
   const canvasApi = useMemo(() => createDesignCanvasApi(api), [api]);
   const { agents, rescan: rescanAgents } = useAgents();
 
   useEffect(() => {
     let active = true;
-    void api.getProject(projectId).then((next) => {
-      if (active) setProject(next);
-    }).catch(() => {});
+    void Promise.allSettled([api.getProject(projectId), api.getSettings()]).then(([projectResult, settingsResult]) => {
+      if (!active) return;
+      if (projectResult.status === "fulfilled") setProject(projectResult.value);
+      if (settingsResult.status === "fulfilled") {
+        setAgentDefaults({
+          agentCommand: settingsResult.value.agentCommand,
+          model: settingsResult.value.model,
+        });
+      }
+    });
     return () => {
       active = false;
     };
@@ -59,6 +75,12 @@ function DesignProjectScreen({ projectId, api }: { projectId: string; api: ApiCl
       : undefined,
   }), [project?.projectPath]);
 
+  const renameProject = useCallback(async (name: string) => {
+    const updated = await api.patchProject(projectId, { name });
+    setProject(updated);
+    window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated }));
+  }, [api, projectId]);
+
   return (
     <DesignCanvasScreen
       key={projectId}
@@ -66,8 +88,12 @@ function DesignProjectScreen({ projectId, api }: { projectId: string; api: ApiCl
       projectName={project?.name ?? "Untitled"}
       api={canvasApi}
       agents={agents}
+      initialAgentCommand={agentDefaults?.agentCommand}
+      initialModel={agentDefaults?.model}
       onRescanAgents={rescanAgents}
       onBackHome={() => navigate("/")}
+      onRenameProject={renameProject}
+      onOpenSettings={onOpenSettings}
       projectPath={project?.projectPath}
       onRevealExport={revealExport}
     />
@@ -95,11 +121,14 @@ export function designCanvasAttachmentItems(
         mimeType: image.mimeType ?? (image.base64.startsWith("iVBOR") ? "image/png" : "image/jpeg"),
         base64: image.base64,
       },
-      node: {
-        id: `node-home-image-${index + 1}`,
-        kind: "image",
-        name: title,
-        geometry: { x: 100 + index * 390, y: 100, width: 360, height: 260 },
+      binding: {
+        type: "create-node",
+        node: {
+          id: `node-home-image-${index + 1}`,
+          kind: "image",
+          name: title,
+          geometry: { x: 100 + index * 390, y: 100, width: 360, height: 260 },
+        },
       },
     });
   }
@@ -117,22 +146,28 @@ export function designCanvasAttachmentItems(
             versionId: ref.projectReference.sourceVersionId,
           },
         },
-        node: {
-          id: `node-home-reference-${index + 1}`,
-          kind: "document",
-          name: title,
-          geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+        binding: {
+          type: "create-node",
+          node: {
+            id: `node-home-reference-${index + 1}`,
+            kind: "document",
+            name: title,
+            geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+          },
         },
       });
       continue;
     }
     items.push({
       asset: { name: `${title}.html`, mimeType: "text/html", base64: ref.base64 },
-      node: {
-        id: `node-home-reference-${index + 1}`,
-        kind: "document",
-        name: title,
-        geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+      binding: {
+        type: "create-node",
+        node: {
+          id: `node-home-reference-${index + 1}`,
+          kind: "document",
+          name: title,
+          geometry: { x: 100 + (itemIndex % 3) * 390, y: 100 + Math.floor(itemIndex / 3) * 320, width: 360, height: 260 },
+        },
       },
     });
   }
@@ -145,7 +180,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   switch (route.name) {
     case "project":
     case "project-canvas":
-      return <DesignProjectScreen key={route.id} projectId={route.id} api={api} />;
+      return <DesignProjectScreen key={route.id} projectId={route.id} api={api} onOpenSettings={onOpenSettings} />;
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":

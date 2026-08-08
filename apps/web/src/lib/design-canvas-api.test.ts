@@ -38,6 +38,8 @@ function designJob(overrides: Partial<DesignJob> = {}): DesignJob {
   return {
     id: "job-1",
     kind: "node-generation",
+    runnerId: "fixture",
+    model: null,
     status: "queued",
     nodeId: null,
     parentJobId: null,
@@ -74,7 +76,10 @@ test("local files cross the network once as an atomic Asset and material-Node ba
     "GET",
     "POST",
   ]);
-  const request = jsonBody<{ expectedRevision: number; items: Array<{ asset: unknown; node: { id: string } }> }>(
+  const request = jsonBody<{
+    expectedRevision: number;
+    items: Array<{ asset: unknown; binding: { type: "create-node"; node: { id: string } } }>;
+  }>(
     fetchImpl.mock.calls[1]![1],
   );
   expect(request).toEqual({
@@ -82,24 +87,61 @@ test("local files cross the network once as an atomic Asset and material-Node ba
     items: [
       {
         asset: { name: "hero.png", mimeType: "image/png", base64: "AQID" },
-        node: {
-          id: expect.stringMatching(/^node-/),
-          kind: "image",
-          name: "hero.png",
-          geometry: { x: 100, y: 200, width: 360, height: 260 },
+        binding: {
+          type: "create-node",
+          node: {
+            id: expect.stringMatching(/^node-/),
+            kind: "image",
+            name: "hero.png",
+            geometry: { x: 100, y: 200, width: 360, height: 260 },
+          },
         },
       },
       {
         asset: { name: "demo.mp4", mimeType: "video/mp4", base64: "BAU=" },
-        node: {
-          id: expect.stringMatching(/^node-/),
-          kind: "video",
-          name: "demo.mp4",
-          geometry: { x: 128, y: 228, width: 440, height: 280 },
+        binding: {
+          type: "create-node",
+          node: {
+            id: expect.stringMatching(/^node-/),
+            kind: "video",
+            name: "demo.mp4",
+            geometry: { x: 128, y: 228, width: 440, height: 280 },
+          },
         },
       },
     ],
   });
+});
+
+test("image imports infer a missing MIME type and preserve portrait proportions in the Node frame", async () => {
+  const importUrl = "http://d/api/projects/project%20%2F1/design-canvas/assets/import";
+  const canvasUrl = "http://d/api/projects/project%20%2F1/design-canvas";
+  const close = vi.fn();
+  vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 1728, height: 2304, close })));
+  const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+    const url = String(input);
+    const method = requestMethod(init);
+    if (url === canvasUrl && method === "GET") return jsonResponse(emptyCanvas(2));
+    if (url === importUrl && method === "POST") return jsonResponse(emptyCanvas(3));
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  try {
+    const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "" }));
+    await api.importLocalFiles("project /1", [new File([new Uint8Array([1, 2, 3])], "portrait.webp")], { x: 40, y: 60 });
+
+    const request = jsonBody<{
+      items: Array<{ asset: { mimeType: string }; binding: { node: { geometry: unknown } } }>;
+    }>(fetchImpl.mock.calls[1]![1]);
+    expect(request.items[0]).toEqual(expect.objectContaining({
+      asset: expect.objectContaining({ mimeType: "image/webp" }),
+      binding: expect.objectContaining({
+        node: expect.objectContaining({ geometry: { x: 40, y: 60, width: 280, height: 360 } }),
+      }),
+    }));
+    expect(close).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test("an atomic local import retries only the conflicting batch with stable Node identity", async () => {
@@ -140,8 +182,33 @@ test("an atomic local import retries only the conflicting batch with stable Node
   expect(importBodies).toHaveLength(2);
   expect(importBodies[0]).toEqual(expect.objectContaining({ expectedRevision: 7 }));
   expect(importBodies[1]).toEqual(expect.objectContaining({ expectedRevision: 8 }));
-  expect((importBodies[0] as { items: Array<{ node: { id: string } }> }).items[0]!.node.id)
-    .toBe((importBodies[1] as { items: Array<{ node: { id: string } }> }).items[0]!.node.id);
+  expect((importBodies[0] as { items: Array<{ binding: { node: { id: string } } }> }).items[0]!.binding.node.id)
+    .toBe((importBodies[1] as { items: Array<{ binding: { node: { id: string } } }> }).items[0]!.binding.node.id);
+});
+
+test("adding a material revision imports one file against the latest Canvas head without creating another Node", async () => {
+  const importUrl = "http://d/api/projects/project%20%2F1/design-canvas/assets/import";
+  const canvasUrl = "http://d/api/projects/project%20%2F1/design-canvas";
+  const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+    const url = String(input);
+    const method = requestMethod(init);
+    if (url === canvasUrl && method === "GET") return jsonResponse(emptyCanvas(8));
+    if (url === importUrl && method === "POST") return jsonResponse(emptyCanvas(9));
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "" }));
+  const replacement = new File([new Uint8Array([9, 8, 7])], "hero-final.png", { type: "image/png" });
+
+  await expect(api.appendMaterialVersion("project /1", "image /1", replacement))
+    .resolves.toEqual(emptyCanvas(9));
+
+  expect(jsonBody(fetchImpl.mock.calls[1]![1])).toEqual({
+    expectedRevision: 8,
+    items: [{
+      asset: { name: "hero-final.png", mimeType: "image/png", base64: "CQgH" },
+      binding: { type: "append-version", nodeId: "image /1" },
+    }],
+  });
 });
 
 test("local import rejects oversized browser-held files before reading or sending them", async () => {
@@ -167,8 +234,8 @@ test("a resumed project-version import recognizes its deterministic Node and doe
     const method = requestMethod(init);
     if (url === canvasUrl && method === "GET") return jsonResponse(resumed ?? emptyCanvas(3));
     if (url === importUrl && method === "POST") {
-      const request = jsonBody<{ items: Array<{ node: { id: string; kind: "document"; name: string; geometry: DesignCanvas["nodes"][number]["geometry"] } }> }>(init);
-      const imported = request.items[0]!.node;
+      const request = jsonBody<{ items: Array<{ binding: { type: "create-node"; node: { id: string; kind: "document"; name: string; geometry: DesignCanvas["nodes"][number]["geometry"] } } }> }>(init);
+      const imported = request.items[0]!.binding.node;
       resumed = emptyCanvas(4);
       resumed.nodeOrder = [imported.id];
       resumed.nodes = [{
@@ -243,11 +310,14 @@ test("a project version becomes an isolated UTF-8 descriptor and one document no
           versionId: "source-version",
         },
       },
-      node: {
-        id: expect.stringMatching(/^node-context-version-[a-f0-9]{16}$/),
-        kind: "document",
-        name: "结账 Café",
-        geometry: { x: 64, y: 96, width: 320, height: 190 },
+      binding: {
+        type: "create-node",
+        node: {
+          id: expect.stringMatching(/^node-context-version-[a-f0-9]{16}$/),
+          kind: "document",
+          name: "结账 Café",
+          geometry: { x: 64, y: 96, width: 320, height: 190 },
+        },
       },
     }],
   });
@@ -287,6 +357,35 @@ test("Agent turns map prompt and selection onto the exact node-scoped wire contr
   });
 });
 
+test("Agent turns preserve an explicit provider-default model on the wire", async () => {
+  const result = {
+    thread: {
+      id: "thread-1",
+      scope: { type: "main" as const },
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    job: designJob({ nodeId: null, kind: "main-agent" }),
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(result, 202));
+  const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "" }));
+
+  await api.submitAgentTurn("project-1", { type: "main" }, {
+    prompt: "Use the provider default",
+    context: { nodeIds: [] },
+    agentCommand: "codebuddy",
+    model: null,
+  });
+
+  expect(jsonBody(fetchImpl.mock.calls[0]![1])).toEqual({
+    message: "Use the provider default",
+    context: { nodeIds: [] },
+    agentCommand: "codebuddy",
+    model: null,
+  });
+});
+
 test("exact preview identities and implementation export revisions are never replaced by latest state", async () => {
   const exportResult = {
     exportId: "export-42",
@@ -306,11 +405,18 @@ test("exact preview identities and implementation export revisions are never rep
   });
   expect(fetchImpl).not.toHaveBeenCalled();
 
-  await expect(api.startImplementationExport("project /1", 42)).resolves.toEqual(exportResult);
+  await expect(api.startImplementationExport("project /1", 42, {
+    agentCommand: "claude",
+    model: "sonnet",
+  })).resolves.toEqual(exportResult);
   expect(fetchImpl).toHaveBeenCalledTimes(1);
   expect(fetchImpl.mock.calls[0]![0]).toBe(
     "http://d/api/projects/project%20%2F1/design-canvas/exports",
   );
   expect(requestMethod(fetchImpl.mock.calls[0]![1])).toBe("POST");
-  expect(jsonBody(fetchImpl.mock.calls[0]![1])).toEqual({ canvasRevision: 42 });
+  expect(jsonBody(fetchImpl.mock.calls[0]![1])).toEqual({
+    canvasRevision: 42,
+    agentCommand: "claude",
+    model: "sonnet",
+  });
 });

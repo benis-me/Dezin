@@ -14,6 +14,7 @@ import type {
   DesignExportManifest,
   DesignFrozenContext,
 } from "./design-types.ts";
+import { DESIGN_EXPORT_CONTENT_SECURITY_POLICY } from "./design-export-policy.ts";
 
 export const DESIGN_EXPORT_VISUAL_THRESHOLDS = Object.freeze({
   meanAbsoluteError: 0.04,
@@ -57,19 +58,7 @@ const DESIGN_EXPORT_CHROME_PATHS = [
   "/usr/bin/chromium-browser",
   "/usr/bin/chromium",
 ];
-const OUTPUT_CSP = [
-  "default-src 'self'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "media-src 'self' data: blob:",
-  "font-src 'self' data: blob:",
-  "connect-src 'self'",
-  "frame-src 'none'",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join("; ");
+const OUTPUT_CSP = DESIGN_EXPORT_CONTENT_SECURITY_POLICY;
 
 export interface DesignExportVisualCaptureInput {
   sourceUrl: string;
@@ -97,6 +86,12 @@ export interface DesignExportVisualCaptureSession {
 export interface DesignExportVisualGateInput {
   stagingDir: string;
   exportId: string;
+  execution: {
+    jobId: string;
+    providerId: string;
+    model: string | null;
+  };
+  sources: DesignExportManifest["nodes"];
   sourcePreviewOrigin: string;
   context: DesignFrozenContext;
   signal: AbortSignal;
@@ -310,13 +305,42 @@ export async function runDesignExportVisualGate(
   const generativeNodes = input.context.nodes.filter((node) => node.selectedVersionId !== null
     && node.selectedVersionChecksum !== null
     && ["component", "page", "design-system", "research", "design-tokens", "design-document", "layout", "knowledge"].includes(node.kind));
-  const caseCount = generativeNodes.length * DESIGN_EXPORT_VISUAL_VIEWPORTS.length;
+  const caseCount = (generativeNodes.length + 1) * DESIGN_EXPORT_VISUAL_VIEWPORTS.length;
   if (generativeNodes.length === 0 || caseCount > MAX_VISUAL_CASES) {
-    throw new DesignExportVisualGateError(`Visual gate requires 1-${MAX_VISUAL_CASES / DESIGN_EXPORT_VISUAL_VIEWPORTS.length} selected generative Nodes`);
+    throw new DesignExportVisualGateError(`Visual gate requires 1-${(MAX_VISUAL_CASES / DESIGN_EXPORT_VISUAL_VIEWPORTS.length) - 1} selected generative Nodes`);
   }
   const unsafeNode = generativeNodes.find((node) => !SAFE_EVIDENCE_SEGMENT.test(node.id)
     || !SAFE_EVIDENCE_SEGMENT.test(node.selectedVersionId!));
   if (unsafeNode) throw new DesignExportVisualGateError(`Visual gate received an unsafe Node or Version identity: ${unsafeNode.id}`);
+  if (!SAFE_EVIDENCE_SEGMENT.test(input.execution.jobId)
+    || !SAFE_EVIDENCE_SEGMENT.test(input.execution.providerId)
+    || Buffer.byteLength(input.execution.providerId, "utf8") > 512
+    || !(input.execution.model === null || (typeof input.execution.model === "string"
+      && input.execution.model.trim() === input.execution.model && input.execution.model.length > 0
+      && Buffer.byteLength(input.execution.model, "utf8") <= 512))) {
+    throw new DesignExportVisualGateError("Visual gate received an invalid Export execution identity");
+  }
+  const sourceByNodeId = new Map(input.sources.map((source) => [source.nodeId, source]));
+  if (sourceByNodeId.size !== input.sources.length || input.sources.length !== generativeNodes.length) {
+    throw new DesignExportVisualGateError("Visual gate source Version provenance does not match the frozen Canvas");
+  }
+  for (const node of generativeNodes) {
+    const source = sourceByNodeId.get(node.id);
+    if (!source || source.nodeKind !== node.kind || source.versionId !== node.selectedVersionId
+      || source.checksum !== node.selectedVersionChecksum
+      || source.sourceJobId !== node.selectedVersionJobId
+      || source.sourceProviderId !== node.selectedVersionRunnerId
+      || source.sourceModel !== node.selectedVersionModel
+      || (source.sourceJobId !== null && !SAFE_EVIDENCE_SEGMENT.test(source.sourceJobId))
+      || (source.sourceProviderId !== null && (!source.sourceProviderId.trim()
+        || source.sourceProviderId.trim() !== source.sourceProviderId
+        || Buffer.byteLength(source.sourceProviderId, "utf8") > 512))
+      || (source.sourceModel !== null && (!source.sourceModel.trim()
+        || source.sourceModel.trim() !== source.sourceModel
+        || Buffer.byteLength(source.sourceModel, "utf8") > 512))) {
+      throw new DesignExportVisualGateError(`Visual gate source Version provenance is invalid for ${node.id}`);
+    }
+  }
 
   const validationRoot = join(input.stagingDir, "validation", "visual");
   await rm(validationRoot, { recursive: true, force: true });
@@ -331,8 +355,66 @@ export async function runDesignExportVisualGate(
         signal: input.signal,
       });
       const cases: Array<Record<string, unknown>> = [];
+      const rootChecks: Array<Record<string, unknown>> = [];
       let evidenceBytes = 0;
+      const rootReference = generativeNodes[0]!;
+      for (const viewport of DESIGN_EXPORT_VISUAL_VIEWPORTS) {
+        input.signal.throwIfAborted();
+        const sourceUrl = `${sourcePreviewOrigin}/api/projects/${encodeURIComponent(input.context.projectId)}/design-canvas/nodes/${encodeURIComponent(rootReference.id)}/versions/${encodeURIComponent(rootReference.selectedVersionId!)}/preview/`;
+        let captured: DesignExportVisualCapture;
+        try {
+          captured = await session.capture({
+            sourceUrl,
+            outputUrl: `${session.outputOrigin}/`,
+            nodeId: rootReference.id,
+            viewport,
+            signal: input.signal,
+          });
+        } catch (error) {
+          if (input.signal.aborted) throw error;
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: ${detail}`);
+        }
+        if (captured.blockedRequests.length > 0) {
+          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: blocked external request ${captured.blockedRequests[0]}`);
+        }
+        if (captured.markerNodeIds.length !== 1
+          || captured.markerNodeIds[0] !== rootReference.id
+          || !captured.markerVisible) {
+          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: expected exactly one visible data-dezin-export-node-id marker for ${rootReference.id}`);
+        }
+        const comparison = await compareDesignExportScreenshots(captured.sourcePng, captured.outputPng);
+        if (!comparison.passed) {
+          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: ${metricsSummary(comparison.metrics)}`);
+        }
+        const [sourceEvidence, outputEvidence, diffEvidence] = await Promise.all([
+          writeEvidenceFile(validationRoot, `root/${viewport.name}-source.png`, captured.sourcePng),
+          writeEvidenceFile(validationRoot, `root/${viewport.name}-output.png`, captured.outputPng),
+          writeEvidenceFile(validationRoot, `root/${viewport.name}-diff.png`, comparison.diffPng),
+        ]);
+        evidenceBytes += sourceEvidence.bytes + outputEvidence.bytes + diffEvidence.bytes;
+        if (evidenceBytes > MAX_VISUAL_EVIDENCE_BYTES) {
+          throw new DesignExportVisualGateError(`Visual gate evidence exceeds ${MAX_VISUAL_EVIDENCE_BYTES} bytes`);
+        }
+        rootChecks.push({
+          route: "/",
+          nodeId: rootReference.id,
+          nodeName: rootReference.name,
+          nodeKind: rootReference.kind,
+          versionId: rootReference.selectedVersionId,
+          versionChecksum: rootReference.selectedVersionChecksum,
+          sourceJobId: sourceByNodeId.get(rootReference.id)!.sourceJobId,
+          sourceProviderId: sourceByNodeId.get(rootReference.id)!.sourceProviderId,
+          sourceModel: sourceByNodeId.get(rootReference.id)!.sourceModel,
+          sourcePath: new URL(sourceUrl).pathname,
+          viewport,
+          metrics: comparison.metrics,
+          passed: true,
+          evidence: { source: sourceEvidence, output: outputEvidence, diff: diffEvidence },
+        });
+      }
       for (const node of generativeNodes) {
+        const sourceProvenance = sourceByNodeId.get(node.id)!;
         for (const viewport of DESIGN_EXPORT_VISUAL_VIEWPORTS) {
           input.signal.throwIfAborted();
           const sourcePath = `/api/projects/${encodeURIComponent(input.context.projectId)}/design-canvas/nodes/${encodeURIComponent(node.id)}/versions/${encodeURIComponent(node.selectedVersionId!)}/preview/`;
@@ -377,6 +459,9 @@ export async function runDesignExportVisualGate(
             nodeKind: node.kind,
             versionId: node.selectedVersionId,
             versionChecksum: node.selectedVersionChecksum,
+            sourceJobId: sourceProvenance.sourceJobId,
+            sourceProviderId: sourceProvenance.sourceProviderId,
+            sourceModel: sourceProvenance.sourceModel,
             sourcePath,
             outputRoute,
             viewport,
@@ -392,6 +477,9 @@ export async function runDesignExportVisualGate(
         protocol: DESIGN_EXPORT_VISUAL_PROTOCOL,
         projectId: input.context.projectId,
         exportId: input.exportId,
+        jobId: input.execution.jobId,
+        providerId: input.execution.providerId,
+        model: input.execution.model,
         canvasRevision: input.context.canvasRevision,
         contextHash: input.context.checksum,
         browserVersion: session.browserVersion,
@@ -405,6 +493,7 @@ export async function runDesignExportVisualGate(
           viewports: DESIGN_EXPORT_VISUAL_VIEWPORTS,
         },
         thresholds: DESIGN_EXPORT_VISUAL_THRESHOLDS,
+        rootChecks,
         cases,
         passed: true,
         createdAt: (dependencies.now ?? Date.now)(),
@@ -644,10 +733,6 @@ async function configurePage(page: Page): Promise<void> {
 
 async function settlePage(page: Page, signal: AbortSignal): Promise<void> {
   await boundedOperation(page.waitForNetworkIdle({ idleTime: 400, timeout: SETTLE_TIMEOUT_MS }), signal, SETTLE_TIMEOUT_MS + 500, "Visual network settle");
-  await boundedOperation(page.addStyleTag({ content: `
-    *,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;caret-color:transparent!important}
-    html{scroll-behavior:auto!important}::-webkit-scrollbar{display:none!important}
-  ` }).then(() => undefined), signal, 2_000, "Visual animation suppression");
   await boundedOperation(page.evaluate(async () => {
     const globalValue = globalThis as any;
     const documentValue = globalValue.document;
@@ -723,7 +808,6 @@ async function openPuppeteerCaptureSession(input: {
       timeout: 30_000,
       defaultViewport: null,
       args: [
-        "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-background-networking",
         "--disable-component-update",
@@ -812,9 +896,20 @@ async function openPuppeteerCaptureSession(input: {
           if (!expected) return { ids: elements.map((element) => element.dataset.dezinExportNodeId ?? ""), visible: false };
           const style = globalValue.getComputedStyle(expected);
           const rect = expected.getBoundingClientRect();
+          const visibleLeft = Math.max(0, rect.left);
+          const visibleTop = Math.max(0, rect.top);
+          const visibleRight = Math.min(globalValue.innerWidth, rect.right);
+          const visibleBottom = Math.min(globalValue.innerHeight, rect.bottom);
+          const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+          const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+          const centerX = Math.min(globalValue.innerWidth - 1, Math.max(0, visibleLeft + (visibleWidth / 2)));
+          const centerY = Math.min(globalValue.innerHeight - 1, Math.max(0, visibleTop + (visibleHeight / 2)));
+          const centerElement = globalValue.document.elementFromPoint(centerX, centerY);
+          const ownsCenterPoint = centerElement === expected || expected.contains(centerElement);
           const visible = expected.isConnected && style.display !== "none" && style.visibility !== "hidden"
-            && Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0
-            && rect.right > 0 && rect.bottom > 0 && rect.left < globalValue.innerWidth && rect.top < globalValue.innerHeight;
+            && Number(style.opacity) > 0
+            && visibleWidth >= 16 && visibleHeight >= 16 && (visibleWidth * visibleHeight) >= 256
+            && ownsCenterPoint;
           return { ids: [expectedNodeId], visible };
         }, captureInput.nodeId);
         return {

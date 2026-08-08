@@ -13,8 +13,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { cn } from "../lib/utils.ts";
-import { DESIGN_NODE_CATALOG } from "./catalog.ts";
+import {
+  ContextMenuItem,
+  DropdownMenuItem,
+} from "../components/ui/index.ts";
+import { DESIGN_NODE_CATALOG, type DesignNodeCatalogItem } from "./catalog.ts";
 import type { DesignNodeKind } from "./types.ts";
 
 const ICONS: Record<DesignNodeKind, LucideIcon> = {
@@ -34,43 +37,59 @@ const ICONS: Record<DesignNodeKind, LucideIcon> = {
 
 export function NodeCatalogMenu({
   onChoose,
-  className,
-  style,
-  labelledBy,
+  menuType,
 }: {
   onChoose: (kind: DesignNodeKind) => void;
-  className?: string;
-  style?: React.CSSProperties;
-  labelledBy?: string;
+  menuType: "dropdown" | "context";
 }) {
-  return (
-    <div
-      role="menu"
-      aria-label={labelledBy ? undefined : "Add Design node"}
-      aria-labelledby={labelledBy}
-      className={cn("design-node-catalog", className)}
-      style={style}
-      onContextMenu={(event) => event.preventDefault()}
-    >
-      {(["generate", "context"] as const).map((category) => (
-        <section key={category}>
-          <p className="design-node-catalog__label">{category === "generate" ? "Generate" : "Add context"}</p>
-          <div className="design-node-catalog__grid">
-            {DESIGN_NODE_CATALOG.filter((item) => item.category === category).map((item) => {
-              const Icon = ICONS[item.kind];
-              return (
-                <button key={item.kind} type="button" role="menuitem" onClick={() => onChoose(item.kind)}>
-                  <span className="design-node-catalog__icon"><Icon aria-hidden /></span>
-                  <span className="min-w-0">
-                    <strong>{item.label}</strong>
-                    <small>{item.description}</small>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </section>
-      ))}
-    </div>
+  return (["generate", "context"] as const).map((category) => {
+    const labelId = `design-node-catalog-${menuType}-${category}`;
+    return (
+      <section key={category} role="group" aria-labelledby={labelId}>
+        <p id={labelId} className="design-node-catalog__label">
+          {category === "generate" ? "Generate" : "Add context"}
+        </p>
+        <div className="design-node-catalog__grid">
+          {DESIGN_NODE_CATALOG.filter((item) => item.category === category).map((item) => (
+            <CatalogMenuItem
+              key={item.kind}
+              item={item}
+              menuType={menuType}
+              onChoose={onChoose}
+            />
+          ))}
+        </div>
+      </section>
+    );
+  });
+}
+
+function CatalogMenuItem({
+  item,
+  menuType,
+  onChoose,
+}: {
+  item: DesignNodeCatalogItem;
+  menuType: "dropdown" | "context";
+  onChoose: (kind: DesignNodeKind) => void;
+}) {
+  const Icon = ICONS[item.kind];
+  const content = (
+    <>
+      <span className="design-node-catalog__icon"><Icon aria-hidden /></span>
+      <span className="min-w-0">
+        <strong>{item.label}</strong>
+        {menuType === "dropdown" ? <small>{item.description}</small> : null}
+      </span>
+    </>
+  );
+  return menuType === "context" ? (
+    <ContextMenuItem className="design-node-catalog__item" onSelect={() => onChoose(item.kind)}>
+      {content}
+    </ContextMenuItem>
+  ) : (
+    <DropdownMenuItem className="design-node-catalog__item" onSelect={() => onChoose(item.kind)}>
+      {content}
+    </DropdownMenuItem>
   );
 }

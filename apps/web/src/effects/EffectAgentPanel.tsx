@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowDown, ArrowUp, ChevronLeft, Sparkles } from "lucide-react";
 import type { EffectDetail, EffectParamValue } from "../lib/api.ts";
+import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { Button, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { useApi } from "../lib/api-context.tsx";
@@ -243,14 +244,7 @@ export function EffectAgentPanel({
                 transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
                 className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
               >
-                <div
-                  className={cn(
-                    "max-w-[88%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
-                    message.role === "user" ? "rounded-br-md bg-surface-2 text-foreground" : "rounded-bl-md bg-card text-foreground",
-                  )}
-                >
-                  {message.content}
-                </div>
+                <AgentMessageBody role={message.role} content={message.content} className={message.role === "assistant" ? "w-full" : undefined} />
               </motion.div>
             ))}
           </AnimatePresence>
@@ -280,7 +274,7 @@ export function EffectAgentPanel({
         <div ref={composerRef} className="bg-background px-3 pb-3">
           <div
             data-testid="effect-agent-composer"
-            className="pointer-events-auto relative rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring"
+            className="agent-composer-frame pointer-events-auto relative px-2.5 pb-2 pt-2.5"
           >
             <textarea
               aria-label="Message"
@@ -288,7 +282,7 @@ export function EffectAgentPanel({
               value={text}
               onChange={(event) => setText(event.target.value)}
               placeholder={effect.origin === "custom" ? "Ask for shader code or parameter changes..." : "Ask for stronger grain, warmer light, softer motion..."}
-              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
+              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-xs leading-[18px] tracking-[-0.01em] outline-none placeholder:text-foreground/45"
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();

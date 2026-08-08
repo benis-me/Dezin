@@ -14,17 +14,18 @@ export function QuickStart({
   return (
     <section className="design-canvas-quick-start" aria-labelledby="design-canvas-quick-start-title">
       <span className="design-canvas-quick-start__mark"><Sparkles aria-hidden /></span>
-      <div>
+      <div className="design-canvas-quick-start__intro">
+        <span className="design-canvas-quick-start__eyebrow">A blank canvas</span>
         <h2 id="design-canvas-quick-start-title">Quick Start</h2>
-        <p>Start from a node, bring in context, or let the Main Agent compose the canvas.</p>
+        <p>Begin with one useful artifact. Everything you add becomes shared context for the Agents that follow.</p>
       </div>
       <div className="design-canvas-quick-start__actions">
-        <button type="button" onClick={onAddPage}><LayoutTemplate aria-hidden /><span><strong>Page</strong><small>Design a complete screen</small></span></button>
-        <button type="button" onClick={onAddResearch}><Search aria-hidden /><span><strong>Research</strong><small>Ground the design direction</small></span></button>
-        <button type="button" onClick={onImport}><FileUp aria-hidden /><span><strong>Import context</strong><small>Images, video, docs, files</small></span></button>
-        <button type="button" onClick={onOpenMainAgent}><MessageSquareText aria-hidden /><span><strong>Main Agent</strong><small>Coordinate nodes and Agents</small></span></button>
+        <button type="button" onClick={onAddPage}><span><LayoutTemplate aria-hidden /></span><div><strong>Create a page</strong><small>Start with a complete screen</small></div></button>
+        <button type="button" onClick={onAddResearch}><span><Search aria-hidden /></span><div><strong>Research a direction</strong><small>Collect evidence before designing</small></div></button>
+        <button type="button" onClick={onImport}><span><FileUp aria-hidden /></span><div><strong>Bring in context</strong><small>Images, video, documents, or files</small></div></button>
+        <button type="button" onClick={onOpenMainAgent}><span><MessageSquareText aria-hidden /></span><div><strong>Plan with the Main Agent</strong><small>Compose and dispatch several Nodes</small></div></button>
       </div>
-      <p className="design-canvas-quick-start__hint">You can also right-click anywhere on the canvas.</p>
+      <p className="design-canvas-quick-start__hint">Right-click anywhere to add any Node</p>
     </section>
   );
 }

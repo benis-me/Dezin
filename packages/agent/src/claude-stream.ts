@@ -11,6 +11,13 @@ export interface ClaudeToolUse {
   input: Record<string, unknown>;
 }
 
+/** Runtime identity emitted by the spawned Claude-compatible CLI itself. */
+export interface ClaudeStreamInit {
+  model: string | null;
+  apiKeySource: string | null;
+  cliVersion: string | null;
+}
+
 export interface ParsedClaudeStream {
   /** Concatenated assistant text (falls back to the final result string). */
   text: string;
@@ -22,6 +29,12 @@ export interface ParsedClaudeStream {
   isError: boolean;
   /** Claude Code session id, if present (for future --resume). */
   sessionId: string | null;
+  /** The sole system/init envelope. Runners reject a missing or ambiguous init. */
+  init: ClaudeStreamInit | null;
+  /** Number of system/init envelopes observed in the stream, including safe re-announcements. */
+  initCount: number;
+  /** True when repeated init envelopes disagree about the runtime or execution. */
+  initConflict: boolean;
 }
 
 export interface AskUserQuestionExtraction {
@@ -141,6 +154,10 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
   let result: string | null = null;
   let isError = false;
   let sessionId: string | null = null;
+  let init: ClaudeStreamInit | null = null;
+  let initCount = 0;
+  let initExecutionKey: string | null = null;
+  let initConflict = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -158,6 +175,34 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
     if (sid) sessionId = sid;
 
     switch (obj.type) {
+      case "system": {
+        if (obj.subtype !== "init") break;
+        initCount += 1;
+        const candidate: ClaudeStreamInit = {
+          model: str(obj.model),
+          apiKeySource: str(obj.apiKeySource),
+          cliVersion: str(obj.claude_code_version) ?? str(obj.cli_version) ?? str(obj.version),
+        };
+        // CodeBuddy re-emits system/init after an unavailable-tool recovery. That is
+        // one execution, not an ambiguous identity, when both its runtime identity
+        // and stable execution identifiers remain identical. Volatile timestamps are
+        // deliberately excluded. A changed session/request still fails closed.
+        const candidateExecutionKey = JSON.stringify([
+          candidate.model,
+          candidate.apiKeySource,
+          candidate.cliVersion,
+          str(obj.session_id),
+          str(obj.uuid),
+          str(obj._requestId),
+        ]);
+        if (initCount === 1) {
+          init = candidate;
+          initExecutionKey = candidateExecutionKey;
+        } else if (candidateExecutionKey !== initExecutionKey) {
+          initConflict = true;
+        }
+        break;
+      }
       case "assistant": {
         const message = asObject(obj.message);
         const content = message?.content;
@@ -188,5 +233,5 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
   }
 
   if (!text && result) text = result;
-  return { text: text.trim(), toolUses, result, isError, sessionId };
+  return { text: text.trim(), toolUses, result, isError, sessionId, init, initCount, initConflict };
 }

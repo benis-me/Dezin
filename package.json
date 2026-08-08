@@ -23,7 +23,8 @@
     "build:check": "pnpm --filter @dezin/web build && node scripts/check-bundle-size.mjs",
     "test:leaks": "node scripts/check-process-leaks.mjs -- pnpm test",
     "ci": "pnpm typecheck && node scripts/check-process-leaks.mjs -- pnpm test:coverage && pnpm build:check && pnpm audit --prod --audit-level high",
-    "benchmark": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/benchmark.ts"
+    "benchmark": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/benchmark.ts",
+    "qa:design:codebuddy": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/qa-design-codebuddy.ts"
   },
   "packageManager": "pnpm@11.9.0",
   "devDependencies": {

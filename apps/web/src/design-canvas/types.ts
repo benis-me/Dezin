@@ -117,9 +117,13 @@ export interface DesignNodeVersion {
   id: string;
   nodeId: string;
   sequence: number;
+  contentKind: "html" | "asset";
+  assetId: string | null;
+  mimeType: string | null;
+  fileName: string | null;
   checksum: string;
   bytes: number;
-  contextHash: string;
+  contextHash: string | null;
   jobId: string | null;
   runnerId: string | null;
   model: string | null;
@@ -158,6 +162,8 @@ export interface DesignJobActivity {
 export interface DesignJob {
   id: string;
   kind: DesignJobKind;
+  runnerId: string;
+  model: string | null;
   status: DesignJobStatus;
   nodeId: string | null;
   parentJobId: string | null;
@@ -184,7 +190,8 @@ export interface DesignAgentContext {
 
 export interface DesignAgentSelection {
   agentCommand?: string;
-  model?: string;
+  /** null explicitly selects the provider default; undefined inherits Settings. */
+  model?: string | null;
 }
 
 export interface DesignAgentTurnResult {

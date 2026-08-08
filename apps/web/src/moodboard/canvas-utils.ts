@@ -68,9 +68,10 @@ export interface FloatingChromeInput {
   containerHeight: number;
   surfaceWidth: number;
   surfaceHeight: number;
-  placement: "top" | "bottom";
+  placement: "top" | "bottom" | "right" | "left";
   occluders?: CanvasRect[];
   padding?: number;
+  gap?: number;
   allowSidePlacement?: boolean;
 }
 
@@ -410,6 +411,7 @@ export function resolveFloatingChromeRect({
   placement,
   occluders = [],
   padding = 8,
+  gap = 0,
   allowSidePlacement = true,
 }: FloatingChromeInput): { left: number; top: number } {
   const containerRect = rectFromBounds(0, 0, containerWidth, containerHeight);
@@ -422,33 +424,54 @@ export function resolveFloatingChromeRect({
   const targetRight = anchor.targetRight ?? anchor.left;
   const targetRect = rectFromBounds(Math.min(targetLeft, targetRight), anchor.top, Math.max(targetLeft, targetRight), anchor.bottom);
   const anchorRect = intersectRects(targetRect, safeRect) ?? targetRect;
-  const placements = placement === "top" ? (["top", "bottom"] as const) : (["bottom", "top"] as const);
-  const sidePlacements = placement === "top" ? (["right", "left"] as const) : (["right", "left"] as const);
-  const placementCandidates = allowSidePlacement ? [...placements, ...sidePlacements] : placements;
-
-  for (const nextPlacement of placementCandidates) {
-    const rect = floatingChromePlacementRect(nextPlacement, anchorRect, width, height);
-    if (rect.left >= safeRect.left && rect.right <= safeRect.right && rect.top >= safeRect.top && rect.bottom <= safeRect.bottom) {
-      return { left: rect.left, top: rect.top };
+  if (placement === "right" || placement === "left") {
+    const sidePlacements = placement === "right" ? (["right", "left"] as const) : (["left", "right"] as const);
+    const verticalPlacements = (["top", "bottom"] as const);
+    const placementCandidates = allowSidePlacement ? [...sidePlacements, ...verticalPlacements] : sidePlacements;
+    for (const nextPlacement of placementCandidates) {
+      const rect = floatingChromePlacementRect(nextPlacement, anchorRect, width, height, gap);
+      if (nextPlacement === "right" || nextPlacement === "left") {
+        if (rect.left >= safeRect.left && rect.right <= safeRect.right) {
+          return {
+            left: rect.left,
+            top: clamp(rect.top, safeRect.top, Math.max(safeRect.top, safeRect.bottom - height)),
+          };
+        }
+      } else if (rect.top >= safeRect.top && rect.bottom <= safeRect.bottom) {
+        return {
+          left: clamp(rect.left, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
+          top: rect.top,
+        };
+      }
+    }
+  } else {
+    const placements = placement === "top" ? (["top", "bottom"] as const) : (["bottom", "top"] as const);
+    const sidePlacements = (["right", "left"] as const);
+    const placementCandidates = allowSidePlacement ? [...placements, ...sidePlacements] : placements;
+    for (const nextPlacement of placementCandidates) {
+      const rect = floatingChromePlacementRect(nextPlacement, anchorRect, width, height, gap);
+      if (rect.left >= safeRect.left && rect.right <= safeRect.right && rect.top >= safeRect.top && rect.bottom <= safeRect.bottom) {
+        return { left: rect.left, top: rect.top };
+      }
     }
   }
 
-  const fallback = floatingChromePlacementRect(placement, anchorRect, width, height);
+  const fallback = floatingChromePlacementRect(placement, anchorRect, width, height, gap);
   return {
     left: clamp(fallback.left, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
     top: clamp(fallback.top, safeRect.top, Math.max(safeRect.top, safeRect.bottom - height)),
   };
 }
 
-function floatingChromePlacementRect(placement: "top" | "bottom" | "right" | "left", anchorRect: CanvasRect, width: number, height: number): CanvasRect {
+function floatingChromePlacementRect(placement: "top" | "bottom" | "right" | "left", anchorRect: CanvasRect, width: number, height: number, gap = 0): CanvasRect {
   const centerX = anchorRect.left + anchorRect.width / 2;
   const centerY = anchorRect.top + anchorRect.height / 2;
   if (placement === "top" || placement === "bottom") {
     const left = centerX - width / 2;
-    const top = placement === "top" ? anchorRect.top - height : anchorRect.bottom;
+    const top = placement === "top" ? anchorRect.top - height - gap : anchorRect.bottom + gap;
     return rectFromBounds(left, top, left + width, top + height);
   }
-  const left = placement === "left" ? anchorRect.left - width : anchorRect.right;
+  const left = placement === "left" ? anchorRect.left - width - gap : anchorRect.right + gap;
   const top = centerY - height / 2;
   return rectFromBounds(left, top, left + width, top + height);
 }

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { Viewport } from "@xyflow/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { AgentInfo } from "../lib/api.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { DesignCanvasScreen } from "./DesignCanvasScreen.tsx";
 import type {
@@ -52,6 +53,13 @@ vi.mock("@xyflow/react", async () => {
 });
 
 const PROJECT_ID = "interaction-project";
+const CLAUDE_AGENT: AgentInfo = {
+  id: "claude",
+  command: "claude",
+  available: true,
+  availability: "ready",
+  models: ["sonnet"],
+};
 
 function designNode(id: string, x: number): DesignNode {
   return {
@@ -97,6 +105,8 @@ const thread: DesignThread = {
 const mainJob: DesignJob = {
   id: "main-job",
   kind: "main-agent",
+  runnerId: "fixture",
+  model: null,
   status: "ready",
   nodeId: null,
   parentJobId: null,
@@ -137,10 +147,10 @@ function createApi(initial: DesignCanvas, mainAgentViewport?: Viewport) {
     undo: vi.fn(async () => current),
     redo: vi.fn(async () => current),
     importLocalFiles: vi.fn(async () => current),
+    appendMaterialVersion: vi.fn(async () => current),
     importProjectVersion: vi.fn(async () => current),
     listNodeVersions: vi.fn(async () => []),
     getExactVersionPreview: vi.fn(async (_projectId, nodeId, versionId) => ({ nodeId, versionId, url: "about:blank" })),
-    getAssetPreviewUrl: vi.fn(() => "about:blank"),
     getThread: vi.fn(async (_projectId, scope) => ({ ...thread, scope })),
     submitAgentTurn,
     listJobs: vi.fn(async () => []),
@@ -164,8 +174,13 @@ test("completed multi-select drags persist one geometry batch and keyboard posit
   const nodeA = designNode("page-a", 80);
   const nodeB = designNode("page-b", 620);
   const { api, applyIntents } = createApi(designCanvas([nodeA, nodeB]));
-  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} />);
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
   await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(2));
+  expect(flowHarness.props?.panOnDrag).toEqual([1]);
+  fireEvent.click(screen.getByRole("button", { name: "Hand tool" }));
+  await waitFor(() => expect(flowHarness.props?.panOnDrag).toEqual([0, 1]));
+  fireEvent.click(screen.getByRole("button", { name: "Select tool" }));
+  await waitFor(() => expect(flowHarness.props?.panOnDrag).toEqual([1]));
 
   act(() => {
     flowHarness.props?.onNodesChange?.([
@@ -200,10 +215,51 @@ test("completed multi-select drags persist one geometry batch and keyboard posit
   ]);
 });
 
-test("authoritative Main Agent viewport drives the mounted flow while a local pan acknowledgement does not loop", async () => {
+test("a stale position save acknowledgement cannot rewind a newer local drag", async () => {
+  const node = designNode("page-a", 80);
+  const initial = designCanvas([node]);
+  const { api, applyIntents } = createApi(initial);
+  let resolveFirstSave!: (canvas: DesignCanvas) => void;
+  applyIntents.mockImplementationOnce((_projectId, request) => new Promise<DesignCanvas>((resolve) => {
+    resolveFirstSave = resolve;
+    expect(request.intents).toEqual([{
+      type: "update-node",
+      nodeId: node.id,
+      patch: { geometry: { x: 180, y: 140, width: 480, height: 360 } },
+    }]);
+  }));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodesChange?.([{
+      type: "position", id: node.id, position: { x: 180, y: 140 }, dragging: false,
+    }]);
+  });
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1));
+  act(() => {
+    flowHarness.props?.onNodesChange?.([{
+      type: "position", id: node.id, position: { x: 280, y: 240 }, dragging: false,
+    }]);
+  });
+
+  await act(async () => {
+    resolveFirstSave(designCanvas([{
+      ...node,
+      geometry: { x: 180, y: 140, width: 480, height: 360 },
+      updatedAt: 2,
+    }], 2));
+    await Promise.resolve();
+  });
+
+  expect(flowHarness.props?.nodes[0]?.position).toEqual({ x: 280, y: 240 });
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(2));
+});
+
+test("the mounted viewport stays locally owned while persistence and Agent snapshots update", async () => {
   const backendViewport = { x: 48, y: -32, zoom: 1.75 };
   const { api, applyIntents } = createApi(designCanvas([designNode("page-a", 80)]), backendViewport);
-  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} />);
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
   await waitFor(() => expect(flowHarness.props).not.toBeNull());
 
   const localViewport = { x: 18, y: 24, zoom: 1.2 };
@@ -212,7 +268,8 @@ test("authoritative Main Agent viewport drives the mounted flow while a local pa
     flowHarness.props?.onMove?.(null, localViewport);
     flowHarness.props?.onMoveEnd?.(null, localViewport);
   });
-  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1), { timeout: 1_000 });
+  expect(screen.queryByText("Updating canvas")).not.toBeInTheDocument();
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1), { timeout: 1_200 });
   expect(applyIntents.mock.calls[0]?.[1].intents).toEqual([{ type: "set-viewport", viewport: localViewport }]);
   expect(flowHarness.setViewport).not.toHaveBeenCalled();
 
@@ -221,9 +278,49 @@ test("authoritative Main Agent viewport drives the mounted flow while a local pa
   fireEvent.change(await screen.findByRole("textbox", { name: "Main Agent message" }), { target: { value: "Reframe the canvas" } });
   fireEvent.click(screen.getByRole("button", { name: "Send to Main Agent" }));
 
-  await waitFor(() => expect(flowHarness.setViewport).toHaveBeenCalledWith(backendViewport, { duration: 0 }));
-  expect(flowHarness.viewport).toEqual(backendViewport);
-  expect(screen.getByText("175%")).toBeInTheDocument();
-  await new Promise((resolve) => window.setTimeout(resolve, 240));
+  await waitFor(() => expect(api.submitAgentTurn).toHaveBeenCalledTimes(1));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.viewport).toEqual(localViewport);
+  expect(screen.getByText("120%")).toBeInTheDocument();
+  await new Promise((resolve) => window.setTimeout(resolve, 540));
   expect(applyIntents).not.toHaveBeenCalled();
+});
+
+test("a stale viewport save acknowledgement cannot rewind a newer local pan", async () => {
+  const initial = designCanvas([designNode("page-a", 80)]);
+  const { api, applyIntents } = createApi(initial);
+  let resolveFirstSave!: (canvas: DesignCanvas) => void;
+  applyIntents.mockImplementationOnce((_projectId, request) => new Promise<DesignCanvas>((resolve) => {
+    resolveFirstSave = resolve;
+    expect(request.intents).toEqual([{
+      type: "set-viewport",
+      viewport: { x: 10, y: 20, zoom: 1.1 },
+    }]);
+  }));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props).not.toBeNull());
+
+  const first = { x: 10, y: 20, zoom: 1.1 };
+  act(() => {
+    flowHarness.viewport = { ...first };
+    flowHarness.props?.onMove?.(null, first);
+    flowHarness.props?.onMoveEnd?.(null, first);
+  });
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1), { timeout: 1_200 });
+
+  const latest = { x: 90, y: -40, zoom: 1.6 };
+  act(() => {
+    flowHarness.viewport = { ...latest };
+    flowHarness.props?.onMove?.(null, latest);
+    flowHarness.props?.onMoveEnd?.(null, latest);
+  });
+  await act(async () => {
+    resolveFirstSave(designCanvas(initial.nodes, 2, first));
+    await Promise.resolve();
+  });
+
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.viewport).toEqual(latest);
+  expect(screen.getByText("160%")).toBeInTheDocument();
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(2), { timeout: 1_200 });
 });

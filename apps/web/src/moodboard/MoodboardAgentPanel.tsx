@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronLeft, Copy, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
 import {
@@ -8,6 +8,7 @@ import {
   upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
+import { AgentThinkingState } from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -269,9 +270,8 @@ export function MoodboardAgentPanel({
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
               >
-                <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
-                  <Loader2 size={14} className="animate-spin" />
-                  Working...
+                <div className="px-1 py-1 text-[13px] leading-[18px]">
+                  <AgentThinkingState />
                 </div>
               </motion.div>
             ) : null}
@@ -323,8 +323,8 @@ export function MoodboardAgentPanel({
               }
               void filesFromDataTransfer(dataTransfer).then(attachFiles);
             }}
-            className={`pointer-events-auto relative rounded-2xl border bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring ${
-              dragging ? "border-ring ring-2 ring-ring/40" : "border-input hover:border-border-strong"
+            className={`agent-composer-frame pointer-events-auto relative px-2.5 pb-2 pt-2.5 ${
+              dragging ? "border-ring ring-1 ring-ring/30" : ""
             }`}
           >
             {dragging ? (
@@ -382,7 +382,7 @@ export function MoodboardAgentPanel({
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   placeholder="Ask for visual direction or generate material..."
-                  className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
+                  className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-xs leading-[18px] tracking-[-0.01em] outline-none placeholder:text-foreground/45"
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey && !isImeComposing(event)) {
                       event.preventDefault();

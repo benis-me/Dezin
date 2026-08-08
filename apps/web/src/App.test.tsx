@@ -69,6 +69,8 @@ test("a Project screen wires a ready Export to the browser-safe path fallback", 
   const readyExport: DesignJob = {
     id: "job-ready-export",
     kind: "implementation-export",
+    runnerId: "fixture",
+    model: null,
     status: "ready",
     nodeId: null,
     parentJobId: null,
@@ -209,11 +211,14 @@ test("Home attachment mapping keeps exact source Version identity in the atomic 
         versionId: "version-exact",
       },
     },
-    node: {
-      id: "node-home-reference-1",
-      kind: "document",
-      name: "Checkout source",
-      geometry: { x: 100, y: 100, width: 360, height: 260 },
+    binding: {
+      type: "create-node",
+      node: {
+        id: "node-home-reference-1",
+        kind: "document",
+        name: "Checkout source",
+        geometry: { x: 100, y: 100, width: 360, height: 260 },
+      },
     },
   }]);
 });
@@ -257,11 +262,14 @@ test("Home sends attached bytes through one Canvas batch without the retired ref
         mimeType: "image/png",
         base64: expect.any(String),
       },
-      node: {
-        id: "node-home-image-1",
-        kind: "image",
-        name: "direction.png",
-        geometry: { x: 100, y: 100, width: 360, height: 260 },
+      binding: {
+        type: "create-node",
+        node: {
+          id: "node-home-image-1",
+          kind: "image",
+          name: "direction.png",
+          geometry: { x: 100, y: 100, width: 360, height: 260 },
+        },
       },
     }],
   });

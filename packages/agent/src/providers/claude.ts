@@ -10,6 +10,6 @@ export const claudeProvider: AgentProvider = {
   seedModels: ["opus", "sonnet", "haiku"],
   fastModel: "haiku",
   createRunner: ({ command, model, enforceArtifactUpdate, spawner, buildArgs }) =>
-    new ClaudeCodeRunner({ command, model, enforceArtifactUpdate, spawner, buildArgs }),
+    new ClaudeCodeRunner({ id: "claude", command, model, enforceArtifactUpdate, spawner, buildArgs }),
   oneShotArgs: (model, prompt) => ["-p", prompt, "--permission-mode", "bypassPermissions", ...(model ? ["--model", model] : [])],
 };

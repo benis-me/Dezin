@@ -50,6 +50,8 @@ function fakeJob(id: string, patch: Partial<DesignJob> = {}): DesignJob {
   return {
     id,
     kind: "node-generation",
+    runnerId: "fixture",
+    model: null,
     status: "queued",
     nodeId: null,
     parentJobId: null,

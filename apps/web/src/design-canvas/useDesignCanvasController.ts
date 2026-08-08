@@ -6,7 +6,7 @@ import {
   markPendingDesignCanvasContextComplete,
   releasePendingDesignCanvasIntent,
 } from "../lib/pending-design-canvas.ts";
-import type { DesignCanvasApi } from "./api.ts";
+import { isDesignAgentCommand, type DesignCanvasApi, type DesignImplementationExportSelection } from "./api.ts";
 import type {
   DesignAgentSelection,
   DesignCanvas,
@@ -30,13 +30,14 @@ export interface DesignCanvasController {
   undo: () => Promise<DesignCanvas | null>;
   redo: () => Promise<DesignCanvas | null>;
   importLocalFiles: (files: readonly File[], position: { x: number; y: number }) => Promise<DesignCanvas>;
+  appendMaterialVersion: (nodeId: string, file: File) => Promise<DesignCanvas>;
   submitAgentTurn: (
     scope: DesignThreadScope,
     prompt: string,
     nodeIds: readonly string[],
     selection?: DesignAgentSelection,
   ) => Promise<void>;
-  startExport: () => Promise<DesignExportResult>;
+  startExport: (selection: DesignImplementationExportSelection) => Promise<DesignExportResult>;
   cancelJob: (jobId: string) => Promise<void>;
   retryPendingIntent: () => void;
   clearError: () => void;
@@ -232,6 +233,12 @@ export function useDesignCanvasController({
     return next;
   }), [api, enqueue, projectId, setCanvas]);
 
+  const appendMaterialVersion = useCallback((nodeId: string, file: File) => enqueue(async () => {
+    const next = await api.appendMaterialVersion(projectId, nodeId, file);
+    setCanvas(next);
+    return next;
+  }), [api, enqueue, projectId, setCanvas]);
+
   const submitAgentTurn = useCallback(async (
     scope: DesignThreadScope,
     prompt: string,
@@ -259,12 +266,12 @@ export function useDesignCanvasController({
     }
   }, [api, beginMutation, finishMutation, projectId, refresh, reportError, setCanvas]);
 
-  const startExport = useCallback(async () => {
+  const startExport = useCallback(async (selection: DesignImplementationExportSelection) => {
     const current = canvasRef.current;
     if (!current) throw new Error("Design canvas is not ready.");
     beginMutation();
     try {
-      const result = await api.startImplementationExport(projectId, current.revision);
+      const result = await api.startImplementationExport(projectId, current.revision, selection);
       setJobs((existing) => [result.job, ...existing.filter((job) => job.id !== result.job.id)]);
       onExportReady?.(result);
       await refresh();
@@ -321,8 +328,8 @@ export function useDesignCanvasController({
             prompt: intent.prompt.trim(),
             context: { nodeIds: next?.nodeOrder ?? [] },
             idempotencyKey: `initial-design-canvas-${projectId}`,
-            ...(intent.agentCommand ? { agentCommand: intent.agentCommand } : {}),
-            ...(intent.model ? { model: intent.model } : {}),
+            ...(isDesignAgentCommand(intent.agentCommand) ? { agentCommand: intent.agentCommand } : {}),
+            ...(isDesignAgentCommand(intent.agentCommand) && intent.model ? { model: intent.model } : {}),
           });
           if (result.canvas) setCanvas(result.canvas);
           setJobs((current) => [result.job, ...current.filter((job) => job.id !== result.job.id)]);
@@ -364,6 +371,7 @@ export function useDesignCanvasController({
     undo,
     redo,
     importLocalFiles,
+    appendMaterialVersion,
     submitAgentTurn,
     startExport,
     cancelJob,

@@ -8,11 +8,19 @@
 
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
-import { abortError } from "./types.ts";
+import type { AgentExecutionIdentity, AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
+import { AgentExecutionIdentityError, AgentTurnError, abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 import { agentSpawnEnv } from "./providers/cli.ts";
 import { assertSuccessfulExit, readArtifactSnapshot, readUpdatedArtifactHtml } from "./runner-utils.ts";
+
+const CLAUDE_MODEL_ALIASES = new Set(["opus", "sonnet", "haiku"]);
+
+function matchesClaudeModelRequest(providerId: string, requested: string, observed: string): boolean {
+  if (requested === observed) return true;
+  if (providerId !== "claude" || !CLAUDE_MODEL_ALIASES.has(requested)) return false;
+  return new RegExp(`^claude-${requested}-[A-Za-z0-9][A-Za-z0-9._-]*$`).test(observed);
+}
 import { BoundedTextBuffer } from "./bounded-text-buffer.ts";
 import { terminateOwnedProcessGroup } from "./process-group.ts";
 
@@ -235,6 +243,8 @@ export class NodeSpawner implements ProcessSpawner {
 }
 
 export interface ClaudeCodeRunnerOptions {
+  /** Stable runtime identity; defaults to the Claude Code implementation id. */
+  id?: string;
   /** CLI command, default "claude". */
   command?: string;
   /** Optional model override (--model). */
@@ -250,7 +260,8 @@ export interface ClaudeCodeRunnerOptions {
 }
 
 export class ClaudeCodeRunner implements AgentRunner {
-  readonly id = "claude-code";
+  readonly id: string;
+  readonly identityProtocol = "claude-stream-json-init-v1" as const;
   /** The CLI command this runner spawns (inspectable for tests/diagnostics). */
   readonly command: string;
   /** The model override, if any. */
@@ -260,6 +271,7 @@ export class ClaudeCodeRunner implements AgentRunner {
 
   constructor(opts: ClaudeCodeRunnerOptions = {}) {
     this.opts = opts;
+    this.id = opts.id ?? "claude-code";
     this.command = opts.command ?? "claude";
     this.model = opts.model;
     this.enforceArtifactUpdate = opts.enforceArtifactUpdate ?? true;
@@ -281,6 +293,38 @@ export class ClaudeCodeRunner implements AgentRunner {
     ];
     if (this.model) args.push("--model", this.model);
     return args;
+  }
+
+  private executionIdentity(parsed: ReturnType<typeof parseClaudeStream>): AgentExecutionIdentity {
+    const requested: AgentExecutionIdentity["requested"] = {
+      providerId: this.id,
+      model: this.model ?? null,
+    };
+    if (parsed.initCount < 1 || parsed.initConflict || parsed.init === null || typeof parsed.init.model !== "string"
+      || parsed.init.model.trim() !== parsed.init.model || parsed.init.model.length === 0) {
+      throw new AgentExecutionIdentityError(
+        `${this.command} did not emit one consistent system/init execution identity`,
+        requested,
+        null,
+      );
+    }
+    const observed: AgentExecutionIdentity["observed"] = {
+      providerId: this.id,
+      model: parsed.init.model,
+      command: this.command,
+      cliVersion: parsed.init.cliVersion,
+      apiKeySource: parsed.init.apiKeySource,
+      protocol: "claude-stream-json-init-v1",
+    };
+    if (requested.model !== null
+      && !matchesClaudeModelRequest(requested.providerId, requested.model, observed.model)) {
+      throw new AgentExecutionIdentityError(
+        `${this.command} reported model ${JSON.stringify(observed.model)} instead of requested model ${JSON.stringify(requested.model)}`,
+        requested,
+        observed,
+      );
+    }
+    return { requested, observed };
   }
 
   async runTurn(input: AgentTurnInput): Promise<AgentTurnResult> {
@@ -325,20 +369,33 @@ export class ClaudeCodeRunner implements AgentRunner {
       args: this.buildArgs(input.systemPrompt),
       cwd: input.projectDir,
       stdin,
+      timeoutMs: input.timeoutMs,
       onStdout,
       signal: input.signal,
       env: input.env,
     });
 
-    assertSuccessfulExit(command, output);
     const parsed = parseClaudeStream(output.stdout);
-    if (parsed.isError) {
-      throw new Error(`${command} returned an error result${parsed.result ? `: ${parsed.result}` : ""}`);
-    }
-    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, command, {
-      enforceArtifactUpdate: this.enforceArtifactUpdate,
-    });
+    const executionIdentity = this.executionIdentity(parsed);
+    try {
+      assertSuccessfulExit(command, output);
+      if (parsed.isError) {
+        throw new AgentTurnError(
+          `${command} returned an error result${parsed.result ? `: ${parsed.result}` : ""}`,
+          executionIdentity,
+        );
+      }
+      const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, command, {
+        enforceArtifactUpdate: this.enforceArtifactUpdate,
+      });
 
-    return { text: parsed.text, artifactHtml, artifactPath };
+      return { text: parsed.text, artifactHtml, artifactPath, executionIdentity };
+    } catch (error) {
+      if (error instanceof AgentTurnError) throw error;
+      throw new AgentTurnError(
+        error instanceof Error ? error.message : `${command} turn failed`,
+        executionIdentity,
+      );
+    }
   }
 }

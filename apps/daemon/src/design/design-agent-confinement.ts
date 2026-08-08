@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   NodeSpawner,
@@ -12,18 +12,76 @@ import {
 import type { Settings } from "../../../../packages/core/src/index.ts";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const CLAUDE_DESIGN_TOOLS = "Read,Write,Edit,Glob,Grep";
+const DESIGN_FILE_TOOLS = "Read,Write,Edit,Glob,Grep";
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
-const DESIGN_AGENT_COMMANDS = ["claude", "codebuddy", "codex"] as const;
+const DESIGN_AGENT_COMMANDS = ["claude", "codebuddy"] as const;
+const CODEBUDDY_DESIGN_SETTINGS = JSON.stringify({
+  disableAllHooks: true,
+  promptSuggestionEnabled: false,
+  memory: {
+    autoMemoryEnabled: false,
+    relevanceSelection: false,
+    memoryExtraction: false,
+    teamMemory: { enabled: false },
+  },
+  permissions: {
+    defaultMode: "acceptEdits",
+    disableBypassPermissionsMode: "disable",
+    disableAutoMode: "disable",
+  },
+});
+const UNVERIFIED_DESIGN_CONFINEMENT_ERROR = "The selected Agent cannot run on Design Canvas because its workspace policy does not provide verified project-only confinement";
+const DESIGN_RUNTIME_ENVIRONMENT_KEYS = ["HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
+const DESIGN_PROVIDER_ENVIRONMENT_KEYS: Record<ConfinedDesignProvider, readonly string[]> = {
+  claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
+  codebuddy: [],
+};
 
 type ConfinedDesignProvider = (typeof DESIGN_AGENT_COMMANDS)[number];
+
+function minimalDesignAgentEnvironment(
+  provider: ConfinedDesignProvider,
+  requested: NodeJS.ProcessEnv | undefined,
+  runtime: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  for (const key of DESIGN_RUNTIME_ENVIRONMENT_KEYS) {
+    const value = runtime[key];
+    if (typeof value === "string" && value.length > 0) result[key] = value;
+  }
+  const home = runtime.HOME;
+  const runtimeDirectories = [
+    dirname(process.execPath),
+    ...(home ? [
+      join(home, ".local", "bin"),
+      join(home, "bin"),
+      join(home, ".npm-global", "bin"),
+      join(home, ".volta", "bin"),
+      join(home, ".bun", "bin"),
+      join(home, ".asdf", "shims"),
+      join(home, "Library", "pnpm"),
+    ] : []),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  result.PATH = [...new Set(runtimeDirectories.filter(isAbsolute))].join(delimiter);
+  for (const key of DESIGN_PROVIDER_ENVIRONMENT_KEYS[provider]) {
+    const value = requested?.[key];
+    if (typeof value === "string" && value.length > 0) result[key] = value;
+  }
+  return result;
+}
 
 export class DesignAgentProviderUnsupportedError extends Error {
   readonly command: string;
 
   constructor(command: string) {
     super(
-      `Design Agents support only the exact confined commands claude, codebuddy, or codex; ${JSON.stringify(command)} has no verified Design sandbox`,
+      `The selected Agent ${JSON.stringify(command)} does not expose a verified Design execution contract`,
     );
     this.name = "DesignAgentProviderUnsupportedError";
     this.command = command;
@@ -76,26 +134,9 @@ function assertExactArgs(
 }
 
 export function designClaudeArgs(
-  provider: "claude" | "codebuddy",
   model: string | undefined,
   systemPrompt: string,
 ): string[] {
-  const isolation = provider === "claude"
-    ? [
-        "--safe-mode",
-        "--strict-mcp-config",
-        "--mcp-config",
-        EMPTY_MCP_CONFIG,
-        "--no-chrome",
-        "--disable-slash-commands",
-      ]
-    : [
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--mcp-config",
-        EMPTY_MCP_CONFIG,
-      ];
   return [
     "-p",
     "--input-format",
@@ -106,8 +147,13 @@ export function designClaudeArgs(
     "--permission-mode",
     "dontAsk",
     "--tools",
-    CLAUDE_DESIGN_TOOLS,
-    ...isolation,
+    DESIGN_FILE_TOOLS,
+    "--safe-mode",
+    "--strict-mcp-config",
+    "--mcp-config",
+    EMPTY_MCP_CONFIG,
+    "--no-chrome",
+    "--disable-slash-commands",
     "--no-session-persistence",
     "--append-system-prompt",
     systemPrompt,
@@ -115,18 +161,43 @@ export function designClaudeArgs(
   ];
 }
 
-export function designCodexArgs(model: string | undefined): string[] {
+export function designCodeBuddyArgs(
+  model: string | undefined,
+  systemPrompt: string,
+): string[] {
   return [
-    "exec",
-    "--skip-git-repo-check",
-    "--sandbox",
-    "workspace-write",
-    "--ephemeral",
-    "--ignore-user-config",
-    "--ignore-rules",
-    ...(model ? ["-m", model] : []),
-    "-",
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "acceptEdits",
+    "--tools",
+    DESIGN_FILE_TOOLS,
+    "--strict-mcp-config",
+    "--mcp-config",
+    EMPTY_MCP_CONFIG,
+    "--setting-sources",
+    "",
+    "--settings",
+    CODEBUDDY_DESIGN_SETTINGS,
+    "--no-session-persistence",
+    "--append-system-prompt",
+    systemPrompt,
+    ...(model ? ["--model", model] : []),
   ];
+}
+
+function designAgentArgs(
+  provider: ConfinedDesignProvider,
+  model: string | undefined,
+  systemPrompt: string,
+): string[] {
+  return provider === "codebuddy"
+    ? designCodeBuddyArgs(model, systemPrompt)
+    : designClaudeArgs(model, systemPrompt);
 }
 
 function assertConfinedArguments(
@@ -134,11 +205,7 @@ function assertConfinedArguments(
   model: string | undefined,
   args: readonly string[],
 ): void {
-  if (provider === "codex") {
-    assertExactArgs(args, designCodexArgs(model));
-    return;
-  }
-  const expected = designClaudeArgs(provider, model, "__SYSTEM_PROMPT__");
+  const expected = designAgentArgs(provider, model, "__SYSTEM_PROMPT__");
   const promptIndex = expected.indexOf("__SYSTEM_PROMPT__");
   assertExactArgs(args, expected, [promptIndex]);
 }
@@ -182,24 +249,40 @@ export class DesignConfinedSpawner implements ProcessSpawner {
   readonly #command: string;
   readonly #model: string | undefined;
   readonly #delegate: ProcessSpawner;
+  readonly #platform: NodeJS.Platform;
+  readonly #runtimeEnvironment: NodeJS.ProcessEnv;
 
   constructor(input: {
     dataDir: string;
     projectId: string;
-    provider: ConfinedDesignProvider;
+    provider: ConfinedDesignProvider | "codex";
     command: string;
     model?: string;
     delegate?: ProcessSpawner;
+    /** Platform seam for proving Windows fail-closed behavior without a Windows host. */
+    platform?: NodeJS.Platform;
+    /** Runtime-only seam; caller-supplied Agent env never controls HOME or command lookup. */
+    runtimeEnvironment?: NodeJS.ProcessEnv;
   }) {
+    if (input.provider === "codex") {
+      throw new DesignAgentConfinementError(UNVERIFIED_DESIGN_CONFINEMENT_ERROR);
+    }
     this.#dataDir = resolve(input.dataDir);
     this.#projectId = safeSegment(input.projectId, "Project id");
     this.#provider = input.provider;
     this.#command = input.command;
     this.#model = input.model;
-    this.#delegate = input.delegate ?? new NodeSpawner();
+    this.#delegate = input.delegate ?? new NodeSpawner({ inheritEnvironment: false });
+    this.#platform = input.platform ?? process.platform;
+    this.#runtimeEnvironment = input.runtimeEnvironment ?? process.env;
   }
 
   async run(input: SpawnInput): Promise<SpawnOutput> {
+    if (this.#platform === "win32") {
+      throw new DesignAgentConfinementError(
+        "Windows Design Agent process confinement is not verified and is not available",
+      );
+    }
     if (input.command !== this.#command) {
       throw new DesignAgentConfinementError("Design Agent command changed after policy selection");
     }
@@ -231,13 +314,20 @@ export class DesignConfinedSpawner implements ProcessSpawner {
     if (canonicalRelative !== lexicalRelative || stagingPathKind(canonicalRelative) === null) {
       throw new DesignAgentConfinementError("Design Agent cwd traverses a staging symlink");
     }
-    return this.#delegate.run({ ...input, cwd: canonicalCwd });
+    return this.#delegate.run({
+      ...input,
+      cwd: canonicalCwd,
+      env: minimalDesignAgentEnvironment(this.#provider, input.env, this.#runtimeEnvironment),
+    });
   }
 }
 
 export function createConfinedDesignAgentRunner(input: CreateConfinedDesignRunnerInput): AgentRunner {
   const command = input.override?.agentCommand || input.settings.agentCommand || "claude";
   const model = input.override?.model || input.settings.model || undefined;
+  if (command === "codex") {
+    throw new DesignAgentConfinementError(UNVERIFIED_DESIGN_CONFINEMENT_ERROR);
+  }
   if (!(DESIGN_AGENT_COMMANDS as readonly string[]).includes(command)) {
     throw new DesignAgentProviderUnsupportedError(command);
   }
@@ -259,13 +349,6 @@ export function createConfinedDesignAgentRunner(input: CreateConfinedDesignRunne
     model,
     enforceArtifactUpdate: input.enforceArtifactUpdate,
     spawner,
-    ...(providerId === "codex"
-      ? {
-          buildArgs: () => designCodexArgs(model),
-          viaStdin: true,
-        }
-      : {
-          buildArgs: (systemPrompt: string) => designClaudeArgs(providerId, model, systemPrompt),
-        }),
+    buildArgs: (systemPrompt: string) => designAgentArgs(providerId, model, systemPrompt),
   });
 }

@@ -13,6 +13,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
+import { parse } from "@babel/parser";
+import { transform as transformCss, transformStyleAttribute } from "lightningcss";
+import {
+  parse as parseHtml,
+  type DefaultTreeAdapterTypes,
+  type ParserError,
+} from "parse5";
 import {
   DESIGN_GENERATIVE_NODE_KINDS,
   DESIGN_NODE_KINDS,
@@ -36,13 +43,18 @@ import {
   type DesignThread,
   type DesignThreadMessage,
   type DesignThreadRole,
+  type DesignVersionContentKind,
   type DesignVersionManifest,
+  type DesignVersionPublicationPhase,
+  type DesignVersionPublicationTransaction,
   type DesignViewport,
 } from "./design-types.ts";
+import { stableStringify } from "../canonical-json.ts";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_HISTORY = 50;
+const MAX_RETIRED_NODE_IDS = 5_000;
 export const MAX_DESIGN_ASSET_BYTES = 32 * 1024 * 1024;
 export const MAX_DESIGN_ASSET_BATCH_BYTES = 64 * 1024 * 1024;
 export const MAX_DESIGN_ASSET_BATCH_ITEMS = 32;
@@ -236,7 +248,11 @@ async function writeAtomicJson(path: string, value: unknown): Promise<void> {
   await writeAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function withProjectLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+async function withProjectLock<T>(
+  root: string,
+  operation: () => Promise<T>,
+  options: { allowPublicationTransactions?: boolean } = {},
+): Promise<T> {
   const prior = projectLocks.get(root) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolveLock) => {
@@ -246,6 +262,7 @@ async function withProjectLock<T>(root: string, operation: () => Promise<T>): Pr
   projectLocks.set(root, tail);
   await prior;
   try {
+    if (!options.allowPublicationTransactions) await assertNoDesignVersionPublicationsUnlocked(root);
     return await operation();
   } finally {
     release();
@@ -326,8 +343,10 @@ async function ensureDesignDirectories(root: string): Promise<void> {
     mkdir(join(root, "nodes"), { recursive: true }),
     mkdir(join(root, "assets"), { recursive: true }),
     mkdir(join(root, "agents", "main"), { recursive: true }),
+    mkdir(join(root, "agents", "main", "executions"), { recursive: true }),
     mkdir(join(root, "jobs"), { recursive: true }),
     mkdir(join(root, "exports"), { recursive: true }),
+    mkdir(join(root, "transactions", "publications"), { recursive: true }),
   ]);
 }
 
@@ -366,7 +385,7 @@ async function readProject(root: string): Promise<DesignProjectFile> {
   const expectedProjectId = basename(resolve(root, ".."));
   if (project.schemaVersion !== DESIGN_SCHEMA_VERSION || !Number.isSafeInteger(project.revision)
     || project.revision < 0 || !Array.isArray(project.nodeOrder) || !Array.isArray(project.nodes)
-    || !Array.isArray(project.retiredNodeIds) || project.retiredNodeIds.length > 5_000
+    || !Array.isArray(project.retiredNodeIds) || project.retiredNodeIds.length > MAX_RETIRED_NODE_IDS
     || new Set(project.retiredNodeIds).size !== project.retiredNodeIds.length
     || project.retiredNodeIds.some((id) => typeof id !== "string" || !SAFE_SEGMENT.test(id))
     || !Array.isArray(project.undo)
@@ -392,6 +411,16 @@ async function readProject(root: string): Promise<DesignProjectFile> {
       || typeof receipt !== "object" || !SAFE_SEGMENT.test(receipt.jobId)
       || !["node-generation", "node-analysis", "main-agent", "implementation-export"].includes(receipt.kind)
       || (receipt.nodeId !== null && !SAFE_SEGMENT.test(receipt.nodeId))
+      || !(receipt.requestHash === undefined || SHA256.test(receipt.requestHash))
+      || !(receipt.authorityHash === undefined || SHA256.test(receipt.authorityHash))
+      || !(receipt.mainPlanHash === undefined || SHA256.test(receipt.mainPlanHash))
+      || !(receipt.mainPlanAppliedRevision === undefined
+        || (Number.isSafeInteger(receipt.mainPlanAppliedRevision)
+          && receipt.mainPlanAppliedRevision >= 0
+          && receipt.mainPlanAppliedRevision <= project.revision))
+      || ((receipt.mainPlanHash !== undefined || receipt.mainPlanAppliedRevision !== undefined)
+        && receipt.kind !== "main-agent")
+      || (receipt.mainPlanAppliedRevision !== undefined && receipt.mainPlanHash === undefined)
       || !validStoredTimestamp(receipt.createdAt)) {
       throw new DesignStorageError("corrupt", "Design project contains an invalid Agent receipt");
     }
@@ -435,8 +464,13 @@ function assertStoredNode(value: unknown): asserts value is DesignNode {
     throw new DesignStorageError("corrupt", "Design project contains an invalid Node record");
   }
   const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
+  const hasHead = node.currentVersionId !== null;
   if ((generative && node.assetId !== null)
-    || (!generative && (node.currentVersionId !== null || node.selectedVersionId !== null || node.versionCount !== 0))) {
+    || (!generative && (
+      hasHead !== ((node.versionCount as number) > 0)
+      || (hasHead !== (node.assetId !== null))
+      || (!hasHead && node.selectedVersionId !== null)
+    ))) {
     throw new DesignStorageError("corrupt", "Design project Node payload ownership is inconsistent");
   }
 }
@@ -493,7 +527,9 @@ async function readCanvasUnlocked(root: string): Promise<DesignCanvas> {
 
 export async function initializeDesignProject(dataDir: string, projectId: string, now?: number): Promise<DesignCanvas> {
   const root = designRoot(dataDir, projectId);
-  return withProjectLock(root, () => initializeUnlocked(root, projectId, now));
+  return withProjectLock(root, () => initializeUnlocked(root, projectId, now), {
+    allowPublicationTransactions: true,
+  });
 }
 
 export async function getDesignCanvas(dataDir: string, projectId: string): Promise<DesignCanvas> {
@@ -503,6 +539,20 @@ export async function getDesignCanvas(dataDir: string, projectId: string): Promi
     await recoverPendingAssetImportsUnlocked(root);
     return readCanvasUnlocked(root);
   });
+}
+
+function retireNodeIdentities(project: DesignProjectFile, candidates: Iterable<string>): void {
+  const additions: string[] = [];
+  for (const id of candidates) {
+    if (!project.retiredNodeIds.includes(id) && !additions.includes(id)) additions.push(id);
+  }
+  if (project.retiredNodeIds.length + additions.length > MAX_RETIRED_NODE_IDS) {
+    throw new DesignStorageError(
+      "limit",
+      "Design canvas retired Node identity limit reached",
+    );
+  }
+  project.retiredNodeIds.push(...additions);
 }
 
 async function addNode(
@@ -526,27 +576,22 @@ async function addNode(
   }
   const assetId = intent.node.assetId ?? null;
   if (assetId !== null) safeSegment(assetId, "Asset id");
-  if (assetId !== null && !["image", "video", "document", "file"].includes(kind)) {
-    throw new DesignStorageError("invalid-input", "Only material Nodes may bind an Asset");
-  }
   if (assetId !== null) {
-    const asset = preparedAsset?.id === assetId
-      ? preparedAsset
-      : await getDesignAssetManifest(dataDir, projectId, assetId);
-    if (!matchesMaterialNodeKind(kind, asset.mimeType)) {
-      throw new DesignStorageError("invalid-input", `Asset ${assetId} mimeType does not match Node kind ${kind}`);
-    }
+    throw new DesignStorageError(
+      "invalid-input",
+      "Material Assets must be bound through the atomic Asset import API so v1 cannot be skipped",
+    );
   }
   const created: DesignNode = {
     id,
     kind,
     name: nodeName(intent.node.name, kind),
     geometry: geometry(intent.node.geometry, defaultGeometry(kind)),
-    state: assetId === null ? "empty" : "ready",
+    state: "empty",
     currentVersionId: null,
     selectedVersionId: null,
     versionCount: 0,
-    assetId,
+    assetId: null,
     activeJobId: null,
     error: null,
     createdAt: timestamp,
@@ -580,7 +625,7 @@ async function applyIntent(
     }
     nodes.delete(id);
     project.nodeOrder = project.nodeOrder.filter((candidate) => candidate !== id);
-    if (!project.retiredNodeIds.includes(id)) project.retiredNodeIds.push(id);
+    retireNodeIdentities(project, [id]);
     return;
   }
   if (intent.type === "set-viewport") {
@@ -615,7 +660,12 @@ async function applyIntent(
     if (patch.selectedVersionId !== undefined) {
       if (patch.selectedVersionId !== null) {
         safeSegment(patch.selectedVersionId, "Version id");
-        await getDesignVersion(dataDir, projectId, node.id, patch.selectedVersionId);
+        const selected = await getDesignVersionUnlocked(designRoot(dataDir, projectId), node.id, patch.selectedVersionId);
+        const expectedContentKind: DesignVersionContentKind = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[])
+          .includes(node.kind) ? "html" : "asset";
+        if (selected.contentKind !== expectedContentKind) {
+          throw new DesignStorageError("corrupt", `Design Version ${selected.id} does not match Node kind ${node.kind}`);
+        }
       }
       node.selectedVersionId = patch.selectedVersionId;
     }
@@ -629,7 +679,12 @@ async function applyIntent(
 export async function mutateDesignCanvas(
   dataDir: string,
   projectId: string,
-  input: { expectedRevision: number; intents: DesignCanvasIntent[] },
+  input: {
+    expectedRevision: number;
+    intents: DesignCanvasIntent[];
+    /** Internal Main Agent application receipt committed with the Canvas bytes. */
+    mainPlanApplication?: { jobId: string; receiptKey: string; planHash: string };
+  },
   now?: number,
 ): Promise<DesignCanvas> {
   const root = designRoot(dataDir, projectId);
@@ -637,17 +692,45 @@ export async function mutateDesignCanvas(
     await requireInitialized(root);
     await recoverPendingAssetImportsUnlocked(root);
     const project = await readProject(root);
+    let mainPlanReceipt: DesignProjectFile["turnReceipts"][string] | null = null;
+    if (input.mainPlanApplication !== undefined) {
+      const application = input.mainPlanApplication;
+      if (!application || typeof application !== "object" || Array.isArray(application)
+        || Object.keys(application).some((key) => !["jobId", "receiptKey", "planHash"].includes(key))
+        || typeof application.receiptKey !== "string" || !application.receiptKey
+        || application.receiptKey.length > 512 || !SHA256.test(application.planHash)) {
+        throw new DesignStorageError("invalid-input", "Main Agent plan application receipt is invalid");
+      }
+      const jobId = safeSegment(application.jobId, "Job id");
+      const receipt = project.turnReceipts[application.receiptKey];
+      const job = await readJob(root, jobId);
+      const execution = await readDesignMainPlanExecutionUnlocked(root, project, application.receiptKey);
+      if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || receipt.jobId !== job.id
+        || receipt.authorityHash !== job.contextHash || job.kind !== "main-agent" || job.status !== "running"
+        || execution === null || execution.planHash !== application.planHash) {
+        throw new DesignStorageError("conflict", "Main Agent plan application requires its active Job authority");
+      }
+      if (receipt.mainPlanAppliedRevision !== undefined) return canvas(project, readNodes(project));
+      mainPlanReceipt = receipt;
+    }
     if (!Number.isSafeInteger(input?.expectedRevision) || input.expectedRevision < 0) {
       throw new DesignStorageError("invalid-input", "expectedRevision is invalid");
     }
     if (input.expectedRevision !== project.revision) {
       throw new DesignRevisionConflictError(input.expectedRevision, project.revision);
     }
-    if (!Array.isArray(input.intents) || input.intents.length < 1 || input.intents.length > 100) {
+    if (!Array.isArray(input.intents) || input.intents.length > 100
+      || (input.intents.length < 1 && mainPlanReceipt === null)) {
       throw new DesignStorageError("invalid-input", "Canvas mutation must contain 1 to 100 intents");
     }
     const timestamp = nowValue(now);
     const nodes = readNodes(project);
+    if (input.intents.length === 0) {
+      mainPlanReceipt!.mainPlanAppliedRevision = project.revision;
+      project.updatedAt = Math.max(project.updatedAt, timestamp);
+      await writeAtomicJson(projectFilePath(root), project);
+      return canvas(project, nodes);
+    }
     const before = snapshot(project, nodes);
     const changed = new Set<string>();
     for (const intent of input.intents) await applyIntent(dataDir, projectId, project, nodes, intent, timestamp, changed);
@@ -657,6 +740,7 @@ export async function mutateDesignCanvas(
       project.redo = [];
     }
     project.revision += 1;
+    if (mainPlanReceipt !== null) mainPlanReceipt.mainPlanAppliedRevision = project.revision;
     project.updatedAt = Math.max(project.updatedAt, timestamp);
     await writeAtomicJson(projectFilePath(root), project);
     return canvas(project, nodes);
@@ -695,6 +779,11 @@ async function restoreCanvasHistory(
         "Cancel active scoped Agent Jobs before undoing or redoing a structural Node change",
       );
     }
+    // A Node id is also the durable namespace for its immutable Versions and
+    // scoped Agent thread. History may restore that same Node, but once any
+    // restore removes it from the live Canvas, a later add-node must never
+    // alias a fresh Node onto the old on-disk namespace.
+    retireNodeIdentities(project, project.nodeOrder.filter((id) => !targetNodeIds.has(id)));
     const restored = new Map(target.nodes.map((snapshotNode) => {
       const currentNode = currentNodes.get(snapshotNode.id);
       if (!currentNode) return [snapshotNode.id, cloneNode(snapshotNode)] as const;
@@ -707,6 +796,7 @@ async function restoreCanvasHistory(
           ? currentNode.selectedVersionId
           : snapshotNode.selectedVersionId,
         versionCount: currentNode.versionCount,
+        assetId: currentNode.assetId,
         activeJobId: currentNode.activeJobId,
         error: currentNode.error,
         updatedAt: currentNode.updatedAt,
@@ -788,9 +878,29 @@ function extensionFor(name: string, type: string): string {
 }
 
 function strictBase64(value: unknown): Buffer {
-  if (typeof value !== "string" || value.length === 0 || value.length > Math.ceil(MAX_DESIGN_ASSET_BYTES / 3) * 4 + 4
-    || value.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+  if (typeof value !== "string" || value.length === 0
+    || value.length > Math.ceil(MAX_DESIGN_ASSET_BYTES / 3) * 4 + 4
+    || value.length % 4 !== 0) {
     throw new DesignStorageError("invalid-input", "Asset base64 is invalid");
+  }
+  // Do not validate a multi-megabyte payload with a repeated-group RegExp.
+  // V8's RegExp engine recursively backtracks that shape and overflows the
+  // JavaScript stack for otherwise valid local images around 4 MiB or larger.
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const contentLength = value.length - padding;
+  for (let index = 0; index < contentLength; index += 1) {
+    const code = value.charCodeAt(index);
+    const valid = (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 43
+      || code === 47;
+    if (!valid) throw new DesignStorageError("invalid-input", "Asset base64 is invalid");
+  }
+  for (let index = contentLength; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) {
+      throw new DesignStorageError("invalid-input", "Asset base64 is invalid");
+    }
   }
   const bytes = Buffer.from(value, "base64");
   if (bytes.length < 1 || bytes.length > MAX_DESIGN_ASSET_BYTES || bytes.toString("base64") !== value) {
@@ -981,7 +1091,27 @@ export interface DesignAssetStoreInput {
 
 export interface DesignCanvasAssetImport {
   asset: DesignAssetStoreInput;
-  node: Extract<DesignCanvasIntent, { type: "add-node" }>["node"];
+  binding:
+    | {
+        type: "create-node";
+        node: Extract<DesignCanvasIntent, { type: "add-node" }>["node"];
+      }
+    | { type: "append-version"; nodeId: string };
+}
+
+export type DesignAssetImportPhase = "marker" | "assets" | "versions" | "canvas";
+
+export interface DesignAssetImportTestHooks {
+  /** Test-only: leave the durable WAL exactly as a process exit would. */
+  simulateProcessCrash?: boolean;
+  afterPhase?: (phase: DesignAssetImportPhase) => void | Promise<void>;
+}
+
+export interface ImportedDesignMaterialVersion {
+  canvas: DesignCanvas;
+  node: DesignNode;
+  version: DesignVersionManifest;
+  asset: DesignAssetManifest;
 }
 
 type PreparedDesignAsset =
@@ -1021,13 +1151,11 @@ async function prepareDesignAsset(
       const sourceProjectId = safeSegment(source.projectId, "Source Project id");
       const sourceNodeId = safeSegment(source.nodeId, "Source Node id");
       const sourceVersionId = safeSegment(source.versionId, "Source Version id");
-      const resolved = await resolveDesignVersionFile(
-        dataDir,
-        sourceProjectId,
-        sourceNodeId,
-        sourceVersionId,
-        "index.html",
-      );
+      // Same-Project imports already hold this Project lock. Re-entering the
+      // public read barrier would deadlock; the current lock is the barrier.
+      const resolved = sourceProjectId === projectId
+        ? await resolveDesignVersionFileUnlocked(root, sourceNodeId, sourceVersionId, "index.html")
+        : await resolveDesignVersionFile(dataDir, sourceProjectId, sourceNodeId, sourceVersionId, "index.html");
       bytes = await readFile(resolved.path);
       const copiedChecksum = createHash("sha256").update(bytes).digest("hex");
       if (copiedChecksum !== resolved.manifest.checksum) {
@@ -1210,23 +1338,56 @@ async function stagePreparedDesignAsset(directory: string, prepared: PreparedDes
   }
 }
 
+interface DesignAssetImportTransactionBinding {
+  createdNode: boolean;
+  nodeId: string;
+  assetId: string;
+  previousHeadVersionId: string | null;
+  previousSelectedVersionId: string | null;
+  previousVersionCount: number;
+  previousAssetId: string | null;
+  selectedVersionIdAfter: string | null;
+  manifest: DesignVersionManifest;
+}
+
 interface DesignAssetImportTransaction {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
+  projectId: string;
   expectedRevision: number;
   nextRevision: number;
   createdAssetIds: string[];
-  bindings: Array<{ nodeId: string; assetId: string }>;
+  bindings: DesignAssetImportTransactionBinding[];
+  checksum: string;
+}
+
+interface DesignAssetImportOutcome {
+  canvas: DesignCanvas;
+  bindings: Array<{
+    node: DesignNode;
+    version: DesignVersionManifest;
+    asset: DesignAssetManifest;
+  }>;
 }
 
 function assetImportTransactionsRoot(root: string): string {
   return join(root, "assets", ".transactions");
 }
 
-function assertAssetImportTransaction(value: unknown): asserts value is DesignAssetImportTransaction {
+function assetImportTransactionChecksum(
+  value: Omit<DesignAssetImportTransaction, "checksum">,
+): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function assertAssetImportTransaction(
+  value: unknown,
+  expectedProjectId: string,
+): asserts value is DesignAssetImportTransaction {
   const transaction = storedRecord(value, "Design Asset import transaction", [
-    "schemaVersion", "expectedRevision", "nextRevision", "createdAssetIds", "bindings",
+    "schemaVersion", "projectId", "expectedRevision", "nextRevision", "createdAssetIds", "bindings", "checksum",
   ]);
   if (transaction.schemaVersion !== DESIGN_SCHEMA_VERSION
+    || transaction.projectId !== expectedProjectId || !SAFE_SEGMENT.test(expectedProjectId)
     || !Number.isSafeInteger(transaction.expectedRevision) || (transaction.expectedRevision as number) < 0
     || !Number.isSafeInteger(transaction.nextRevision)
     || transaction.nextRevision !== (transaction.expectedRevision as number) + 1
@@ -1234,8 +1395,15 @@ function assertAssetImportTransaction(value: unknown): asserts value is DesignAs
     || transaction.createdAssetIds.length > MAX_DESIGN_ASSET_BATCH_ITEMS
     || !Array.isArray(transaction.bindings)
     || transaction.bindings.length < 1
-    || transaction.bindings.length > MAX_DESIGN_ASSET_BATCH_ITEMS) {
+    || transaction.bindings.length > MAX_DESIGN_ASSET_BATCH_ITEMS
+    || typeof transaction.checksum !== "string" || !SHA256.test(transaction.checksum)) {
     throw new DesignStorageError("corrupt", "Design Asset import transaction is invalid");
+  }
+  const { checksum, ...content } = transaction;
+  if (checksum !== assetImportTransactionChecksum(
+    content as Omit<DesignAssetImportTransaction, "checksum">,
+  )) {
+    throw new DesignStorageError("corrupt", "Design Asset import transaction checksum is invalid");
   }
   const assetIds = new Set<string>();
   for (const assetId of transaction.createdAssetIds) {
@@ -1246,22 +1414,95 @@ function assertAssetImportTransaction(value: unknown): asserts value is DesignAs
   }
   const nodeIds = new Set<string>();
   for (const value of transaction.bindings) {
-    const binding = storedRecord(value, "Design Asset import transaction binding", ["nodeId", "assetId"]);
+    const binding = storedRecord(value, "Design Asset import transaction binding", [
+      "createdNode", "nodeId", "assetId", "previousHeadVersionId", "previousSelectedVersionId",
+      "previousVersionCount", "previousAssetId", "selectedVersionIdAfter", "manifest",
+    ]);
     if (typeof binding.nodeId !== "string" || !SAFE_SEGMENT.test(binding.nodeId) || nodeIds.has(binding.nodeId)
-      || typeof binding.assetId !== "string" || !SAFE_SEGMENT.test(binding.assetId)) {
+      || typeof binding.assetId !== "string" || !/^asset-[a-f0-9]{32}$/.test(binding.assetId)
+      || typeof binding.createdNode !== "boolean"
+      || !validStoredNullableId(binding.previousHeadVersionId)
+      || !validStoredNullableId(binding.previousSelectedVersionId)
+      || !Number.isSafeInteger(binding.previousVersionCount) || (binding.previousVersionCount as number) < 0
+      || !validStoredNullableId(binding.previousAssetId)
+      || !validStoredNullableId(binding.selectedVersionIdAfter)
+      || !binding.manifest || typeof binding.manifest !== "object") {
       throw new DesignStorageError("corrupt", "Design Asset import transaction binding is invalid");
+    }
+    const manifest = binding.manifest as DesignVersionManifest;
+    const versionId = (manifest as { id?: unknown }).id;
+    if (typeof versionId !== "string") {
+      throw new DesignStorageError("corrupt", "Design Asset import transaction Version is invalid");
+    }
+    assertStoredVersionManifest(manifest, binding.nodeId, versionId);
+    if (manifest.contentKind !== "asset" || manifest.assetId !== binding.assetId
+      || manifest.canvasRevision !== transaction.expectedRevision || manifest.publicationStatus !== "published"
+      || manifest.expectedHeadVersionId !== binding.previousHeadVersionId
+      || manifest.sequence !== (binding.previousVersionCount as number) + 1
+      || (binding.selectedVersionIdAfter !== manifest.id
+        && binding.selectedVersionIdAfter !== binding.previousSelectedVersionId)
+      || (binding.createdNode && (
+        binding.previousHeadVersionId !== null || binding.previousSelectedVersionId !== null
+        || binding.previousVersionCount !== 0 || binding.previousAssetId !== null
+        || binding.selectedVersionIdAfter !== manifest.id
+      ))) {
+      throw new DesignStorageError("corrupt", "Design Asset import transaction Version authority is invalid");
     }
     nodeIds.add(binding.nodeId);
   }
+  const validatedBindings = transaction.bindings as DesignAssetImportTransactionBinding[];
+  if ([...assetIds].some((assetId) => !validatedBindings.some((binding) => binding.assetId === assetId))) {
+    throw new DesignStorageError("corrupt", "Design Asset import transaction contains an unbound Asset");
+  }
+}
+
+async function verifyMaterialVersionManifestDirectory(
+  directory: string,
+  expected: DesignVersionManifest,
+): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0]?.isFile() || entries[0].name !== "manifest.json") {
+    throw new DesignStorageError("corrupt", `Material Design Version ${expected.id} payload is invalid`);
+  }
+  const manifest = await readJson<DesignVersionManifest>(
+    join(directory, "manifest.json"),
+    `Material Design Version ${expected.id}`,
+  );
+  assertStoredVersionManifest(manifest, expected.nodeId, expected.id);
+  if (JSON.stringify(manifest) !== JSON.stringify(expected)) {
+    throw new DesignStorageError("corrupt", `Material Design Version ${expected.id} diverges from its WAL`);
+  }
+}
+
+function assetImportBindingIsCommitted(
+  node: DesignNode | undefined,
+  binding: DesignAssetImportTransactionBinding,
+): boolean {
+  return node !== undefined
+    && node.currentVersionId === binding.manifest.id
+    && node.selectedVersionId === binding.selectedVersionIdAfter
+    && node.versionCount === binding.previousVersionCount + 1
+    && node.assetId === binding.assetId;
+}
+
+function assetImportBindingIsBefore(
+  node: DesignNode | undefined,
+  binding: DesignAssetImportTransactionBinding,
+): boolean {
+  if (binding.createdNode) return node === undefined;
+  return node !== undefined
+    && node.currentVersionId === binding.previousHeadVersionId
+    && node.selectedVersionId === binding.previousSelectedVersionId
+    && node.versionCount === binding.previousVersionCount
+    && node.assetId === binding.previousAssetId;
 }
 
 async function recoverPendingAssetImportsUnlocked(root: string): Promise<void> {
   const transactionsRoot = assetImportTransactionsRoot(root);
   if (!(await exists(transactionsRoot))) return;
-  const entries = await readdir(transactionsRoot, { withFileTypes: true });
+  const entries = (await readdir(transactionsRoot, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name));
   if (entries.length === 0) return;
-  const project = await readProject(root);
-  const nodes = readNodes(project);
   for (const entry of entries) {
     const transactionRoot = join(transactionsRoot, entry.name);
     if (!entry.isDirectory() || !SAFE_SEGMENT.test(entry.name)) {
@@ -1273,20 +1514,55 @@ async function recoverPendingAssetImportsUnlocked(root: string): Promise<void> {
       continue;
     }
     const transaction = await readJson<DesignAssetImportTransaction>(transactionPath, "Design Asset import transaction");
-    assertAssetImportTransaction(transaction);
-    const committed = project.revision >= transaction.nextRevision
-      && transaction.bindings.every((binding) => nodes.get(binding.nodeId)?.assetId === binding.assetId);
-    if (committed) {
+    const projectId = basename(resolve(root, ".."));
+    assertAssetImportTransaction(transaction, projectId);
+    const project = await readProject(root);
+    const nodes = readNodes(project);
+    const committed = transaction.bindings.every((binding) =>
+      assetImportBindingIsCommitted(nodes.get(binding.nodeId), binding));
+    if (project.revision === transaction.nextRevision) {
+      if (!committed) {
+        throw new DesignStorageError("corrupt", "Committed Design Asset import has inconsistent Canvas authority");
+      }
       for (const binding of transaction.bindings) {
-        if (!(await exists(join(assetRoot(root, binding.assetId), "manifest.json")))) {
-          throw new DesignStorageError("corrupt", "Committed Design Asset import is missing an Asset");
+        const asset = await getDesignAssetManifestUnlocked(root, binding.assetId);
+        if (asset.checksum !== binding.manifest.checksum || asset.bytes !== binding.manifest.bytes) {
+          throw new DesignStorageError("corrupt", "Committed Design Asset import Asset diverges from its Version");
+        }
+        await verifyMaterialVersionManifestDirectory(
+          versionRoot(root, binding.nodeId, binding.manifest.id),
+          binding.manifest,
+        );
+      }
+    } else if (project.revision === transaction.expectedRevision) {
+      if (!transaction.bindings.every((binding) =>
+        assetImportBindingIsBefore(nodes.get(binding.nodeId), binding))) {
+        throw new DesignStorageError("corrupt", "Interrupted Design Asset import lost its prior Canvas authority");
+      }
+      for (const binding of transaction.bindings) {
+        const target = versionRoot(root, binding.nodeId, binding.manifest.id);
+        if (await exists(target)) {
+          await verifyMaterialVersionManifestDirectory(target, binding.manifest);
+          await rm(target, { recursive: true, force: true });
+        }
+      }
+      const referencedAssetIds = new Set(project.nodes.flatMap((node) => node.assetId ? [node.assetId] : []));
+      for (const assetId of transaction.createdAssetIds) {
+        if (referencedAssetIds.has(assetId)) {
+          throw new DesignStorageError("corrupt", "Interrupted Design Asset import Asset became unexpectedly referenced");
+        }
+        const target = assetRoot(root, assetId);
+        if (await exists(target)) {
+          const asset = await getDesignAssetManifestUnlocked(root, assetId);
+          const expected = transaction.bindings.find((binding) => binding.assetId === assetId)!.manifest;
+          if (asset.checksum !== expected.checksum || asset.bytes !== expected.bytes) {
+            throw new DesignStorageError("corrupt", "Interrupted Design Asset import Asset diverges from its WAL");
+          }
+          await rm(target, { recursive: true, force: true });
         }
       }
     } else {
-      const referencedAssetIds = new Set(project.nodes.flatMap((node) => node.assetId ? [node.assetId] : []));
-      await Promise.all(transaction.createdAssetIds
-        .filter((assetId) => !referencedAssetIds.has(assetId))
-        .map((assetId) => rm(assetRoot(root, assetId), { recursive: true, force: true })));
+      throw new DesignStorageError("corrupt", "Design Asset import WAL revision authority is invalid");
     }
     await rm(transactionRoot, { recursive: true, force: true });
   }
@@ -1308,20 +1584,65 @@ export async function storeDesignAsset(
   });
 }
 
-/**
- * Atomically ingest immutable Asset payloads and bind their material Nodes in one
- * Canvas revision. Payloads are staged under the project lock; if any payload,
- * Node, CAS, or project commit fails, only Asset directories first created by
- * this transaction are removed. Existing content-addressed Assets are untouched.
- */
-export async function importDesignCanvasAssetBatch(
+function materialVersionManifest(
+  projectId: string,
+  node: DesignNode,
+  asset: DesignAssetManifest,
+  canvasRevision: number,
+  timestamp: number,
+): DesignVersionManifest {
+  const id = `version-${randomUUID()}`;
+  const expectedHeadVersionId = node.currentVersionId;
+  return {
+    schemaVersion: DESIGN_SCHEMA_VERSION,
+    id,
+    nodeId: node.id,
+    contentKind: "asset",
+    assetId: asset.id,
+    sequence: node.versionCount + 1,
+    checksum: asset.checksum,
+    bytes: asset.bytes,
+    contextHash: createHash("sha256").update(stableStringify({
+      protocol: "dezin-material-version-v1",
+      projectId,
+      nodeId: node.id,
+      assetId: asset.id,
+      assetChecksum: asset.checksum,
+      assetBytes: asset.bytes,
+      canvasRevision,
+      expectedHeadVersionId,
+    })).digest("hex"),
+    canvasRevision,
+    expectedHeadVersionId,
+    publicationStatus: "published",
+    assetPins: [],
+    jobId: null,
+    runnerId: null,
+    model: null,
+    createdAt: timestamp,
+  };
+}
+
+async function stageMaterialVersionManifest(
+  directory: string,
+  manifest: DesignVersionManifest,
+): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+}
+
+async function importDesignCanvasAssetBatchUnlocked(
   dataDir: string,
   projectId: string,
+  root: string,
   input: { expectedRevision: number; items: DesignCanvasAssetImport[] },
   now?: number,
-): Promise<DesignCanvas> {
-  const root = designRoot(dataDir, projectId);
-  return withProjectLock(root, async () => {
+  hooks?: DesignAssetImportTestHooks,
+): Promise<DesignAssetImportOutcome> {
     await requireInitialized(root);
     await recoverPendingAssetImportsUnlocked(root);
     const project = await readProject(root);
@@ -1342,13 +1663,18 @@ export async function importDesignCanvasAssetBatch(
     const nodes = readNodes(project);
     const before = snapshot(project, nodes);
     const createdAssetIds = new Set<string>();
-    const bindings: Array<{ nodeId: string; assetId: string }> = [];
+    const bindings: DesignAssetImportTransactionBinding[] = [];
+    const imported: DesignAssetImportOutcome["bindings"] = [];
+    const touchedNodeIds = new Set<string>();
     const transactionId = `import-${randomUUID()}`;
     const transactionRoot = join(assetImportTransactionsRoot(root), transactionId);
     let totalBytes = 0;
+    let transaction: DesignAssetImportTransaction | null = null;
+    let markerWritten = false;
     try {
       for (const item of input.items) {
-        if (!item || typeof item !== "object" || Array.isArray(item)) {
+        if (!item || typeof item !== "object" || Array.isArray(item)
+          || Object.keys(item).some((key) => !["asset", "binding"].includes(key))) {
           throw new DesignStorageError("invalid-input", "Asset import item is invalid");
         }
         const prepared = await prepareDesignAsset(dataDir, projectId, root, item.asset, timestamp);
@@ -1365,11 +1691,78 @@ export async function importDesignCanvasAssetBatch(
           );
           createdAssetIds.add(prepared.manifest.id);
         }
-        const importedNode = await addNode(dataDir, projectId, project, nodes, {
-          type: "add-node",
-          node: { ...item.node, assetId: prepared.manifest.id },
-        }, timestamp, prepared.manifest);
-        bindings.push({ nodeId: importedNode.id, assetId: prepared.manifest.id });
+        const binding = item.binding;
+        if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+          throw new DesignStorageError("invalid-input", "Asset import binding is invalid");
+        }
+        let importedNode: DesignNode;
+        let createdNode = false;
+        if (binding.type === "create-node") {
+          if (Object.keys(binding).some((key) => !["type", "node"].includes(key))) {
+            throw new DesignStorageError("invalid-input", "Asset create-Node binding is invalid");
+          }
+          importedNode = await addNode(dataDir, projectId, project, nodes, {
+            type: "add-node",
+            node: binding.node,
+          }, timestamp);
+          createdNode = true;
+        } else if (binding.type === "append-version") {
+          if (Object.keys(binding).some((key) => !["type", "nodeId"].includes(key))) {
+            throw new DesignStorageError("invalid-input", "Asset append-Version binding is invalid");
+          }
+          const nodeId = safeSegment(binding.nodeId, "Node id");
+          const existingNode = nodes.get(nodeId);
+          if (!existingNode) throw new DesignStorageError("not-found", `Design Node ${nodeId} was not found`);
+          importedNode = existingNode;
+        } else {
+          throw new DesignStorageError("invalid-input", "Asset import binding is unsupported");
+        }
+        if (touchedNodeIds.has(importedNode.id)) {
+          throw new DesignStorageError("invalid-input", "Asset import batch may bind each material Node only once");
+        }
+        touchedNodeIds.add(importedNode.id);
+        if ((DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(importedNode.kind)) {
+          throw new DesignStorageError("invalid-input", "Only material Nodes may publish Asset Versions");
+        }
+        if (importedNode.activeJobId !== null) {
+          throw new DesignStorageError("conflict", "Cancel the active scoped Agent Job before importing a material Version");
+        }
+        if (!matchesMaterialNodeKind(importedNode.kind, prepared.manifest.mimeType)) {
+          throw new DesignStorageError(
+            "invalid-input",
+            `Asset ${prepared.manifest.id} mimeType does not match Node kind ${importedNode.kind}`,
+          );
+        }
+        const previousHeadVersionId = importedNode.currentVersionId;
+        const previousSelectedVersionId = importedNode.selectedVersionId;
+        const previousVersionCount = importedNode.versionCount;
+        const previousAssetId = importedNode.assetId;
+        const followsHead = previousSelectedVersionId === null || previousSelectedVersionId === previousHeadVersionId;
+        const manifest = materialVersionManifest(projectId, importedNode, prepared.manifest, project.revision, timestamp);
+        const selectedVersionIdAfter = followsHead ? manifest.id : previousSelectedVersionId;
+        await stageMaterialVersionManifest(
+          join(transactionRoot, "versions", importedNode.id, manifest.id),
+          manifest,
+        );
+        importedNode.currentVersionId = manifest.id;
+        importedNode.selectedVersionId = selectedVersionIdAfter;
+        importedNode.versionCount = previousVersionCount + 1;
+        importedNode.assetId = prepared.manifest.id;
+        importedNode.state = "ready";
+        importedNode.error = null;
+        importedNode.updatedAt = timestamp;
+        bindings.push({
+          createdNode,
+          nodeId: importedNode.id,
+          assetId: prepared.manifest.id,
+          previousHeadVersionId,
+          previousSelectedVersionId,
+          previousVersionCount,
+          previousAssetId,
+          selectedVersionIdAfter,
+          manifest,
+        });
+        imported.push({ node: importedNode, version: manifest, asset: prepared.manifest });
       }
 
       project.nodes = project.nodeOrder.map((id) => cloneNode(nodes.get(id)!));
@@ -1377,29 +1770,115 @@ export async function importDesignCanvasAssetBatch(
       project.redo = [];
       project.revision += 1;
       project.updatedAt = Math.max(project.updatedAt, timestamp);
-      const transaction: DesignAssetImportTransaction = {
+      const transactionContent: Omit<DesignAssetImportTransaction, "checksum"> = {
         schemaVersion: DESIGN_SCHEMA_VERSION,
+        projectId,
         expectedRevision: input.expectedRevision,
         nextRevision: project.revision,
         createdAssetIds: [...createdAssetIds].sort(),
         bindings,
       };
+      transaction = {
+        ...transactionContent,
+        checksum: assetImportTransactionChecksum(transactionContent),
+      };
       await writeAtomicJson(join(transactionRoot, "transaction.json"), transaction);
+      markerWritten = true;
+      await hooks?.afterPhase?.("marker");
       for (const assetId of createdAssetIds) {
         await rename(join(transactionRoot, "assets", assetId), assetRoot(root, assetId));
       }
+      await hooks?.afterPhase?.("assets");
+      for (const binding of bindings) {
+        await mkdir(join(nodeRoot(root, binding.nodeId), "versions"), { recursive: true });
+        await rename(
+          join(transactionRoot, "versions", binding.nodeId, binding.manifest.id),
+          versionRoot(root, binding.nodeId, binding.manifest.id),
+        );
+      }
+      await hooks?.afterPhase?.("versions");
       await writeAtomicJson(projectFilePath(root), project);
+      await hooks?.afterPhase?.("canvas");
       await rm(transactionRoot, { recursive: true, force: true }).catch(() => {});
-      return canvas(project, nodes);
+      const committedCanvas = canvas(project, nodes);
+      return {
+        canvas: committedCanvas,
+        bindings: imported.map((entry) => ({ ...entry, node: cloneNode(nodes.get(entry.node.id)!) })),
+      };
     } catch (error) {
-      await Promise.all([
-        ...[...createdAssetIds].map((assetId) =>
-          rm(assetRoot(root, assetId), { recursive: true, force: true })),
-        rm(transactionRoot, { recursive: true, force: true }),
-      ]);
+      if (!markerWritten) {
+        await rm(transactionRoot, { recursive: true, force: true });
+        throw error;
+      }
+      if (hooks?.simulateProcessCrash) throw error;
+      await recoverPendingAssetImportsUnlocked(root);
+      const recoveredProject = await readProject(root);
+      const recoveredNodes = readNodes(recoveredProject);
+      if (transaction !== null && recoveredProject.revision === transaction.nextRevision
+        && transaction.bindings.every((binding) =>
+          assetImportBindingIsCommitted(recoveredNodes.get(binding.nodeId), binding))) {
+        return {
+          canvas: canvas(recoveredProject, recoveredNodes),
+          bindings: imported.map((entry) => ({
+            ...entry,
+            node: cloneNode(recoveredNodes.get(entry.node.id)!),
+          })),
+        };
+      }
       throw error;
     }
+}
+
+/**
+ * Atomically ingest immutable Asset payloads and publish each material binding
+ * as an immutable Node Version in one Canvas revision. The durable WAL owns the
+ * Asset directories, Version manifests, and Canvas head transition together.
+ */
+export async function importDesignCanvasAssetBatch(
+  dataDir: string,
+  projectId: string,
+  input: { expectedRevision: number; items: DesignCanvasAssetImport[] },
+  now?: number,
+  hooks?: DesignAssetImportTestHooks,
+): Promise<DesignCanvas> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => (
+    await importDesignCanvasAssetBatchUnlocked(dataDir, projectId, root, input, now, hooks)
+  ).canvas);
+}
+
+export async function appendDesignMaterialVersion(
+  dataDir: string,
+  projectId: string,
+  input: { expectedRevision: number; nodeId: string; asset: DesignAssetStoreInput },
+  now?: number,
+  hooks?: DesignAssetImportTestHooks,
+): Promise<ImportedDesignMaterialVersion> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    const outcome = await importDesignCanvasAssetBatchUnlocked(dataDir, projectId, root, {
+      expectedRevision: input.expectedRevision,
+      items: [{
+        asset: input.asset,
+        binding: { type: "append-version", nodeId: input.nodeId },
+      }],
+    }, now, hooks);
+    const binding = outcome.bindings[0];
+    if (!binding) throw new DesignStorageError("corrupt", "Material Version import produced no binding");
+    return { canvas: outcome.canvas, ...binding };
   });
+}
+
+async function getDesignAssetManifestUnlocked(
+  root: string,
+  assetId: string,
+): Promise<DesignAssetManifest> {
+  const manifest = await readJson<DesignAssetManifest>(
+    join(assetRoot(root, assetId), "manifest.json"),
+    `Design Asset ${assetId}`,
+  );
+  assertStoredAssetManifest(manifest, assetId);
+  return manifest;
 }
 
 export async function getDesignAssetManifest(
@@ -1407,13 +1886,7 @@ export async function getDesignAssetManifest(
   projectId: string,
   assetId: string,
 ): Promise<DesignAssetManifest> {
-  const root = designRoot(dataDir, projectId);
-  const manifest = await readJson<DesignAssetManifest>(
-    join(assetRoot(root, assetId), "manifest.json"),
-    `Design Asset ${assetId}`,
-  );
-  assertStoredAssetManifest(manifest, assetId);
-  return manifest;
+  return getDesignAssetManifestUnlocked(designRoot(dataDir, projectId), assetId);
 }
 
 export async function listDesignAssets(dataDir: string, projectId: string): Promise<DesignAssetManifest[]> {
@@ -1436,11 +1909,19 @@ export async function resolveDesignAssetFile(
   assetId: string,
   requestedFile: string,
 ): Promise<{ manifest: DesignAssetManifest; path: string }> {
-  const manifest = await getDesignAssetManifest(dataDir, projectId, assetId);
+  return resolveDesignAssetFileUnlocked(designRoot(dataDir, projectId), assetId, requestedFile);
+}
+
+async function resolveDesignAssetFileUnlocked(
+  root: string,
+  assetId: string,
+  requestedFile: string,
+): Promise<{ manifest: DesignAssetManifest; path: string }> {
+  const manifest = await getDesignAssetManifestUnlocked(root, assetId);
   if (requestedFile !== manifest.fileName || basename(requestedFile) !== requestedFile) {
     throw new DesignStorageError("not-found", "Design Asset file was not found");
   }
-  const path = join(assetRoot(designRoot(dataDir, projectId), assetId), manifest.fileName);
+  const path = join(assetRoot(root, assetId), manifest.fileName);
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.size !== manifest.bytes) {
     throw new DesignStorageError("corrupt", `Design Asset ${assetId} payload is invalid`);
@@ -1483,7 +1964,2007 @@ function allowedDesignUrl(value: string, allowCanonicalAssets: boolean): boolean
     && /^\/api\/projects\/[A-Za-z0-9._-]+\/design-canvas\/assets\/asset-[a-f0-9]{32}\/original\.[a-z0-9]{1,12}\?nodeId=[A-Za-z0-9._-]+&versionId=version-[A-Za-z0-9._-]+&checksum=[a-f0-9]{64}$/i.test(url);
 }
 
-const CANONICAL_DESIGN_ASSET_URL = /\/api\/projects\/[A-Za-z0-9._-]+\/design-canvas\/assets\/asset-[a-f0-9]{32}\/original\.[a-z0-9]{1,12}\?nodeId=[A-Za-z0-9._-]+&versionId=version-[A-Za-z0-9._-]+&checksum=[a-f0-9]{64}/gi;
+interface DesignJavaScriptNode {
+  type: string;
+  [key: string]: unknown;
+}
+
+type DesignJavaScriptProvenance = "global" | "dom" | "style" | "local" | "unknown";
+
+interface DesignJavaScriptScope {
+  parent: DesignJavaScriptScope | null;
+  kind: "program" | "parameter" | "function-body" | "static-block" | "block";
+  bindings: Set<string>;
+  constantStrings: Map<string, string>;
+  possibleStrings: Map<string, ReadonlySet<string>>;
+  possibleValues: Map<string, readonly unknown[]>;
+  invalidatedBindings: Set<string>;
+  reassignedBindings: Set<string>;
+  initializers: Map<string, unknown>;
+  stableValues: Map<string, unknown>;
+  provenances: Map<string, DesignJavaScriptProvenance>;
+  callables: Set<string>;
+}
+
+interface DesignJavaScriptIndex {
+  bindings: WeakSet<object>;
+  scopeByNode: WeakMap<object, DesignJavaScriptScope>;
+  parentByNode: WeakMap<object, DesignJavaScriptNode | null>;
+  thisOwnerByNode: WeakMap<object, DesignJavaScriptNode>;
+  localThisFunctions: WeakSet<object>;
+}
+
+function designJavaScriptNode(value: unknown): value is DesignJavaScriptNode {
+  return value !== null && typeof value === "object" && typeof (value as { type?: unknown }).type === "string";
+}
+
+function forEachDesignJavaScriptChild(
+  node: DesignJavaScriptNode,
+  visit: (child: DesignJavaScriptNode, key: string) => void,
+): void {
+  for (const [key, child] of Object.entries(node)) {
+    if (key === "loc" || key === "comments" || key === "tokens" || key === "errors") continue;
+    if (Array.isArray(child)) {
+      for (const entry of child) {
+        if (designJavaScriptNode(entry)) visit(entry, key);
+      }
+    } else if (designJavaScriptNode(child)) {
+      visit(child, key);
+    }
+  }
+}
+
+function visitDesignJavaScript(
+  node: DesignJavaScriptNode,
+  visit: (node: DesignJavaScriptNode, parent: DesignJavaScriptNode | null, key: string | null) => void,
+  parent: DesignJavaScriptNode | null = null,
+  key: string | null = null,
+): void {
+  visit(node, parent, key);
+  forEachDesignJavaScriptChild(node, (child, childKey) => {
+    visitDesignJavaScript(child, visit, node, childKey);
+  });
+}
+
+function designJavaScriptFunction(node: DesignJavaScriptNode): boolean {
+  return node.type === "FunctionDeclaration"
+    || node.type === "FunctionExpression"
+    || node.type === "ArrowFunctionExpression"
+    || node.type === "ObjectMethod"
+    || node.type === "ClassMethod"
+    || node.type === "ClassPrivateMethod";
+}
+
+function designJavaScriptClass(node: DesignJavaScriptNode): boolean {
+  return node.type === "ClassDeclaration" || node.type === "ClassExpression";
+}
+
+function addDesignJavaScriptBinding(
+  value: unknown,
+  scope: DesignJavaScriptScope,
+  bindings: WeakSet<object>,
+): void {
+  if (!designJavaScriptNode(value)) return;
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    scope.bindings.add(value.name);
+    bindings.add(value);
+    return;
+  }
+  if (value.type === "RestElement") {
+    addDesignJavaScriptBinding(value.argument, scope, bindings);
+    return;
+  }
+  if (value.type === "AssignmentPattern") {
+    addDesignJavaScriptBinding(value.left, scope, bindings);
+    return;
+  }
+  if (value.type === "ArrayPattern") {
+    for (const element of Array.isArray(value.elements) ? value.elements : []) {
+      addDesignJavaScriptBinding(element, scope, bindings);
+    }
+    return;
+  }
+  if (value.type === "ObjectPattern") {
+    for (const property of Array.isArray(value.properties) ? value.properties : []) {
+      if (!designJavaScriptNode(property)) continue;
+      addDesignJavaScriptBinding(
+        property.type === "RestElement" ? property.argument : property.value,
+        scope,
+        bindings,
+      );
+    }
+  }
+}
+
+function nearestDesignJavaScriptVarScope(scope: DesignJavaScriptScope): DesignJavaScriptScope {
+  let current = scope;
+  while (!["program", "function-body", "static-block"].includes(current.kind) && current.parent !== null) {
+    current = current.parent;
+  }
+  return current;
+}
+
+function newDesignJavaScriptScope(
+  parent: DesignJavaScriptScope | null,
+  kind: DesignJavaScriptScope["kind"],
+): DesignJavaScriptScope {
+  return {
+    parent,
+    kind,
+    bindings: new Set<string>(),
+    constantStrings: new Map<string, string>(),
+    possibleStrings: new Map<string, ReadonlySet<string>>(),
+    possibleValues: new Map<string, readonly unknown[]>(),
+    invalidatedBindings: new Set<string>(),
+    reassignedBindings: new Set<string>(),
+    initializers: new Map<string, unknown>(),
+    stableValues: new Map<string, unknown>(),
+    provenances: new Map<string, DesignJavaScriptProvenance>(),
+    callables: new Set<string>(),
+  };
+}
+
+function indexDesignJavaScript(root: DesignJavaScriptNode): DesignJavaScriptIndex {
+  const index: DesignJavaScriptIndex = {
+    bindings: new WeakSet<object>(),
+    scopeByNode: new WeakMap<object, DesignJavaScriptScope>(),
+    parentByNode: new WeakMap<object, DesignJavaScriptNode | null>(),
+    thisOwnerByNode: new WeakMap<object, DesignJavaScriptNode>(),
+    localThisFunctions: new WeakSet<object>(),
+  };
+  const walk = (
+    node: DesignJavaScriptNode,
+    incoming: DesignJavaScriptScope | null,
+    parent: DesignJavaScriptNode | null,
+    incomingThisOwner: DesignJavaScriptNode | null,
+  ): void => {
+    if (node.type === "FunctionDeclaration" && incoming !== null) {
+      addDesignJavaScriptBinding(node.id, incoming, index.bindings);
+      if (designJavaScriptNode(node.id) && node.id.type === "Identifier" && typeof node.id.name === "string") {
+        incoming.callables.add(node.id.name);
+        incoming.stableValues.set(node.id.name, node);
+      }
+    } else if (node.type === "ClassDeclaration" && incoming !== null) {
+      addDesignJavaScriptBinding(node.id, incoming, index.bindings);
+      if (designJavaScriptNode(node.id) && node.id.type === "Identifier" && typeof node.id.name === "string") {
+        incoming.stableValues.set(node.id.name, node);
+      }
+    }
+
+    let scope = incoming;
+    if (node.type === "Program") {
+      scope = newDesignJavaScriptScope(null, "program");
+    } else if (designJavaScriptFunction(node)) {
+      scope = newDesignJavaScriptScope(incoming, "parameter");
+      if (node.type === "FunctionExpression") {
+        addDesignJavaScriptBinding(node.id, scope, index.bindings);
+        if (designJavaScriptNode(node.id) && node.id.type === "Identifier" && typeof node.id.name === "string") {
+          scope.callables.add(node.id.name);
+        }
+      }
+      for (const parameter of Array.isArray(node.params) ? node.params : []) {
+        addDesignJavaScriptBinding(parameter, scope, index.bindings);
+      }
+    } else if (designJavaScriptClass(node)) {
+      scope = newDesignJavaScriptScope(incoming, "block");
+      if (node.type === "ClassExpression") addDesignJavaScriptBinding(node.id, scope, index.bindings);
+    } else if (node.type === "CatchClause") {
+      scope = newDesignJavaScriptScope(incoming, "block");
+      addDesignJavaScriptBinding(node.param, scope, index.bindings);
+    } else if (node.type === "StaticBlock") {
+      scope = newDesignJavaScriptScope(incoming, "static-block");
+    } else if (node.type === "BlockStatement"
+      || node.type === "ForStatement"
+      || node.type === "ForInStatement"
+      || node.type === "ForOfStatement"
+      || node.type === "SwitchStatement") {
+      scope = newDesignJavaScriptScope(incoming, "block");
+    }
+    if (scope === null) throw new Error("JavaScript AST has no Program scope");
+    index.scopeByNode.set(node, scope);
+    index.parentByNode.set(node, parent);
+    if (incomingThisOwner !== null) index.thisOwnerByNode.set(node, incomingThisOwner);
+
+    if (node.type === "VariableDeclarator" && parent?.type === "VariableDeclaration") {
+      const target = parent.kind === "var" ? nearestDesignJavaScriptVarScope(scope) : scope;
+      addDesignJavaScriptBinding(node.id, target, index.bindings);
+      if (designJavaScriptNode(node.id) && node.id.type === "Identifier" && typeof node.id.name === "string") {
+        if (target.stableValues.has(node.id.name)) {
+          target.stableValues.delete(node.id.name);
+          target.callables.delete(node.id.name);
+          target.constantStrings.delete(node.id.name);
+          target.possibleStrings.delete(node.id.name);
+          target.possibleValues.delete(node.id.name);
+          target.invalidatedBindings.add(node.id.name);
+          target.reassignedBindings.add(node.id.name);
+        } else {
+          target.stableValues.set(node.id.name, node.init);
+          if (designJavaScriptNode(node.init) && designJavaScriptFunction(node.init)) {
+            target.callables.add(node.id.name);
+          }
+          if (parent.kind === "const") {
+            target.initializers.set(node.id.name, node.init);
+            const constant = staticDesignJavaScriptString(node.init);
+            target.possibleValues.set(node.id.name, [node.init]);
+            if (constant !== null) {
+              target.constantStrings.set(node.id.name, constant);
+              target.possibleStrings.set(node.id.name, new Set([constant]));
+            }
+          }
+        }
+      }
+    } else if (node.type === "ImportSpecifier"
+      || node.type === "ImportDefaultSpecifier"
+      || node.type === "ImportNamespaceSpecifier") {
+      addDesignJavaScriptBinding(node.local, scope, index.bindings);
+    }
+
+    const functionBodyScope = designJavaScriptFunction(node)
+      ? newDesignJavaScriptScope(scope, "function-body")
+      : null;
+    forEachDesignJavaScriptChild(node, (child, key) => {
+      const childScope = designJavaScriptFunction(node) && (key === "key" || key === "decorators")
+        ? incoming
+        : designJavaScriptFunction(node) && key === "body"
+          ? functionBodyScope
+        : scope;
+      const thisOwner = designJavaScriptFunction(node) && node.type !== "ArrowFunctionExpression"
+        ? node
+        : incomingThisOwner;
+      walk(child, childScope, node, thisOwner);
+    });
+  };
+  walk(root, null, null, null);
+
+  const invalidateStableValue = (
+    value: unknown,
+    scope: DesignJavaScriptScope | undefined,
+    reassignsBinding = true,
+  ): void => {
+    if (!designJavaScriptNode(value)) return;
+    if (value.type === "Identifier" && typeof value.name === "string") {
+      const binding = designJavaScriptBindingScope(scope, value.name);
+      binding?.stableValues.delete(value.name);
+      binding?.callables.delete(value.name);
+      binding?.constantStrings.delete(value.name);
+      binding?.possibleStrings.delete(value.name);
+      binding?.possibleValues.delete(value.name);
+      binding?.invalidatedBindings.add(value.name);
+      if (reassignsBinding) binding?.reassignedBindings.add(value.name);
+      return;
+    }
+    if (value.type === "MemberExpression" || value.type === "OptionalMemberExpression") {
+      invalidateStableValue(value.object, index.scopeByNode.get(value), false);
+      return;
+    }
+    if (value.type === "RestElement") {
+      invalidateStableValue(value.argument, scope, reassignsBinding);
+      return;
+    }
+    if (value.type === "AssignmentPattern") {
+      invalidateStableValue(value.left, scope, reassignsBinding);
+      return;
+    }
+    if (value.type === "ArrayPattern") {
+      for (const element of Array.isArray(value.elements) ? value.elements : []) {
+        invalidateStableValue(element, scope, reassignsBinding);
+      }
+      return;
+    }
+    if (value.type === "ObjectPattern") {
+      for (const property of Array.isArray(value.properties) ? value.properties : []) {
+        if (!designJavaScriptNode(property)) continue;
+        invalidateStableValue(
+          property.type === "RestElement" ? property.argument : property.value,
+          scope,
+          reassignsBinding,
+        );
+      }
+    }
+  };
+  visitDesignJavaScript(root, (node) => {
+    if (node.type === "AssignmentExpression") {
+      invalidateStableValue(node.left, index.scopeByNode.get(node));
+    } else if (node.type === "UpdateExpression") {
+      invalidateStableValue(node.argument, index.scopeByNode.get(node));
+    } else if ((node.type === "ForInStatement" || node.type === "ForOfStatement")
+      && (!designJavaScriptNode(node.left) || node.left.type !== "VariableDeclaration")) {
+      invalidateStableValue(node.left, index.scopeByNode.get(node));
+    } else if (node.type === "CallExpression" && designJavaScriptNode(node.callee)
+      && (node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression")) {
+      const calleeName = designJavaScriptMemberName(node.callee, index);
+      const calleePath = designJavaScriptGlobalPath(node.callee, index);
+      const effective = calleePath === null ? null : designJavaScriptEffectivePath(calleePath);
+      if ((effective?.root === "Object" && ["assign", "defineProperty"].includes(calleeName ?? ""))
+        || (effective?.root === "Reflect" && calleeName === "set")) {
+        invalidateStableValue(
+          Array.isArray(node.arguments) ? node.arguments[0] : null,
+          index.scopeByNode.get(node),
+          false,
+        );
+      }
+      if (["copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift"]
+        .includes(calleeName ?? "")) {
+        invalidateStableValue(node.callee.object, index.scopeByNode.get(node), false);
+      }
+    }
+  });
+
+  interface StaticCallSite {
+    args: unknown[];
+    receiver: DesignJavaScriptProvenance | null;
+  }
+  const callSites = new Map<DesignJavaScriptNode, StaticCallSite[]>();
+  const escapedFunctions = new WeakSet<object>();
+  const recordCall = (
+    callable: DesignJavaScriptNode,
+    args: unknown[],
+    receiver: DesignJavaScriptProvenance | null,
+  ): void => {
+    const existing = callSites.get(callable) ?? [];
+    existing.push({ args, receiver });
+    callSites.set(callable, existing);
+  };
+  visitDesignJavaScript(root, (node, parent, key) => {
+    if ((node.type === "Identifier" || node.type === "MemberExpression" || node.type === "OptionalMemberExpression")
+      && !index.bindings.has(node)) {
+      const resolved = designJavaScriptStableValue(node, index);
+      if (resolved !== null && designJavaScriptFunction(resolved)
+        && !(parent?.type === "CallExpression" && key === "callee")) {
+        escapedFunctions.add(resolved);
+      }
+    }
+    if (node.type === "CallExpression" && designJavaScriptNode(node.callee)) {
+      const callable = designJavaScriptStableValue(node.callee, index);
+      if (callable !== null && designJavaScriptFunction(callable)) {
+        const receiver = node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression"
+          ? designJavaScriptProvenance(node.callee.object, index)
+          : null;
+        recordCall(callable, Array.isArray(node.arguments) ? node.arguments : [], receiver);
+      }
+    }
+    if (node.type === "NewExpression" && designJavaScriptNode(node.callee)) {
+      const classNode = designJavaScriptStableValue(node.callee, index);
+      if (classNode !== null && (classNode.type === "ClassDeclaration" || classNode.type === "ClassExpression")
+        && designJavaScriptNode(classNode.body) && Array.isArray(classNode.body.body)) {
+        const constructor = classNode.body.body.find((candidate) => designJavaScriptNode(candidate)
+          && candidate.static !== true && designJavaScriptObjectPropertyName(candidate) === "constructor");
+        if (designJavaScriptNode(constructor) && designJavaScriptFunction(constructor)) {
+          recordCall(constructor, Array.isArray(node.arguments) ? node.arguments : [], "local");
+        }
+      }
+    }
+  });
+  const assignLocalParameterProvenance = (
+    pattern: unknown,
+    scope: DesignJavaScriptScope,
+  ): void => {
+    if (!designJavaScriptNode(pattern)) return;
+    if (pattern.type === "Identifier" && typeof pattern.name === "string") {
+      if (!scope.invalidatedBindings.has(pattern.name)) scope.provenances.set(pattern.name, "local");
+      return;
+    }
+    if (pattern.type === "RestElement") {
+      assignLocalParameterProvenance(pattern.argument, scope);
+      return;
+    }
+    if (pattern.type === "AssignmentPattern") {
+      assignLocalParameterProvenance(pattern.left, scope);
+      return;
+    }
+    if (pattern.type === "ArrayPattern") {
+      for (const element of Array.isArray(pattern.elements) ? pattern.elements : []) {
+        assignLocalParameterProvenance(element, scope);
+      }
+      return;
+    }
+    if (pattern.type === "ObjectPattern") {
+      for (const property of Array.isArray(pattern.properties) ? pattern.properties : []) {
+        if (!designJavaScriptNode(property)) continue;
+        assignLocalParameterProvenance(
+          property.type === "RestElement" ? property.argument : property.value,
+          scope,
+        );
+      }
+    }
+  };
+  const expandPossibleValues = (candidates: readonly unknown[]): readonly unknown[] | null => {
+    const expanded: unknown[] = [];
+    for (const candidate of candidates) {
+      const possible = designJavaScriptPossibleValues(candidate, index);
+      if (possible === null || expanded.length + possible.length > 256) return null;
+      expanded.push(...possible);
+    }
+    return expanded;
+  };
+  const assignPossibleValueProvenance = (
+    pattern: unknown,
+    candidates: readonly unknown[],
+    scope: DesignJavaScriptScope,
+  ): void => {
+    if (!designJavaScriptNode(pattern) || candidates.length === 0) return;
+    const expanded = expandPossibleValues(candidates);
+    if (expanded === null || expanded.length === 0) return;
+    if (pattern.type === "Identifier" && typeof pattern.name === "string") {
+      if (!scope.invalidatedBindings.has(pattern.name)) scope.possibleValues.set(pattern.name, expanded);
+      return;
+    }
+    if (pattern.type === "AssignmentPattern") {
+      assignPossibleValueProvenance(pattern.left, expanded.map((candidate) => (
+        candidate === undefined ? pattern.right : candidate
+      )), scope);
+      return;
+    }
+    if (pattern.type === "ArrayPattern") {
+      const arrays = expanded.map((candidate) => designJavaScriptPossibleValues(candidate, index)?.[0]);
+      if (arrays.some((candidate) => !designJavaScriptNode(candidate) || candidate.type !== "ArrayExpression")) return;
+      const elements = Array.isArray(pattern.elements) ? pattern.elements : [];
+      for (let elementIndex = 0; elementIndex < elements.length; elementIndex += 1) {
+        const element = elements[elementIndex];
+        if (element === null || element === undefined) continue;
+        const elementCandidates = arrays.map((candidate) => (
+          designJavaScriptNode(candidate) && Array.isArray(candidate.elements)
+            ? candidate.elements[elementIndex]
+            : undefined
+        ));
+        if (elementCandidates.some((candidate) => candidate === null || candidate === undefined)) continue;
+        assignPossibleValueProvenance(element, elementCandidates, scope);
+      }
+      return;
+    }
+    if (pattern.type === "ObjectPattern") {
+      const objects = expanded.map((candidate) => designJavaScriptPossibleValues(candidate, index)?.[0]);
+      if (objects.some((candidate) => !designJavaScriptNode(candidate) || candidate.type !== "ObjectExpression")) return;
+      for (const property of Array.isArray(pattern.properties) ? pattern.properties : []) {
+        if (!designJavaScriptNode(property) || property.type === "RestElement") continue;
+        const propertyName = designJavaScriptObjectPropertyName(property);
+        if (propertyName === null) continue;
+        const propertyCandidates = objects.map((candidate) => designJavaScriptObjectPropertyValue(candidate, propertyName));
+        if (propertyCandidates.some((candidate) => candidate === undefined)) continue;
+        assignPossibleValueProvenance(property.value, propertyCandidates, scope);
+      }
+    }
+  };
+  const assignPossibleStringProvenance = (
+    pattern: unknown,
+    candidates: readonly unknown[],
+    scope: DesignJavaScriptScope,
+  ): void => {
+    if (!designJavaScriptNode(pattern) || candidates.length === 0) return;
+    if (pattern.type === "Identifier" && typeof pattern.name === "string") {
+      if (scope.invalidatedBindings.has(pattern.name)) return;
+      const values = new Set<string>();
+      for (const candidate of candidates) {
+        const possible = designJavaScriptPossibleConstantStrings(candidate, index);
+        if (possible === null) return;
+        for (const value of possible) {
+          values.add(value);
+          if (values.size > 256) return;
+        }
+      }
+      scope.possibleStrings.set(pattern.name, values);
+      if (values.size === 1) scope.constantStrings.set(pattern.name, values.values().next().value!);
+      return;
+    }
+    if (pattern.type === "AssignmentPattern") {
+      assignPossibleStringProvenance(pattern.left, candidates.map((candidate) => (
+        candidate === undefined ? pattern.right : candidate
+      )), scope);
+      return;
+    }
+    if (pattern.type === "ArrayPattern") {
+      const arrays = candidates.map((candidate) => designJavaScriptStableValue(candidate, index));
+      if (arrays.some((candidate) => candidate?.type !== "ArrayExpression")) return;
+      const elements = Array.isArray(pattern.elements) ? pattern.elements : [];
+      for (let elementIndex = 0; elementIndex < elements.length; elementIndex += 1) {
+        const element = elements[elementIndex];
+        if (element === null || element === undefined) continue;
+        const elementCandidates = arrays.map((candidate) => (
+          Array.isArray(candidate?.elements) ? candidate.elements[elementIndex] : undefined
+        ));
+        if (elementCandidates.some((candidate) => candidate === null || candidate === undefined)) continue;
+        assignPossibleStringProvenance(element, elementCandidates, scope);
+      }
+      return;
+    }
+    if (pattern.type === "ObjectPattern") {
+      const objects = candidates.map((candidate) => designJavaScriptStableValue(candidate, index));
+      if (objects.some((candidate) => candidate?.type !== "ObjectExpression")) return;
+      for (const property of Array.isArray(pattern.properties) ? pattern.properties : []) {
+        if (!designJavaScriptNode(property) || property.type === "RestElement") continue;
+        const propertyName = designJavaScriptObjectPropertyName(property);
+        if (propertyName === null) continue;
+        const propertyCandidates = objects.map((candidate) => (
+          designJavaScriptObjectPropertyValue(candidate, propertyName)
+        ));
+        if (propertyCandidates.some((candidate) => candidate === undefined)) continue;
+        assignPossibleStringProvenance(property.value, propertyCandidates, scope);
+      }
+    }
+  };
+  const propagateLocalCallArguments = (): void => {
+    for (const [callable, sites] of callSites) {
+      if (escapedFunctions.has(callable) || sites.length === 0) continue;
+      if (sites.every((site) => site.receiver === "local")) index.localThisFunctions.add(callable);
+      const parameters = Array.isArray(callable.params) ? callable.params : [];
+      const parameterScope = index.scopeByNode.get(callable);
+      if (parameterScope === undefined) continue;
+      for (let parameterIndex = 0; parameterIndex < parameters.length; parameterIndex += 1) {
+        const parameter = parameters[parameterIndex];
+        const allLocal = sites.every((site) => {
+          const argument = site.args[parameterIndex];
+          if (argument !== undefined) return designJavaScriptProvenance(argument, index) === "local";
+          return designJavaScriptNode(parameter) && parameter.type === "AssignmentPattern"
+            && designJavaScriptProvenance(parameter.right, index) === "local";
+        });
+        if (allLocal) assignLocalParameterProvenance(parameter, parameterScope);
+        const stringArguments = sites.map((site) => {
+          const argument = site.args[parameterIndex];
+          return argument === undefined && designJavaScriptNode(parameter) && parameter.type === "AssignmentPattern"
+            ? parameter.right
+            : argument;
+        });
+        if (!stringArguments.some((argument) => argument === undefined)) {
+          assignPossibleValueProvenance(parameter, stringArguments, parameterScope);
+          assignPossibleStringProvenance(parameter, stringArguments, parameterScope);
+        }
+      }
+    }
+  };
+  propagateLocalCallArguments();
+
+  // Destructuring a statically local presentation record is not a browser-state
+  // probe. Preserve the provenance through direct declarations, for-of loops,
+  // and callbacks over a literal local array while leaving imported, DOM, and
+  // global sources unknown/fail-closed.
+  visitDesignJavaScript(root, (node, parent, key) => {
+    if (node.type === "VariableDeclarator" && designJavaScriptNode(node.id)) {
+      const declaration = index.parentByNode.get(node);
+      let source = node.init;
+      let loop: DesignJavaScriptNode | null = null;
+      if (!designJavaScriptNode(source)) {
+        loop = declaration === undefined || declaration === null
+          ? null
+          : index.parentByNode.get(declaration) ?? null;
+        if (loop !== null && (loop.type === "ForOfStatement" || loop.type === "ForInStatement")
+          && loop.left === declaration) source = loop.right;
+      }
+      const patternScope = index.scopeByNode.get(node.id);
+      const stableDeclaration = declaration?.type === "VariableDeclaration"
+        && (declaration.kind === "const"
+          || ((loop?.type === "ForOfStatement" || loop?.type === "ForInStatement")
+            && declaration.kind === "let"));
+      if (stableDeclaration && patternScope !== undefined
+        && designJavaScriptProvenance(source, index) === "local") {
+        assignLocalParameterProvenance(node.id, patternScope);
+        if (loop?.type === "ForOfStatement") {
+          const collections = designJavaScriptPossibleValues(source, index);
+          const elements = collections?.flatMap((collection) => (
+            designJavaScriptNode(collection) && collection.type === "ArrayExpression" && Array.isArray(collection.elements)
+              ? collection.elements
+              : [undefined]
+          )) ?? [];
+          if (elements.length > 0 && !elements.some((element) => element === null || element === undefined)) {
+            assignPossibleValueProvenance(node.id, elements, patternScope);
+            assignPossibleStringProvenance(node.id, elements, patternScope);
+          }
+        } else if (designJavaScriptNode(source)) {
+          assignPossibleValueProvenance(node.id, [source], patternScope);
+          assignPossibleStringProvenance(node.id, [source], patternScope);
+        }
+      }
+    }
+    if (designJavaScriptFunction(node) && parent !== null
+      && (parent.type === "CallExpression" || parent.type === "OptionalCallExpression")
+      && key === "arguments" && designJavaScriptNode(parent.callee)
+      && (parent.callee.type === "MemberExpression" || parent.callee.type === "OptionalMemberExpression")
+      && ["every", "filter", "find", "findLast", "flatMap", "forEach", "map", "some"]
+        .includes(designJavaScriptMemberName(parent.callee, index) ?? "")) {
+      const receivers = designJavaScriptPossibleValues(parent.callee.object, index);
+      const receiverElements = receivers?.flatMap((receiver) => (
+        designJavaScriptNode(receiver) && receiver.type === "ArrayExpression" && Array.isArray(receiver.elements)
+          ? receiver.elements
+          : [undefined]
+      )) ?? [];
+      if (receiverElements.length === 0 || receiverElements.some((element) => element === null || element === undefined)) return;
+      const parameterScope = index.scopeByNode.get(node);
+      if (parameterScope === undefined) return;
+      const parameters = Array.isArray(node.params) ? node.params : [];
+      for (const parameter of parameters) assignLocalParameterProvenance(parameter, parameterScope);
+      if (parameters[0] !== undefined) {
+        assignPossibleValueProvenance(parameters[0], receiverElements, parameterScope);
+        assignPossibleStringProvenance(parameters[0], receiverElements, parameterScope);
+      }
+    }
+  });
+  // Local loop/callback bindings can feed helper parameters, and helpers can
+  // feed other helpers. Iterate over the finite static call graph so provenance
+  // reaches a fixed point without treating escaped or imported callables as local.
+  for (let pass = 0; pass <= callSites.size; pass += 1) propagateLocalCallArguments();
+  return index;
+}
+
+function hasDesignJavaScriptBinding(scope: DesignJavaScriptScope | undefined, name: string): boolean {
+  let current = scope;
+  while (current !== undefined) {
+    if (current.bindings.has(name)) return true;
+    current = current.parent ?? undefined;
+  }
+  return false;
+}
+
+function designJavaScriptBindingScope(
+  scope: DesignJavaScriptScope | undefined,
+  name: string,
+): DesignJavaScriptScope | null {
+  let current = scope;
+  while (current !== undefined) {
+    if (current.bindings.has(name)) return current;
+    current = current.parent ?? undefined;
+  }
+  return null;
+}
+
+function designJavaScriptStableValue(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+  seen: Set<unknown> = new Set<unknown>(),
+): DesignJavaScriptNode | null {
+  if (!designJavaScriptNode(value) || seen.has(value)) return null;
+  seen.add(value);
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    const scope = designJavaScriptBindingScope(index.scopeByNode.get(value), value.name);
+    return scope?.stableValues.has(value.name) === true
+      ? designJavaScriptStableValue(scope.stableValues.get(value.name), index, seen)
+      : null;
+  }
+  if (value.type === "MemberExpression" || value.type === "OptionalMemberExpression") {
+    const receiver = designJavaScriptStableValue(value.object, index, seen);
+    const memberName = designJavaScriptMemberName(value, index);
+    if (receiver === null || memberName === null) return null;
+    if (receiver.type === "ObjectExpression" && Array.isArray(receiver.properties)) {
+      const property = receiver.properties.find((candidate) => designJavaScriptNode(candidate)
+        && designJavaScriptObjectPropertyName(candidate) === memberName);
+      if (!designJavaScriptNode(property)) return null;
+      return property.type === "ObjectMethod" ? property : designJavaScriptStableValue(property.value, index, seen);
+    }
+    const receiverClass = receiver.type === "NewExpression"
+      ? designJavaScriptStableValue(receiver.callee, index, seen)
+      : receiver;
+    if (receiverClass !== null && (receiverClass.type === "ClassDeclaration" || receiverClass.type === "ClassExpression")
+      && designJavaScriptNode(receiverClass.body) && Array.isArray(receiverClass.body.body)) {
+      const method = receiverClass.body.body.find((candidate) => designJavaScriptNode(candidate)
+        && candidate.static === (receiver.type !== "NewExpression")
+        && designJavaScriptObjectPropertyName(candidate) === memberName);
+      if (!designJavaScriptNode(method)) return null;
+      return designJavaScriptFunction(method) ? method : designJavaScriptStableValue(method.value, index, seen);
+    }
+    return null;
+  }
+  return value;
+}
+
+function designJavaScriptCallable(value: unknown, index: DesignJavaScriptIndex): boolean {
+  if (!designJavaScriptNode(value)) return false;
+  const resolved = designJavaScriptStableValue(value, index);
+  if (resolved !== null && designJavaScriptFunction(resolved)) return true;
+  if (value.type === "CallExpression" && designJavaScriptNode(value.callee)
+    && (value.callee.type === "MemberExpression" || value.callee.type === "OptionalMemberExpression")
+    && designJavaScriptMemberName(value.callee, index) === "bind") {
+    return designJavaScriptCallable(value.callee.object, index);
+  }
+  return false;
+}
+
+function designJavaScriptPossibleValues(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+): readonly unknown[] | null {
+  if (!designJavaScriptNode(value)) return null;
+  if (["TSAsExpression", "TSInstantiationExpression", "TSNonNullExpression", "TSSatisfiesExpression", "TSTypeAssertion"]
+    .includes(value.type)) {
+    return designJavaScriptPossibleValues(value.expression, index);
+  }
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    let scope = index.scopeByNode.get(value);
+    while (scope !== undefined) {
+      if (scope.invalidatedBindings.has(value.name)) return null;
+      const possible = scope.possibleValues.get(value.name);
+      if (possible !== undefined) return possible;
+      if (scope.stableValues.has(value.name)) return [scope.stableValues.get(value.name)];
+      if (scope.bindings.has(value.name)) return null;
+      scope = scope.parent ?? undefined;
+    }
+    return null;
+  }
+  if (value.type === "MemberExpression" || value.type === "OptionalMemberExpression") {
+    const receivers = designJavaScriptPossibleValues(value.object, index);
+    if (receivers === null) return null;
+    const memberName = designJavaScriptMemberName(value, index);
+    const numericIndex = value.computed === true && designJavaScriptNode(value.property)
+      && value.property.type === "NumericLiteral" && typeof value.property.value === "number"
+      ? value.property.value
+      : null;
+    const results: unknown[] = [];
+    for (const receiver of receivers) {
+      if (!designJavaScriptNode(receiver)) return null;
+      if (receiver.type === "ObjectExpression" && memberName !== null) {
+        const propertyValue = designJavaScriptObjectPropertyValue(receiver, memberName);
+        if (propertyValue === undefined) return null;
+        results.push(propertyValue);
+      } else if (receiver.type === "ArrayExpression" && numericIndex !== null
+        && Array.isArray(receiver.elements)) {
+        const element = receiver.elements[numericIndex];
+        if (element === null || element === undefined) return null;
+        results.push(element);
+      } else {
+        return null;
+      }
+      if (results.length > 256) return null;
+    }
+    return results;
+  }
+  if ((value.type === "CallExpression" || value.type === "OptionalCallExpression")
+    && designJavaScriptNode(value.callee)
+    && (value.callee.type === "MemberExpression" || value.callee.type === "OptionalMemberExpression")
+    && designJavaScriptMemberName(value.callee, index) === "slice") {
+    const receivers = designJavaScriptPossibleValues(value.callee.object, index);
+    return receivers !== null && receivers.every((receiver) => (
+      designJavaScriptNode(receiver) && receiver.type === "ArrayExpression"
+    )) ? receivers : null;
+  }
+  return [value];
+}
+
+function designJavaScriptPossibleConstantStrings(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+): ReadonlySet<string> | null {
+  const direct = staticDesignJavaScriptString(value);
+  if (direct !== null) return new Set([direct]);
+  if (designJavaScriptNode(value) && value.type === "Identifier" && typeof value.name === "string") {
+    let scope = index.scopeByNode.get(value);
+    while (scope !== undefined) {
+      if (scope.invalidatedBindings.has(value.name)) return null;
+      const possible = scope.possibleStrings.get(value.name);
+      if (possible !== undefined) return possible;
+      if (scope.stableValues.has(value.name)) {
+        const stable = staticDesignJavaScriptString(scope.stableValues.get(value.name));
+        if (stable !== null) return new Set([stable]);
+      }
+      if (scope.bindings.has(value.name)) break;
+      scope = scope.parent ?? undefined;
+    }
+  }
+  const candidates = designJavaScriptPossibleValues(value, index);
+  if (candidates === null || candidates.length === 0) return null;
+  const strings = new Set<string>();
+  for (const candidate of candidates) {
+    const string = staticDesignJavaScriptString(candidate);
+    if (string === null) return null;
+    strings.add(string);
+    if (strings.size > 256) return null;
+  }
+  return strings;
+}
+
+function designJavaScriptConstantString(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+): string | null {
+  const possible = designJavaScriptPossibleConstantStrings(value, index);
+  return possible?.size === 1 ? possible.values().next().value ?? null : null;
+}
+
+function designJavaScriptPatternIsLocal(
+  pattern: unknown,
+  index: DesignJavaScriptIndex,
+): boolean {
+  if (!designJavaScriptNode(pattern)) return false;
+  if (pattern.type === "Identifier") return designJavaScriptProvenance(pattern, index) === "local";
+  if (pattern.type === "RestElement") return designJavaScriptPatternIsLocal(pattern.argument, index);
+  if (pattern.type === "AssignmentPattern") return designJavaScriptPatternIsLocal(pattern.left, index);
+  if (pattern.type === "ArrayPattern") {
+    return (Array.isArray(pattern.elements) ? pattern.elements : [])
+      .filter((element) => element !== null)
+      .every((element) => designJavaScriptPatternIsLocal(element, index));
+  }
+  if (pattern.type === "ObjectPattern") {
+    return (Array.isArray(pattern.properties) ? pattern.properties : []).every((property) => {
+      if (!designJavaScriptNode(property)) return false;
+      return designJavaScriptPatternIsLocal(
+        property.type === "RestElement" ? property.argument : property.value,
+        index,
+      );
+    });
+  }
+  return false;
+}
+
+function designJavaScriptReference(
+  node: DesignJavaScriptNode,
+  parent: DesignJavaScriptNode | null,
+  key: string | null,
+  index: DesignJavaScriptIndex,
+): boolean {
+  if (node.type !== "Identifier" || index.bindings.has(node)) return false;
+  if (parent === null) return true;
+  if (parent.type.startsWith("TS")) {
+    const runtimeExpression = [
+      "TSAsExpression",
+      "TSInstantiationExpression",
+      "TSNonNullExpression",
+      "TSSatisfiesExpression",
+      "TSTypeAssertion",
+    ].includes(parent.type) && key === "expression";
+    const runtimeParameter = parent.type === "TSParameterProperty" && key === "parameter";
+    if (!runtimeExpression && !runtimeParameter) return false;
+  }
+  if ((parent.type === "MemberExpression" || parent.type === "OptionalMemberExpression")
+    && key === "property" && parent.computed !== true) return false;
+  if ((parent.type === "ObjectProperty" || parent.type === "ObjectMethod"
+      || parent.type === "ClassProperty" || parent.type === "ClassMethod"
+      || parent.type === "ClassPrivateProperty" || parent.type === "ClassPrivateMethod")
+    && key === "key" && parent.computed !== true) return false;
+  if ((parent.type === "LabeledStatement" || parent.type === "BreakStatement" || parent.type === "ContinueStatement")
+    && key === "label") return false;
+  if (parent.type === "MetaProperty" || parent.type === "PrivateName") return false;
+  if ((parent.type === "ImportSpecifier" && key === "imported")
+    || ((parent.type === "ExportSpecifier" || parent.type === "ExportNamespaceSpecifier") && key === "exported")) {
+    return false;
+  }
+  return true;
+}
+
+function staticDesignJavaScriptString(value: unknown): string | null {
+  if (!designJavaScriptNode(value)) return null;
+  if (["TSAsExpression", "TSInstantiationExpression", "TSNonNullExpression", "TSSatisfiesExpression", "TSTypeAssertion"]
+    .includes(value.type)) return staticDesignJavaScriptString(value.expression);
+  if (value.type === "StringLiteral" && typeof value.value === "string") return value.value;
+  if (value.type === "TemplateLiteral"
+    && Array.isArray(value.expressions) && value.expressions.length === 0
+    && Array.isArray(value.quasis) && value.quasis.length === 1) {
+    const quasi = value.quasis[0];
+    if (designJavaScriptNode(quasi) && quasi.type === "TemplateElement"
+      && quasi.value !== null && typeof quasi.value === "object") {
+      const cooked = (quasi.value as { cooked?: unknown }).cooked;
+      return typeof cooked === "string" ? cooked : null;
+    }
+  }
+  if (value.type === "BinaryExpression" && value.operator === "+") {
+    const left = staticDesignJavaScriptString(value.left);
+    const right = staticDesignJavaScriptString(value.right);
+    return left === null || right === null ? null : left + right;
+  }
+  return null;
+}
+
+function designJavaScriptMemberName(node: DesignJavaScriptNode, index?: DesignJavaScriptIndex): string | null {
+  if (node.type !== "MemberExpression" && node.type !== "OptionalMemberExpression") return null;
+  if (node.computed !== true && designJavaScriptNode(node.property)
+    && node.property.type === "Identifier" && typeof node.property.name === "string") {
+    return node.property.name;
+  }
+  return index === undefined
+    ? staticDesignJavaScriptString(node.property)
+    : designJavaScriptConstantString(node.property, index);
+}
+
+const DESIGN_JAVASCRIPT_NETWORK_GLOBALS = new Set([
+  "fetch",
+  "XMLHttpRequest",
+  "WebSocket",
+  "EventSource",
+  "WebTransport",
+  "Worker",
+  "SharedWorker",
+  "importScripts",
+  "Image",
+  "Audio",
+  "RTCPeerConnection",
+]);
+const DESIGN_JAVASCRIPT_NETWORK_MEMBER_CAPABILITIES = new Set([
+  ...DESIGN_JAVASCRIPT_NETWORK_GLOBALS,
+  "sendBeacon",
+  "send",
+  "connect",
+  "addModule",
+  "register",
+]);
+const DESIGN_JAVASCRIPT_WINDOW_MEMBER_CAPABILITIES = new Set([
+  "open",
+  "postMessage",
+]);
+const DESIGN_JAVASCRIPT_DYNAMIC_CODE_GLOBALS = new Set([
+  "eval",
+  "Function",
+  "AsyncFunction",
+  "GeneratorFunction",
+  "AsyncGeneratorFunction",
+]);
+const DESIGN_JAVASCRIPT_TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
+const DESIGN_JAVASCRIPT_EXPORT_SCHEDULER_GLOBALS = new Set([
+  "setTimeout",
+  "setInterval",
+  "requestAnimationFrame",
+  "requestIdleCallback",
+  "queueMicrotask",
+]);
+const DESIGN_JAVASCRIPT_EXPORT_STATE_GLOBALS = new Set([
+  "navigator",
+  "screen",
+  "devicePixelRatio",
+  "matchMedia",
+  "visualViewport",
+  "performance",
+  "chrome",
+  "name",
+  "localStorage",
+  "sessionStorage",
+  "indexedDB",
+  "caches",
+  "cookieStore",
+  "Storage",
+  "StorageManager",
+  "IDBFactory",
+  "IDBDatabase",
+  "IDBObjectStore",
+  "IDBTransaction",
+  "IDBRequest",
+  "IDBCursor",
+  "IDBKeyRange",
+]);
+const DESIGN_JAVASCRIPT_EXPORT_STATE_MEMBERS = new Set([
+  ...DESIGN_JAVASCRIPT_EXPORT_STATE_GLOBALS,
+  "cookie",
+  "hasStorageAccess",
+  "requestStorageAccess",
+  "webdriver",
+  "outerWidth",
+  "outerHeight",
+  "__lookupGetter__",
+  "__lookupSetter__",
+]);
+const DESIGN_JAVASCRIPT_EXPORT_ANIMATION_GLOBALS = new Set([
+  "Animation",
+  "AnimationEvent",
+  "DocumentTimeline",
+  "KeyframeEffect",
+]);
+const DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS = new Set([
+  "animate",
+  "getAnimations",
+  "timeline",
+  "animation",
+  "animationDelay",
+  "animationDuration",
+  "animationName",
+  "animationTimeline",
+  "transition",
+  "transitionDelay",
+  "transitionDuration",
+  "transitionProperty",
+  "scrollTimeline",
+  "viewTimeline",
+]);
+const DESIGN_JAVASCRIPT_EXPORT_REFLECTION_MEMBERS = new Set([
+  "entries",
+  "getOwnPropertyDescriptor",
+  "getOwnPropertyDescriptors",
+  "getOwnPropertyNames",
+  "getOwnPropertySymbols",
+  "has",
+  "keys",
+  "ownKeys",
+  "values",
+]);
+const DESIGN_JAVASCRIPT_GLOBAL_NAMESPACES = new Set([
+  "window",
+  "self",
+  "globalThis",
+  "document",
+  "navigator",
+]);
+const DESIGN_JAVASCRIPT_PARENT_GLOBALS = new Set(["top", "parent", "opener", "frames", "frameElement"]);
+const DESIGN_JAVASCRIPT_URL_PROPERTIES = new Set([
+  "src",
+  "srcset",
+  "href",
+  "poster",
+  "action",
+  "formAction",
+  "formaction",
+]);
+const DESIGN_JAVASCRIPT_MARKUP_PROPERTIES = new Set(["innerHTML", "outerHTML", "srcdoc"]);
+const DESIGN_JAVASCRIPT_CSS_URL_PROPERTIES = new Set([
+  "background",
+  "backgroundImage",
+  "borderImage",
+  "borderImageSource",
+  "content",
+  "cursor",
+  "filter",
+  "listStyle",
+  "listStyleImage",
+  "mask",
+  "maskImage",
+  "clipPath",
+  "offsetPath",
+  "shapeOutside",
+]);
+const DESIGN_JAVASCRIPT_MARKUP_METHODS = new Set([
+  "insertAdjacentHTML",
+  "setHTMLUnsafe",
+  "createContextualFragment",
+  "write",
+  "writeln",
+  "parseFromString",
+]);
+const DESIGN_JAVASCRIPT_NAVIGATION_METHODS = new Set(["assign", "replace", "reload"]);
+const DESIGN_JAVASCRIPT_HISTORY_METHODS = new Set(["pushState", "replaceState", "go", "back", "forward"]);
+const DESIGN_JAVASCRIPT_UNSAFE_CREATED_ELEMENTS = new Set([
+  "script",
+  "style",
+  "link",
+  "base",
+  "meta",
+  "iframe",
+  "frame",
+  "frameset",
+  "object",
+  "embed",
+  "portal",
+  "fencedframe",
+]);
+
+interface DesignJavaScriptGlobalPath {
+  root: string;
+  path: string[];
+  dynamic: boolean;
+}
+
+function designJavaScriptGlobalPath(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+): DesignJavaScriptGlobalPath | null {
+  if (!designJavaScriptNode(value)) return null;
+  if (value.type === "ThisExpression") {
+    const owner = index.thisOwnerByNode.get(value);
+    if (owner !== undefined && index.localThisFunctions.has(owner)) return null;
+    return { root: "window", path: [], dynamic: false };
+  }
+  if (value.type === "Identifier" && typeof value.name === "string"
+    && !hasDesignJavaScriptBinding(index.scopeByNode.get(value), value.name)) {
+    return { root: value.name, path: [], dynamic: false };
+  }
+  if (value.type !== "MemberExpression" && value.type !== "OptionalMemberExpression") return null;
+  const base = designJavaScriptGlobalPath(value.object, index);
+  if (base === null) return null;
+  const member = designJavaScriptMemberName(value, index);
+  return {
+    root: base.root,
+    path: member === null ? base.path : [...base.path, member],
+    dynamic: base.dynamic || member === null,
+  };
+}
+
+function designJavaScriptSafeProbe(
+  node: DesignJavaScriptNode,
+  parent: DesignJavaScriptNode | null,
+  key: string | null,
+): boolean {
+  if (parent?.type === "UnaryExpression" && key === "argument"
+    && ["typeof", "void", "!"].includes(String(parent.operator))) return true;
+  if (parent?.type === "BinaryExpression"
+    && ["===", "!==", "==", "!=", "in"].includes(String(parent.operator))) return true;
+  return parent?.type === "ExpressionStatement" && key === "expression";
+}
+
+function designJavaScriptMemberObject(
+  parent: DesignJavaScriptNode | null,
+  key: string | null,
+): boolean {
+  return (parent?.type === "MemberExpression" || parent?.type === "OptionalMemberExpression") && key === "object";
+}
+
+function designJavaScriptWriteTarget(
+  parent: DesignJavaScriptNode | null,
+  key: string | null,
+): boolean {
+  return (parent?.type === "AssignmentExpression" && key === "left")
+    || (parent?.type === "UpdateExpression" && key === "argument")
+    || (parent?.type === "UnaryExpression" && parent.operator === "delete" && key === "argument")
+    || ((parent?.type === "ForInStatement" || parent?.type === "ForOfStatement") && key === "left");
+}
+
+function designJavaScriptCapabilityEscapes(
+  node: DesignJavaScriptNode,
+  parent: DesignJavaScriptNode | null,
+  key: string | null,
+): boolean {
+  if (designJavaScriptSafeProbe(node, parent, key) || designJavaScriptMemberObject(parent, key)) return false;
+  if (parent?.type === "UnaryExpression" && key === "argument") return false;
+  if (parent?.type === "BinaryExpression" || parent?.type === "LogicalExpression"
+    || parent?.type === "ConditionalExpression" || parent?.type === "IfStatement"
+    || parent?.type === "WhileStatement" || parent?.type === "DoWhileStatement") return false;
+  return true;
+}
+
+function designJavaScriptEffectivePath(path: DesignJavaScriptGlobalPath): { root: string; path: string[] } {
+  if (["window", "self", "globalThis"].includes(path.root) && path.path.length > 0) {
+    return { root: path.path[0]!, path: path.path.slice(1) };
+  }
+  return { root: path.root, path: path.path };
+}
+
+const DESIGN_JAVASCRIPT_DOM_RETURNING_METHODS = new Set([
+  "querySelector",
+  "getElementById",
+  "getElementsByClassName",
+  "getElementsByName",
+  "getElementsByTagName",
+  "closest",
+  "createElement",
+  "createElementNS",
+  "createDocumentFragment",
+  "createRange",
+  "cloneNode",
+]);
+const DESIGN_JAVASCRIPT_PARENT_ESCAPE_PROPERTIES = new Set([
+  "ownerDocument",
+  "defaultView",
+  "contentWindow",
+  "contentDocument",
+]);
+
+function designJavaScriptProvenance(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+  seen: Set<unknown> = new Set<unknown>(),
+): DesignJavaScriptProvenance {
+  if (!designJavaScriptNode(value) || seen.has(value)) return "unknown";
+  seen.add(value);
+  if (["TSAsExpression", "TSInstantiationExpression", "TSNonNullExpression", "TSSatisfiesExpression", "TSTypeAssertion"]
+    .includes(value.type)) return designJavaScriptProvenance(value.expression, index, seen);
+  if ([
+    "ObjectExpression", "ArrayExpression", "FunctionExpression", "ArrowFunctionExpression",
+    "ClassExpression", "StringLiteral", "NumericLiteral", "BooleanLiteral", "NullLiteral", "TemplateLiteral",
+  ].includes(value.type)) return "local";
+  if (value.type === "ThisExpression") {
+    const owner = index.thisOwnerByNode.get(value);
+    return owner !== undefined && index.localThisFunctions.has(owner) ? "local" : "global";
+  }
+  if (value.type === "Identifier" && typeof value.name === "string") {
+    const binding = designJavaScriptBindingScope(index.scopeByNode.get(value), value.name);
+    if (binding === null) {
+      return ["document"].includes(value.name) ? "dom"
+        : DESIGN_JAVASCRIPT_GLOBAL_NAMESPACES.has(value.name)
+          || DESIGN_JAVASCRIPT_PARENT_GLOBALS.has(value.name)
+          || ["location", "history", "open"].includes(value.name)
+          ? "global"
+          : "unknown";
+    }
+    const parameterProvenance = binding.provenances.get(value.name);
+    if (parameterProvenance !== undefined) return parameterProvenance;
+    if (!binding.reassignedBindings.has(value.name) && binding.initializers.has(value.name)) {
+      return designJavaScriptProvenance(binding.initializers.get(value.name), index, seen);
+    }
+    if (binding.invalidatedBindings.has(value.name) || !binding.stableValues.has(value.name)) return "unknown";
+    return designJavaScriptProvenance(binding.stableValues.get(value.name), index, seen);
+  }
+  if (value.type === "NewExpression") {
+    const calleePath = designJavaScriptGlobalPath(value.callee, index);
+    if (calleePath !== null) {
+      const root = designJavaScriptEffectivePath(calleePath).root;
+      if (["DOMParser", "Range"].includes(root)) return "dom";
+      if (root === "CSSStyleSheet") return "style";
+    }
+    return "local";
+  }
+  if (value.type === "CallExpression" || value.type === "OptionalCallExpression") {
+    if (!designJavaScriptNode(value.callee)) return "unknown";
+    const calleeName = value.callee.type === "MemberExpression" || value.callee.type === "OptionalMemberExpression"
+      ? designJavaScriptMemberName(value.callee, index)
+      : null;
+    const calleePath = designJavaScriptGlobalPath(value.callee, index);
+    if (calleePath !== null) {
+      const effective = designJavaScriptEffectivePath(calleePath);
+      if (effective.root === "document" && DESIGN_JAVASCRIPT_DOM_RETURNING_METHODS.has(calleeName ?? "")) return "dom";
+      if (effective.root === "Object" && calleeName === "assign" && Array.isArray(value.arguments)) {
+        return designJavaScriptProvenance(value.arguments[0], index, seen);
+      }
+    }
+    if (value.callee.type === "MemberExpression" || value.callee.type === "OptionalMemberExpression") {
+      const receiver = designJavaScriptProvenance(value.callee.object, index, seen);
+      if (DESIGN_JAVASCRIPT_DOM_RETURNING_METHODS.has(calleeName ?? "") && receiver === "dom") return "dom";
+      if (receiver === "local" && [
+        "at", "concat", "every", "filter", "find", "findIndex", "findLast", "findLastIndex",
+        "flat", "flatMap", "includes", "indexOf", "join", "lastIndexOf", "map", "reduce",
+        "reduceRight", "slice", "some", "split", "substring", "substr", "toLowerCase",
+        "toUpperCase", "trim", "trimEnd", "trimStart",
+      ].includes(calleeName ?? "")) return "local";
+    }
+    return "unknown";
+  }
+  if (value.type === "MemberExpression" || value.type === "OptionalMemberExpression") {
+    const globalPath = designJavaScriptGlobalPath(value, index);
+    if (globalPath !== null) {
+      const effective = designJavaScriptEffectivePath(globalPath);
+      if (effective.root === "document") {
+        if (DESIGN_JAVASCRIPT_PARENT_ESCAPE_PROPERTIES.has(effective.path[0] ?? "")) return "global";
+        if (effective.path.at(-1) === "style") return "style";
+        if (["dataset", "classList"].includes(effective.path.at(-1) ?? "")) return "local";
+        return "dom";
+      }
+      if (["window", "self", "globalThis", "navigator", "location", "history"].includes(effective.root)
+        || DESIGN_JAVASCRIPT_PARENT_GLOBALS.has(effective.root)) return "global";
+    }
+    const receiver = designJavaScriptProvenance(value.object, index, seen);
+    const memberName = designJavaScriptMemberName(value, index);
+    if (receiver === "local") return "local";
+    if (receiver === "style") return "style";
+    if (receiver === "dom" && memberName === "style") return "style";
+    if (receiver === "dom" && ["dataset", "classList"].includes(memberName ?? "")) return "local";
+    if (receiver === "dom" && [
+      "body", "head", "documentElement", "parentElement", "firstElementChild", "lastElementChild",
+      "nextElementSibling", "previousElementSibling", "children",
+    ].includes(memberName ?? "")) return "dom";
+    return receiver === "global" ? "global" : "unknown";
+  }
+  return "unknown";
+}
+
+function designJavaScriptUnsafeReceiver(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+): boolean {
+  return designJavaScriptProvenance(value, index) !== "local";
+}
+
+function designJavaScriptObjectPropertyName(
+  property: DesignJavaScriptNode,
+): string | null {
+  if (!["ObjectProperty", "ObjectMethod", "ClassProperty", "ClassMethod", "ClassPrivateProperty", "ClassPrivateMethod"]
+    .includes(property.type)) return null;
+  if (property.computed !== true && designJavaScriptNode(property.key)
+    && property.key.type === "Identifier" && typeof property.key.name === "string") return property.key.name;
+  return staticDesignJavaScriptString(property.key);
+}
+
+function designJavaScriptObjectPropertyValue(
+  value: unknown,
+  propertyName: string,
+): unknown {
+  if (!designJavaScriptNode(value) || value.type !== "ObjectExpression" || !Array.isArray(value.properties)) {
+    return undefined;
+  }
+  const property = value.properties.find((candidate) => designJavaScriptNode(candidate)
+    && designJavaScriptObjectPropertyName(candidate) === propertyName);
+  return designJavaScriptNode(property) && property.type === "ObjectProperty" ? property.value : undefined;
+}
+
+function designJavaScriptSelfTarget(value: unknown, index: DesignJavaScriptIndex): boolean {
+  return designJavaScriptConstantString(value, index)?.trim().toLowerCase() === "_self";
+}
+
+function validateDesignJavaScriptUrl(
+  value: unknown,
+  index: DesignJavaScriptIndex,
+  allowCanonicalAssets: boolean,
+  exportProject = false,
+): boolean {
+  const urls = designJavaScriptPossibleConstantStrings(value, index);
+  return urls !== null && urls.size > 0 && [...urls].every((url) => (
+    allowedDesignUrl(url, allowCanonicalAssets)
+    || (exportProject && allowedDesignExportUrl(url))
+  ));
+}
+
+function allowedDesignExportUrl(value: string): boolean {
+  const url = value.trim();
+  if (url.startsWith("#") || url.startsWith("blob:")) return true;
+  if (/^data:(?:image|font)\/[a-z0-9.+-]+(?:;[a-z0-9.+-]+=[^;,]*)*;base64,[a-z0-9+/=\s]+$/i.test(url)) return true;
+  if (/[\u0000-\u001f\u007f\\]/.test(url) || url.startsWith("//")) return false;
+  return url.startsWith("/") || url.startsWith("./") || url.startsWith("../");
+}
+
+function allowedDesignExportModuleSpecifier(value: unknown): boolean {
+  return designJavaScriptNode(value) && value.type === "StringLiteral"
+    && typeof value.value === "string"
+    && /^(?:\.\/|\.\.\/)[A-Za-z0-9._/-]+$/.test(value.value)
+    && !value.value.split("/").includes(".context");
+}
+
+function validateDesignJavaScript(
+  script: string,
+  allowCanonicalAssets: boolean,
+  sourceType: "script" | "module" = "script",
+  exportProject = false,
+): void {
+  let syntax: ReturnType<typeof parse>;
+  try {
+    syntax = parse(script, {
+      sourceType,
+      plugins: exportProject ? ["typescript", "jsx"] : [],
+    });
+  } catch {
+    throw new DesignStorageError("invalid-html", "Generated inline JavaScript is invalid");
+  }
+  const program: unknown = syntax.program;
+  if (!designJavaScriptNode(program)) {
+    throw new DesignStorageError("invalid-html", "Generated inline JavaScript is invalid");
+  }
+  const index = indexDesignJavaScript(program);
+  let accessesParentNavigation = false;
+  let accessesRemoteContent = false;
+  let changesNavigation = false;
+  let opensWindow = false;
+  let evaluatesDynamicCode = false;
+  let injectsMarkup = false;
+  visitDesignJavaScript(program, (node, parent, key) => {
+    if (node.type === "Identifier" && typeof node.name === "string"
+      && designJavaScriptReference(node, parent, key, index)
+      && !hasDesignJavaScriptBinding(index.scopeByNode.get(node), node.name)) {
+      const safeProbe = designJavaScriptSafeProbe(node, parent, key);
+      if (DESIGN_JAVASCRIPT_PARENT_GLOBALS.has(node.name)) accessesParentNavigation = true;
+      if (DESIGN_JAVASCRIPT_NETWORK_GLOBALS.has(node.name) && !safeProbe) accessesRemoteContent = true;
+      if (DESIGN_JAVASCRIPT_DYNAMIC_CODE_GLOBALS.has(node.name) && !safeProbe) evaluatesDynamicCode = true;
+      if (node.name === "open" && !safeProbe) opensWindow = true;
+      if (DESIGN_JAVASCRIPT_TIMER_GLOBALS.has(node.name) && !safeProbe
+        && !(parent?.type === "CallExpression" && key === "callee")) evaluatesDynamicCode = true;
+      if ((node.name === "location" || node.name === "history") && !safeProbe
+        && !designJavaScriptMemberObject(parent, key)
+        && designJavaScriptCapabilityEscapes(node, parent, key)) changesNavigation = true;
+      if (DESIGN_JAVASCRIPT_GLOBAL_NAMESPACES.has(node.name) && !safeProbe
+        && !designJavaScriptMemberObject(parent, key)) accessesRemoteContent = true;
+    }
+    if (node.type === "MemberExpression" || node.type === "OptionalMemberExpression") {
+      const memberName = designJavaScriptMemberName(node, index);
+      const globalPath = designJavaScriptGlobalPath(node, index);
+      const receiver = designJavaScriptProvenance(node.object, index);
+      const unsafeReceiver = receiver !== "local";
+      const safeProbe = designJavaScriptSafeProbe(node, parent, key);
+      if (memberName === "constructor" && !designJavaScriptSafeProbe(node, parent, key)) evaluatesDynamicCode = true;
+      if (unsafeReceiver && memberName !== null && !safeProbe
+        && DESIGN_JAVASCRIPT_NETWORK_MEMBER_CAPABILITIES.has(memberName)) accessesRemoteContent = true;
+      if (unsafeReceiver && memberName !== null && !safeProbe
+        && DESIGN_JAVASCRIPT_WINDOW_MEMBER_CAPABILITIES.has(memberName)) opensWindow = true;
+      if (DESIGN_JAVASCRIPT_PARENT_ESCAPE_PROPERTIES.has(memberName ?? "") && unsafeReceiver) {
+        accessesParentNavigation = true;
+      }
+      if (designJavaScriptWriteTarget(parent, key) && memberName === null && unsafeReceiver) accessesRemoteContent = true;
+      if (designJavaScriptWriteTarget(parent, key) && unsafeReceiver
+        && DESIGN_JAVASCRIPT_MARKUP_PROPERTIES.has(memberName ?? "")) {
+        injectsMarkup = true;
+      }
+      if (globalPath !== null) {
+        const effective = designJavaScriptEffectivePath(globalPath);
+        const first = effective.path[0] ?? null;
+        const last = effective.path.at(-1) ?? null;
+        const safeProbe = designJavaScriptSafeProbe(node, parent, key);
+        if (globalPath.dynamic && [
+          "window", "self", "globalThis", "document", "navigator", "location", "history",
+          "top", "parent", "opener", "frames", "frameElement",
+        ].includes(globalPath.root)) accessesRemoteContent = true;
+        if (DESIGN_JAVASCRIPT_PARENT_GLOBALS.has(effective.root)
+          || (effective.root === "document" && first === "defaultView")) accessesParentNavigation = true;
+        if (DESIGN_JAVASCRIPT_NETWORK_GLOBALS.has(effective.root) && !safeProbe) accessesRemoteContent = true;
+        if (DESIGN_JAVASCRIPT_DYNAMIC_CODE_GLOBALS.has(effective.root) && !safeProbe) evaluatesDynamicCode = true;
+        if (effective.root === "open" && !safeProbe) opensWindow = true;
+        if (DESIGN_JAVASCRIPT_TIMER_GLOBALS.has(effective.root) && !safeProbe
+          && !(parent?.type === "CallExpression" && key === "callee")) evaluatesDynamicCode = true;
+        if (["window", "self", "globalThis", "document", "navigator"].includes(effective.root)
+          && effective.path.length === 0 && !safeProbe
+          && designJavaScriptCapabilityEscapes(node, parent, key)) accessesRemoteContent = true;
+        if (effective.root === "location") {
+          if (designJavaScriptWriteTarget(parent, key)
+            || (first !== null && DESIGN_JAVASCRIPT_NAVIGATION_METHODS.has(first) && !safeProbe)
+            || (effective.path.length === 0 && designJavaScriptCapabilityEscapes(node, parent, key))) {
+            changesNavigation = true;
+          }
+        }
+        if (effective.root === "history") {
+          if (designJavaScriptWriteTarget(parent, key)
+            || (first !== null && DESIGN_JAVASCRIPT_HISTORY_METHODS.has(first) && !safeProbe)
+            || (effective.path.length === 0 && designJavaScriptCapabilityEscapes(node, parent, key))) {
+            changesNavigation = true;
+          }
+        }
+        if (effective.root === "navigator" && (first === "sendBeacon" || first === "serviceWorker") && !safeProbe) {
+          accessesRemoteContent = true;
+        }
+        if (effective.root === "document" && (first === "location"
+          || (first === "defaultView" && last === "location"))) changesNavigation = true;
+      }
+    }
+    if ((node.type === "ImportDeclaration" || node.type === "ExportAllDeclaration"
+      || (node.type === "ExportNamedDeclaration" && node.source !== null && node.source !== undefined))
+      && !(exportProject && allowedDesignExportModuleSpecifier(node.source))) {
+      accessesRemoteContent = true;
+    }
+    if (node.type === "ImportExpression"
+      || (node.type === "CallExpression" && designJavaScriptNode(node.callee) && node.callee.type === "Import")) {
+      accessesRemoteContent = true;
+    }
+    if (node.type === "AssignmentExpression" && designJavaScriptNode(node.left)
+      && (node.left.type === "MemberExpression" || node.left.type === "OptionalMemberExpression")) {
+      const memberName = designJavaScriptMemberName(node.left, index);
+      const receiver = designJavaScriptProvenance(node.left.object, index);
+      const unsafeReceiver = receiver !== "local";
+      if (unsafeReceiver && DESIGN_JAVASCRIPT_URL_PROPERTIES.has(memberName ?? "")) {
+          if (!validateDesignJavaScriptUrl(node.right, index, allowCanonicalAssets, exportProject)) accessesRemoteContent = true;
+      }
+      if (unsafeReceiver && ["target", "formTarget"].includes(memberName ?? "")) {
+        const target = designJavaScriptConstantString(node.right, index)?.trim().toLowerCase();
+        if (target !== "_self") opensWindow = true;
+      }
+      if (receiver === "style") {
+        const cssValue = designJavaScriptConstantString(node.right, index);
+        if (memberName === "cssText") {
+          if (cssValue === null) accessesRemoteContent = true;
+          else validateDesignCss(cssValue, allowCanonicalAssets, "attribute");
+        } else if (memberName === null
+          || (cssValue === null && DESIGN_JAVASCRIPT_CSS_URL_PROPERTIES.has(memberName))) {
+          accessesRemoteContent = true;
+        } else if (cssValue !== null) {
+          validateDesignCss(`${memberName}: ${cssValue}`, allowCanonicalAssets, "attribute");
+        }
+      }
+    }
+    if (node.type === "CallExpression" && designJavaScriptNode(node.callee)) {
+      const args = Array.isArray(node.arguments) ? node.arguments : [];
+      if (node.callee.type === "Identifier" && typeof node.callee.name === "string"
+        && DESIGN_JAVASCRIPT_TIMER_GLOBALS.has(node.callee.name)
+        && !hasDesignJavaScriptBinding(index.scopeByNode.get(node.callee), node.callee.name)) {
+        if (!designJavaScriptCallable(args[0], index)) evaluatesDynamicCode = true;
+      }
+      if (node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression") {
+        const calleeName = designJavaScriptMemberName(node.callee, index);
+        const calleePath = designJavaScriptGlobalPath(node.callee, index);
+        const receiver = designJavaScriptProvenance(node.callee.object, index);
+        const unsafeReceiver = receiver !== "local";
+        if (unsafeReceiver && DESIGN_JAVASCRIPT_MARKUP_METHODS.has(calleeName ?? "")) injectsMarkup = true;
+        if (unsafeReceiver && calleeName === "addModule") accessesRemoteContent = true;
+        if (unsafeReceiver && (calleeName === "setAttribute" || calleeName === "setAttributeNS")) {
+          const offset = calleeName === "setAttributeNS" ? 1 : 0;
+          const attribute = designJavaScriptConstantString(args[offset], index);
+          if (attribute === null) accessesRemoteContent = true;
+          else if (/^on/i.test(attribute) || DESIGN_JAVASCRIPT_MARKUP_PROPERTIES.has(attribute)) injectsMarkup = true;
+          else if (["target", "formtarget"].includes(attribute.toLowerCase())) {
+            const target = designJavaScriptConstantString(args[offset + 1], index)?.trim().toLowerCase();
+            if (target !== "_self") opensWindow = true;
+          } else if (attribute.toLowerCase() === "style") {
+            const style = designJavaScriptConstantString(args[offset + 1], index);
+            if (style === null) accessesRemoteContent = true;
+            else validateDesignCss(style, allowCanonicalAssets, "attribute");
+          }
+          else if (DESIGN_JAVASCRIPT_URL_PROPERTIES.has(attribute)
+            && !validateDesignJavaScriptUrl(args[offset + 1], index, allowCanonicalAssets, exportProject)) accessesRemoteContent = true;
+        }
+        if (receiver === "style" && calleeName === "setProperty") {
+          const property = designJavaScriptConstantString(args[0], index);
+          const cssValue = designJavaScriptConstantString(args[1], index);
+          if (property === null
+            || (cssValue === null && DESIGN_JAVASCRIPT_CSS_URL_PROPERTIES.has(property))) accessesRemoteContent = true;
+          else if (cssValue !== null) validateDesignCss(`${property}: ${cssValue}`, allowCanonicalAssets, "attribute");
+        }
+        if ((unsafeReceiver && ["insertRule", "addRule", "replaceSync"].includes(calleeName ?? ""))
+          || (receiver === "style" && calleeName === "replace")) {
+          const css = designJavaScriptConstantString(args[0], index);
+          if (css === null) accessesRemoteContent = true;
+          else validateDesignCss(css, allowCanonicalAssets, "stylesheet");
+        }
+        if (calleePath !== null) {
+          const effective = designJavaScriptEffectivePath(calleePath);
+          if (DESIGN_JAVASCRIPT_TIMER_GLOBALS.has(effective.root)) {
+            if (!designJavaScriptCallable(args[0], index)) evaluatesDynamicCode = true;
+          }
+          if (effective.root === "document"
+            && (calleeName === "createElement" || calleeName === "createElementNS")) {
+            const tagName = designJavaScriptConstantString(args[calleeName === "createElementNS" ? 1 : 0], index);
+            if (tagName === null || DESIGN_JAVASCRIPT_UNSAFE_CREATED_ELEMENTS.has(tagName.toLowerCase())) {
+              injectsMarkup = true;
+            }
+          }
+          if (effective.root === "Reflect" && calleeName === "set") {
+            const target = designJavaScriptProvenance(args[0], index);
+            if (target !== "local") {
+              const property = designJavaScriptConstantString(args[1], index);
+              if (property === null) accessesRemoteContent = true;
+              else if (DESIGN_JAVASCRIPT_MARKUP_PROPERTIES.has(property)) injectsMarkup = true;
+              else if (["target", "formTarget"].includes(property)
+                && !designJavaScriptSelfTarget(args[2], index)) opensWindow = true;
+              else if (DESIGN_JAVASCRIPT_URL_PROPERTIES.has(property)
+                && !validateDesignJavaScriptUrl(args[2], index, allowCanonicalAssets, exportProject)) accessesRemoteContent = true;
+            }
+          }
+          if ((effective.root === "Object" || effective.root === "Reflect")
+            && calleeName === "defineProperty") {
+            const target = designJavaScriptProvenance(args[0], index);
+            if (target !== "local") {
+              const property = designJavaScriptConstantString(args[1], index);
+              if (property === null) accessesRemoteContent = true;
+              else if (DESIGN_JAVASCRIPT_MARKUP_PROPERTIES.has(property)) injectsMarkup = true;
+              else if (["target", "formTarget"].includes(property)
+                && !designJavaScriptSelfTarget(
+                  designJavaScriptObjectPropertyValue(args[2], "value"),
+                  index,
+                )) opensWindow = true;
+              else if (DESIGN_JAVASCRIPT_URL_PROPERTIES.has(property)) accessesRemoteContent = true;
+            }
+          }
+          if (effective.root === "Object" && calleeName === "assign") {
+            const target = designJavaScriptProvenance(args[0], index);
+            for (const source of args.slice(1)) {
+              if (target === "local") {
+                if (designJavaScriptProvenance(source, index) !== "local") accessesRemoteContent = true;
+                continue;
+              }
+              if (!designJavaScriptNode(source) || source.type !== "ObjectExpression"
+                || !Array.isArray(source.properties)) {
+                accessesRemoteContent = true;
+                continue;
+              }
+              for (const property of source.properties) {
+                if (!designJavaScriptNode(property) || property.type === "SpreadElement") {
+                  accessesRemoteContent = true;
+                  continue;
+                }
+                const propertyName = designJavaScriptObjectPropertyName(property);
+                if (propertyName === null) accessesRemoteContent = true;
+                else if (DESIGN_JAVASCRIPT_MARKUP_PROPERTIES.has(propertyName)) injectsMarkup = true;
+                else if (["target", "formTarget"].includes(propertyName)
+                  && !designJavaScriptSelfTarget(property.value, index)) opensWindow = true;
+                else if (DESIGN_JAVASCRIPT_URL_PROPERTIES.has(propertyName)
+                  && !validateDesignJavaScriptUrl(property.value, index, allowCanonicalAssets, exportProject)) accessesRemoteContent = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  if (accessesParentNavigation) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not access parent, top, or opener");
+  }
+  if (changesNavigation) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not change browser navigation");
+  }
+  if (opensWindow) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not open browser windows");
+  }
+  if (evaluatesDynamicCode) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not evaluate dynamic JavaScript");
+  }
+  if (injectsMarkup) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not inject executable markup");
+  }
+  if (accessesRemoteContent) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not load remote scripts or resources");
+  }
+}
+
+const DESIGN_HTML_URL_ATTRIBUTES = new Set([
+  "src",
+  "href",
+  "poster",
+  "action",
+  "formaction",
+  "data",
+  "manifest",
+]);
+const DESIGN_HTML_RESPONSIVE_URL_ATTRIBUTES = new Set(["srcset", "imagesrcset"]);
+const DESIGN_HTML_BROWSING_CONTEXT_ELEMENTS = new Set([
+  "iframe",
+  "frame",
+  "frameset",
+  "object",
+  "embed",
+  "portal",
+  "fencedframe",
+]);
+const DESIGN_HTML_JAVASCRIPT_TYPES = new Set([
+  "application/ecmascript",
+  "application/javascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
+  "text/ecmascript",
+  "text/javascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
+]);
+
+function designHtmlElement(node: DefaultTreeAdapterTypes.Node): node is DefaultTreeAdapterTypes.Element {
+  return "tagName" in node && typeof node.tagName === "string" && Array.isArray(node.attrs);
+}
+
+function designHtmlChildren(node: DefaultTreeAdapterTypes.Node): DefaultTreeAdapterTypes.ChildNode[] {
+  const children = "childNodes" in node && Array.isArray(node.childNodes) ? [...node.childNodes] : [];
+  if (designHtmlElement(node) && node.tagName === "template" && "content" in node
+    && node.content !== null && typeof node.content === "object" && Array.isArray(node.content.childNodes)) {
+    children.push(...node.content.childNodes);
+  }
+  return children;
+}
+
+function designHtmlText(element: DefaultTreeAdapterTypes.Element): string {
+  return element.childNodes.map((node) => node.nodeName === "#text" && "value" in node ? node.value : "").join("");
+}
+
+function designHtmlAttribute(element: DefaultTreeAdapterTypes.Element, name: string): string | null {
+  return element.attrs.find((attribute) => attribute.name.toLowerCase() === name)?.value ?? null;
+}
+
+function validateDesignCss(
+  css: string,
+  allowCanonicalAssets: boolean,
+  mode: "stylesheet" | "attribute" = "stylesheet",
+): void {
+  let dependencies: ReturnType<typeof transformCss>["dependencies"];
+  try {
+    dependencies = mode === "attribute"
+      ? transformStyleAttribute({
+        filename: "design-inline-style.css",
+        code: Buffer.from(css),
+        analyzeDependencies: true,
+      }).dependencies
+      : transformCss({
+        filename: "design-inline.css",
+        code: Buffer.from(css),
+        analyzeDependencies: true,
+      }).dependencies;
+  } catch {
+    throw new DesignStorageError("invalid-html", "Generated HTML contains invalid CSS");
+  }
+  for (const dependency of dependencies ?? []) {
+    if (dependency.type === "import") {
+      throw new DesignStorageError("invalid-html", "Generated HTML must keep styles and style assets local");
+    }
+    if (dependency.type !== "url" || !allowedDesignUrl(dependency.url, allowCanonicalAssets)) {
+      throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned style asset URL");
+    }
+  }
+}
+
+export function validateDesignExportJavaScript(source: string): string[] {
+  validateDesignJavaScript(source, false, "module", true);
+  const syntax = parse(source, { sourceType: "module", plugins: ["typescript", "jsx"] });
+  const program = syntax.program as unknown as DesignJavaScriptNode;
+  const index = indexDesignJavaScript(program);
+  const specifiers: string[] = [];
+  let usesDeferredScheduler = false;
+  let executionEnvironmentProbe: string | null = null;
+  let usesWebAnimations = false;
+  let usesDynamicStyle = false;
+  const markExecutionEnvironmentProbe = (node: DesignJavaScriptNode, reason: string): void => {
+    if (executionEnvironmentProbe !== null) return;
+    const location = node.loc as { start?: { line?: number; column?: number } } | undefined;
+    const line = location?.start?.line;
+    const column = location?.start?.column;
+    executionEnvironmentProbe = `${reason}${line === undefined ? "" : ` at ${line}:${(column ?? 0) + 1}`}`;
+  };
+  visitDesignJavaScript(program, (node, parent, key) => {
+    if (node.type === "Identifier" && typeof node.name === "string"
+      && designJavaScriptReference(node, parent, key, index)
+      && !hasDesignJavaScriptBinding(index.scopeByNode.get(node), node.name)) {
+      if (DESIGN_JAVASCRIPT_EXPORT_SCHEDULER_GLOBALS.has(node.name)) usesDeferredScheduler = true;
+      if (DESIGN_JAVASCRIPT_EXPORT_STATE_GLOBALS.has(node.name)) {
+        markExecutionEnvironmentProbe(node, `global ${node.name}`);
+      }
+      if (DESIGN_JAVASCRIPT_EXPORT_ANIMATION_GLOBALS.has(node.name)) usesWebAnimations = true;
+    }
+    if (node.type === "MemberExpression" || node.type === "OptionalMemberExpression") {
+      const memberName = designJavaScriptMemberName(node, index);
+      const globalPath = designJavaScriptGlobalPath(node, index);
+      const effective = globalPath === null ? null : designJavaScriptEffectivePath(globalPath);
+      if (memberName !== null && DESIGN_JAVASCRIPT_EXPORT_SCHEDULER_GLOBALS.has(memberName)
+        && designJavaScriptProvenance(node.object, index) !== "local") {
+        usesDeferredScheduler = true;
+      }
+      if (memberName !== null && DESIGN_JAVASCRIPT_EXPORT_STATE_MEMBERS.has(memberName)
+        && designJavaScriptProvenance(node.object, index) !== "local") {
+        markExecutionEnvironmentProbe(node, `unproven member ${memberName}`);
+      }
+      if (memberName === null && designJavaScriptProvenance(node.object, index) !== "local") {
+        markExecutionEnvironmentProbe(node, "dynamic member on an unproven receiver");
+      }
+      if (effective !== null && DESIGN_JAVASCRIPT_EXPORT_STATE_GLOBALS.has(effective.root)) {
+        markExecutionEnvironmentProbe(node, `global path ${effective.root}`);
+      }
+      if (effective?.root === "document"
+        && ["visibilityState", "hidden", "prerendering", "referrer", "hasFocus"].includes(effective.path[0] ?? "")) {
+        markExecutionEnvironmentProbe(node, `document.${effective.path[0]}`);
+      }
+      if (memberName !== null && DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(memberName)) {
+        usesWebAnimations = true;
+      }
+    }
+    if (node.type === "ObjectProperty" && parent?.type === "ObjectPattern") {
+      const memberName = node.computed === true
+        ? designJavaScriptConstantString(node.key, index)
+        : designJavaScriptNode(node.key) && node.key.type === "Identifier" && typeof node.key.name === "string"
+          ? node.key.name
+          : staticDesignJavaScriptString(node.key);
+      const localPattern = designJavaScriptPatternIsLocal(parent, index);
+      if (!localPattern && (memberName === null || DESIGN_JAVASCRIPT_EXPORT_STATE_MEMBERS.has(memberName))) {
+        markExecutionEnvironmentProbe(node, `destructured ${memberName ?? "dynamic property"} from an unproven value`);
+      }
+      if (!localPattern && (memberName === null || DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(memberName))) {
+        usesWebAnimations = true;
+      }
+    }
+    if (node.type === "ObjectProperty" && parent?.type === "ObjectExpression") {
+      const propertyName = designJavaScriptObjectPropertyName(node);
+      if (propertyName !== null && DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(propertyName)) {
+        usesWebAnimations = true;
+      }
+    }
+    if (node.type === "AssignmentExpression" && designJavaScriptNode(node.left)
+      && (node.left.type === "MemberExpression" || node.left.type === "OptionalMemberExpression")) {
+      const memberName = designJavaScriptMemberName(node.left, index);
+      const receiver = designJavaScriptProvenance(node.left.object, index);
+      if (receiver === "style" && memberName === "cssText") {
+        const css = designJavaScriptConstantString(node.right, index);
+        if (css === null) usesDynamicStyle = true;
+        else assertDesignExportCssIsStatic(css);
+      } else if (receiver === "style") {
+        const value = designJavaScriptConstantString(node.right, index);
+        if (memberName === null || value === null) usesDynamicStyle = true;
+        else assertDesignExportCssIsStatic(`${memberName}: ${value}`);
+      }
+      if (memberName !== null && DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(memberName)) {
+        usesWebAnimations = true;
+      }
+    }
+    if ((node.type === "CallExpression" || node.type === "OptionalCallExpression")
+      && designJavaScriptNode(node.callee)
+      && (node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression")) {
+      const args = Array.isArray(node.arguments) ? node.arguments : [];
+      const calleeName = designJavaScriptMemberName(node.callee, index);
+      const calleePath = designJavaScriptGlobalPath(node.callee, index);
+      const effective = calleePath === null ? null : designJavaScriptEffectivePath(calleePath);
+      const receiver = designJavaScriptProvenance(node.callee.object, index);
+      if (effective !== null && ["Object", "Reflect"].includes(effective.root)
+        && DESIGN_JAVASCRIPT_EXPORT_REFLECTION_MEMBERS.has(calleeName ?? "")
+        && designJavaScriptProvenance(args[0], index) !== "local") {
+        markExecutionEnvironmentProbe(node, `${effective.root}.${calleeName ?? "dynamic reflection"} on an unproven value`);
+      }
+      if (calleeName === "setAttribute" || calleeName === "setAttributeNS") {
+        const offset = calleeName === "setAttributeNS" ? 1 : 0;
+        const attribute = designJavaScriptConstantString(args[offset], index)?.toLowerCase();
+        const value = designJavaScriptConstantString(args[offset + 1], index);
+        if (attribute === "style") {
+          if (value === null) usesDynamicStyle = true;
+          else assertDesignExportCssIsStatic(value);
+        }
+      }
+      if (receiver === "style" && calleeName === "setProperty") {
+        const property = designJavaScriptConstantString(args[0], index);
+        const value = designJavaScriptConstantString(args[1], index);
+        if (property === null || value === null) usesDynamicStyle = true;
+        else assertDesignExportCssIsStatic(`${property}: ${value}`);
+      }
+      if (["insertRule", "addRule", "replaceSync"].includes(calleeName ?? "")
+        || (receiver === "style" && calleeName === "replace")) {
+        const css = designJavaScriptConstantString(args[0], index);
+        if (css === null) usesDynamicStyle = true;
+        else assertDesignExportCssIsStatic(css);
+      }
+      if (effective?.root === "document"
+        && (calleeName === "createElement" || calleeName === "createElementNS")) {
+        const tagName = designJavaScriptConstantString(args[calleeName === "createElementNS" ? 1 : 0], index)?.toLowerCase();
+        if (["animate", "set", "marquee"].includes(tagName ?? "")) usesWebAnimations = true;
+      }
+      if (effective !== null && ["Object", "Reflect"].includes(effective.root)
+        && ["defineProperty", "get", "set"].includes(calleeName ?? "")) {
+        const property = designJavaScriptConstantString(args[1], index);
+        if (property !== null && DESIGN_JAVASCRIPT_EXPORT_STATE_MEMBERS.has(property)) {
+          markExecutionEnvironmentProbe(node, `${effective.root}.${calleeName ?? "reflection"} of ${property}`);
+        }
+        if (property !== null && DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(property)) {
+          usesWebAnimations = true;
+        }
+      }
+    }
+    if ((node.type === "ImportDeclaration" || node.type === "ExportAllDeclaration"
+      || (node.type === "ExportNamedDeclaration" && node.source !== null && node.source !== undefined))
+      && designJavaScriptNode(node.source) && node.source.type === "StringLiteral"
+      && typeof node.source.value === "string") {
+      specifiers.push(node.source.value);
+    }
+  });
+  if (usesDeferredScheduler) {
+    throw new DesignStorageError("invalid-html", "Design Export JavaScript cannot use deferred timer or scheduler capabilities");
+  }
+  if (usesWebAnimations) {
+    throw new DesignStorageError("invalid-html", "Design Export JavaScript cannot use Web Animations or deferred animation capabilities");
+  }
+  if (usesDynamicStyle) {
+    throw new DesignStorageError("invalid-html", "Design Export JavaScript cannot construct dynamic CSS outside static validation");
+  }
+  if (executionEnvironmentProbe !== null) {
+    throw new DesignStorageError(
+      "invalid-html",
+      `Design Export JavaScript cannot inspect browser environment or persistent storage state (${executionEnvironmentProbe})`,
+    );
+  }
+  return specifiers;
+}
+
+function normalizedDesignExportCssForCapabilityScan(css: string): string {
+  let normalized = "";
+  for (let index = 0; index < css.length;) {
+    const character = css[index]!;
+    const next = css[index + 1];
+    if (character === "/" && next === "*") {
+      const end = css.indexOf("*/", index + 2);
+      if (end < 0) return normalized;
+      normalized += " ";
+      index = end + 2;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      const quote = character;
+      normalized += " ";
+      index += 1;
+      while (index < css.length) {
+        if (css[index] === "\\") {
+          index += css[index + 1] === "\r" && css[index + 2] === "\n" ? 3 : 2;
+          continue;
+        }
+        if (css[index] === quote) {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    normalized += character;
+    index += 1;
+  }
+  return normalized.replace(
+    /\\(?:([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|([^\r\n\f]))/gi,
+    (_match, hexadecimal: string | undefined, escaped: string | undefined) => hexadecimal === undefined
+      ? escaped ?? ""
+      : String.fromCodePoint(Number.parseInt(hexadecimal, 16)),
+  );
+}
+
+function assertDesignExportCssIsStatic(css: string): void {
+  const normalized = normalizedDesignExportCssForCapabilityScan(css);
+  if (/@(?:-webkit-)?keyframes\b|@starting-style\b/i.test(normalized)
+    || /(?:^|[;{])\s*(?:-webkit-)?(?:animation|transition)(?:-[a-z-]+)?\s*:/i.test(normalized)
+    || /(?:^|[;{])\s*(?:scroll-timeline|view-timeline|timeline-scope)(?:-[a-z-]+)?\s*:/i.test(normalized)) {
+    throw new DesignStorageError(
+      "invalid-input",
+      "Implementation Export CSS cannot use animations, transitions, timelines, or deferred visual changes",
+    );
+  }
+}
+
+export function validateDesignExportCss(
+  css: string,
+  mode: "stylesheet" | "attribute" = "stylesheet",
+): void {
+  assertDesignExportCssIsStatic(css);
+  let dependencies: ReturnType<typeof transformCss>["dependencies"];
+  try {
+    dependencies = mode === "attribute"
+      ? transformStyleAttribute({
+        filename: "design-export-style.css",
+        code: Buffer.from(css),
+        analyzeDependencies: true,
+      }).dependencies
+      : transformCss({
+        filename: "design-export.css",
+        code: Buffer.from(css),
+        analyzeDependencies: true,
+      }).dependencies;
+  } catch {
+    throw new DesignStorageError("invalid-input", "Implementation Export contains invalid CSS");
+  }
+  for (const dependency of dependencies ?? []) {
+    if (dependency.type === "import" || dependency.type !== "url"
+      || !allowedDesignExportUrl(dependency.url)) {
+      throw new DesignStorageError("invalid-input", "Implementation Export CSS must remain local and self-contained");
+    }
+  }
+}
+
+function validateDesignResponsiveUrls(value: string, allowCanonicalAssets: boolean): void {
+  const candidates = value.split(",").map((entry) => entry.trim().split(/\s+/, 1)[0] ?? "");
+  if (candidates.length === 0 || candidates.some((candidate) => !allowedDesignUrl(candidate, allowCanonicalAssets))) {
+    throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned or external responsive-image URL");
+  }
+}
+
+function validateDesignScriptElement(
+  element: DefaultTreeAdapterTypes.Element,
+  allowCanonicalAssets: boolean,
+): void {
+  if (designHtmlAttribute(element, "src") !== null) {
+    throw new DesignStorageError("invalid-html", "Generated HTML must keep JavaScript inline");
+  }
+  const rawType = (designHtmlAttribute(element, "type") ?? "").trim().toLowerCase();
+  const type = rawType.split(";", 1)[0]?.trim() ?? "";
+  const script = designHtmlText(element);
+  if (type === "speculationrules" || type === "importmap") {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not declare browser-loading script data");
+  }
+  if (type === "module") {
+    validateDesignJavaScript(script, allowCanonicalAssets, "module");
+    return;
+  }
+  if (type === "" || DESIGN_HTML_JAVASCRIPT_TYPES.has(type)) {
+    validateDesignJavaScript(script, allowCanonicalAssets, "script");
+    return;
+  }
+  if ((type === "application/json" || type.endsWith("+json")) && script.trim()) {
+    try {
+      JSON.parse(script);
+    } catch {
+      throw new DesignStorageError("invalid-html", "Generated HTML contains invalid JSON script data");
+    }
+  }
+}
+
+function validateDesignHtmlElement(
+  element: DefaultTreeAdapterTypes.Element,
+  allowCanonicalAssets: boolean,
+): void {
+  const tagName = element.tagName.toLowerCase();
+  if (DESIGN_HTML_BROWSING_CONTEXT_ELEMENTS.has(tagName)) {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not create nested browsing contexts");
+  }
+  if (tagName === "base") {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not redefine navigation");
+  }
+  const rel = designHtmlAttribute(element, "rel")?.trim().toLowerCase().split(/\s+/) ?? [];
+  if (tagName === "link" && rel.includes("stylesheet")) {
+    throw new DesignStorageError("invalid-html", "Generated HTML must keep styles inline");
+  }
+  if (tagName === "meta" && designHtmlAttribute(element, "http-equiv")?.trim().toLowerCase() === "refresh") {
+    throw new DesignStorageError("invalid-html", "Generated HTML may not refresh navigation");
+  }
+  for (const attribute of element.attrs) {
+    const name = attribute.name.toLowerCase();
+    if (name.startsWith("on")) {
+      throw new DesignStorageError("invalid-html", "Generated HTML may not use executable event attributes");
+    }
+    if (["target", "formtarget"].includes(name) && attribute.value.trim().toLowerCase() !== "_self") {
+      throw new DesignStorageError("invalid-html", "Generated HTML may not target another browsing context");
+    }
+    if (name === "style") validateDesignCss(attribute.value, allowCanonicalAssets, "attribute");
+    if (DESIGN_HTML_URL_ATTRIBUTES.has(name) && !allowedDesignUrl(attribute.value, allowCanonicalAssets)) {
+      const rejected = attribute.value.trim();
+      const preview = rejected.length > 160 ? `${rejected.slice(0, 160)}…` : rejected;
+      throw new DesignStorageError(
+        "invalid-html",
+        `Generated HTML contains an unpinned or external URL in <${tagName}> ${name}=${JSON.stringify(preview)}`,
+      );
+    }
+    if (DESIGN_HTML_RESPONSIVE_URL_ATTRIBUTES.has(name)) {
+      validateDesignResponsiveUrls(attribute.value, allowCanonicalAssets);
+    }
+    if (name === "ping") {
+      const targets = attribute.value.trim().split(/\s+/).filter(Boolean);
+      if (targets.length === 0 || targets.some((target) => !allowedDesignUrl(target, allowCanonicalAssets))) {
+        throw new DesignStorageError("invalid-html", "Generated HTML contains an external hyperlink audit URL");
+      }
+    }
+  }
+  if (tagName === "style") validateDesignCss(designHtmlText(element), allowCanonicalAssets);
+  if (tagName === "script") validateDesignScriptElement(element, allowCanonicalAssets);
+}
 
 export function validateDesignHtml(
   html: string,
@@ -1496,60 +3977,46 @@ export function validateDesignHtml(
   if (bytes > MAX_DESIGN_HTML_BYTES) {
     throw new DesignStorageError("invalid-html", "Generated HTML exceeds the size limit");
   }
-  if (!/^\s*<!doctype\s+html\s*>/i.test(html)
-    || (html.match(/<html\b/gi)?.length ?? 0) !== 1
-    || (html.match(/<head\b/gi)?.length ?? 0) !== 1
-    || (html.match(/<body\b/gi)?.length ?? 0) !== 1
-    || !/<\/html\s*>\s*$/i.test(html)) {
+  if (!/^\s*<!doctype\s+html\s*>/i.test(html) || !/<\/html\s*>\s*$/i.test(html)) {
     throw new DesignStorageError("invalid-html", "Generated output must be one complete HTML document");
   }
-  if (/<script\b[^>]*\bsrc\s*=/i.test(html)) {
-    throw new DesignStorageError("invalid-html", "Generated HTML must keep JavaScript inline");
+  const parseErrors: ParserError[] = [];
+  const document = parseHtml(html, {
+    sourceCodeLocationInfo: true,
+    onParseError: (error) => parseErrors.push(error),
+  });
+  if (parseErrors.length > 0) {
+    throw new DesignStorageError("invalid-html", "Generated output is not valid HTML");
   }
-  if (/<link\b[^>]*\brel\s*=\s*["']?stylesheet\b/i.test(html)
-    || /@import\s+(?:url\s*\()?\s*["']?https?:/i.test(html)
-    || /url\s*\(\s*["']?https?:/i.test(html)) {
-    throw new DesignStorageError("invalid-html", "Generated HTML must keep styles and style assets local");
-  }
-  if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html) || /<base\b/i.test(html)) {
-    throw new DesignStorageError("invalid-html", "Generated HTML may not redefine or refresh navigation");
-  }
-  if (/\btarget\s*=\s*["']?_(?:top|parent)\b/i.test(html)) {
-    throw new DesignStorageError("invalid-html", "Generated HTML may not target parent navigation");
-  }
-  for (const match of html.matchAll(/\b(?:src|href|poster|action|formaction)\s*=\s*(?:(["'])(.*?)\1|([^\s>]+))/gi)) {
-    if (!allowedDesignUrl(match[2] ?? match[3] ?? "", options.allowCanonicalAssets === true)) {
-      throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned or external URL");
+  let doctypeCount = 0;
+  const structural = new Map<string, DefaultTreeAdapterTypes.Element[]>();
+  const visit = (node: DefaultTreeAdapterTypes.Node): void => {
+    if (node.nodeName === "#documentType" && "name" in node) {
+      if (node.name.toLowerCase() === "html" && node.sourceCodeLocation) doctypeCount += 1;
     }
-  }
-  for (const match of html.matchAll(/\b(?:srcset|imagesrcset)\s*=\s*(?:(["'])(.*?)\1|([^>\s]+))/gi)) {
-    const candidates = (match[2] ?? match[3] ?? "").split(",").map((entry) => entry.trim().split(/\s+/, 1)[0] ?? "");
-    if (candidates.length === 0 || candidates.some((candidate) => !allowedDesignUrl(candidate, options.allowCanonicalAssets === true))) {
-      throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned or external responsive-image URL");
+    if (designHtmlElement(node)) {
+      const tagName = node.tagName.toLowerCase();
+      if (["html", "head", "body"].includes(tagName)) {
+        const matches = structural.get(tagName) ?? [];
+        matches.push(node);
+        structural.set(tagName, matches);
+      }
+      validateDesignHtmlElement(node, options.allowCanonicalAssets === true);
     }
-  }
-  for (const match of html.matchAll(/url\s*\(\s*(["']?)(.*?)\1\s*\)/gi)) {
-    if (!allowedDesignUrl(match[2] ?? "", options.allowCanonicalAssets === true)) {
-      throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned style asset URL");
-    }
-  }
-  for (const match of html.matchAll(/(?:-webkit-)?image-set\s*\((.*?)\)/gis)) {
-    if (/https?:|(?:^|["'(\s])\/(?!\/)/i.test(match[1] ?? "")) {
-      throw new DesignStorageError("invalid-html", "Generated HTML contains an external image-set URL");
-    }
-  }
-  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? "");
-  for (const script of scripts) {
-    const inspected = options.allowCanonicalAssets === true ? script.replace(CANONICAL_DESIGN_ASSET_URL, "") : script;
-    CANONICAL_DESIGN_ASSET_URL.lastIndex = 0;
-    if (/\b(?:window\s*\.\s*)?(?:top|parent|opener)\b/i.test(inspected)
-      || /\bimport\s*(?:\(|[^;\n]*\bfrom\s*)["']https?:/i.test(inspected)
-      || /https?:\/\//i.test(inspected)
-      || /["'`]\s*\/api(?:\/|\?|["'`])/i.test(inspected)
-      || /\b(?:window\s*\.\s*)?location\s*(?:\.\s*(?:assign|replace)\s*\(|(?:\.\s*href)?\s*=)/i.test(inspected)
-      || /\bwindow\s*\.\s*open\s*\(/i.test(inspected)) {
-      throw new DesignStorageError("invalid-html", "Generated HTML may not access parent navigation or remote scripts");
-    }
+    for (const child of designHtmlChildren(node)) visit(child);
+  };
+  visit(document);
+  const hasExactSourceElement = (tagName: "html" | "head" | "body"): boolean => {
+    const matches = structural.get(tagName) ?? [];
+    return matches.length === 1
+      && matches[0]?.sourceCodeLocation !== null
+      && matches[0]?.sourceCodeLocation !== undefined
+      && matches[0]?.sourceCodeLocation?.startTag !== undefined
+      && matches[0]?.sourceCodeLocation?.endTag !== undefined;
+  };
+  if (doctypeCount !== 1 || !hasExactSourceElement("html")
+    || !hasExactSourceElement("head") || !hasExactSourceElement("body")) {
+    throw new DesignStorageError("invalid-html", "Generated output must be one complete HTML document");
   }
 }
 
@@ -1559,12 +4026,23 @@ async function canonicalizeVersionAssets(input: {
   nodeId: string;
   versionId: string;
   html: string;
+  allowedCanonicalAssetUrls: ReadonlySet<string>;
 }): Promise<{ html: string; pins: Array<{ assetId: string; checksum: string }> }> {
   const ids = new Set<string>();
   for (const match of input.html.matchAll(/dezin-asset:\/\/(asset-[a-f0-9]{32})\b/g)) ids.add(match[1]!);
 
   const projectPath = `/api/projects/${input.projectId}/design-canvas/assets/`;
   const escaped = projectPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const canonicalAssetUrl = /\/api\/projects\/([A-Za-z0-9._-]+)\/design-canvas\/assets\/(asset-[a-f0-9]{32})\/original\.[a-z0-9]{1,12}\?nodeId=([A-Za-z0-9._-]+)&versionId=(version-[A-Za-z0-9._-]+)&checksum=([a-f0-9]{64})/gi;
+  for (const match of input.html.matchAll(canonicalAssetUrl)) {
+    if (match[1] !== input.projectId || match[3] !== input.nodeId
+      || !input.allowedCanonicalAssetUrls.has(match[0])) {
+      throw new DesignStorageError(
+        "invalid-html",
+        "Generated HTML contains a canonical Asset URL not authorized by its expected Head Version",
+      );
+    }
+  }
   for (const match of input.html.matchAll(new RegExp(`${escaped}(asset-[a-f0-9]{32})/[^\\s"'<>)]*`, "g"))) {
     ids.add(match[1]!);
   }
@@ -1596,21 +4074,138 @@ function versionRoot(root: string, nodeId: string, versionId: string): string {
   return join(nodeRoot(root, nodeId), "versions", safeSegment(versionId, "Version id"));
 }
 
+function publicationTransactionsRoot(root: string): string {
+  return join(root, "transactions", "publications");
+}
+
+async function assertNoDesignVersionPublicationsUnlocked(root: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(publicationTransactionsRoot(root), { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (entries.length > 0) {
+    throw new DesignStorageError(
+      "conflict",
+      "Design publication recovery must complete before this Project can be read or changed",
+    );
+  }
+}
+
+function publicationTransactionPath(root: string, jobId: string): string {
+  return join(publicationTransactionsRoot(root), `${safeSegment(jobId, "Job id")}.json`);
+}
+
+function pendingVersionRoot(root: string, nodeId: string, versionId: string): string {
+  return join(nodeRoot(root, nodeId), ".pending", "versions", safeSegment(versionId, "Version id"));
+}
+
+export interface DesignVersionPublicationTestHooks {
+  /** Test-only: model a process exit by leaving the durable marker for restart recovery. */
+  simulateProcessCrash?: boolean;
+  afterPhase?: (phase: DesignVersionPublicationPhase) => void | Promise<void>;
+  afterPendingDirectory?: () => void | Promise<void>;
+  afterPendingIndex?: () => void | Promise<void>;
+}
+
+function publicationTransactionChecksum(
+  content: Omit<DesignVersionPublicationTransaction, "checksum">,
+): string {
+  return createHash("sha256").update(stableStringify(content), "utf8").digest("hex");
+}
+
+function assertStoredPublicationTransaction(
+  value: unknown,
+  expectedProjectId: string,
+  expectedJobId: string,
+): asserts value is DesignVersionPublicationTransaction {
+  const transaction = storedRecord(value, `Design publication ${expectedJobId}`, [
+    "schemaVersion", "projectId", "jobId", "nodeId", "manifest", "terminalStatus",
+    "projectRevisionBefore", "previousVersionCount", "currentVersionIdBefore",
+    "selectedVersionIdBefore", "followsHead", "createdAt", "checksum",
+  ]);
+  const { checksum, ...content } = transaction;
+  const actualChecksum = publicationTransactionChecksum(
+    content as Omit<DesignVersionPublicationTransaction, "checksum">,
+  );
+  if (transaction.schemaVersion !== DESIGN_SCHEMA_VERSION || transaction.projectId !== expectedProjectId
+    || transaction.jobId !== expectedJobId || typeof transaction.nodeId !== "string"
+    || !SAFE_SEGMENT.test(transaction.nodeId) || !["ready", "superseded"].includes(String(transaction.terminalStatus))
+    || !Number.isSafeInteger(transaction.projectRevisionBefore) || (transaction.projectRevisionBefore as number) < 0
+    || !Number.isSafeInteger(transaction.previousVersionCount) || (transaction.previousVersionCount as number) < 0
+    || !validStoredNullableId(transaction.currentVersionIdBefore)
+    || !validStoredNullableId(transaction.selectedVersionIdBefore)
+    || typeof transaction.followsHead !== "boolean" || !validStoredTimestamp(transaction.createdAt)
+    || typeof checksum !== "string" || !SHA256.test(checksum) || checksum !== actualChecksum) {
+    throw new DesignStorageError("corrupt", `Design publication ${expectedJobId} is invalid`);
+  }
+  const manifest = transaction.manifest;
+  if (!manifest || typeof manifest !== "object") {
+    throw new DesignStorageError("corrupt", `Design publication ${expectedJobId} manifest is invalid`);
+  }
+  const versionId = (manifest as { id?: unknown }).id;
+  if (typeof versionId !== "string") {
+    throw new DesignStorageError("corrupt", `Design publication ${expectedJobId} manifest is invalid`);
+  }
+  assertStoredVersionManifest(manifest, transaction.nodeId as string, versionId);
+  if ((manifest as DesignVersionManifest).contentKind !== "html"
+    || (manifest as DesignVersionManifest).assetId !== null
+    || (manifest as DesignVersionManifest).jobId !== expectedJobId
+    || ((manifest as DesignVersionManifest).publicationStatus === "published" ? "ready" : "superseded")
+      !== transaction.terminalStatus) {
+    throw new DesignStorageError("corrupt", `Design publication ${expectedJobId} authority is invalid`);
+  }
+}
+
+async function readPublicationTransaction(
+  root: string,
+  projectId: string,
+  jobId: string,
+): Promise<DesignVersionPublicationTransaction> {
+  const value = await readJson<DesignVersionPublicationTransaction>(
+    publicationTransactionPath(root, jobId),
+    `Design publication ${jobId}`,
+  );
+  assertStoredPublicationTransaction(value, projectId, jobId);
+  return value;
+}
+
+async function verifyPublicationPayload(path: string, manifest: DesignVersionManifest): Promise<void> {
+  const manifestValue = await readJson<DesignVersionManifest>(join(path, "manifest.json"), `Design Version ${manifest.id}`);
+  assertStoredVersionManifest(manifestValue, manifest.nodeId, manifest.id);
+  if (JSON.stringify(manifestValue) !== JSON.stringify(manifest)) {
+    throw new DesignStorageError("corrupt", `Design Version ${manifest.id} diverges from its publication marker`);
+  }
+  const htmlPath = join(path, "index.html");
+  const info = await lstat(htmlPath);
+  if (!info.isFile() || info.isSymbolicLink() || info.size !== manifest.bytes) {
+    throw new DesignStorageError("corrupt", `Design Version ${manifest.id} publication payload is invalid`);
+  }
+  const checksum = createHash("sha256").update(await readFile(htmlPath)).digest("hex");
+  if (checksum !== manifest.checksum) {
+    throw new DesignStorageError("corrupt", `Design Version ${manifest.id} publication checksum is invalid`);
+  }
+}
+
 function assertStoredVersionManifest(
   value: unknown,
   expectedNodeId: string,
   expectedVersionId: string,
 ): asserts value is DesignVersionManifest {
   const manifest = storedRecord(value, `Design Version ${expectedVersionId} manifest`, [
-    "schemaVersion", "id", "nodeId", "sequence", "checksum", "bytes", "contextHash", "canvasRevision",
+    "schemaVersion", "id", "nodeId", "contentKind", "assetId", "sequence", "checksum", "bytes", "contextHash", "canvasRevision",
     "expectedHeadVersionId", "publicationStatus", "assetPins", "jobId", "runnerId", "model", "createdAt",
   ]);
   if (manifest.schemaVersion !== DESIGN_SCHEMA_VERSION || manifest.id !== expectedVersionId
     || manifest.nodeId !== expectedNodeId || !SAFE_SEGMENT.test(expectedVersionId) || !SAFE_SEGMENT.test(expectedNodeId)
     || !Number.isSafeInteger(manifest.sequence) || (manifest.sequence as number) < 1
     || !SHA256.test(String(manifest.checksum))
+    || !["html", "asset"].includes(String(manifest.contentKind))
+    || !validStoredNullableId(manifest.assetId)
     || !Number.isSafeInteger(manifest.bytes) || (manifest.bytes as number) < 1
-    || (manifest.bytes as number) > MAX_DESIGN_HTML_BYTES
+    || (manifest.bytes as number) > (manifest.contentKind === "asset" ? MAX_DESIGN_ASSET_BYTES : MAX_DESIGN_HTML_BYTES)
     || !SHA256.test(String(manifest.contextHash))
     || !Number.isSafeInteger(manifest.canvasRevision) || (manifest.canvasRevision as number) < 0
     || !validStoredNullableId(manifest.expectedHeadVersionId)
@@ -1618,7 +4213,11 @@ function assertStoredVersionManifest(
     || !Array.isArray(manifest.assetPins) || manifest.assetPins.length > MAX_ASSET_BUNDLE_FILES
     || !validStoredNullableId(manifest.jobId)
     || !validStoredText(manifest.runnerId, 512, { nullable: true })
+    || (typeof manifest.runnerId === "string" && manifest.runnerId.trim() !== manifest.runnerId)
     || !validStoredText(manifest.model, 512, { nullable: true })
+    || (typeof manifest.model === "string" && manifest.model.trim() !== manifest.model)
+    || (manifest.jobId !== null && manifest.runnerId === null)
+    || (manifest.runnerId === null && manifest.model !== null)
     || !validStoredTimestamp(manifest.createdAt)) {
     throw new DesignStorageError("corrupt", `Design Version ${expectedVersionId} manifest is invalid`);
   }
@@ -1631,14 +4230,241 @@ function assertStoredVersionManifest(
     }
     pinIds.add(pin.assetId);
   }
+  if ((manifest.contentKind === "html" && manifest.assetId !== null)
+    || (manifest.contentKind === "asset" && (
+      typeof manifest.assetId !== "string" || !/^asset-[a-f0-9]{32}$/.test(manifest.assetId)
+      || manifest.assetPins.length !== 0 || manifest.jobId !== null
+      || manifest.runnerId !== null || manifest.model !== null
+    ))) {
+    throw new DesignStorageError("corrupt", `Design Version ${expectedVersionId} content binding is invalid`);
+  }
 }
 
-export async function listDesignVersions(
+function assertPublicationJobAuthority(
+  job: DesignJob,
+  transaction: DesignVersionPublicationTransaction,
+): void {
+  const manifest = transaction.manifest;
+  if (job.id !== transaction.jobId || job.kind !== "node-generation" || job.nodeId !== transaction.nodeId
+    || job.contextHash !== manifest.contextHash || job.canvasRevision !== manifest.canvasRevision
+    || job.expectedHeadVersionId !== manifest.expectedHeadVersionId || job.runnerId !== manifest.runnerId
+    || job.model !== manifest.model || (job.versionId !== null && job.versionId !== manifest.id)) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Job authority is invalid`);
+  }
+}
+
+function publicationNodeState(
+  node: DesignNode,
+  transaction: DesignVersionPublicationTransaction,
+): "before" | "after" | null {
+  const before = node.currentVersionId === transaction.currentVersionIdBefore
+    && node.selectedVersionId === transaction.selectedVersionIdBefore
+    && node.versionCount === transaction.previousVersionCount
+    && node.activeJobId === transaction.jobId;
+  if (before) return "before";
+  const expectedCurrent = transaction.terminalStatus === "ready"
+    ? transaction.manifest.id
+    : transaction.currentVersionIdBefore;
+  const expectedSelected = transaction.terminalStatus === "ready" && transaction.followsHead
+    ? transaction.manifest.id
+    : transaction.selectedVersionIdBefore;
+  const after = node.currentVersionId === expectedCurrent && node.selectedVersionId === expectedSelected
+    && node.versionCount === transaction.previousVersionCount + 1 && node.activeJobId === null
+    && node.state === transaction.terminalStatus;
+  return after ? "after" : null;
+}
+
+async function rollForwardPublicationUnlocked(
+  root: string,
+  transaction: DesignVersionPublicationTransaction,
+  hooks?: DesignVersionPublicationTestHooks,
+): Promise<DesignJob> {
+  const manifest = transaction.manifest;
+  const pending = pendingVersionRoot(root, transaction.nodeId, manifest.id);
+  const target = versionRoot(root, transaction.nodeId, manifest.id);
+  const [pendingExists, targetExists] = await Promise.all([exists(pending), exists(target)]);
+  if (pendingExists === targetExists) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} payload state is invalid`);
+  }
+  if (pendingExists) {
+    await verifyPublicationPayload(pending, manifest);
+  } else {
+    await verifyPublicationPayload(target, manifest);
+  }
+
+  const job = await readJob(root, transaction.jobId);
+  assertPublicationJobAuthority(job, transaction);
+  if (!(job.status === "validating" || job.status === transaction.terminalStatus)) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Job state is invalid`);
+  }
+
+  const project = await readProject(root);
+  if (![transaction.projectRevisionBefore, transaction.projectRevisionBefore + 1].includes(project.revision)) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Canvas revision is invalid`);
+  }
+  const nodes = readNodes(project);
+  const node = nodes.get(transaction.nodeId);
+  if (!node) throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Node is unavailable`);
+  const nodeState = publicationNodeState(node, transaction);
+  if (nodeState === null || (nodeState === "before" && project.revision !== transaction.projectRevisionBefore)
+    || (nodeState === "after" && project.revision !== transaction.projectRevisionBefore + 1)) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Canvas authority is invalid`);
+  }
+  if (pendingExists) {
+    await mkdir(join(nodeRoot(root, transaction.nodeId), "versions"), { recursive: true });
+    await rename(pending, target);
+    await hooks?.afterPhase?.("target");
+  }
+  if (nodeState === "before") {
+    node.versionCount = transaction.previousVersionCount + 1;
+    node.error = null;
+    if (transaction.terminalStatus === "ready") {
+      node.currentVersionId = manifest.id;
+      if (transaction.followsHead) node.selectedVersionId = manifest.id;
+      node.state = "ready";
+    } else {
+      node.state = "superseded";
+    }
+    node.activeJobId = null;
+    node.updatedAt = transaction.createdAt;
+    project.nodes = project.nodeOrder.map((id) => cloneNode(nodes.get(id)!));
+    project.revision = transaction.projectRevisionBefore + 1;
+    project.updatedAt = Math.max(project.updatedAt, transaction.createdAt);
+    await writeAtomicJson(projectFilePath(root), project);
+    await hooks?.afterPhase?.("canvas");
+  }
+
+  job.status = transaction.terminalStatus;
+  job.versionId = manifest.id;
+  job.cancelRequested = false;
+  job.error = transaction.terminalStatus === "ready"
+    ? null
+    : "A newer Node head was published before this result completed";
+  job.updatedAt = Math.max(job.updatedAt, transaction.createdAt);
+  job.finishedAt = job.updatedAt;
+  await writeAtomicJson(jobFilePath(root, job.id), job);
+  await hooks?.afterPhase?.("job");
+  await rm(publicationTransactionPath(root, transaction.jobId));
+  return job;
+}
+
+async function rollBackUnpublishedPublicationUnlocked(
+  root: string,
+  transaction: DesignVersionPublicationTransaction,
+  timestamp: number,
+  pending: string | null = null,
+): Promise<DesignJob> {
+  const job = await readJob(root, transaction.jobId);
+  assertPublicationJobAuthority(job, transaction);
+  if (!(job.status === "validating" || job.status === "cancelled")) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} rollback Job state is invalid`);
+  }
+  const project = await readProject(root);
+  const nodes = readNodes(project);
+  const node = nodes.get(transaction.nodeId);
+  if (!node) throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} Node is unavailable`);
+  const afterRevision = transaction.projectRevisionBefore + 1;
+  const before = project.revision === transaction.projectRevisionBefore
+    && node.currentVersionId === transaction.currentVersionIdBefore
+    && node.selectedVersionId === transaction.selectedVersionIdBefore
+    && node.versionCount === transaction.previousVersionCount && node.activeJobId === transaction.jobId;
+  const after = project.revision === afterRevision && node.currentVersionId === transaction.currentVersionIdBefore
+    && node.selectedVersionId === transaction.selectedVersionIdBefore
+    && node.versionCount === transaction.previousVersionCount && node.activeJobId === null && node.state === "cancelled";
+  if (!before && !after) {
+    throw new DesignStorageError("corrupt", `Design publication ${transaction.jobId} rollback authority is invalid`);
+  }
+  if (pending !== null) await rm(pending, { recursive: true, force: true });
+  if (before) {
+    node.state = "cancelled";
+    node.activeJobId = null;
+    node.error = null;
+    node.updatedAt = timestamp;
+    project.nodes = project.nodeOrder.map((id) => cloneNode(nodes.get(id)!));
+    project.revision = afterRevision;
+    project.updatedAt = Math.max(project.updatedAt, timestamp);
+    await writeAtomicJson(projectFilePath(root), project);
+  }
+  job.status = "cancelled";
+  job.cancelRequested = true;
+  job.error = "Interrupted before Design Version publication payload was durably staged";
+  job.updatedAt = timestamp;
+  job.finishedAt = timestamp;
+  await writeAtomicJson(jobFilePath(root, job.id), job);
+  await rm(publicationTransactionPath(root, transaction.jobId));
+  return job;
+}
+
+function recoverablePendingPayloadError(error: unknown): boolean {
+  return (error instanceof DesignStorageError && (error.code === "missing" || error.code === "corrupt"))
+    || (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT");
+}
+
+async function recoverPublicationTransactionUnlocked(
+  root: string,
+  transaction: DesignVersionPublicationTransaction,
+  timestamp: number,
+): Promise<DesignJob> {
+  const pending = pendingVersionRoot(root, transaction.nodeId, transaction.manifest.id);
+  const target = versionRoot(root, transaction.nodeId, transaction.manifest.id);
+  const [pendingExists, targetExists] = await Promise.all([exists(pending), exists(target)]);
+  if (targetExists) {
+    // Once the target exists it is the candidate immutable Version. Any mismatch must remain
+    // quarantined behind the durable marker instead of being silently discarded or published.
+    return rollForwardPublicationUnlocked(root, transaction);
+  }
+  if (!pendingExists) return rollBackUnpublishedPublicationUnlocked(root, transaction, timestamp);
+  try {
+    await verifyPublicationPayload(pending, transaction.manifest);
+  } catch (error) {
+    if (!recoverablePendingPayloadError(error)) throw error;
+    return rollBackUnpublishedPublicationUnlocked(root, transaction, timestamp, pending);
+  }
+  return rollForwardPublicationUnlocked(root, transaction);
+}
+
+async function recoverPublicationTransactionsUnlocked(
+  root: string,
+  projectId: string,
+  timestamp: number,
+): Promise<DesignJob[]> {
+  const parent = publicationTransactionsRoot(root);
+  if (!(await exists(parent))) return [];
+  const entries = await readdir(parent, { withFileTypes: true });
+  const recovered: DesignJob[] = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (entry.isFile() && /^\.job-[0-9a-f-]{36}\.json\.[0-9a-f-]{36}\.tmp$/.test(entry.name)) {
+      await rm(join(parent, entry.name));
+      continue;
+    }
+    if (!entry.isFile() || !/^job-[0-9a-f-]{36}\.json$/.test(entry.name)) {
+      throw new DesignStorageError("corrupt", "Design publication transaction identity is invalid");
+    }
+    const jobId = entry.name.slice(0, -5);
+    const transaction = await readPublicationTransaction(root, projectId, jobId);
+    recovered.push(await recoverPublicationTransactionUnlocked(root, transaction, timestamp));
+  }
+  return recovered;
+}
+
+/** Recover one durable Version publication without terminalizing unrelated interrupted Jobs. */
+export async function recoverDesignVersionPublication(
   dataDir: string,
   projectId: string,
-  nodeId: string,
-): Promise<DesignVersionManifest[]> {
+  jobId: string,
+  now?: number,
+): Promise<DesignJob | null> {
   const root = designRoot(dataDir, projectId);
+  safeSegment(jobId, "Job id");
+  return withProjectLock(root, async () => {
+    const marker = publicationTransactionPath(root, jobId);
+    if (!(await exists(marker))) return null;
+    const transaction = await readPublicationTransaction(root, projectId, jobId);
+    return recoverPublicationTransactionUnlocked(root, transaction, nowValue(now));
+  }, { allowPublicationTransactions: true });
+}
+
+async function listDesignVersionsUnlocked(root: string, nodeId: string): Promise<DesignVersionManifest[]> {
   safeSegment(nodeId, "Node id");
   const parent = join(nodeRoot(root, nodeId), "versions");
   if (!(await exists(parent))) return [];
@@ -1653,6 +4479,31 @@ export async function listDesignVersions(
   return manifests.sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
 }
 
+export async function listDesignVersions(
+  dataDir: string,
+  projectId: string,
+  nodeId: string,
+): Promise<DesignVersionManifest[]> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return listDesignVersionsUnlocked(root, nodeId);
+  });
+}
+
+async function getDesignVersionUnlocked(
+  root: string,
+  nodeId: string,
+  versionId: string,
+): Promise<DesignVersionManifest> {
+  const manifest = await readJson<DesignVersionManifest>(
+    join(versionRoot(root, nodeId, versionId), "manifest.json"),
+    `Design Version ${versionId}`,
+  );
+  assertStoredVersionManifest(manifest, nodeId, versionId);
+  return manifest;
+}
+
 export async function getDesignVersion(
   dataDir: string,
   projectId: string,
@@ -1660,12 +4511,10 @@ export async function getDesignVersion(
   versionId: string,
 ): Promise<DesignVersionManifest> {
   const root = designRoot(dataDir, projectId);
-  const manifest = await readJson<DesignVersionManifest>(
-    join(versionRoot(root, nodeId, versionId), "manifest.json"),
-    `Design Version ${versionId}`,
-  );
-  assertStoredVersionManifest(manifest, nodeId, versionId);
-  return manifest;
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return getDesignVersionUnlocked(root, nodeId, versionId);
+  });
 }
 
 export async function publishDesignVersion(
@@ -1682,7 +4531,8 @@ export async function publishDesignVersion(
     model: string | null;
   },
   now?: number,
-): Promise<{ manifest: DesignVersionManifest; node: DesignNode }> {
+  hooks?: DesignVersionPublicationTestHooks,
+): Promise<{ manifest: DesignVersionManifest; node: DesignNode; job: DesignJob | null }> {
   const root = designRoot(dataDir, projectId);
   return withProjectLock(root, async () => {
     await requireInitialized(root);
@@ -1703,9 +4553,46 @@ export async function publishDesignVersion(
       || !validStoredText(input.model, 512, { nullable: true })) {
       throw new DesignStorageError("invalid-input", "Generation runner identity is invalid");
     }
-    validateDesignHtml(input.html);
+    let authorityJob: DesignJob | null = null;
+    if (input.jobId !== null) {
+      const authority = await readJob(root, input.jobId);
+      if (authority.kind !== "node-generation"
+        || authority.nodeId !== nodeId
+        || authority.status !== "validating"
+        || authority.cancelRequested
+        || node.activeJobId !== authority.id
+        || authority.contextHash !== input.contextHash
+        || authority.canvasRevision !== input.canvasRevision
+        || authority.expectedHeadVersionId !== input.expectedHeadVersionId
+        || authority.runnerId !== input.runnerId
+        || authority.model !== input.model) {
+        throw new DesignStorageError(
+          "conflict",
+          "Generation Version publication requires the active validating Job authority",
+        );
+      }
+      authorityJob = authority;
+    }
+    // A previous immutable Version already contains checksum-bound canonical
+    // Asset URLs. Permit only exact URLs pinned by this Node's expected Head;
+    // canonicalizeVersionAssets then rebinds them to the new immutable Version.
+    const allowedCanonicalAssetUrls = new Set<string>();
+    if (input.expectedHeadVersionId !== null) {
+      const expectedHead = await getDesignVersionUnlocked(root, nodeId, input.expectedHeadVersionId);
+      for (const pin of expectedHead.assetPins) {
+        const asset = await getDesignAssetManifest(dataDir, projectId, pin.assetId);
+        if (asset.checksum !== pin.checksum) {
+          throw new DesignStorageError("corrupt", `Expected Head Version ${expectedHead.id} has an invalid Asset pin`);
+        }
+        allowedCanonicalAssetUrls.add(
+          `/api/projects/${projectId}/design-canvas/assets/${asset.id}/${asset.fileName}`
+            + `?nodeId=${nodeId}&versionId=${expectedHead.id}&checksum=${asset.checksum}`,
+        );
+      }
+    }
+    validateDesignHtml(input.html, { allowCanonicalAssets: true });
 
-    const existing = await listDesignVersions(dataDir, projectId, nodeId);
+    const existing = await listDesignVersionsUnlocked(root, nodeId);
     const sequence = existing.reduce((maximum, version) => Math.max(maximum, version.sequence), 0) + 1;
     const versionId = `version-${randomUUID()}`;
     const canonical = await canonicalizeVersionAssets({
@@ -1714,6 +4601,7 @@ export async function publishDesignVersion(
       nodeId,
       versionId,
       html: input.html,
+      allowedCanonicalAssetUrls,
     });
     const timestamp = nowValue(now);
     const bytes = Buffer.byteLength(canonical.html, "utf8");
@@ -1723,6 +4611,8 @@ export async function publishDesignVersion(
       schemaVersion: DESIGN_SCHEMA_VERSION,
       id: versionId,
       nodeId,
+      contentKind: "html",
+      assetId: null,
       sequence,
       checksum,
       bytes,
@@ -1736,6 +4626,62 @@ export async function publishDesignVersion(
       model: input.model,
       createdAt: timestamp,
     };
+
+    if (authorityJob !== null) {
+      const transactionContent: Omit<DesignVersionPublicationTransaction, "checksum"> = {
+        schemaVersion: DESIGN_SCHEMA_VERSION,
+        projectId,
+        jobId: authorityJob.id,
+        nodeId,
+        manifest,
+        terminalStatus: publicationStatus === "published" ? "ready" : "superseded",
+        projectRevisionBefore: project.revision,
+        previousVersionCount: node.versionCount,
+        currentVersionIdBefore: node.currentVersionId,
+        selectedVersionIdBefore: node.selectedVersionId,
+        followsHead: node.selectedVersionId === null || node.selectedVersionId === node.currentVersionId,
+        createdAt: timestamp,
+      };
+      const transaction: DesignVersionPublicationTransaction = {
+        ...transactionContent,
+        checksum: publicationTransactionChecksum(transactionContent),
+      };
+      let markerWritten = false;
+      try {
+        await mkdir(publicationTransactionsRoot(root), { recursive: true });
+        const markerPath = publicationTransactionPath(root, authorityJob.id);
+        if (await exists(markerPath)) {
+          throw new DesignStorageError("conflict", `Design publication ${authorityJob.id} already has a transaction`);
+        }
+        await writeAtomicJson(markerPath, transaction);
+        markerWritten = true;
+        await hooks?.afterPhase?.("marker");
+
+        const pending = pendingVersionRoot(root, nodeId, versionId);
+        await mkdir(pending, { recursive: true });
+        await hooks?.afterPendingDirectory?.();
+        await writeFile(join(pending, "index.html"), canonical.html, { flag: "wx", mode: 0o600 });
+        await hooks?.afterPendingIndex?.();
+        await writeFile(join(pending, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+        await hooks?.afterPhase?.("pending");
+        const terminalJob = await rollForwardPublicationUnlocked(root, transaction, hooks);
+        const committedProject = await readProject(root);
+        const committedNode = readNodes(committedProject).get(nodeId);
+        if (!committedNode) throw new DesignStorageError("corrupt", `Design publication ${authorityJob.id} lost its Node`);
+        return { manifest, node: cloneNode(committedNode), job: terminalJob };
+      } catch (error) {
+        if (!markerWritten || hooks?.simulateProcessCrash) throw error;
+        // Reconcile while this exact Project lock is still held. Letting the lock
+        // go first would allow queued Canvas or cancellation writes to invalidate
+        // the durable transaction's revision and Job authority.
+        const recovered = await recoverPublicationTransactionUnlocked(root, transaction, timestamp);
+        if (recovered.status !== transaction.terminalStatus || recovered.versionId !== manifest.id) throw error;
+        const committedProject = await readProject(root);
+        const committedNode = readNodes(committedProject).get(nodeId);
+        if (!committedNode) throw new DesignStorageError("corrupt", `Design publication ${authorityJob.id} lost its Node`);
+        return { manifest, node: cloneNode(committedNode), job: recovered };
+      }
+    }
 
     const pendingParent = join(nodeRoot(root, nodeId), ".pending");
     const pending = join(pendingParent, versionId);
@@ -1767,13 +4713,12 @@ export async function publishDesignVersion(
     project.revision += 1;
     project.updatedAt = Math.max(project.updatedAt, timestamp);
     await writeAtomicJson(projectFilePath(root), project);
-    return { manifest, node: cloneNode(node) };
+    return { manifest, node: cloneNode(node), job: null };
   });
 }
 
-export async function resolveDesignVersionFile(
-  dataDir: string,
-  projectId: string,
+async function resolveDesignVersionFileUnlocked(
+  root: string,
   nodeId: string,
   versionId: string,
   requestedFile: string,
@@ -1781,8 +4726,11 @@ export async function resolveDesignVersionFile(
   if (requestedFile !== "" && requestedFile !== "index.html") {
     throw new DesignStorageError("not-found", "Design Version file was not found");
   }
-  const manifest = await getDesignVersion(dataDir, projectId, nodeId, versionId);
-  const path = join(versionRoot(designRoot(dataDir, projectId), nodeId, versionId), "index.html");
+  const manifest = await getDesignVersionUnlocked(root, nodeId, versionId);
+  if (manifest.contentKind !== "html" || manifest.assetId !== null) {
+    throw new DesignStorageError("not-found", "Material Design Versions do not contain index.html");
+  }
+  const path = join(versionRoot(root, nodeId, versionId), "index.html");
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.size !== manifest.bytes) {
     throw new DesignStorageError("corrupt", `Design Version ${versionId} HTML is invalid`);
@@ -1792,6 +4740,72 @@ export async function resolveDesignVersionFile(
     throw new DesignStorageError("corrupt", `Design Version ${versionId} HTML checksum is invalid`);
   }
   return { manifest, path };
+}
+
+export async function resolveDesignVersionFile(
+  dataDir: string,
+  projectId: string,
+  nodeId: string,
+  versionId: string,
+  requestedFile: string,
+): Promise<{ manifest: DesignVersionManifest; path: string }> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return resolveDesignVersionFileUnlocked(root, nodeId, versionId, requestedFile);
+  });
+}
+
+export type ResolvedDesignVersionPreview =
+  | { kind: "html"; path: string; manifest: DesignVersionManifest }
+  | {
+      kind: "asset";
+      path: string;
+      manifest: DesignVersionManifest;
+      assetManifest: DesignAssetManifest;
+    };
+
+async function resolveDesignVersionPreviewUnlocked(
+  root: string,
+  nodeId: string,
+  versionId: string,
+): Promise<ResolvedDesignVersionPreview> {
+  const manifest = await getDesignVersionUnlocked(root, nodeId, versionId);
+  if (manifest.contentKind === "html") {
+    const resolved = await resolveDesignVersionFileUnlocked(root, nodeId, versionId, "index.html");
+    return { kind: "html", path: resolved.path, manifest: resolved.manifest };
+  }
+  const assetId = manifest.assetId;
+  if (assetId === null) {
+    throw new DesignStorageError("corrupt", `Material Design Version ${versionId} has no Asset`);
+  }
+  const resolved = await resolveDesignAssetFileUnlocked(
+    root,
+    assetId,
+    (await getDesignAssetManifestUnlocked(root, assetId)).fileName,
+  );
+  if (resolved.manifest.checksum !== manifest.checksum || resolved.manifest.bytes !== manifest.bytes) {
+    throw new DesignStorageError("corrupt", `Material Design Version ${versionId} Asset identity is invalid`);
+  }
+  return {
+    kind: "asset",
+    path: resolved.path,
+    manifest,
+    assetManifest: resolved.manifest,
+  };
+}
+
+export async function resolveDesignVersionPreview(
+  dataDir: string,
+  projectId: string,
+  nodeId: string,
+  versionId: string,
+): Promise<ResolvedDesignVersionPreview> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return resolveDesignVersionPreviewUnlocked(root, nodeId, versionId);
+  });
 }
 
 export async function resolvePinnedDesignAssetFile(
@@ -1869,7 +4883,7 @@ function assertStoredThread(
   }
 }
 
-async function readOrCreateThreadUnlocked(
+async function readThreadOrNewUnlocked(
   root: string,
   scope: { type: "main" } | { type: "node"; nodeId: string },
   now?: number,
@@ -1882,9 +4896,21 @@ async function readOrCreateThreadUnlocked(
     }
   }
   const path = threadFilePath(root, scope);
-  if (!(await exists(path))) await writeAtomicJson(path, newThread(scope, nowValue(now)));
+  if (!(await exists(path))) return newThread(scope, nowValue(now));
   const thread = await readJson<DesignThread>(path, "Design Agent thread");
   assertStoredThread(thread, scope);
+  return thread;
+}
+
+async function readOrCreateThreadUnlocked(
+  root: string,
+  scope: { type: "main" } | { type: "node"; nodeId: string },
+  now?: number,
+): Promise<DesignThread> {
+  const path = threadFilePath(root, scope);
+  const existed = await exists(path);
+  const thread = await readThreadOrNewUnlocked(root, scope, now);
+  if (!existed) await writeAtomicJson(path, thread);
   return thread;
 }
 
@@ -1936,9 +4962,257 @@ export async function appendDesignThreadMessage(
   });
 }
 
+export async function updateDesignThreadMessage(
+  dataDir: string,
+  projectId: string,
+  scope: { type: "main" } | { type: "node"; nodeId: string },
+  messageId: string,
+  input: { content: string; expectedRole?: DesignThreadRole; expectedJobId?: string | null },
+  now?: number,
+): Promise<{ thread: DesignThread; message: DesignThreadMessage }> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    safeSegment(messageId, "Thread message id");
+    if (typeof input?.content !== "string" || !input.content.trim()
+      || Buffer.byteLength(input.content, "utf8") > MAX_THREAD_CONTENT_BYTES) {
+      throw new DesignStorageError("invalid-input", "Design Agent message is invalid");
+    }
+    if (input.expectedRole !== undefined && !["user", "assistant", "system", "tool"].includes(input.expectedRole)) {
+      throw new DesignStorageError("invalid-input", "Design Agent expected message role is invalid");
+    }
+    const expectedJobId = input.expectedJobId === undefined ? undefined : input.expectedJobId;
+    if (expectedJobId !== undefined && expectedJobId !== null) safeSegment(expectedJobId, "Expected Job id");
+    const thread = await readThreadOrNewUnlocked(root, scope, now);
+    const index = thread.messages.findIndex((message) => message.id === messageId);
+    if (index < 0) throw new DesignStorageError("not-found", `Design Agent message ${messageId} was not found`);
+    const current = thread.messages[index]!;
+    if ((input.expectedRole !== undefined && current.role !== input.expectedRole)
+      || (expectedJobId !== undefined && current.jobId !== expectedJobId)) {
+      throw new DesignStorageError("conflict", `Design Agent message ${messageId} no longer matches its reservation`);
+    }
+    const message = { ...current, content: input.content.trim() };
+    thread.messages[index] = message;
+    thread.updatedAt = nowValue(now);
+    await writeAtomicJson(threadFilePath(root, scope), thread);
+    return { thread, message };
+  });
+}
+
+const MAX_MAIN_PLAN_PAYLOAD_BYTES = 512 * 1024;
+export const DESIGN_MAIN_AGENT_QUEUED_MESSAGE =
+  "Main Agent orchestration is queued. The final result will replace this status.";
+
+interface StoredDesignMainPlanExecution {
+  schemaVersion: typeof DESIGN_SCHEMA_VERSION;
+  executionId: string;
+  requestHash: string;
+  sourceJobId: string;
+  planHash: string;
+  planPayload: string;
+  planningAuthorityHash: string;
+  canvasRevision: number;
+  runnerId: string;
+  model: string | null;
+  createdAt: number;
+  checksum: string;
+}
+
+export interface DesignMainPlanExecution {
+  executionId: string;
+  sourceJobId: string;
+  planHash: string;
+  planPayload: string;
+  planningAuthorityHash: string;
+  canvasRevision: number;
+  runnerId: string;
+  model: string | null;
+  appliedRevision: number | null;
+}
+
+function mainPlanExecutionId(receiptKey: string): string {
+  return createHash("sha256").update(`dezin-design-main-plan-v1\0${receiptKey}`).digest("hex");
+}
+
+function mainPlanExecutionPath(root: string, receiptKey: string): string {
+  return join(root, "agents", "main", "executions", `${mainPlanExecutionId(receiptKey)}.json`);
+}
+
+function mainPlanExecutionChecksum(value: Omit<StoredDesignMainPlanExecution, "checksum">): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function assertStoredMainPlanExecution(
+  value: unknown,
+  expectedExecutionId: string,
+): asserts value is StoredDesignMainPlanExecution {
+  const record = storedRecord(value, "Design Main Agent plan execution", [
+    "schemaVersion", "executionId", "requestHash", "sourceJobId", "planHash", "planPayload",
+    "planningAuthorityHash", "canvasRevision", "runnerId", "model", "createdAt", "checksum",
+  ]);
+  if (record.schemaVersion !== DESIGN_SCHEMA_VERSION || record.executionId !== expectedExecutionId
+    || !SHA256.test(String(record.executionId)) || !SHA256.test(String(record.requestHash))
+    || typeof record.sourceJobId !== "string" || !SAFE_SEGMENT.test(record.sourceJobId)
+    || !SHA256.test(String(record.planHash)) || typeof record.planPayload !== "string"
+    || !record.planPayload.trim() || Buffer.byteLength(record.planPayload, "utf8") > MAX_MAIN_PLAN_PAYLOAD_BYTES
+    || createHash("sha256").update(record.planPayload).digest("hex") !== record.planHash
+    || !SHA256.test(String(record.planningAuthorityHash))
+    || !Number.isSafeInteger(record.canvasRevision) || (record.canvasRevision as number) < 0
+    || !validStoredText(record.runnerId, 512) || (record.runnerId as string).trim() !== record.runnerId
+    || !validStoredText(record.model, 512, { nullable: true })
+    || (typeof record.model === "string" && record.model.trim() !== record.model)
+    || !validStoredTimestamp(record.createdAt) || !SHA256.test(String(record.checksum))) {
+    throw new DesignStorageError("corrupt", "Design Main Agent plan execution is invalid");
+  }
+  const { checksum, ...content } = record as unknown as StoredDesignMainPlanExecution;
+  if (mainPlanExecutionChecksum(content) !== checksum) {
+    throw new DesignStorageError("corrupt", "Design Main Agent plan execution checksum is invalid");
+  }
+}
+
+async function readDesignMainPlanExecutionUnlocked(
+  root: string,
+  project: DesignProjectFile,
+  receiptKey: string,
+): Promise<DesignMainPlanExecution | null> {
+  const receipt = project.turnReceipts[receiptKey];
+  if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || !SHA256.test(receipt.requestHash ?? "")) {
+    throw new DesignStorageError("conflict", "Main Agent plan execution is not bound to this idempotent request");
+  }
+  const executionId = mainPlanExecutionId(receiptKey);
+  const path = mainPlanExecutionPath(root, receiptKey);
+  if (!(await exists(path))) {
+    if (receipt.mainPlanHash !== undefined) {
+      throw new DesignStorageError("corrupt", "Design Main Agent plan receipt is missing its immutable payload");
+    }
+    return null;
+  }
+  const stored = await readJson<StoredDesignMainPlanExecution>(path, "Design Main Agent plan execution");
+  assertStoredMainPlanExecution(stored, executionId);
+  if (stored.requestHash !== receipt.requestHash) {
+    throw new DesignStorageError("corrupt", "Design Main Agent plan no longer matches its request authority");
+  }
+  if (receipt.mainPlanHash === undefined) {
+    // The immutable payload is written before the Project receipt. Reconcile
+    // the only safe partial state after an exit between those two writes.
+    receipt.mainPlanHash = stored.planHash;
+    await writeAtomicJson(projectFilePath(root), project);
+  } else if (receipt.mainPlanHash !== stored.planHash) {
+    throw new DesignStorageError("corrupt", "Design Main Agent plan receipt checksum diverges");
+  }
+  const sourceJob = await readJob(root, stored.sourceJobId);
+  if (sourceJob.kind !== "main-agent" || sourceJob.contextHash === null
+    || sourceJob.canvasRevision !== stored.canvasRevision
+    || sourceJob.runnerId !== stored.runnerId || sourceJob.model !== stored.model) {
+    throw new DesignStorageError("corrupt", "Design Main Agent plan source Job authority diverges");
+  }
+  return {
+    executionId,
+    sourceJobId: stored.sourceJobId,
+    planHash: stored.planHash,
+    planPayload: stored.planPayload,
+    planningAuthorityHash: stored.planningAuthorityHash,
+    canvasRevision: stored.canvasRevision,
+    runnerId: stored.runnerId,
+    model: stored.model,
+    appliedRevision: receipt.mainPlanAppliedRevision ?? null,
+  };
+}
+
+export async function getDesignMainPlanExecution(
+  dataDir: string,
+  projectId: string,
+  receiptKey: string,
+): Promise<DesignMainPlanExecution | null> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    if (typeof receiptKey !== "string" || !receiptKey || receiptKey.length > 512) {
+      throw new DesignStorageError("invalid-input", "Main Agent receipt key is invalid");
+    }
+    const project = await readProject(root);
+    return readDesignMainPlanExecutionUnlocked(root, project, receiptKey);
+  });
+}
+
+export async function reserveDesignMainPlanExecution(
+  dataDir: string,
+  projectId: string,
+  input: {
+    jobId: string;
+    receiptKey: string;
+    planPayload: string;
+    planningAuthorityHash: string;
+    canvasRevision: number;
+  },
+  now?: number,
+): Promise<DesignMainPlanExecution> {
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    const jobId = safeSegment(input.jobId, "Job id");
+    if (typeof input.receiptKey !== "string" || !input.receiptKey || input.receiptKey.length > 512
+      || typeof input.planPayload !== "string" || !input.planPayload.trim()
+      || Buffer.byteLength(input.planPayload, "utf8") > MAX_MAIN_PLAN_PAYLOAD_BYTES
+      || !SHA256.test(input.planningAuthorityHash)
+      || !Number.isSafeInteger(input.canvasRevision) || input.canvasRevision < 0) {
+      throw new DesignStorageError("invalid-input", "Main Agent plan execution input is invalid");
+    }
+    const project = await readProject(root);
+    const receipt = project.turnReceipts[input.receiptKey];
+    const job = await readJob(root, jobId);
+    if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || receipt.jobId !== job.id
+      || receipt.authorityHash !== job.contextHash || !SHA256.test(receipt.requestHash ?? "")
+      || job.kind !== "main-agent" || job.status !== "running" || job.contextHash === null
+      || job.canvasRevision !== input.canvasRevision) {
+      throw new DesignStorageError("conflict", "Main Agent plan requires the active idempotent Job authority");
+    }
+    const planHash = createHash("sha256").update(input.planPayload).digest("hex");
+    const existing = await readDesignMainPlanExecutionUnlocked(root, project, input.receiptKey);
+    if (existing !== null) {
+      if (existing.planHash !== planHash || existing.planPayload !== input.planPayload
+        || existing.planningAuthorityHash !== input.planningAuthorityHash) {
+        throw new DesignStorageError("conflict", "Main Agent idempotent request already has a different immutable plan");
+      }
+      return existing;
+    }
+    const executionId = mainPlanExecutionId(input.receiptKey);
+    const content: Omit<StoredDesignMainPlanExecution, "checksum"> = {
+      schemaVersion: DESIGN_SCHEMA_VERSION,
+      executionId,
+      requestHash: receipt.requestHash!,
+      sourceJobId: job.id,
+      planHash,
+      planPayload: input.planPayload,
+      planningAuthorityHash: input.planningAuthorityHash,
+      canvasRevision: input.canvasRevision,
+      runnerId: job.runnerId,
+      model: job.model,
+      createdAt: nowValue(now),
+    };
+    await writeAtomicJson(mainPlanExecutionPath(root, input.receiptKey), {
+      ...content,
+      checksum: mainPlanExecutionChecksum(content),
+    });
+    receipt.mainPlanHash = planHash;
+    await writeAtomicJson(projectFilePath(root), project);
+    return {
+      executionId,
+      sourceJobId: job.id,
+      planHash,
+      planPayload: input.planPayload,
+      planningAuthorityHash: input.planningAuthorityHash,
+      canvasRevision: input.canvasRevision,
+      runnerId: job.runnerId,
+      model: job.model,
+      appliedRevision: null,
+    };
+  });
+}
+
 function assertStoredJob(value: unknown, expectedId: string): asserts value is DesignJob {
   const job = storedRecord(value, `Design Job ${expectedId}`, [
-    "schemaVersion", "id", "kind", "status", "nodeId", "parentJobId", "contextHash", "canvasRevision",
+    "schemaVersion", "id", "kind", "runnerId", "model", "status", "nodeId", "parentJobId", "contextHash", "canvasRevision",
     "expectedHeadVersionId", "versionId", "exportId", "error", "cancelRequested", "activity", "createdAt",
     "updatedAt", "finishedAt",
   ]);
@@ -1950,6 +5224,9 @@ function assertStoredJob(value: unknown, expectedId: string): asserts value is D
   const nodeScoped = kind === "node-generation" || kind === "node-analysis";
   if (job.schemaVersion !== DESIGN_SCHEMA_VERSION || job.id !== expectedId || !SAFE_SEGMENT.test(expectedId)
     || !kinds.includes(kind) || !statuses.includes(status)
+    || !validStoredText(job.runnerId, 512) || (job.runnerId as string).trim() !== job.runnerId
+    || !validStoredText(job.model, 512, { nullable: true })
+    || (typeof job.model === "string" && job.model.trim() !== job.model)
     || !validStoredNullableId(job.nodeId) || (nodeScoped !== (job.nodeId !== null))
     || !validStoredNullableId(job.parentJobId)
     || !(job.contextHash === null || (typeof job.contextHash === "string" && SHA256.test(job.contextHash)))
@@ -2006,9 +5283,24 @@ async function buildFrozenContextUnlocked(
     const selectedVersionId = node.selectedVersionId ?? node.currentVersionId;
     const selectedVersion = selectedVersionId === null
       ? null
-      : await getDesignVersion(dataDir, projectId, node.id, selectedVersionId);
+      : await getDesignVersionUnlocked(root, node.id, selectedVersionId);
     const asset = node.assetId === null ? null : await getDesignAssetManifest(dataDir, projectId, node.assetId);
     const selectedVersionAssetPins: DesignFrozenAssetPin[] = [];
+    let selectedVersionPath: string | null = null;
+    if (selectedVersion?.contentKind === "html") {
+      selectedVersionPath = `nodes/${node.id}/versions/${selectedVersion.id}/index.html`;
+    } else if (selectedVersion?.contentKind === "asset") {
+      if (selectedVersion.assetId === null) {
+        throw new DesignStorageError("corrupt", `Material Design Version ${selectedVersion.id} has no Asset`);
+      }
+      const selectedAsset = await getDesignAssetManifest(dataDir, projectId, selectedVersion.assetId);
+      if (selectedAsset.checksum !== selectedVersion.checksum || selectedAsset.bytes !== selectedVersion.bytes) {
+        throw new DesignStorageError("corrupt", `Material Design Version ${selectedVersion.id} Asset diverged from its manifest`);
+      }
+      const selectedPin = frozenAssetPin(selectedAsset);
+      selectedVersionAssetPins.push(selectedPin);
+      selectedVersionPath = selectedPin.path;
+    }
     for (const pin of selectedVersion?.assetPins ?? []) {
       const pinnedAsset = await getDesignAssetManifest(dataDir, projectId, pin.assetId);
       if (pinnedAsset.checksum !== pin.checksum) {
@@ -2023,11 +5315,13 @@ async function buildFrozenContextUnlocked(
       state: node.state,
       geometry: { ...node.geometry },
       selectedVersionId,
+      selectedVersionContentKind: selectedVersion?.contentKind ?? null,
       selectedVersionChecksum: selectedVersion?.checksum ?? null,
       selectedVersionBytes: selectedVersion?.bytes ?? null,
-      selectedVersionPath: selectedVersion === null
-        ? null
-        : `nodes/${node.id}/versions/${selectedVersion.id}/index.html`,
+      selectedVersionPath,
+      selectedVersionJobId: selectedVersion?.jobId ?? null,
+      selectedVersionRunnerId: selectedVersion?.runnerId ?? null,
+      selectedVersionModel: selectedVersion?.model ?? null,
       selectedVersionAssetPins,
       assetId: asset?.id ?? null,
       assetChecksum: asset?.checksum ?? null,
@@ -2128,35 +5422,111 @@ export function assertDesignFrozenContextBudget(
   }
 }
 
+export interface CreateDesignJobInput {
+  kind: DesignJobKind;
+  runnerId: string;
+  model: string | null;
+  nodeId?: string | null;
+  parentJobId?: string | null;
+  expectedCanvasRevision?: number;
+  idempotencyKey?: string | null;
+  /** SHA-256 of the normalized system prompt and user message, supplied by the turn caller. */
+  promptHash?: string | null;
+  /** Ordered priority context whose semantics affect the turn. */
+  contextNodeIds?: readonly string[];
+  /** Reserve both Main Agent messages under the same Project lock as Job creation. */
+  reserveMainThreadTurn?: { userContent: string; assistantContent: string };
+}
+
+export interface CreatedDesignJob {
+  job: DesignJob;
+  reused: boolean;
+  canvas: DesignCanvas;
+  receiptKey: string | null;
+  mainThreadReservation: { thread: DesignThread; assistantMessageId: string } | null;
+}
+
+function normalizedDesignJobRequestHash(input: {
+  kind: DesignJobKind;
+  runnerId: string;
+  model: string | null;
+  nodeId: string | null;
+  parentJobId: string | null;
+  expectedCanvasRevision: number | null;
+  promptHash: string;
+  contextNodeIds: readonly string[];
+}): string {
+  return createHash("sha256").update(stableStringify({
+    protocol: "dezin-design-turn-request-v1",
+    ...input,
+  })).digest("hex");
+}
+
+function assertThreadTurnContent(content: unknown): asserts content is string {
+  if (typeof content !== "string" || !content.trim()
+    || Buffer.byteLength(content, "utf8") > MAX_THREAD_CONTENT_BYTES) {
+    throw new DesignStorageError("invalid-input", "Design Agent message is invalid");
+  }
+}
+
 export async function createDesignJob(
   dataDir: string,
   projectId: string,
-  input: {
-    kind: DesignJobKind;
-    nodeId?: string | null;
-    parentJobId?: string | null;
-    expectedCanvasRevision?: number;
-    idempotencyKey?: string | null;
-  },
+  input: CreateDesignJobInput,
   now?: number,
-): Promise<{ job: DesignJob; reused: boolean; canvas: DesignCanvas }> {
+): Promise<CreatedDesignJob> {
   const root = designRoot(dataDir, projectId);
   return withProjectLock(root, async () => {
     await requireInitialized(root);
     if (!["node-generation", "node-analysis", "main-agent", "implementation-export"].includes(input?.kind)) {
       throw new DesignStorageError("invalid-input", "Design Job kind is unsupported");
     }
-    const project = await readProject(root);
-    if (input.expectedCanvasRevision !== undefined && input.expectedCanvasRevision !== project.revision) {
-      throw new DesignRevisionConflictError(input.expectedCanvasRevision, project.revision);
+    if (!validStoredText(input.runnerId, 512) || input.runnerId.trim() !== input.runnerId
+      || !validStoredText(input.model, 512, { nullable: true })
+      || (typeof input.model === "string" && input.model.trim() !== input.model)) {
+      throw new DesignStorageError("invalid-input", "Design Job runner identity is invalid");
     }
-    const nodes = readNodes(project);
     const nodeId = input.nodeId ?? null;
+    if (nodeId !== null) safeSegment(nodeId, "Node id");
+    const parentJobId = input.parentJobId ?? null;
+    if (parentJobId !== null) safeSegment(parentJobId, "Parent Job id");
     const rawIdempotencyKey = input.idempotencyKey ?? null;
     if (rawIdempotencyKey !== null && (typeof rawIdempotencyKey !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(rawIdempotencyKey))) {
       throw new DesignStorageError("invalid-input", "idempotencyKey is invalid");
     }
+    const promptHash = input.promptHash ?? null;
+    if (rawIdempotencyKey !== null && (typeof promptHash !== "string" || !SHA256.test(promptHash))) {
+      throw new DesignStorageError("invalid-input", "Idempotent Design Agent turns require an exact prompt hash");
+    }
+    if (promptHash !== null && (typeof promptHash !== "string" || !SHA256.test(promptHash))) {
+      throw new DesignStorageError("invalid-input", "Design Agent prompt hash is invalid");
+    }
+    if (input.contextNodeIds !== undefined && (!Array.isArray(input.contextNodeIds)
+      || input.contextNodeIds.length > 100)) {
+      throw new DesignStorageError("invalid-input", "Design Agent priority context is invalid");
+    }
+    const contextNodeIds = Array.from(new Set((input.contextNodeIds ?? []).map((id) =>
+      safeSegment(id, "Context Node id"))));
+    if (input.reserveMainThreadTurn !== undefined) {
+      if (input.kind !== "main-agent") {
+        throw new DesignStorageError("invalid-input", "Only Main Agent Jobs may reserve a Main Agent turn");
+      }
+      assertThreadTurnContent(input.reserveMainThreadTurn.userContent);
+      assertThreadTurnContent(input.reserveMainThreadTurn.assistantContent);
+    }
+    const requestHash = normalizedDesignJobRequestHash({
+      kind: input.kind,
+      runnerId: input.runnerId,
+      model: input.model,
+      nodeId,
+      parentJobId,
+      expectedCanvasRevision: input.expectedCanvasRevision ?? null,
+      promptHash: promptHash ?? createHash("sha256").update("").digest("hex"),
+      contextNodeIds,
+    });
+    const project = await readProject(root);
+    const nodes = readNodes(project);
     const receiptKey = rawIdempotencyKey === null
       ? null
       : `${input.kind}:${nodeId ?? "main"}:${rawIdempotencyKey}`;
@@ -2165,9 +5535,36 @@ export async function createDesignJob(
       if (priorReceipt.kind !== input.kind || priorReceipt.nodeId !== nodeId) {
         throw new DesignStorageError("conflict", "idempotencyKey is already bound to another Design Agent scope");
       }
-      return { job: await readJob(root, priorReceipt.jobId), reused: true, canvas: canvas(project, nodes) };
+      if (priorReceipt.requestHash !== requestHash) {
+        throw new DesignStorageError("conflict", "idempotencyKey is already bound to a different Design Agent request");
+      }
+      const priorJob = await readJob(root, priorReceipt.jobId);
+      if (priorReceipt.authorityHash !== priorJob.contextHash) {
+        throw new DesignStorageError("corrupt", "Design Agent receipt authority no longer matches its frozen Job context");
+      }
+      const committedMainPlan = priorJob.kind === "main-agent"
+        && priorReceipt.mainPlanAppliedRevision !== undefined;
+      if ((priorJob.status !== "failed" && priorJob.status !== "cancelled") || committedMainPlan) {
+        return {
+          job: priorJob,
+          reused: true,
+          canvas: canvas(project, nodes),
+          receiptKey,
+          mainThreadReservation: null,
+        };
+      }
     }
-    if (receiptKey !== null && Object.keys(project.turnReceipts).length >= 5_000) {
+    const unavailableContextId = contextNodeIds.find((id) => !nodes.has(id));
+    if (unavailableContextId !== undefined) {
+      throw new DesignStorageError(
+        "invalid-input",
+        `Design Agent priority context references unavailable Node ${unavailableContextId}`,
+      );
+    }
+    if (input.expectedCanvasRevision !== undefined && input.expectedCanvasRevision !== project.revision) {
+      throw new DesignRevisionConflictError(input.expectedCanvasRevision, project.revision);
+    }
+    if (receiptKey !== null && priorReceipt === undefined && Object.keys(project.turnReceipts).length >= 5_000) {
       throw new DesignStorageError("limit", "Design Agent idempotency receipt limit reached");
     }
     let node: DesignNode | undefined;
@@ -2188,9 +5585,14 @@ export async function createDesignJob(
     } else if (nodeId !== null) {
       throw new DesignStorageError("invalid-input", "Only Node generation Jobs may bind a Node");
     }
-    const parentJobId = input.parentJobId ?? null;
-    if (parentJobId !== null) safeSegment(parentJobId, "Parent Job id");
     const timestamp = nowValue(now);
+    let mainThread: DesignThread | null = null;
+    if (input.reserveMainThreadTurn !== undefined) {
+      mainThread = await readThreadOrNewUnlocked(root, { type: "main" }, timestamp);
+      if (mainThread.messages.length + 2 > MAX_THREAD_MESSAGES) {
+        throw new DesignStorageError("limit", "Design Agent thread does not have capacity for a complete turn");
+      }
+    }
     const jobId = `job-${randomUUID()}`;
     const frozenCanvas = canvas(project, nodes);
     const frozenContext = await buildFrozenContextUnlocked(root, dataDir, projectId, project, nodeId);
@@ -2198,6 +5600,8 @@ export async function createDesignJob(
       schemaVersion: DESIGN_SCHEMA_VERSION,
       id: jobId,
       kind: input.kind,
+      runnerId: input.runnerId,
+      model: input.model,
       status: "queued",
       nodeId,
       parentJobId,
@@ -2213,10 +5617,41 @@ export async function createDesignJob(
       updatedAt: timestamp,
       finishedAt: null,
     };
+    let reservedAssistantMessage: DesignThreadMessage | null = null;
+    if (mainThread !== null && input.reserveMainThreadTurn !== undefined) {
+      const userMessage: DesignThreadMessage = {
+        id: `message-${randomUUID()}`,
+        role: "user",
+        content: input.reserveMainThreadTurn.userContent.trim(),
+        jobId: job.id,
+        createdAt: timestamp,
+      };
+      reservedAssistantMessage = {
+        id: `message-${randomUUID()}`,
+        role: "assistant",
+        content: input.reserveMainThreadTurn.assistantContent.trim(),
+        jobId: job.id,
+        createdAt: timestamp,
+      };
+      mainThread.messages.push(userMessage, reservedAssistantMessage);
+      mainThread.updatedAt = timestamp;
+    }
     await writeAtomicJson(jobContextFilePath(root, job.id), frozenContext);
     await writeAtomicJson(jobFilePath(root, job.id), job);
+    if (mainThread !== null) await writeAtomicJson(threadFilePath(root, { type: "main" }), mainThread);
     if (receiptKey !== null) {
-      project.turnReceipts[receiptKey] = { jobId: job.id, kind: job.kind, nodeId, createdAt: timestamp };
+      project.turnReceipts[receiptKey] = {
+        jobId: job.id,
+        kind: job.kind,
+        nodeId,
+        requestHash,
+        authorityHash: frozenContext.checksum,
+        ...(priorReceipt?.mainPlanHash === undefined ? {} : { mainPlanHash: priorReceipt.mainPlanHash }),
+        ...(priorReceipt?.mainPlanAppliedRevision === undefined
+          ? {}
+          : { mainPlanAppliedRevision: priorReceipt.mainPlanAppliedRevision }),
+        createdAt: timestamp,
+      };
     }
     if (node) {
       node.state = "queued";
@@ -2230,7 +5665,15 @@ export async function createDesignJob(
     } else if (receiptKey !== null) {
       await writeAtomicJson(projectFilePath(root), project);
     }
-    return { job, reused: false, canvas: frozenCanvas };
+    return {
+      job,
+      reused: false,
+      canvas: frozenCanvas,
+      receiptKey,
+      mainThreadReservation: mainThread === null || reservedAssistantMessage === null
+        ? null
+        : { thread: mainThread, assistantMessageId: reservedAssistantMessage.id },
+    };
   });
 }
 
@@ -2268,22 +5711,39 @@ function assertStoredFrozenContext(value: unknown, expectedProjectId: string): a
   const nodeIds = new Set<string>();
   for (const [nodeIndex, entry] of context.nodes.entries()) {
     const node = storedRecord(entry, `Frozen Design context Node ${nodeIndex}`, [
-      "id", "kind", "name", "state", "geometry", "selectedVersionId", "selectedVersionChecksum",
-      "selectedVersionBytes", "selectedVersionPath", "selectedVersionAssetPins", "assetId", "assetChecksum",
-      "assetBytes", "assetPath", "assetBundleFiles",
+      "id", "kind", "name", "state", "geometry", "selectedVersionId", "selectedVersionContentKind",
+      "selectedVersionChecksum", "selectedVersionBytes", "selectedVersionPath", "selectedVersionJobId", "selectedVersionRunnerId",
+      "selectedVersionModel", "selectedVersionAssetPins", "assetId", "assetChecksum", "assetBytes", "assetPath",
+      "assetBundleFiles",
     ]);
     const geometryRecord = storedRecord(node.geometry, `Frozen Design context Node ${nodeIndex} geometry`, ["x", "y", "width", "height"]);
     const validGeometry = [geometryRecord.x, geometryRecord.y, geometryRecord.width, geometryRecord.height]
       .every((part) => typeof part === "number" && Number.isFinite(part))
       && (geometryRecord.width as number) >= 120 && (geometryRecord.width as number) <= 4_096
       && (geometryRecord.height as number) >= 80 && (geometryRecord.height as number) <= 4_096;
-    const selectedAbsent = node.selectedVersionId === null && node.selectedVersionChecksum === null
-      && node.selectedVersionBytes === null && node.selectedVersionPath === null;
+    const selectedAbsent = node.selectedVersionId === null && node.selectedVersionContentKind === null
+      && node.selectedVersionChecksum === null && node.selectedVersionBytes === null && node.selectedVersionPath === null
+      && node.selectedVersionJobId === null && node.selectedVersionRunnerId === null
+      && node.selectedVersionModel === null;
+    const selectedContentKind = node.selectedVersionContentKind;
+    const selectedPathValid = selectedContentKind === "html"
+      ? node.selectedVersionPath === `nodes/${String(node.id)}/versions/${String(node.selectedVersionId)}/index.html`
+      : selectedContentKind === "asset"
+        ? typeof node.selectedVersionPath === "string" && /^\.context\/assets\/asset-[a-f0-9]{32}\/[A-Za-z0-9._-]+$/.test(node.selectedVersionPath)
+        : false;
     const selectedPresent = typeof node.selectedVersionId === "string" && SAFE_SEGMENT.test(node.selectedVersionId)
+      && (selectedContentKind === "html" || selectedContentKind === "asset")
       && typeof node.selectedVersionChecksum === "string" && SHA256.test(node.selectedVersionChecksum)
       && Number.isSafeInteger(node.selectedVersionBytes) && (node.selectedVersionBytes as number) >= 1
-      && typeof node.selectedVersionPath === "string"
-      && node.selectedVersionPath === `nodes/${String(node.id)}/versions/${node.selectedVersionId}/index.html`;
+      && selectedPathValid
+      && validStoredNullableId(node.selectedVersionJobId)
+      && validStoredText(node.selectedVersionRunnerId, 512, { nullable: true })
+      && (typeof node.selectedVersionRunnerId !== "string"
+        || node.selectedVersionRunnerId.trim() === node.selectedVersionRunnerId)
+      && validStoredText(node.selectedVersionModel, 512, { nullable: true })
+      && (typeof node.selectedVersionModel !== "string" || node.selectedVersionModel.trim() === node.selectedVersionModel)
+      && !(node.selectedVersionJobId !== null && node.selectedVersionRunnerId === null)
+      && !(node.selectedVersionRunnerId === null && node.selectedVersionModel !== null);
     const assetAbsent = node.assetId === null && node.assetChecksum === null
       && node.assetBytes === null && node.assetPath === null;
     const assetPresent = typeof node.assetId === "string" && /^asset-[a-f0-9]{32}$/.test(node.assetId)
@@ -2332,6 +5792,16 @@ function assertStoredFrozenContext(value: unknown, expectedProjectId: string): a
     if (!selectedPresent && node.selectedVersionAssetPins.length !== 0) {
       throw new DesignStorageError("corrupt", "Frozen Design context has Version Asset pins without a Version");
     }
+    if (selectedPresent && node.selectedVersionContentKind === "asset") {
+      const primaryAsset = (node.selectedVersionAssetPins as DesignFrozenAssetPin[]).find((pin) => (
+        pin.path === node.selectedVersionPath
+        && pin.checksum === node.selectedVersionChecksum
+        && pin.bytes === node.selectedVersionBytes
+      ));
+      if (!primaryAsset) {
+        throw new DesignStorageError("corrupt", "Frozen material Version has no checksum-bound primary Asset");
+      }
+    }
     if (assetPresent) {
       validateFrozenAsset({
         assetId: node.assetId,
@@ -2352,7 +5822,11 @@ function assertStoredFrozenContext(value: unknown, expectedProjectId: string): a
 }
 
 export async function getDesignJob(dataDir: string, projectId: string, jobId: string): Promise<DesignJob> {
-  return readJob(designRoot(dataDir, projectId), safeSegment(jobId, "Job id"));
+  const root = designRoot(dataDir, projectId);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return readJob(root, safeSegment(jobId, "Job id"));
+  });
 }
 
 async function listDesignJobsUnlocked(root: string): Promise<DesignJob[]> {
@@ -2365,8 +5839,10 @@ async function listDesignJobsUnlocked(root: string): Promise<DesignJob[]> {
 
 export async function listDesignJobs(dataDir: string, projectId: string): Promise<DesignJob[]> {
   const root = designRoot(dataDir, projectId);
-  await requireInitialized(root);
-  return listDesignJobsUnlocked(root);
+  return withProjectLock(root, async () => {
+    await requireInitialized(root);
+    return listDesignJobsUnlocked(root);
+  });
 }
 
 const TERMINAL_JOB_STATUSES = new Set<DesignJobStatus>(["ready", "failed", "cancelled", "superseded"]);
@@ -2389,19 +5865,59 @@ export async function recoverInterruptedDesignJobs(
   const root = designRoot(dataDir, projectId);
   return withProjectLock(root, async () => {
     if (!(await exists(projectFilePath(root)))) return [];
-    const interrupted = (await listDesignJobsUnlocked(root))
-      .filter((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
-    if (interrupted.length === 0) return [];
-
     const timestamp = nowValue(now);
-    const project = await readProject(root);
-    const nodes = readNodes(project);
+    const publicationJobs = await recoverPublicationTransactionsUnlocked(root, projectId, timestamp);
+    const jobs = await listDesignJobsUnlocked(root);
+    const interrupted = jobs
+      .filter((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
     const interruptedIds = new Set(interrupted.map((job) => job.id));
+    const mainJobs = jobs.filter((job) => job.kind === "main-agent");
+    if (mainJobs.length > 0) {
+      const scope = { type: "main" } as const;
+      const path = threadFilePath(root, scope);
+      if (await exists(path)) {
+        const thread = await readJson<DesignThread>(path, "Design Agent thread");
+        assertStoredThread(thread, scope);
+        let changed = false;
+        for (const job of mainJobs) {
+          const reservations = thread.messages.filter((message) => (
+            message.role === "assistant" && message.jobId === job.id
+          ));
+          if (reservations.length > 1) {
+            throw new DesignStorageError("corrupt", `Main Agent Job ${job.id} has duplicate assistant reservations`);
+          }
+          const reservation = reservations[0];
+          if (reservation === undefined) continue;
+          const projected = interruptedIds.has(job.id)
+            ? "Main Agent orchestration was interrupted by daemon restart and cancelled."
+            : job.status === "cancelled"
+              ? job.error === "Interrupted by daemon restart"
+                ? "Main Agent orchestration was interrupted by daemon restart and cancelled."
+                : "Main Agent orchestration cancelled."
+              : job.status === "failed"
+                ? `Main Agent failed: ${job.error ?? "Main Agent turn failed"}`
+                : null;
+          if (projected === null) continue;
+          if (reservation.content !== projected) {
+            reservation.content = projected;
+            changed = true;
+          }
+        }
+        if (changed) {
+          thread.updatedAt = timestamp;
+          // Persist the user-visible terminal projection before terminalizing
+          // the Jobs. A second restart can safely repeat this write if the
+          // process exits between these two durable steps.
+          await writeAtomicJson(path, thread);
+        }
+      }
+    }
     for (const job of interrupted) {
       if (job.kind === "implementation-export" && job.exportId !== null) {
         await Promise.all([
           rm(join(root, "exports", job.exportId), { recursive: true, force: true }),
           rm(join(root, "exports", ".pending", job.exportId), { recursive: true, force: true }),
+          rm(join(root, "exports", ".validation", job.exportId), { recursive: true, force: true }),
         ]);
       } else if (job.kind === "main-agent") {
         await rm(join(root, "exports", ".pending", `main-${job.id}`), { recursive: true, force: true });
@@ -2418,19 +5934,37 @@ export async function recoverInterruptedDesignJobs(
       job.finishedAt = timestamp;
       await writeAtomicJson(jobFilePath(root, job.id), job);
     }
+
+    const project = await readProject(root);
+    const nodes = readNodes(project);
+    const jobsById = new Map(jobs.map((job) => [job.id, job]));
+    const publicationIds = new Set(publicationJobs.map((job) => job.id));
+    const reprojectedTerminalJobs: DesignJob[] = [];
+    let projectChanged = interrupted.length > 0;
     for (const node of nodes.values()) {
-      if (node.activeJobId === null || !interruptedIds.has(node.activeJobId)) continue;
-      node.state = "cancelled";
+      if (node.activeJobId === null) continue;
+      const activeJob = jobsById.get(node.activeJobId);
+      if (!activeJob || activeJob.nodeId !== node.id) {
+        throw new DesignStorageError("corrupt", `Design Node ${node.id} has invalid active Job authority`);
+      }
+      if (!TERMINAL_JOB_STATUSES.has(activeJob.status)) continue;
+      node.state = nodeStateForJob(activeJob.status);
       node.activeJobId = null;
-      node.error = null;
+      node.error = activeJob.status === "failed" ? (activeJob.error ?? "Generation failed") : null;
       node.updatedAt = timestamp;
+      projectChanged = true;
+      if (!interruptedIds.has(activeJob.id) && !publicationIds.has(activeJob.id)) {
+        reprojectedTerminalJobs.push(activeJob);
+      }
     }
-    project.nodes = project.nodeOrder.map((id) => cloneNode(nodes.get(id)!));
-    project.revision += 1;
-    project.updatedAt = Math.max(project.updatedAt, timestamp);
-    await writeAtomicJson(projectFilePath(root), project);
-    return interrupted;
-  });
+    if (projectChanged) {
+      project.nodes = project.nodeOrder.map((id) => cloneNode(nodes.get(id)!));
+      project.revision += 1;
+      project.updatedAt = Math.max(project.updatedAt, timestamp);
+      await writeAtomicJson(projectFilePath(root), project);
+    }
+    return [...publicationJobs, ...interrupted, ...reprojectedTerminalJobs];
+  }, { allowPublicationTransactions: true });
 }
 
 function nodeStateForJob(status: DesignJobStatus): DesignNodeState {
@@ -2451,6 +5985,8 @@ export async function updateDesignJob(
   jobId: string,
   patch: {
     status?: DesignJobStatus;
+    runnerId?: string;
+    model?: string | null;
     contextHash?: string;
     versionId?: string | null;
     exportId?: string | null;
@@ -2462,6 +5998,20 @@ export async function updateDesignJob(
   return withProjectLock(root, async () => {
     const job = await readJob(root, safeSegment(jobId, "Job id"));
     const timestamp = nowValue(now);
+    const updatesIdentity = patch.runnerId !== undefined || patch.model !== undefined;
+    if (updatesIdentity) {
+      if (patch.runnerId === undefined || patch.model === undefined
+        || !validStoredText(patch.runnerId, 512) || patch.runnerId.trim() !== patch.runnerId
+        || !validStoredText(patch.model, 512, { nullable: true })
+        || (typeof patch.model === "string" && patch.model.trim() !== patch.model)) {
+        throw new DesignStorageError("invalid-input", "Observed Job runner identity is invalid");
+      }
+      if (job.status !== "running") {
+        throw new DesignStorageError("conflict", "Observed Job runner identity may only bind a running Job");
+      }
+      job.runnerId = patch.runnerId;
+      job.model = patch.model;
+    }
     if (patch.contextHash !== undefined) {
       if (!SHA256.test(patch.contextHash)) throw new DesignStorageError("invalid-input", "Job context hash is invalid");
       job.contextHash = patch.contextHash;

@@ -9,6 +9,10 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import { createDesignProject } from "../src/design/design-project-store.ts";
 import {
+  DESIGN_EXPORT_TYPESCRIPT_VERSION,
+  DESIGN_EXPORT_VITE_VERSION,
+} from "../src/design/design-global-agents.ts";
+import {
   createDesignJob,
   getDesignJob,
   mutateDesignCanvas,
@@ -215,6 +219,8 @@ test("daemon restart recovery discovers filesystem-only Design Projects", async 
   });
   const created = await createDesignJob(dataDir, project.projectId, {
     kind: "node-generation",
+    runnerId: "http-recovery-fixture",
+    model: null,
     nodeId: "node-page",
   });
   await updateDesignJob(dataDir, project.projectId, created.job.id, { status: "running" });
@@ -266,14 +272,14 @@ test("filesystem-only Design Projects run Main Agent, Node Agent, and Implementa
           private: true,
           type: "module",
           scripts: { dev: "vite", build: "vite build", preview: "vite preview" },
-          devDependencies: { typescript: "^6.0.3", vite: "^8.0.16" },
+          devDependencies: { typescript: DESIGN_EXPORT_TYPESCRIPT_VERSION, vite: DESIGN_EXPORT_VITE_VERSION },
         };
         const index = "<!doctype html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Export</title></head><body><div id=\"app\"></div><script type=\"module\" src=\"/src/main.ts\"></script></body></html>";
         await mkdir(join(input.projectDir, "src"), { recursive: true });
         await Promise.all([
           writeFile(join(input.projectDir, "package.json"), `${JSON.stringify(packageJson)}\n`),
           writeFile(join(input.projectDir, "index.html"), index),
-          writeFile(join(input.projectDir, "src", "main.ts"), "import './styles.css';\nconst app = document.querySelector<HTMLDivElement>('#app');\nif (!app) throw new Error('Missing app');\nif (new URLSearchParams(window.location.search).get('dezin-node') !== 'node-page') throw new Error('Unknown route');\nconst page = document.createElement('main');\npage.dataset.dezinExportNodeId = 'node-page';\npage.textContent = 'Filesystem Node';\napp.append(page);\n"),
+          writeFile(join(input.projectDir, "src", "main.ts"), "import './styles.css';\nconst app = document.querySelector<HTMLDivElement>('#app');\nif (!app) throw new Error('Missing app');\nconst nodeId = new URLSearchParams(window.location.search).get('dezin-node');\nif (nodeId !== null && nodeId !== 'node-page') throw new Error('Unknown route');\nconst page = document.createElement('main');\npage.dataset.dezinExportNodeId = 'node-page';\npage.textContent = 'Filesystem Node';\napp.append(page);\n"),
           writeFile(join(input.projectDir, "src", "styles.css"), "body { margin: 0; }\n"),
         ]);
         return { text: "Fresh implementation complete", artifactHtml: index, artifactPath: "index.html" };

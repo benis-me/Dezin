@@ -32,6 +32,26 @@ function assertLocalFileBatch(files: readonly File[]): void {
   }
 }
 
+function inferredMimeType(file: File): string {
+  if (file.type.trim()) return file.type.trim().toLowerCase();
+  const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+  const known: Record<string, string> = {
+    avif: "image/avif",
+    gif: "image/gif",
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    png: "image/png",
+    svg: "image/svg+xml",
+    webp: "image/webp",
+    mp4: "video/mp4",
+    webm: "video/webm",
+    pdf: "application/pdf",
+    md: "text/markdown",
+    txt: "text/plain",
+  };
+  return known[extension] ?? "application/octet-stream";
+}
+
 function fileKind(mimeType: string): DesignMaterialNodeKind {
   if (mimeType.startsWith("image/")) return "image";
   if (mimeType.startsWith("video/")) return "video";
@@ -59,6 +79,36 @@ function fileBase64(file: File): Promise<string> {
   });
 }
 
+interface ImportedMediaSize {
+  width: number;
+  height: number;
+}
+
+function fittedImageNodeSize(source: ImportedMediaSize): ImportedMediaSize {
+  if (!Number.isFinite(source.width) || !Number.isFinite(source.height) || source.width <= 0 || source.height <= 0) {
+    return { width: 360, height: 260 };
+  }
+  const ratio = source.width / source.height;
+  if (ratio >= 1) {
+    const width = 420;
+    return { width, height: Math.round(Math.max(200, Math.min(360, width / ratio))) };
+  }
+  const height = 360;
+  return { width: Math.round(Math.max(280, Math.min(420, height * ratio))), height };
+}
+
+async function importedMediaSize(file: File, kind: DesignMaterialNodeKind): Promise<ImportedMediaSize | null> {
+  if (kind !== "image" || typeof globalThis.createImageBitmap !== "function") return null;
+  try {
+    const bitmap = await globalThis.createImageBitmap(file);
+    const size = fittedImageNodeSize({ width: bitmap.width, height: bitmap.height });
+    bitmap.close();
+    return size;
+  } catch {
+    return null;
+  }
+}
+
 function importedNodeIntent(
   assetId: string,
   name: string,
@@ -66,10 +116,11 @@ function importedNodeIntent(
   position: DesignCanvasImportPosition,
   index = 0,
   id?: string,
+  mediaSize?: ImportedMediaSize | null,
 ): Extract<DesignCanvasIntent, { type: "add-node" }> {
   const kind = fileKind(mimeType);
-  const width = kind === "video" ? 440 : kind === "image" ? 360 : 320;
-  const height = kind === "video" ? 280 : kind === "image" ? 260 : 190;
+  const width = mediaSize?.width ?? (kind === "video" ? 440 : kind === "image" ? 360 : 320);
+  const height = mediaSize?.height ?? (kind === "video" ? 280 : kind === "image" ? 260 : 190);
   return {
     type: "add-node",
     node: {
@@ -126,11 +177,13 @@ async function importBatchAgainstLatest(
     const canvas = await api.getDesignCanvas(projectId);
     const existing = new Map(canvas.nodes.map((node) => [node.id, node]));
     const remaining = items.filter((item) => {
-      if (!item.node.id) return true;
-      const node = existing.get(item.node.id);
+      if (item.binding.type === "append-version") return true;
+      const imported = item.binding.node;
+      if (!imported.id) return true;
+      const node = existing.get(imported.id);
       if (!node) return true;
-      if (node.kind !== item.node.kind) {
-        throw new Error(`Imported context identity ${item.node.id} is already used by another Node.`);
+      if (node.kind !== imported.kind) {
+        throw new Error(`Imported context identity ${imported.id} is already used by another Node.`);
       }
       return false;
     });
@@ -162,15 +215,28 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
     importLocalFiles: async (projectId, files, position) => {
       assertLocalFileBatch(files);
       const items = await Promise.all(files.map(async (file, index): Promise<DesignCanvasAssetImportItem> => {
-        const mimeType = file.type || "application/octet-stream";
-        const node = importedNodeIntent("pending-asset", file.name, mimeType, position, index).node;
+        const mimeType = inferredMimeType(file);
+        const kind = fileKind(mimeType);
+        const mediaSize = await importedMediaSize(file, kind);
+        const node = importedNodeIntent("pending-asset", file.name, mimeType, position, index, undefined, mediaSize).node;
         const { assetId: _assetId, ...materialNode } = node;
         return {
           asset: { name: file.name, mimeType, base64: await fileBase64(file) },
-          node: { ...materialNode, id: importNodeId() },
+          binding: {
+            type: "create-node",
+            node: { ...materialNode, id: importNodeId() },
+          },
         };
       }));
       return importBatchAgainstLatest(api, projectId, items);
+    },
+    appendMaterialVersion: async (projectId, nodeId, file) => {
+      assertLocalFileBatch([file]);
+      const mimeType = inferredMimeType(file);
+      return importBatchAgainstLatest(api, projectId, [{
+        asset: { name: file.name, mimeType, base64: await fileBase64(file) },
+        binding: { type: "append-version", nodeId },
+      }]);
     },
     importProjectVersion: async (projectId, context, position) => {
       return importBatchAgainstLatest(api, projectId, [{
@@ -183,11 +249,14 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
             versionId: context.sourceVersionId,
           },
         },
-        node: {
-          id: pendingProjectVersionNodeId(context, position),
-          kind: "document",
-          name: context.title,
-          geometry: { x: position.x, y: position.y, width: 320, height: 190 },
+        binding: {
+          type: "create-node",
+          node: {
+            id: pendingProjectVersionNodeId(context, position),
+            kind: "document",
+            name: context.title,
+            geometry: { x: position.x, y: position.y, width: 320, height: 190 },
+          },
         },
       }]);
     },
@@ -198,19 +267,17 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
       versionId,
       url: api.designNodeVersionPreviewUrl(projectId, nodeId, versionId),
     }),
-    getAssetPreviewUrl: (projectId, assetId) => api.designCanvasAssetUrl(projectId, assetId),
-
     getThread: (projectId, scope, signal) => api.getDesignThread(projectId, scope, signal),
     submitAgentTurn: (projectId, scope, request) => api.submitDesignAgentTurn(projectId, scope, {
       message: request.prompt,
       context: request.context,
       ...(request.agentCommand ? { agentCommand: request.agentCommand } : {}),
-      ...(request.model ? { model: request.model } : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
     }),
     listJobs: (projectId, signal) => api.listDesignJobs(projectId, signal),
     cancelJob: (projectId, jobId) => api.cancelDesignJob(projectId, jobId),
-    startImplementationExport: (projectId, canvasRevision) =>
-      api.startDesignImplementationExport(projectId, { canvasRevision }),
+    startImplementationExport: (projectId, canvasRevision, selection) =>
+      api.startDesignImplementationExport(projectId, { canvasRevision, ...selection }),
   };
 }

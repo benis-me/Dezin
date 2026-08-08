@@ -7,9 +7,16 @@ export type {
   AgentRunner,
   AgentTurnInput,
   AgentTurnResult,
+  AgentExecutionIdentity,
   TurnRole,
 } from "./types.ts";
-export { AbortError, abortError, isAbortError } from "./types.ts";
+export {
+  AbortError,
+  AgentExecutionIdentityError,
+  AgentTurnError,
+  abortError,
+  isAbortError,
+} from "./types.ts";
 export { FakeRunner, type FakeRunnerOptions } from "./fake-runner.ts";
 export {
   generateArtifact,
@@ -27,6 +34,7 @@ export {
   FINAL_SUMMARY_END,
   type ParsedClaudeStream,
   type ClaudeToolUse,
+  type ClaudeStreamInit,
   type ClaudeActivity,
   type AskUserQuestionExtraction,
   type FinalSummaryExtraction,

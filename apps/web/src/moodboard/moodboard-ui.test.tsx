@@ -799,6 +799,21 @@ test("resolveFloatingChromeRect falls back to a side placement when vertical spa
   ).toEqual({ left: 110, top: 10 });
 });
 
+test("resolveFloatingChromeRect keeps a right-side Agent beside a low Node when horizontal space exists", () => {
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 300, targetLeft: 280, targetRight: 500, top: 650, bottom: 770 },
+      containerWidth: 1200,
+      containerHeight: 800,
+      surfaceWidth: 344,
+      surfaceHeight: 540,
+      placement: "right",
+      padding: 10,
+      gap: 12,
+    }),
+  ).toEqual({ left: 512, top: 250 });
+});
+
 test("resolveFloatingChromeRect can disable side placement for selection toolbars", () => {
   expect(
     resolveFloatingChromeRect({
@@ -2140,7 +2155,7 @@ test("MoodboardAgentPanel shows progress immediately for an empty active convers
     </ApiProvider>,
   );
 
-  expect(screen.getByText("Working...")).toBeInTheDocument();
+  expect(screen.getByText("Thinking")).toBeInTheDocument();
   expect(screen.queryByText(/Ask for visual direction/)).toBeNull();
   expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-auto");
 });

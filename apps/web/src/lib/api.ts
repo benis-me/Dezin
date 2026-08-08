@@ -59,12 +59,17 @@ export type DesignCanvasAssetImportSource =
 
 export interface DesignCanvasAssetImportItem {
   asset: DesignCanvasAssetImportSource;
-  node: {
-    id?: string;
-    kind: DesignNodeKind;
-    name?: string;
-    geometry?: Partial<DesignNodeGeometry>;
-  };
+  binding:
+    | {
+        type: "create-node";
+        node: {
+          id?: string;
+          kind: DesignNodeKind;
+          name?: string;
+          geometry?: Partial<DesignNodeGeometry>;
+        };
+      }
+    | { type: "append-version"; nodeId: string };
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -552,7 +557,7 @@ export interface ApiClient {
       message: string;
       context?: { nodeIds: string[] };
       agentCommand?: string;
-      model?: string;
+      model?: string | null;
       idempotencyKey?: string;
     },
   ): Promise<DesignAgentTurnResult>;
@@ -560,7 +565,7 @@ export interface ApiClient {
   cancelDesignJob(projectId: string, jobId: string): Promise<DesignJob>;
   startDesignImplementationExport(
     projectId: string,
-    input: { canvasRevision: number; agentCommand?: string; model?: string },
+    input: { canvasRevision: number; agentCommand?: string; model?: string | null },
   ): Promise<DesignExportResult>;
   listDesignSystems(): Promise<DesignSystemCard[]>;
   getDesignSystem(id: string): Promise<DesignSystemDetail>;

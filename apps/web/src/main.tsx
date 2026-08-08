@@ -6,6 +6,8 @@ import { ApiProvider } from "./lib/api-context.tsx";
 import { AgentsProvider } from "./lib/agents-context.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { native } from "./lib/native.ts";
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import "@fontsource/space-grotesk/500.css";
 import "@fontsource/space-grotesk/600.css";
 import "./styles/globals.css";
@@ -24,7 +26,7 @@ const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
 createRoot(root).render(
   <StrictMode>
-    <MotionConfig reducedMotion="user">
+    <MotionConfig reducedMotion="user" transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}>
       <ApiProvider>
         <AgentsProvider>
           <ToastProvider>

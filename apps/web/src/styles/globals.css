@@ -70,12 +70,18 @@
   --text-title--line-height: 1.1;
   --text-title--letter-spacing: -0.02em;
 
-  /* Elevation — borders do the separating; shadow only for true overlays (menus,
-     dialogs). Flat surfaces carry no shadow. */
-  --shadow-pop: 0 4px 14px oklch(0.145 0 0 / 0.07), 0 18px 48px oklch(0.145 0 0 / 0.11);
-  --shadow-card: 0 1px 1px oklch(0.145 0 0 / 0.025);
+  /* Layered light: a hairline contact ring, a close shadow, then faint ambient
+     depth. Static surfaces remain flat; these presets belong to real overlays. */
+  --shadow-pop: 0 0 0 0.5px oklch(0.145 0 0 / 0.1), 0 1px 2px oklch(0.145 0 0 / 0.05), 0 8px 18px oklch(0.145 0 0 / 0.045), 0 22px 52px oklch(0.145 0 0 / 0.07);
+  --shadow-card: 0 0 0 0.5px oklch(0.145 0 0 / 0.075), 0 1px 2px oklch(0.145 0 0 / 0.045), 0 2px 4px oklch(0.145 0 0 / 0.018);
 
-  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.17, 1, 0.32, 1);
+  --ease-spring: cubic-bezier(0.35, 1.55, 0.65, 1);
+  --ease-in-out: cubic-bezier(0.66, 0, 0.34, 1);
+  --duration-fast: 140ms;
+  --duration-normal: 200ms;
+  --duration-slow: 280ms;
 }
 
 :root {
@@ -124,9 +130,9 @@
   --brand-foreground: oklch(0.985 0 0);
   --brand-soft: oklch(0.97 0 0);
 
-  --font-display: "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono-stack: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-brand: "Space Grotesk", "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Geist Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  --font-mono-stack: "Geist Mono Variable", "SF Mono", ui-monospace, Menlo, monospace;
+  --font-brand: "Space Grotesk", "Geist Variable", ui-sans-serif, system-ui, sans-serif;
 }
 
 /* The Dezin wordmark. */
@@ -177,6 +183,9 @@
   --brand: oklch(0.985 0 0);
   --brand-foreground: oklch(0.205 0 0);
   --brand-soft: oklch(0.26 0 0);
+
+  --shadow-pop: 0 0 0 0.5px oklch(1 0 0 / 0.1), 0 1px 2px oklch(0 0 0 / 0.28), 0 10px 24px oklch(0 0 0 / 0.24), 0 24px 56px oklch(0 0 0 / 0.28);
+  --shadow-card: 0 0 0 0.5px oklch(1 0 0 / 0.075), 0 1px 2px oklch(0 0 0 / 0.2), 0 2px 4px oklch(0 0 0 / 0.1);
 }
 
 @layer base {
@@ -191,9 +200,12 @@
   body {
     margin: 0;
     font-family: var(--font-display);
+    font-weight: 425;
+    letter-spacing: -0.006em;
     background: var(--background);
     color: var(--foreground);
     -webkit-font-smoothing: antialiased;
+    font-optical-sizing: auto;
     text-rendering: optimizeLegibility;
     /* Chrome is not selectable; opt real content back in below. */
     -webkit-user-select: none;

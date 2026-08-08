@@ -1,20 +1,31 @@
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
+import {
+  AgentImageGenerationState,
+  AgentProgressList,
+  AgentReasoning,
+  AgentThinkingState,
+  AgentWebSearch,
+  type AgentProgressItem,
+  type AgentSearchResult,
+} from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
-import { Button } from "../components/ui/Button.tsx";
+import { Button } from "../components/ui/index.ts";
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
 import { cn } from "../lib/utils.ts";
+import { motion, useReducedMotion } from "motion/react";
 import {
   ArrowUp,
   Check,
   ChevronDown,
   Circle,
+  CircleAlert,
+  FileUp,
   LoaderCircle,
   MessageSquareText,
   Paperclip,
   PanelRightClose,
-  Sparkles,
   X,
 } from "lucide-react";
 import {
@@ -27,15 +38,19 @@ import {
   type Ref,
 } from "react";
 
-import type { DesignCanvasApi } from "./api.ts";
-import { catalogItem } from "./catalog.ts";
+import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
+import { NodeMentionInput } from "./NodeMentionInput.tsx";
 import type {
   DesignJob,
+  DesignJobActivity,
   DesignNode,
   DesignNodeVersion,
   DesignThread,
   DesignThreadScope,
 } from "./types.ts";
+
+const AGENT_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+const AGENT_MOTION_EASE_IN_OUT: [number, number, number, number] = [0.66, 0, 0.34, 1];
 
 interface FloatingPosition {
   left: number;
@@ -79,11 +94,11 @@ export function useFloatingNodePanel({
     }
     const panelRect = panel.getBoundingClientRect();
     const occluders: CanvasRect[] = mainPanelOpen ? [{
-      left: Math.max(0, hostRect.width - 356),
+      left: Math.max(0, hostRect.width - 400),
       top: 0,
       right: hostRect.width,
       bottom: hostRect.height,
-      width: Math.min(356, hostRect.width),
+      width: Math.min(400, hostRect.width),
       height: hostRect.height,
     }] : [];
     const resolved = resolveFloatingChromeRect({
@@ -96,11 +111,12 @@ export function useFloatingNodePanel({
       },
       containerWidth: hostRect.width,
       containerHeight: hostRect.height,
-      surfaceWidth: panelRect.width || 332,
-      surfaceHeight: Math.min(panelRect.height || 590, hostRect.height - 16),
-      placement: "top",
+      surfaceWidth: panelRect.width || 372,
+      surfaceHeight: Math.min(panelRect.height || 560, hostRect.height - 24),
+      placement: "right",
       occluders,
-      padding: 8,
+      padding: 10,
+      gap: 12,
       allowSidePlacement: true,
     });
     setPosition((current) => {
@@ -140,12 +156,15 @@ export interface CanvasAgentPanelProps {
   jobs: readonly DesignJob[];
   versions?: readonly DesignNodeVersion[];
   selectedVersionId?: string | null;
-  assetRevision?: string | null;
+  onAppendMaterialVersion?: (file: File) => Promise<void>;
+  materialRevisionAccept?: string;
   agents?: readonly AgentInfo[];
   initialAgentCommand?: string;
   initialModel?: string;
+  agentSelection?: CanvasAgentSelection;
+  onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onRescanAgents?: () => Promise<void>;
-  onSubmit: (prompt: string, nodeIds: readonly string[], selection: { agentCommand?: string; model?: string }) => Promise<void>;
+  onSubmit: (prompt: string, nodeIds: readonly string[], selection: { agentCommand?: string; model?: string | null }) => Promise<void>;
   onCancelJob: (jobId: string) => Promise<void>;
   onAttachFiles: (files: readonly File[]) => Promise<void>;
   projectPath?: string | null;
@@ -156,6 +175,11 @@ export interface CanvasAgentPanelProps {
   style?: React.CSSProperties;
   floating?: boolean;
   rootRef?: Ref<HTMLElement>;
+}
+
+export interface CanvasAgentSelection {
+  agentCommand: string;
+  model: string;
 }
 
 interface MainAgentJobGroup {
@@ -196,6 +220,71 @@ function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | n
   return groups;
 }
 
+function versionOptionLabel(version: DesignNodeVersion): string {
+  const materialName = version.contentKind === "asset"
+    ? version.fileName ?? version.mimeType ?? "Material"
+    : null;
+  const timestamp = new Date(version.createdAt).toLocaleString();
+  return `v${version.sequence} · ${materialName ? `${materialName} · ` : ""}${timestamp}`;
+}
+
+function compactActivityText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "Activity updated";
+  if ((normalized.startsWith("{") || normalized.startsWith("[")) && normalized.length > 240) {
+    return "Prepared the structured response";
+  }
+  if (normalized.length <= 260) return normalized;
+  const sentence = normalized.match(/^.{80,220}?[.!?](?:\s|$)/)?.[0]?.trim();
+  return `${sentence ?? normalized.slice(0, 220).trimEnd()}…`;
+}
+
+function isWebSearchActivity(activity: DesignJobActivity): boolean {
+  return /\b(?:web\s+search|searching\s+(?:the\s+)?web|searched\s+(?:the\s+)?web)\b/i.test(activity.text);
+}
+
+function isImageGenerationActivity(activity: DesignJobActivity): boolean {
+  return /\b(?:generating|generate|rendering)\s+(?:an?\s+)?image\b/i.test(activity.text);
+}
+
+function quotedActivityText(text: string): string | null {
+  return /[“"]([^”"]{2,180})[”"]/.exec(text)?.[1]?.trim() ?? null;
+}
+
+function searchResults(activities: readonly DesignJobActivity[], active: boolean): AgentSearchResult[] {
+  return activities.flatMap((activity, index) => {
+    const href = activity.text.match(/https?:\/\/[^\s)>\]]+/)?.[0]?.replace(/[.,;:]$/, "");
+    if (!href) return [];
+    const title = compactActivityText(activity.text.replace(href, "").replace(/^[\s·—:-]+|[\s·—:-]+$/g, "")) || href;
+    return [{
+      id: activity.id,
+      title,
+      href,
+      state: active && index === activities.length - 1 ? "loading" as const : "done" as const,
+    }];
+  });
+}
+
+function jobStatusLabel(job: DesignJob): string {
+  switch (job.status) {
+    case "queued": return "Queued";
+    case "running": return "Working";
+    case "validating": return "Validating";
+    case "ready": return "Complete";
+    case "failed": return "Failed";
+    case "cancelled": return "Cancelled";
+    case "superseded": return "Superseded";
+  }
+}
+
+function compactJobDuration(durationMs: number): string {
+  const seconds = Math.max(1, Math.round(durationMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
+}
+
 export function CanvasAgentPanel({
   projectId,
   api,
@@ -206,10 +295,13 @@ export function CanvasAgentPanel({
   jobs,
   versions = [],
   selectedVersionId,
-  assetRevision = null,
+  onAppendMaterialVersion,
+  materialRevisionAccept,
   agents = [],
   initialAgentCommand = "",
   initialModel = "",
+  agentSelection: controlledAgentSelection,
+  onAgentSelectionChange,
   onRescanAgents = async () => {},
   onSubmit,
   onCancelJob,
@@ -223,30 +315,48 @@ export function CanvasAgentPanel({
   floating = false,
   rootRef,
 }: CanvasAgentPanelProps) {
+  const reduceMotion = useReducedMotion();
   const [thread, setThread] = useState<DesignThread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [agentCommand, setAgentCommand] = useState(initialAgentCommand);
-  const [model, setModel] = useState(initialModel);
-  const [contextNodeIds, setContextNodeIds] = useState<string[]>(nodes.map((node) => node.id));
-  const [allContext, setAllContext] = useState(true);
-  const [contextOpen, setContextOpen] = useState(false);
+  const [appendingRevision, setAppendingRevision] = useState(false);
+  const [internalAgentSelection, setInternalAgentSelection] = useState<CanvasAgentSelection>(() => ({
+    agentCommand: initialAgentCommand,
+    model: initialModel,
+  }));
+  const agentSelection = controlledAgentSelection ?? internalAgentSelection;
+  const setAgentSelection = useCallback((next: CanvasAgentSelection) => {
+    setInternalAgentSelection(next);
+    onAgentSelectionChange?.(next);
+  }, [onAgentSelectionChange]);
+  const [contextNodeIds, setContextNodeIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const revisionInputRef = useRef<HTMLInputElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const threadLoadSequenceRef = useRef(0);
   const scopeKey = scope.type === "main" ? "main" : `node:${scope.nodeId}`;
-  const relatedJobs = useMemo(() => (
-    scope.type === "main"
+  const relatedJobs = useMemo(() => {
+    const related = scope.type === "main"
       ? jobs.filter((job) => job.kind === "main-agent" || job.kind === "implementation-export" || job.parentJobId !== null)
-      : jobs.filter((job) => job.nodeId === scope.nodeId)
-  ), [jobs, scope]);
+      : jobs.filter((job) => job.nodeId === scope.nodeId);
+    return related.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }, [jobs, scope]);
   const nodeNames = useMemo(() => new Map(nodes.map((node) => [node.id, node.name])), [nodes]);
+  const scopedNode = scope.type === "node" ? nodes.find((node) => node.id === scope.nodeId) ?? null : null;
   const mainJobGroups = useMemo(
     () => scope.type === "main" ? groupMainAgentJobs(relatedJobs, thread) : [],
     [relatedJobs, scope.type, thread],
   );
+  const confinedAgents = useMemo(
+    () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
+    [agents],
+  );
+  const activeConfinedAgent = confinedAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
   const live = relatedJobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
+  const transcriptTailKey = relatedJobs.map((job) => (
+    `${job.id}:${job.status}:${job.activity.length}:${job.error ?? ""}`
+  )).join("|");
 
   const loadThread = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++threadLoadSequenceRef.current;
@@ -271,9 +381,24 @@ export function CanvasAgentPanel({
 
   useEffect(() => {
     const existingIds = new Set(nodes.map((node) => node.id));
-    if (allContext) setContextNodeIds([...existingIds]);
-    else setContextNodeIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [allContext, nodes]);
+    setContextNodeIds((current) => current.filter((id) => existingIds.has(id)));
+  }, [nodes]);
+
+  useEffect(() => {
+    const active = confinedAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
+    if (active) {
+      if (agentSelection.model && !active.models.includes(agentSelection.model)) {
+        setAgentSelection({ agentCommand: active.command, model: "" });
+      }
+      return;
+    }
+    const fallback = confinedAgents[0] ?? null;
+    if (fallback) {
+      setAgentSelection({ agentCommand: fallback.command, model: "" });
+    } else if (agentSelection.agentCommand || agentSelection.model) {
+      setAgentSelection({ agentCommand: "", model: "" });
+    }
+  }, [agentSelection.agentCommand, agentSelection.model, confinedAgents, setAgentSelection]);
 
   useEffect(() => {
     if (!live) return;
@@ -284,17 +409,19 @@ export function CanvasAgentPanel({
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (transcript) transcript.scrollTop = transcript.scrollHeight;
-  }, [thread?.messages.length, relatedJobs.length]);
+  }, [thread?.messages.length, thread?.updatedAt, transcriptTailKey]);
 
   const submit = async () => {
     const prompt = draft.trim();
-    if (!prompt || submitting) return;
+    if (!prompt || submitting || !activeConfinedAgent) return;
     setSubmitting(true);
     setThreadError(null);
     try {
       await onSubmit(prompt, contextNodeIds, {
-        ...(agentCommand ? { agentCommand } : {}),
-        ...(model ? { model } : {}),
+        agentCommand: activeConfinedAgent.command,
+        ...(agentSelection.model
+          ? { model: agentSelection.model }
+          : { model: null }),
       });
       setDraft("");
       await loadThread();
@@ -305,23 +432,26 @@ export function CanvasAgentPanel({
     }
   };
 
+  const panelVisible = style?.visibility !== "hidden";
   return (
-    <section
+    <motion.section
       ref={rootRef}
       data-canvas-agent-panel
       data-agent-scope={scopeKey}
       className={cn("design-canvas-agent", floating && "design-canvas-agent--floating", className)}
       style={style}
+      initial={floating && !reduceMotion ? { opacity: 0, x: 8, y: 2, scale: 0.992, filter: "blur(2px)" } : false}
+      animate={floating ? (panelVisible
+        ? { opacity: 1, x: 0, y: 0, scale: 1, filter: "blur(0px)" }
+        : { opacity: 0, x: reduceMotion ? 0 : 8, y: 0, scale: reduceMotion ? 1 : 0.992, filter: reduceMotion ? "blur(0px)" : "blur(2px)" }) : undefined}
+      transition={{ duration: reduceMotion ? 0 : 0.22, ease: AGENT_MOTION_EASE }}
       aria-label={`${title} panel`}
       onContextMenu={(event) => event.stopPropagation()}
     >
       <header className="design-canvas-agent__header">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="design-canvas-agent__mark"><Sparkles aria-hidden /></span>
-          <div className="min-w-0">
-            <h2 className="truncate text-xs font-semibold tracking-[-0.01em] text-foreground">{title}</h2>
-            <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{subtitle}</p>
-          </div>
+        <div className="min-w-0">
+          <h2 className="truncate text-xs font-semibold tracking-[-0.01em] text-foreground">{title}</h2>
+          {subtitle ? <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{subtitle}</p> : null}
         </div>
         {onClose ? (
           <Button variant="ghost" size="icon-xs" aria-label={`Close ${title}`} onClick={onClose}>
@@ -330,31 +460,64 @@ export function CanvasAgentPanel({
         ) : null}
       </header>
 
-      {assetRevision ? (
+      {(versions.length > 0 && onSelectVersion) || onAppendMaterialVersion ? (
         <div className="design-canvas-agent__versions">
-          <span className="design-canvas-agent__versions-label">Version</span>
-          <output className="design-canvas-agent__asset-revision">Asset revision · {assetRevision}</output>
-        </div>
-      ) : versions.length > 0 && onSelectVersion ? (
-        <div className="design-canvas-agent__versions">
-          <label htmlFor={`${scopeKey}-version`}>Version</label>
-          <div className="relative min-w-0 flex-1">
-            <select
-              id={`${scopeKey}-version`}
-              value={selectedVersionId ?? versions.at(-1)?.id ?? ""}
-              onChange={(event) => {
-                void onSelectVersion(event.target.value).catch((problem) => {
-                  setThreadError(problem instanceof Error ? problem.message : String(problem));
-                });
-              }}
-              className="h-7 w-full appearance-none rounded-md border border-border bg-background px-2 pr-7 text-[11px] text-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
-            >
-              {[...versions].reverse().map((version) => (
-                <option key={version.id} value={version.id}>v{version.sequence} · {new Date(version.createdAt).toLocaleString()}</option>
-              ))}
-            </select>
-            <ChevronDown aria-hidden className="pointer-events-none absolute right-2 top-2 size-3 text-muted-foreground" />
-          </div>
+          {versions.length > 0 && onSelectVersion ? (
+            <>
+              <label htmlFor={`${scopeKey}-version`}>Version</label>
+              <div className="relative min-w-0 flex-1">
+                <select
+                  id={`${scopeKey}-version`}
+                  value={selectedVersionId ?? versions.at(-1)?.id ?? ""}
+                  onChange={(event) => {
+                    void onSelectVersion(event.target.value).catch((problem) => {
+                      setThreadError(problem instanceof Error ? problem.message : String(problem));
+                    });
+                  }}
+                  className="h-7 w-full appearance-none rounded-md border border-border bg-background px-2 pr-7 text-[11px] text-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+                >
+                  {[...versions].reverse().map((version) => (
+                    <option key={version.id} value={version.id}>{versionOptionLabel(version)}</option>
+                  ))}
+                </select>
+                <ChevronDown aria-hidden className="pointer-events-none absolute right-2 top-2 size-3 text-muted-foreground" />
+              </div>
+            </>
+          ) : (
+            <span className="design-canvas-agent__versions-label">No versions yet</span>
+          )}
+          {onAppendMaterialVersion ? (
+            <>
+              <input
+                ref={revisionInputRef}
+                type="file"
+                accept={materialRevisionAccept}
+                className="hidden"
+                aria-label={`Add revision to ${scopedNode?.name ?? title}`}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file || appendingRevision) return;
+                  setAppendingRevision(true);
+                  setThreadError(null);
+                  void onAppendMaterialVersion(file).catch((problem) => {
+                    setThreadError(problem instanceof Error ? problem.message : String(problem));
+                  }).finally(() => setAppendingRevision(false));
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="shrink-0"
+                disabled={appendingRevision}
+                onClick={() => revisionInputRef.current?.click()}
+              >
+                {appendingRevision ? <LoaderCircle aria-hidden className="animate-spin" /> : <FileUp aria-hidden />}
+                Add revision
+              </Button>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -385,7 +548,7 @@ export function CanvasAgentPanel({
             >
               <header className="design-canvas-agent__activity-group-header">
                 <p>{group.label}</p>
-                <span>{childCount} {childCount === 1 ? "child Agent" : "child Agents"}</span>
+                {childCount > 0 ? <span>{childCount} {childCount === 1 ? "child Agent" : "child Agents"}</span> : null}
               </header>
               {group.jobs.map((job) => (
                 <AgentActivityCard
@@ -417,6 +580,7 @@ export function CanvasAgentPanel({
           type="file"
           multiple
           className="hidden"
+          aria-label={`Attach files to ${title}`}
           onChange={(event) => {
             const files = event.target.files ? [...event.target.files] : [];
             event.target.value = "";
@@ -427,86 +591,64 @@ export function CanvasAgentPanel({
             }
           }}
         />
-        <div className="design-canvas-agent__context-row">
-          <div className="design-canvas-agent__context-control">
-            <button
-              type="button"
-              className="design-canvas-agent__context-trigger"
-              aria-expanded={contextOpen}
-              onClick={() => setContextOpen((current) => !current)}
-            >
-              Focus · {contextNodeIds.length} <ChevronDown aria-hidden />
-            </button>
-            {contextOpen ? (
-              <div className="design-canvas-agent__context-menu" role="menu" aria-label="Focused canvas nodes">
-              <button
-                type="button"
-                className="design-canvas-agent__context-item"
-                onClick={() => setAllContext((current) => !current)}
-              >
-                {allContext ? <Check aria-hidden /> : <Circle aria-hidden />}
-                <span><strong>Prioritize all nodes</strong><small>Automatically prioritizes new nodes</small></span>
-              </button>
-              <p className="px-2 pb-1 pt-0.5 text-[9px] leading-4 text-muted-foreground">The entire canvas is always available. Selected Nodes receive extra focus.</p>
-              <div className="my-1 h-px bg-border" />
-              <div className="max-h-52 overflow-y-auto">
-                {nodes.map((node) => {
-                  const checked = contextNodeIds.includes(node.id);
-                  return (
-                    <button
-                      type="button"
-                      key={node.id}
-                      className="design-canvas-agent__context-item"
-                      onClick={() => {
-                        setAllContext(false);
-                        setContextNodeIds((current) => checked ? current.filter((id) => id !== node.id) : [...current, node.id]);
-                      }}
-                    >
-                      {checked ? <Check aria-hidden /> : <Circle aria-hidden />}
-                      <span><strong>{node.name}</strong><small>{catalogItem(node.kind).label}</small></span>
-                    </button>
-                  );
-                })}
-              </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
         <div className="design-canvas-agent__composer-shell">
-          <textarea
-            aria-label={`${title} message`}
+          <NodeMentionInput
+            nodes={nodes}
+            excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
             value={draft}
-            rows={1}
-            placeholder={scope.type === "main" ? "Coordinate the canvas and its Agents…" : "Ask this node's Agent…"}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                event.preventDefault();
-                void submit();
-              }
-            }}
+            onChange={setDraft}
+            priorityNodeIds={contextNodeIds}
+            onPriorityNodeIdsChange={setContextNodeIds}
+            ariaLabel={`${title} message`}
+            placeholder={scope.type === "main"
+              ? "Coordinate the canvas. Type @ to reference a Node…"
+              : "Ask this Node's Agent. Type @ to add context…"}
+            onSubmitShortcut={() => void submit()}
           />
           <div className="design-canvas-agent__actions">
             <div className="flex min-w-0 items-center gap-1">
               <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
                 <Paperclip aria-hidden />
               </Button>
-              {agents.length > 0 ? (
+              {confinedAgents.length > 0 ? (
                 <AgentModelSelect
-                  agents={[...agents]}
-                  agent={agentCommand}
-                  model={model}
-                  onAgentChange={setAgentCommand}
-                  onModelChange={setModel}
+                  agents={confinedAgents}
+                  agent={agentSelection.agentCommand}
+                  model={agentSelection.model}
+                  onAgentChange={(agentCommand) => {
+                    if (agentSelection.agentCommand !== agentCommand) {
+                      setAgentSelection({ agentCommand, model: "" });
+                    }
+                  }}
+                  onModelChange={(model) => {
+                    if (agentSelection.model !== model) {
+                      setAgentSelection({ ...agentSelection, model });
+                    }
+                  }}
                   onRescan={onRescanAgents}
                   dropUp
                 />
-              ) : null}
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="design-canvas-agent__agent-unavailable"
+                  title="No compatible Design Agent is currently available"
+                  onClick={() => {
+                    void onRescanAgents().catch((problem) => {
+                      setThreadError(problem instanceof Error ? problem.message : String(problem));
+                    });
+                  }}
+                >
+                  <CircleAlert aria-hidden />Agent unavailable
+                </Button>
+              )}
             </div>
             <Button
               size="icon-sm"
               aria-label={`Send to ${title}`}
-              disabled={!draft.trim() || submitting}
+              disabled={!draft.trim() || submitting || !activeConfinedAgent}
               onClick={() => void submit()}
               className="size-7"
             >
@@ -514,9 +656,21 @@ export function CanvasAgentPanel({
             </Button>
           </div>
         </div>
-        {threadError ? <p role="alert" className="mt-1.5 text-[10px] leading-4 text-destructive">{threadError}</p> : null}
+        {threadError ? (
+          <motion.div
+            role="alert"
+            className="design-canvas-agent__composer-notice"
+            initial={reduceMotion ? false : { opacity: 0, y: 5, filter: "blur(2px)" }}
+            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
+          >
+            <CircleAlert aria-hidden />
+            <span>{threadError}</span>
+            <button type="button" aria-label="Dismiss Agent error" onClick={() => setThreadError(null)}><X aria-hidden /></button>
+          </motion.div>
+        ) : null}
       </div>
-    </section>
+    </motion.section>
   );
 }
 
@@ -533,9 +687,14 @@ function AgentActivityCard({
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancel: (jobId: string) => Promise<void>;
 }) {
+  const reduceMotion = useReducedMotion();
   const [revealFeedback, setRevealFeedback] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
+  const [expanded, setExpanded] = useState(active || job.status === "failed");
+  useEffect(() => {
+    if (active || job.status === "failed") setExpanded(true);
+  }, [active, job.status]);
   const kindLabel = job.kind === "node-generation"
     ? "Node generation"
     : job.kind === "node-analysis"
@@ -544,89 +703,178 @@ function AgentActivityCard({
         ? "Main Agent"
         : "Implementation export";
   const label = job.nodeId === null ? kindLabel : `${kindLabel} · ${nodeName ?? job.nodeId}`;
+  const displayLabel = job.kind === "node-generation"
+    ? `${nodeName ?? "Node"} generation`
+    : job.kind === "node-analysis"
+      ? `${nodeName ?? "Node"} analysis`
+      : job.kind === "main-agent"
+        ? "Canvas plan"
+        : "Implementation export";
   const exportId = job.kind === "implementation-export" ? job.exportId : null;
   const exportPath = exportId
     ? designExportPath(projectPath, exportId)
     : null;
+  const searchActivities = job.activity.filter(isWebSearchActivity);
+  const imageActivity = [...job.activity].reverse().find(isImageGenerationActivity) ?? null;
+  const reasoningItems = job.activity
+    .filter((activity) => activity.kind === "text" && !isWebSearchActivity(activity) && !isImageGenerationActivity(activity))
+    .map((activity) => ({ id: activity.id, text: compactActivityText(activity.text) }));
+  const progressActivities = job.activity.filter((activity) => (
+    activity.kind !== "text" && !isWebSearchActivity(activity) && !isImageGenerationActivity(activity)
+  ));
+  const omittedProgressCount = Math.max(0, progressActivities.length - 7);
+  const visibleProgressActivities = progressActivities.slice(-7);
+  const progressItems: AgentProgressItem[] = [
+    ...(omittedProgressCount > 0 ? [{
+      id: `${job.id}-earlier-actions`,
+      text: `${omittedProgressCount} earlier actions completed`,
+      state: "done" as const,
+    }] : []),
+    ...visibleProgressActivities.map((activity, index) => ({
+      id: activity.id,
+      text: compactActivityText(activity.text),
+      state: job.status === "failed" && index === visibleProgressActivities.length - 1
+        ? "failed" as const
+        : active && index === visibleProgressActivities.length - 1
+          ? "active" as const
+          : "done" as const,
+    })),
+  ];
+  const searchQuery = searchActivities.length > 0
+    ? quotedActivityText(searchActivities[0]!.text)
+      ?? (compactActivityText(searchActivities[0]!.text).replace(/^.*?\bsearch(?:ing|ed)?\b\s*/i, "") || "the web")
+    : null;
+  const imagePrompt = imageActivity
+    ? quotedActivityText(imageActivity.text) ?? compactActivityText(imageActivity.text)
+    : null;
+  const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
   return (
     <article
       className="design-canvas-agent__activity"
       data-status={job.status}
+      data-collapsed={!expanded || undefined}
       data-job-id={job.id}
       data-node-id={job.nodeId ?? undefined}
       data-parent-job-id={job.parentJobId ?? undefined}
       aria-label={`${label} · ${job.status}`}
     >
+      {active ? (
+        <motion.span
+          className="design-canvas-agent__activity-live-beam"
+          aria-hidden
+          initial={false}
+          animate={reduceMotion
+            ? { opacity: 0 }
+            : { x: ["-150%", "430%"], opacity: [0, 0.82, 0.82, 0] }}
+          transition={{
+            duration: 2.6,
+            ease: AGENT_MOTION_EASE_IN_OUT,
+            repeat: Number.POSITIVE_INFINITY,
+            repeatDelay: 0.8,
+            times: [0, 0.18, 0.72, 1],
+          }}
+        />
+      ) : null}
       <header>
-        <div className="min-w-0">
-          <p>{label}</p>
-          <span>{job.status}</span>
-        </div>
+        <motion.button
+          type="button"
+          className="design-canvas-agent__activity-toggle"
+          aria-expanded={expanded}
+          whileTap={reduceMotion ? undefined : { scale: 0.985 }}
+          transition={{ duration: 0.12, ease: AGENT_MOTION_EASE }}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span className="design-canvas-agent__activity-status" data-status={job.status} aria-hidden>
+            {active
+              ? <LoaderCircle />
+              : job.status === "ready"
+                ? <Check />
+                : job.status === "failed"
+                  ? <CircleAlert />
+                  : <Circle />}
+          </span>
+          <span className="design-canvas-agent__activity-copy">
+            <strong>{displayLabel}</strong>
+            <small>
+              {jobStatusLabel(job)}
+              {!active && durationMs > 0 ? ` · ${compactJobDuration(durationMs)}` : ""}
+            </small>
+          </span>
+          <motion.span
+            className="design-canvas-agent__activity-chevron"
+            aria-hidden
+            animate={{ rotate: expanded ? 0 : -90 }}
+            transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
+          >
+            <ChevronDown />
+          </motion.span>
+        </motion.button>
         {active ? (
           <Button
             type="button"
             size="xs"
             variant="ghost"
-            className="h-6 px-1.5 text-[9px]"
+            className="design-canvas-agent__activity-stop"
             onClick={() => {
               void onCancel(job.id).catch(() => undefined);
             }}
           >
             <X aria-hidden />Stop
           </Button>
-        ) : job.status === "ready" ? <Check aria-hidden /> : <Circle aria-hidden />}
+        ) : null}
       </header>
-      {job.kind === "implementation-export" && job.exportId ? (
-        <div className="design-canvas-agent__activity-result">
-          <p>{job.status === "ready" ? "Export ready" : "Export"} · {job.exportId}</p>
-          {job.status === "ready" ? (
-            <>
-              {exportPath ? (
-                <code title={exportPath}>{exportPath}</code>
-              ) : <small>Output path unavailable until Project metadata loads.</small>}
-              <div className="design-canvas-agent__activity-export-actions">
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="outline"
-                  disabled={revealing || !exportPath || !onRevealExport}
-                  onClick={() => {
-                    if (!onRevealExport || !exportId) return;
-                    setRevealing(true);
-                    setRevealFeedback(null);
-                    void onRevealExport(exportId).then((result) => {
-                      setRevealFeedback(result === "revealed"
-                        ? "Opened in Finder."
-                        : result === "copied"
-                          ? "Finder unavailable · path copied."
-                          : "Reveal unavailable · copy the path shown above.");
-                    }).catch(() => {
-                      setRevealFeedback("Couldn't reveal this export.");
-                    }).finally(() => setRevealing(false));
-                  }}
-                >
-                  {revealing ? <LoaderCircle aria-hidden className="animate-spin" /> : null}
-                  Reveal export
-                </Button>
-                {revealFeedback ? <output role="status">{revealFeedback}</output> : null}
-              </div>
-            </>
+      <div className="design-canvas-agent__activity-collapsible" data-collapsed={!expanded || undefined}>
+        <div>
+          <div className="design-canvas-agent__activity-body">
+            <AgentReasoning items={reasoningItems} active={active} durationMs={durationMs} />
+            {searchQuery ? (
+              <AgentWebSearch query={searchQuery} results={searchResults(searchActivities, active)} active={active} />
+            ) : null}
+            {active && imagePrompt ? <AgentImageGenerationState prompt={imagePrompt} /> : null}
+            <AgentProgressList items={progressItems} defaultOpen={active || job.status === "failed"} />
+            {active && job.activity.length === 0 ? <AgentThinkingState /> : null}
+          </div>
+          {job.kind === "implementation-export" && job.exportId ? (
+            <div className="design-canvas-agent__activity-result">
+              <p>{job.status === "ready" ? "Export ready" : "Export"} · {job.exportId}</p>
+              {job.status === "ready" ? (
+                <>
+                  {exportPath ? (
+                    <code title={exportPath}>{exportPath}</code>
+                  ) : <small>Output path unavailable until Project metadata loads.</small>}
+                  <div className="design-canvas-agent__activity-export-actions">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      disabled={revealing || !exportPath || !onRevealExport}
+                      onClick={() => {
+                        if (!onRevealExport || !exportId) return;
+                        setRevealing(true);
+                        setRevealFeedback(null);
+                        void onRevealExport(exportId).then((result) => {
+                          setRevealFeedback(result === "revealed"
+                            ? "Opened in Finder."
+                            : result === "copied"
+                              ? "Finder unavailable · path copied."
+                              : "Reveal unavailable · copy the path shown above.");
+                        }).catch(() => {
+                          setRevealFeedback("Couldn't reveal this export.");
+                        }).finally(() => setRevealing(false));
+                      }}
+                    >
+                      {revealing ? <LoaderCircle aria-hidden className="animate-spin" /> : null}
+                      Reveal export
+                    </Button>
+                    {revealFeedback ? <output role="status">{revealFeedback}</output> : null}
+                  </div>
+                </>
+              ) : null}
+            </div>
           ) : null}
+          {job.error ? <p className="design-canvas-agent__activity-error">{job.error}</p> : null}
         </div>
-      ) : null}
-      {job.activity.length ? (
-        <ol>
-          {job.activity.slice(-4).map((item, index) => (
-            <li key={item.id} data-current={index === Math.min(3, job.activity.length - 1) && active}>
-              <span aria-hidden />
-              <p>{item.text}</p>
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <p className="px-3 pb-3 text-[10px] text-muted-foreground">Waiting for activity…</p>
-      )}
-      {job.error ? <p className="border-t border-border px-3 py-2 text-[10px] text-destructive">{job.error}</p> : null}
+      </div>
     </article>
   );
 }
