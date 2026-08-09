@@ -324,6 +324,9 @@ test("Implementation Export prompt requires deterministic Node routes and visibl
     assert.match(prompt, /element bearing data-dezin-export-node-id is itself the route root/i);
     assert.match(prompt, /&\.board.*\[data-dezin-export-node-id\]\.board/i);
     assert.match(prompt, /never a descendant selector.*\[data-dezin-export-node-id\] \.board/i);
+    assert.match(prompt, /never hoist a source child layout class onto the marker wrapper/i);
+    assert.match(prompt, /same-element class combination.*\.nav\.page/i);
+    assert.match(prompt, /frozen body contains multiple sibling roots.*marker model the body baseline/i);
     assert.match(prompt, /Frozen Nodes may disagree in their :root variables and body typography/i);
     assert.match(prompt, /preserve each Version's exact custom-property values, font stack, font size, line height/i);
     assert.match(prompt, /Do not collapse Node-specific root\/body baselines into one shared global token declaration/i);

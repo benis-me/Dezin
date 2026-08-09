@@ -139,7 +139,9 @@ at least one non-empty static `src/**/*.css` stylesheet imported through the
 TypeScript graph; no security or build guarantee depends on one conventional
 stylesheet filename. Route CSS must apply source-root geometry to the exact
 `data-dezin-export-node-id` marker element (including a same-element root class),
-not to an impossible descendant copy of that class. Node-specific `:root` tokens
+not to an impossible descendant copy of that class. Child layout classes are not
+hoisted onto the marker: multi-sibling documents preserve each child's original
+same-element class composition and CSS cascade. Node-specific `:root` tokens
 and body typography are likewise re-scoped onto that marker instead of being
 silently replaced by another Version's global baseline. HTML, CSS, and TypeScript
 are parsed into explicit local-only allowlists; runtime network/timer/storage/
