@@ -74,13 +74,14 @@ const DEFAULT_CLOCK: StoreClock = { now: () => Date.now(), id: () => randomUUID(
 export class Store {
   readonly db: DatabaseSync;
   readonly workspace: SharinganWorkspaceStore;
+  readonly legacyDesignBackupPath: string | null;
   private readonly clock: StoreClock;
 
   constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK) {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
-    discardLegacyDesignStore(this.db);
+    this.legacyDesignBackupPath = discardLegacyDesignStore(this.db);
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec("BEGIN IMMEDIATE");
     try {

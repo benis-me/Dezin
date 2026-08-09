@@ -252,6 +252,26 @@ test("ClaudeCodeRunner accepts CodeBuddy re-announcing one execution identity af
   assert.equal(result.artifactHtml, "<main>published safely</main>");
 });
 
+test("ClaudeCodeRunner fails closed when repeated system/init envelopes have no stable execution id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-unbound-repeated-identity-"));
+  const lines = STREAM.split("\n");
+  const init = JSON.parse(lines[0]!);
+  delete init.session_id;
+  delete init.uuid;
+  delete init._requestId;
+  const stream = [JSON.stringify(init), JSON.stringify(init), ...lines.slice(1)].join("\n");
+  const runner = new ClaudeCodeRunner({
+    spawner: new FakeSpawner(stream, "<main>must not publish</main>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => error instanceof AgentExecutionIdentityError
+      && error.observed === null
+      && /one consistent system\/init execution identity/i.test(error.message),
+  );
+});
+
 test("ClaudeCodeRunner fails closed when repeated system/init envelopes identify different executions", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-ambiguous-identity-"));
   const lines = STREAM.split("\n");
@@ -601,6 +621,27 @@ test("ClaudeCodeRunner preserves the observed default model when the provider re
       });
       return true;
     },
+  );
+});
+
+test("ClaudeCodeRunner preserves a provider 429 reset message when the error result has no result field", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-rate-limit-"));
+  const stream = [
+    `{"type":"system","subtype":"init","session_id":"s1","model":"hy3-ioa","apiKeySource":"host","claude_code_version":"2.132.0"}`,
+    `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"429 使用量已超出频率限制，将在 2026-08-03 15:47:07 UTC+8 重置"}]}}`,
+    `{"type":"result","subtype":"error_during_execution","is_error":true}`,
+  ].join("\n");
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    model: "hy3-ioa",
+    spawner: new FakeSpawner(stream, "<h1>old</h1>"),
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    (error: unknown) => error instanceof AgentTurnError
+      && /429.*15:47:07 UTC\+8/i.test(error.message),
   );
 });
 

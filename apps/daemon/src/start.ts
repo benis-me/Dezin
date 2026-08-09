@@ -88,6 +88,20 @@ async function main(): Promise<void> {
   };
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
+  if (store.legacyDesignBackupPath !== null) {
+    const warning = {
+      kind: "legacy-design-store-retired",
+      migratedAt: Date.now(),
+      backupPath: store.legacyDesignBackupPath,
+      message: "Legacy Standard Design tables were retired; the complete pre-migration SQLite database was preserved at backupPath.",
+    };
+    writeFileSync(
+      join(DATA_DIR, "legacy-design-migration.json"),
+      `${JSON.stringify(warning, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    console.warn(`[DEZIN MIGRATION] ${warning.message} ${warning.backupPath}`);
+  }
   const startupController = new AbortController();
   let storeClosed = false;
   const closeStore = (): void => {

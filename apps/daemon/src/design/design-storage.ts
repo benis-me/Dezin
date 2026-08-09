@@ -3297,6 +3297,7 @@ function validateDesignJavaScript(
   const index = indexDesignJavaScript(program);
   let accessesParentNavigation = false;
   let accessesRemoteContent = false;
+  let remoteContentViolation: string | null = null;
   let changesNavigation = false;
   let opensWindow = false;
   let evaluatesDynamicCode = false;
@@ -3399,15 +3400,18 @@ function validateDesignJavaScript(
         if (target !== "_self") opensWindow = true;
       }
       if (receiver === "style") {
-        const cssValue = designJavaScriptConstantString(node.right, index);
+        const cssValues = designJavaScriptPossibleConstantStrings(node.right, index);
         if (memberName === "cssText") {
-          if (cssValue === null) accessesRemoteContent = true;
-          else validateDesignCss(cssValue, allowCanonicalAssets, "attribute");
+          if (cssValues === null || cssValues.size === 0) accessesRemoteContent = true;
+          else for (const cssValue of cssValues) validateDesignCss(cssValue, allowCanonicalAssets, "attribute");
         } else if (memberName === null
-          || (cssValue === null && DESIGN_JAVASCRIPT_CSS_URL_PROPERTIES.has(memberName))) {
+          || ((cssValues === null || cssValues.size === 0)
+            && DESIGN_JAVASCRIPT_CSS_URL_PROPERTIES.has(memberName))) {
           accessesRemoteContent = true;
-        } else if (cssValue !== null) {
-          validateDesignCss(`${memberName}: ${cssValue}`, allowCanonicalAssets, "attribute");
+        } else if (cssValues !== null) {
+          for (const cssValue of cssValues) {
+            validateDesignCss(`${memberName}: ${cssValue}`, allowCanonicalAssets, "attribute");
+          }
         }
       }
     }
@@ -3523,6 +3527,29 @@ function validateDesignJavaScript(
         }
       }
     }
+    if (accessesRemoteContent && remoteContentViolation === null) {
+      let operation = node.type;
+      if (node.type === "Identifier" && typeof node.name === "string") {
+        operation = `identifier ${node.name}`;
+      } else if (node.type === "MemberExpression" || node.type === "OptionalMemberExpression") {
+        operation = `member ${designJavaScriptMemberName(node, index) ?? "<dynamic>"}`;
+      } else if (node.type === "AssignmentExpression" && designJavaScriptNode(node.left)
+        && (node.left.type === "MemberExpression" || node.left.type === "OptionalMemberExpression")) {
+        operation = `assignment to ${designJavaScriptMemberName(node.left, index) ?? "<dynamic member>"}`;
+      } else if (node.type === "CallExpression" && designJavaScriptNode(node.callee)) {
+        operation = node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression"
+          ? `call to ${designJavaScriptMemberName(node.callee, index) ?? "<dynamic member>"}`
+          : `call to ${node.callee.type === "Identifier" ? String(node.callee.name) : node.callee.type}`;
+      } else if (node.type === "ImportDeclaration" && designJavaScriptNode(node.source)
+        && typeof node.source.value === "string") {
+        operation = `import ${node.source.value}`;
+      }
+      const location = node.loc as { start?: { line?: number; column?: number } } | undefined;
+      const line = location?.start?.line;
+      const column = location?.start?.column;
+      const excerpt = line === undefined ? "" : (script.split(/\r?\n/)[line - 1]?.trim().slice(0, 240) ?? "");
+      remoteContentViolation = `${operation}${line === undefined ? "" : ` at ${line}:${(column ?? 0) + 1}`}${excerpt ? ` — ${excerpt}` : ""}`;
+    }
   });
   if (accessesParentNavigation) {
     throw new DesignStorageError("invalid-html", "Generated HTML may not access parent, top, or opener");
@@ -3540,7 +3567,10 @@ function validateDesignJavaScript(
     throw new DesignStorageError("invalid-html", "Generated HTML may not inject executable markup");
   }
   if (accessesRemoteContent) {
-    throw new DesignStorageError("invalid-html", "Generated HTML may not load remote scripts or resources");
+    throw new DesignStorageError(
+      "invalid-html",
+      `Generated HTML may not load remote scripts or resources${remoteContentViolation === null ? "" : ` (${remoteContentViolation})`}`,
+    );
   }
 }
 
@@ -3649,7 +3679,8 @@ export function validateDesignExportJavaScript(source: string): string[] {
     const location = node.loc as { start?: { line?: number; column?: number } } | undefined;
     const line = location?.start?.line;
     const column = location?.start?.column;
-    executionEnvironmentProbe = `${reason}${line === undefined ? "" : ` at ${line}:${(column ?? 0) + 1}`}`;
+    const excerpt = line === undefined ? "" : (source.split(/\r?\n/)[line - 1]?.trim().slice(0, 240) ?? "");
+    executionEnvironmentProbe = `${reason}${line === undefined ? "" : ` at ${line}:${(column ?? 0) + 1}`}${excerpt ? ` — ${excerpt}` : ""}`;
   };
   visitDesignJavaScript(program, (node, parent, key) => {
     if (node.type === "Identifier" && typeof node.name === "string"
@@ -3673,8 +3704,9 @@ export function validateDesignExportJavaScript(source: string): string[] {
         && designJavaScriptProvenance(node.object, index) !== "local") {
         markExecutionEnvironmentProbe(node, `unproven member ${memberName}`);
       }
-      if (memberName === null && designJavaScriptProvenance(node.object, index) !== "local") {
-        markExecutionEnvironmentProbe(node, "dynamic member on an unproven receiver");
+      const receiverProvenance = designJavaScriptProvenance(node.object, index);
+      if (memberName === null && receiverProvenance !== "local") {
+        markExecutionEnvironmentProbe(node, `dynamic member on a ${receiverProvenance} receiver`);
       }
       if (effective !== null && DESIGN_JAVASCRIPT_EXPORT_STATE_GLOBALS.has(effective.root)) {
         markExecutionEnvironmentProbe(node, `global path ${effective.root}`);
@@ -3712,13 +3744,13 @@ export function validateDesignExportJavaScript(source: string): string[] {
       const memberName = designJavaScriptMemberName(node.left, index);
       const receiver = designJavaScriptProvenance(node.left.object, index);
       if (receiver === "style" && memberName === "cssText") {
-        const css = designJavaScriptConstantString(node.right, index);
-        if (css === null) usesDynamicStyle = true;
-        else assertDesignExportCssIsStatic(css);
+        const cssValues = designJavaScriptPossibleConstantStrings(node.right, index);
+        if (cssValues === null || cssValues.size === 0) usesDynamicStyle = true;
+        else for (const css of cssValues) assertDesignExportCssIsStatic(css);
       } else if (receiver === "style") {
-        const value = designJavaScriptConstantString(node.right, index);
-        if (memberName === null || value === null) usesDynamicStyle = true;
-        else assertDesignExportCssIsStatic(`${memberName}: ${value}`);
+        const values = designJavaScriptPossibleConstantStrings(node.right, index);
+        if (memberName === null || values === null || values.size === 0) usesDynamicStyle = true;
+        else for (const value of values) assertDesignExportCssIsStatic(`${memberName}: ${value}`);
       }
       if (memberName !== null && DESIGN_JAVASCRIPT_EXPORT_ANIMATION_MEMBERS.has(memberName)) {
         usesWebAnimations = true;
@@ -5213,8 +5245,8 @@ export async function reserveDesignMainPlanExecution(
 function assertStoredJob(value: unknown, expectedId: string): asserts value is DesignJob {
   const job = storedRecord(value, `Design Job ${expectedId}`, [
     "schemaVersion", "id", "kind", "runnerId", "model", "status", "nodeId", "parentJobId", "contextHash", "canvasRevision",
-    "expectedHeadVersionId", "versionId", "exportId", "error", "cancelRequested", "activity", "createdAt",
-    "updatedAt", "finishedAt",
+    "expectedHeadVersionId", "versionId", "exportId", "error", "cancelRequested", "conversationOnly", "activity",
+    "createdAt", "updatedAt", "finishedAt",
   ]);
   const kinds = ["node-generation", "node-analysis", "main-agent", "implementation-export"];
   const statuses = ["queued", "running", "validating", "ready", "failed", "cancelled", "superseded"];
@@ -5237,6 +5269,8 @@ function assertStoredJob(value: unknown, expectedId: string): asserts value is D
     || !validStoredNullableId(job.exportId) || (kind !== "implementation-export" && job.exportId !== null)
     || !validStoredText(job.error, 16_384, { nullable: true, empty: true })
     || typeof job.cancelRequested !== "boolean"
+    || !(job.conversationOnly === undefined || typeof job.conversationOnly === "boolean")
+    || (job.conversationOnly === true && kind !== "main-agent")
     || !Array.isArray(job.activity) || job.activity.length > MAX_JOB_ACTIVITY
     || !validStoredTimestamp(job.createdAt) || !validStoredTimestamp(job.updatedAt)
     || !(job.finishedAt === null || validStoredTimestamp(job.finishedAt))
@@ -5612,6 +5646,7 @@ export async function createDesignJob(
       exportId: null,
       error: null,
       cancelRequested: false,
+      conversationOnly: false,
       activity: [],
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -5991,6 +6026,7 @@ export async function updateDesignJob(
     versionId?: string | null;
     exportId?: string | null;
     error?: string | null;
+    conversationOnly?: boolean;
   },
   now?: number,
 ): Promise<DesignJob> {
@@ -6029,6 +6065,12 @@ export async function updateDesignJob(
         throw new DesignStorageError("invalid-input", "Job error is invalid");
       }
       job.error = patch.error;
+    }
+    if (patch.conversationOnly !== undefined) {
+      if (typeof patch.conversationOnly !== "boolean" || job.kind !== "main-agent" || job.status !== "running") {
+        throw new DesignStorageError("invalid-input", "Only a running Main Agent Job may bind conversation semantics");
+      }
+      job.conversationOnly = patch.conversationOnly;
     }
     if (patch.status !== undefined && patch.status !== job.status) {
       if (!JOB_TRANSITIONS[job.status].has(patch.status)) {

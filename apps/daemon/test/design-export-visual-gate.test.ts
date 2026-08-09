@@ -60,6 +60,21 @@ function smallControlPng(includeControl: boolean): Buffer {
   return canvas.toBuffer("image/png");
 }
 
+function registrationPatternPng(offsetX: number, offsetY: number): Buffer {
+  const canvas = createCanvas(256, 192);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#f6f1e8";
+  context.fillRect(0, 0, 256, 192);
+  context.save();
+  context.translate(offsetX, offsetY);
+  context.fillStyle = "#17202a";
+  for (let x = 12; x < 244; x += 4) context.fillRect(x, 12, 1, 168);
+  context.fillStyle = "#c48b9f";
+  for (let y = 16; y < 176; y += 8) context.fillRect(16, y, 224, 2);
+  context.restore();
+  return canvas.toBuffer("image/png");
+}
+
 function visualContext(): DesignFrozenContext {
   return {
     schemaVersion: 2,
@@ -127,6 +142,7 @@ test("Design Export visual comparison accepts byte-distinct PNGs with identical 
   const result = await compareDesignExportScreenshots(source, output);
 
   assert.equal(result.passed, true);
+  assert.deepEqual(result.alignment, { offsetX: 0, offsetY: 0 });
   assert.deepEqual(result.metrics, {
     meanAbsoluteError: 0,
     changedPixelRatio: 0,
@@ -135,6 +151,28 @@ test("Design Export visual comparison accepts byte-distinct PNGs with identical 
     minimumSsim: 1,
   });
   assert.equal(result.diffPng.length > 0, true);
+});
+
+test("Design Export visual comparison registers a bounded one-pixel viewport offset", async () => {
+  const result = await compareDesignExportScreenshots(
+    registrationPatternPng(0, 0),
+    registrationPatternPng(1, 1),
+  );
+
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.alignment, { offsetX: 1, offsetY: 1 });
+  assert.equal(result.metrics.changedPixelRatio, 0);
+});
+
+test("Design Export visual comparison does not hide a two-pixel viewport offset", async () => {
+  const result = await compareDesignExportScreenshots(
+    registrationPatternPng(0, 0),
+    registrationPatternPng(2, 0),
+  );
+
+  assert.equal(result.passed, false);
+  assert.equal(Math.abs(result.alignment.offsetX) <= 1, true);
+  assert.equal(Math.abs(result.alignment.offsetY) <= 1, true);
 });
 
 test("Design Export visual comparison rejects a missing local region", async () => {
@@ -165,10 +203,31 @@ test("Design Export visual comparison rejects one missing local control on a lar
   assert.equal(result.passed, false);
 });
 
-test("Design Export visual gate validates desktop and mobile and writes a byte-bound receipt", async () => {
+test("Design Export visual gate validates desktop and mobile while ignoring material Version routes", async () => {
   const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-receipt-"));
   const screenshot = patchedPng(128, 96, "#f6f1e8", "#17202a");
   const context = visualContext();
+  context.nodes.push({
+    id: "node-image",
+    kind: "image",
+    name: "Reference",
+    state: "ready",
+    geometry: { x: 1300, y: 0, width: 320, height: 240 },
+    selectedVersionId: "version-image",
+    selectedVersionContentKind: "asset",
+    selectedVersionChecksum: "c".repeat(64),
+    selectedVersionBytes: 64,
+    selectedVersionPath: ".context/assets/asset-image/original.webp",
+    selectedVersionJobId: null,
+    selectedVersionRunnerId: null,
+    selectedVersionModel: null,
+    selectedVersionAssetPins: [],
+    assetId: "asset-image",
+    assetChecksum: "c".repeat(64),
+    assetBytes: 64,
+    assetPath: ".context/assets/asset-image/original.webp",
+    assetBundleFiles: [],
+  });
   let closed = false;
   const captureSession: DesignExportVisualCaptureSession = {
     browserVersion: "Chrome/fixture",
@@ -188,10 +247,20 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
   };
   try {
     await mkdir(join(stagingDir, "dist"));
+    const provenance = visualProvenance();
     const result = await runDesignExportVisualGate({
       stagingDir,
       exportId: "export-visual",
-      ...visualProvenance(),
+      execution: provenance.execution,
+      sources: [...provenance.sources, {
+        nodeId: "node-image",
+        nodeKind: "image",
+        versionId: "version-image",
+        checksum: "c".repeat(64),
+        sourceJobId: null,
+        sourceProviderId: null,
+        sourceModel: null,
+      }],
       sourcePreviewOrigin: "http://127.0.0.1:34567",
       context,
       signal: new AbortController().signal,
@@ -210,12 +279,16 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
     assert.equal(receipt.jobId, "job-export");
     assert.equal(receipt.providerId, "codebuddy");
     assert.equal(receipt.model, "hy3-ioa");
+    assert.equal(receipt.capturePolicy.screenshotRegistration, "bounded-to-one-css-pixel-per-axis");
     assert.deepEqual(receipt.rootChecks.map((entry: { viewport: { name: string } }) => entry.viewport.name), ["desktop", "mobile"]);
     assert.equal(receipt.rootChecks.every((entry: { passed: boolean }) => entry.passed), true);
     assert.equal(receipt.rootChecks.every((entry: { nodeId: string }) => entry.nodeId === "node-page"), true);
     assert.equal(receipt.rootChecks.every((entry: { versionId: string }) => entry.versionId === "version-one"), true);
     assert.equal(receipt.rootChecks.every((entry: { sourceJobId: string }) => entry.sourceJobId === "job-source"), true);
-    assert.equal(receipt.rootChecks.every((entry: { metrics: { meanSsim: number } }) => entry.metrics.meanSsim === 1), true);
+    assert.equal(receipt.rootChecks.every((entry: {
+      metrics: { meanSsim: number };
+      alignment: { offsetX: number; offsetY: number };
+    }) => entry.metrics.meanSsim === 1 && entry.alignment.offsetX === 0 && entry.alignment.offsetY === 0), true);
     for (const rootCheck of receipt.rootChecks as Array<{ evidence: Record<string, { path: string; checksum: string; bytes: number }> }>) {
       assert.deepEqual(Object.keys(rootCheck.evidence), ["source", "output", "diff"]);
       for (const evidence of Object.values(rootCheck.evidence)) {
@@ -225,11 +298,43 @@ test("Design Export visual gate validates desktop and mobile and writes a byte-b
       }
     }
     assert.deepEqual(receipt.cases.map((entry: { viewport: { name: string } }) => entry.viewport.name), ["desktop", "mobile"]);
-    assert.equal(receipt.cases.every((entry: { passed: boolean }) => entry.passed), true);
+    assert.equal(receipt.cases.every((entry: {
+      passed: boolean;
+      alignment: { offsetX: number; offsetY: number };
+    }) => entry.passed && Math.abs(entry.alignment.offsetX) <= 1 && Math.abs(entry.alignment.offsetY) <= 1), true);
     assert.equal(receipt.cases.every((entry: { sourceJobId: string }) => entry.sourceJobId === "job-source"), true);
     assert.equal(receipt.cases.every((entry: { sourceProviderId: string }) => entry.sourceProviderId === "codebuddy"), true);
     assert.equal(receipt.cases.every((entry: { sourceModel: string }) => entry.sourceModel === "hy3-ioa"), true);
     assert.equal(receipt.createdAt, 123_456);
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate rejects an extra material source outside the frozen context", async () => {
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-extra-source-"));
+  try {
+    const provenance = visualProvenance();
+    await assert.rejects(
+      runDesignExportVisualGate({
+        stagingDir,
+        exportId: "export-extra-source",
+        ...provenance,
+        sources: [...provenance.sources, {
+          nodeId: "node-extra-image",
+          nodeKind: "image",
+          versionId: "version-extra-image",
+          checksum: "d".repeat(64),
+          sourceJobId: null,
+          sourceProviderId: null,
+          sourceModel: null,
+        }],
+        sourcePreviewOrigin: "http://127.0.0.1:34567",
+        context: visualContext(),
+        signal: new AbortController().signal,
+      }),
+      /source Version provenance does not match the frozen Canvas/i,
+    );
   } finally {
     await rm(stagingDir, { recursive: true, force: true });
   }
@@ -553,6 +658,58 @@ test("Design Export visual gate blocks external network in real Chrome", async (
       /root application.*desktop 1280x800.*blocked external request.*network\.invalid/i,
     );
     await assert.rejects(readFile(join(stagingDir, "validation", "visual", "receipt.json")));
+  } finally {
+    await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+});
+
+test("Design Export visual gate eagerly settles off-screen lazy images", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the Design Export visual gate adapter");
+    return;
+  }
+  const stagingDir = await mkdtemp(join(tmpdir(), "dezin-export-visual-lazy-image-"));
+  const pixel = solidPng(8, 8, "#c48b9f");
+  const css = `html,body{margin:0;background:#f6f1e8;color:#17202a}
+    main{min-height:7000px}.visible{height:800px;display:grid;place-items:center}
+    .spacer{height:6000px}img{display:block;width:8px;height:8px}`;
+  const html = `<!doctype html><html><head><link rel="stylesheet" href="/style.css"></head><body>
+    <main data-dezin-export-node-id="node-page"><div class="visible">Lazy image boundary</div>
+    <div class="spacer"></div><img loading="lazy" src="/pixel.png" alt=""></main></body></html>`;
+  const sourceServer = createServer((request, response) => {
+    const pathname = new URL(request.url ?? "/", "http://source.local").pathname;
+    if (pathname === "/style.css") {
+      response.writeHead(200, { "content-type": "text/css; charset=utf-8" });
+      response.end(css);
+      return;
+    }
+    if (pathname === "/pixel.png") {
+      response.writeHead(200, { "content-type": "image/png" });
+      response.end(pixel);
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(html);
+  });
+  await new Promise<void>((resolve) => sourceServer.listen(0, "127.0.0.1", resolve));
+  const { port } = sourceServer.address() as AddressInfo;
+  try {
+    await mkdir(join(stagingDir, "dist"), { recursive: true });
+    await Promise.all([
+      writeFile(join(stagingDir, "dist", "index.html"), html),
+      writeFile(join(stagingDir, "dist", "style.css"), css),
+      writeFile(join(stagingDir, "dist", "pixel.png"), pixel),
+    ]);
+    const result = await runDesignExportVisualGate({
+      stagingDir,
+      exportId: "export-lazy-image-settle",
+      ...visualProvenance(),
+      sourcePreviewOrigin: `http://127.0.0.1:${port}`,
+      context: visualContext(),
+      signal: new AbortController().signal,
+    });
+    assert.match(result.receiptChecksum, /^[a-f0-9]{64}$/);
   } finally {
     await new Promise<void>((resolve) => sourceServer.close(() => resolve()));
     await rm(stagingDir, { recursive: true, force: true });

@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { Components } from "streamdown";
 
+import { explicitExternalImageHref, localPassiveImageSource } from "../lib/local-media-url.ts";
 import { cn } from "../lib/utils.ts";
 
 interface CitationReference {
@@ -259,15 +260,22 @@ function AgentUnorderedList({ children, className }: ComponentPropsWithoutRef<"u
 }
 
 function AgentGeneratedImage({ src, alt = "", title }: ComponentPropsWithoutRef<"img">) {
-  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const localSrc = localPassiveImageSource(src);
+  const externalHref = explicitExternalImageHref(src);
+  const [state, setState] = useState<"loading" | "ready" | "failed" | "blocked">(
+    localSrc ? "loading" : src ? "blocked" : "failed",
+  );
+  useEffect(() => {
+    setState(localSrc ? "loading" : src ? "blocked" : "failed");
+  }, [localSrc, src]);
   return (
     <figure className="agent-generated-image" data-agent-component="image-generation" data-state={state}>
       <div className="agent-generated-image__canvas">
         <span className="agent-generated-image__dots" aria-hidden />
         <span className="agent-generated-image__glow" aria-hidden />
-        {src ? (
+        {localSrc ? (
           <img
-            src={src}
+            src={localSrc}
             alt={alt}
             title={title}
             loading="lazy"
@@ -276,11 +284,20 @@ function AgentGeneratedImage({ src, alt = "", title }: ComponentPropsWithoutRef<
           />
         ) : null}
         <span className="agent-generated-image__badge">Image</span>
-        {state === "failed" ? <ImageIcon className="agent-generated-image__fallback" aria-hidden /> : null}
+        {state === "failed" || state === "blocked" ? <ImageIcon className="agent-generated-image__fallback" aria-hidden /> : null}
       </div>
       <figcaption>
-        <strong>{state === "loading" ? "Generating image" : state === "ready" ? "Generated image" : "Image unavailable"}</strong>
+        <strong>{state === "loading"
+          ? "Generating image"
+          : state === "ready"
+            ? "Generated image"
+            : state === "blocked"
+              ? "External image blocked"
+              : "Image unavailable"}</strong>
         {alt ? <span>“{alt}”</span> : null}
+        {state === "blocked" && externalHref ? (
+          <a className="agent-response-link" href={externalHref} target="_blank" rel="noreferrer">Open image explicitly</a>
+        ) : null}
       </figcaption>
     </figure>
   );

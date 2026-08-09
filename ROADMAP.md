@@ -1,36 +1,53 @@
 # Roadmap
 
-Dezin is an early open-source release. The core loop — describe → generate → lint → repair → preview → export — works end to end, across multiple agent CLIs, in both Prototype and Standard modes. This file is an honest list of what's solid and what's still rough or unbuilt.
+Dezin is an early open-source Design Canvas. This file describes the current product, not the retired Prototype/Standard workspace.
 
 ## Shipped
 
-- Closed anti-slop **lint → repair loop** with a single source of truth (linter rules generate the craft doc; a drift test enforces it).
-- **Multi-agent BYOK** — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, Hermes — scanned from PATH, picked per run, with the agent's real version.
-- **Prototype** (single HTML) and **Standard** (Vite + React project) build modes.
-- **33 built-in design systems** with brand marks; import your own from a code folder or a `.fig` file.
-- **Variant branches**: fork, iterate independently, and **compare** with a draggable slider.
-- **Parallel variant generation**: fan one Standard prompt out to 2–4 seeded branches, run each independently, and compare the results without stealing the active branch.
-- **Versions workspace**: per-branch run/version history, file preview, restore, diff, compare, and chat jump actions.
-- **References**: attach another project's real artifact, drop screenshots, paste local paths.
-- **Moodboards**: create local boards for visual references, arrange images/notes/sections/generator nodes on the canvas, and use a board-scoped Agent panel.
-- **Project-to-Moodboard references**: attach a Moodboard from the project composer; the Agent receives budgeted board structure, notes, recent context, and local asset paths without storing a full canvas dump in the visible conversation.
-- Streaming **process view**, durable run event replay/reconnect, sandboxed preview, `.zip` export, command palette, dark mode.
-- Optional **agent-backed visual QA** for rendered screenshots and viewport geometry.
-- **Electron desktop** shell with off-screen capture, and a **Chrome extension** for cover-image capture.
-- **Live agent model discovery with seed fallback**: providers use their CLI/API model list when available and retain curated seed models when discovery is unavailable.
-- **CI quality gates**: full workspace tests, measured coverage floors, typechecking, bundle budgets, child-process leak detection, and high-severity production dependency audit.
+- Infinite **Design Canvas** with typed generative and material Nodes.
+- Immutable, checksum-bound Node Versions and content-addressed Asset bundles.
+- Revision-CAS Canvas mutations, local viewport authority, undo/redo, semantic arrange, resize, and version switching.
+- **Main Agent** text conversation, bounded Canvas plans, and scoped child dispatches.
+- **Node Agents** with frozen Canvas context and target-only publication.
+- Installed-provider/custom-CLI selection with model discovery; strict Claude/CodeBuddy execution identity and exact pending-directory confinement for every Design runner.
+- Provider-neutral durable Job activity, cancellation, idempotency, restart recovery, and semantic status presentation.
+- Atomic migration backup and receipt before destructive retirement of old SQLite Design tables.
+- Imported images/documents and exact cross-project Version references.
+- Local single-HTML Node preview with strict URL, DOM-capability, asset, and responsive-output validation.
+- **Implementation Export** to an immutable local Vite + TypeScript directory with a frozen manifest, strict source/built-output scanning, CSP, TypeScript, isolated Vite build, and Chrome desktop/mobile visual evidence.
+- One bounded continuation for incomplete/timeout Export work and one bounded validation-repair turn.
+- Moodboards, Design Systems, Effects, Settings, Electron development shell, and Chrome reference-capture extension.
+- CI gates for tests, measured coverage floors, typechecking, bundle budgets, child-process leaks, and high-severity production dependency audit.
 
-## TODO / rough edges
+## Required before the next release
 
-- [ ] **Standard-mode hardening.** Building real Vite projects works but is newer than the prototype path; expect more edge cases (dependency installs, dev-server lifecycle, larger file trees).
-- [ ] **Design-system import depth.** `.fig` parsing extracts palette / frames / fonts; code-folder import hands files to the agent. Neither yet produces a full 9-section `DESIGN.md` as polished as the hand-authored built-ins.
-- [ ] **Desktop packaging.** The Electron app runs, but code-signing, notarization, and distribution (installers, auto-update) are intentionally not done.
-- [ ] **Chrome extension polish.** Functional capture-to-composer; not packaged for the Web Store, limited site coverage.
-- [ ] **Release automation.** CI quality gates now run on pushes and pull requests, but tagged release packaging and publishing remain manual.
-- [ ] **Broader test coverage** for newer UI surfaces and workflows (agent scan, references, Moodboard edge cases, Standard-mode edge cases).
+- [ ] Complete a quota-backed production-path CodeBuddy `hy3-ioa` Canvas + Implementation Export receipt, including every deterministic Node route and immutable output hash.
+- [ ] Add provider-version black-box confinement receipts for additional real CLIs; generic providers are available, but do not yet have Claude/CodeBuddy's verified tool and execution-identity guarantees.
+- [ ] Exercise first-fit geometry, persisted resize, light/dark appearance, reduced motion, tooltips, and live activity motion in packaged Electron on macOS.
+- [ ] Package, sign, notarize, and distribute the Electron application.
+
+## Architecture follow-ups
+
+- [ ] Split Canvas storage into Canvas state, Asset/Version publication, Job/Thread ledger, frozen context, and static validation modules.
+- [ ] Extract Implementation Export from the global-Agent module behind one production adapter shared by HTTP and QA.
+- [ ] Stream persisted Job activity over SSE instead of polling while preserving durable replay.
+- [ ] Move the initial Home→Canvas intent handoff from session storage to an idempotent daemon bootstrap Job.
+- [ ] Publish shared pure Design Canvas contracts for daemon and Web rather than maintaining mirrored unions.
+- [ ] Split the largest Canvas screen and Agent panel along controller/view boundaries and add focused browser interaction coverage.
+
+## Formally retired from the primary Canvas contract
+
+The repository still contains useful standalone or historical code for these concepts, but the current application does not claim them as shipped Canvas features:
+
+- Prototype/Standard build-mode selection.
+- Project variant branches and the old Files/Versions workspace.
+- The staged Research direction gate.
+- The global `skills × design systems × craft` prompt stack.
+- The legacy `@dezin/quality` anti-slop lint→repair loop as a Canvas publication gate.
+- Browser ZIP download for Implementation Export; publication currently produces a local immutable directory.
+
+Reintroducing one of these requires a new Canvas-native contract, tests, and documentation—it must not be inferred from the retained package alone.
 
 ## Explicitly out of scope
 
-Deliberately not built, and not planned: telemetry, hosted inference / a paid model router, a plugin marketplace, "connectors", GitHub code-linking as a managed integration, and ambient automation. Dezin stays local-first and BYOK.
-
-Have a use case that needs one of the TODOs? Open an issue — see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+Hosted inference, a paid model router, telemetry, managed connectors, a plugin marketplace, and ambient background automation. Dezin remains local-state-first and uses provider CLIs under the user's own accounts.

@@ -1,5 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { explicitExternalImageHref, localPassiveImageSource } from "../lib/local-media-url.ts";
 import { cn } from "../lib/utils.ts";
 
 /**
@@ -26,6 +27,18 @@ export function Markdown({ children, className }: { children: string; className?
               {children}
             </a>
           ),
+          img: ({ src, alt }) => {
+            const localSrc = localPassiveImageSource(src);
+            const externalHref = explicitExternalImageHref(src);
+            if (localSrc) {
+              return <img src={localSrc} alt={alt ?? ""} loading="lazy" className="max-w-full rounded-lg" />;
+            }
+            return externalHref ? (
+              <a href={externalHref} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
+                External image blocked{alt ? `: ${alt}` : ""}
+              </a>
+            ) : <span>Unsafe image link blocked{alt ? `: ${alt}` : ""}</span>;
+          },
           blockquote: ({ children }) => (
             <blockquote className="border-l-2 border-border pl-3 text-muted-foreground">{children}</blockquote>
           ),

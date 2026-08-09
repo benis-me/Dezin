@@ -611,14 +611,14 @@
 .design-canvas-agent__activity > header { display: flex; min-height: 48px; align-items: center; gap: 3px; padding: 3px 5px 3px 4px; }
 .design-canvas-agent__activity-toggle { display: grid; min-width: 0; flex: 1; grid-template-columns: 28px minmax(0, 1fr) 18px; align-items: center; gap: 7px; border-radius: 9px; padding: 4px 5px; text-align: left; }
 .design-canvas-agent__activity-toggle:hover { background: color-mix(in oklch, var(--foreground) 4.5%, transparent); }
-.design-canvas-agent__activity-status { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 8px; background: color-mix(in oklch, var(--background) 90%, transparent); color: var(--muted-foreground); }
+.design-canvas-agent__activity-status { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 8px; background: color-mix(in srgb, var(--muted-foreground) 8%, var(--card)); color: var(--muted-foreground); }
 .design-canvas-agent__activity-status svg { width: 13px; height: 13px; stroke-width: 1.8; }
-.design-canvas-agent__activity-status[data-status="ready"] { background: color-mix(in oklch, var(--success) 9%, var(--background)); color: var(--success); }
-.design-canvas-agent__activity-status[data-status="failed"] { background: color-mix(in oklch, var(--destructive) 8%, var(--background)); color: var(--destructive); }
-.design-canvas-agent__activity-status[data-status="queued"] { background: color-mix(in oklch, var(--warning) 9%, var(--background)); color: var(--warning); }
+.design-canvas-agent__activity-status[data-status="ready"] { background: color-mix(in srgb, var(--success) 11%, var(--card)); color: var(--success); box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--success) 18%, transparent); }
+.design-canvas-agent__activity-status[data-status="failed"] { background: color-mix(in srgb, var(--destructive) 10%, var(--card)); color: var(--destructive); box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--destructive) 16%, transparent); }
+.design-canvas-agent__activity-status[data-status="queued"] { background: color-mix(in srgb, var(--warning) 11%, var(--card)); color: var(--warning); }
 .design-canvas-agent__activity-status[data-status="running"],
-.design-canvas-agent__activity-status[data-status="validating"] { background: color-mix(in oklch, var(--design-canvas-accent) 9%, var(--background)); color: var(--design-canvas-accent); }
-.design-canvas-agent__activity-status[data-status="cancelled"] { background: color-mix(in oklch, var(--warning) 8%, var(--background)); color: var(--warning); }
+.design-canvas-agent__activity-status[data-status="validating"] { background: color-mix(in srgb, var(--design-canvas-accent) 11%, var(--card)); color: var(--design-canvas-accent); }
+.design-canvas-agent__activity-status[data-status="cancelled"] { background: color-mix(in srgb, var(--warning) 10%, var(--card)); color: var(--warning); }
 .design-canvas-agent__activity-status[data-status="queued"] svg,
 .design-canvas-agent__activity-status[data-status="running"] svg,
 .design-canvas-agent__activity-status[data-status="validating"] svg { animation: design-canvas-spin 900ms linear infinite; }
@@ -634,7 +634,7 @@
 .design-canvas-agent__activity-collapsible[data-collapsed] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
 .design-canvas-agent__activity-collapsible > div { min-height: 0; overflow: hidden; }
 .design-canvas-agent__activity-body { display: grid; gap: 10px; border-top: 1px solid color-mix(in oklch, var(--border) 66%, transparent); padding: 10px; }
-.design-canvas-agent__activity-result { margin: 0 10px 10px; border: 1px solid color-mix(in oklch, var(--success) 13%, var(--border)); border-radius: 9px; padding: 9px; background: color-mix(in oklch, var(--success) 2.8%, var(--background)); color: var(--muted-foreground); font-size: 10px; }
+.design-canvas-agent__activity-result { margin: 0 10px 10px; border: 1px solid color-mix(in srgb, var(--success) 14%, var(--border)); border-radius: 9px; padding: 9px; background: color-mix(in srgb, var(--success) 3%, var(--card)); color: var(--muted-foreground); font-size: 10px; }
 .design-canvas-agent__activity-result > p { color: var(--foreground); font-size: 11.5px; font-weight: 550; }
 .design-canvas-agent__activity-result > code,
 .design-canvas-agent__activity-result > small { display: block; overflow: hidden; margin-top: 5px; font-size: 9.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }

@@ -3,7 +3,6 @@ import {
   AgentImageGenerationState,
   AgentProgressList,
   AgentReasoning,
-  AgentThinkingState,
   AgentWebSearch,
   type AgentProgressItem,
   type AgentSearchResult,
@@ -203,11 +202,22 @@ function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | n
     if (grouped) grouped.push(child);
     else childrenByParent.set(child.parentJobId!, [child]);
   }
-  const groups = parents.map((parent) => ({
-    parentJobId: parent.id,
-    label: boundedTurnLabel(thread, parent),
-    jobs: [parent, ...(childrenByParent.get(parent.id) ?? [])],
-  }));
+  const groups = parents.flatMap((parent) => {
+    const groupedChildren = childrenByParent.get(parent.id) ?? [];
+    const hasAssistantReply = thread?.messages.some((message) => (
+      message.role === "assistant" && message.jobId === parent.id
+    )) ?? false;
+    const conversationOnly = parent.kind === "main-agent"
+      && parent.status === "ready"
+      && parent.conversationOnly === true
+      && groupedChildren.length === 0
+      && hasAssistantReply;
+    return conversationOnly ? [] : [{
+      parentJobId: parent.id,
+      label: boundedTurnLabel(thread, parent),
+      jobs: [parent, ...groupedChildren],
+    }];
+  });
   const visibleParents = new Set(parents.map((parent) => parent.id));
   for (const [parentJobId, orphanedChildren] of childrenByParent) {
     if (visibleParents.has(parentJobId)) continue;
@@ -348,11 +358,11 @@ export function CanvasAgentPanel({
     () => scope.type === "main" ? groupMainAgentJobs(relatedJobs, thread) : [],
     [relatedJobs, scope.type, thread],
   );
-  const confinedAgents = useMemo(
+  const availableAgents = useMemo(
     () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
     [agents],
   );
-  const activeConfinedAgent = confinedAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
+  const activeAgent = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
   const live = relatedJobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
   const transcriptTailKey = relatedJobs.map((job) => (
     `${job.id}:${job.status}:${job.activity.length}:${job.error ?? ""}`
@@ -385,20 +395,20 @@ export function CanvasAgentPanel({
   }, [nodes]);
 
   useEffect(() => {
-    const active = confinedAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
+    const active = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
     if (active) {
       if (agentSelection.model && !active.models.includes(agentSelection.model)) {
         setAgentSelection({ agentCommand: active.command, model: "" });
       }
       return;
     }
-    const fallback = confinedAgents[0] ?? null;
+    const fallback = availableAgents[0] ?? null;
     if (fallback) {
       setAgentSelection({ agentCommand: fallback.command, model: "" });
     } else if (agentSelection.agentCommand || agentSelection.model) {
       setAgentSelection({ agentCommand: "", model: "" });
     }
-  }, [agentSelection.agentCommand, agentSelection.model, confinedAgents, setAgentSelection]);
+  }, [agentSelection.agentCommand, agentSelection.model, availableAgents, setAgentSelection]);
 
   useEffect(() => {
     if (!live) return;
@@ -413,12 +423,12 @@ export function CanvasAgentPanel({
 
   const submit = async () => {
     const prompt = draft.trim();
-    if (!prompt || submitting || !activeConfinedAgent) return;
+    if (!prompt || submitting || !activeAgent) return;
     setSubmitting(true);
     setThreadError(null);
     try {
       await onSubmit(prompt, contextNodeIds, {
-        agentCommand: activeConfinedAgent.command,
+        agentCommand: activeAgent.command,
         ...(agentSelection.model
           ? { model: agentSelection.model }
           : { model: null }),
@@ -610,9 +620,9 @@ export function CanvasAgentPanel({
               <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
                 <Paperclip aria-hidden />
               </Button>
-              {confinedAgents.length > 0 ? (
+              {availableAgents.length > 0 ? (
                 <AgentModelSelect
-                  agents={confinedAgents}
+                  agents={availableAgents}
                   agent={agentSelection.agentCommand}
                   model={agentSelection.model}
                   onAgentChange={(agentCommand) => {
@@ -634,7 +644,7 @@ export function CanvasAgentPanel({
                   variant="ghost"
                   size="xs"
                   className="design-canvas-agent__agent-unavailable"
-                  title="No compatible Design Agent is currently available"
+                  title="No Design Agent is currently available"
                   onClick={() => {
                     void onRescanAgents().catch((problem) => {
                       setThreadError(problem instanceof Error ? problem.message : String(problem));
@@ -648,7 +658,7 @@ export function CanvasAgentPanel({
             <Button
               size="icon-sm"
               aria-label={`Send to ${title}`}
-              disabled={!draft.trim() || submitting || !activeConfinedAgent}
+              disabled={!draft.trim() || submitting || !activeAgent}
               onClick={() => void submit()}
               className="size-7"
             >
@@ -832,7 +842,6 @@ function AgentActivityCard({
             ) : null}
             {active && imagePrompt ? <AgentImageGenerationState prompt={imagePrompt} /> : null}
             <AgentProgressList items={progressItems} defaultOpen={active || job.status === "failed"} />
-            {active && job.activity.length === 0 ? <AgentThinkingState /> : null}
           </div>
           {job.kind === "implementation-export" && job.exportId ? (
             <div className="design-canvas-agent__activity-result">

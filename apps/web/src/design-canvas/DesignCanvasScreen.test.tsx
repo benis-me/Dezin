@@ -640,7 +640,7 @@ test("Agent transcripts ignore an older request that resolves after a newer refr
   expect(screen.getByText("Newest transcript")).toBeInTheDocument();
 });
 
-test("Canvas Agent ignores an initial unconfined provider and submits with available Claude", async () => {
+test("Canvas Agent accepts any available runtime provider", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas());
   const onSubmit = vi.fn(async () => {});
@@ -666,18 +666,14 @@ test("Canvas Agent ignores an initial unconfined provider and submits with avail
     />,
   );
 
-  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Claude"));
-  await user.click(screen.getByRole("button", { name: "Agent and model" }));
-  expect(screen.queryByRole("button", { name: /Codex/ })).not.toBeInTheDocument();
-  await user.click(await screen.findByRole("button", { name: "Default" }));
-  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Codex"));
   await user.type(screen.getByRole("textbox", { name: "Main Agent message" }), "Coordinate the redesign");
   await user.click(screen.getByRole("button", { name: "Send to Main Agent" }));
 
   await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
     "Coordinate the redesign",
     [],
-    { agentCommand: "claude", model: null },
+    { agentCommand: "codex", model: "gpt-5" },
   ));
 });
 
@@ -765,7 +761,7 @@ test("Canvas Agent keeps its action row stable and offers a generic rescan when 
   );
 
   const unavailable = await screen.findByRole("button", { name: "Agent unavailable" });
-  expect(unavailable).toHaveAttribute("title", "No compatible Design Agent is currently available");
+  expect(unavailable).toHaveAttribute("title", "No Design Agent is currently available");
   expect(screen.queryByRole("button", { name: "Agent and model" })).not.toBeInTheDocument();
   expect(screen.queryByText(/Claude|CodeBuddy/)).not.toBeInTheDocument();
   await user.click(unavailable);
@@ -824,6 +820,66 @@ test("Node and Main Agent composers both fail closed without a compatible runtim
   expect(within(mainPanel).getByRole("button", { name: "Send to Main Agent" })).toBeDisabled();
   expect(within(mainPanel).getByRole("button", { name: "Agent unavailable" })).toBeInTheDocument();
   expect(api.submitAgentTurn).not.toHaveBeenCalled();
+});
+
+test("A new Agent Job renders one Thinking placeholder, not two", async () => {
+  const { api } = createCanvasApi(canvas());
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={[{ ...job, id: "job-thinking", status: "running", activity: [], finishedAt: null }]}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  expect(await screen.findAllByText("Thinking")).toHaveLength(1);
+});
+
+test("A completed conversational Main Agent turn renders as a message without an activity card", async () => {
+  const { api } = createCanvasApi(canvas());
+  const conversationJob = {
+    ...job,
+    id: "job-conversation",
+    conversationOnly: true,
+    activity: [
+      { id: "activity-reasoning", kind: "status" as const, text: "Reviewed the request", createdAt: 1 },
+      { id: "activity-conversation", kind: "text" as const, text: "你好！", createdAt: 2 },
+    ],
+  };
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [
+      { id: "message-user", role: "user", content: "你好", jobId: conversationJob.id, createdAt: 1 },
+      { id: "message-assistant", role: "assistant", content: "你好！有什么我可以帮你的？", jobId: conversationJob.id, createdAt: 2 },
+    ],
+  });
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={[conversationJob]}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  expect(await screen.findByText("你好！有什么我可以帮你的？")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
+  expect(screen.queryByText("Canvas plan")).not.toBeInTheDocument();
 });
 
 test("Node Agent activity stays chronological so a successful retry is the visible tail", async () => {
@@ -1031,7 +1087,7 @@ test("Export opens Main Agent and keeps the implementation job visible through c
   expect(await screen.findByText("Opened in Finder.")).toBeInTheDocument();
 });
 
-test("Export stays disabled with provider-neutral guidance when no compatible runtime Agent is available", async () => {
+test("Export stays disabled with provider-neutral guidance when no runtime Agent is available", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
   render(
@@ -1039,7 +1095,14 @@ test("Export stays disabled with provider-neutral guidance when no compatible ru
       projectId={PROJECT_ID}
       projectName="Editorial"
       api={api}
-      agents={[{ id: "codex", command: "codex", available: true, version: "1", models: ["gpt-5"] }]}
+      agents={[{
+        id: "codex",
+        command: "codex",
+        available: false,
+        availability: "authentication-required",
+        unavailableReason: "Authentication required",
+        models: ["gpt-5"],
+      }]}
       initialAgentCommand="codex"
       initialModel="gpt-5"
     />,
@@ -1047,7 +1110,7 @@ test("Export stays disabled with provider-neutral guidance when no compatible ru
 
   const exportButton = await screen.findByRole("button", { name: "Export code" });
   expect(exportButton).toBeDisabled();
-  expect(exportButton).toHaveAttribute("title", "No compatible Design Agent is currently available for export");
+  expect(exportButton).toHaveAttribute("title", "No Design Agent is currently available for export");
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   expect(within(screen.getByLabelText("Main Agent panel")).getByRole("button", { name: "Agent unavailable" })).toBeInTheDocument();
   expect(api.startImplementationExport).not.toHaveBeenCalled();

@@ -380,8 +380,9 @@ export class ClaudeCodeRunner implements AgentRunner {
     try {
       assertSuccessfulExit(command, output);
       if (parsed.isError) {
+        const detail = (parsed.result || parsed.text).trim().slice(0, 4_000);
         throw new AgentTurnError(
-          `${command} returned an error result${parsed.result ? `: ${parsed.result}` : ""}`,
+          `${command} returned an error result${detail ? `: ${detail}` : ""}`,
           executionIdentity,
         );
       }

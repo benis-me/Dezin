@@ -158,7 +158,7 @@
 .agent-task-list__collapsible[data-collapsed] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
 .agent-task-list__collapsible > div { min-height: 0; overflow: hidden; }
 .agent-task-list[data-collapsed] { padding: 5px 9px; background: color-mix(in oklch, var(--surface-2) 72%, var(--card)); }
-.agent-task-list[data-complete] { border-color: color-mix(in oklch, var(--success) 14%, var(--border)); background: color-mix(in oklch, var(--success) 2.8%, var(--card)); }
+.agent-task-list[data-complete] { border-color: color-mix(in srgb, var(--success) 14%, var(--border)); background: color-mix(in srgb, var(--success) 3%, var(--card)); }
 .agent-task-list[data-collapsed] .agent-task-list__chevron { opacity: 1; }
 .agent-task-list[data-collapsed] .agent-task-list__icon > svg:first-child { opacity: 0; }
 .agent-task-list__items { display: grid; gap: 7px; margin: 0; padding: 9px 0 0; list-style: none; }
@@ -249,7 +249,7 @@ a.agent-citation-mark:hover { background: var(--border); color: var(--foreground
 .agent-progress__collapsible[data-collapsed] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
 .agent-progress__collapsible > div { min-height: 0; overflow: hidden; }
 .agent-progress[data-collapsed] { padding: 5px 9px; background: color-mix(in oklch, var(--surface-2) 72%, var(--card)); }
-.agent-progress[data-complete] { border-color: color-mix(in oklch, var(--success) 14%, var(--border)); background: color-mix(in oklch, var(--success) 2.8%, var(--card)); }
+.agent-progress[data-complete] { border-color: color-mix(in srgb, var(--success) 14%, var(--border)); background: color-mix(in srgb, var(--success) 3%, var(--card)); }
 .agent-progress:not([data-complete]):not([data-collapsed]) { border-color: color-mix(in oklch, var(--design-canvas-accent, var(--ring)) 13%, var(--border)); background: color-mix(in oklch, var(--design-canvas-accent, var(--ring)) 2.4%, var(--card)); }
 .agent-progress[data-collapsed] .agent-progress__chevron { opacity: 1; }
 .agent-progress[data-collapsed] .agent-progress__header-icon > svg:first-child { opacity: 0; }

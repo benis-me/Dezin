@@ -44,6 +44,8 @@ test("Agent composer grows within explicit bounds without a separator above it",
 test("Agent Job cards reserve red surfaces for failures", () => {
   expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="ready"\][^\{]*\{[^}]*background:\s*var\(--card\);/s);
   expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*var\(--destructive\)[^}]*background:/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*color-mix\(in srgb, var\(--success\)/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*var\(--destructive\)/s);
   expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="(?:running|ready)"\][^{]*\{[^}]*background:[^;}]*var\(--destructive\)/s);
 });
 

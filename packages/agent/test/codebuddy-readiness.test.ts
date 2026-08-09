@@ -94,7 +94,10 @@ async function probe(fixture: Fixture, options: { signal?: AbortSignal; timeoutM
   assert.equal(typeof provider?.probeReadiness, "function");
   return provider!.probeReadiness!(fixture.command, {
     cwd: fixture.cwd,
-    timeoutMs: options.timeoutMs ?? 1_000,
+    // Node startup can approach one second when the coverage runner executes
+    // provider suites concurrently. Keep success fixtures comfortably above
+    // scheduler jitter; timeout/abort behavior uses explicit short deadlines.
+    timeoutMs: options.timeoutMs ?? 3_000,
     signal: options.signal,
   });
 }

@@ -171,6 +171,7 @@ export interface DesignJob {
   versionId: string | null;
   exportId: string | null;
   error: string | null;
+  conversationOnly?: boolean;
   activity: DesignJobActivity[];
   createdAt: number;
   updatedAt: number;

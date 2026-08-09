@@ -29,11 +29,10 @@ export interface DesignAgentTurnRequest extends DesignAgentSelection {
   idempotencyKey?: string;
 }
 
-export const DESIGN_AGENT_COMMANDS = ["codebuddy", "claude"] as const;
-export type DesignAgentCommand = (typeof DESIGN_AGENT_COMMANDS)[number];
+export type DesignAgentCommand = string;
 
 export function isDesignAgentCommand(value: string | undefined): value is DesignAgentCommand {
-  return value !== undefined && (DESIGN_AGENT_COMMANDS as readonly string[]).includes(value);
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 /** Export carries the exact selected Design Agent authority instead of

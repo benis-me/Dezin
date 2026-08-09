@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -268,6 +269,40 @@ test("Main Agent accepts only an exact JSON command envelope", () => {
   })), /unexpected field/i);
 });
 
+test("Main Agent accepts an ordinary text conversation without creating Canvas work", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-conversation-"));
+  const projectId = "project-main-conversation";
+  let dispatchCalls = 0;
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const started = await startDesignMainTurn({
+      dataDir,
+      projectId,
+      message: "你好",
+      runner: runner("conversation", async () => ({
+        text: "你好！有什么我可以帮你的？",
+        artifactHtml: "",
+      })),
+      systemPrompt: "Converse normally unless Canvas work is requested.",
+      async dispatchNode() {
+        dispatchCalls += 1;
+        throw new Error("conversation must not dispatch");
+      },
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Conversation failed");
+    assert.equal(completed.conversationOnly, true);
+    assert.equal(dispatchCalls, 0);
+    assert.equal((await getDesignCanvas(dataDir, projectId)).revision, 0);
+    const messages = (await getDesignThread(dataDir, projectId, { type: "main" })).messages;
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.equal(messages.at(-1)?.content, "你好！有什么我可以帮你的？");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Implementation Export prompt requires deterministic Node routes and visible identity markers", () => {
   const store = new Store(":memory:");
   try {
@@ -282,10 +317,22 @@ test("Implementation Export prompt requires deterministic Node routes and visibl
     assert.match(prompt, /daemon-seeded byte-for-byte at public\/assets\/<assetId>\/<relative path>/i);
     assert.match(prompt, /do not alter or delete the seeded files/i);
     assert.match(prompt, /verify every Write path includes its required \.ts or \.css extension/i);
+    assert.match(prompt, /at least one non-empty static src\/\*\*\/\*\.css stylesheet/i);
+    assert.match(prompt, /every stylesheet imported through the TypeScript module graph/i);
+    assert.match(prompt, /never place CSS in TypeScript strings or create\/inject style or link elements at runtime/i);
+    assert.match(prompt, /scope route styles under each Node root/i);
+    assert.match(prompt, /element bearing data-dezin-export-node-id is itself the route root/i);
+    assert.match(prompt, /&\.board.*\[data-dezin-export-node-id\]\.board/i);
+    assert.match(prompt, /never a descendant selector.*\[data-dezin-export-node-id\] \.board/i);
+    assert.match(prompt, /Frozen Nodes may disagree in their :root variables and body typography/i);
+    assert.match(prompt, /preserve each Version's exact custom-property values, font stack, font size, line height/i);
+    assert.match(prompt, /Do not collapse Node-specific root\/body baselines into one shared global token declaration/i);
     assert.match(prompt, /one mistyped path makes the entire Export fail/i);
     assert.match(prompt, /every document\.createElement\/createElementNS tag argument.*static validation can prove safe/i);
     assert.match(prompt, /never define or use generic el\(tag, attrs\), svgEl\(tag, attrs\)/i);
-    assert.match(prompt, /every value written to src, srcset, href, poster, action, or formAction must likewise be a literal or same-scope immutable constant at the DOM write/i);
+    assert.match(prompt, /every value written to src, srcset, href, poster, action, or formAction must likewise be a literal or a finite same-scope immutable literal set/i);
+    assert.match(prompt, /copying a function parameter or object property into a const does not make it proven/i);
+    assert.match(prompt, /fresh-code bans also apply inside comments and displayed specimen\/code strings/i);
     assert.match(prompt, /never define generic a\(href, \.\.\.\) or img\(src, \.\.\.\) helpers/i);
     assert.match(prompt, /helper declaration, call arity, return type, and import exactly consistent under strict TypeScript/i);
     assert.match(prompt, /never add a declare module "\*\.css" augmentation inside a \.ts file/i);
@@ -351,6 +398,7 @@ test("Main Agent atomically applies Canvas commands and exposes best-effort chil
     assert.equal(started.job.model, null);
     const completed = await started.completion;
     assert.equal(completed.status, "ready", completed.error ?? "Main Agent did not complete");
+    assert.equal(completed.conversationOnly, false);
 
     const canvas = await getDesignCanvas(dataDir, projectId);
     assert.equal(canvas.revision, 2, "one Canvas CAS plus one child Job state transition");
@@ -1020,20 +1068,34 @@ test("Implementation Export publishes a fresh built Vite project with a byte-bou
       dataDir: fixture.dataDir,
       projectId: fixture.projectId,
       canvasRevision: fixture.canvasRevision,
-      runner: runner("fresh-vite", async (input) => ({
-        ...await writeFreshViteProject(input),
-        executionIdentity: {
-          requested: { providerId: "fresh-vite", model: null },
-          observed: {
-            providerId: "fresh-vite",
-            model: "runtime-export-model",
-            command: "fresh-vite",
-            cliVersion: "1.0.0",
-            apiKeySource: null,
-            protocol: "claude-stream-json-init-v1",
+      runner: runner("fresh-vite", async (input) => {
+        const result = await writeFreshViteProject(input);
+        const mainPath = join(input.projectDir, "src", "main.ts");
+        await Promise.all([
+          rename(
+            join(input.projectDir, "src", "styles.css"),
+            join(input.projectDir, "src", "main.css"),
+          ),
+          readFile(mainPath, "utf8").then((main) => writeFile(
+            mainPath,
+            main.replace('import "./styles.css";', 'import "./main.css";'),
+          )),
+        ]);
+        return {
+          ...result,
+          executionIdentity: {
+            requested: { providerId: "fresh-vite", model: null },
+            observed: {
+              providerId: "fresh-vite",
+              model: "runtime-export-model",
+              command: "fresh-vite",
+              cliVersion: "1.0.0",
+              apiKeySource: null,
+              protocol: "claude-stream-json-init-v1",
+            },
           },
-        },
-      })),
+        };
+      }),
       systemPrompt: "Reimplement the selected Canvas as fresh Vite and TypeScript source.",
       sourcePreviewOrigin: "http://127.0.0.1:34567",
       visualGate: successfulVisualGate,
@@ -1063,7 +1125,7 @@ test("Implementation Export publishes a fresh built Vite project with a byte-bou
       "package.json",
       "index.html",
       "src/main.ts",
-      "src/styles.css",
+      "src/main.css",
       "dist/index.html",
       "dezin-export.json",
     ]) {
@@ -1248,11 +1310,15 @@ test("Implementation Export retries once when the Agent leaves a partial require
         calls += 1;
         const result = await writeFreshViteProject(input);
         if (calls === 1) {
-          await rm(join(input.projectDir, "src", "main.ts"));
+          await Promise.all([
+            rm(join(input.projectDir, "src", "main.ts")),
+            rm(join(input.projectDir, "src", "styles.css")),
+          ]);
           return result;
         }
         assert.match(input.message, /partial Implementation Export/i);
         assert.match(input.message, /src\/main\.ts/);
+        assert.match(input.message, /src\/\*\*\/\*\.css/);
         assert.match(input.message, /rewrite index\.html/i);
         return result;
       }),
@@ -1321,9 +1387,16 @@ test("Implementation Export gives one exact validation diagnostic back for an in
           const indexPath = join(input.projectDir, "index.html");
           const index = await readFile(indexPath, "utf8");
           await writeFile(indexPath, index.replace("</head>", '<link rel="stylesheet" href="/src/styles.css"></head>'));
+          await writeFile(
+            join(input.projectDir, "src", "broken.ts"),
+            'const anchor = document.createElement("a");\nanchor.href = unknownExternalState;\n',
+          );
           return result;
         }
         assert.match(input.message, /must load styles through the local TypeScript module graph/i);
+        assert.match(input.message, /src\/broken\.ts.*assignment to href/is);
+        assert.match(input.message, /TypeScript.*unknownExternalState/is);
+        await writeFile(join(input.projectDir, "src", "broken.ts"), "export const repaired = true;\n");
         const indexPath = join(input.projectDir, "index.html");
         const index = await readFile(indexPath, "utf8");
         assert.match(index, /dezin-validation-repair-required/);
@@ -1342,6 +1415,45 @@ test("Implementation Export gives one exact validation diagnostic back for an in
     assert.equal(completed.status, "ready", completed.error ?? "Validation repair failed");
     assert.equal(calls, 2);
     assert.ok(completed.activity.some((entry) => /validation found a repairable issue/i.test(entry.text)));
+  } finally {
+    await rm(fixture.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Implementation Export requires every stylesheet to be statically reachable from src/main.ts", async () => {
+  const fixture = await generatedProject("dezin-design-export-stylesheet-graph-");
+  let calls = 0;
+  try {
+    const started = await startDesignImplementationExport({
+      dataDir: fixture.dataDir,
+      projectId: fixture.projectId,
+      canvasRevision: fixture.canvasRevision,
+      runner: runner("stylesheet-graph", async (input) => {
+        calls += 1;
+        const mainPath = join(input.projectDir, "src", "main.ts");
+        if (calls === 1) {
+          const result = await writeFreshViteProject(input);
+          const main = await readFile(mainPath, "utf8");
+          await writeFile(mainPath, main.replace('import "./styles.css";\n', ""));
+          return result;
+        }
+        assert.match(input.message, /Every src stylesheet must be statically reachable from src\/main\.ts: src\/styles\.css/i);
+        const main = await readFile(mainPath, "utf8");
+        await writeFile(mainPath, `import "./styles.css";\n${main}`);
+        const indexPath = join(input.projectDir, "index.html");
+        const index = await readFile(indexPath, "utf8");
+        const repaired = index.replace(/<div id="dezin-validation-repair-required">[^<]*<\/div>/, "");
+        await writeFile(indexPath, repaired);
+        return { text: "Connected the static stylesheet graph", artifactHtml: repaired, artifactPath: "index.html" };
+      }),
+      systemPrompt: "Reimplement the frozen selected Design Canvas Versions.",
+      sourcePreviewOrigin: "http://127.0.0.1:34567",
+      visualGate: successfulVisualGate,
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Unreachable stylesheet repair failed");
+    assert.equal(calls, 2);
   } finally {
     await rm(fixture.dataDir, { recursive: true, force: true });
   }
@@ -1937,7 +2049,7 @@ if (nodeId === null) {
 `,
         );
       },
-      error: /local self-contained UI|network|fresh-code boundary/i,
+      error: /local self-contained UI|network|remote scripts or resources|fresh-code boundary/i,
     },
     {
       name: "package manager hook at the Export root",

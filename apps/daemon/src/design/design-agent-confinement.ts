@@ -2,6 +2,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
+  GenericCliRunner,
   NodeSpawner,
   getProvider,
   type AgentRunner,
@@ -14,7 +15,7 @@ import type { Settings } from "../../../../packages/core/src/index.ts";
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DESIGN_FILE_TOOLS = "Read,Write,Edit,Glob,Grep";
 const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
-const DESIGN_AGENT_COMMANDS = ["claude", "codebuddy"] as const;
+const STRICT_DESIGN_AGENT_COMMANDS = ["claude", "codebuddy"] as const;
 const CODEBUDDY_DESIGN_SETTINGS = JSON.stringify({
   disableAllHooks: true,
   promptSuggestionEnabled: false,
@@ -30,17 +31,16 @@ const CODEBUDDY_DESIGN_SETTINGS = JSON.stringify({
     disableAutoMode: "disable",
   },
 });
-const UNVERIFIED_DESIGN_CONFINEMENT_ERROR = "The selected Agent cannot run on Design Canvas because its workspace policy does not provide verified project-only confinement";
 const DESIGN_RUNTIME_ENVIRONMENT_KEYS = ["HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
-const DESIGN_PROVIDER_ENVIRONMENT_KEYS: Record<ConfinedDesignProvider, readonly string[]> = {
+const DESIGN_PROVIDER_ENVIRONMENT_KEYS: Record<StrictDesignProvider, readonly string[]> = {
   claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
   codebuddy: [],
 };
 
-type ConfinedDesignProvider = (typeof DESIGN_AGENT_COMMANDS)[number];
+type StrictDesignProvider = (typeof STRICT_DESIGN_AGENT_COMMANDS)[number];
 
 function minimalDesignAgentEnvironment(
-  provider: ConfinedDesignProvider,
+  provider: string,
   requested: NodeJS.ProcessEnv | undefined,
   runtime: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
@@ -69,9 +69,17 @@ function minimalDesignAgentEnvironment(
     "/sbin",
   ];
   result.PATH = [...new Set(runtimeDirectories.filter(isAbsolute))].join(delimiter);
-  for (const key of DESIGN_PROVIDER_ENVIRONMENT_KEYS[provider]) {
-    const value = requested?.[key];
-    if (typeof value === "string" && value.length > 0) result[key] = value;
+  if ((STRICT_DESIGN_AGENT_COMMANDS as readonly string[]).includes(provider)) {
+    for (const key of DESIGN_PROVIDER_ENVIRONMENT_KEYS[provider as StrictDesignProvider]) {
+      const value = requested?.[key];
+      if (typeof value === "string" && value.length > 0) result[key] = value;
+    }
+  } else {
+    for (const [key, value] of Object.entries(requested ?? {})) {
+      if (key === "DEZIN_DAEMON_TOKEN" || key === "NODE_OPTIONS"
+        || key.startsWith("DYLD_") || key.startsWith("LD_")) continue;
+      if (typeof value === "string" && value.length > 0) result[key] = value;
+    }
   }
   return result;
 }
@@ -191,7 +199,7 @@ export function designCodeBuddyArgs(
 }
 
 function designAgentArgs(
-  provider: ConfinedDesignProvider,
+  provider: StrictDesignProvider,
   model: string | undefined,
   systemPrompt: string,
 ): string[] {
@@ -200,8 +208,24 @@ function designAgentArgs(
     : designClaudeArgs(model, systemPrompt);
 }
 
+function boundedDesignProviderArgs(
+  provider: string,
+  model: string | undefined,
+  systemPrompt: string,
+): string[] | null {
+  if (provider !== "codex") return null;
+  return [
+    "exec",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "workspace-write",
+    ...(model ? ["-m", model] : []),
+    systemPrompt,
+  ];
+}
+
 function assertConfinedArguments(
-  provider: ConfinedDesignProvider,
+  provider: StrictDesignProvider,
   model: string | undefined,
   args: readonly string[],
 ): void {
@@ -245,7 +269,7 @@ function confinedRelative(root: string, candidate: string): string {
 export class DesignConfinedSpawner implements ProcessSpawner {
   readonly #dataDir: string;
   readonly #projectId: string;
-  readonly #provider: ConfinedDesignProvider;
+  readonly #provider: string;
   readonly #command: string;
   readonly #model: string | undefined;
   readonly #delegate: ProcessSpawner;
@@ -255,7 +279,7 @@ export class DesignConfinedSpawner implements ProcessSpawner {
   constructor(input: {
     dataDir: string;
     projectId: string;
-    provider: ConfinedDesignProvider | "codex";
+    provider: string;
     command: string;
     model?: string;
     delegate?: ProcessSpawner;
@@ -264,9 +288,6 @@ export class DesignConfinedSpawner implements ProcessSpawner {
     /** Runtime-only seam; caller-supplied Agent env never controls HOME or command lookup. */
     runtimeEnvironment?: NodeJS.ProcessEnv;
   }) {
-    if (input.provider === "codex") {
-      throw new DesignAgentConfinementError(UNVERIFIED_DESIGN_CONFINEMENT_ERROR);
-    }
     this.#dataDir = resolve(input.dataDir);
     this.#projectId = safeSegment(input.projectId, "Project id");
     this.#provider = input.provider;
@@ -286,9 +307,14 @@ export class DesignConfinedSpawner implements ProcessSpawner {
     if (input.command !== this.#command) {
       throw new DesignAgentConfinementError("Design Agent command changed after policy selection");
     }
-    assertConfinedArguments(this.#provider, this.#model, input.args);
-    if (input.stdin.length === 0) {
-      throw new DesignAgentConfinementError("Confined Design Agent prompt must be delivered on stdin");
+    if ((STRICT_DESIGN_AGENT_COMMANDS as readonly string[]).includes(this.#provider)) {
+      assertConfinedArguments(this.#provider as StrictDesignProvider, this.#model, input.args);
+      if (input.stdin.length === 0) {
+        throw new DesignAgentConfinementError("Confined Design Agent prompt must be delivered on stdin");
+      }
+    } else {
+      const boundedArgs = boundedDesignProviderArgs(this.#provider, this.#model, "__SYSTEM_PROMPT__");
+      if (boundedArgs !== null) assertExactArgs(input.args, boundedArgs, [boundedArgs.length - 1]);
     }
 
     const designRoot = resolve(this.#dataDir, "projects", this.#projectId, "design");
@@ -325,17 +351,14 @@ export class DesignConfinedSpawner implements ProcessSpawner {
 export function createConfinedDesignAgentRunner(input: CreateConfinedDesignRunnerInput): AgentRunner {
   const command = input.override?.agentCommand || input.settings.agentCommand || "claude";
   const model = input.override?.model || input.settings.model || undefined;
-  if (command === "codex") {
-    throw new DesignAgentConfinementError(UNVERIFIED_DESIGN_CONFINEMENT_ERROR);
-  }
-  if (!(DESIGN_AGENT_COMMANDS as readonly string[]).includes(command)) {
-    throw new DesignAgentProviderUnsupportedError(command);
-  }
   const provider = getProvider(command);
-  if (!provider || provider.id !== command) {
-    throw new DesignAgentProviderUnsupportedError(command);
-  }
-  const providerId = provider.id as ConfinedDesignProvider;
+  const providerId = provider?.id
+    ?? (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
+  if (!SAFE_SEGMENT.test(providerId)) throw new DesignAgentProviderUnsupportedError(command);
+  const strictProvider = (STRICT_DESIGN_AGENT_COMMANDS as readonly string[]).includes(providerId)
+    ? providerId as StrictDesignProvider
+    : null;
+  const boundedArgs = boundedDesignProviderArgs(providerId, model, "__SYSTEM_PROMPT__");
   const spawner = new DesignConfinedSpawner({
     dataDir: input.dataDir,
     projectId: input.projectId,
@@ -344,11 +367,30 @@ export function createConfinedDesignAgentRunner(input: CreateConfinedDesignRunne
     model,
     delegate: input.spawner,
   });
-  return provider.createRunner({
+  if (provider) {
+    return provider.createRunner({
+      command,
+      model,
+      enforceArtifactUpdate: input.enforceArtifactUpdate,
+      spawner,
+      ...(strictProvider !== null
+        ? { buildArgs: (systemPrompt: string) => designAgentArgs(strictProvider, model, systemPrompt) }
+        : boundedArgs !== null
+          ? { buildArgs: (systemPrompt: string) => boundedDesignProviderArgs(providerId, model, systemPrompt)! }
+          : {}),
+    });
+  }
+  return new GenericCliRunner({
+    id: providerId,
     command,
     model,
+    config: {
+      buildArgs: (candidateModel, prompt) => [
+        ...(candidateModel ? ["--model", candidateModel] : []),
+        prompt,
+      ],
+    },
     enforceArtifactUpdate: input.enforceArtifactUpdate,
     spawner,
-    buildArgs: (systemPrompt: string) => designAgentArgs(providerId, model, systemPrompt),
   });
 }

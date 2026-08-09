@@ -34,6 +34,8 @@ export interface DesignExportVisualMetrics {
 
 export interface DesignExportScreenshotComparison {
   passed: boolean;
+  /** Bounded CSS-pixel registration applied only while computing metrics/diff. */
+  alignment: { offsetX: number; offsetY: number };
   metrics: DesignExportVisualMetrics;
   diffPng: Buffer;
 }
@@ -141,10 +143,24 @@ function luminance(red: number, green: number, blue: number): number {
   return (red * 0.2126) + (green * 0.7152) + (blue * 0.0722);
 }
 
+function alignedPixelIndex(
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  alignment: { offsetX: number; offsetY: number },
+): number {
+  const outputX = Math.max(0, Math.min(width - 1, x + alignment.offsetX));
+  const outputY = Math.max(0, Math.min(height - 1, y + alignment.offsetY));
+  return ((outputY * width) + outputX) * 4;
+}
+
 function tileSsim(
   source: Uint8ClampedArray,
   output: Uint8ClampedArray,
   width: number,
+  height: number,
+  alignment: { offsetX: number; offsetY: number },
   startX: number,
   startY: number,
   endX: number,
@@ -155,9 +171,10 @@ function tileSsim(
   let outputMean = 0;
   for (let y = startY; y < endY; y += 1) {
     for (let x = startX; x < endX; x += 1) {
-      const index = ((y * width) + x) * 4;
-      sourceMean += luminance(source[index]!, source[index + 1]!, source[index + 2]!);
-      outputMean += luminance(output[index]!, output[index + 1]!, output[index + 2]!);
+      const sourceIndex = ((y * width) + x) * 4;
+      const outputIndex = alignedPixelIndex(width, height, x, y, alignment);
+      sourceMean += luminance(source[sourceIndex]!, source[sourceIndex + 1]!, source[sourceIndex + 2]!);
+      outputMean += luminance(output[outputIndex]!, output[outputIndex + 1]!, output[outputIndex + 2]!);
       count += 1;
     }
   }
@@ -168,9 +185,10 @@ function tileSsim(
   let covariance = 0;
   for (let y = startY; y < endY; y += 1) {
     for (let x = startX; x < endX; x += 1) {
-      const index = ((y * width) + x) * 4;
-      const sourceDelta = luminance(source[index]!, source[index + 1]!, source[index + 2]!) - sourceMean;
-      const outputDelta = luminance(output[index]!, output[index + 1]!, output[index + 2]!) - outputMean;
+      const sourceIndex = ((y * width) + x) * 4;
+      const outputIndex = alignedPixelIndex(width, height, x, y, alignment);
+      const sourceDelta = luminance(source[sourceIndex]!, source[sourceIndex + 1]!, source[sourceIndex + 2]!) - sourceMean;
+      const outputDelta = luminance(output[outputIndex]!, output[outputIndex + 1]!, output[outputIndex + 2]!) - outputMean;
       sourceVariance += sourceDelta * sourceDelta;
       outputVariance += outputDelta * outputDelta;
       covariance += sourceDelta * outputDelta;
@@ -188,6 +206,49 @@ function tileSsim(
   return Math.max(-1, Math.min(1, denominator === 0 ? 1 : numerator / denominator));
 }
 
+const SCREENSHOT_REGISTRATION_CANDIDATES = [
+  { offsetX: 0, offsetY: 0 },
+  { offsetX: -1, offsetY: 0 },
+  { offsetX: 1, offsetY: 0 },
+  { offsetX: 0, offsetY: -1 },
+  { offsetX: 0, offsetY: 1 },
+  { offsetX: -1, offsetY: -1 },
+  { offsetX: -1, offsetY: 1 },
+  { offsetX: 1, offsetY: -1 },
+  { offsetX: 1, offsetY: 1 },
+] as const;
+
+function registrationError(
+  source: DecodedPng,
+  output: DecodedPng,
+  alignment: { offsetX: number; offsetY: number },
+): number {
+  let error = 0;
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const sourceIndex = ((y * source.width) + x) * 4;
+      const outputIndex = alignedPixelIndex(source.width, source.height, x, y, alignment);
+      error += Math.abs(source.pixels[sourceIndex]! - output.pixels[outputIndex]!)
+        + Math.abs(source.pixels[sourceIndex + 1]! - output.pixels[outputIndex + 1]!)
+        + Math.abs(source.pixels[sourceIndex + 2]! - output.pixels[outputIndex + 2]!);
+    }
+  }
+  return error;
+}
+
+function bestScreenshotAlignment(source: DecodedPng, output: DecodedPng): { offsetX: number; offsetY: number } {
+  let best: { offsetX: number; offsetY: number } = SCREENSHOT_REGISTRATION_CANDIDATES[0];
+  let bestError = registrationError(source, output, best);
+  for (const candidate of SCREENSHOT_REGISTRATION_CANDIDATES.slice(1)) {
+    const error = registrationError(source, output, candidate);
+    if (error < bestError) {
+      best = candidate;
+      bestError = error;
+    }
+  }
+  return best;
+}
+
 export async function compareDesignExportScreenshots(
   sourcePng: Buffer,
   outputPng: Buffer,
@@ -197,22 +258,27 @@ export async function compareDesignExportScreenshots(
     throw new Error(`Visual screenshots differ in dimensions: ${source.width}x${source.height} vs ${output.width}x${output.height}`);
   }
   const pixels = source.width * source.height;
+  const alignment = bestScreenshotAlignment(source, output);
   let absoluteError = 0;
   let changedPixels = 0;
   const diffCanvas = createCanvas(source.width, source.height);
   const diffContext = diffCanvas.getContext("2d");
   const diff = diffContext.createImageData(source.width, source.height);
-  for (let index = 0; index < source.pixels.length; index += 4) {
-    const red = Math.abs(source.pixels[index]! - output.pixels[index]!);
-    const green = Math.abs(source.pixels[index + 1]! - output.pixels[index + 1]!);
-    const blue = Math.abs(source.pixels[index + 2]! - output.pixels[index + 2]!);
-    absoluteError += red + green + blue;
-    if (Math.max(red, green, blue) >= 24) changedPixels += 1;
-    const amplified = Math.min(255, Math.max(red, green, blue) * 4);
-    diff.data[index] = amplified;
-    diff.data[index + 1] = Math.round(amplified * 0.18);
-    diff.data[index + 2] = Math.round(amplified * 0.32);
-    diff.data[index + 3] = 255;
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const sourceIndex = ((y * source.width) + x) * 4;
+      const outputIndex = alignedPixelIndex(source.width, source.height, x, y, alignment);
+      const red = Math.abs(source.pixels[sourceIndex]! - output.pixels[outputIndex]!);
+      const green = Math.abs(source.pixels[sourceIndex + 1]! - output.pixels[outputIndex + 1]!);
+      const blue = Math.abs(source.pixels[sourceIndex + 2]! - output.pixels[outputIndex + 2]!);
+      absoluteError += red + green + blue;
+      if (Math.max(red, green, blue) >= 24) changedPixels += 1;
+      const amplified = Math.min(255, Math.max(red, green, blue) * 4);
+      diff.data[sourceIndex] = amplified;
+      diff.data[sourceIndex + 1] = Math.round(amplified * 0.18);
+      diff.data[sourceIndex + 2] = Math.round(amplified * 0.32);
+      diff.data[sourceIndex + 3] = 255;
+    }
   }
   diffContext.putImageData(diff, 0, 0);
 
@@ -224,6 +290,8 @@ export async function compareDesignExportScreenshots(
         source.pixels,
         output.pixels,
         source.width,
+        source.height,
+        alignment,
         x,
         y,
         Math.min(source.width, x + tileSize),
@@ -247,6 +315,7 @@ export async function compareDesignExportScreenshots(
       && metrics.meanSsim >= DESIGN_EXPORT_VISUAL_THRESHOLDS.meanSsim
       && metrics.p05Ssim >= DESIGN_EXPORT_VISUAL_THRESHOLDS.p05Ssim
       && metrics.minimumSsim >= DESIGN_EXPORT_VISUAL_THRESHOLDS.minimumSsim,
+    alignment,
     metrics,
     diffPng: diffCanvas.toBuffer("image/png"),
   };
@@ -285,8 +354,11 @@ async function writeEvidenceFile(
   };
 }
 
-function metricsSummary(metrics: DesignExportVisualMetrics): string {
-  return `MAE ${metrics.meanAbsoluteError.toFixed(4)}, changed ${(metrics.changedPixelRatio * 100).toFixed(2)}%, SSIM ${metrics.meanSsim.toFixed(4)}, p05 ${metrics.p05Ssim.toFixed(4)}, min ${metrics.minimumSsim.toFixed(4)}`;
+function metricsSummary(
+  metrics: DesignExportVisualMetrics,
+  alignment: DesignExportScreenshotComparison["alignment"],
+): string {
+  return `MAE ${metrics.meanAbsoluteError.toFixed(4)}, changed ${(metrics.changedPixelRatio * 100).toFixed(2)}%, SSIM ${metrics.meanSsim.toFixed(4)}, p05 ${metrics.p05Ssim.toFixed(4)}, min ${metrics.minimumSsim.toFixed(4)}, alignment ${alignment.offsetX},${alignment.offsetY}`;
 }
 
 export class DesignExportVisualGateError extends Error {
@@ -320,11 +392,16 @@ export async function runDesignExportVisualGate(
       && Buffer.byteLength(input.execution.model, "utf8") <= 512))) {
     throw new DesignExportVisualGateError("Visual gate received an invalid Export execution identity");
   }
+  const selectedNodes = input.context.nodes.filter((node) =>
+    node.selectedVersionId !== null && node.selectedVersionChecksum !== null);
   const sourceByNodeId = new Map(input.sources.map((source) => [source.nodeId, source]));
-  if (sourceByNodeId.size !== input.sources.length || input.sources.length !== generativeNodes.length) {
+  // Material Versions are not visual routes, but they remain immutable Export
+  // inputs. Require the complete source list to match the frozen Canvas exactly
+  // before selecting the generative subset used for screenshot comparisons.
+  if (sourceByNodeId.size !== input.sources.length || input.sources.length !== selectedNodes.length) {
     throw new DesignExportVisualGateError("Visual gate source Version provenance does not match the frozen Canvas");
   }
-  for (const node of generativeNodes) {
+  for (const node of selectedNodes) {
     const source = sourceByNodeId.get(node.id);
     if (!source || source.nodeKind !== node.kind || source.versionId !== node.selectedVersionId
       || source.checksum !== node.selectedVersionChecksum
@@ -385,7 +462,7 @@ export async function runDesignExportVisualGate(
         }
         const comparison = await compareDesignExportScreenshots(captured.sourcePng, captured.outputPng);
         if (!comparison.passed) {
-          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: ${metricsSummary(comparison.metrics)}`);
+          throw new DesignExportVisualGateError(`Visual gate failed for root application at ${viewport.name} ${viewport.width}x${viewport.height}: ${metricsSummary(comparison.metrics, comparison.alignment)}`);
         }
         const [sourceEvidence, outputEvidence, diffEvidence] = await Promise.all([
           writeEvidenceFile(validationRoot, `root/${viewport.name}-source.png`, captured.sourcePng),
@@ -409,6 +486,7 @@ export async function runDesignExportVisualGate(
           sourcePath: new URL(sourceUrl).pathname,
           viewport,
           metrics: comparison.metrics,
+          alignment: comparison.alignment,
           passed: true,
           evidence: { source: sourceEvidence, output: outputEvidence, diff: diffEvidence },
         });
@@ -441,7 +519,7 @@ export async function runDesignExportVisualGate(
           }
           const comparison = await compareDesignExportScreenshots(captured.sourcePng, captured.outputPng);
           if (!comparison.passed) {
-            throw new DesignExportVisualGateError(`Visual gate failed for ${node.name} (${node.id}) at ${viewport.name} ${viewport.width}x${viewport.height}: ${metricsSummary(comparison.metrics)}`);
+            throw new DesignExportVisualGateError(`Visual gate failed for ${node.name} (${node.id}) at ${viewport.name} ${viewport.width}x${viewport.height}: ${metricsSummary(comparison.metrics, comparison.alignment)}`);
           }
           const prefix = `${node.id}/${viewport.name}`;
           const [sourceEvidence, outputEvidence, diffEvidence] = await Promise.all([
@@ -466,6 +544,7 @@ export async function runDesignExportVisualGate(
             outputRoute,
             viewport,
             metrics: comparison.metrics,
+            alignment: comparison.alignment,
             passed: true,
             evidence: { source: sourceEvidence, output: outputEvidence, diff: diffEvidence },
           });
@@ -490,6 +569,7 @@ export async function runDesignExportVisualGate(
           locale: "en-US",
           timezone: "UTC",
           network: "phase-isolated-source-preview-or-export-loopback-only",
+          screenshotRegistration: "bounded-to-one-css-pixel-per-axis",
           viewports: DESIGN_EXPORT_VISUAL_VIEWPORTS,
         },
         thresholds: DESIGN_EXPORT_VISUAL_THRESHOLDS,
@@ -737,15 +817,28 @@ async function settlePage(page: Page, signal: AbortSignal): Promise<void> {
     const globalValue = globalThis as any;
     const documentValue = globalValue.document;
     await documentValue.fonts?.ready;
-    await Promise.all(Array.from(documentValue.images as any[]).map(async (image: any) => {
-      if (image.complete) {
-        await image.decode().catch(() => {});
-        return;
+    const images = Array.from(documentValue.images as any[]);
+    // Off-screen `loading="lazy"` images may never dispatch load/error while
+    // the visual gate remains at scroll position zero. Promote them before
+    // waiting so every local image reaches a terminal state deterministically.
+    for (const image of images) image.loading = "eager";
+    await Promise.all(images.map(async (image: any) => {
+      if (!image.complete) {
+        await new Promise<void>((resolveImage) => {
+          const finish = () => {
+            image.removeEventListener("load", finish);
+            image.removeEventListener("error", finish);
+            resolveImage();
+          };
+          image.addEventListener("load", finish, { once: true });
+          image.addEventListener("error", finish, { once: true });
+          // The resource can complete between the first check and listener
+          // registration. Re-check after both listeners exist so settle cannot
+          // wait forever on an event that already fired.
+          if (image.complete) finish();
+        });
       }
-      await new Promise<void>((resolveImage) => {
-        image.addEventListener("load", () => resolveImage(), { once: true });
-        image.addEventListener("error", () => resolveImage(), { once: true });
-      });
+      await image.decode().catch(() => {});
     }));
     globalValue.scrollTo(0, 0);
     await new Promise<void>((resolveFrame) => globalValue.requestAnimationFrame(() => globalValue.requestAnimationFrame(() => resolveFrame())));

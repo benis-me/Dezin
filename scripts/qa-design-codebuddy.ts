@@ -1,9 +1,9 @@
 /**
  * Explicit, disposable Design Canvas QA harness for a real CodeBuddy turn.
  *
- * This is deliberately outside the production daemon entrypoint. Production
- * Design Agents remain subject to their normal provider-confinement policy;
- * the harness opts into AppDeps.designRunner only for a fresh mkdtemp Project.
+ * This starts the real daemon HTTP adapter against a disposable data directory.
+ * It deliberately does not inject AppDeps.designRunner: provider resolution,
+ * argv, environment, staging confinement, identity, and timeouts are production.
  *
  *   DEZIN_QA_CODEBUDDY=1 pnpm qa:design:codebuddy
  *   DEZIN_QA_CODEBUDDY=1 DEZIN_QA_EXPORT=1 pnpm qa:design:codebuddy
@@ -18,11 +18,7 @@ import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import {
-  getProvider,
-  type AgentRunner,
-  type AgentTurnInput,
-} from "../packages/agent/src/index.ts";
+import { getProvider } from "../packages/agent/src/index.ts";
 import { Store } from "../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../apps/daemon/src/app.ts";
 import type {
@@ -37,7 +33,8 @@ const PROVIDER = "codebuddy";
 const MODEL = "hy3-ioa";
 const TERMINAL_JOB_STATES = new Set(["ready", "failed", "cancelled", "superseded"]);
 const MAIN_PAGE_ID = "qa-page";
-const EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
+const REFERENCE_NODE_ID = "qa-reference";
+const REFERENCE_WEBP_BASE64 = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
 
 interface ProjectResponse {
   id: string;
@@ -70,6 +67,15 @@ interface QaVersionReceipt {
   htmlPath: string;
 }
 
+interface QaAssetReceipt {
+  assetId: string;
+  fileName: string;
+  checksum: string;
+  publicPath: string;
+  outputChecksum: string;
+  outputBytes: number;
+}
+
 interface QaExportReceipt {
   requested: boolean;
   status: "skipped" | DesignJob["status"];
@@ -83,6 +89,7 @@ interface QaExportReceipt {
   visualReceiptPath?: string;
   visualReceiptChecksum?: string;
   outputFileCount?: number;
+  seededAsset?: QaAssetReceipt;
   error?: string | null;
 }
 
@@ -117,57 +124,6 @@ async function resolveExecutable(candidate: string): Promise<string> {
     }
   }
   throw new Error(`Could not resolve executable ${JSON.stringify(candidate)}`);
-}
-
-function buildCodeBuddyArgs(systemPrompt: string): string[] {
-  return [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--permission-mode",
-    "acceptEdits",
-    "--tools",
-    "Read,Write,Edit,Glob,Grep",
-    "--strict-mcp-config",
-    "--mcp-config",
-    EMPTY_MCP_CONFIG,
-    "--no-session-persistence",
-    "--append-system-prompt",
-    systemPrompt,
-    "--model",
-    MODEL,
-  ];
-}
-
-function createQaRunner(command: string): AgentRunner {
-  const provider = getProvider(PROVIDER);
-  if (!provider || provider.id !== PROVIDER) throw new Error("CodeBuddy provider is not registered");
-  const options = {
-    command,
-    model: MODEL,
-    buildArgs: buildCodeBuddyArgs,
-  };
-  const mainRunner = provider.createRunner({
-    ...options,
-    // Main Agent must leave the daemon-seeded compatibility HTML untouched.
-    enforceArtifactUpdate: false,
-  });
-  const artifactRunner = provider.createRunner({
-    ...options,
-    // Node generation and implementation export must produce new bytes.
-    enforceArtifactUpdate: true,
-  });
-  return {
-    id: PROVIDER,
-    identityProtocol: "claude-stream-json-init-v1",
-    runTurn(input: AgentTurnInput) {
-      const mainPlanningTurn = input.systemPrompt.includes("Main Agent for one Design Canvas");
-      return (mainPlanningTurn ? mainRunner : artifactRunner).runTurn(input);
-    },
-  };
 }
 
 async function jsonRequest<T>(baseUrl: string, path: string, init: RequestInit = {}): Promise<T> {
@@ -313,10 +269,12 @@ async function verifyExport(input: {
   root: string;
   canvasRevision: number;
   timeoutMs: number;
+  agentCommand: string;
+  seededAsset: { id: string; fileName: string; checksum: string };
 }): Promise<QaExportReceipt> {
   const started = await jsonRequest<StartedExportResponse>(input.baseUrl, `${input.root}/exports`, jsonBody({
     canvasRevision: input.canvasRevision,
-    agentCommand: PROVIDER,
+    agentCommand: input.agentCommand,
     model: MODEL,
   }));
   const completed = await waitForJob(input.baseUrl, input.root, started.job.id, input.timeoutMs);
@@ -351,6 +309,16 @@ async function verifyExport(input: {
   if (visualReceiptChecksum !== manifest.visualValidation.receiptChecksum) {
     throw new Error(`Export ${started.exportId} visual receipt checksum is invalid`);
   }
+  const assetBinding = manifest.assets.find((asset) => asset.assetId === input.seededAsset.id);
+  if (assetBinding?.checksum !== input.seededAsset.checksum) {
+    throw new Error(`Export ${started.exportId} does not bind the seeded WebP Asset`);
+  }
+  const publicPath = `public/assets/${input.seededAsset.id}/${input.seededAsset.fileName}`;
+  const outputAsset = manifest.outputFiles.find((file) => file.path === publicPath);
+  if (!outputAsset || outputAsset.checksum !== input.seededAsset.checksum
+    || sha256(await readFile(join(exportRoot, publicPath))) !== input.seededAsset.checksum) {
+    throw new Error(`Export ${started.exportId} did not preserve the seeded WebP bytes`);
+  }
 
   return {
     requested: true,
@@ -365,6 +333,14 @@ async function verifyExport(input: {
     visualReceiptPath,
     visualReceiptChecksum,
     outputFileCount: manifest.outputFiles.length,
+    seededAsset: {
+      assetId: input.seededAsset.id,
+      fileName: input.seededAsset.fileName,
+      checksum: input.seededAsset.checksum,
+      publicPath,
+      outputChecksum: outputAsset.checksum,
+      outputBytes: outputAsset.bytes,
+    },
     error: null,
   };
 }
@@ -372,7 +348,10 @@ async function verifyExport(input: {
 async function run(): Promise<void> {
   const startedAt = Date.now();
   const requestedExport = process.env.DEZIN_QA_EXPORT === "1";
-  const timeoutMs = positiveInteger(process.env.DEZIN_QA_TIMEOUT_MS, 30 * 60_000, "DEZIN_QA_TIMEOUT_MS");
+  // Export may use an initial 50-minute turn, one bounded continuation, and one
+  // validation repair before Chrome capture. The harness must outlive that legal job.
+  const defaultTimeoutMs = requestedExport ? 165 * 60_000 : 60 * 60_000;
+  const timeoutMs = positiveInteger(process.env.DEZIN_QA_TIMEOUT_MS, defaultTimeoutMs, "DEZIN_QA_TIMEOUT_MS");
   let dataDir: string | null = null;
   let store: Store | null = null;
   let runtimeSupervisor: ReturnType<typeof createRuntimeSupervisor> | null = null;
@@ -398,13 +377,12 @@ async function run(): Promise<void> {
     const version = (await execFile(command, ["--version"], { timeout: 10_000 })).stdout.trim();
 
     store = new Store(join(dataDir, "app.sqlite"));
-    store.updateSettings({ agentCommand: PROVIDER, model: MODEL });
+    store.updateSettings({ agentCommand: command, model: MODEL });
     runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
     server = createApp({
       dataDir,
       store,
       runtimeSupervisor,
-      designRunner: createQaRunner(command),
     });
     await new Promise<void>((resolvePromise, reject) => {
       server!.once("error", reject);
@@ -425,17 +403,47 @@ async function run(): Promise<void> {
     if (initialCanvas.nodes.length !== 0 || initialCanvas.revision !== 0) {
       throw new Error("QA Project did not start from an empty Design Canvas");
     }
+    const importedCanvas = await jsonRequest<DesignCanvas>(baseUrl, `${root}/assets/import`, jsonBody({
+      expectedRevision: initialCanvas.revision,
+      items: [{
+        asset: {
+          name: "qa-reference.webp",
+          mimeType: "image/webp",
+          base64: REFERENCE_WEBP_BASE64,
+        },
+        binding: {
+          type: "create-node",
+          node: {
+            id: REFERENCE_NODE_ID,
+            kind: "image",
+            name: "QA WebP reference",
+            geometry: { x: 40, y: 80, width: 240, height: 240 },
+          },
+        },
+      }],
+    }));
+    const referenceNode = importedCanvas.nodes.find((node) => node.id === REFERENCE_NODE_ID);
+    if (!referenceNode?.assetId || referenceNode.currentVersionId === null) {
+      throw new Error("QA WebP reference was not atomically imported");
+    }
+    const assets = await jsonRequest<Array<{ id: string; fileName: string; checksum: string }>>(
+      baseUrl,
+      `${root}/assets`,
+    );
+    const seededAsset = assets.find((asset) => asset.id === referenceNode.assetId);
+    if (!seededAsset) throw new Error("QA WebP Asset manifest is unavailable");
 
     const mainPrompt = [
       `Create exactly one Page Node with id ${JSON.stringify(MAIN_PAGE_ID)} and name "CodeBuddy QA Page".`,
-      "Use geometry x=80, y=80, width=1120, height=760. Do not add any other Node.",
-      `Dispatch that Page exactly once with this scoped brief: "Create a polished, responsive offline product page that visibly says CodeBuddy hy3 QA. Use only inline CSS and JavaScript, no external assets or URLs."`,
-      "Use no priority context Nodes. Keep your user-facing reply concise.",
+      "Use geometry x=340, y=80, width=1120, height=760. Preserve the existing Image Node and do not add any other Node.",
+      `Dispatch that Page exactly once with this scoped brief: "Create a polished, responsive offline product page that visibly says CodeBuddy hy3 QA. Visibly render the supplied immutable reference as a hero image using exactly dezin-asset://${seededAsset.id}. Use only inline CSS and JavaScript, with no external assets or URLs."`,
+      `Use exactly ${REFERENCE_NODE_ID} as the one priority context Node. Keep your user-facing reply concise.`,
+      "Do not remove, rename, move, or otherwise mutate the existing Image Node.",
     ].join(" ");
     const mainStarted = await jsonRequest<StartedJobResponse>(baseUrl, `${root}/agent/turns`, jsonBody({
       message: mainPrompt,
-      context: { nodeIds: [] },
-      agentCommand: PROVIDER,
+      context: { nodeIds: [REFERENCE_NODE_ID] },
+      agentCommand: command,
       model: MODEL,
       idempotencyKey: "codebuddy-hy3-main-v1",
     }));
@@ -446,6 +454,10 @@ async function run(): Promise<void> {
     const canvasAfterMain = await jsonRequest<DesignCanvas>(baseUrl, root);
     const page = canvasAfterMain.nodes.find((node) => node.id === MAIN_PAGE_ID && node.kind === "page");
     if (!page) throw new Error(`Main Agent did not create exact Page Node ${MAIN_PAGE_ID}`);
+    if (canvasAfterMain.nodes.length !== 2
+      || canvasAfterMain.nodes.find((node) => node.id === REFERENCE_NODE_ID)?.assetId !== seededAsset.id) {
+      throw new Error("Main Agent changed the frozen QA WebP reference or created an extra Node");
+    }
     const child = await waitForMainChild(baseUrl, root, mainCompleted.id, page.id, 10_000);
     nodeJobId = child.id;
     const nodeCompleted = TERMINAL_JOB_STATES.has(child.status)
@@ -476,6 +488,8 @@ async function run(): Promise<void> {
           root,
           canvasRevision: canvasAfterNode.revision,
           timeoutMs,
+          agentCommand: command,
+          seededAsset,
         })
       : { requested: false, status: "skipped" as const };
     if (exportReceipt.requested && exportReceipt.status !== "ready") {
@@ -487,7 +501,7 @@ async function run(): Promise<void> {
       schemaVersion: 1,
       status: "ready",
       optIn: "DEZIN_QA_CODEBUDDY=1",
-      productionConfinementChanged: false,
+      productionExecutionPath: true,
       provider: {
         id: PROVIDER,
         model: MODEL,

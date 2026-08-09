@@ -134,8 +134,15 @@ Only exact root files plus typed `src/` files and magic-checked passive
 `public/` assets enter that snapshot. Approved frozen binary context assets are
 copied byte-for-byte by the daemon into a deterministic read-only `public/assets/`
 namespace before the Agent runs, so the confined text-editing toolset never has
-to reproduce image, font, audio, or video bytes. HTML, CSS, and TypeScript are
-parsed into explicit local-only allowlists; runtime network/timer/storage/
+to reproduce image, font, audio, or video bytes. The implementation must contain
+at least one non-empty static `src/**/*.css` stylesheet imported through the
+TypeScript graph; no security or build guarantee depends on one conventional
+stylesheet filename. Route CSS must apply source-root geometry to the exact
+`data-dezin-export-node-id` marker element (including a same-element root class),
+not to an impossible descendant copy of that class. Node-specific `:root` tokens
+and body typography are likewise re-scoped onto that marker instead of being
+silently replaced by another Version's global baseline. HTML, CSS, and TypeScript
+are parsed into explicit local-only allowlists; runtime network/timer/storage/
 environment-inspection capabilities, CSS/Web animations, and module imports
 outside `src/` are rejected. The daemon binds the exact installed
 TypeScript and Vite versions in `package.json`, verifies its own strict
@@ -146,33 +153,43 @@ runs the visual gate. Chrome requires the
 ordinary root application to default to the first frozen generative Node with
 its exact visible marker, compares it against that immutable Version at desktop
 and mobile sizes, and records source/output/diff evidence before comparing every
-deterministic Node route.
+deterministic generative Node route. Metric computation may register the two
+screenshots by at most one CSS pixel per axis to absorb semantic-rebuild origin
+rounding; the chosen offset is recorded in every receipt case, and larger shifts
+remain visible to the normal thresholds. Selected material Versions remain bound in
+the Export manifest and seed immutable assets, but do not create visual routes.
 `dezin-export.json` binds both the frozen inputs and every source/build output
 byte. Export never mutates the single-HTML design sources.
 
-Claude-stream-compatible Agent Jobs (Claude and CodeBuddy) accept no successful
-result without a verified `system/init` execution identity. A repeated init is
-accepted only when its provider, model, CLI/API-key source, stable session or
-request id, and every other execution field are identical; any conflicting init
-fails closed. The daemon distinguishes the requested provider/model from the
-runtime-observed identity: the confined spawner binds each supported provider to
-one exact CLI/argv policy and a Project-owned pending directory, while
-`system/init` attests the model selected by that process. It does not inherit the
-daemon environment or receive the daemon bearer token. Design fails closed on
-Windows and for Codex because those paths do not currently prove the same
-project-read/provider-network boundary; their general non-Design registration
-is unaffected. An explicit model mismatch is rejected, and the running Job is
-rebound to the observed identity before it can publish. Node Version manifests
-inherit that Job identity. Implementation Export manifests and visual receipts
-additionally bind the Export Job/provider/model and retain each source Version's
-Job/provider/model provenance.
+Design accepts installed provider runners and custom CLI commands rather than
+limiting the picker to Claude and CodeBuddy. Every runner is launched in one
+exact Project-owned pending directory through the confinement spawner, receives
+a narrowed environment without the daemon bearer token, and cannot publish from
+its writable tree directly. Windows remains fail-closed because equivalent
+process confinement has not been proven there.
+
+Claude-stream-compatible Jobs (currently Claude and CodeBuddy) additionally
+accept no successful result without a verified `system/init` execution identity.
+A repeated init is accepted only when its provider, model, CLI/API-key source,
+stable session or request id, and every other execution field are identical; any
+conflicting init fails closed. Their exact CLI arguments remove shell/network
+and package-manager tools, bind Read/Write/Edit/Glob/Grep, and disable ambient
+configuration and persistence. Other providers use their production runner
+contract and pending-directory fence but do not claim this stronger per-tool or
+stream-attested guarantee until a provider-version black-box receipt exists.
+An explicit observed model mismatch is rejected, and the running Job is rebound
+to the best available observed identity before it can publish. Node Version
+manifests inherit that Job identity. Implementation Export manifests and visual
+receipts additionally bind the Export Job/provider/model and retain each source
+Version's Job/provider/model provenance.
 
 Implementation turns have a 50-minute ceiling. A plan-only, incomplete-scaffold,
 or first-turn timeout may continue the same staging directory once; a subsequent
-failure is terminal. After that, one editable index/source/type/build validation
-failure may receive its exact daemon diagnostic in one final in-place repair
-turn. Both continuations use a daemon marker that must be removed so artifact
-verification observes real work. Unauthorized paths, frozen-context or seeded-
+failure is terminal. After that, editable index/source/type/build failures are collected into one
+bounded diagnostic set and may receive one final in-place repair turn. This
+prevents a first-file failure from hiding independent TypeScript or capability
+errors while preserving a single repair ceiling. Both continuations use a
+daemon marker that must be removed so artifact verification observes real work. Unauthorized paths, frozen-context or seeded-
 Asset changes, provider/model drift, and a second validation failure never retry.
 Every repaired project restarts the root allowlist, source/runtime capability,
 strict TypeScript, isolated Vite build, and Chrome visual gates from zero. The

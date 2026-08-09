@@ -42,11 +42,32 @@ test("Agent output uses the AIcss-inspired code, diff, task, table, image, and c
   expect(diff).toHaveTextContent("+1-1");
   expect(container.querySelector('[data-agent-component="task-list"]')).toHaveTextContent("1/2");
   expect(container.querySelector('[data-agent-component="data-table"]')).toHaveTextContent("hy3-ioa128k");
-  expect(container.querySelector('[data-agent-component="image-generation"]')).toHaveTextContent("Generating image");
+  const image = container.querySelector('[data-agent-component="image-generation"]');
+  expect(image).toHaveTextContent("External image blocked");
+  expect(image?.querySelector("img")).toBeNull();
+  expect(within(image as HTMLElement).getByRole("link", { name: "Open image explicitly" })).toHaveAttribute(
+    "href",
+    "https://example.com/frame.webp",
+  );
   expect(screen.getByRole("link", { name: "Source 1: Interface spec" })).toBeInTheDocument();
   const sources = screen.getByRole("contentinfo", { name: "Sources" });
   expect(sources).toHaveTextContent("Interface spec");
   expect(sources).toHaveTextContent("example.com");
+});
+
+test("Agent output renders passive local images without authorizing remote image requests", () => {
+  const { container } = render(<AgentOutputText text="![Local preview](/api/assets/preview.png)" />);
+  const image = container.querySelector<HTMLImageElement>('[data-agent-component="image-generation"] img');
+  expect(image).toHaveAttribute("src", "/api/assets/preview.png");
+  fireEvent.load(image!);
+  expect(container.querySelector('[data-agent-component="image-generation"]')).toHaveTextContent("Generated image");
+
+  const remote = render(<AgentOutputText text="![Remote](https://example.com/remote.png)" animate />);
+  expect(remote.container.querySelector('img[src^="https://"]')).toBeNull();
+  expect(remote.container).toHaveTextContent("External image blocked");
+  remote.rerender(<AgentOutputText text="![Now local](/api/assets/local.png)" animate />);
+  expect(remote.container.querySelector('img[src="/api/assets/local.png"]')).not.toBeNull();
+  expect(remote.container).toHaveTextContent("Generating image");
 });
 
 test("citationReferences keeps numbered sources ordered and deduplicated", () => {

@@ -94,6 +94,169 @@ test("Project codec and CRUD accept Sharingan identities only", () => {
   store.close();
 });
 
+test("Sharingan Workspace resource revisions publish through immutable snapshots", () => {
+  const store = freshStore();
+  const project = store.createProject({
+    name: "Capture workspace",
+    sharingan: true,
+    sourceUrl: "https://example.com/capture",
+  });
+  const foundation = store.workspace.ensureSharinganWorkspaceFoundation(project.id);
+  assert.deepEqual(store.workspace.ensureSharinganWorkspaceFoundation(project.id), foundation);
+  assert.equal(store.workspace.getGraph(project.id).revision, 0);
+  assert.deepEqual(store.workspace.listResources(project.id), []);
+  assert.deepEqual(store.workspace.listResources("missing-project"), []);
+  assert.deepEqual(store.workspace.listSnapshots("missing-project"), []);
+  assert.throws(() => store.workspace.ensureSharinganWorkspaceFoundation("missing-project"), /requires one active Sharingan Project/);
+  assert.throws(() => store.workspace.listResourceRevisions(project.id, "missing-resource"), /was not found/);
+  assert.throws(() => store.workspace.createResourceForProject(project.id, {
+    kind: "sharingan-capture",
+    title: "Stale graph",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: foundation.graphRevision + 1,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  }), /Revision conflict/);
+  assert.throws(() => store.workspace.createResourceForProject(project.id, {
+    kind: "sharingan-capture",
+    title: "Stale snapshot",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: "snapshot-stale",
+  }), /active-snapshot conflict/);
+
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "sharingan-capture",
+    title: "Primary capture",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: foundation.graphRevision,
+    expectedSnapshotId: foundation.activeSnapshotId,
+  });
+  assert.equal(created.graph.revision, 1);
+  assert.equal(created.graph.nodes[0]?.resourceId, created.resource.id);
+  assert.equal(created.snapshot.provenance.kind, "graph-command");
+  assert.deepEqual(store.workspace.listResources(project.id), [created.resource]);
+  assert.throws(() => store.workspace.createResourceForProject(project.id, {
+    kind: "sharingan-capture",
+    title: "Duplicate capture",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: created.graph.revision,
+    expectedSnapshotId: created.snapshot.id,
+  }), /already owns a capture Resource/);
+
+  const checksumOne = "a".repeat(64);
+  const revisionOne = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "revision-one",
+    parentRevisionId: null,
+    manifestPath: "captures/revision-one/manifest.json",
+    summary: "Initial immutable capture",
+    metadata: { width: 1440, height: 900 },
+    checksum: checksumOne,
+    provenance: { source: "browser-capture" },
+  });
+  assert.equal(revisionOne.sequence, 1);
+  assert.throws(() => store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: revisionOne.id,
+    parentRevisionId: null,
+    manifestPath: "captures/collision/manifest.json",
+    summary: "Identity collision",
+    metadata: {},
+    checksum: "d".repeat(64),
+    provenance: {},
+  }), /identity collision/);
+  assert.equal(store.workspace.getResourceRevisionForProject(project.id, created.resource.id, "missing"), null);
+  assert.throws(() => store.workspace.publishResourceRevisionForProject(
+    project.id,
+    created.resource.id,
+    "missing-revision",
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: "Missing revision",
+    },
+  ), /Revision was not found/);
+  assert.equal(
+    store.workspace.getResourceRevisionViewFactsForProject(project.id, created.resource.id, revisionOne.id)?.snapshotId,
+    created.snapshot.id,
+  );
+  const snapshotOne = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    created.resource.id,
+    revisionOne.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: created.snapshot.id,
+      reason: "Publish first capture",
+    },
+  );
+  assert.equal(snapshotOne.resourceRevisions[created.resource.id], revisionOne.id);
+  assert.equal(snapshotOne.provenance.kind, "resource-publication");
+  assert.equal(store.workspace.getResourceForProject(project.id, created.resource.id)?.headRevisionId, revisionOne.id);
+
+  const revisionTwo = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "revision-two",
+    parentRevisionId: revisionOne.id,
+    manifestPath: "captures/revision-two/manifest.json",
+    summary: "Updated immutable capture",
+    metadata: { width: 1440, height: 900, pageCount: 2 },
+    checksum: "b".repeat(64),
+    provenance: { source: "browser-capture", parent: revisionOne.id },
+  });
+  assert.throws(() => store.workspace.publishResourceRevisionForProject(
+    project.id,
+    created.resource.id,
+    revisionTwo.id,
+    {
+      expectedHeadRevisionId: revisionOne.id,
+      expectedSnapshotId: created.snapshot.id,
+      reason: "Stale Snapshot",
+    },
+  ), /active-snapshot conflict/);
+  const snapshotTwo = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    created.resource.id,
+    revisionTwo.id,
+    {
+      expectedHeadRevisionId: revisionOne.id,
+      expectedSnapshotId: snapshotOne.id,
+      reason: "Publish second capture",
+    },
+  );
+  assert.deepEqual(
+    store.workspace.listResourceRevisions(project.id, created.resource.id).map((revision) => revision.id),
+    [revisionOne.id, revisionTwo.id],
+  );
+  assert.deepEqual(
+    store.workspace.listSnapshots(project.id).map((snapshot) => snapshot.sequence),
+    [1, 2, 3, 4],
+  );
+  assert.equal(snapshotTwo.parentSnapshotId, snapshotOne.id);
+  assert.equal(snapshotTwo.resourceRevisions[created.resource.id], revisionTwo.id);
+
+  const foreign = store.createProject({
+    name: "Foreign capture",
+    sharingan: true,
+    sourceUrl: "https://example.com/foreign",
+  });
+  store.workspace.ensureSharinganWorkspaceFoundation(foreign.id);
+  assert.throws(
+    () => store.workspace.getResourceForProject(foreign.id, created.resource.id),
+    /belongs to another Project/,
+  );
+  assert.throws(
+    () => store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+      revisionId: "revision-stale",
+      parentRevisionId: revisionOne.id,
+      manifestPath: "captures/stale/manifest.json",
+      summary: "Stale candidate",
+      metadata: {},
+      checksum: "c".repeat(64),
+      provenance: {},
+    }),
+    /resource-head conflict/,
+  );
+  store.close();
+});
+
 test("Moodboard nodes, edited assets, conversations, and messages round-trip", () => {
   const store = freshStore();
   const board = store.createMoodboard({ name: "References" });
@@ -204,6 +367,11 @@ test("opening a legacy store atomically removes retired Design tables while pres
   legacy.close();
 
   const rebuilt = new Store(path, fakeClock());
+  assert.match(rebuilt.legacyDesignBackupPath ?? "", /\.legacy-design-backup-\d+-\d+\.sqlite$/);
+  const backup = new DatabaseSync(rebuilt.legacyDesignBackupPath!, { readOnly: true });
+  assert.equal((backup.prepare("SELECT status FROM runs WHERE id = 'legacy-run'").get() as { status: string }).status, "succeeded");
+  assert.equal((backup.prepare("SELECT project_id FROM artifacts WHERE id = 'legacy-artifact'").get() as { project_id: string }).project_id, project.id);
+  backup.close();
   const tables = new Set((rebuilt.db.prepare(
     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
   ).all() as Array<{ name: string }>).map((row) => row.name));

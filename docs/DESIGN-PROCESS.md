@@ -1,11 +1,17 @@
-# Design process — the staged generation path
+# Design process — archived staged generation path
 
-Status: **implemented and merged to `main`**, validated end-to-end on real CodeBuddy +
-Hunyuan runs. This document is the blueprint for moving Dezin from a single silent turn to
-a staged path that mirrors how a real designer works: research before design, converge on
-a direction before high-fidelity, critique against intent.
+> **Historical document.** This pipeline belonged to the pre-Canvas application and is
+> not part of the current Design Canvas runtime or public product contract. In particular,
+> the active app does not expose Prototype/Standard modes, a direction gate, project
+> variants, or `@dezin/quality` as a Canvas publication gate. The code packages are retained
+> for reference and standalone tests. See [`DESIGN-CANVAS.md`](./DESIGN-CANVAS.md) for the
+> authoritative current architecture.
 
-### Implemented
+Historical status: this predecessor was implemented and validated on CodeBuddy + Hunyuan
+before the Canvas transition. The remainder of this document records that design rather
+than promising current behavior.
+
+### Historically implemented
 
 - Skills as runtime progressive disclosure: the composer exposes a *catalog* (each
   skill's name + description + "use when" + an on-demand path to its playbook); the agent

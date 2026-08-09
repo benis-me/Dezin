@@ -3,6 +3,8 @@ packages:
   - apps/*
 allowBuilds:
   electron: true
+overrides:
+  postcss: 8.5.26
 minimumReleaseAgeExclude:
   - simple-icons@16.24.1
   - '@ai-sdk/azure@4.0.5'

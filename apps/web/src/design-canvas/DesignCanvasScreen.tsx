@@ -711,7 +711,7 @@ export function DesignCanvasScreen({
       : ungeneratedNodes.length > 0
       ? `Generate every design Node before exporting: ${ungeneratedNodes.map((node) => node.name).join(", ")}`
       : !executionAgent
-        ? "No compatible Design Agent is currently available for export"
+        ? "No Design Agent is currently available for export"
         : "Reimplement selected Node versions as Vite + TypeScript";
 
   return (

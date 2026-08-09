@@ -274,6 +274,8 @@ export interface DesignJob {
   exportId: string | null;
   error: string | null;
   cancelRequested: boolean;
+  /** True only for a Main Agent turn that produced no Canvas plan or child work. */
+  conversationOnly?: boolean;
   activity: DesignJobActivity[];
   createdAt: number;
   updatedAt: number;

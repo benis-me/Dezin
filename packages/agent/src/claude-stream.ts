@@ -157,6 +157,7 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
   let init: ClaudeStreamInit | null = null;
   let initCount = 0;
   let initExecutionKey: string | null = null;
+  let initHasStableExecutionId = false;
   let initConflict = false;
 
   for (const line of lines) {
@@ -187,18 +188,20 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
         // one execution, not an ambiguous identity, when both its runtime identity
         // and stable execution identifiers remain identical. Volatile timestamps are
         // deliberately excluded. A changed session/request still fails closed.
+        const stableExecutionIds = [str(obj.session_id), str(obj.uuid), str(obj._requestId)];
+        const candidateHasStableExecutionId = stableExecutionIds.some((value) => value !== null);
         const candidateExecutionKey = JSON.stringify([
           candidate.model,
           candidate.apiKeySource,
           candidate.cliVersion,
-          str(obj.session_id),
-          str(obj.uuid),
-          str(obj._requestId),
+          ...stableExecutionIds,
         ]);
         if (initCount === 1) {
           init = candidate;
           initExecutionKey = candidateExecutionKey;
-        } else if (candidateExecutionKey !== initExecutionKey) {
+          initHasStableExecutionId = candidateHasStableExecutionId;
+        } else if (!initHasStableExecutionId || !candidateHasStableExecutionId
+          || candidateExecutionKey !== initExecutionKey) {
           initConflict = true;
         }
         break;

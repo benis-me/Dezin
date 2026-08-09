@@ -5,9 +5,13 @@ afterEach(() => {
   localStorage.removeItem("dezin.test.panel");
 });
 
-test("readPanelPercent uses the fallback when no layout was stored", () => {
+test("readPanelPercent uses the fallback when no valid layout was stored", () => {
   expect(readStoredPanelPercent("dezin.test.panel", 24, 55)).toBeNull();
   expect(readPanelPercent("dezin.test.panel", 33, 24, 55)).toBe(33);
+  localStorage.setItem("dezin.test.panel", "   ");
+  expect(readStoredPanelPercent("dezin.test.panel", 24, 55)).toBeNull();
+  localStorage.setItem("dezin.test.panel", "not-a-number");
+  expect(readStoredPanelPercent("dezin.test.panel", 24, 55)).toBeNull();
 });
 
 test("readPanelPercent preserves saved fractions and clamps invalid extremes", () => {
@@ -16,6 +20,9 @@ test("readPanelPercent preserves saved fractions and clamps invalid extremes", (
 
   localStorage.setItem("dezin.test.panel", "0");
   expect(readPanelPercent("dezin.test.panel", 33, 24, 55)).toBe(24);
+
+  localStorage.setItem("dezin.test.panel", "40");
+  expect(readPanelPercent("dezin.test.panel", 33, 24, 55)).toBe(40);
 });
 
 test("panelPercentFromPixels converts a pixel default into a clamped percentage", () => {

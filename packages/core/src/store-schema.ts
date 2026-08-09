@@ -578,7 +578,7 @@ function copyRetainedStoreRows(db: DatabaseSync, hadRunRevisionColumn: boolean, 
  * file atomically: copy only independent app domains and valid Sharingan rows,
  * recreate the exact current schema, and leave every legacy Design row behind.
  */
-export function discardLegacyDesignStore(db: DatabaseSync): boolean {
+export function discardLegacyDesignStore(db: DatabaseSync): string | null {
   const tables = applicationTables(db);
   const present = new Set(tables);
   const hasLegacyTable = LEGACY_DESIGN_TABLES.some((table) => present.has(table));
@@ -589,7 +589,7 @@ export function discardLegacyDesignStore(db: DatabaseSync): boolean {
   const hasRetiredSettings = present.has("settings")
     && tableHasColumn(db, "settings", "default_design_system_id");
   const shouldRebuild = hasLegacyTable || hadRunRevisionColumn || hadRunSnapshotColumn || hasRetiredSettings;
-  if (!shouldRebuild) return false;
+  if (!shouldRebuild) return null;
 
   const known = new Set<string>([...CURRENT_STORE_TABLES, ...LEGACY_DESIGN_TABLES]);
   const unknown = tables.filter((table) => !known.has(table));
@@ -599,6 +599,23 @@ export function discardLegacyDesignStore(db: DatabaseSync): boolean {
   const missingRetained = CURRENT_STORE_TABLES.filter((table) => !present.has(table));
   if (missingRetained.length > 0) {
     throw new Error(`Cannot preserve independent store domains; legacy database is missing: ${missingRetained.join(", ")}`);
+  }
+
+  const database = (db.prepare("PRAGMA database_list").all() as Array<{ name?: unknown; file?: unknown }>)
+    .find((entry) => entry.name === "main");
+  const databasePath = typeof database?.file === "string" ? database.file : "";
+  if (!databasePath) {
+    throw new Error("Cannot discard legacy Design schema without a file-backed backup");
+  }
+  const backupPath = `${databasePath}.legacy-design-backup-${Date.now()}-${process.pid}.sqlite`;
+  const quotedBackupPath = backupPath.replaceAll("'", "''");
+  try {
+    db.exec(`VACUUM main INTO '${quotedBackupPath}'`);
+  } catch (error) {
+    throw new Error(
+      `Cannot discard legacy Design schema because its backup failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 
   db.exec("PRAGMA foreign_keys = OFF");
@@ -625,7 +642,7 @@ export function discardLegacyDesignStore(db: DatabaseSync): boolean {
     const integrity = db.prepare("PRAGMA integrity_check").get() as { integrity_check?: unknown } | undefined;
     if (integrity?.integrity_check !== "ok") throw new Error("Rebuilt store failed SQLite integrity_check");
     db.exec("COMMIT");
-    return true;
+    return backupPath;
   } catch (error) {
     try {
       db.exec("ROLLBACK");

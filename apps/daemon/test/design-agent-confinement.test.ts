@@ -5,14 +5,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
-  getProvider,
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
 } from "../../../packages/agent/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 import {
-  DesignAgentProviderUnsupportedError,
   DesignConfinedSpawner,
   designClaudeArgs,
   designCodeBuddyArgs,
@@ -232,28 +230,44 @@ test("CodeBuddy Design runners use their verified no-Bash policy and exact job c
   assert.equal(call.args.some((argument) => /^(Bash|Web|Task|Agent)$/i.test(argument)), false);
 });
 
-test("Agents without verified project-only confinement fail closed with provider-neutral guidance", async (t) => {
+test("Codex Design runners are accepted and remain scoped to the exact Project staging directory", async (t) => {
   const f = await fixture(t);
-  const delegate = new RecordingSpawner();
-  assert.equal(getProvider("codex")?.id, "codex");
-  assert.throws(
-    () => createProductionDesignNodeRunner(
-      settings("codex", "gpt-design"),
-      { dataDir: f.dataDir, projectId: f.projectId, spawner: delegate },
-    ),
-    /selected Agent.*verified project-only confinement/i,
+  const delegate = new RecordingSpawner({ structuredOutput: false });
+  const runner = createProductionDesignNodeRunner(
+    settings("codex", "gpt-design"),
+    { dataDir: f.dataDir, projectId: f.projectId, spawner: delegate },
   );
-  assert.throws(
-    () => new DesignConfinedSpawner({
-      dataDir: f.dataDir,
-      projectId: f.projectId,
-      provider: "codex",
-      command: "codex",
-      delegate,
-    }),
-    /selected Agent.*verified project-only confinement/i,
-  );
-  assert.equal(delegate.calls.length, 0);
+
+  const result = await runner.runTurn({
+    systemPrompt: "design system",
+    message: "create the node",
+    projectDir: f.nodeStaging,
+  });
+
+  assert.equal(runner.id, "codex");
+  assert.equal(result.artifactPath, "index.html");
+  assert.equal(delegate.calls.length, 1);
+  assert.equal(delegate.calls[0]?.cwd, await realpath(f.nodeStaging));
+  assert.equal(delegate.calls[0]?.command, "codex");
+  assert.deepEqual(delegate.calls[0]?.args.slice(0, 4), ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write"]);
+  assert.equal(delegate.calls[0]?.args.includes("danger-full-access"), false);
+
+  const guard = new DesignConfinedSpawner({
+    dataDir: f.dataDir,
+    projectId: f.projectId,
+    provider: "codex",
+    command: "codex",
+    model: "gpt-design",
+    delegate,
+  });
+  await assert.rejects(guard.run({
+    command: "codex",
+    args: ["exec", "--skip-git-repo-check", "--sandbox", "danger-full-access", "-m", "gpt-design", "prompt"],
+    cwd: f.nodeStaging,
+    stdin: "",
+    env: {},
+  }), /arguments do not match the confined policy/i);
+  assert.equal(delegate.calls.length, 1);
 });
 
 test("Main Agent analysis uses the same confined policy without requiring an artifact mutation", async (t) => {
@@ -278,30 +292,11 @@ test("Main Agent analysis uses the same confined policy without requiring an art
   assert.equal(spawner.calls[0]?.args.includes("bypassPermissions"), false);
 });
 
-test("Design runners fail closed for every provider without a verified confinement contract", () => {
-  assert.throws(
-    () => createProductionDesignNodeRunner(
-      settings("gemini"),
-      { dataDir: "/tmp/design-test", projectId: "project-test" },
-    ),
-    (error) => error instanceof DesignAgentProviderUnsupportedError
-      && /does not expose a verified Design execution contract/i.test(error.message),
-  );
-  assert.throws(
-    () => createProductionDesignAnalysisRunner(
-      settings("custom-agent"),
-      { dataDir: "/tmp/design-test", projectId: "project-test" },
-    ),
-    (error) => error instanceof DesignAgentProviderUnsupportedError,
-  );
-  assert.throws(
-    () => createProductionDesignNodeRunner(
-      settings("/usr/local/bin/claude"),
-      { dataDir: "/tmp/design-test", projectId: "project-test" },
-    ),
-    (error) => error instanceof DesignAgentProviderUnsupportedError
-      && /does not expose a verified Design execution contract/i.test(error.message),
-  );
+test("Design runners accept registered, custom, and absolute-path providers", () => {
+  const confinement = { dataDir: "/tmp/design-test", projectId: "project-test" };
+  assert.equal(createProductionDesignNodeRunner(settings("gemini"), confinement).id, "gemini");
+  assert.equal(createProductionDesignAnalysisRunner(settings("custom-agent"), confinement).id, "custom-agent");
+  assert.equal(createProductionDesignNodeRunner(settings("/usr/local/bin/claude"), confinement).id, "claude");
 });
 
 test("the last-mile spawner rejects unsafe argv drift before the delegated process runs", async (t) => {

@@ -331,6 +331,30 @@ test("Design Export state validation permits local presentation-record destructu
   }
 });
 
+test("Design Export proves finite local values for URL-capable style properties", () => {
+  assert.doesNotThrow(() => validateDesignExportJavaScript(`
+    function swatch(background: string): HTMLElement {
+      const element = document.createElement("span");
+      element.style.background = background;
+      return element;
+    }
+    document.body.append(swatch("#1a1a1a"), swatch("linear-gradient(#fff, #eee)"));
+  `));
+
+  assert.throws(() => validateDesignExportJavaScript(`
+    function swatch(background: string): HTMLElement {
+      const element = document.createElement("span");
+      element.style.background = background;
+      return element;
+    }
+    document.body.append(swatch("url(https://evil.example/tracker.png)"));
+  `), /remote|unpinned/i);
+  assert.throws(() => validateDesignExportJavaScript(`
+    const element = document.createElement("span");
+    element.style.background = unknownExternalState;
+  `), /assignment to background at 3:5/i);
+});
+
 test("Design Export CSS rejects animations, transitions, and timeline-delayed changes", () => {
   const unsafeCss = [
     ".gate { animation: swap 1ms 60s forwards } @keyframes swap { to { opacity: 0 } }",
