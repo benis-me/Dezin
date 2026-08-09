@@ -19,9 +19,28 @@ import {
   updateDesignJob,
 } from "../src/design/design-storage.ts";
 
-async function waitForReadyJob(base: string, projectId: string, jobId: string): Promise<void> {
+async function waitForReadyJob(
+  base: string,
+  projectId: string,
+  jobId: string,
+  transport: typeof fetch = fetch,
+): Promise<void> {
+  let consecutiveTransportFailures = 0;
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const jobs = await (await fetch(`${base}/api/projects/${projectId}/design-canvas/jobs`)).json() as Array<{
+    let response: Response;
+    try {
+      response = await transport(`${base}/api/projects/${projectId}/design-canvas/jobs`);
+      consecutiveTransportFailures = 0;
+    } catch (error) {
+      consecutiveTransportFailures += 1;
+      if (consecutiveTransportFailures >= 50) {
+        throw new Error(`Job ${jobId} polling lost its loopback transport`, { cause: error });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      continue;
+    }
+    assert.equal(response.status, 200, `Job ${jobId} polling returned HTTP ${response.status}`);
+    const jobs = await response.json() as Array<{
       id: string;
       status: string;
       error: string | null;
@@ -35,6 +54,18 @@ async function waitForReadyJob(base: string, projectId: string, jobId: string): 
   }
   assert.fail(`Job ${jobId} did not become ready`);
 }
+
+test("Job HTTP polling tolerates one transient loopback transport reset", async () => {
+  let calls = 0;
+  const transport = async (): Promise<Response> => {
+    calls += 1;
+    if (calls === 1) throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+    return Response.json([{ id: "job-ready", status: "ready", error: null }]);
+  };
+
+  await waitForReadyJob("http://unused.invalid", "project", "job-ready", transport as typeof fetch);
+  assert.equal(calls, 2);
+});
 
 test("current Project HTTP is minimal and retired Design architecture stays unregistered", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-current-http-"));
