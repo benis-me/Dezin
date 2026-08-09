@@ -546,9 +546,9 @@ export function DesignCanvasScreen({
     if (!canvas || canvas.nodes.length < 2) return;
     const layout = arrangeDesignNodes(canvas.nodes, canvas.nodeOrder);
     void controller.applyIntents([{ type: "replace-layout", nodes: layout }]).then(() => {
-      window.requestAnimationFrame(() => void flowRef.current?.fitView({ padding: 0.16, duration: 260 }));
+      window.requestAnimationFrame(() => void flowRef.current?.fitView({ padding: 0.16, duration: reduceMotion ? 0 : 260 }));
     }).catch(() => undefined);
-  }, [canvas, controller.applyIntents]);
+  }, [canvas, controller.applyIntents, reduceMotion]);
 
   const clearSelection = useCallback(() => {
     selectionGuardRef.current = null;
@@ -860,15 +860,15 @@ export function DesignCanvasScreen({
               <CanvasToolButton compact label="Arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}>
                 <LayoutGrid aria-hidden />
               </CanvasToolButton>
-              <CanvasToolButton compact label="Fit canvas" onClick={() => void flowRef.current?.fitView({ padding: 0.16, duration: 240 })}>
+              <CanvasToolButton compact label="Fit canvas" onClick={() => void flowRef.current?.fitView({ padding: 0.16, duration: reduceMotion ? 0 : 240 })}>
                 <LocateFixed aria-hidden />
               </CanvasToolButton>
               <span className="design-canvas-tools__divider" aria-hidden />
-              <CanvasToolButton compact label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: 140 })}>
+              <CanvasToolButton compact label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: reduceMotion ? 0 : 140 })}>
                 <Minus aria-hidden />
               </CanvasToolButton>
               <output aria-label="Canvas zoom">{Math.round(zoom * 100)}%</output>
-              <CanvasToolButton compact label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: 140 })}>
+              <CanvasToolButton compact label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: reduceMotion ? 0 : 140 })}>
                 <Plus aria-hidden />
               </CanvasToolButton>
             </div>
@@ -920,9 +920,9 @@ export function DesignCanvasScreen({
             <motion.div
               key="main-agent"
               className="design-canvas-main-agent"
-              initial={reduceMotion ? false : { opacity: 0, x: 12, y: 4, scale: 0.992, filter: "blur(2px)" }}
-              animate={{ opacity: 1, x: 0, y: 0, scale: 1, filter: "blur(0px)" }}
-              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 8, scale: 0.995, filter: "blur(2px)" }}
+              initial={reduceMotion ? false : { opacity: 0, x: 12, y: 4, scale: 0.992 }}
+              animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: 8, scale: 0.995 }}
               transition={{ duration: reduceMotion ? 0 : 0.24, ease: CANVAS_MOTION_EASE }}
             >
               <CanvasAgentPanel
@@ -980,7 +980,7 @@ export function DesignCanvasScreen({
               onFit={() => void flowRef.current?.fitView({
                 nodes: flowNodesRef.current.filter((node) => node.id === contextMenuNode.id),
                 padding: 0.24,
-                duration: 220,
+                duration: reduceMotion ? 0 : 220,
                 maxZoom: 1.35,
               })}
               onDelete={() => removeNode(contextMenuNode.id)}

@@ -207,16 +207,26 @@ test("generated Node previews have kind-aware fit dimensions without resizing ma
   expect(preferredGeneratedNodeGeometry(node({ kind: "image" }))).toMatchObject({ width: 480, height: 360 });
 });
 
-test("Node identity chrome counter-scales against the Canvas viewport", async () => {
-  const zoomedCanvas = canvas([node()]);
+test("Node identity chrome counter-scales as one bounded row so long names cannot collide with status", async () => {
+  const zoomedCanvas = canvas([node({
+    name: "7666005930341717169001.webp",
+    geometry: { x: 80, y: 80, width: 360, height: 260 },
+  })]);
   zoomedCanvas.viewport = { x: 0, y: 0, zoom: 0.5 };
   const { api } = createCanvasApi(zoomedCanvas);
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   const flowNode = await screen.findByTestId("rf__node-page-1");
   await waitFor(() => {
-    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__chrome")).toHaveStyle({ height: "48px" });
-    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__identity")).toHaveStyle({ transform: "scale(2)" });
+    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__chrome")).toHaveStyle({
+      width: "calc(50% - 2px)",
+      height: "24px",
+      left: "2px",
+      transform: "scale(2)",
+      transformOrigin: "left bottom",
+    });
+    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__identity")).not.toHaveAttribute("style");
+    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__state-anchor")).not.toHaveAttribute("style");
   });
 });
 

@@ -18,7 +18,16 @@ const flowHarness = vi.hoisted(() => ({
   props: null as Record<string, any> | null,
   viewport: { x: 0, y: 0, zoom: 1 },
   setViewport: vi.fn(),
+  fitView: vi.fn(),
+  zoomIn: vi.fn(),
+  zoomOut: vi.fn(),
 }));
+const motionHarness = vi.hoisted(() => ({ reduced: false }));
+
+vi.mock("motion/react", async () => {
+  const actual = await vi.importActual<typeof import("motion/react")>("motion/react");
+  return { ...actual, useReducedMotion: () => motionHarness.reduced };
+});
 
 vi.mock("@xyflow/react", async () => {
   const actual = await vi.importActual<typeof import("@xyflow/react")>("@xyflow/react");
@@ -34,9 +43,18 @@ vi.mock("@xyflow/react", async () => {
       return true;
     },
     screenToFlowPosition: (point: { x: number; y: number }) => point,
-    zoomIn: async () => true,
-    zoomOut: async () => true,
-    fitView: async () => true,
+    zoomIn: async (options?: unknown) => {
+      flowHarness.zoomIn(options);
+      return true;
+    },
+    zoomOut: async (options?: unknown) => {
+      flowHarness.zoomOut(options);
+      return true;
+    },
+    fitView: async (options?: unknown) => {
+      flowHarness.fitView(options);
+      return true;
+    },
   };
   function ReactFlowMock(props: Record<string, any>) {
     flowHarness.props = props;
@@ -164,10 +182,28 @@ beforeEach(() => {
   flowHarness.props = null;
   flowHarness.viewport = { x: 0, y: 0, zoom: 1 };
   flowHarness.setViewport.mockClear();
+  flowHarness.fitView.mockClear();
+  flowHarness.zoomIn.mockClear();
+  flowHarness.zoomOut.mockClear();
+  motionHarness.reduced = false;
 });
 
 afterEach(() => {
   vi.clearAllTimers();
+});
+
+test("reduced motion makes canvas Fit and Zoom navigation immediate", async () => {
+  motionHarness.reduced = true;
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Fit canvas" }));
+  expect(flowHarness.fitView).toHaveBeenCalledWith({ padding: 0.16, duration: 0 });
+  fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  expect(flowHarness.zoomIn).toHaveBeenCalledWith({ duration: 0 });
+  fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
+  expect(flowHarness.zoomOut).toHaveBeenCalledWith({ duration: 0 });
 });
 
 test("completed multi-select drags persist one geometry batch and keyboard position changes do not need drag-stop", async () => {

@@ -218,21 +218,20 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       <div
         className="design-canvas-node__chrome"
         style={{
-          height: `${24 * chromeScale}px`,
+          width: `calc(${100 / chromeScale}% - 2px)`,
+          height: "24px",
+          left: `${chromeScale}px`,
+          right: "auto",
           bottom: `calc(100% + ${3 * chromeScale}px)`,
+          transform: `scale(${chromeScale})`,
+          transformOrigin: "left bottom",
         }}
       >
-        <div
-          className="design-canvas-node__identity"
-          style={{ transform: `scale(${chromeScale})` }}
-        >
+        <div className="design-canvas-node__identity">
           <span className="design-canvas-node__kind-icon"><Icon aria-hidden /></span>
           <strong className="design-canvas-node__name">{node.name}</strong>
         </div>
-        <span
-          className="design-canvas-node__state-anchor"
-          style={{ transform: `scale(${chromeScale})` }}
-        >
+        <span className="design-canvas-node__state-anchor">
           <NodeState state={node.state} />
         </span>
       </div>

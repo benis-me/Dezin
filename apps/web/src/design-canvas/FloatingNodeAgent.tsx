@@ -450,10 +450,10 @@ export function CanvasAgentPanel({
       data-agent-scope={scopeKey}
       className={cn("design-canvas-agent", floating && "design-canvas-agent--floating", className)}
       style={style}
-      initial={floating && !reduceMotion ? { opacity: 0, x: 8, y: 2, scale: 0.992, filter: "blur(2px)" } : false}
+      initial={floating && !reduceMotion ? { opacity: 0, x: 8, y: 2, scale: 0.992 } : false}
       animate={floating ? (panelVisible
-        ? { opacity: 1, x: 0, y: 0, scale: 1, filter: "blur(0px)" }
-        : { opacity: 0, x: reduceMotion ? 0 : 8, y: 0, scale: reduceMotion ? 1 : 0.992, filter: reduceMotion ? "blur(0px)" : "blur(2px)" }) : undefined}
+        ? { opacity: 1, x: 0, y: 0, scale: 1 }
+        : { opacity: 0, x: reduceMotion ? 0 : 8, y: 0, scale: reduceMotion ? 1 : 0.992 }) : undefined}
       transition={{ duration: reduceMotion ? 0 : 0.22, ease: AGENT_MOTION_EASE }}
       aria-label={`${title} panel`}
       onContextMenu={(event) => event.stopPropagation()}
@@ -670,8 +670,8 @@ export function CanvasAgentPanel({
           <motion.div
             role="alert"
             className="design-canvas-agent__composer-notice"
-            initial={reduceMotion ? false : { opacity: 0, y: 5, filter: "blur(2px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            initial={reduceMotion ? false : { opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
           >
             <CircleAlert aria-hidden />
@@ -776,7 +776,7 @@ function AgentActivityCard({
           animate={reduceMotion
             ? { opacity: 0 }
             : { x: ["-150%", "430%"], opacity: [0, 0.82, 0.82, 0] }}
-          transition={{
+          transition={reduceMotion ? { duration: 0 } : {
             duration: 2.6,
             ease: AGENT_MOTION_EASE_IN_OUT,
             repeat: Number.POSITIVE_INFINITY,

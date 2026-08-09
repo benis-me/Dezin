@@ -22,12 +22,19 @@ test("Design Canvas keeps native titlebar and floating feedback geometry stable"
   expect(css).toMatch(/\.design-canvas-agent__composer-notice\s*\{[^}]*position:\s*absolute;/s);
 });
 
-test("selected Nodes use a gap outline and discoverable corner brackets instead of a resizer box", () => {
+test("selected and keyboard-focused Nodes use a gap outline with discoverable corner brackets", () => {
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*15px;/s);
   expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:/s);
+  expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
   expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
+});
+
+test("counter-scaled Node identity stays legible and bounded over neighboring previews", () => {
+  expect(css).toMatch(/\.design-canvas-node__identity\s*\{[^}]*flex:\s*0 1 auto;[^}]*background:[^}]*backdrop-filter:/s);
+  expect(css).toContain("@container (max-width: 70px)");
+  expect(css).toContain("@container (max-width: 42px)");
 });
 
 test("Agent header is compact and does not reserve an ornamental mark", () => {

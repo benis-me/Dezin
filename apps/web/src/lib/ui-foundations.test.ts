@@ -36,6 +36,12 @@ test("the web shell uses self-hosted Fontsource assets without remote font origi
   expect(main).toMatch(/@fontsource-variable\/geist-mono/);
 });
 
+test("manual light and dark themes expose their color scheme to native controls", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/styles/globals.css"), "utf8");
+  expect(css).toMatch(/:root\s*\{[^}]*color-scheme:\s*light;/s);
+  expect(css).toMatch(/\.dark\s*\{[^}]*color-scheme:\s*dark;/s);
+});
+
 test("Agent availability explains every selectable runtime state", () => {
   expect(agentAvailabilityReason(undefined)).toBe("Choose an available Agent.");
   expect(agentAvailabilityReason(agent({ available: true, availability: "ready" }))).toBeNull();
