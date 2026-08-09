@@ -2,10 +2,11 @@ import { defineConfig } from "vitest/config";
 import type { Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { assertLazyEditorModulesStayLazy } from "../../scripts/bundle-module-policy.mjs";
+import { webPortfilePlugin } from "./vite-portfile-plugin.ts";
 
 /**
  * Portless dev: discover the daemon's URL from the discovery file the daemon
@@ -54,29 +55,7 @@ const webPort = Number(process.env.DEZIN_WEB_PORT ?? 6273);
 // Mirror the daemon's portfile pattern for Vite's own port: once the server is
 // listening, write the ACTUAL bound URL to .dezin/web.json so the desktop shell
 // can find us even after an auto-fallback (strictPort off → next free port).
-function webPortfilePlugin() {
-  const file = join(import.meta.dirname, "..", "..", ".dezin", "web.json");
-  const clean = () => {
-    try {
-      rmSync(file, { force: true });
-    } catch {
-      /* ignore */
-    }
-  };
-  return {
-    name: "dezin-web-portfile",
-    configureServer(server: { httpServer: { once: Function; address: Function } | null }) {
-      server.httpServer?.once("listening", () => {
-        const addr = server.httpServer?.address();
-        const port = addr && typeof addr === "object" ? addr.port : webPort;
-        mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file, JSON.stringify({ url: `http://localhost:${port}`, port }));
-      });
-      server.httpServer?.once("close", clean);
-      process.once("exit", clean);
-    },
-  };
-}
+const webPortfile = join(import.meta.dirname, "..", "..", ".dezin", "web.json");
 
 function bundleModuleGuardPlugin(): Plugin {
   return {
@@ -100,7 +79,12 @@ function bundleModuleGuardPlugin(): Plugin {
 const router = () => daemonTarget();
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), webPortfilePlugin(), bundleModuleGuardPlugin()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    webPortfilePlugin({ file: webPortfile, fallbackPort: webPort }),
+    bundleModuleGuardPlugin(),
+  ],
   resolve: {
     alias: {
       "@": join(import.meta.dirname, "src"),
