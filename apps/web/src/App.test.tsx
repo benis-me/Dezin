@@ -31,9 +31,9 @@ const api = makeFakeApi({
   }),
 });
 
-function renderApp() {
+function renderApp(client = api) {
   return render(
-    <ApiProvider client={api}>
+    <ApiProvider client={client}>
       <App />
     </ApiProvider>,
   );
@@ -53,9 +53,15 @@ test("routes to each screen", async () => {
   cleanup();
 
   window.history.pushState({}, "", "/projects/new");
-  renderApp();
+  renderApp({
+    ...api,
+    getDesignCanvas: async (projectId) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return api.getDesignCanvas(projectId);
+    },
+  });
   expect(await screen.findByRole("main", { name: "Design canvas" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Add Design node" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Add Design node" })).toBeInTheDocument();
 });
 
 test("a Project screen wires a ready Export to the browser-safe path fallback", async () => {
