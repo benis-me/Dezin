@@ -67,6 +67,7 @@ import {
 } from "../components/ui/index.ts";
 import { StudioToolbarHeader } from "../components/ui/StudioHeader.tsx";
 import type { AgentInfo } from "../lib/api.ts";
+import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { previewDocumentSrc } from "../lib/preview-channel.ts";
 import { arrangeDesignNodes } from "./auto-layout.ts";
@@ -212,10 +213,12 @@ export function DesignCanvasScreen({
   const flowRef = useRef<ReactFlowInstance<DesignFlowNode> | null>(null);
   const flowNodesRef = useRef<DesignFlowNode[]>([]);
   const draggingNodeIdsRef = useRef(new Set<string>());
+  const resizingNodeIdsRef = useRef(new Set<string>());
   const pendingNodeGeometriesRef = useRef(new Map<string, DesignNode["geometry"]>());
   const viewportSaveTimerRef = useRef<number | null>(null);
   const localViewportTargetRef = useRef<Viewport | null>(null);
   const authoritativeViewportRef = useRef<Viewport | null>(null);
+  const focusViewportLockRef = useRef<Viewport | null>(null);
   const mountedViewportProjectRef = useRef<string | null>(null);
   const layoutFrameRef = useRef<number | null>(null);
   const pendingImportPositionRef = useRef({ x: 120, y: 120 });
@@ -382,6 +385,7 @@ export function DesignCanvasScreen({
       : null;
     const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
     const activeViewport = flowRef.current?.getViewport() ?? canvas?.viewport ?? null;
+    focusViewportLockRef.current = activeViewport ? { ...activeViewport } : null;
     const durationMs = sourceNode && surfaceBounds && activeViewport
       ? focusedNodeTransform(
           sourceNode.geometry,
@@ -499,7 +503,14 @@ export function DesignCanvasScreen({
       next.set(nodeId, aspectRatio);
       return next;
     });
-  }, []);
+    const source = canvas?.nodes.find((node) => node.id === nodeId);
+    if (!source || source.kind !== "image" || resizingNodeIdsRef.current.has(nodeId)) return;
+    const pending = pendingNodeGeometriesRef.current.get(nodeId);
+    const currentGeometry = pending ?? source.geometry;
+    if (Math.abs(currentGeometry.width / currentGeometry.height - aspectRatio) < 0.0001) return;
+    const fitted = fittedImageNodeSize({ width: aspectRatio, height: 1 });
+    persistNodeResize(nodeId, { ...currentGeometry, ...fitted });
+  }, [canvas?.nodes, persistNodeResize]);
 
   const onFocusAnimationStart = useCallback((nodeId: string, phase: NodeFocusPhase, durationMs: number) => {
     if (phase !== "closing") return;
@@ -610,9 +621,10 @@ export function DesignCanvasScreen({
       focusCloseCompletionRef.current = null;
       setFocusedPanelNodeId(null);
       setFocusTransition(null);
+      focusViewportLockRef.current = null;
     }
     const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
-    const activeViewport = flowRef.current?.getViewport() ?? canvas.viewport;
+    const activeViewport = focusViewportLockRef.current ?? flowRef.current?.getViewport() ?? canvas.viewport;
     const measuredSourceTransform = focusedCanvasNode && surfaceBounds
       ? focusedNodeTransform(
           focusedCanvasNode.geometry,
@@ -647,6 +659,9 @@ export function DesignCanvasScreen({
     for (const nodeId of draggingNodeIdsRef.current) {
       if (!canvasNodeIds.has(nodeId)) draggingNodeIdsRef.current.delete(nodeId);
     }
+    for (const nodeId of resizingNodeIdsRef.current) {
+      if (!canvasNodeIds.has(nodeId)) resizingNodeIdsRef.current.delete(nodeId);
+    }
     for (const [nodeId, pending] of pendingNodeGeometriesRef.current) {
       const canonical = canvas.nodes.find((node) => node.id === nodeId)?.geometry;
       if (!canonical || sameGeometry(canonical, pending)) pendingNodeGeometriesRef.current.delete(nodeId);
@@ -670,7 +685,9 @@ export function DesignCanvasScreen({
       const existing = currentById.get(canonicalNode.id);
       const authoritativeNode = canonicalNode.data.node;
       const pending = pendingNodeGeometriesRef.current.get(canonicalNode.id);
-      const localGeometry = existing && draggingNodeIdsRef.current.has(canonicalNode.id)
+      const locallyChanging = draggingNodeIdsRef.current.has(canonicalNode.id)
+        || resizingNodeIdsRef.current.has(canonicalNode.id);
+      const localGeometry = existing && locallyChanging
         ? flowNodeGeometry(existing, authoritativeNode.geometry)
         : pending ?? authoritativeNode.geometry;
       const displayedNode = sameGeometry(localGeometry, authoritativeNode.geometry)
@@ -731,6 +748,8 @@ export function DesignCanvasScreen({
     if (focusReleaseTimerRef.current !== null) window.clearTimeout(focusReleaseTimerRef.current);
     if (selectionGhostTimerRef.current !== null) window.clearTimeout(selectionGhostTimerRef.current);
     if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
+    draggingNodeIdsRef.current.clear();
+    resizingNodeIdsRef.current.clear();
     pendingNodeGeometriesRef.current.clear();
     focusTransitionSequenceRef.current += 1;
     focusCloseCompletionRef.current = null;
@@ -738,6 +757,7 @@ export function DesignCanvasScreen({
     contextSelectionGuardRef.current = null;
     selectionClearGuardRef.current = false;
     focusClosingRef.current = false;
+    focusViewportLockRef.current = null;
     mountedViewportProjectRef.current = null;
     flowRef.current = null;
   }, []);
@@ -929,11 +949,16 @@ export function DesignCanvasScreen({
     const next = replaceFlowNodes((current) => applyNodeChanges(changes, current));
     let completedPositionChange = false;
     for (const change of changes) {
-      if (change.type !== "position") continue;
-      if (change.dragging === true) draggingNodeIdsRef.current.add(change.id);
-      if (change.dragging === false) {
-        draggingNodeIdsRef.current.add(change.id);
-        completedPositionChange = true;
+      if (change.type === "position") {
+        if (change.dragging === true) draggingNodeIdsRef.current.add(change.id);
+        if (change.dragging === false) {
+          draggingNodeIdsRef.current.add(change.id);
+          completedPositionChange = true;
+        }
+      }
+      if (change.type === "dimensions") {
+        if (change.resizing === true) resizingNodeIdsRef.current.add(change.id);
+        if (change.resizing === false) resizingNodeIdsRef.current.delete(change.id);
       }
     }
     if (completedPositionChange) {
@@ -968,15 +993,27 @@ export function DesignCanvasScreen({
     }, 500);
   }, [controller.applyIntents, controller.refresh]);
 
+  const restoreLockedFocusViewport = useCallback((viewport: Viewport): boolean => {
+    const locked = focusViewportLockRef.current;
+    if (!locked) return false;
+    setZoom(locked.zoom);
+    if (!sameViewport(viewport, locked)) {
+      void flowRef.current?.setViewport({ ...locked }, { duration: 0 }).catch(() => undefined);
+    }
+    return true;
+  }, []);
+
   const onMove = useCallback<OnMove>((_event, viewport) => {
+    if (restoreLockedFocusViewport(viewport)) return;
     setZoom(viewport.zoom);
     bumpLayout();
-  }, [bumpLayout]);
+  }, [bumpLayout, restoreLockedFocusViewport]);
 
   const onMoveEnd = useCallback<OnMoveEnd>((_event, viewport) => {
+    if (restoreLockedFocusViewport(viewport)) return;
     setZoom(viewport.zoom);
     persistViewport(viewport);
-  }, [persistViewport]);
+  }, [persistViewport, restoreLockedFocusViewport]);
 
   const arrange = useCallback(() => {
     if (!canvas || canvas.nodes.length < 2) return;
@@ -1052,6 +1089,13 @@ export function DesignCanvasScreen({
       if (focusFinishTimerRef.current !== null) window.clearTimeout(focusFinishTimerRef.current);
       focusFinishTimerRef.current = null;
       focusCloseCompletionRef.current = null;
+      const lockedViewport = focusViewportLockRef.current;
+      const currentViewport = flowRef.current?.getViewport();
+      if (lockedViewport && currentViewport && !sameViewport(currentViewport, lockedViewport)) {
+        void flowRef.current?.setViewport({ ...lockedViewport }, { duration: 0 }).catch(() => undefined);
+      }
+      if (lockedViewport) setZoom(lockedViewport.zoom);
+      focusViewportLockRef.current = null;
       setFocusTransition(null);
       clearSelection();
       focusReleaseTimerRef.current = window.setTimeout(releaseFocus, motionEnabled ? 120 : 80);
@@ -1065,6 +1109,12 @@ export function DesignCanvasScreen({
     if (focusActive) closeNodeFocus();
     else clearSelection();
   }, [clearSelection, closeNodeFocus, focusActive]);
+
+  const blockFocusedMiddleButton = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (!focusActive || event.button !== 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, [focusActive]);
 
   const dispatchSurfaceContextMenu = useCallback((event: ReactMouseEvent | MouseEvent, targetNodeId: string | null) => {
     event.preventDefault();
@@ -1320,6 +1370,7 @@ export function DesignCanvasScreen({
       className="design-canvas-root"
       data-node-focus={focusTransition?.phase}
       data-main-agent={mainAgentOpen || undefined}
+      style={{ "--design-focus-duration": `${activeFocusDurationMs}ms` } as CSSProperties}
     >
       <input
         ref={fileInputRef}
@@ -1429,6 +1480,9 @@ export function DesignCanvasScreen({
               if (event.dataTransfer.types.includes("Files")) event.preventDefault();
             }}
             onContextMenu={onSurfaceContextMenu}
+            onPointerDownCapture={blockFocusedMiddleButton}
+            onMouseDownCapture={blockFocusedMiddleButton}
+            onAuxClickCapture={blockFocusedMiddleButton}
             onWheelCapture={(event) => {
               if (focusActive && (event.metaKey || event.ctrlKey)) {
                 event.preventDefault();

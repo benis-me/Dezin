@@ -74,7 +74,7 @@
   min-width: 100%;
   min-height: 100%;
   background:
-    linear-gradient(90deg, color-mix(in oklch, var(--surface-2) 48%, var(--background)) 0 47px, transparent 47px),
+    linear-gradient(90deg, color-mix(in oklch, var(--surface-2) 42%, var(--background)) 0 34px, transparent 34px),
     var(--background);
 }
 
@@ -82,22 +82,22 @@
   min-width: max-content;
   min-height: 100%;
   margin: 0;
-  padding: 18px 24px 24px 0;
+  padding: 10px 14px 14px 0;
   background: transparent;
   color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground));
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: clamp(11px, 1vw, 13px);
+  font-size: clamp(10.5px, 0.86vw, 12.5px);
   font-variant-ligatures: none;
-  line-height: 1.68;
+  line-height: 1.52;
   tab-size: 2;
 }
 
 .design-typed-material__highlight .th-line { display: block; min-height: 1lh; }
 .design-typed-material__highlight .th-line::before {
   display: inline-block;
-  width: 47px;
+  width: 34px;
   box-sizing: border-box;
-  padding-right: 13px;
+  padding-right: 8px;
   color: color-mix(in oklch, var(--muted-foreground) 48%, transparent);
   content: attr(data-line);
   font-size: 0.86em;
@@ -105,32 +105,32 @@
   user-select: none;
 }
 
-.design-typed-material__highlight .th-comment { color: color-mix(in oklch, var(--muted-foreground) 72%, transparent); font-style: italic; }
-.design-typed-material__highlight .th-keyword,
-.design-typed-material__highlight .th-meta { color: oklch(0.58 0.16 292); }
-.design-typed-material__highlight .th-string,
-.design-typed-material__highlight .th-attr { color: oklch(0.57 0.12 151); }
-.design-typed-material__highlight .th-number,
-.design-typed-material__highlight .th-literal { color: oklch(0.61 0.13 55); }
-.design-typed-material__highlight .th-function,
-.design-typed-material__highlight .th-property { color: oklch(0.56 0.13 242); }
-.design-typed-material__highlight .th-type,
-.design-typed-material__highlight .th-tag { color: oklch(0.6 0.13 194); }
-.design-typed-material__highlight .th-operator,
-.design-typed-material__highlight .th-punctuation { color: color-mix(in oklch, var(--foreground) 64%, var(--muted-foreground)); }
-.design-typed-material__highlight .th-inserted { background: oklch(0.8 0.12 150 / 0.14); color: oklch(0.52 0.12 150); }
-.design-typed-material__highlight .th-deleted { background: oklch(0.75 0.15 25 / 0.12); color: oklch(0.56 0.16 25); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-comment { color: color-mix(in oklch, var(--muted-foreground) 72%, transparent); font-style: italic; }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-keyword,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-meta { color: oklch(0.58 0.16 292); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-string,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-attr { color: oklch(0.57 0.12 151); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-number,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-literal { color: oklch(0.61 0.13 55); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-function,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-property { color: oklch(0.56 0.13 242); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-type,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-tag { color: oklch(0.6 0.13 194); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-operator,
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-punctuation { color: color-mix(in oklch, var(--foreground) 64%, var(--muted-foreground)); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-inserted { background: oklch(0.8 0.12 150 / 0.14); color: oklch(0.52 0.12 150); }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-deleted { background: oklch(0.75 0.15 25 / 0.12); color: oklch(0.56 0.16 25); }
 
-.dark .design-typed-material__highlight .th-keyword,
-.dark .design-typed-material__highlight .th-meta { color: oklch(0.75 0.13 294); }
-.dark .design-typed-material__highlight .th-string,
-.dark .design-typed-material__highlight .th-attr { color: oklch(0.76 0.12 151); }
-.dark .design-typed-material__highlight .th-number,
-.dark .design-typed-material__highlight .th-literal { color: oklch(0.79 0.12 67); }
-.dark .design-typed-material__highlight .th-function,
-.dark .design-typed-material__highlight .th-property { color: oklch(0.76 0.12 242); }
-.dark .design-typed-material__highlight .th-type,
-.dark .design-typed-material__highlight .th-tag { color: oklch(0.78 0.11 194); }
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-keyword,
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-meta { color: oklch(0.75 0.13 294); }
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-string,
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-attr { color: oklch(0.76 0.12 151); }
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-number,
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-literal { color: oklch(0.79 0.12 67); }
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-function,
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-property { color: oklch(0.76 0.12 242); }
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-type,
+.dark :where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-tag { color: oklch(0.78 0.11 194); }
 
 .design-typed-material__editor {
   z-index: 2;
@@ -149,12 +149,12 @@
 .design-typed-material__editor-header {
   display: flex;
   min-width: 0;
-  min-height: 46px;
+  min-height: 38px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   border-bottom: 1px solid color-mix(in oklch, var(--border) 76%, transparent);
-  padding: 6px 8px 6px 14px;
+  padding: 4px 6px 4px 12px;
   background: color-mix(in oklch, var(--card) 94%, transparent);
 }
 
@@ -180,25 +180,63 @@
 .design-typed-material__identity > small::before { content: "\00b7"; margin-right: 8px; }
 .design-typed-material__editor-actions button svg { width: 13px; height: 13px; }
 
+.design-typed-material__editor-code {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.design-typed-material__editor-highlight {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.design-typed-material__editor-highlight .th-code {
+  min-width: max-content;
+  min-height: 100%;
+  margin: 0;
+  padding: 14px 16px;
+  background: transparent;
+  color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground));
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 12.5px;
+  font-variant-ligatures: none;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
 .design-typed-material__textarea {
+  position: relative;
+  z-index: 2;
   width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   resize: none;
   border: 0;
   border-radius: 0;
   outline: 0;
-  padding: clamp(18px, 3.8vw, 40px);
+  padding: 14px 16px;
   background: var(--background);
   box-shadow: none;
   color: var(--foreground);
   caret-color: var(--foreground);
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 13px;
+  font-size: 12.5px;
   font-variant-ligatures: none;
-  line-height: 1.68;
+  line-height: 1.55;
   tab-size: 2;
   white-space: pre;
+}
+.design-typed-material__textarea[data-syntax-highlighted="true"] {
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 .design-typed-material__textarea::selection { background: color-mix(in oklch, var(--design-canvas-accent) 26%, transparent); }
 .design-typed-material__textarea[readonly] { color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground)); }

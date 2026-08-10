@@ -224,8 +224,8 @@ function NodeCornerResizeControls({
     <NodeResizeControl
       key={position}
       position={position}
-      minWidth={280}
-      minHeight={200}
+      minWidth={lockAspectRatio ? 120 : 280}
+      minHeight={lockAspectRatio ? 80 : 200}
       keepAspectRatio={lockAspectRatio}
       shouldResize={() => enabled}
       className={cn(
@@ -609,12 +609,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             />
           ) : null}
 
-          {live && hasRichContent ? (
-            <div className="design-canvas-node__working-badge" role="status">
-              <LoaderCircle aria-hidden />
-              <span>{node.state === "validating" ? "Preparing the next preview" : "Creating the next version"}</span>
-            </div>
-          ) : null}
+          {live && hasRichContent ? <NodeGenerationStatus state={node.state} /> : null}
 
           {(node.state === "failed" || node.state === "cancelled" || node.state === "superseded") && hasRichContent ? (
             <div className="design-canvas-node__failure" role="status">
@@ -628,7 +623,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
   );
 }
 
-function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["state"]; label: string }) {
+export function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["state"]; label: string }) {
   const title = state === "queued"
     ? "Waiting to begin"
     : state === "validating"
@@ -639,7 +634,36 @@ function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["state"]; 
     : state === "validating"
       ? "Checking the single-file result before it becomes a version."
       : "The Agent is composing a new single-file design from the canvas context.";
-  return <NodePlaceholder icon="loading" title={title} detail={detail} />;
+  return (
+    <div className="design-canvas-node__generation" data-generation-state={state} role="status">
+      <GenerationDotField />
+      <div className="design-canvas-node__generation-copy">
+        <p>{title}</p>
+        <span>{detail}</span>
+      </div>
+    </div>
+  );
+}
+
+export function NodeGenerationStatus({ state }: { state: DesignNode["state"] }) {
+  return (
+    <div className="design-canvas-node__working-badge" data-generation-state={state} role="status">
+      <GenerationDotField compact />
+      <span>{state === "validating" ? "Preparing the next preview" : "Creating the next version"}</span>
+    </div>
+  );
+}
+
+function GenerationDotField({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={compact ? "design-canvas-node__working-dots" : "design-canvas-node__generation-dots"}
+      aria-hidden
+    >
+      <span className="design-canvas-node__generation-field" />
+      <span className="design-canvas-node__generation-glow" />
+    </span>
+  );
 }
 
 function articleFor(label: string): string {

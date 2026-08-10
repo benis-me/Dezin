@@ -204,6 +204,20 @@ test("longer flights receive more time so near and far openings keep a consisten
   expect(far.durationMs).toBeLessThanOrEqual(NODE_FOCUS_MAX_FLIGHT_DURATION_MS);
 });
 
+test("focused Node flight keeps a clearly visible curved arc in screen space", () => {
+  const viewport = { x: 0, y: 0, zoom: 0.8 };
+  const transform = focusedNodeTransform(
+    geometry(-920, -620, 520, 340),
+    { width: 1_280, height: 760 },
+    viewport,
+    { reservedRight: 360, layoutMode: "preview" },
+  );
+  const screenArc = Math.hypot(transform.arcX, transform.arcY) * viewport.zoom;
+
+  expect(screenArc).toBeGreaterThanOrEqual(52);
+  expect(screenArc).toBeLessThanOrEqual(76.1);
+});
+
 test("sampled focus frames follow a real curve with continuous progress rather than a two-segment pause", () => {
   const motion = nodeFocusMotions(
     [{ id: "focus", geometry: geometry(0, 0) }],

@@ -65,6 +65,8 @@ const AGENT_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 const AGENT_MOTION_EASE_IN_OUT: [number, number, number, number] = [0.66, 0, 0.34, 1];
 const TRANSCRIPT_MESSAGE_PAGE_SIZE = 12;
 const TRANSCRIPT_JOB_PAGE_SIZE = 6;
+const RESERVED_MAIN_AGENT_QUEUED_REPLY =
+  "Main Agent orchestration is queued. The final result will replace this status.";
 
 interface FloatingPosition {
   nodeId: string | null;
@@ -263,8 +265,19 @@ interface OptimisticUserTurn {
 
 type AgentTimelineItem =
   | { kind: "message"; id: string; createdAt: number; message: DesignThread["messages"][number] }
+  | { kind: "thinking"; id: string; createdAt: number }
   | { kind: "main-job-group"; id: string; createdAt: number; group: MainAgentJobGroup }
   | { kind: "node-job"; id: string; createdAt: number; job: DesignJob };
+
+function isReservedMainAgentReply(message: DesignThread["messages"][number]): boolean {
+  return message.role === "assistant"
+    && message.jobId !== null
+    && message.content.trim() === RESERVED_MAIN_AGENT_QUEUED_REPLY;
+}
+
+export function composerBeamActive(focused: boolean, reduceMotion: boolean | null): boolean {
+  return focused && reduceMotion !== true;
+}
 
 function boundedTurnLabel(thread: DesignThread | null, job: DesignJob): string {
   const prompt = thread?.messages.find((message) => message.jobId === job.id && message.role === "user")?.content.trim();
@@ -405,7 +418,6 @@ export function CanvasAgentPanel({
   compact = false,
   entryX = 0,
   entryY = 8,
-  deferTranscriptMs = 0,
   rootRef,
 }: CanvasAgentPanelProps) {
   const reduceMotion = useReducedMotion();
@@ -694,7 +706,6 @@ export function CanvasAgentPanel({
         projectPath={projectPath}
         onRevealExport={onRevealExport}
         onCancelJob={onCancelJob}
-        deferTranscriptMs={deferTranscriptMs}
         reduceMotion={reduceMotion === true}
         tailKey={`${transcriptTailKey}|${visibleOptimisticUserTurn?.message.id ?? ""}`}
       />
@@ -717,7 +728,7 @@ export function CanvasAgentPanel({
           }}
         />
         <BorderBeam
-          active={composerFocused}
+          active={composerBeamActive(composerFocused, reduceMotion)}
           borderRadius={14}
           brightness={1.08}
           className="design-canvas-agent__composer-beam"
@@ -830,7 +841,6 @@ const AgentTranscript = memo(function AgentTranscript({
   projectPath,
   onRevealExport,
   onCancelJob,
-  deferTranscriptMs,
   reduceMotion,
   tailKey,
 }: {
@@ -845,23 +855,33 @@ const AgentTranscript = memo(function AgentTranscript({
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancelJob: (jobId: string) => Promise<void>;
-  deferTranscriptMs: number;
   reduceMotion: boolean;
   tailKey: string;
 }) {
-  const [ready, setReady] = useState(reduceMotion || deferTranscriptMs <= 0);
   const [historyPages, setHistoryPages] = useState(1);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
   const messageHistoryLimit = historyPages * TRANSCRIPT_MESSAGE_PAGE_SIZE;
   const jobHistoryLimit = historyPages * (scopeType === "main" ? TRANSCRIPT_JOB_PAGE_SIZE : 2);
+  const threadMatchesScope = thread !== null && (
+    thread.scope.type === "main"
+      ? scopeKey === "main"
+      : scopeKey === `node:${thread.scope.nodeId}`
+  );
   const threadMessages = optimisticUserTurn
-    ? [...(thread?.messages ?? []), optimisticUserTurn.message]
-    : thread?.messages ?? [];
-  const visibleMessages = threadMessages.slice(-messageHistoryLimit);
+    ? [...(threadMatchesScope ? thread.messages : []), optimisticUserTurn.message]
+    : threadMatchesScope ? thread.messages : [];
+  const reservedMainReplies = scopeType === "main"
+    ? threadMessages.filter(isReservedMainAgentReply)
+    : [];
+  const presentableMessages = scopeType === "main"
+    ? threadMessages.filter((message) => !isReservedMainAgentReply(message))
+    : threadMessages;
+  const visibleMessages = presentableMessages.slice(-messageHistoryLimit);
   const visibleMainJobGroups = mainJobGroups.slice(-jobHistoryLimit);
   const visibleRelatedJobs = relatedJobs.slice(-jobHistoryLimit);
-  const hiddenTranscriptCount = Math.max(0, threadMessages.length - visibleMessages.length)
+  const visibleReservedMainReplies = reservedMainReplies.slice(-jobHistoryLimit);
+  const hiddenTranscriptCount = Math.max(0, presentableMessages.length - visibleMessages.length)
     + (scopeType === "main"
       ? Math.max(0, mainJobGroups.length - visibleMainJobGroups.length)
       : Math.max(0, relatedJobs.length - visibleRelatedJobs.length));
@@ -880,6 +900,7 @@ const AgentTranscript = memo(function AgentTranscript({
       message,
     }));
     if (scopeType === "main") {
+      const representedJobIds = new Set(visibleMainJobGroups.map((group) => group.parentJobId));
       items.push(...visibleMainJobGroups.map((group) => ({
         kind: "main-job-group" as const,
         id: `main-job-group:${group.parentJobId}`,
@@ -889,6 +910,15 @@ const AgentTranscript = memo(function AgentTranscript({
           ?? Math.min(...group.jobs.map((job) => job.createdAt)),
         group,
       })));
+      items.push(...visibleReservedMainReplies.flatMap((message) => (
+        message.jobId !== null && representedJobIds.has(message.jobId)
+          ? []
+          : [{
+            kind: "thinking" as const,
+            id: `thinking:${message.id}`,
+            createdAt: userTurnCreatedAt.get(message.jobId ?? "") ?? message.createdAt,
+          }]
+      )));
     } else {
       items.push(...visibleRelatedJobs.map((job) => ({
         kind: "node-job" as const,
@@ -908,23 +938,16 @@ const AgentTranscript = memo(function AgentTranscript({
       || priority(left) - priority(right)
       || left.id.localeCompare(right.id)
     ));
-  }, [optimisticUserTurn, scopeType, threadMessages, visibleMainJobGroups, visibleMessages, visibleRelatedJobs]);
+  }, [optimisticUserTurn, scopeType, threadMessages, visibleMainJobGroups, visibleMessages, visibleRelatedJobs, visibleReservedMainReplies]);
 
   useEffect(() => {
     setHistoryPages(1);
     restoreScrollRef.current = null;
-    if (reduceMotion || deferTranscriptMs <= 0) {
-      setReady(true);
-      return;
-    }
-    setReady(false);
-    const timer = window.setTimeout(() => setReady(true), deferTranscriptMs);
-    return () => window.clearTimeout(timer);
-  }, [deferTranscriptMs, reduceMotion, scopeKey]);
+  }, [scopeKey]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
-    if (!transcript || !ready) return;
+    if (!transcript) return;
     const restore = restoreScrollRef.current;
     if (restore) {
       transcript.scrollTop = restore.top + transcript.scrollHeight - restore.height;
@@ -932,88 +955,85 @@ const AgentTranscript = memo(function AgentTranscript({
     } else {
       transcript.scrollTop = transcript.scrollHeight;
     }
-  }, [historyPages, ready, tailKey, thread?.messages.length, thread?.updatedAt]);
+  }, [historyPages, tailKey, thread?.messages.length, thread?.updatedAt]);
 
   return (
-    <div ref={transcriptRef} className="design-canvas-agent__transcript">
-      {!ready || threadLoading ? (
-        <div className="design-canvas-agent__transcript-placeholder" aria-hidden>
-          <span />
-          <span />
-          <span />
+    <div
+      ref={transcriptRef}
+      className="design-canvas-agent__transcript"
+      aria-busy={threadLoading || undefined}
+    >
+      {hiddenTranscriptCount > 0 ? (
+        <button
+          type="button"
+          className="design-canvas-agent__history-more"
+          onClick={() => {
+            const transcript = transcriptRef.current;
+            if (transcript) restoreScrollRef.current = { height: transcript.scrollHeight, top: transcript.scrollTop };
+            setHistoryPages((current) => current + 1);
+          }}
+        >
+          Show earlier activity <span>{hiddenTranscriptCount}</span>
+        </button>
+      ) : null}
+      {!threadLoading && presentableMessages.length === 0 && reservedMainReplies.length === 0 && relatedJobs.length === 0 ? (
+        <div className="design-canvas-agent__empty">
+          <p className="text-[11px] font-medium text-foreground/75">
+            {scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
+          </p>
+          <p className="max-w-[24rem] text-[10px] leading-[1.45] text-muted-foreground/80">
+            Complete canvas context is already available to this Agent.
+          </p>
         </div>
-      ) : (
-        <>
-          {hiddenTranscriptCount > 0 ? (
-            <button
-              type="button"
-              className="design-canvas-agent__history-more"
-              onClick={() => {
-                const transcript = transcriptRef.current;
-                if (transcript) restoreScrollRef.current = { height: transcript.scrollHeight, top: transcript.scrollTop };
-                setHistoryPages((current) => current + 1);
-              }}
+      ) : null}
+      {timeline.map((item) => {
+        if (item.kind === "thinking") {
+          return <AgentThinkingIndicator key={item.id} reduceMotion={reduceMotion} />;
+        }
+        if (item.kind === "message") {
+          const { message } = item;
+          return (
+            <motion.article
+              key={item.id}
+              className="design-canvas-agent__message"
+              data-role={message.role}
+              initial={reduceMotion ? false : { opacity: 0, y: 8, x: message.role === "user" ? 5 : -3 }}
+              animate={{ opacity: 1, y: 0, x: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.28, ease: AGENT_MOTION_EASE }}
             >
-              Show earlier activity <span>{hiddenTranscriptCount}</span>
-            </button>
-          ) : null}
-          {threadMessages.length === 0 && relatedJobs.length === 0 ? (
-            <div className="design-canvas-agent__empty">
-              <p className="text-[11px] font-medium text-foreground/75">
-                {scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
-              </p>
-              <p className="max-w-[24rem] text-[10px] leading-[1.45] text-muted-foreground/80">
-                Complete canvas context is already available to this Agent.
-              </p>
-            </div>
-          ) : null}
-          {timeline.map((item) => {
-            if (item.kind === "message") {
-              const { message } = item;
-              return (
-                <motion.article
-                  key={item.id}
-                  className="design-canvas-agent__message"
-                  data-role={message.role}
-                  initial={reduceMotion ? false : { opacity: 0, y: 8, x: message.role === "user" ? 5 : -3 }}
-                  animate={{ opacity: 1, y: 0, x: 0 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.28, ease: AGENT_MOTION_EASE }}
-                >
-                  <div className="design-canvas-agent__message-meta">
-                    <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : message.role}</span>
-                    <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                  </div>
-                  <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
-                </motion.article>
-              );
-            }
-            if (item.kind === "main-job-group") {
-              return (
-                <MainAgentJobGroupView
-                  key={item.id}
-                  group={item.group}
-                  nodeNames={nodeNames}
-                  projectPath={projectPath}
-                  onRevealExport={onRevealExport}
-                  onCancelJob={onCancelJob}
-                  reduceMotion={reduceMotion}
-                  latestRelatedJobId={latestRelatedJobId}
-                />
-              );
-            }
-            return (
-              <AgentActivityCard
-                key={item.id}
-                job={item.job}
-                nodeName={item.job.nodeId === null ? undefined : nodeNames.get(item.job.nodeId)}
-                projectPath={projectPath}
-                onRevealExport={onRevealExport}
-                onCancel={onCancelJob}
-              />
-            );
-          })}
-        </>
-      )}
+              <div className="design-canvas-agent__message-meta">
+                <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : message.role}</span>
+                <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+              </div>
+              <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
+            </motion.article>
+          );
+        }
+        if (item.kind === "main-job-group") {
+          return (
+            <MainAgentJobGroupView
+              key={item.id}
+              group={item.group}
+              nodeNames={nodeNames}
+              projectPath={projectPath}
+              onRevealExport={onRevealExport}
+              onCancelJob={onCancelJob}
+              reduceMotion={reduceMotion}
+              latestRelatedJobId={latestRelatedJobId}
+            />
+          );
+        }
+        return (
+          <AgentActivityCard
+            key={item.id}
+            job={item.job}
+            nodeName={item.job.nodeId === null ? undefined : nodeNames.get(item.job.nodeId)}
+            projectPath={projectPath}
+            onRevealExport={onRevealExport}
+            onCancel={onCancelJob}
+          />
+        );
+      })}
     </div>
   );
 });

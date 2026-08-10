@@ -1,5 +1,5 @@
 import { Code2, ExternalLink, FileText, RotateCcw, Save } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 import { Markdown } from "../components/Markdown.tsx";
 import { Button } from "../components/ui/Button.tsx";
@@ -230,16 +230,28 @@ export function TextEditor({
   descriptor,
   content,
   active,
+  syntaxHighlighting = descriptor.presentation.kind === "code",
   onAppendMaterialVersion,
 }: {
   descriptor: TextMaterialDescriptor;
   content: string;
   active: boolean;
+  syntaxHighlighting?: boolean;
   onAppendMaterialVersion?: (file: File) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(content);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const highlightRef = useRef<HTMLDivElement | null>(null);
+  const deferredDraft = useDeferredValue(draft);
+  const highlightedEditorHtml = useMemo(() => (
+    syntaxHighlighting
+      ? typedMaterialHighlighter.highlight(deferredDraft, {
+          lang: descriptor.presentation.language ?? "plaintext",
+          lineNumbers: false,
+        }).html
+      : null
+  ), [deferredDraft, descriptor.presentation.language, syntaxHighlighting]);
   const changed = draft !== content;
   const editable = onAppendMaterialVersion !== undefined;
 
@@ -305,20 +317,38 @@ export function TextEditor({
           </Button>
         </div>
       </header>
-      <textarea
-        className="design-typed-material__textarea nodrag nopan nowheel"
-        aria-label={`Edit ${descriptor.fileName}`}
-        value={draft}
-        readOnly={!editable}
-        spellCheck={descriptor.presentation.kind === "markdown"}
-        onChange={(event) => setDraft(event.target.value)}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "s") {
-            event.preventDefault();
-            void save();
-          }
-        }}
-      />
+      <div className="design-typed-material__editor-code">
+        {highlightedEditorHtml ? (
+          <div
+            ref={highlightRef}
+            aria-hidden
+            className="design-typed-material__editor-highlight"
+            dangerouslySetInnerHTML={{ __html: highlightedEditorHtml }}
+          />
+        ) : null}
+        <textarea
+          className="design-typed-material__textarea nodrag nopan nowheel"
+          aria-label={`Edit ${descriptor.fileName}`}
+          data-syntax-highlighted={syntaxHighlighting ? "true" : undefined}
+          value={draft}
+          readOnly={!editable}
+          spellCheck={descriptor.presentation.kind === "markdown"}
+          wrap={syntaxHighlighting ? "off" : "soft"}
+          onChange={(event) => setDraft(event.target.value)}
+          onScroll={(event) => {
+            const highlight = highlightRef.current;
+            if (!highlight) return;
+            highlight.scrollTop = event.currentTarget.scrollTop;
+            highlight.scrollLeft = event.currentTarget.scrollLeft;
+          }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "s") {
+              event.preventDefault();
+              void save();
+            }
+          }}
+        />
+      </div>
       {saveError ? <p className="design-typed-material__save-error" role="alert">{saveError}</p> : null}
     </section>
   );
@@ -378,6 +408,7 @@ export function TypedMaterialSurface({
           descriptor={state.descriptor}
           content={state.content}
           active={editorVisible}
+          syntaxHighlighting={richRenderingAllowed && state.descriptor.presentation.kind === "code"}
           onAppendMaterialVersion={onAppendMaterialVersion
             ? (file) => onAppendMaterialVersion(node.id, file)
             : undefined}

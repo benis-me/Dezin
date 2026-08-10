@@ -12,7 +12,7 @@ import {
 import type { DesignAgentTurnRequest, DesignCanvasApi } from "./api.ts";
 import { preferredGeneratedNodeGeometry } from "./DesignCanvasNode.tsx";
 import { DesignCanvasScreen } from "./DesignCanvasScreen.tsx";
-import { CanvasAgentPanel } from "./FloatingNodeAgent.tsx";
+import { CanvasAgentPanel, composerBeamActive } from "./FloatingNodeAgent.tsx";
 import type {
   DesignAgentTurnResult,
   DesignCanvas,
@@ -373,6 +373,13 @@ test("Agent panels preserve the native context menu without opening the canvas N
   expect(mainPanel.dispatchEvent(mainEvent)).toBe(true);
   expect(mainEvent.defaultPrevented).toBe(false);
   expect(screen.queryByRole("menu", { name: "Add Design node" })).not.toBeInTheDocument();
+});
+
+test("Agent composer keeps its focused surface but disables the traveling Beam for reduced motion", () => {
+  expect(composerBeamActive(false, false)).toBe(false);
+  expect(composerBeamActive(true, false)).toBe(true);
+  expect(composerBeamActive(true, null)).toBe(true);
+  expect(composerBeamActive(true, true)).toBe(false);
 });
 
 test("selected Nodes have no redundant Agent or delete buttons and expose kind-specific context menus", async () => {
@@ -850,6 +857,14 @@ test("material Nodes use the selected immutable Version for preview and expose t
     expect(focusedWidth / focusedHeight).toBeCloseTo(1_728 / 2_304, 3);
     expect(focusedHeight).toBeLessThanOrEqual(640);
   });
+  await waitFor(() => expect(api.applyIntents).toHaveBeenCalledWith(PROJECT_ID, {
+    baseRevision: 1,
+    intents: [{
+      type: "update-node",
+      nodeId: material.id,
+      patch: { geometry: { x: 80, y: 80, width: 270, height: 360 } },
+    }],
+  }));
   expect(api.getExactVersionPreview).toHaveBeenCalledWith(
     PROJECT_ID,
     material.id,
@@ -971,7 +986,7 @@ test("Agent transcripts ignore an older request that resolves after a newer refr
   expect(screen.getByText("Newest transcript")).toBeInTheDocument();
 });
 
-test("Agent panel reveals its interactive shell before deferred transcript history", async () => {
+test("Agent panel renders local transcript history without an artificial skeleton delay", async () => {
   const { api } = createCanvasApi(canvas());
   vi.mocked(api.getThread).mockResolvedValue({
     ...thread,
@@ -988,7 +1003,7 @@ test("Agent panel reveals its interactive shell before deferred transcript histo
       nodes={[]}
       jobs={[]}
       agents={[CLAUDE_AGENT]}
-      deferTranscriptMs={120}
+      deferTranscriptMs={5_000}
       onSubmit={async () => {}}
       onCancelJob={async () => {}}
       onAttachFiles={async () => {}}
@@ -996,8 +1011,7 @@ test("Agent panel reveals its interactive shell before deferred transcript histo
   );
 
   expect(screen.getByRole("textbox", { name: "Main Agent message" })).toBeInTheDocument();
-  expect(rendered.container.querySelector(".design-canvas-agent__transcript-placeholder")).toBeInTheDocument();
-  expect(screen.queryByText("Deferred history")).not.toBeInTheDocument();
+  expect(rendered.container.querySelector(".design-canvas-agent__transcript-placeholder")).not.toBeInTheDocument();
   expect(await screen.findByText("Deferred history")).toBeInTheDocument();
 });
 
@@ -1370,6 +1384,53 @@ test("A new Agent Job renders one Thinking placeholder, not two", async () => {
   expect(timeline).toHaveLength(2);
   expect(timeline[0]).toHaveAttribute("data-role", "user");
   expect(timeline[1]).toHaveAttribute("aria-label", "Thinking");
+});
+
+test("a reserved Main Agent reply is represented only by Thinking directly after its user turn", async () => {
+  const { api } = createCanvasApi(canvas());
+  const thinkingJob = {
+    ...job,
+    id: "job-reserved-thinking",
+    kind: "main-agent" as const,
+    status: "running" as const,
+    activity: [],
+    createdAt: 40,
+    updatedAt: 40,
+    finishedAt: null,
+  };
+  const reservedReply = "Main Agent orchestration is queued. The final result will replace this status.";
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [
+      { id: "message-reserved-user", role: "user", content: "Refine the visual hierarchy", jobId: thinkingJob.id, createdAt: 40 },
+      { id: "message-reserved-assistant", role: "assistant", content: reservedReply, jobId: thinkingJob.id, createdAt: 40 },
+    ],
+  });
+  const rendered = render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={[thinkingJob]}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  const thinking = await screen.findByRole("status", { name: "Thinking" });
+  expect(screen.queryByText(reservedReply)).not.toBeInTheDocument();
+  const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
+    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+  )];
+  expect(timeline).toHaveLength(2);
+  expect(timeline[0]).toHaveAttribute("data-role", "user");
+  expect(timeline[0]).toHaveTextContent("Refine the visual hierarchy");
+  expect(timeline[1]).toBe(thinking);
 });
 
 test("A completed conversational Main Agent turn renders as a message without an activity card", async () => {

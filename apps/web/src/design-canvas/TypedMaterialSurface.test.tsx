@@ -140,6 +140,10 @@ describe("TypedMaterialSurface", () => {
 
     const editor = await screen.findByRole("textbox", { name: "Edit answer.ts" });
     expect(editor).toHaveValue("export const answer: number = 42\n");
+    const editorHighlight = container.querySelector(".design-typed-material__editor-highlight");
+    expect(editorHighlight).not.toBeNull();
+    expect(editorHighlight?.querySelector(".th-keyword")).toHaveTextContent("export");
+    expect(editor).toHaveAttribute("data-syntax-highlighted", "true");
     await userEvent.type(editor, "// saved");
     await userEvent.click(screen.getByRole("button", { name: "Save revision" }));
     expect(append).toHaveBeenCalledTimes(1);

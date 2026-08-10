@@ -24,10 +24,11 @@ test("Design Canvas keeps native titlebar and floating feedback geometry stable"
   expect(css).toMatch(/\.design-canvas-agent__composer-notice\s*\{[^}]*position:\s*absolute;/s);
 });
 
-test("selected and keyboard-focused Nodes use a gap outline with discoverable corner brackets", () => {
+test("selected and keyboard-focused Nodes use restrained depth with discoverable corner brackets", () => {
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*14px;/s);
-  expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-width:\s*1\.5px;[^}]*border-color:\s*white;[^}]*box-shadow:/s);
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 16px 36px/s);
+  expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 10px 20px/s);
+  expect(css).not.toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*white/s);
   expect(css).toMatch(/\[data-node-focus\][^{]*\[data-node-focus-role="source"\]::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
@@ -36,15 +37,22 @@ test("selected and keyboard-focused Nodes use a gap outline with discoverable co
   expect(css).toMatch(/\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.3;/s);
   expect(css).toMatch(/\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node__resize-control--interactive,[^{]*\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-control--enabled\s*\{[^}]*pointer-events:\s*auto/s);
   expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
+  expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*7px;[^}]*left:\s*7px;/s);
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
 
 test("marquee selection is solid and leaves a short animated solid ghost", () => {
-  expect(css).toMatch(/\.design-canvas-surface \.react-flow__selection\s*\{[^}]*border:\s*1px solid/s);
-  expect(css).toMatch(/\.design-canvas-surface \.react-flow__nodesselection-rect\s*\{[^}]*border:\s*1px solid/s);
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__selection\s*\{[^}]*border:\s*1\.5px solid/s);
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__nodesselection-rect\s*\{[^}]*border:\s*2px solid[^}]*background:[^}]*box-shadow:/s);
   expect(css).not.toMatch(/\.react-flow__(?:nodes)?selection[^}]*dashed/s);
   expect(css).toMatch(/\.design-canvas-selection-ghost\s*\{[^}]*border:\s*1px solid[^}]*animation:\s*design-canvas-selection-out 180ms/s);
   expect(css).toContain("@keyframes design-canvas-selection-out");
+});
+
+test("image Nodes suppress frame chrome because their geometry owns the intrinsic media ratio", () => {
+  expect(css).toMatch(/\.design-canvas-node\[data-node-kind="image"\],[^}]*\{[^}]*min-width:\s*120px;[^}]*min-height:\s*80px;/s);
+  expect(css).toMatch(/\.design-canvas-node\[data-node-kind="image"\] \.design-canvas-node__frame\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-node__asset--image\s*\{[^}]*object-fit:\s*contain;[^}]*background-color:\s*transparent;/s);
 });
 
 test("Node previews have no permanent title chrome or zoom-in cursor", () => {
@@ -58,7 +66,7 @@ test("focused Nodes fly above an opaque same-color mask while background Nodes r
   expect(css).toMatch(/\.design-canvas-node\s*\{[^}]*transition:\s*transform[^;]+,[^}]*opacity/s);
   expect(css).toMatch(/\[data-node-focus-role="away"\]\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(var\(--design-node-focus-x\),\s*var\(--design-node-focus-y\),\s*0\)/s);
   expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\]::after\s*\{[^}]*background:\s*inherit;[^}]*opacity:\s*1;/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] > \.react-flow\s*\{[^}]*z-index:\s*48\s*!important;/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] > \.react-flow\s*\{[^}]*z-index:\s*48\s*!important;[^}]*pointer-events:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node\.design-canvas-flow-node--focused\s*\{[^}]*z-index:\s*48\s*!important;/s);
   expect(css).toMatch(/\.design-canvas-surface::after\s*\{[^}]*opacity var\(--design-focus-duration\)[^}]*transform var\(--design-focus-duration\)/s);
   expect(css).toMatch(/data-node-focus="opening"[^}]*opacity:\s*1;/s);
@@ -88,7 +96,7 @@ test("Agent composer grows within explicit bounds without a separator above it",
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*width:\s*100%;[^}]*border-radius:\s*14px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*color-mix\(in oklch, var\(--foreground\) 5\.5%, var\(--card\)\);[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]\s*\{[^}]*animation-duration:\s*0\.001ms !important;[^}]*animation-iteration-count:\s*1 !important;[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]::before,[\s\S]*animation:\s*none !important;/s);
 });
 
@@ -120,6 +128,16 @@ test("light-mode bottom controls and context menus follow the Spatial surface la
   expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*320ms,\s*360ms;/s);
   expect(css).toMatch(/\.design-node-context-menu\s*\{[^}]*width:\s*284px;[^}]*border-radius:\s*16px;/s);
   expect(css).not.toMatch(/\.design-canvas-node:hover(?:\s+\.design-canvas-node__frame)?\s*\{[^}]*\btransform:\s*[^;}]*scale/s);
+});
+
+test("canvas chrome exits on focus opening and re-enters during closing", () => {
+  expect(css).toMatch(/\.design-canvas-root\[data-node-focus="opening"\] \.design-canvas-topbar__leading\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(-10px,\s*0,\s*0\);/s);
+  expect(css).toMatch(/\.design-canvas-root\[data-node-focus="opening"\] \.design-canvas-topbar__actions\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(10px,\s*0,\s*0\);/s);
+  expect(css).toMatch(/\.design-canvas-root\[data-node-focus="closing"\] \.design-canvas-topbar__leading,[^{]*\.design-canvas-root\[data-node-focus="closing"\] \.design-canvas-topbar__actions\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0,\s*0,\s*0\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-tools\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(10px,\s*8px,\s*0\) scale\(0\.98\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(-10px,\s*8px,\s*0\) scale\(0\.98\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-tools,[^{]*\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0,\s*0,\s*0\) scale\(1\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] \.react-flow__pane\s*\{\s*pointer-events:\s*none;/s);
 });
 
 test("focused preview controls are larger and animate with the focus chrome", () => {

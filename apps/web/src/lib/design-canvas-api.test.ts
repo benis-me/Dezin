@@ -135,10 +135,51 @@ test("image imports infer a missing MIME type and preserve portrait proportions 
     expect(request.items[0]).toEqual(expect.objectContaining({
       asset: expect.objectContaining({ mimeType: "image/webp" }),
       binding: expect.objectContaining({
-        node: expect.objectContaining({ geometry: { x: 40, y: 60, width: 280, height: 360 } }),
+        node: expect.objectContaining({ geometry: { x: 40, y: 60, width: 270, height: 360 } }),
       }),
     }));
     expect(close).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("extreme image imports preserve every storage-representable ratio without unbounded geometry", async () => {
+  const importUrl = "http://d/api/projects/project%20%2F1/design-canvas/assets/import";
+  const canvasUrl = "http://d/api/projects/project%20%2F1/design-canvas";
+  const close = vi.fn();
+  const sizes = new Map([
+    ["wide.png", { width: 2_000, height: 100 }],
+    ["tall.png", { width: 100, height: 2_000 }],
+    ["impossible.png", { width: 10_000, height: 100 }],
+  ]);
+  vi.stubGlobal("createImageBitmap", vi.fn(async (file: File) => ({ ...sizes.get(file.name)!, close })));
+  const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+    const url = String(input);
+    const method = requestMethod(init);
+    if (url === canvasUrl && method === "GET") return jsonResponse(emptyCanvas(2));
+    if (url === importUrl && method === "POST") return jsonResponse(emptyCanvas(3));
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  try {
+    const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "" }));
+    await api.importLocalFiles("project /1", [
+      new File([new Uint8Array([1])], "wide.png", { type: "image/png" }),
+      new File([new Uint8Array([2])], "tall.png", { type: "image/png" }),
+      new File([new Uint8Array([3])], "impossible.png", { type: "image/png" }),
+    ], { x: 10, y: 20 });
+
+    const request = jsonBody<{
+      items: Array<{ binding: { node: { geometry: { width: number; height: number } } } }>;
+    }>(fetchImpl.mock.calls[1]![1]);
+    expect(request.items.map((item) => item.binding.node.geometry)).toEqual([
+      expect.objectContaining({ width: 1_600, height: 80 }),
+      expect.objectContaining({ width: 120, height: 2_400 }),
+      expect.objectContaining({ width: 4_096, height: 80 }),
+    ]);
+    expect(request.items[0]!.binding.node.geometry.width / request.items[0]!.binding.node.geometry.height).toBe(20);
+    expect(request.items[1]!.binding.node.geometry.width / request.items[1]!.binding.node.geometry.height).toBe(1 / 20);
+    expect(close).toHaveBeenCalledTimes(3);
   } finally {
     vi.unstubAllGlobals();
   }

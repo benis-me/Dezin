@@ -10,6 +10,7 @@ import type {
   DesignCanvasIntent,
   DesignMaterialNodeKind,
 } from "../design-canvas/types.ts";
+import { fittedImageNodeSize } from "./design-canvas-geometry.ts";
 
 const IMPORT_RETRIES = 3;
 const MAX_LOCAL_ASSET_BYTES = 32 * 1024 * 1024;
@@ -82,19 +83,6 @@ function fileBase64(file: File): Promise<string> {
 interface ImportedMediaSize {
   width: number;
   height: number;
-}
-
-function fittedImageNodeSize(source: ImportedMediaSize): ImportedMediaSize {
-  if (!Number.isFinite(source.width) || !Number.isFinite(source.height) || source.width <= 0 || source.height <= 0) {
-    return { width: 360, height: 260 };
-  }
-  const ratio = source.width / source.height;
-  if (ratio >= 1) {
-    const width = 420;
-    return { width, height: Math.round(Math.max(200, Math.min(360, width / ratio))) };
-  }
-  const height = 360;
-  return { width: Math.round(Math.max(280, Math.min(420, height * ratio))), height };
 }
 
 async function importedMediaSize(file: File, kind: DesignMaterialNodeKind): Promise<ImportedMediaSize | null> {

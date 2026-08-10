@@ -271,7 +271,7 @@ export function focusedNodeTransform(
   const curve = curvedOffset(
     totalShiftX,
     totalShiftY,
-    clamp(Math.sqrt(screenDistance) * 1.25 / viewportZoom, 0, 36 / viewportZoom),
+    clamp(Math.sqrt(screenDistance) * 2.75 / viewportZoom, 0, 76 / viewportZoom),
   );
 
   return {

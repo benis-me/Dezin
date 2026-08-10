@@ -238,6 +238,7 @@ test("single-click selects while double-click flies only the Node and its neighb
     durationMs: expect.any(Number),
   });
   expect(flowHarness.props?.panOnScroll).toBe(false);
+  expect(flowHarness.props?.panOnDrag).toBe(false);
   expect(flowHarness.props?.zoomOnPinch).toBe(false);
   expect(flowHarness.props?.nodesDraggable).toBe(false);
   expect(flowHarness.props?.nodes[0]?.className).toBe("design-canvas-flow-node--focused");
@@ -252,12 +253,38 @@ test("single-click selects while double-click flies only the Node and its neighb
   });
   expect(screen.queryByLabelText("Page B Agent panel")).not.toBeInTheDocument();
   expect(focusedSurface).toHaveAttribute("data-node-focus", "opening");
+  const middlePointer = new MouseEvent("pointerdown", {
+    bubbles: true,
+    cancelable: true,
+    button: 1,
+    buttons: 4,
+  });
+  focusedSurface.dispatchEvent(middlePointer);
+  expect(middlePointer.defaultPrevented).toBe(true);
+  const middleMouse = new MouseEvent("mousedown", {
+    bubbles: true,
+    cancelable: true,
+    button: 1,
+    buttons: 4,
+  });
+  focusedSurface.dispatchEvent(middleMouse);
+  expect(middleMouse.defaultPrevented).toBe(true);
+
+  const canonicalViewport = { ...flowHarness.viewport };
+  const attemptedViewport = { x: 260, y: -180, zoom: 1.35 };
+  flowHarness.viewport = attemptedViewport;
+  act(() => {
+    flowHarness.props?.onMove?.(new MouseEvent("mousemove"), attemptedViewport);
+    flowHarness.props?.onMoveEnd?.(new MouseEvent("mouseup"), attemptedViewport);
+  });
+  await waitFor(() => expect(flowHarness.viewport).toEqual(canonicalViewport));
+  expect(flowHarness.setViewport).toHaveBeenLastCalledWith(canonicalViewport, { duration: 0 });
   expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
   expect(applyIntents).not.toHaveBeenCalled();
 
   fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
   await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
-  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.viewport).toEqual(canonicalViewport);
   expect(flowHarness.props?.panOnScroll).toBe(true);
   expect(applyIntents).not.toHaveBeenCalled();
 });
@@ -524,6 +551,52 @@ test("completed multi-select drags persist one geometry batch and keyboard posit
   expect(applyIntents.mock.calls[0]?.[1].intents).toEqual([
     { type: "update-node", nodeId: nodeA.id, patch: { geometry: { x: 208, y: 160, width: 480, height: 360 } } },
   ]);
+});
+
+test("Node resize dimensions remain live through layout measurement and persist only on release", async () => {
+  const node = designNode("page-a", 80);
+  const { api, applyIntents } = createApi(designCanvas([node]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodesChange?.([{
+      type: "dimensions",
+      id: node.id,
+      dimensions: { width: 640, height: 480 },
+      resizing: true,
+      setAttributes: true,
+    }]);
+  });
+  await act(async () => {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  });
+
+  expect(flowHarness.props?.nodes[0]).toMatchObject({ width: 640, height: 480 });
+  expect(flowHarness.props?.nodes[0]?.data.node.geometry).toMatchObject({ width: 640, height: 480 });
+  expect(applyIntents).not.toHaveBeenCalled();
+
+  act(() => {
+    flowHarness.props?.nodes[0]?.data.onResize(node.id, {
+      x: node.geometry.x,
+      y: node.geometry.y,
+      width: 640,
+      height: 480,
+    });
+    flowHarness.props?.onNodesChange?.([{
+      type: "dimensions",
+      id: node.id,
+      dimensions: { width: 640, height: 480 },
+      resizing: false,
+    }]);
+  });
+
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1));
+  expect(applyIntents.mock.calls[0]?.[1].intents).toEqual([{
+    type: "update-node",
+    nodeId: node.id,
+    patch: { geometry: { x: 80, y: 80, width: 640, height: 480 } },
+  }]);
 });
 
 test("a stale position save acknowledgement cannot rewind a newer local drag", async () => {
