@@ -1,7 +1,8 @@
 import { expect, test } from "vitest";
 
-import { focusVisualStateFromTransform } from "./DesignCanvasNode.tsx";
+import { focusVisualFrames, focusVisualStateFromTransform } from "./DesignCanvasNode.tsx";
 import {
+  focusedNodeLayoutMode,
   focusedNodeTransform,
   NODE_FOCUS_DETAIL_DELAY_MS,
   NODE_FOCUS_FLIGHT_DURATION_MS,
@@ -28,6 +29,18 @@ test("focus interruption reads Chromium matrix3d transforms without snapping", (
     "matrix3d(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1, 0, 42, 64, 0, 1)",
     0.75,
   )).toEqual({ x: 42, y: 64, scaleX: 2, scaleY: 3, opacity: 0.75 });
+});
+
+test("runtime focus frames interpolate the live renderer viewport and return to its exact canvas size", () => {
+  const canvas = { x: 0, y: 0, scaleX: 1, scaleY: 1, opacity: 1, width: 400, height: 300 };
+  const focus = { x: 120, y: 80, scaleX: 1.25, scaleY: 1.25, opacity: 1, width: 720, height: 540 };
+  const opening = focusVisualFrames(canvas, focus, 8, -12);
+  const closing = focusVisualFrames(focus, canvas, -8, 12);
+
+  expect(opening[0]).toMatchObject({ width: "400px", height: "300px" });
+  expect(opening.at(-1)).toMatchObject({ width: "720px", height: "540px" });
+  expect(closing[0]).toMatchObject({ width: "720px", height: "540px" });
+  expect(closing.at(-1)).toMatchObject({ width: "400px", height: "300px" });
 });
 
 test("Node focus motion sends surrounding Nodes away on straight paths with stronger displacement nearby", () => {
@@ -84,9 +97,24 @@ test("focused Node flies to its responsive content slot while preserving a net 1
   expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
   expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
   expect(transform.scale).toBe(transform.scaleX);
-  expect(transform).toMatchObject({ layoutWidth: 1_544, layoutHeight: 804 });
-  expect(transform.startScaleX).toBeCloseTo(800 / 1_544, 4);
-  expect(transform.startScaleY).toBeCloseTo(600 / 804, 4);
+  expect(transform).toMatchObject({
+    startX: 0,
+    startY: 0,
+    startScaleX: 1,
+    startScaleY: 1,
+    startWidth: 800,
+    startHeight: 600,
+    layoutWidth: 1_544,
+    layoutHeight: 804,
+  });
+  const sourceMotion = nodeFocusMotions([{ id: "focus", geometry: node }], "focus", "opening", transform).get("focus")!;
+  const frames = nodeFocusAnimationFrames(sourceMotion);
+  expect(frames[0]).toMatchObject({
+    width: 800,
+    height: 600,
+    transform: "translate3d(0px, 0px, 0) scale(1, 1)",
+  });
+  expect(frames.at(-1)).toMatchObject({ width: 1_544, height: 804 });
 });
 
 test("focused layout adapts continuously to window height without scaling its content", () => {
@@ -101,6 +129,69 @@ test("focused layout adapts continuously to window height without scaling its co
   expect(short.scaleY * viewport.zoom).toBeCloseTo(1, 4);
   expect(tall.scaleX * viewport.zoom).toBeCloseTo(1, 4);
   expect(tall.scaleY * viewport.zoom).toBeCloseTo(1, 4);
+});
+
+test("focus layout mode follows the Node's actual content instead of treating every preview as a webpage", () => {
+  expect(focusedNodeLayoutMode({ kind: "page", fileName: "landing.html" })).toBe("web");
+  expect(focusedNodeLayoutMode({ kind: "document", fileName: "captured-page.html" })).toBe("code");
+  expect(focusedNodeLayoutMode({ kind: "component", mimeType: "text/html", fileName: "Hero" })).toBe("preview");
+  expect(focusedNodeLayoutMode({ kind: "image", fileName: "poster.png" })).toBe("media");
+  expect(focusedNodeLayoutMode({ kind: "video", fileName: "motion.mp4" })).toBe("media");
+  expect(focusedNodeLayoutMode({ kind: "document", mimeType: "text/markdown", fileName: "brief.md" })).toBe("document");
+  expect(focusedNodeLayoutMode({ kind: "file", fileName: "tokens.ts" })).toBe("code");
+  expect(focusedNodeLayoutMode({ kind: "component", fileName: "Hero" })).toBe("preview");
+});
+
+test("media focus stays bounded and preserves the Canvas card's intrinsic aspect ratio", () => {
+  const node = geometry(300, 220, 420, 280);
+  const viewport = { x: 0, y: 0, zoom: 0.75 };
+  const transform = focusedNodeTransform(node, { width: 1_600, height: 900 }, viewport, {
+    reservedRight: 0,
+    layoutMode: "media",
+  });
+
+  expect(transform.layoutWidth).toBe(651);
+  expect(transform.layoutHeight).toBe(434);
+  expect(transform.layoutWidth / transform.layoutHeight).toBeCloseTo(node.width / node.height, 3);
+  expect(transform.layoutHeight).toBeLessThan(810);
+  expect(transform.startScaleX).toBe(1);
+  expect(transform.startScaleY).toBe(1);
+  expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+  expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
+});
+
+test("documents and code get focused reading surfaces while webpages retain the near-full 100% layout", () => {
+  const node = geometry(240, 160, 420, 280);
+  const surface = { width: 1_600, height: 900 };
+  const viewport = { x: 0, y: 0, zoom: 0.6 };
+  const shared = { reservedRight: 0 } as const;
+  const web = focusedNodeTransform(node, surface, viewport, { ...shared, layoutMode: "web" });
+  const document = focusedNodeTransform(node, surface, viewport, { ...shared, layoutMode: "document" });
+  const code = focusedNodeTransform(node, surface, viewport, { ...shared, layoutMode: "code" });
+  const preview = focusedNodeTransform(geometry(240, 160, 480, 360), surface, viewport, {
+    ...shared,
+    layoutMode: "preview",
+  });
+
+  expect(web).toMatchObject({ layoutWidth: 1_544, layoutHeight: 810 });
+  expect(document).toMatchObject({ layoutWidth: 720, layoutHeight: 760 });
+  expect(code).toMatchObject({ layoutWidth: 900, layoutHeight: 720 });
+  expect(preview).toMatchObject({ layoutWidth: 648, layoutHeight: 486 });
+  for (const transform of [web, document, code, preview]) {
+    expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+    expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
+  }
+});
+
+test("content-specific focus geometry is deterministic so closing can exactly reverse opening", () => {
+  const node = geometry(-520, 410, 320, 190);
+  const surface = { width: 1_280, height: 760 };
+  const viewport = { x: 72, y: -34, zoom: 0.7 };
+  const options = { reservedRight: 360, layoutMode: "document" } as const;
+
+  expect(focusedNodeTransform(node, surface, viewport, options)).toEqual(
+    focusedNodeTransform(node, surface, viewport, options),
+  );
 });
 
 test("longer flights receive more time so near and far openings keep a consistent perceived rate", () => {
@@ -130,6 +221,8 @@ test("sampled focus frames follow a real curve with continuous progress rather t
       scaleX: 1.4,
       scaleY: 1.4,
       scale: 1.4,
+      startWidth: 400,
+      startHeight: 300,
       layoutWidth: 900,
       layoutHeight: 700,
       durationMs: 500,
@@ -149,6 +242,26 @@ test("sampled focus frames follow a real curve with continuous progress rather t
       translations[index]!.y - translations[index - 1]!.y,
     )).toBeGreaterThan(0);
   }
+  expect(frames[0]).toMatchObject({ width: 400, height: 300 });
+  expect(frames.at(-1)).toMatchObject({ width: 900, height: 700 });
+});
+
+test("closing frames return the source renderer to its canonical dimensions before focus clears", () => {
+  const transform = focusedNodeTransform(
+    geometry(180, 120, 420, 280),
+    { width: 1_280, height: 760 },
+    { x: -20, y: 45, zoom: 0.7 },
+    { reservedRight: 360, layoutMode: "media" },
+  );
+  const closing = nodeFocusMotions(nodes, "focus", "closing", transform).get("focus")!;
+  const frames = nodeFocusAnimationFrames(closing);
+
+  expect(frames[0]).toMatchObject({ width: transform.layoutWidth, height: transform.layoutHeight });
+  expect(frames.at(-1)).toMatchObject({
+    width: transform.startWidth,
+    height: transform.startHeight,
+    transform: "translate3d(0px, 0px, 0) scale(1, 1)",
+  });
 });
 
 test("focus easing starts promptly, settles smoothly, and delays detail behind the flight", () => {

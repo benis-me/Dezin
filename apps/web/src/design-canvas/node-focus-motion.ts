@@ -20,6 +20,8 @@ export interface NodeFocusMotion {
   scaleY: number;
   /** Kept for callers that only need the uniform focused scale. */
   scale: number;
+  startWidth: number | null;
+  startHeight: number | null;
   layoutWidth: number | null;
   layoutHeight: number | null;
   durationMs: number;
@@ -37,6 +39,14 @@ interface SurfaceSize {
   height: number;
 }
 
+export type FocusedNodeLayoutMode = "web" | "media" | "document" | "code" | "preview";
+
+export interface FocusedNodeContentDescriptor {
+  kind: DesignNode["kind"];
+  fileName?: string | null;
+  mimeType?: string | null;
+}
+
 export interface FocusedNodeTransform {
   startX: number;
   startY: number;
@@ -49,6 +59,8 @@ export interface FocusedNodeTransform {
   scaleX: number;
   scaleY: number;
   scale: number;
+  startWidth: number;
+  startHeight: number;
   layoutWidth: number;
   layoutHeight: number;
   durationMs: number;
@@ -57,6 +69,11 @@ export interface FocusedNodeTransform {
 export interface FocusedNodeLayoutOptions {
   reservedRight?: number;
   targetWidth?: number;
+  targetHeight?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+  contentAspectRatio?: number;
+  layoutMode?: FocusedNodeLayoutMode;
   horizontalInset?: number;
   topInset?: number;
   bottomInset?: number;
@@ -69,6 +86,34 @@ export const NODE_FOCUS_DETAIL_DELAY_MS = 110;
 export function nodeFocusEase(progress: number): number {
   const value = Math.max(0, Math.min(1, progress));
   return 1 - ((1 - value) ** 3);
+}
+
+/**
+ * Chooses a focus surface from content identity, rather than assuming every
+ * Node is a full-height webpage. The filename fallback keeps imported text
+ * assets useful before their exact Version metadata has reached the Canvas.
+ */
+export function focusedNodeLayoutMode(content: FocusedNodeContentDescriptor): FocusedNodeLayoutMode {
+  const mimeType = content.mimeType?.trim().toLowerCase() ?? "";
+  const fileName = content.fileName?.trim().toLowerCase() ?? "";
+  const extension = /(?:^|\/)[^/]+(\.[a-z0-9]+)$/.exec(fileName)?.[1] ?? "";
+
+  if (content.kind === "image" || content.kind === "video") return "media";
+  // Generated Nodes keep the layout implied by their Canvas kind even though
+  // their immutable preview artifact is usually HTML. Otherwise every
+  // component, design system, and document would collapse back into the same
+  // full-height webpage treatment as soon as Version metadata arrives.
+  if (content.kind === "page") return "web";
+  if (content.kind === "research" || content.kind === "design-document" || content.kind === "knowledge") {
+    return "document";
+  }
+  if (content.kind !== "document" && content.kind !== "file") return "preview";
+
+  if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) return "media";
+  if (mimeType === "text/markdown" || extension === ".md" || extension === ".mdx") return "document";
+  if (CODE_FILE_EXTENSIONS.has(extension) || CODE_MIME_PATTERN.test(mimeType)) return "code";
+  if (content.kind === "document") return "document";
+  return "preview";
 }
 
 export function nodeFocusMotions(
@@ -87,6 +132,8 @@ export function nodeFocusMotions(
     scaleX: 1,
     scaleY: 1,
     scale: 1,
+    startWidth: 0,
+    startHeight: 0,
     layoutWidth: 0,
     layoutHeight: 0,
     durationMs: NODE_FOCUS_FLIGHT_DURATION_MS,
@@ -115,6 +162,8 @@ export function nodeFocusMotions(
         scaleX: focusedTransform.scaleX,
         scaleY: focusedTransform.scaleY,
         scale: focusedTransform.scale,
+        startWidth: focusedTransform.startWidth || focused.geometry.width,
+        startHeight: focusedTransform.startHeight || focused.geometry.height,
         layoutWidth: focusedTransform.layoutWidth || focused.geometry.width,
         layoutHeight: focusedTransform.layoutHeight || focused.geometry.height,
         durationMs: focusedTransform.durationMs,
@@ -153,6 +202,8 @@ export function nodeFocusMotions(
       scaleX: 1,
       scaleY: 1,
       scale: 1,
+      startWidth: null,
+      startHeight: null,
       layoutWidth: null,
       layoutHeight: null,
       durationMs: Math.round(clamp(300 + displacement * 0.72, 330, 405)),
@@ -181,33 +232,45 @@ export function focusedNodeTransform(
   const reservedRight = clamp(options.reservedRight ?? 376, 0, Math.max(0, width - 320));
   const availableWidth = Math.max(280, width - horizontalInset * 2 - reservedRight);
   const availableHeight = Math.max(200, height - topInset - bottomInset);
-  const layoutWidth = roundMotionValue(clamp(options.targetWidth ?? availableWidth, 280, availableWidth));
-  const layoutHeight = roundMotionValue(availableHeight);
+  const { layoutWidth, layoutHeight } = focusedLayoutSize(
+    geometry,
+    { width: availableWidth, height: availableHeight },
+    options,
+  );
   const targetCenterX = horizontalInset + availableWidth / 2;
   const targetCenterY = topInset + availableHeight / 2;
   const layoutCenterX = geometry.x + layoutWidth / 2;
   const layoutCenterY = geometry.y + layoutHeight / 2;
+  const canonicalCenterX = geometry.x + geometry.width / 2;
+  const canonicalCenterY = geometry.y + geometry.height / 2;
   const currentScreenCenterX = layoutCenterX * viewportZoom + viewport.x;
   const currentScreenCenterY = layoutCenterY * viewportZoom + viewport.y;
+  const canonicalScreenCenterX = canonicalCenterX * viewportZoom + viewport.x;
+  const canonicalScreenCenterY = canonicalCenterY * viewportZoom + viewport.y;
 
   const screenShiftX = targetCenterX - currentScreenCenterX;
   const screenShiftY = targetCenterY - currentScreenCenterY;
-  const startX = (geometry.width - layoutWidth) / 2;
-  const startY = (geometry.height - layoutHeight) / 2;
+  const startX = 0;
+  const startY = 0;
   const shiftX = screenShiftX / viewportZoom;
   const shiftY = screenShiftY / viewportZoom;
-  const startScaleX = geometry.width / layoutWidth;
-  const startScaleY = geometry.height / layoutHeight;
+  const startScaleX = 1;
+  const startScaleY = 1;
   const focusedScale = 1 / viewportZoom;
   const scaleTravel = Math.hypot(
-    layoutWidth * Math.abs(focusedScale - startScaleX) * viewportZoom / 2,
-    layoutHeight * Math.abs(focusedScale - startScaleY) * viewportZoom / 2,
+    Math.abs(layoutWidth - geometry.width * viewportZoom) / 2,
+    Math.abs(layoutHeight - geometry.height * viewportZoom) / 2,
   );
-  const screenDistance = Math.hypot((shiftX - startX) * viewportZoom, (shiftY - startY) * viewportZoom);
+  const screenDistance = Math.hypot(
+    targetCenterX - canonicalScreenCenterX,
+    targetCenterY - canonicalScreenCenterY,
+  );
   const perceivedTravel = screenDistance + scaleTravel;
+  const totalShiftX = shiftX + (layoutWidth - geometry.width) / 2;
+  const totalShiftY = shiftY + (layoutHeight - geometry.height) / 2;
   const curve = curvedOffset(
-    shiftX - startX,
-    shiftY - startY,
+    totalShiftX,
+    totalShiftY,
     clamp(Math.sqrt(screenDistance) * 1.25 / viewportZoom, 0, 36 / viewportZoom),
   );
 
@@ -223,9 +286,53 @@ export function focusedNodeTransform(
     scaleX: roundMotionValue(focusedScale),
     scaleY: roundMotionValue(focusedScale),
     scale: roundMotionValue(focusedScale),
+    startWidth: roundMotionValue(geometry.width),
+    startHeight: roundMotionValue(geometry.height),
     layoutWidth,
     layoutHeight,
     durationMs: focusFlightDuration(perceivedTravel),
+  };
+}
+
+function focusedLayoutSize(
+  geometry: DesignNode["geometry"],
+  available: SurfaceSize,
+  options: FocusedNodeLayoutOptions,
+): { layoutWidth: number; layoutHeight: number } {
+  const mode = options.layoutMode ?? "web";
+  if (mode === "web") {
+    return {
+      layoutWidth: roundMotionValue(clamp(options.targetWidth ?? available.width, 280, available.width)),
+      layoutHeight: roundMotionValue(clamp(options.targetHeight ?? available.height, 200, available.height)),
+    };
+  }
+
+  if (mode === "document" || mode === "code") {
+    const defaultWidth = mode === "document" ? 720 : 900;
+    const defaultHeight = mode === "document" ? 760 : 720;
+    const maximumWidth = Math.min(available.width, options.maxWidth ?? defaultWidth);
+    const maximumHeight = Math.min(available.height, options.maxHeight ?? defaultHeight);
+    return {
+      layoutWidth: roundMotionValue(clamp(options.targetWidth ?? maximumWidth, 280, maximumWidth)),
+      layoutHeight: roundMotionValue(clamp(options.targetHeight ?? maximumHeight, 200, maximumHeight)),
+    };
+  }
+
+  const defaultMaxWidth = mode === "media" ? 760 : 960;
+  const defaultMaxHeight = mode === "media" ? 640 : 720;
+  const maximumScale = mode === "media" ? 1.55 : 1.35;
+  const maximumWidth = Math.min(available.width, options.maxWidth ?? defaultMaxWidth, options.targetWidth ?? Number.POSITIVE_INFINITY);
+  const maximumHeight = Math.min(available.height, options.maxHeight ?? defaultMaxHeight, options.targetHeight ?? Number.POSITIVE_INFINITY);
+  const aspectRatio = Number.isFinite(options.contentAspectRatio) && (options.contentAspectRatio ?? 0) > 0
+    ? clamp(options.contentAspectRatio!, 0.05, 20)
+    : clamp(geometry.width / Math.max(1, geometry.height), 0.05, 20);
+  const basisWidth = Math.max(1, geometry.width);
+  const basisHeight = basisWidth / aspectRatio;
+  const scale = Math.min(maximumScale, maximumWidth / basisWidth, maximumHeight / basisHeight);
+
+  return {
+    layoutWidth: roundMotionValue(basisWidth * scale),
+    layoutHeight: roundMotionValue(basisHeight * scale),
   };
 }
 
@@ -259,10 +366,21 @@ function fallbackDirection(id: string, index: number): { x: number; y: number } 
   return { x: Math.cos(angle), y: Math.sin(angle) };
 }
 
+const CODE_FILE_EXTENSIONS = new Set([
+  ".c", ".cc", ".cpp", ".cs", ".css", ".cts", ".go", ".graphql", ".gql", ".h", ".hpp",
+  ".htm", ".html", ".ini", ".java", ".js", ".json", ".jsonc", ".jsx", ".kt", ".kts", ".less", ".lua",
+  ".mjs", ".mts", ".php", ".py", ".rb", ".rs", ".sass", ".scss", ".sh", ".sql", ".svelte",
+  ".swift", ".toml", ".ts", ".tsx", ".vue", ".xml", ".yaml", ".yml",
+]);
+
+const CODE_MIME_PATTERN = /(?:javascript|typescript|json|graphql|yaml|toml|html|xhtml|xml|css|x-(?:c|c\+\+|go|java|python|ruby|rust|shellscript|swift)|sql)/;
+
 export interface NodeFocusAnimationFrame {
   offset: number;
   transform: string;
   opacity: number;
+  width: number | null;
+  height: number | null;
 }
 
 export function nodeFocusAnimationFrames(
@@ -283,10 +401,18 @@ export function nodeFocusAnimationFrames(
     const y = inverse * inverse * motion.startY + 2 * inverse * progress * controlY + progress * progress * motion.shiftY;
     const scaleX = motion.startScaleX + (motion.scaleX - motion.startScaleX) * progress;
     const scaleY = motion.startScaleY + (motion.scaleY - motion.startScaleY) * progress;
+    const width = motion.startWidth !== null && motion.layoutWidth !== null
+      ? motion.startWidth + (motion.layoutWidth - motion.startWidth) * progress
+      : null;
+    const height = motion.startHeight !== null && motion.layoutHeight !== null
+      ? motion.startHeight + (motion.layoutHeight - motion.startHeight) * progress
+      : null;
     return {
       offset,
       transform: `translate3d(${roundMotionValue(x)}px, ${roundMotionValue(y)}px, 0) scale(${roundMotionValue(scaleX)}, ${roundMotionValue(scaleY)})`,
       opacity: fades ? roundMotionValue(1 - progress) : 1,
+      width: width === null ? null : roundMotionValue(width),
+      height: height === null ? null : roundMotionValue(height),
     };
   });
 }

@@ -24,6 +24,7 @@ import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-
 import type { AgentInfo } from "../lib/api.ts";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
 import { cn } from "../lib/utils.ts";
+import { BorderBeam } from "border-beam";
 import { motion, useReducedMotion } from "motion/react";
 import {
   ArrowUp,
@@ -408,6 +409,7 @@ export function CanvasAgentPanel({
   rootRef,
 }: CanvasAgentPanelProps) {
   const reduceMotion = useReducedMotion();
+  const [composerFocused, setComposerFocused] = useState(false);
   const [thread, setThread] = useState<DesignThread | null>(null);
   const [threadLoading, setThreadLoading] = useState(true);
   const [threadError, setThreadError] = useState<string | null>(null);
@@ -714,71 +716,89 @@ export function CanvasAgentPanel({
             }
           }}
         />
-        <div className="design-canvas-agent__composer-shell">
-          <NodeMentionInput
-            nodes={nodes}
-            excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
-            value={draft}
-            onChange={setDraft}
-            priorityNodeIds={contextNodeIds}
-            onPriorityNodeIdsChange={setContextNodeIds}
-            ariaLabel={`${title} message`}
-            placeholder={scope.type === "main"
-              ? "Coordinate the canvas. Type @ to reference a Node…"
-              : "Ask this Node's Agent. Type @ to add context…"}
-            onSubmitShortcut={() => void submit()}
-          />
-          <div className="design-canvas-agent__actions">
-            <div className="flex min-w-0 items-center gap-1">
-              <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
-                <Paperclip aria-hidden />
-              </Button>
-              {availableAgents.length > 0 ? (
-                <AgentModelSelect
-                  agents={availableAgents}
-                  agent={agentSelection.agentCommand}
-                  model={agentSelection.model}
-                  onAgentChange={(agentCommand) => {
-                    if (agentSelection.agentCommand !== agentCommand) {
-                      setAgentSelection({ agentCommand, model: "" });
-                    }
-                  }}
-                  onModelChange={(model) => {
-                    if (agentSelection.model !== model) {
-                      setAgentSelection({ ...agentSelection, model });
-                    }
-                  }}
-                  onRescan={onRescanAgents}
-                  dropUp
-                />
-              ) : (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  className="design-canvas-agent__agent-unavailable"
-                  title="No Design Agent is currently available"
-                  onClick={() => {
-                    void onRescanAgents().catch((problem) => {
-                      setThreadError(problem instanceof Error ? problem.message : String(problem));
-                    });
-                  }}
-                >
-                  <CircleAlert aria-hidden />Agent unavailable
+        <BorderBeam
+          active={composerFocused}
+          borderRadius={14}
+          brightness={1.08}
+          className="design-canvas-agent__composer-beam"
+          colorVariant="colorful"
+          duration={2.35}
+          hueRange={18}
+          saturation={0.9}
+          staticColors={reduceMotion === true}
+          strength={0.28}
+          theme="auto"
+          onFocusCapture={() => setComposerFocused(true)}
+          onBlurCapture={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setComposerFocused(false);
+          }}
+        >
+          <div className="design-canvas-agent__composer-shell">
+            <NodeMentionInput
+              nodes={nodes}
+              excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
+              value={draft}
+              onChange={setDraft}
+              priorityNodeIds={contextNodeIds}
+              onPriorityNodeIdsChange={setContextNodeIds}
+              ariaLabel={`${title} message`}
+              placeholder={scope.type === "main"
+                ? "Coordinate the canvas. Type @ to reference a Node…"
+                : "Ask this Node's Agent. Type @ to add context…"}
+              onSubmitShortcut={() => void submit()}
+            />
+            <div className="design-canvas-agent__actions">
+              <div className="flex min-w-0 items-center gap-1">
+                <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
+                  <Paperclip aria-hidden />
                 </Button>
-              )}
+                {availableAgents.length > 0 ? (
+                  <AgentModelSelect
+                    agents={availableAgents}
+                    agent={agentSelection.agentCommand}
+                    model={agentSelection.model}
+                    onAgentChange={(agentCommand) => {
+                      if (agentSelection.agentCommand !== agentCommand) {
+                        setAgentSelection({ agentCommand, model: "" });
+                      }
+                    }}
+                    onModelChange={(model) => {
+                      if (agentSelection.model !== model) {
+                        setAgentSelection({ ...agentSelection, model });
+                      }
+                    }}
+                    onRescan={onRescanAgents}
+                    dropUp
+                  />
+                ) : (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    className="design-canvas-agent__agent-unavailable"
+                    title="No Design Agent is currently available"
+                    onClick={() => {
+                      void onRescanAgents().catch((problem) => {
+                        setThreadError(problem instanceof Error ? problem.message : String(problem));
+                      });
+                    }}
+                  >
+                    <CircleAlert aria-hidden />Agent unavailable
+                  </Button>
+                )}
+              </div>
+              <Button
+                size="icon-sm"
+                aria-label={`Send to ${title}`}
+                disabled={!draft.trim() || submitting || !activeAgent}
+                onClick={() => void submit()}
+                className="size-7"
+              >
+                {submitting ? <LoaderCircle aria-hidden className="animate-spin" /> : <ArrowUp aria-hidden />}
+              </Button>
             </div>
-            <Button
-              size="icon-sm"
-              aria-label={`Send to ${title}`}
-              disabled={!draft.trim() || submitting || !activeAgent}
-              onClick={() => void submit()}
-              className="size-7"
-            >
-              {submitting ? <LoaderCircle aria-hidden className="animate-spin" /> : <ArrowUp aria-hidden />}
-            </Button>
           </div>
-        </div>
+        </BorderBeam>
         {threadError ? (
           <motion.div
             role="alert"

@@ -204,6 +204,7 @@ function createCanvasApi(initial: DesignCanvas) {
 
 afterEach(() => {
   discardPendingDesignCanvasIntent(PROJECT_ID);
+  vi.unstubAllGlobals();
 });
 
 test("generated Node previews have kind-aware fit dimensions without resizing material Assets", () => {
@@ -272,6 +273,12 @@ test("Canvas menus use dismissible animated primitives and toolbars keep the req
     "Fit canvas",
     "Zoom out",
     "Zoom in",
+  ]);
+  expect(within(view).getAllByRole("button").map((button) => button.getAttribute("data-size"))).toEqual([
+    "icon-sm",
+    "icon-sm",
+    "icon-sm",
+    "icon-sm",
   ]);
   expect(within(view).getByLabelText("Canvas zoom")).toHaveTextContent("100%");
   expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
@@ -355,6 +362,13 @@ test("Agent panels preserve the native context menu without opening the canvas N
 
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   const mainPanel = screen.getByLabelText("Main Agent panel");
+  const composer = within(mainPanel).getByRole("textbox", { name: "Main Agent message" });
+  const beam = composer.closest(".design-canvas-agent__composer-beam");
+  expect(beam).not.toHaveAttribute("data-active");
+  fireEvent.focus(composer);
+  await waitFor(() => expect(beam).toHaveAttribute("data-active"));
+  fireEvent.blur(composer, { relatedTarget: null });
+  await waitFor(() => expect(beam).not.toHaveAttribute("data-active"));
   const mainEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   expect(mainPanel.dispatchEvent(mainEvent)).toBe(true);
   expect(mainEvent.defaultPrevented).toBe(false);
@@ -377,7 +391,11 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   const { api } = createCanvasApi(canvas([page, image]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-page-menu"));
+  const pageFlowNode = await screen.findByTestId("rf__node-page-menu");
+  expect(pageFlowNode.querySelectorAll(
+    ".design-canvas-node__resize-control--enabled.design-canvas-node__resize-control--affordance",
+  )).toHaveLength(4);
+  fireEvent.click(pageFlowNode);
   expect(await screen.findByLabelText("Checkout Agent panel", { selector: "section" })).toHaveAttribute("data-agent-size", "compact");
   expect(document.querySelector(".react-flow__resize-control")).not.toBeNull();
   expect(screen.queryByRole("button", { name: "Open Agent" })).not.toBeInTheDocument();
@@ -502,6 +520,130 @@ test("double-clicking a ready generated Node enters focus with an operable stric
   expect(screen.getByLabelText("Main Agent panel")).toBeInTheDocument();
 });
 
+test("exact iframe identity and src stay stable across focus open and close", async () => {
+  const target = node({
+    id: "page-stable-frame",
+    name: "Stateful page",
+    state: "ready",
+    currentVersionId: "version-stable-frame",
+    selectedVersionId: "version-stable-frame",
+    versionCount: 1,
+  });
+  const exactUrl = `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview`;
+  const embeddedUrl = `${exactUrl}/embed`;
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getExactVersionPreview).mockResolvedValue({
+    nodeId: target.id,
+    versionId: target.currentVersionId!,
+    url: exactUrl,
+  });
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const frame = await screen.findByTitle(`Stateful page, version ${target.currentVersionId}`) as HTMLIFrameElement;
+  expect(frame).toHaveAttribute("src", embeddedUrl);
+  expect(frame).toHaveAttribute("tabindex", "-1");
+
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Stateful page; double click to focus and interact" }));
+  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  expect(screen.getByTitle(`Stateful page, version ${target.currentVersionId}`)).toBe(frame);
+  expect(frame).toHaveAttribute("src", embeddedUrl);
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(screen.getByTitle(`Stateful page, version ${target.currentVersionId}`)).toBe(frame);
+  expect(frame).toHaveAttribute("src", embeddedUrl);
+  expect(frame).toHaveAttribute("tabindex", "-1");
+});
+
+test.each([
+  { mimeType: "application/json", fileName: "renamed.data", expectedMode: "code", webTools: false },
+  { mimeType: "application/typescript", fileName: "extensionless-source", expectedMode: "code", webTools: false },
+  { mimeType: "text/html", fileName: "landing.renamed", expectedMode: "code", webTools: false },
+])("exact $mimeType metadata drives imported file focus as $expectedMode", async ({
+  mimeType,
+  fileName,
+  expectedMode,
+  webTools,
+}) => {
+  const target = node({
+    id: `file-${mimeType.replace(/\W+/g, "-")}`,
+    kind: "file",
+    name: "Untitled imported file",
+    state: "ready",
+    assetId: "asset-exact-metadata",
+    currentVersionId: `version-${mimeType.replace(/\W+/g, "-")}`,
+    selectedVersionId: `version-${mimeType.replace(/\W+/g, "-")}`,
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.listNodeVersions).mockResolvedValue([{
+    id: target.currentVersionId!,
+    nodeId: target.id,
+    sequence: 1,
+    contentKind: "asset",
+    assetId: target.assetId,
+    mimeType,
+    fileName,
+    checksum: "sum-exact-metadata",
+    bytes: 24,
+    contextHash: null,
+    jobId: null,
+    runnerId: null,
+    model: null,
+    createdAt: 1,
+  }]);
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    blob: async () => ({ size: 17, text: async () => "export const x = 1" }),
+  })));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const shield = await screen.findByRole("button", { name: "Select Untitled imported file; double click to focus and interact" });
+  await waitFor(() => expect(document.querySelector(".design-typed-material")).toHaveAttribute("data-presentation", "code"));
+  fireEvent.doubleClick(shield);
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focused-content", expectedMode));
+  if (webTools) expect(screen.getByRole("button", { name: "Desktop preview" })).toBeInTheDocument();
+  else expect(screen.queryByRole("button", { name: "Desktop preview" })).not.toBeInTheDocument();
+});
+
+test("exact generated Page metadata keeps browser layout and website tools", async () => {
+  const target = node({
+    id: "page-exact-browser-layout",
+    kind: "page",
+    name: "Renamed page",
+    state: "ready",
+    currentVersionId: "version-exact-browser-layout",
+    selectedVersionId: "version-exact-browser-layout",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.listNodeVersions).mockResolvedValue([{
+    id: target.currentVersionId!,
+    nodeId: target.id,
+    sequence: 1,
+    contentKind: "html",
+    assetId: null,
+    mimeType: "text/html",
+    fileName: "extensionless-artifact",
+    checksum: "sum-page-metadata",
+    bytes: 128,
+    contextHash: "context",
+    jobId: null,
+    runnerId: null,
+    model: null,
+    createdAt: 1,
+  }]);
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const shield = await screen.findByRole("button", { name: "Select Renamed page; double click to focus and interact" });
+  fireEvent.doubleClick(shield);
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focused-content", "web"));
+  expect(screen.getByRole("button", { name: "Desktop preview" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Export preview HTML" })).toBeInTheDocument();
+});
+
 test("focused previews accept context menus only over their iframe's private MessagePort", async () => {
   const target = node({
     id: "page-embedded-menu",
@@ -520,12 +662,11 @@ test("focused previews accept context menus only over their iframe's private Mes
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   const frame = await screen.findByTitle(`Embedded page, version ${target.currentVersionId}`) as HTMLIFrameElement;
-  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Embedded page; double click to focus and interact" }));
-  await waitFor(() => expect(frame).toHaveAttribute(
+  expect(frame).toHaveAttribute(
     "src",
     `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview/embed`,
-  ));
-  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  );
+  expect(frame).toHaveAttribute("tabindex", "-1");
   expect(frame.contentWindow).not.toBeNull();
   const nonce = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
   const channel = new MessageChannel();
@@ -565,6 +706,19 @@ test("focused previews accept context menus only over their iframe's private Mes
   expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
 
   channel.port1.start();
+  // The one-shot child handshake happens while this is still an ordinary canvas
+  // preview. The parent keeps the port but rejects menu actions until focus.
+  channel.port1.postMessage(message);
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
+
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Embedded page; double click to focus and interact" }));
+  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  expect(screen.getByTitle(`Embedded page, version ${target.currentVersionId}`)).toBe(frame);
+  expect(frame).toHaveAttribute(
+    "src",
+    `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview/embed`,
+  );
   channel.port1.postMessage(message);
   const menu = await screen.findByRole("menu", { name: "Page Node actions" });
   expect(within(menu).getByRole("menuitem", { name: "Fit this Node" })).toHaveAttribute("data-disabled");
@@ -678,10 +832,24 @@ test("material Nodes use the selected immutable Version for preview and expose t
   await waitFor(() => expect(screen.queryByRole("option", { name: /V1 · direction-v1\.png ·/ })).not.toBeInTheDocument());
   expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "opening");
   expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
-  expect(await screen.findByRole("img", { name: "Direction reference" })).toHaveAttribute(
+  expect(screen.queryByRole("button", { name: "Desktop preview" })).not.toBeInTheDocument();
+  const image = await screen.findByRole("img", { name: "Direction reference" });
+  expect(image).toHaveAttribute(
     "src",
     "https://preview.local/image-1/version-image-selected",
   );
+  Object.defineProperties(image, {
+    naturalWidth: { configurable: true, value: 1_728 },
+    naturalHeight: { configurable: true, value: 2_304 },
+  });
+  fireEvent.load(image);
+  const focusedMaterial = image.closest<HTMLElement>(".design-canvas-node");
+  await waitFor(() => {
+    const focusedWidth = Number.parseFloat(focusedMaterial?.style.width ?? "0");
+    const focusedHeight = Number.parseFloat(focusedMaterial?.style.height ?? "0");
+    expect(focusedWidth / focusedHeight).toBeCloseTo(1_728 / 2_304, 3);
+    expect(focusedHeight).toBeLessThanOrEqual(640);
+  });
   expect(api.getExactVersionPreview).toHaveBeenCalledWith(
     PROJECT_ID,
     material.id,

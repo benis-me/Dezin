@@ -1,7 +1,6 @@
 import { NodeResizeControl, useViewport, type ControlPosition, type Node, type NodeProps } from "@xyflow/react";
 import {
   CircleAlert,
-  FileText,
   LoaderCircle,
   Maximize2,
   Play,
@@ -19,7 +18,9 @@ import {
 import { cn } from "../lib/utils.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
+import { useExactVersionMetadata } from "./exact-version-metadata.ts";
 import { nodeFocusEase, type NodeFocusMotion } from "./node-focus-motion.ts";
+import { TypedMaterialSurface } from "./TypedMaterialSurface.tsx";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
 
@@ -28,6 +29,8 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   projectId: string;
   api: DesignCanvasApi;
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
+  onAppendMaterialVersion?: (nodeId: string, file: File) => Promise<void>;
+  onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
   onPreviewContextMenu?: (nodeId: string, clientX: number, clientY: number) => void;
   onFocusAnimationStart?: (nodeId: string, phase: NodeFocusMotion["phase"], durationMs: number) => void;
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
@@ -42,6 +45,8 @@ export interface FocusVisualState {
   scaleX: number;
   scaleY: number;
   opacity: number;
+  width?: number;
+  height?: number;
 }
 
 interface FocusAnimationState {
@@ -93,10 +98,16 @@ export function focusVisualStateFromTransform(transform: string, opacity: number
 function readFocusVisualState(element: HTMLElement): FocusVisualState {
   const computed = getComputedStyle(element);
   const opacity = Number.parseFloat(computed.opacity);
-  return focusVisualStateFromTransform(computed.transform, Number.isFinite(opacity) ? opacity : 1);
+  const width = Number.parseFloat(computed.width);
+  const height = Number.parseFloat(computed.height);
+  return {
+    ...focusVisualStateFromTransform(computed.transform, Number.isFinite(opacity) ? opacity : 1),
+    width: Number.isFinite(width) ? width : element.offsetWidth,
+    height: Number.isFinite(height) ? height : element.offsetHeight,
+  };
 }
 
-function focusVisualFrames(
+export function focusVisualFrames(
   start: FocusVisualState,
   end: FocusVisualState,
   arcX: number,
@@ -113,17 +124,27 @@ function focusVisualFrames(
     const scaleX = start.scaleX + (end.scaleX - start.scaleX) * progress;
     const scaleY = start.scaleY + (end.scaleY - start.scaleY) * progress;
     const opacity = start.opacity + (end.opacity - start.opacity) * progress;
+    const width = start.width !== undefined && end.width !== undefined
+      ? start.width + (end.width - start.width) * progress
+      : undefined;
+    const height = start.height !== undefined && end.height !== undefined
+      ? start.height + (end.height - start.height) * progress
+      : undefined;
     return {
       offset,
       transform: `translate3d(${x}px, ${y}px, 0) scale(${scaleX}, ${scaleY})`,
       opacity,
+      ...(width === undefined ? {} : { width: `${width}px` }),
+      ...(height === undefined ? {} : { height: `${height}px` }),
     };
   });
 }
 
-function previewFrameAddress(url: string, embedded: boolean): { src: string; instrumented: boolean } {
-  if (!embedded) return { src: previewDocumentSrc(url), instrumented: false };
+function previewFrameAddress(url: string): { src: string; instrumented: boolean } {
   try {
+    // Keep one immutable document identity from canvas preview through focus and
+    // back. Swapping exact preview <-> embed here reloads the iframe, erasing its
+    // scroll position and runtime state even when React preserves the element.
     return { src: embeddedPreviewDocumentSrc(url), instrumented: true };
   } catch {
     // Non-production adapters and old fixtures can still render exact previews;
@@ -184,14 +205,16 @@ function useNearViewport(selected: boolean): { ref: React.RefObject<HTMLDivEleme
 
 function NodeCornerResizeControls({
   node,
-  interactive,
+  enabled,
+  emphasized,
   lockAspectRatio,
   onResize,
   onResizeStart,
   onResizeEnd,
 }: {
   node: DesignNode;
-  interactive: boolean;
+  enabled: boolean;
+  emphasized: boolean;
   lockAspectRatio: boolean;
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
   onResizeStart: () => void;
@@ -204,14 +227,14 @@ function NodeCornerResizeControls({
       minWidth={280}
       minHeight={200}
       keepAspectRatio={lockAspectRatio}
-      shouldResize={() => interactive}
+      shouldResize={() => enabled}
       className={cn(
         "design-canvas-node__resize-control",
-        interactive
+        enabled && "design-canvas-node__resize-control--enabled",
+        emphasized
           ? "design-canvas-node__resize-control--interactive"
           : "design-canvas-node__resize-control--affordance",
       )}
-      style={{ pointerEvents: interactive ? "auto" : "none" }}
       onResizeStart={onResizeStart}
       onResizeEnd={(_event, params) => {
         onResizeEnd();
@@ -256,6 +279,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     projectId,
     api,
     onResize,
+    onAppendMaterialVersion,
+    onContentAspectRatio,
     onPreviewContextMenu,
     onFocusAnimationStart,
     onFocusAnimationComplete,
@@ -278,16 +303,23 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     node,
     enabled: shouldMountRichPreview,
   });
+  useExactVersionMetadata({
+    api,
+    projectId,
+    nodeId: node.id,
+    versionId,
+    enabled: shouldMountRichPreview,
+  });
   const catalog = catalogItem(node.kind);
   const hasRichContent = versionId !== null;
   const live = LIVE_STATES.has(node.state);
   const previewFrameAddressValue = preview && !material
-    ? previewFrameAddress(preview.url, focusSource)
+    ? previewFrameAddress(preview.url)
     : null;
   useEmbeddedPreviewContextMenuChannel({
     iframeRef,
-    previewSrc: focusSource ? previewFrameAddressValue?.src ?? null : null,
-    enabled: focusSource && previewFrameAddressValue?.instrumented === true && onPreviewContextMenu !== undefined,
+    previewSrc: previewFrameAddressValue?.src ?? null,
+    enabled: previewFrameAddressValue?.instrumented === true && onPreviewContextMenu !== undefined,
     onContextMenu: (message) => {
       const iframe = iframeRef.current;
       if (!focusSource || !onPreviewContextMenu || !iframe) return;
@@ -337,6 +369,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       focusMotion.startScaleY,
       focusMotion.scaleX,
       focusMotion.scaleY,
+      focusMotion.startWidth,
+      focusMotion.startHeight,
       focusMotion.layoutWidth,
       focusMotion.layoutHeight,
       focusMotion.role,
@@ -349,6 +383,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       scaleX: focusMotion.scaleX,
       scaleY: focusMotion.scaleY,
       opacity: focusMotion.role === "source" ? 1 : 0,
+      width: focusMotion.layoutWidth ?? undefined,
+      height: focusMotion.layoutHeight ?? undefined,
     };
     const canvasTarget: FocusVisualState = {
       x: focusMotion.startX,
@@ -356,6 +392,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       scaleX: focusMotion.startScaleX,
       scaleY: focusMotion.startScaleY,
       opacity: 1,
+      width: focusMotion.startWidth ?? undefined,
+      height: focusMotion.startHeight ?? undefined,
     };
     const start = running
       ? readFocusVisualState(element)
@@ -373,13 +411,24 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       }, 0);
       return () => window.clearTimeout(settleTimer);
     }
+    const fullSizeTravel = focusMotion.startWidth !== null && focusMotion.layoutWidth !== null
+      && focusMotion.startHeight !== null && focusMotion.layoutHeight !== null
+      ? Math.abs(focusMotion.layoutWidth - focusMotion.startWidth) * 0.35
+        + Math.abs(focusMotion.layoutHeight - focusMotion.startHeight) * 0.35
+      : 0;
+    const remainingSizeTravel = start.width !== undefined && end.width !== undefined
+      && start.height !== undefined && end.height !== undefined
+      ? Math.abs(end.width - start.width) * 0.35 + Math.abs(end.height - start.height) * 0.35
+      : 0;
     const fullTravel = Math.hypot(focusMotion.shiftX - focusMotion.startX, focusMotion.shiftY - focusMotion.startY)
       + Math.abs(focusMotion.scaleX - focusMotion.startScaleX) * 180
       + Math.abs(focusMotion.scaleY - focusMotion.startScaleY) * 180
+      + fullSizeTravel
       + (focusMotion.role === "source" ? 0 : 80);
     const remainingTravel = Math.hypot(end.x - start.x, end.y - start.y)
       + Math.abs(end.scaleX - start.scaleX) * 180
       + Math.abs(end.scaleY - start.scaleY) * 180
+      + remainingSizeTravel
       + Math.abs(end.opacity - start.opacity) * 80;
     const travelRatio = Math.min(1, remainingTravel / Math.max(1, fullTravel));
     const durationRatio = Math.sqrt(travelRatio);
@@ -443,14 +492,23 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         focusInteractive && "design-canvas-node--focus-interactive nodrag nopan",
       )}
       style={{
-        width: focusSource && focusMotion.layoutWidth ? focusMotion.layoutWidth : "100%",
-        height: focusSource && focusMotion.layoutHeight ? focusMotion.layoutHeight : "100%",
+        width: focusSource
+          ? focusMotion.phase === "closing"
+            ? focusMotion.startWidth ?? "100%"
+            : focusMotion.layoutWidth ?? "100%"
+          : "100%",
+        height: focusSource
+          ? focusMotion.phase === "closing"
+            ? focusMotion.startHeight ?? "100%"
+            : focusMotion.layoutHeight ?? "100%"
+          : "100%",
         ...focusStyle,
       }}
     >
       <NodeCornerResizeControls
         node={node}
-        interactive={selected && focusMotion === null}
+        enabled={focusMotion === null}
+        emphasized={selected}
         lockAspectRatio={catalog.lockAspectRatio === true}
         onResize={onResize}
         onResizeStart={() => setResizing(true)}
@@ -492,7 +550,17 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             shouldMountRichPreview ? (
               preview ? (
                 material ? (
-                  <MaterialPreview key={preview.url} node={node} url={preview.url} interactive={focusInteractive} />
+                  <MaterialPreview
+                    key={preview.url}
+                    node={node}
+                    projectId={projectId}
+                    api={api}
+                    versionId={versionId}
+                    url={preview.url}
+                    focusMotion={focusMotion}
+                    onAppendMaterialVersion={onAppendMaterialVersion}
+                    onContentAspectRatio={onContentAspectRatio}
+                  />
                 ) : (
                   <iframe
                     ref={iframeRef}
@@ -578,7 +646,25 @@ function articleFor(label: string): string {
   return /^[aeiou]/i.test(label) ? "an" : "a";
 }
 
-function MaterialPreview({ node, url, interactive }: { node: DesignNode; url: string; interactive: boolean }) {
+function MaterialPreview({
+  node,
+  projectId,
+  api,
+  versionId,
+  url,
+  focusMotion,
+  onAppendMaterialVersion,
+  onContentAspectRatio,
+}: {
+  node: DesignNode;
+  projectId: string;
+  api: DesignCanvasApi;
+  versionId: string;
+  url: string;
+  focusMotion: NodeFocusMotion | null;
+  onAppendMaterialVersion?: (nodeId: string, file: File) => Promise<void>;
+  onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
+}) {
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
@@ -601,6 +687,12 @@ function MaterialPreview({ node, url, interactive }: { node: DesignNode; url: st
         loading="lazy"
         decoding="async"
         className="design-canvas-node__asset design-canvas-node__asset--image"
+        onLoad={(event) => {
+          const image = event.currentTarget;
+          if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+            onContentAspectRatio?.(node.id, image.naturalWidth / image.naturalHeight);
+          }
+        }}
         onError={() => setFailed(true)}
       />
     );
@@ -611,23 +703,30 @@ function MaterialPreview({ node, url, interactive }: { node: DesignNode; url: st
         src={url}
         width={Math.round(node.geometry.width)}
         height={Math.round(node.geometry.height)}
-        controls={interactive}
+        controls={focusMotion?.phase === "opening" && focusMotion.role === "source"}
         muted
         preload="metadata"
         className="design-canvas-node__asset design-canvas-node__asset--video nodrag nopan"
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            onContentAspectRatio?.(node.id, video.videoWidth / video.videoHeight);
+          }
+        }}
         onError={() => setFailed(true)}
       />
     );
   }
   return (
-    <div className="design-canvas-node__file-preview">
-      <span className="design-canvas-node__file-icon"><FileText aria-hidden /></span>
-      <div>
-        <p>{node.name}</p>
-        <span>Available as exact context to every Agent on this canvas.</span>
-      </div>
-      <a className="nodrag nopan" href={url} target="_blank" rel="noreferrer">Open file</a>
-    </div>
+    <TypedMaterialSurface
+      node={node}
+      projectId={projectId}
+      api={api}
+      versionId={versionId}
+      url={url}
+      focusMotion={focusMotion}
+      onAppendMaterialVersion={onAppendMaterialVersion}
+    />
   );
 }
 

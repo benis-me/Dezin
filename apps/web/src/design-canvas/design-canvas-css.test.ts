@@ -27,11 +27,14 @@ test("Design Canvas keeps native titlebar and floating feedback geometry stable"
 test("selected and keyboard-focused Nodes use a gap outline with discoverable corner brackets", () => {
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*14px;/s);
   expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-width:\s*1\.5px;[^}]*border-color:\s*white;[^}]*box-shadow:/s);
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 22px 48px/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 16px 36px/s);
   expect(css).toMatch(/\[data-node-focus\][^{]*\[data-node-focus-role="source"\]::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
-  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{[^}]*\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.24;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;[^}]*transition:\s*opacity 160ms[^}]*transform 180ms/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{\s*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover \.design-canvas-node__resize-control--enabled\s*\{\s*pointer-events:\s*auto;/s);
+  expect(css).toMatch(/\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.3;/s);
+  expect(css).toMatch(/\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node__resize-control--interactive,[^{]*\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-control--enabled\s*\{[^}]*pointer-events:\s*auto/s);
   expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
@@ -80,11 +83,13 @@ test("Agent header is compact and its solid surface does not use backdrop glass"
 });
 
 test("Agent composer grows within explicit bounds without a separator above it", () => {
-  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 14px 14px;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 10px 10px;[^}]*background:\s*transparent;/s);
   expect(css).not.toMatch(/\.design-canvas-agent__composer\s*\{[^}]*border-top:/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*width:\s*100%;[^}]*border-radius:\s*14px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-shell:focus-within\s*\{[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]\s*\{[^}]*animation-duration:\s*0\.001ms !important;[^}]*animation-iteration-count:\s*1 !important;[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]::before,[\s\S]*animation:\s*none !important;/s);
 });
 
 test("expanded Agent detail never grows a left emphasis rail", () => {
@@ -109,6 +114,7 @@ test("light-mode bottom controls and context menus follow the Spatial surface la
   expect(css).toMatch(/\.design-canvas-zoom\s*\{\s*bottom:\s*12px;\s*left:\s*12px;/s);
   expect(css).toMatch(/#design-canvas-add\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;[^}]*padding:\s*0;/s);
   expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\]\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s);
+  expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\] > svg\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*stroke-width:\s*2;/s);
   expect(css).toMatch(/\.design-canvas-surface\[data-main-agent\] \.design-canvas-tools\s*\{[^}]*right:\s*calc\(clamp\(380px, 32vw, 492px\) \+ 20px\);/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*\.design-canvas-node\s*\{\s*opacity:\s*0\.45;/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*320ms,\s*360ms;/s);

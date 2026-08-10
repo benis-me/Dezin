@@ -73,7 +73,9 @@ import { arrangeDesignNodes } from "./auto-layout.ts";
 import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import { DesignCanvasNode, type DesignFlowNode } from "./DesignCanvasNode.tsx";
+import { readExactVersionMetadata, useExactVersionMetadata } from "./exact-version-metadata.ts";
 import {
+  focusedNodeLayoutMode,
   focusedNodeTransform,
   NODE_FOCUS_FLIGHT_DURATION_MS,
   NODE_FOCUS_DETAIL_DELAY_MS,
@@ -92,6 +94,7 @@ import { NodeCatalogMenu } from "./NodeCatalogMenu.tsx";
 import { QuickStart } from "./QuickStart.tsx";
 import type { DesignExportResult, DesignJobStatus, DesignNode, DesignNodeKind, DesignNodeVersion } from "./types.ts";
 import { useDesignCanvasController } from "./useDesignCanvasController.ts";
+import { previewVersionIdForNode } from "./useExactVersionPreview.ts";
 
 const NODE_TYPES = { design: DesignCanvasNode } as const;
 const EMPTY_EDGES: Edge[] = [];
@@ -135,17 +138,33 @@ const FOCUSED_PREVIEW_WIDTHS: Record<FocusedPreviewDevice, number | undefined> =
 
 function focusedLayoutOptions(
   surface: { width: number; height: number },
+  node: DesignNode,
   targetWidth?: number,
+  contentAspectRatio?: number,
+  metadata?: DesignNodeVersion | null,
 ): Parameters<typeof focusedNodeTransform>[3] {
+  const layoutMode = focusedNodeLayoutMode({
+    kind: node.kind,
+    fileName: metadata?.fileName ?? node.name,
+    mimeType: metadata?.mimeType,
+  });
+  const responsiveTargetWidth = layoutMode === "web" ? targetWidth : undefined;
   if (surface.width <= 720) {
     return {
       reservedRight: 0,
       horizontalInset: 16,
       bottomInset: Math.min(520, surface.height * 0.56) + 90,
-      targetWidth,
+      layoutMode,
+      targetWidth: responsiveTargetWidth,
+      contentAspectRatio,
     };
   }
-  return { reservedRight: FLOATING_NODE_AGENT_WIDTH_PX + 24, targetWidth };
+  return {
+    reservedRight: FLOATING_NODE_AGENT_WIDTH_PX + 24,
+    layoutMode,
+    targetWidth: responsiveTargetWidth,
+    contentAspectRatio,
+  };
 }
 
 export interface DesignCanvasScreenProps {
@@ -243,6 +262,7 @@ export function DesignCanvasScreen({
   const [versions, setVersions] = useState<DesignNodeVersion[]>([]);
   const [versionsNodeId, setVersionsNodeId] = useState<string | null>(null);
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const [contentAspectRatios, setContentAspectRatios] = useState<ReadonlyMap<string, number>>(() => new Map());
   const availableDesignAgents = useMemo(
     () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
     [agents],
@@ -280,6 +300,14 @@ export function DesignCanvasScreen({
       ? canvas?.nodes.find((node) => node.id === focusTransition.nodeId) ?? null
       : null
   ), [canvas?.nodes, focusTransition]);
+  const focusedVersionId = focusedCanvasNode ? previewVersionIdForNode(focusedCanvasNode) : null;
+  const focusedVersionMetadata = useExactVersionMetadata({
+    api,
+    projectId,
+    nodeId: focusedCanvasNode?.id ?? null,
+    versionId: focusedVersionId,
+    enabled: focusedCanvasNode !== null,
+  }).metadata;
   const focusActive = focusTransition !== null;
   const historyLocked = useMemo(() => (
     (canvas?.nodes.some((node) => node.activeJobId !== null) ?? false)
@@ -344,6 +372,14 @@ export function DesignCanvasScreen({
     setFocusedNodeId(nodeId);
     if (!panelAlreadyVisible) setFocusedPanelNodeId(null);
     const sourceNode = canvas?.nodes.find((candidate) => candidate.id === nodeId) ?? null;
+    const sourceVersionMetadata = sourceNode
+      ? readExactVersionMetadata({
+          api,
+          projectId,
+          nodeId: sourceNode.id,
+          versionId: previewVersionIdForNode(sourceNode),
+        })
+      : null;
     const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
     const activeViewport = flowRef.current?.getViewport() ?? canvas?.viewport ?? null;
     const durationMs = sourceNode && surfaceBounds && activeViewport
@@ -351,7 +387,13 @@ export function DesignCanvasScreen({
           sourceNode.geometry,
           { width: surfaceBounds.width, height: surfaceBounds.height },
           activeViewport,
-          focusedLayoutOptions(surfaceBounds),
+          focusedLayoutOptions(
+            surfaceBounds,
+            sourceNode,
+            undefined,
+            contentAspectRatios.get(sourceNode.id),
+            sourceVersionMetadata,
+          ),
         ).durationMs
       : NODE_FOCUS_FLIGHT_DURATION_MS;
     setFocusTransition({ nodeId, phase: "opening", durationMs });
@@ -380,7 +422,7 @@ export function DesignCanvasScreen({
       revealPanel();
     }
 
-  }, [canvas, focusedPanelNodeId, reduceMotion, replaceFlowNodes]);
+  }, [api, canvas, contentAspectRatios, focusedPanelNodeId, projectId, reduceMotion, replaceFlowNodes]);
 
   const setFocusedNodeAgentVisible = useCallback((visible: boolean) => {
     const nodeId = focusedNodeId ?? focusedPanelNodeId ?? selectedNodeIds[0] ?? null;
@@ -443,6 +485,21 @@ export function DesignCanvasScreen({
   const persistNodeResize = useCallback((nodeId: string, geometry: DesignNode["geometry"]) => {
     persistNodeGeometries([{ nodeId, geometry }]);
   }, [persistNodeGeometries]);
+
+  const appendMaterialRevision = useCallback(async (nodeId: string, file: File): Promise<void> => {
+    await controller.appendMaterialVersion(nodeId, file);
+  }, [controller.appendMaterialVersion]);
+
+  const reportContentAspectRatio = useCallback((nodeId: string, aspectRatio: number) => {
+    if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return;
+    setContentAspectRatios((current) => {
+      const previous = current.get(nodeId);
+      if (previous !== undefined && Math.abs(previous - aspectRatio) < 0.0001) return current;
+      const next = new Map(current);
+      next.set(nodeId, aspectRatio);
+      return next;
+    });
+  }, []);
 
   const onFocusAnimationStart = useCallback((nodeId: string, phase: NodeFocusPhase, durationMs: number) => {
     if (phase !== "closing") return;
@@ -561,7 +618,13 @@ export function DesignCanvasScreen({
           focusedCanvasNode.geometry,
           { width: surfaceBounds.width, height: surfaceBounds.height },
           activeViewport,
-          focusedLayoutOptions(surfaceBounds, FOCUSED_PREVIEW_WIDTHS[focusedPreviewDevice]),
+          focusedLayoutOptions(
+            surfaceBounds,
+            focusedCanvasNode,
+            FOCUSED_PREVIEW_WIDTHS[focusedPreviewDevice],
+            contentAspectRatios.get(focusedCanvasNode.id),
+            focusedVersionMetadata,
+          ),
         )
       : undefined;
     const previousSourceMotion = focusTransition
@@ -595,6 +658,8 @@ export function DesignCanvasScreen({
       projectId,
       api,
       persistNodeResize,
+      appendMaterialRevision,
+      reportContentAspectRatio,
       onPreviewContextMenu,
       onFocusAnimationStart,
       onFocusAnimationComplete,
@@ -647,7 +712,7 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [api, applyInitialViewport, canvas, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusMotionEnabled, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, selectedNodeIds]);
+  }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusedVersionMetadata, focusMotionEnabled, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
   const onFlowInit = useCallback((instance: ReactFlowInstance<DesignFlowNode>) => {
     flowRef.current = instance;
@@ -806,13 +871,8 @@ export function DesignCanvasScreen({
     }
     const guardedNodeId = selectionGuardRef.current;
     if (guardedNodeId && !next.includes(guardedNodeId)) return;
-    if (guardedNodeId) {
-      selectionGuardRef.current = null;
-      if (selectionGuardFrameRef.current !== null) {
-        window.cancelAnimationFrame(selectionGuardFrameRef.current);
-        selectionGuardFrameRef.current = null;
-      }
-    }
+    // Keep the guard for its complete frame window. React Flow can acknowledge
+    // this click before a delayed empty selection from the preceding pane click.
     setSelectedNodeIds((current) => (
       current.length === next.length && current.every((id, index) => id === next[index]) ? current : next
     ));
@@ -822,6 +882,14 @@ export function DesignCanvasScreen({
   const onNodeClick = useCallback<NodeMouseHandler<DesignFlowNode>>((_event, node) => {
     if (focusActive) return;
     selectionClearGuardRef.current = false;
+    selectionGuardRef.current = node.id;
+    if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
+    selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
+      selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
+        selectionGuardFrameRef.current = null;
+        selectionGuardRef.current = null;
+      });
+    });
     contextSelectionGuardRef.current = null;
     if (contextSelectionGuardFrameRef.current !== null) {
       window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
@@ -1209,12 +1277,15 @@ export function DesignCanvasScreen({
   ]);
 
   const exporting = controller.jobs.some((job) => job.kind === "implementation-export" && isLiveJobStatus(job.status));
-  const focusedVersionId = focusedCanvasNode?.selectedVersionId
-    ?? focusedCanvasNode?.currentVersionId
-    ?? focusedCanvasNode?.lastReadyVersionId
-    ?? null;
+  const focusedContentLayoutMode = focusedCanvasNode
+    ? focusedNodeLayoutMode({
+        kind: focusedCanvasNode.kind,
+        fileName: focusedVersionMetadata?.fileName ?? focusedCanvasNode.name,
+        mimeType: focusedVersionMetadata?.mimeType,
+      })
+    : null;
   const focusedPreviewToolsVisible = focusedCanvasNode !== null
-    && !isMaterialNodeKind(focusedCanvasNode.kind)
+    && focusedContentLayoutMode === "web"
     && focusedVersionId !== null;
   const activeFocusDurationMs = focusTransition?.durationMs ?? NODE_FOCUS_FLIGHT_DURATION_MS;
   const generativeNodes = canvas?.nodes.filter((node) => !isMaterialNodeKind(node.kind)) ?? [];
@@ -1345,6 +1416,7 @@ export function DesignCanvasScreen({
             data-node-agent={focusedPanelNodeId ? "open" : undefined}
             data-main-agent={mainAgentOpen || undefined}
             data-preview-device={focusTransition ? focusedPreviewDevice : undefined}
+            data-focused-content={focusTransition ? focusedContentLayoutMode ?? undefined : undefined}
             data-context-menu-open={contextMenuOpen || undefined}
             data-focus-motion={focusMotionEnabled ? "animated" : "instant"}
             style={{
@@ -1562,10 +1634,10 @@ export function DesignCanvasScreen({
             </div>
 
             <div className="design-canvas-zoom" role="toolbar" aria-label="Canvas view controls" onContextMenu={(event) => event.stopPropagation()}>
-              <CanvasToolButton compact label="Arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}>
+              <CanvasToolButton label="Arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}>
                 <LayoutGrid aria-hidden />
               </CanvasToolButton>
-              <CanvasToolButton compact label="Fit canvas" onClick={() => void flowRef.current?.fitView({
+              <CanvasToolButton label="Fit canvas" onClick={() => void flowRef.current?.fitView({
                 padding: 0.16,
                 duration: reduceMotion ? 0 : 240,
                 ease: nodeFocusEase,
@@ -1574,11 +1646,11 @@ export function DesignCanvasScreen({
                 <LocateFixed aria-hidden />
               </CanvasToolButton>
               <span className="design-canvas-tools__divider" aria-hidden />
-              <CanvasToolButton compact label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: reduceMotion ? 0 : 140 })}>
+              <CanvasToolButton label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: reduceMotion ? 0 : 140 })}>
                 <Minus aria-hidden />
               </CanvasToolButton>
               <output aria-label="Canvas zoom">{Math.round(zoom * 100)}%</output>
-              <CanvasToolButton compact label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: reduceMotion ? 0 : 140 })}>
+              <CanvasToolButton label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: reduceMotion ? 0 : 140 })}>
                 <Plus aria-hidden />
               </CanvasToolButton>
             </div>
@@ -1911,14 +1983,12 @@ function HeaderIconAction({
 function CanvasToolButton({
   label,
   active,
-  compact = false,
   disabled = false,
   onClick,
   children,
 }: {
   label: string;
   active?: boolean;
-  compact?: boolean;
   disabled?: boolean;
   onClick: () => void;
   children: ReactNode;
@@ -1929,7 +1999,7 @@ function CanvasToolButton({
         <Button
           type="button"
           variant={active ? "secondary" : "ghost"}
-          size={compact ? "icon-xs" : "icon-sm"}
+          size="icon-sm"
           aria-label={label}
           aria-pressed={active === undefined ? undefined : active}
           disabled={disabled}
@@ -1948,6 +2018,8 @@ function canvasToFlowNodes(
   projectId: string,
   api: DesignCanvasApi,
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void,
+  onAppendMaterialVersion: (nodeId: string, file: File) => Promise<void>,
+  onContentAspectRatio: (nodeId: string, aspectRatio: number) => void,
   onPreviewContextMenu: (nodeId: string, clientX: number, clientY: number) => void,
   onFocusAnimationStart: (nodeId: string, phase: NodeFocusPhase, durationMs: number) => void,
   onFocusAnimationComplete: (nodeId: string, phase: NodeFocusPhase) => void,
@@ -1973,6 +2045,8 @@ function canvasToFlowNodes(
       projectId,
       api,
       onResize,
+      onAppendMaterialVersion,
+      onContentAspectRatio,
       onPreviewContextMenu,
       onFocusAnimationStart,
       onFocusAnimationComplete,
@@ -2040,6 +2114,8 @@ function sameNodeFocusMotion(left: NodeFocusMotion | null | undefined, right: No
     && left.scaleX === right.scaleX
     && left.scaleY === right.scaleY
     && left.scale === right.scale
+    && left.startWidth === right.startWidth
+    && left.startHeight === right.startHeight
     && left.layoutWidth === right.layoutWidth
     && left.layoutHeight === right.layoutHeight
     && left.durationMs === right.durationMs

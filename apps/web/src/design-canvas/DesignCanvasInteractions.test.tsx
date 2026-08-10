@@ -262,6 +262,29 @@ test("single-click selects while double-click flies only the Node and its neighb
   expect(applyIntents).not.toHaveBeenCalled();
 });
 
+test("a rapid pane deselect then Node click ignores the pane's delayed empty selection echo", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeClick?.(new MouseEvent("click"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.selected).toBe(true));
+  expect(await screen.findByLabelText("Page A Agent panel")).toBeInTheDocument();
+
+  const nodeClickTarget = flowHarness.props!.nodes[0]!;
+  act(() => {
+    flowHarness.props?.onPaneClick?.();
+    flowHarness.props?.onNodeClick?.(new MouseEvent("click"), nodeClickTarget);
+    flowHarness.props?.onSelectionChange?.({ nodes: [{ ...nodeClickTarget, selected: true }] });
+    flowHarness.props?.onSelectionChange?.({ nodes: [] });
+  });
+
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.selected).toBe(true));
+  expect(screen.getByLabelText("Page A Agent panel")).toBeInTheDocument();
+});
+
 test("repeated canvas clicks cannot restart or stutter the return flight", async () => {
   const { api } = createApi(designCanvas([designNode("page-a", 80)]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
