@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Dezin web shell — Vite + React 19 + Tailwind v4, neutral-grayscale Linear/Vercel aesthetic.",
+  "description": "Dezin web shell — a quiet, spatial, local-first creative canvas built with Vite and React 19.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

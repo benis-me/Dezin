@@ -8,7 +8,7 @@ import {
   type AgentSearchResult,
 } from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
-import { Button } from "../components/ui/index.ts";
+import { Button, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
@@ -28,8 +28,10 @@ import {
   X,
 } from "lucide-react";
 import {
+  memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -50,48 +52,83 @@ import type {
 
 const AGENT_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 const AGENT_MOTION_EASE_IN_OUT: [number, number, number, number] = [0.66, 0, 0.34, 1];
+const TRANSCRIPT_MESSAGE_PAGE_SIZE = 12;
+const TRANSCRIPT_JOB_PAGE_SIZE = 6;
 
 interface FloatingPosition {
+  nodeId: string | null;
   left: number;
   top: number;
+  entryX: number;
+  entryY: number;
   visible: boolean;
+}
+
+const COMPACT_AGENT_SIZE = { width: 352, height: 520 } as const;
+const FOCUSED_AGENT_SIZE = { width: 352, height: 720 } as const;
+
+function boundedEntryOffset(distance: number, limit: number): number {
+  if (Math.abs(distance) < 3) return 0;
+  return Math.max(-limit, Math.min(limit, distance));
 }
 
 export function useFloatingNodePanel({
   hostRef,
   panelRef,
   nodeId,
+  focused,
   mainPanelOpen,
   layoutNonce,
 }: {
   hostRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLElement | null>;
   nodeId: string | null;
+  focused: boolean;
   mainPanelOpen: boolean;
   layoutNonce: number;
 }): FloatingPosition {
-  const [position, setPosition] = useState<FloatingPosition>({ left: 16, top: 16, visible: false });
+  const [position, setPosition] = useState<FloatingPosition>({
+    nodeId: null,
+    left: 16,
+    top: 16,
+    entryX: 0,
+    entryY: 8,
+    visible: false,
+  });
 
   const measure = useCallback(() => {
     const host = hostRef.current;
-    const panel = panelRef.current;
-    if (!host || !panel || !nodeId) {
-      setPosition((current) => current.visible ? { ...current, visible: false } : current);
+    if (!host || !nodeId) {
+      setPosition((current) => current.visible || current.nodeId !== null
+        ? { ...current, nodeId: null, visible: false }
+        : current);
       return;
     }
     const node = [...host.querySelectorAll<HTMLElement>("[data-design-node-id]")]
       .find((candidate) => candidate.dataset.designNodeId === nodeId);
     if (!node) {
-      setPosition((current) => current.visible ? { ...current, visible: false } : current);
+      setPosition((current) => current.visible || current.nodeId !== null
+        ? { ...current, nodeId: null, visible: false }
+        : current);
       return;
     }
+
+    const panel = panelRef.current;
     const hostRect = host.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
-    if (nodeRect.right < hostRect.left || nodeRect.left > hostRect.right || nodeRect.bottom < hostRect.top || nodeRect.top > hostRect.bottom) {
+    const expectedSize = focused ? FOCUSED_AGENT_SIZE : COMPACT_AGENT_SIZE;
+    const panelWidth = panel?.offsetWidth || expectedSize.width;
+    const panelHeight = Math.min(panel?.offsetHeight || expectedSize.height, hostRect.height - 24);
+    if (!focused && (
+      nodeRect.right < hostRect.left
+      || nodeRect.left > hostRect.right
+      || nodeRect.bottom < hostRect.top
+      || nodeRect.top > hostRect.bottom
+    )) {
       setPosition((current) => current.visible ? { ...current, visible: false } : current);
       return;
     }
-    const panelRect = panel.getBoundingClientRect();
+
     const occluders: CanvasRect[] = mainPanelOpen ? [{
       left: Math.max(0, hostRect.width - 400),
       top: 0,
@@ -100,7 +137,10 @@ export function useFloatingNodePanel({
       width: Math.min(400, hostRect.width),
       height: hostRect.height,
     }] : [];
-    const resolved = resolveFloatingChromeRect({
+    const resolved = focused ? {
+      left: Math.max(12, hostRect.width - panelWidth - 12),
+      top: 12,
+    } : resolveFloatingChromeRect({
       anchor: {
         left: nodeRect.left - hostRect.left,
         top: nodeRect.top - hostRect.top,
@@ -110,30 +150,40 @@ export function useFloatingNodePanel({
       },
       containerWidth: hostRect.width,
       containerHeight: hostRect.height,
-      surfaceWidth: panelRect.width || 372,
-      surfaceHeight: Math.min(panelRect.height || 560, hostRect.height - 24),
+      surfaceWidth: panelWidth,
+      surfaceHeight: panelHeight,
       placement: "right",
       occluders,
       padding: 10,
       gap: 12,
       allowSidePlacement: true,
     });
-    setPosition((current) => {
-      if (current.visible && current.left === resolved.left && current.top === resolved.top) return current;
-      return { ...resolved, visible: true };
-    });
-  }, [hostRef, mainPanelOpen, nodeId, panelRef]);
+    const nodeCenterX = nodeRect.left - hostRect.left + nodeRect.width / 2;
+    const nodeCenterY = nodeRect.top - hostRect.top + nodeRect.height / 2;
+    const entryX = boundedEntryOffset(nodeCenterX - (resolved.left + panelWidth / 2), 18);
+    const entryY = boundedEntryOffset(nodeCenterY - (resolved.top + panelHeight / 2), 12);
+    const next = { nodeId, ...resolved, entryX, entryY, visible: true };
+    setPosition((current) => (
+      current.nodeId === next.nodeId
+      && current.visible
+      && current.left === next.left
+      && current.top === next.top
+      && current.entryX === next.entryX
+      && current.entryY === next.entryY
+        ? current
+        : next
+    ));
+  }, [focused, hostRef, mainPanelOpen, nodeId, panelRef]);
 
-  useEffect(() => {
-    let frame = window.requestAnimationFrame(measure);
+  useLayoutEffect(() => {
+    measure();
+    let frame = 0;
     const host = hostRef.current;
-    const panel = panelRef.current;
     const observer = new ResizeObserver(() => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(measure);
     });
     if (host) observer.observe(host);
-    if (panel) observer.observe(panel);
     window.addEventListener("resize", measure);
     return () => {
       window.cancelAnimationFrame(frame);
@@ -173,6 +223,10 @@ export interface CanvasAgentPanelProps {
   className?: string;
   style?: React.CSSProperties;
   floating?: boolean;
+  compact?: boolean;
+  entryX?: number;
+  entryY?: number;
+  deferTranscriptMs?: number;
   rootRef?: Ref<HTMLElement>;
 }
 
@@ -187,10 +241,15 @@ interface MainAgentJobGroup {
   jobs: DesignJob[];
 }
 
+type AgentTimelineItem =
+  | { kind: "message"; id: string; createdAt: number; message: DesignThread["messages"][number] }
+  | { kind: "main-job-group"; id: string; createdAt: number; group: MainAgentJobGroup }
+  | { kind: "node-job"; id: string; createdAt: number; job: DesignJob };
+
 function boundedTurnLabel(thread: DesignThread | null, job: DesignJob): string {
   const prompt = thread?.messages.find((message) => message.jobId === job.id && message.role === "user")?.content.trim();
-  if (prompt) return `Turn · ${prompt.length > 72 ? `${prompt.slice(0, 72)}…` : prompt}`;
-  return job.kind === "implementation-export" ? `Export · ${job.exportId ?? job.id}` : "Main Agent turn";
+  if (prompt) return prompt.length > 72 ? `${prompt.slice(0, 72)}…` : prompt;
+  return job.kind === "implementation-export" ? `Export · ${job.exportId ?? job.id}` : "Canvas activity";
 }
 
 function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | null): MainAgentJobGroup[] {
@@ -223,7 +282,7 @@ function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | n
     if (visibleParents.has(parentJobId)) continue;
     groups.push({
       parentJobId,
-      label: `Main Agent turn · ${parentJobId}`,
+      label: `Canvas activity · ${parentJobId}`,
       jobs: orphanedChildren,
     });
   }
@@ -323,10 +382,15 @@ export function CanvasAgentPanel({
   className,
   style,
   floating = false,
+  compact = false,
+  entryX = 0,
+  entryY = 8,
+  deferTranscriptMs = 0,
   rootRef,
 }: CanvasAgentPanelProps) {
   const reduceMotion = useReducedMotion();
   const [thread, setThread] = useState<DesignThread | null>(null);
+  const [threadLoading, setThreadLoading] = useState(true);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -343,15 +407,15 @@ export function CanvasAgentPanel({
   const [contextNodeIds, setContextNodeIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
   const threadLoadSequenceRef = useRef(0);
+  const loadedThreadScopeRef = useRef<string | null>(null);
   const scopeKey = scope.type === "main" ? "main" : `node:${scope.nodeId}`;
   const relatedJobs = useMemo(() => {
     const related = scope.type === "main"
       ? jobs.filter((job) => job.kind === "main-agent" || job.kind === "implementation-export" || job.parentJobId !== null)
       : jobs.filter((job) => job.nodeId === scope.nodeId);
     return related.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
-  }, [jobs, scope]);
+  }, [jobs, scopeKey]);
   const nodeNames = useMemo(() => new Map(nodes.map((node) => [node.id, node.name])), [nodes]);
   const scopedNode = scope.type === "node" ? nodes.find((node) => node.id === scope.nodeId) ?? null : null;
   const mainJobGroups = useMemo(
@@ -370,16 +434,22 @@ export function CanvasAgentPanel({
 
   const loadThread = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++threadLoadSequenceRef.current;
+    const initialLoad = loadedThreadScopeRef.current !== scopeKey;
+    if (initialLoad) setThreadLoading(true);
     try {
       const next = await api.getThread(projectId, scope, signal);
       if (!signal?.aborted && sequence === threadLoadSequenceRef.current) {
+        loadedThreadScopeRef.current = scopeKey;
         setThread(next);
         setThreadError(null);
       }
     } catch (problem) {
       if (!signal?.aborted && sequence === threadLoadSequenceRef.current) {
+        loadedThreadScopeRef.current = scopeKey;
         setThreadError(problem instanceof Error ? problem.message : String(problem));
       }
+    } finally {
+      if (!signal?.aborted && sequence === threadLoadSequenceRef.current && initialLoad) setThreadLoading(false);
     }
   }, [api, projectId, scopeKey]);
 
@@ -416,11 +486,6 @@ export function CanvasAgentPanel({
     return () => window.clearInterval(timer);
   }, [live, loadThread]);
 
-  useEffect(() => {
-    const transcript = transcriptRef.current;
-    if (transcript) transcript.scrollTop = transcript.scrollHeight;
-  }, [thread?.messages.length, thread?.updatedAt, transcriptTailKey]);
-
   const submit = async () => {
     const prompt = draft.trim();
     if (!prompt || submitting || !activeAgent) return;
@@ -442,31 +507,44 @@ export function CanvasAgentPanel({
     }
   };
 
-  const panelVisible = style?.visibility !== "hidden";
+  const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
+  const panelEyebrow = scope.type === "main" ? "Main Agent" : "Node Agent";
   return (
     <motion.section
       ref={rootRef}
       data-canvas-agent-panel
       data-agent-scope={scopeKey}
+      data-agent-size={compact ? "compact" : "focus"}
       className={cn("design-canvas-agent", floating && "design-canvas-agent--floating", className)}
-      style={style}
-      initial={floating && !reduceMotion ? { opacity: 0, x: 8, y: 2, scale: 0.992 } : false}
-      animate={floating ? (panelVisible
-        ? { opacity: 1, x: 0, y: 0, scale: 1 }
-        : { opacity: 0, x: reduceMotion ? 0 : 8, y: 0, scale: reduceMotion ? 1 : 0.992 }) : undefined}
-      transition={{ duration: reduceMotion ? 0 : 0.22, ease: AGENT_MOTION_EASE }}
+      style={{ ...style, transformOrigin: "center center" }}
+      initial={floating && !reduceMotion ? { opacity: 0, x: entryX, y: entryY, scale: compact ? 0.955 : 0.985 } : false}
+      animate={floating ? { opacity: 1, x: 0, y: 0, scale: compact ? 0.975 : 1 } : undefined}
+      exit={floating ? { opacity: 0, x: reduceMotion ? 0 : entryX, y: reduceMotion ? 0 : entryY, scale: compact ? 0.955 : 0.985 } : undefined}
+      transition={{
+        duration: reduceMotion ? 0 : 0.26,
+        ease: AGENT_MOTION_EASE,
+      }}
       aria-label={`${title} panel`}
       onContextMenu={(event) => event.stopPropagation()}
     >
+      <div className="design-canvas-agent__surface">
       <header className="design-canvas-agent__header">
-        <div className="min-w-0">
-          <h2 className="truncate text-xs font-semibold tracking-[-0.01em] text-foreground">{title}</h2>
-          {subtitle ? <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{subtitle}</p> : null}
+        <div className="design-canvas-agent__header-copy">
+          <span className="design-canvas-agent__eyebrow">{panelEyebrow}</span>
+          <h2>{panelTitle}</h2>
+          {subtitle ? <p>{subtitle}</p> : null}
         </div>
         {onClose ? (
-          <Button variant="ghost" size="icon-xs" aria-label={`Close ${title}`} onClick={onClose}>
-            {floating ? <X aria-hidden /> : <PanelRightClose aria-hidden />}
-          </Button>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon-xs" aria-label={`Close ${title}`} onClick={onClose}>
+                  {floating ? <X aria-hidden /> : <PanelRightClose aria-hidden />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="left" sideOffset={6}>{floating ? "Hide Agent" : "Close Agent"}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         ) : null}
       </header>
 
@@ -531,58 +609,21 @@ export function CanvasAgentPanel({
         </div>
       ) : null}
 
-      <div ref={transcriptRef} className="design-canvas-agent__transcript">
-        {(thread?.messages.length ?? 0) === 0 && relatedJobs.length === 0 ? (
-          <div className="design-canvas-agent__empty">
-            <MessageSquareText aria-hidden />
-            <p>Ask this Agent to work from the complete canvas context.</p>
-          </div>
-        ) : null}
-        {thread?.messages.map((message) => (
-          <article key={message.id} className="design-canvas-agent__message" data-role={message.role}>
-            <div className="design-canvas-agent__message-meta">
-              <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : message.role}</span>
-              <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-            </div>
-            <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
-          </article>
-        ))}
-        {scope.type === "main" ? mainJobGroups.map((group) => {
-          const childCount = group.jobs.filter((job) => job.nodeId !== null).length;
-          return (
-            <section
-              key={group.parentJobId}
-              className="design-canvas-agent__activity-group"
-              aria-label={group.label}
-              data-parent-job-id={group.parentJobId}
-            >
-              <header className="design-canvas-agent__activity-group-header">
-                <p>{group.label}</p>
-                {childCount > 0 ? <span>{childCount} {childCount === 1 ? "child Agent" : "child Agents"}</span> : null}
-              </header>
-              {group.jobs.map((job) => (
-                <AgentActivityCard
-                  key={job.id}
-                  job={job}
-                  nodeName={job.nodeId === null ? undefined : nodeNames.get(job.nodeId)}
-                  projectPath={projectPath}
-                  onRevealExport={onRevealExport}
-                  onCancel={onCancelJob}
-                />
-              ))}
-            </section>
-          );
-        }) : relatedJobs.map((job) => (
-          <AgentActivityCard
-            key={job.id}
-            job={job}
-            nodeName={job.nodeId === null ? undefined : nodeNames.get(job.nodeId)}
-            projectPath={projectPath}
-            onRevealExport={onRevealExport}
-            onCancel={onCancelJob}
-          />
-        ))}
-      </div>
+      <AgentTranscript
+        scopeKey={scopeKey}
+        scopeType={scope.type}
+        thread={thread}
+        threadLoading={threadLoading}
+        relatedJobs={relatedJobs}
+        mainJobGroups={mainJobGroups}
+        nodeNames={nodeNames}
+        projectPath={projectPath}
+        onRevealExport={onRevealExport}
+        onCancelJob={onCancelJob}
+        deferTranscriptMs={deferTranscriptMs}
+        reduceMotion={reduceMotion === true}
+        tailKey={transcriptTailKey}
+      />
 
       <div className="design-canvas-agent__composer">
         <input
@@ -680,7 +721,266 @@ export function CanvasAgentPanel({
           </motion.div>
         ) : null}
       </div>
+      </div>
     </motion.section>
+  );
+}
+
+const AgentTranscript = memo(function AgentTranscript({
+  scopeKey,
+  scopeType,
+  thread,
+  threadLoading,
+  relatedJobs,
+  mainJobGroups,
+  nodeNames,
+  projectPath,
+  onRevealExport,
+  onCancelJob,
+  deferTranscriptMs,
+  reduceMotion,
+  tailKey,
+}: {
+  scopeKey: string;
+  scopeType: DesignThreadScope["type"];
+  thread: DesignThread | null;
+  threadLoading: boolean;
+  relatedJobs: readonly DesignJob[];
+  mainJobGroups: readonly MainAgentJobGroup[];
+  nodeNames: ReadonlyMap<string, string>;
+  projectPath?: string | null;
+  onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
+  onCancelJob: (jobId: string) => Promise<void>;
+  deferTranscriptMs: number;
+  reduceMotion: boolean;
+  tailKey: string;
+}) {
+  const [ready, setReady] = useState(reduceMotion || deferTranscriptMs <= 0);
+  const [historyPages, setHistoryPages] = useState(1);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
+  const messageHistoryLimit = historyPages * TRANSCRIPT_MESSAGE_PAGE_SIZE;
+  const jobHistoryLimit = historyPages * (scopeType === "main" ? TRANSCRIPT_JOB_PAGE_SIZE : 2);
+  const threadMessages = thread?.messages ?? [];
+  const visibleMessages = threadMessages.slice(-messageHistoryLimit);
+  const visibleMainJobGroups = mainJobGroups.slice(-jobHistoryLimit);
+  const visibleRelatedJobs = relatedJobs.slice(-jobHistoryLimit);
+  const hiddenTranscriptCount = Math.max(0, threadMessages.length - visibleMessages.length)
+    + (scopeType === "main"
+      ? Math.max(0, mainJobGroups.length - visibleMainJobGroups.length)
+      : Math.max(0, relatedJobs.length - visibleRelatedJobs.length));
+  const latestRelatedJobId = relatedJobs.at(-1)?.id ?? null;
+  const timeline = useMemo<AgentTimelineItem[]>(() => {
+    const items: AgentTimelineItem[] = visibleMessages.map((message) => ({
+      kind: "message",
+      id: `message:${message.id}`,
+      createdAt: message.createdAt,
+      message,
+    }));
+    if (scopeType === "main") {
+      items.push(...visibleMainJobGroups.map((group) => ({
+        kind: "main-job-group" as const,
+        id: `main-job-group:${group.parentJobId}`,
+        createdAt: Math.min(...group.jobs.map((job) => job.createdAt)),
+        group,
+      })));
+    } else {
+      items.push(...visibleRelatedJobs.map((job) => ({
+        kind: "node-job" as const,
+        id: `node-job:${job.id}`,
+        createdAt: job.createdAt,
+        job,
+      })));
+    }
+    const priority = (item: AgentTimelineItem): number => {
+      if (item.kind !== "message") return 1;
+      return item.message.role === "user" ? 0 : 2;
+    };
+    return items.sort((left, right) => (
+      left.createdAt - right.createdAt
+      || priority(left) - priority(right)
+      || left.id.localeCompare(right.id)
+    ));
+  }, [scopeType, visibleMainJobGroups, visibleMessages, visibleRelatedJobs]);
+
+  useEffect(() => {
+    setHistoryPages(1);
+    restoreScrollRef.current = null;
+    if (reduceMotion || deferTranscriptMs <= 0) {
+      setReady(true);
+      return;
+    }
+    setReady(false);
+    const timer = window.setTimeout(() => setReady(true), deferTranscriptMs);
+    return () => window.clearTimeout(timer);
+  }, [deferTranscriptMs, reduceMotion, scopeKey]);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript || !ready) return;
+    const restore = restoreScrollRef.current;
+    if (restore) {
+      transcript.scrollTop = restore.top + transcript.scrollHeight - restore.height;
+      restoreScrollRef.current = null;
+    } else {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+  }, [historyPages, ready, tailKey, thread?.messages.length, thread?.updatedAt]);
+
+  return (
+    <div ref={transcriptRef} className="design-canvas-agent__transcript">
+      {!ready || threadLoading ? (
+        <div className="design-canvas-agent__transcript-placeholder" aria-hidden>
+          <span />
+          <span />
+          <span />
+        </div>
+      ) : (
+        <>
+          {hiddenTranscriptCount > 0 ? (
+            <button
+              type="button"
+              className="design-canvas-agent__history-more"
+              onClick={() => {
+                const transcript = transcriptRef.current;
+                if (transcript) restoreScrollRef.current = { height: transcript.scrollHeight, top: transcript.scrollTop };
+                setHistoryPages((current) => current + 1);
+              }}
+            >
+              Show earlier activity <span>{hiddenTranscriptCount}</span>
+            </button>
+          ) : null}
+          {threadMessages.length === 0 && relatedJobs.length === 0 ? (
+            <div className="design-canvas-agent__empty">
+              <MessageSquareText aria-hidden />
+              <p>Ask this Agent to work from the complete canvas context.</p>
+            </div>
+          ) : null}
+          {timeline.map((item) => {
+            if (item.kind === "message") {
+              const { message } = item;
+              return (
+                <motion.article
+                  key={item.id}
+                  className="design-canvas-agent__message"
+                  data-role={message.role}
+                  initial={reduceMotion ? false : { opacity: 0, y: 8, x: message.role === "user" ? 5 : -3 }}
+                  animate={{ opacity: 1, y: 0, x: 0 }}
+                  transition={{ duration: reduceMotion ? 0 : 0.28, ease: AGENT_MOTION_EASE }}
+                >
+                  <div className="design-canvas-agent__message-meta">
+                    <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : message.role}</span>
+                    <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                  </div>
+                  <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
+                </motion.article>
+              );
+            }
+            if (item.kind === "main-job-group") {
+              return (
+                <MainAgentJobGroupView
+                  key={item.id}
+                  group={item.group}
+                  nodeNames={nodeNames}
+                  projectPath={projectPath}
+                  onRevealExport={onRevealExport}
+                  onCancelJob={onCancelJob}
+                  reduceMotion={reduceMotion}
+                  latestRelatedJobId={latestRelatedJobId}
+                />
+              );
+            }
+            return (
+              <AgentActivityCard
+                key={item.id}
+                job={item.job}
+                nodeName={item.job.nodeId === null ? undefined : nodeNames.get(item.job.nodeId)}
+                projectPath={projectPath}
+                onRevealExport={onRevealExport}
+                onCancel={onCancelJob}
+              />
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+});
+
+function MainAgentJobGroupView({
+  group,
+  nodeNames,
+  projectPath,
+  onRevealExport,
+  onCancelJob,
+  reduceMotion,
+  latestRelatedJobId,
+}: {
+  group: MainAgentJobGroup;
+  nodeNames: ReadonlyMap<string, string>;
+  projectPath?: string | null;
+  onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
+  onCancelJob: (jobId: string) => Promise<void>;
+  reduceMotion: boolean;
+  latestRelatedJobId: string | null;
+}) {
+  const mainJob = group.jobs.find((job) => job.kind === "main-agent") ?? null;
+  const workJobs = group.jobs.filter((job) => job.kind !== "main-agent");
+  const mainActive = mainJob !== null && ["queued", "running", "validating"].includes(mainJob.status);
+  if (workJobs.length === 0) {
+    if (mainActive) return <AgentThinkingIndicator reduceMotion={reduceMotion} />;
+    if (mainJob?.status !== "failed") return null;
+    return (
+      <AgentActivityCard
+        job={mainJob}
+        projectPath={projectPath}
+        onRevealExport={onRevealExport}
+        onCancel={onCancelJob}
+      />
+    );
+  }
+  const childCount = workJobs.filter((job) => job.nodeId !== null).length;
+  return (
+    <section
+      className="design-canvas-agent__activity-group"
+      aria-label={group.label}
+      data-parent-job-id={group.parentJobId}
+    >
+      <header className="design-canvas-agent__activity-group-header">
+        <p>{group.label}</p>
+        {childCount > 0 ? <span>{childCount} {childCount === 1 ? "child Agent" : "child Agents"}</span> : null}
+      </header>
+      {mainActive ? <AgentThinkingIndicator reduceMotion={reduceMotion} /> : null}
+      {workJobs.map((job) => (
+        <AgentActivityCard
+          key={job.id}
+          job={job}
+          nodeName={job.nodeId === null ? undefined : nodeNames.get(job.nodeId)}
+          projectPath={projectPath}
+          onRevealExport={onRevealExport}
+          onCancel={onCancelJob}
+          initiallyExpanded={job.id === latestRelatedJobId && job.kind === "implementation-export" && job.status === "ready"}
+        />
+      ))}
+    </section>
+  );
+}
+
+function AgentThinkingIndicator({ reduceMotion }: { reduceMotion: boolean }) {
+  return (
+    <motion.div
+      className="design-canvas-agent__thinking"
+      role="status"
+      aria-label="Thinking"
+      initial={reduceMotion ? false : { opacity: 0, x: -4, y: 4 }}
+      animate={{ opacity: 1, x: 0, y: 0 }}
+      transition={{ duration: reduceMotion ? 0 : 0.26, ease: AGENT_MOTION_EASE }}
+    >
+      <span className="design-canvas-agent__thinking-orb" aria-hidden>
+        {Array.from({ length: 9 }, (_, index) => <span key={index} />)}
+      </span>
+      <span className="design-canvas-agent__thinking-label">Thinking…</span>
+    </motion.div>
   );
 }
 
@@ -690,21 +990,23 @@ function AgentActivityCard({
   projectPath,
   onRevealExport,
   onCancel,
+  initiallyExpanded = false,
 }: {
   job: DesignJob;
   nodeName?: string;
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancel: (jobId: string) => Promise<void>;
+  initiallyExpanded?: boolean;
 }) {
   const reduceMotion = useReducedMotion();
   const [revealFeedback, setRevealFeedback] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
-  const [expanded, setExpanded] = useState(active || job.status === "failed");
+  const [expanded, setExpanded] = useState(active || initiallyExpanded);
   useEffect(() => {
-    if (active || job.status === "failed") setExpanded(true);
-  }, [active, job.status]);
+    if (active || initiallyExpanded) setExpanded(true);
+  }, [active, initiallyExpanded]);
   const kindLabel = job.kind === "node-generation"
     ? "Node generation"
     : job.kind === "node-analysis"
@@ -833,6 +1135,16 @@ function AgentActivityCard({
           </Button>
         ) : null}
       </header>
+      {job.error && !expanded ? (
+        <button
+          type="button"
+          className="design-canvas-agent__activity-error-summary"
+          title={job.error}
+          onClick={() => setExpanded(true)}
+        >
+          {compactActivityText(job.error)}
+        </button>
+      ) : null}
       <div className="design-canvas-agent__activity-collapsible" data-collapsed={!expanded || undefined}>
         <div>
           <div className="design-canvas-agent__activity-body">
@@ -881,7 +1193,9 @@ function AgentActivityCard({
               ) : null}
             </div>
           ) : null}
-          {job.error ? <p className="design-canvas-agent__activity-error">{job.error}</p> : null}
+          {job.error ? (
+            <p className="design-canvas-agent__activity-error" aria-hidden={!expanded}>{job.error}</p>
+          ) : null}
         </div>
       </div>
     </article>

@@ -222,7 +222,7 @@ a.agent-citation-mark:hover { background: var(--border); color: var(--foreground
 }
 
 .agent-reasoning { width: 100%; max-width: 100%; color: var(--muted-foreground); font-size: 12px; line-height: 18px; }
-.agent-reasoning[data-active] { border-left: 2px solid color-mix(in oklch, var(--design-canvas-accent, var(--ring)) 28%, transparent); padding-left: 8px; }
+.agent-reasoning[data-active] { border-color: color-mix(in oklch, var(--design-canvas-accent, var(--ring)) 16%, var(--border)); background: color-mix(in oklch, var(--design-canvas-accent, var(--ring)) 3%, transparent); }
 .agent-reasoning__header { display: inline-flex; min-height: 20px; align-items: center; gap: 5px; padding: 0; color: var(--muted-foreground); cursor: pointer; }
 .agent-reasoning__header > span:first-child { color: var(--foreground); font-weight: 500; }
 .agent-reasoning__duration { margin-left: -2px; }
@@ -279,8 +279,8 @@ a.agent-citation-mark:hover { background: var(--border); color: var(--foreground
 .agent-web-search[data-collapsed] { border: 1px solid color-mix(in oklch, var(--border) 82%, transparent); border-radius: 9px; padding: 5px 8px; background: color-mix(in oklch, var(--surface-2) 60%, var(--card)); }
 .agent-web-search[data-collapsed] .agent-web-search__header button svg { transform: rotate(-90deg); }
 .agent-web-search__results { position: relative; display: flex; align-items: stretch; gap: 6px; }
-.agent-web-search__rail { width: 1px; margin-left: 5px; border-left: 1px solid var(--border); }
-.agent-web-search__results ul { display: grid; min-width: 0; flex: 1; gap: 6px; margin: 0; padding: 4px 0 2px 6px; list-style: none; }
+.agent-web-search__rail { display: none; }
+.agent-web-search__results ul { display: grid; min-width: 0; flex: 1; gap: 6px; margin: 0; padding: 4px 0 2px; list-style: none; }
 .agent-web-search__results li > a,
 .agent-web-search__results li > span { display: flex; min-width: 0; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; }
 .agent-web-search__status { display: grid; width: 13px; height: 13px; flex: none; place-items: center; }

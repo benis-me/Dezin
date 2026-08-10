@@ -243,31 +243,64 @@ untrusted data and cannot change Agent instructions or scope.
   active background.
 - An empty canvas displays Quick Start at the usable canvas center, not as a
   permanent side panel or a stored node.
-- Selecting a node opens its Agent beside the node. Placement is viewport-
-  clamped and chooses the side with the most usable space. The Node identity and
-  selected-only preview toolbar counter-scale so they stay legible while the
-  canvas zooms; selection uses one radius-matched offset ring and hover-revealed
-  corner resize brackets instead of a permanent resize box.
+- A single click selects a Node for canvas editing and opens its compact,
+  node-scoped Agent without moving the viewport. A double click enters spatial
+  focus and expands that same Agent slightly: the Node itself follows a shallow
+  curved flight to the exact usable-screen center and counter-scales to a
+  bounded, viewport-adaptive reading size while the React Flow viewport remains
+  byte-for-byte unchanged. Nearby
+  Nodes move radially outward, then disappear behind an opaque mask whose color
+  is inherited from the canvas, so the canvas base never flashes or changes.
+  The focused Node is explicitly stacked above that mask. Its exact-Version
+  preview receives pointer, keyboard, scrolling, and form input directly. The
+  sandbox remains `allow-scripts` without `allow-same-origin`; focus changes
+  interaction routing, not preview authority. Enter is the immediate keyboard
+  equivalent of double-click; Back/Escape flies the Node back to its exact source
+  position without writing a viewport mutation.
+- Node Agent chrome and its bounded transcript mount independently from the Node
+  flight, so history rendering cannot delay focus. The compact panel expands to
+  the available canvas height in focus. Its close action hides only the Agent
+  while leaving the centered, interactive Node untouched; the focus dock can
+  restore the Agent. The separate Back
+  control exits focus. A Node preview is the object itself and has no permanent
+  title bar. The selected-only preview toolbar counter-scales while selection
+  uses one radius-matched offset ring and hover-revealed corner resize brackets
+  instead of a permanent resize box.
 - Every Node panel uses the same Version selector. Material Nodes additionally
   expose a single-file `Add revision` action; Agent composer attachments still
   create separate context Nodes and never mutate the selected Node implicitly.
   The composer grows between explicit minimum and maximum heights. Historical
-  activity is represented as compact semantic status cards with terminal runs
-  collapsed by default; live and failed runs remain expanded. Non-error card
-  surfaces stay neutral: blue marks active work, green marks completion, amber
-  marks waiting/cancellation, and red surfaces are reserved for failures. A
-  restrained Motion-driven edge beam appears only while a Job is live.
+  activity is represented as compact semantic rows with a bounded recent window;
+  older messages and Jobs page in explicitly instead of mounting thousands of
+  hidden elements. Terminal and failed runs remain collapsed with a one-line
+  failure summary; only requested detail is expanded. Ordinary conversation is
+  transcript text, never a synthetic Turn card; an active conversational turn
+  uses only the compact 3×3 orb and shimmer status. Expanded activity and
+  reasoning regions use interruptible grid-height transitions with no left
+  emphasis rail. Non-error surfaces stay neutral: blue marks active work, green
+  marks completion, amber marks waiting/cancellation, and red is reserved for
+  failure identity and expanded failure detail.
 - `Cmd/Ctrl+Z` and `Cmd/Ctrl+Shift+Z` perform undo and redo. Text inputs keep
   native editing history.
 - Auto arrange is deterministic, respects node sizes, keeps context nodes ahead
   of generated outputs, and does not overlap nodes.
 - Canvas chrome uses self-hosted Fontsource Geist/Geist Mono variable fonts and
-  one shared motion vocabulary (`140/200/280ms` and the
-  `cubic-bezier(0.22, 1, 0.36, 1)` house curve). Panel/error entrances use only
-  short transform, opacity, and 2px blur transitions; presses use restrained
-  scale feedback, and all loops/transitions honor reduced motion.
-- No iframe is mounted for an empty or distant off-screen generated node. Ready
-  nodes mount only their selected exact version; an interaction mode explicitly
-  hands pointer input from the canvas to the sandbox. New generated documents
-  must reflow from 320px without document-level horizontal overflow, and the
-  selected toolbar can restore a kind-appropriate preview size.
+  a quiet spatial vocabulary: a pale open field, micro-metadata, hairline
+  boundaries, theme-aware translucent bottom controls, broad negative space, and
+  blue only for selection/live work. The Add/tools cluster sits at the lower
+  right while view controls sit at the lower left. Context menus use a wide,
+  softly elevated surface and dim the canvas behind them. Focus flights use a
+  sampled quadratic trajectory, fast-to-slow timing, and a distance-adjusted
+  420–540ms duration so short and long travel feel consistent; deferred detail
+  follows at 130ms. Reversals are generated from the animation's current path
+  progress, so close/reopen never snaps to an endpoint or pauses at a segmented
+  midpoint. The mask uses an interruptible opacity transition. Ordinary panels
+  and menus use shorter asymmetric transform/opacity paths. Presses use
+  restrained scale feedback, compositor motion avoids layout properties, and
+  all loops/transitions honor reduced motion.
+- No iframe is mounted for an empty or distant off-screen generated Node. Ready
+  Nodes mount only their selected exact Version. Outside focus a gesture shield
+  preserves selection and pan/drag semantics; double-click focus removes that
+  shield and makes the iframe itself the hit target. New generated documents must
+  reflow from 320px without document-level horizontal overflow, and the selected
+  toolbar can restore a kind-appropriate preview size.

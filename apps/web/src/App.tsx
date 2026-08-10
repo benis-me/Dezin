@@ -46,6 +46,8 @@ function DesignProjectScreen({
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [agentDefaults, setAgentDefaults] = useState<Pick<Settings, "agentCommand" | "model"> | null>(null);
+  const agentDefaultsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const latestAgentDefaultsRef = useRef<Pick<Settings, "agentCommand" | "model"> | null>(null);
   const canvasApi = useMemo(() => createDesignCanvasApi(api), [api]);
   const { agents, rescan: rescanAgents } = useAgents();
 
@@ -54,11 +56,13 @@ function DesignProjectScreen({
     void Promise.allSettled([api.getProject(projectId), api.getSettings()]).then(([projectResult, settingsResult]) => {
       if (!active) return;
       if (projectResult.status === "fulfilled") setProject(projectResult.value);
-      if (settingsResult.status === "fulfilled") {
-        setAgentDefaults({
+      if (settingsResult.status === "fulfilled" && latestAgentDefaultsRef.current === null) {
+        const defaults = {
           agentCommand: settingsResult.value.agentCommand,
           model: settingsResult.value.model,
-        });
+        };
+        latestAgentDefaultsRef.current = defaults;
+        setAgentDefaults(defaults);
       }
     });
     return () => {
@@ -81,6 +85,23 @@ function DesignProjectScreen({
     window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated }));
   }, [api, projectId]);
 
+  const persistAgentDefaults = useCallback((selection: { agentCommand: string; model: string }) => {
+    latestAgentDefaultsRef.current = selection;
+    setAgentDefaults(selection);
+    const save = agentDefaultsSaveQueueRef.current.catch(() => undefined).then(async () => {
+      const updated = await api.updateSettings({
+        agentCommand: selection.agentCommand,
+        model: selection.model,
+      });
+      if (latestAgentDefaultsRef.current?.agentCommand === selection.agentCommand
+        && latestAgentDefaultsRef.current.model === selection.model) {
+        setAgentDefaults({ agentCommand: updated.agentCommand, model: updated.model });
+      }
+    });
+    agentDefaultsSaveQueueRef.current = save;
+    return save;
+  }, [api]);
+
   return (
     <DesignCanvasScreen
       key={projectId}
@@ -90,6 +111,7 @@ function DesignProjectScreen({
       agents={agents}
       initialAgentCommand={agentDefaults?.agentCommand}
       initialModel={agentDefaults?.model}
+      onAgentDefaultsChange={persistAgentDefaults}
       onRescanAgents={rescanAgents}
       onBackHome={() => navigate("/")}
       onRenameProject={renameProject}

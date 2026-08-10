@@ -1,24 +1,13 @@
 import { NodeResizeControl, useViewport, type ControlPosition, type Node, type NodeProps } from "@xyflow/react";
 import {
-  Box,
-  Braces,
   CircleAlert,
-  Component,
-  File,
   FileText,
-  Image as ImageIcon,
-  LayoutTemplate,
-  Library,
   LoaderCircle,
   Maximize2,
-  MousePointer2,
-  Palette,
   Play,
-  Search,
   Sparkles,
-  Video,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ComponentType } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 
 import { Button } from "../components/ui/Button.tsx";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip.tsx";
@@ -26,6 +15,7 @@ import { previewDocumentSrc } from "../lib/preview-channel.ts";
 import { cn } from "../lib/utils.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
+import { nodeFocusEase, type NodeFocusMotion } from "./node-focus-motion.ts";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
 
@@ -34,24 +24,59 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   projectId: string;
   api: DesignCanvasApi;
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
+  focusMotion?: NodeFocusMotion | null;
 }
 
 export type DesignFlowNode = Node<DesignFlowNodeData, "design">;
 
-const KIND_ICONS: Record<DesignNodeKind, ComponentType<{ className?: string }>> = {
-  component: Component,
-  page: LayoutTemplate,
-  "design-system": Palette,
-  research: Search,
-  "design-tokens": Braces,
-  "design-document": FileText,
-  layout: Box,
-  knowledge: Library,
-  image: ImageIcon,
-  video: Video,
-  document: FileText,
-  file: File,
-};
+interface FocusVisualState {
+  x: number;
+  y: number;
+  scale: number;
+  opacity: number;
+}
+
+interface FocusAnimationState {
+  animation: Animation;
+  target: NodeFocusMotion["phase"];
+  pathKey: string;
+}
+
+function readFocusVisualState(element: HTMLElement): FocusVisualState {
+  const computed = getComputedStyle(element);
+  const transform = computed.transform;
+  const matrix = /^matrix\(([-\d.e]+),\s*[-\d.e]+,\s*[-\d.e]+,\s*([-\d.e]+),\s*([-\d.e]+),\s*([-\d.e]+)\)$/.exec(transform);
+  return {
+    x: matrix ? Number(matrix[3]) : 0,
+    y: matrix ? Number(matrix[4]) : 0,
+    scale: matrix ? (Number(matrix[1]) + Number(matrix[2])) / 2 : 1,
+    opacity: Number.parseFloat(computed.opacity) || 0,
+  };
+}
+
+function focusVisualFrames(
+  start: FocusVisualState,
+  end: FocusVisualState,
+  arcX: number,
+  arcY: number,
+): Keyframe[] {
+  const controlX = (start.x + end.x) / 2 + arcX * 2;
+  const controlY = (start.y + end.y) / 2 + arcY * 2;
+  return Array.from({ length: 17 }, (_, index): Keyframe => {
+    const offset = index / 16;
+    const progress = nodeFocusEase(offset);
+    const inverse = 1 - progress;
+    const x = inverse * inverse * start.x + 2 * inverse * progress * controlX + progress * progress * end.x;
+    const y = inverse * inverse * start.y + 2 * inverse * progress * controlY + progress * progress * end.y;
+    const scale = start.scale + (end.scale - start.scale) * progress;
+    const opacity = start.opacity + (end.opacity - start.opacity) * progress;
+    return {
+      offset,
+      transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})`,
+      opacity,
+    };
+  });
+}
 
 const STATE_LABELS: Record<DesignNode["state"], string> = {
   empty: "Not generated",
@@ -102,15 +127,6 @@ function useNearViewport(selected: boolean): { ref: React.RefObject<HTMLDivEleme
   return { ref, nearViewport };
 }
 
-function NodeState({ state }: { state: DesignNode["state"] }) {
-  const label = STATE_LABELS[state];
-  return (
-    <span className="design-canvas-node__state" data-state={state} aria-label={label} title={label}>
-      <span aria-hidden className="design-canvas-node__state-mark" />
-    </span>
-  );
-}
-
 function NodeCornerResizeControls({
   node,
   onResize,
@@ -146,31 +162,102 @@ function NodeCornerResizeControls({
 }
 
 export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) {
-  const { node, projectId, api, onResize } = data;
-  const [interacting, setInteracting] = useState(false);
+  const { node, projectId, api, onResize, focusMotion = null } = data;
   const [resizing, setResizing] = useState(false);
   const { zoom } = useViewport();
   const chromeScale = 1 / Math.max(0.12, zoom);
   const { ref, nearViewport } = useNearViewport(selected);
+  const focusAnimationRef = useRef<FocusAnimationState | null>(null);
   const material = isMaterialNodeKind(node.kind);
-  const shouldMountRichPreview = nearViewport || selected || interacting;
+  const focusInteractive = focusMotion?.phase === "opening" && focusMotion.role === "source";
+  const shouldMountRichPreview = nearViewport || selected || focusInteractive;
   const { preview, versionId, loading, error: previewError } = useExactVersionPreview({
     api,
     projectId,
     node,
     enabled: shouldMountRichPreview,
   });
-  const Icon = KIND_ICONS[node.kind];
   const catalog = catalogItem(node.kind);
   const hasRichContent = versionId !== null;
   const live = LIVE_STATES.has(node.state);
   const previousVersionIdRef = useRef(versionId);
+  const focusStyle = focusMotion ? {
+    "--design-node-focus-x": `${focusMotion.shiftX}px`,
+    "--design-node-focus-y": `${focusMotion.shiftY}px`,
+    "--design-node-focus-arc-x": `${focusMotion.arcX}px`,
+    "--design-node-focus-arc-y": `${focusMotion.arcY}px`,
+    "--design-node-focus-scale": focusMotion.scale,
+    "--design-node-focus-mid-x": `${focusMotion.shiftX * 0.62 + focusMotion.arcX}px`,
+    "--design-node-focus-mid-y": `${focusMotion.shiftY * 0.62 + focusMotion.arcY}px`,
+    "--design-node-focus-mid-scale": 0.38 + focusMotion.scale * 0.62,
+    "--design-node-focus-duration": `${focusMotion.durationMs}ms`,
+    "--design-node-focus-delay": `${focusMotion.delayMs}ms`,
+    "--design-node-focus-fade-duration": `${focusMotion.fadeDurationMs}ms`,
+  } as CSSProperties : undefined;
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    const running = focusAnimationRef.current;
+    if (!element || !focusMotion) {
+      running?.animation.cancel();
+      focusAnimationRef.current = null;
+      return;
+    }
+    const pathKey = [
+      focusMotion.shiftX,
+      focusMotion.shiftY,
+      focusMotion.arcX,
+      focusMotion.arcY,
+      focusMotion.scale,
+      focusMotion.role,
+    ].join(":");
+    if (running?.target === focusMotion.phase && running.pathKey === pathKey) return;
+
+    const openingTarget: FocusVisualState = {
+      x: focusMotion.shiftX,
+      y: focusMotion.shiftY,
+      scale: focusMotion.scale,
+      opacity: focusMotion.role === "source" ? 1 : 0,
+    };
+    const closingTarget: FocusVisualState = { x: 0, y: 0, scale: 1, opacity: 1 };
+    const start = running
+      ? readFocusVisualState(element)
+      : focusMotion.phase === "opening"
+        ? closingTarget
+        : openingTarget;
+    const end = focusMotion.phase === "opening" ? openingTarget : closingTarget;
+    running?.animation.cancel();
+    if (focusMotion.durationMs <= 0 || typeof element.animate !== "function") {
+      focusAnimationRef.current = null;
+      return;
+    }
+    const fullTravel = Math.hypot(focusMotion.shiftX, focusMotion.shiftY)
+      + Math.abs(focusMotion.scale - 1) * 240
+      + (focusMotion.role === "source" ? 0 : 80);
+    const remainingTravel = Math.hypot(end.x - start.x, end.y - start.y)
+      + Math.abs(end.scale - start.scale) * 240
+      + Math.abs(end.opacity - start.opacity) * 80;
+    const durationRatio = Math.sqrt(Math.min(1, remainingTravel / Math.max(1, fullTravel)));
+    const durationMs = Math.max(120, Math.round(focusMotion.durationMs * durationRatio));
+    const animation = element.animate(
+      focusVisualFrames(start, end, focusMotion.arcX, focusMotion.arcY),
+      {
+        duration: durationMs,
+        delay: running ? 0 : focusMotion.delayMs,
+        easing: "linear",
+        fill: "both",
+      },
+    );
+    focusAnimationRef.current = { animation, target: focusMotion.phase, pathKey };
+  }, [focusMotion, ref]);
+
+  useEffect(() => () => {
+    focusAnimationRef.current?.animation.cancel();
+    focusAnimationRef.current = null;
+  }, []);
 
   useEffect(() => {
-    if (!selected) {
-      setInteracting(false);
-      setResizing(false);
-    }
+    if (!selected) setResizing(false);
   }, [selected]);
   useEffect(() => {
     const previousVersionId = previousVersionIdRef.current;
@@ -183,30 +270,23 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       onResize(node.id, preferred);
     }
   }, [material, node, onResize, versionId]);
-  useEffect(() => {
-    if (!interacting) return;
-    const exit = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setInteracting(false);
-    };
-    window.addEventListener("keydown", exit, true);
-    return () => window.removeEventListener("keydown", exit, true);
-  }, [interacting]);
-
   return (
     <div
       ref={ref}
       data-design-node-id={node.id}
       data-node-kind={node.kind}
       data-node-state={node.state}
+      data-node-focus-role={focusMotion?.role}
+      data-node-focus-phase={focusMotion?.phase}
       className={cn(
         "design-canvas-node",
         selected && "design-canvas-node--selected",
         resizing && "design-canvas-node--resizing",
-        interacting && "design-canvas-node--interacting nodrag nopan",
+        focusInteractive && "design-canvas-node--focus-interactive nodrag nopan",
       )}
-      style={{ width: "100%", height: "100%" }}
+      style={{ width: "100%", height: "100%", ...focusStyle }}
     >
-      {selected && !interacting ? (
+      {selected && !focusInteractive ? (
         <NodeCornerResizeControls
           node={node}
           onResize={onResize}
@@ -215,28 +295,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         />
       ) : null}
 
-      <div
-        className="design-canvas-node__chrome"
-        style={{
-          width: `calc(${100 / chromeScale}% - 2px)`,
-          height: "24px",
-          left: `${chromeScale}px`,
-          right: "auto",
-          bottom: `calc(100% + ${3 * chromeScale}px)`,
-          transform: `scale(${chromeScale})`,
-          transformOrigin: "left bottom",
-        }}
-      >
-        <div className="design-canvas-node__identity">
-          <span className="design-canvas-node__kind-icon"><Icon aria-hidden /></span>
-          <strong className="design-canvas-node__name">{node.name}</strong>
-        </div>
-        <span className="design-canvas-node__state-anchor">
-          <NodeState state={node.state} />
-        </span>
-      </div>
-
-      {selected && hasRichContent && (!material || node.kind === "video") ? (
+      {selected && hasRichContent && !material && !focusInteractive ? (
         <TooltipProvider delayDuration={180}>
           <div
             className="nodrag nopan design-canvas-node__toolbar"
@@ -251,35 +310,16 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
               <TooltipTrigger asChild>
                 <Button
                   type="button"
-                  variant={interacting ? "secondary" : "ghost"}
+                  variant="ghost"
                   size="icon-xs"
-                  aria-label={interacting ? "Exit preview interaction" : "Interact with preview"}
-                  aria-pressed={interacting}
-                  onClick={() => setInteracting((current) => !current)}
+                  aria-label="Fit Node preview"
+                  onClick={() => onResize(node.id, preferredGeneratedNodeGeometry(node))}
                 >
-                  <MousePointer2 aria-hidden />
+                  <Maximize2 aria-hidden />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={5}>
-                {interacting ? "Exit interaction (Esc)" : "Interact with preview"}
-              </TooltipContent>
+              <TooltipContent side="bottom" sideOffset={5}>Fit Node preview</TooltipContent>
             </Tooltip>
-            {!material ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Fit Node preview"
-                    onClick={() => onResize(node.id, preferredGeneratedNodeGeometry(node))}
-                  >
-                    <Maximize2 aria-hidden />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" sideOffset={5}>Fit Node preview</TooltipContent>
-              </Tooltip>
-            ) : null}
           </div>
         </TooltipProvider>
       ) : null}
@@ -290,14 +330,14 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             shouldMountRichPreview ? (
               preview ? (
                 material ? (
-                  <MaterialPreview key={preview.url} node={node} url={preview.url} interactive={interacting} />
+                  <MaterialPreview key={preview.url} node={node} url={preview.url} interactive={focusInteractive} />
                 ) : (
                   <iframe
                     className="design-canvas-node__iframe nodrag nopan"
                     title={`${node.name}, version ${versionId}`}
                     src={previewDocumentSrc(preview.url)}
                     sandbox="allow-scripts"
-                    tabIndex={interacting ? 0 : -1}
+                    tabIndex={focusInteractive ? 0 : -1}
                   />
                 )
               ) : (
@@ -330,12 +370,11 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             />
           )}
 
-          {hasRichContent && !interacting ? (
+          {hasRichContent && !focusInteractive ? (
             <button
               type="button"
-              className="design-canvas-node__gesture-shield nodrag nopan"
-              aria-label={`Select ${node.name}; double click to interact with preview`}
-              onDoubleClick={() => setInteracting(true)}
+              className="design-canvas-node__gesture-shield nopan"
+              aria-label={`Select ${node.name}; double click to focus and interact`}
             />
           ) : null}
 

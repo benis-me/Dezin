@@ -232,6 +232,9 @@ async function createWindow() {
     openSafeExternal(u);
     return { action: "deny" };
   });
+  // Dezin owns zoom inside its canvases. Prevent Chromium's page-level
+  // command/control-wheel zoom, including gestures originating in preview iframes.
+  window.webContents.on("zoom-changed", (event) => event.preventDefault());
   window.webContents.on("will-navigate", (event, targetUrl) => {
     if (isAllowedAppNavigation(targetUrl, url)) return;
     event.preventDefault();

@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Viewport } from "@xyflow/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -21,6 +22,7 @@ const flowHarness = vi.hoisted(() => ({
   fitView: vi.fn(),
   zoomIn: vi.fn(),
   zoomOut: vi.fn(),
+  moveEndDelayMs: null as number | null,
 }));
 const motionHarness = vi.hoisted(() => ({ reduced: false }));
 
@@ -38,8 +40,12 @@ vi.mock("@xyflow/react", async () => {
     setViewport: async (viewport: Viewport, options?: unknown) => {
       flowHarness.viewport = { ...viewport };
       flowHarness.setViewport(viewport, options);
-      flowHarness.props?.onMove?.(null, viewport);
-      flowHarness.props?.onMoveEnd?.(null, viewport);
+      const notifyMove = () => {
+        flowHarness.props?.onMove?.(null, viewport);
+        flowHarness.props?.onMoveEnd?.(null, viewport);
+      };
+      if (flowHarness.moveEndDelayMs === null) notifyMove();
+      else window.setTimeout(notifyMove, flowHarness.moveEndDelayMs);
       return true;
     },
     screenToFlowPosition: (point: { x: number; y: number }) => point,
@@ -61,7 +67,14 @@ vi.mock("@xyflow/react", async () => {
     React.useEffect(() => {
       props.onInit?.(instance);
     }, []);
-    return React.createElement("div", { "data-testid": "mock-react-flow" });
+    return React.createElement(
+      "div",
+      { "data-testid": "mock-react-flow" },
+      props.nodes.map((node: { id: string }) => React.createElement("div", {
+        key: node.id,
+        "data-design-node-id": node.id,
+      })),
+    );
   }
   return {
     ...actual,
@@ -185,6 +198,7 @@ beforeEach(() => {
   flowHarness.fitView.mockClear();
   flowHarness.zoomIn.mockClear();
   flowHarness.zoomOut.mockClear();
+  flowHarness.moveEndDelayMs = null;
   motionHarness.reduced = false;
 });
 
@@ -192,14 +206,250 @@ afterEach(() => {
   vi.clearAllTimers();
 });
 
-test("reduced motion makes canvas Fit and Zoom navigation immediate", async () => {
+test("single-click selects while double-click flies only the Node and its neighbors above a stable viewport", async () => {
+  const nodeA = designNode("page-a", 80);
+  const nodeB = designNode("page-b", 760);
+  const { api, applyIntents } = createApi(designCanvas([nodeA, nodeB]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(2));
+
+  act(() => {
+    flowHarness.props?.onNodeClick?.(new MouseEvent("click"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.selected).toBe(true));
+  expect(await screen.findByLabelText("Page A Agent panel")).toHaveAttribute("data-agent-size", "compact");
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({
+    role: "source",
+    scale: expect.any(Number),
+    durationMs: expect.any(Number),
+  }));
+  expect(screen.getByLabelText("Page A Agent panel")).toHaveAttribute("data-agent-size", "focus");
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.props?.nodes[1]?.data.focusMotion).toMatchObject({
+    role: "away",
+    shiftX: expect.any(Number),
+    arcX: expect.any(Number),
+    durationMs: expect.any(Number),
+  });
+  expect(flowHarness.props?.panOnScroll).toBe(false);
+  expect(flowHarness.props?.zoomOnPinch).toBe(false);
+  expect(flowHarness.props?.nodesDraggable).toBe(false);
+  expect(flowHarness.props?.nodes[0]?.className).toBe("design-canvas-flow-node--focused");
+  expect(flowHarness.props?.nodes[1]?.className).toBe("design-canvas-flow-node--inactive");
+  const focusedSurface = document.querySelector<HTMLElement>(".design-canvas-surface")!;
+  const modifiedWheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 80 });
+  const preventWheelDefault = vi.spyOn(modifiedWheel, "preventDefault");
+  fireEvent(focusedSurface, modifiedWheel);
+  expect(preventWheelDefault).toHaveBeenCalled();
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[1]);
+  });
+  expect(screen.queryByLabelText("Page B Agent panel")).not.toBeInTheDocument();
+  expect(focusedSurface).toHaveAttribute("data-node-focus", "opening");
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+  expect(applyIntents).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.props?.panOnScroll).toBe(true);
+  expect(applyIntents).not.toHaveBeenCalled();
+});
+
+test("repeated canvas clicks cannot restart or stutter the return flight", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({ role: "source" }));
+  const staleSelectedEcho = { ...flowHarness.props!.nodes[0]!, selected: true };
+
+  act(() => {
+    flowHarness.props?.onPaneClick?.();
+    flowHarness.props?.onPaneClick?.();
+    flowHarness.props?.onPaneClick?.();
+  });
+
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  act(() => {
+    flowHarness.props?.onSelectionChange?.({ nodes: [staleSelectedEcho] });
+  });
+  expect(flowHarness.props?.nodes[0]?.selected).toBe(false);
+  expect(screen.queryByLabelText("Page A Agent panel")).not.toBeInTheDocument();
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+});
+
+test("Enter opens a selected Node immediately as the keyboard alternative to double-click", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeClick?.(new MouseEvent("click"), flowHarness.props.nodes[0]);
+  });
+  fireEvent.keyDown(window, { key: "Enter" });
+
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({
+    role: "source",
+    durationMs: 0,
+  }));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focus-motion", "instant");
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+});
+
+test("focus never emits a camera move that a late React Flow callback could persist", async () => {
+  flowHarness.moveEndDelayMs = 430;
+  const { api, applyIntents } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({ role: "source" }));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(applyIntents).not.toHaveBeenCalled();
+  expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus");
+});
+
+test("Node Agent chrome can hide without moving the centered source or the canvas", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  const panel = await screen.findByLabelText("Page A Agent panel");
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({ role: "source" }));
+  const focusedMotion = flowHarness.props!.nodes[0]!.data.focusMotion!;
+  const panelClose = panel.querySelector<HTMLButtonElement>('button[aria-label="Close Page A Agent"]');
+  expect(panelClose).not.toBeNull();
+  fireEvent.click(panelClose!);
+
+  await waitFor(() => expect(screen.queryByLabelText("Page A Agent panel")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Show Node Agent" })).toBeInTheDocument();
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({
+    shiftX: focusedMotion.shiftX,
+    shiftY: focusedMotion.shiftY,
+    scale: focusedMotion.scale,
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Show Node Agent" }));
+  expect(await screen.findByLabelText("Page A Agent panel")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Hide Node Agent" })).toBeInTheDocument();
+  expect(panel).not.toBeInTheDocument();
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+});
+
+test("a closing flight ignores adjacent Node double-clicks until the canvas is restored", async () => {
+  const nodeA = designNode("page-a", 80);
+  const nodeB = designNode("page-b", 760);
+  const { api } = createApi(designCanvas([nodeA, nodeB]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(2));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument());
+
+  act(() => {
+    fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[1]);
+  });
+
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("Page B Agent panel")).not.toBeInTheDocument();
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
+});
+
+test("double-clicking the same Node reverses an interrupted closing flight in place", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "opening"));
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "closing"));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "opening"));
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: "Escape" });
+});
+
+test("Escape dismisses transient Agent controls before reversing an in-progress Node flight", async () => {
+  const user = userEvent.setup();
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({ role: "source" }));
+  await user.click(await screen.findByRole("button", { name: "Agent and model" }));
+  expect(await screen.findByLabelText("Choose Agent and model")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByLabelText("Choose Agent and model")).not.toBeInTheDocument();
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "opening");
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "closing");
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focus-motion", "animated");
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+});
+
+test("reduced motion makes Node focus, canvas Fit, and Zoom navigation immediate", async () => {
   motionHarness.reduced = true;
   const { api } = createApi(designCanvas([designNode("page-a", 80)]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
   await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
 
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({
+    role: "source",
+    durationMs: 0,
+  }));
+  expect(flowHarness.setViewport).not.toHaveBeenCalled();
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focus-motion", "instant");
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+
   fireEvent.click(screen.getByRole("button", { name: "Fit canvas" }));
-  expect(flowHarness.fitView).toHaveBeenCalledWith({ padding: 0.16, duration: 0 });
+  expect(flowHarness.fitView).toHaveBeenCalledWith({
+    padding: 0.16,
+    duration: 0,
+    ease: expect.any(Function),
+    interpolate: "smooth",
+  });
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   expect(flowHarness.zoomIn).toHaveBeenCalledWith({ duration: 0 });
   fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));

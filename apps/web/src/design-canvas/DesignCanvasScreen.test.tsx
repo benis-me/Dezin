@@ -207,7 +207,7 @@ test("generated Node previews have kind-aware fit dimensions without resizing ma
   expect(preferredGeneratedNodeGeometry(node({ kind: "image" }))).toMatchObject({ width: 480, height: 360 });
 });
 
-test("Node identity chrome counter-scales as one bounded row so long names cannot collide with status", async () => {
+test("Node previews stay title-bar-free at every canvas zoom", async () => {
   const zoomedCanvas = canvas([node({
     name: "7666005930341717169001.webp",
     geometry: { x: 80, y: 80, width: 360, height: 260 },
@@ -217,17 +217,9 @@ test("Node identity chrome counter-scales as one bounded row so long names canno
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   const flowNode = await screen.findByTestId("rf__node-page-1");
-  await waitFor(() => {
-    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__chrome")).toHaveStyle({
-      width: "calc(50% - 2px)",
-      height: "24px",
-      left: "2px",
-      transform: "scale(2)",
-      transformOrigin: "left bottom",
-    });
-    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__identity")).not.toHaveAttribute("style");
-    expect(flowNode.querySelector<HTMLElement>(".design-canvas-node__state-anchor")).not.toHaveAttribute("style");
-  });
+  expect(flowNode.querySelector(".design-canvas-node__chrome")).toBeNull();
+  expect(flowNode.querySelector(".design-canvas-node__identity")).toBeNull();
+  expect(flowNode.querySelector(".design-canvas-node__state-anchor")).toBeNull();
 });
 
 test("empty projects expose Quick Start and toolbar/right-click share one node catalog", async () => {
@@ -241,14 +233,15 @@ test("empty projects expose Quick Start and toolbar/right-click share one node c
   await waitFor(() => expect(applyIntents).toHaveBeenCalledWith(PROJECT_ID, expect.objectContaining({
     intents: [expect.objectContaining({ type: "add-node", node: expect.objectContaining({ kind: "page" }) })],
   })));
-  expect(await screen.findByLabelText("Page Agent panel", { selector: "section" })).toBeInTheDocument();
-  expect(document.querySelector(".react-flow__resize-control")).not.toBeNull();
+  await waitFor(() => expect(document.querySelector(".react-flow__resize-control")).not.toBeNull());
+  expect(await screen.findByLabelText("Page Agent panel", { selector: "section" })).toHaveAttribute("data-agent-size", "compact");
+  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Add Design node" }));
   expect(screen.getByRole("menu", { name: "Add Design node" })).toBeInTheDocument();
   await user.click(screen.getByRole("menuitem", { name: /Research/ }));
   await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(2));
-  expect(await screen.findByLabelText("Research Agent panel", { selector: "section" })).toBeInTheDocument();
+  expect(await screen.findByLabelText("Research Agent panel", { selector: "section" })).toHaveAttribute("data-agent-size", "compact");
 
   fireEvent.contextMenu(screen.getByLabelText("Infinite Design canvas"), { clientX: 320, clientY: 260 });
   expect(screen.getByRole("menu", { name: "Add Design node" })).toBeInTheDocument();
@@ -263,10 +256,11 @@ test("Canvas menus use dismissible animated primitives and toolbars keep the req
 
   const tools = await screen.findByRole("toolbar", { name: "Canvas tools" });
   expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
-    "Add Design node",
     "Select tool",
     "Hand tool",
+    "Add Design node",
   ]);
+  expect(within(tools).getByRole("button", { name: "Add Design node" })).toHaveTextContent("");
   const view = screen.getByRole("toolbar", { name: "Canvas view controls" });
   expect(within(view).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
     "Arrange nodes",
@@ -347,7 +341,7 @@ test("Agent panels preserve the native context menu without opening the canvas N
   const { api } = createCanvasApi(canvas([node()]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-page-1"));
+  fireEvent.doubleClick(await screen.findByTestId("rf__node-page-1"));
   const nodePanel = await screen.findByLabelText("Landing page Agent panel", { selector: "section" });
   const nodeEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   expect(nodePanel.dispatchEvent(nodeEvent)).toBe(true);
@@ -379,12 +373,14 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   fireEvent.click(await screen.findByTestId("rf__node-page-menu"));
-  expect(await screen.findByLabelText("Checkout Agent panel", { selector: "section" })).toBeInTheDocument();
+  expect(await screen.findByLabelText("Checkout Agent panel", { selector: "section" })).toHaveAttribute("data-agent-size", "compact");
+  expect(document.querySelector(".react-flow__resize-control")).not.toBeNull();
   expect(screen.queryByRole("button", { name: "Open Agent" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Delete Checkout" })).not.toBeInTheDocument();
 
   fireEvent.contextMenu(screen.getByTestId("rf__node-page-menu"), { clientX: 180, clientY: 180 });
   const pageMenu = await screen.findByRole("menu", { name: "Page Node actions" });
+  await waitFor(() => expect(screen.queryByLabelText("Checkout Agent panel", { selector: "section" })).not.toBeInTheDocument());
   expect(within(pageMenu).getByRole("menuitem", { name: "Create page with Agent" })).toBeInTheDocument();
   expect(within(pageMenu).queryByRole("menuitem", { name: /revision/ })).not.toBeInTheDocument();
   fireEvent.keyDown(document, { key: "Escape" });
@@ -404,6 +400,7 @@ test("dismissing a Node context menu never swaps its closing content to the Canv
   const flowNode = await screen.findByTestId("rf__node-page-context-stable");
   fireEvent.contextMenu(flowNode, { clientX: 180, clientY: 180 });
   expect(await screen.findByRole("menu", { name: "Page Node actions" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Stable menu Agent panel", { selector: "section" })).not.toBeInTheDocument();
 
   const pane = document.querySelector<HTMLElement>(".react-flow__pane");
   expect(pane).not.toBeNull();
@@ -447,7 +444,8 @@ test("add-node retries preserve one explicit id and open only that Node after a 
   if (firstIntent?.type !== "add-node" || replayedIntent?.type !== "add-node") throw new Error("Expected add-node intents");
   expect(firstIntent.node.id).toMatch(/^page-[0-9a-f-]{36}$/);
   expect(replayedIntent.node.id).toBe(firstIntent.node.id);
-  expect(await screen.findByLabelText("Page Agent panel", { selector: "section" })).toBeInTheDocument();
+  await waitFor(() => expect(document.querySelector(".react-flow__resize-control")).not.toBeNull());
+  expect(await screen.findByLabelText("Page Agent panel", { selector: "section" })).toHaveAttribute("data-agent-size", "compact");
   expect(screen.queryByLabelText("Foreign page Agent panel", { selector: "section" })).not.toBeInTheDocument();
 });
 
@@ -467,7 +465,7 @@ test("history stays keyboard-only and shortcuts remain locked while a scoped Nod
   expect(api.redo).not.toHaveBeenCalled();
 });
 
-test("ready generated nodes mount only an exact-version iframe with a strict sandbox and gesture shield", async () => {
+test("double-clicking a ready generated Node enters focus with an operable strict-sandbox iframe", async () => {
   const ready = node({ state: "failed", currentVersionId: "version-1", versionCount: 1, error: "Latest run failed" });
   const { api } = createCanvasApi(canvas([ready]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
@@ -476,10 +474,16 @@ test("ready generated nodes mount only an exact-version iframe with a strict san
   expect(frame).toHaveAttribute("sandbox", "allow-scripts");
   expect(frame).toHaveAttribute("tabindex", "-1");
   expect(screen.getByText("Latest run failed")).toBeInTheDocument();
-  const shield = screen.getByRole("button", { name: "Select Landing page; double click to interact with preview" });
+  const shield = screen.getByRole("button", { name: "Select Landing page; double click to focus and interact" });
+  expect(shield).not.toHaveClass("nodrag");
+  fireEvent.click(shield);
+  expect(frame).toHaveAttribute("tabindex", "-1");
+  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
+
   fireEvent.doubleClick(shield);
-  expect(frame).toHaveAttribute("tabindex", "0");
-  expect(screen.queryByRole("button", { name: "Select Landing page; double click to interact with preview" })).not.toBeInTheDocument();
+  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Select Landing page; double click to focus and interact" })).not.toBeInTheDocument();
 });
 
 test("material Nodes use the selected immutable Version for preview and expose the shared Version selector", async () => {
@@ -528,9 +532,9 @@ test("material Nodes use the selected immutable Version for preview and expose t
   }]);
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-image-1"));
+  fireEvent.doubleClick(await screen.findByTestId("rf__node-image-1"));
   expect(await screen.findByLabelText("Version")).toHaveValue("version-image-selected");
-  expect(screen.getByRole("option", { name: /v1 · direction-v1\.png/ })).toBeInTheDocument();
+  expect(await screen.findByRole("option", { name: /v1 · direction-v1\.png/ })).toBeInTheDocument();
   expect(await screen.findByRole("img", { name: "Direction reference" })).toHaveAttribute(
     "src",
     "https://preview.local/image-1/version-image-selected",
@@ -557,7 +561,7 @@ test("a material Node Agent adds one revision while composer attachments remain 
   const { api } = createCanvasApi(canvas([material]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-image-revision"));
+  fireEvent.doubleClick(await screen.findByTestId("rf__node-image-revision"));
   const panel = await screen.findByLabelText("Direction reference Agent panel", { selector: "section" });
   const revision = new File(["new"], "direction-v2.png", { type: "image/png" });
   fireEvent.change(within(panel).getByLabelText("Add revision to Direction reference"), {
@@ -577,7 +581,7 @@ test("a material Node Agent adds one revision while composer attachments remain 
   expect(api.appendMaterialVersion).toHaveBeenCalledTimes(1);
 });
 
-test("switching directly between nodes remounts Agent scope without leaking transcript, draft, or focus", async () => {
+test("focus ignores adjacent Node double-clicks and remounts scope only after an explicit close", async () => {
   const user = userEvent.setup();
   const nodeA = node({ id: "page-a", name: "Node A" });
   const nodeB = node({ id: "page-b", name: "Node B", geometry: { x: 620, y: 80, width: 480, height: 360 } });
@@ -596,16 +600,22 @@ test("switching directly between nodes remounts Agent scope without leaking tran
   }));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-page-a"));
+  fireEvent.doubleClick(await screen.findByTestId("rf__node-page-a"));
   expect(await screen.findByText("Node A private transcript")).toBeInTheDocument();
   const nodeADraft = await screen.findByRole("textbox", { name: "Node A Agent message" });
   await user.type(nodeADraft, "Only for A @node b");
   await user.click(await screen.findByRole("option", { name: /Node B/ }));
   expect(screen.getByRole("button", { name: "Remove Node B reference" })).toBeInTheDocument();
 
+  fireEvent.doubleClick(screen.getByTestId("rf__node-page-b"));
+  expect(screen.getByLabelText("Node A Agent panel", { selector: "section" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Node B Agent panel", { selector: "section" })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
   fireEvent.click(screen.getByTestId("rf__node-page-b"));
   expect(await screen.findByLabelText("Node B Agent panel", { selector: "section" })).toBeInTheDocument();
-  expect(screen.queryByText("Node A private transcript")).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText("Node A private transcript")).not.toBeInTheDocument());
   expect(screen.getByRole("textbox", { name: "Node B Agent message" })).toHaveValue("");
   expect(screen.queryByRole("button", { name: "Remove Node B reference" })).not.toBeInTheDocument();
 });
@@ -648,6 +658,137 @@ test("Agent transcripts ignore an older request that resolves after a newer refr
   await Promise.resolve();
   expect(screen.queryByText("Older transcript")).not.toBeInTheDocument();
   expect(screen.getByText("Newest transcript")).toBeInTheDocument();
+});
+
+test("Agent panel reveals its interactive shell before deferred transcript history", async () => {
+  const { api } = createCanvasApi(canvas());
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [{ id: "deferred-message", role: "assistant", content: "Deferred history", jobId: null, createdAt: 2 }],
+  });
+
+  const rendered = render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={[]}
+      agents={[CLAUDE_AGENT]}
+      deferTranscriptMs={120}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  expect(screen.getByRole("textbox", { name: "Main Agent message" })).toBeInTheDocument();
+  expect(rendered.container.querySelector(".design-canvas-agent__transcript-placeholder")).toBeInTheDocument();
+  expect(screen.queryByText("Deferred history")).not.toBeInTheDocument();
+  expect(await screen.findByText("Deferred history")).toBeInTheDocument();
+});
+
+test("Agent transcripts render a bounded recent window and page older history on demand", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas());
+  const messages = Array.from({ length: 20 }, (_, index) => ({
+    id: `message-${index + 1}`,
+    role: "assistant" as const,
+    content: `Message ${index + 1}`,
+    jobId: null,
+    createdAt: index + 1,
+  }));
+  const jobs = Array.from({ length: 14 }, (_, index): DesignJob => ({
+    ...job,
+    id: `job-history-${index + 1}`,
+    kind: "implementation-export",
+    exportId: `export-history-${index + 1}`,
+    createdAt: index + 1,
+    updatedAt: index + 1,
+    finishedAt: index + 1,
+  }));
+  vi.mocked(api.getThread).mockResolvedValue({ ...thread, messages });
+
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={jobs}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  expect(await screen.findByText("Message 20")).toBeInTheDocument();
+  expect(screen.queryByText("Message 8")).not.toBeInTheDocument();
+  expect(screen.getAllByLabelText("Implementation export · ready")).toHaveLength(6);
+  expect(screen.getByRole("button", { name: "Show earlier activity 16" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Show earlier activity 16" }));
+  expect(await screen.findByText("Message 1")).toBeInTheDocument();
+  expect(screen.getAllByLabelText("Implementation export · ready")).toHaveLength(12);
+  expect(screen.getByRole("button", { name: "Show earlier activity 2" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Show earlier activity 2" }));
+  expect(screen.queryByRole("button", { name: /Show earlier activity/ })).not.toBeInTheDocument();
+});
+
+test("Agent transcript interleaves cards by creation time and always appends a new user bubble at the tail", async () => {
+  const target = node({ id: "page-order", name: "Ordered page" });
+  const activityJob: DesignJob = {
+    ...job,
+    id: "job-middle",
+    kind: "node-generation",
+    nodeId: target.id,
+    createdAt: 20,
+    updatedAt: 21,
+    finishedAt: 21,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    scope: { type: "node", nodeId: target.id },
+    messages: [
+      { id: "message-user-old", role: "user", content: "Earlier request", jobId: null, createdAt: 5 },
+      { id: "message-assistant", role: "assistant", content: "Earlier response", jobId: null, createdAt: 10 },
+      { id: "message-user-new", role: "user", content: "Newest request", jobId: null, createdAt: 30 },
+    ],
+  });
+  const rendered = render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Ordered page Agent"
+      subtitle=""
+      nodes={[target]}
+      jobs={[activityJob]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  await screen.findByText("Newest request");
+  const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
+    ".design-canvas-agent__message, .design-canvas-agent__activity",
+  )];
+  expect(timeline.map((item) => item.dataset.role ?? item.dataset.jobId)).toEqual([
+    "user",
+    "assistant",
+    activityJob.id,
+    "user",
+  ]);
+  expect(timeline.at(-1)).toHaveTextContent("Newest request");
+  expect(screen.getByText("Earlier request")).toBeInTheDocument();
 });
 
 test("Canvas Agent accepts any available runtime provider", async () => {
@@ -815,7 +956,7 @@ test("Node and Main Agent composers both fail closed without a compatible runtim
   const { api } = createCanvasApi(canvas([node()]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
-  fireEvent.click(await screen.findByTestId("rf__node-page-1"));
+  fireEvent.doubleClick(await screen.findByTestId("rf__node-page-1"));
   const nodePanel = await screen.findByLabelText("Landing page Agent panel", { selector: "section" });
   await waitFor(() => expect(nodePanel).toHaveStyle({ visibility: "visible" }));
   fireEvent.change(within(nodePanel).getByLabelText("Landing page Agent message"), {
@@ -850,7 +991,9 @@ test("A new Agent Job renders one Thinking placeholder, not two", async () => {
     />,
   );
 
-  expect(await screen.findAllByText("Thinking")).toHaveLength(1);
+  const thinking = await screen.findByRole("status", { name: "Thinking" });
+  expect(within(thinking).getByText("Thinking…")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Main Agent · running")).not.toBeInTheDocument();
 });
 
 test("A completed conversational Main Agent turn renders as a message without an activity card", async () => {
@@ -930,12 +1073,12 @@ test("Node Agent activity stays chronological so a successful retry is the visib
     />,
   );
 
-  await screen.findByText("Older attempt failed");
+  expect(await screen.findAllByText("Older attempt failed")).toHaveLength(2);
   expect([...rendered.container.querySelectorAll<HTMLElement>("[data-job-id]")]
     .map((element) => element.dataset.jobId)).toEqual([failed.id, ready.id]);
 });
 
-test("Main Agent groups every live child by its parent turn and labels the target Node", async () => {
+test("Main Agent groups delegated work without wrapping ordinary turns in cards", async () => {
   const childNodes = ["Checkout", "Header", "Pricing", "FAQ", "Footer", "Account", "Search"].map((name, index) => (
     node({ id: `node-${index + 1}`, name })
   ));
@@ -975,9 +1118,10 @@ test("Main Agent groups every live child by its parent turn and labels the targe
     />,
   );
 
-  const firstTurn = await screen.findByLabelText("Turn · Build six launch surfaces");
+  const firstTurn = await screen.findByLabelText("Build six launch surfaces");
   expect(firstTurn).toHaveAttribute("data-parent-job-id", parentA.id);
   expect(within(firstTurn).getByText("6 child Agents")).toBeInTheDocument();
+  expect(within(firstTurn).queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
   for (const target of childNodes.slice(0, 6)) {
     const activity = within(firstTurn).getByLabelText(`Node generation · ${target.name} · queued`);
     expect(activity).toHaveAttribute("data-node-id", target.id);
@@ -985,7 +1129,7 @@ test("Main Agent groups every live child by its parent turn and labels the targe
   }
   expect(rendered.container.querySelectorAll('[data-job-id^="job-child-"]')).toHaveLength(7);
 
-  const secondTurn = screen.getByLabelText("Turn · Add global search");
+  const secondTurn = screen.getByLabelText("Add global search");
   expect(within(secondTurn).getByText("1 child Agent")).toBeInTheDocument();
   expect(within(secondTurn).getByLabelText("Node generation · Search · queued")).toBeInTheDocument();
 });
@@ -1048,6 +1192,7 @@ test("late Settings defaults replace an untouched Agent fallback before Export",
 test("Export opens Main Agent and keeps the implementation job visible through completion", async () => {
   const user = userEvent.setup();
   const revealExport = vi.fn(async () => "revealed" as const);
+  const persistAgentDefaults = vi.fn(async () => {});
   const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
   const exportJob: DesignJob = {
     ...job,
@@ -1073,6 +1218,7 @@ test("Export opens Main Agent and keeps the implementation job visible through c
       agents={[CLAUDE_AGENT]}
       initialAgentCommand="claude"
       initialModel="sonnet"
+      onAgentDefaultsChange={persistAgentDefaults}
       onRevealExport={revealExport}
     />,
   );
@@ -1080,6 +1226,7 @@ test("Export opens Main Agent and keeps the implementation job visible through c
   await user.click(await screen.findByRole("button", { name: "Main Agent" }));
   await user.click(screen.getByRole("button", { name: "Agent and model" }));
   await user.click(await screen.findByRole("button", { name: "opus" }));
+  await waitFor(() => expect(persistAgentDefaults).toHaveBeenCalledWith({ agentCommand: "claude", model: "opus" }));
   await user.keyboard("{Escape}");
   await user.click(screen.getByRole("button", { name: "Export code" }));
   expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
@@ -1166,7 +1313,7 @@ test("Export stays disabled while any generated Node still has projected or list
 test("file drops become material context nodes and undo/redo shortcuts call authoritative history", async () => {
   const { api } = createCanvasApi(canvas([node()], 1, 1, 1));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
-  await screen.findByText("Landing page");
+  await screen.findByTestId("rf__node-page-1");
   const surface = screen.getByLabelText("Infinite Design canvas");
   fireEvent.drop(surface, { clientX: 200, clientY: 180, dataTransfer: { files: [new File(["image"], "reference.png", { type: "image/png" })], types: ["Files"] } });
   await waitFor(() => expect(api.importLocalFiles).toHaveBeenCalledTimes(1));
