@@ -6,6 +6,7 @@ export interface DesignNodeCatalogItem {
   description: string;
   category: "generate" | "context";
   defaultGeometry: Pick<DesignNodeGeometry, "width" | "height">;
+  lockAspectRatio?: boolean;
   accepts?: string;
 }
 export const DESIGN_NODE_CATALOG: readonly DesignNodeCatalogItem[] = [
@@ -17,8 +18,8 @@ export const DESIGN_NODE_CATALOG: readonly DesignNodeCatalogItem[] = [
   { kind: "design-document", label: "Design.md", description: "Durable design direction", category: "generate", defaultGeometry: { width: 420, height: 340 } },
   { kind: "layout", label: "Layout", description: "Structure and responsive rules", category: "generate", defaultGeometry: { width: 420, height: 320 } },
   { kind: "knowledge", label: "Knowledge", description: "Project knowledge base", category: "generate", defaultGeometry: { width: 420, height: 340 } },
-  { kind: "image", label: "Image", description: "Reference image or artwork", category: "context", defaultGeometry: { width: 320, height: 300 }, accepts: "image/*" },
-  { kind: "video", label: "Video", description: "Motion reference or footage", category: "context", defaultGeometry: { width: 400, height: 300 }, accepts: "video/*" },
+  { kind: "image", label: "Image", description: "Reference image or artwork", category: "context", defaultGeometry: { width: 320, height: 300 }, lockAspectRatio: true, accepts: "image/*" },
+  { kind: "video", label: "Video", description: "Motion reference or footage", category: "context", defaultGeometry: { width: 400, height: 300 }, lockAspectRatio: true, accepts: "video/*" },
   { kind: "document", label: "Document", description: "PDF, text, or rich document", category: "context", defaultGeometry: { width: 360, height: 260 }, accepts: ".pdf,.md,.txt,.doc,.docx,text/*,application/pdf" },
   { kind: "file", label: "File", description: "Any project context file", category: "context", defaultGeometry: { width: 340, height: 220 }, accepts: "*/*" },
 ] as const;

@@ -796,6 +796,10 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(materialPreview.headers.get("content-type"), "image/png");
     assert.equal(materialPreview.headers.get("x-content-type-options"), "nosniff");
     assert.deepEqual(Buffer.from(await materialPreview.arrayBuffer()), imageBytes);
+    const materialEmbeddedPreview = await fetch(
+      `${base}${root}/nodes/node-image/versions/${imageNode.currentVersionId}/preview/embed`,
+    );
+    assert.equal(materialEmbeddedPreview.status, 415, await materialEmbeddedPreview.clone().text());
 
     const revisedImageBytes = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -852,11 +856,81 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     });
     const preview = await fetch(`${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/`);
     assert.equal(preview.status, 200);
+    assert.equal(preview.headers.get("etag"), `"sha256-${published.manifest.checksum}"`);
     const csp = preview.headers.get("content-security-policy") ?? "";
-    for (const directive of ["default-src 'none'", "connect-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'", "navigate-to 'none'", "sandbox allow-scripts"]) {
+    for (const directive of ["default-src 'none'", "connect-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'", "sandbox allow-scripts"]) {
       assert.match(csp, new RegExp(directive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
+    assert.doesNotMatch(csp, /navigate-to/);
+    assert.doesNotMatch(csp, /allow-top-navigation/);
     const previewHtml = await preview.text();
+    assert.equal(
+      createHash("sha256").update(Buffer.from(previewHtml, "utf8")).digest("hex"),
+      published.manifest.checksum,
+    );
+    assert.doesNotMatch(previewHtml, /data-dezin-embedded-preview-bridge/);
+
+    const embeddedPreviewUrl = `${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/embed`;
+    const embeddedPreview = await fetch(embeddedPreviewUrl);
+    assert.equal(embeddedPreview.status, 200, await embeddedPreview.clone().text());
+    const embeddedBytes = Buffer.from(await embeddedPreview.arrayBuffer());
+    const embeddedHtml = embeddedBytes.toString("utf8");
+    const embeddedChecksum = createHash("sha256").update(embeddedBytes).digest("hex");
+    const embeddedEtag = `"sha256-${embeddedChecksum}"`;
+    assert.equal(embeddedPreview.headers.get("etag"), embeddedEtag);
+    assert.notEqual(embeddedEtag, `"sha256-${published.manifest.checksum}"`);
+    assert.equal(embeddedPreview.headers.get("content-length"), String(embeddedBytes.length));
+    assert.equal(embeddedPreview.headers.get("cache-control"), "private, no-cache");
+    const embeddedCsp = embeddedPreview.headers.get("content-security-policy") ?? "";
+    assert.match(embeddedCsp, /worker-src 'none'/);
+    assert.doesNotMatch(embeddedCsp, /navigate-to/);
+    assert.doesNotMatch(embeddedCsp, /allow-top-navigation/);
+    assert.notEqual(embeddedCsp, csp);
+    assert.match(embeddedHtml, /data-dezin-embedded-preview-bridge/);
+    assert.match(embeddedHtml, /addEventListener\("contextmenu"/);
+    assert.match(embeddedHtml, /event\.isTrusted/);
+    assert.match(embeddedHtml, /const apply=Reflect\.apply/);
+    assert.match(embeddedHtml, /Event\.prototype\.preventDefault/);
+    assert.match(embeddedHtml, /Event\.prototype\.stopImmediatePropagation/);
+    assert.match(embeddedHtml, /MessagePort\.prototype\.postMessage/);
+    assert.match(embeddedHtml, /MessagePort\.prototype\.start/);
+    assert.match(embeddedHtml, /apply\(prevent,event,\[\]\)/);
+    assert.match(embeddedHtml, /apply\(stop,event,\[\]\)/);
+    assert.match(embeddedHtml, /apply\(portPost,channel\.port1/);
+    assert.doesNotMatch(embeddedHtml, /parent\.postMessage\(/);
+    assert.match(embeddedHtml, /type:"embedded-preview-context-menu-ready"/);
+    assert.match(embeddedHtml, /type:"embedded-preview-context-menu"/);
+    assert.match(embeddedHtml, /clientX:event\.clientX,clientY:event\.clientY/);
+    const bridgeBody = /<script data-dezin-embedded-preview-bridge>([\s\S]*?)<\/script>/.exec(embeddedHtml)?.[1];
+    assert.ok(bridgeBody);
+    assert.doesNotThrow(() => new Function(bridgeBody));
+    assert.ok(
+      embeddedHtml.indexOf("data-dezin-embedded-preview-bridge") < embeddedHtml.indexOf("<html>"),
+      "the capture bridge must run before generated document scripts and handlers",
+    );
+    assert.ok(
+      embeddedHtml.indexOf('addEventListener("contextmenu"') < embeddedHtml.indexOf("apply(parentPost,parent"),
+      "the trusted context-menu listener must exist before the child transfers its private port",
+    );
+
+    const embeddedHead = await fetch(embeddedPreviewUrl, { method: "HEAD" });
+    assert.equal(embeddedHead.status, 200);
+    assert.equal(embeddedHead.headers.get("etag"), embeddedEtag);
+    assert.equal(embeddedHead.headers.get("content-length"), String(embeddedBytes.length));
+    assert.equal((await embeddedHead.arrayBuffer()).byteLength, 0);
+    const embeddedNotModified = await fetch(embeddedPreviewUrl, {
+      headers: { "if-none-match": embeddedEtag },
+    });
+    assert.equal(embeddedNotModified.status, 304);
+    assert.equal(embeddedNotModified.headers.get("etag"), embeddedEtag);
+    assert.equal(embeddedNotModified.headers.get("content-length"), null);
+
+    const exactPreviewAgain = await fetch(
+      `${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/`,
+    );
+    assert.equal(exactPreviewAgain.headers.get("etag"), `"sha256-${published.manifest.checksum}"`);
+    assert.equal(await exactPreviewAgain.text(), previewHtml);
+
     const pinnedPath = previewHtml.match(/\/api\/projects\/[^"']+checksum=[a-f0-9]{64}/)?.[0];
     assert.ok(pinnedPath);
     const pinned = await fetch(`${base}${pinnedPath}`);

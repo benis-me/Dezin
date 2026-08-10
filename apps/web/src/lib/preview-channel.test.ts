@@ -2,8 +2,11 @@ import { expect, test, vi } from "vitest";
 import {
   cacheBustedPreviewUrl,
   createPreviewChannelController,
+  embeddedPreviewDocumentSrc,
+  isEmbeddedPreviewContextMenuPortMessage,
   previewBridgeAddressForSrc,
   previewBridgeNonceForSrc,
+  type PreviewChannelMessage,
   withPreviewBridgeNonce,
 } from "./preview-channel.ts";
 
@@ -38,15 +41,64 @@ test("nonce and cache-bust helpers preserve URL fragments exactly", () => {
   expect(previewBridgeNonceForSrc("http://preview.local/#dezin-bridge=short")).toBeNull();
 });
 
+test("embedded preview URLs are derived only from exact Design Version preview URLs", () => {
+  expect(embeddedPreviewDocumentSrc(
+    "/api/projects/project-one/design-canvas/nodes/node-one/versions/version-one/preview/",
+    "http://app.local",
+  )).toBe(
+    "/api/projects/project-one/design-canvas/nodes/node-one/versions/version-one/preview/embed",
+  );
+  expect(embeddedPreviewDocumentSrc(
+    `http://preview.local/api/projects/project%20%2F1/design-canvas/nodes/node%20%2F1/versions/version%20%2F9/preview/?t=42#dezin-bridge=${NONCE}`,
+    "http://app.local",
+  )).toBe(
+    "http://preview.local/api/projects/project%20%2F1/design-canvas/nodes/node%20%2F1/versions/version%20%2F9/preview/embed?t=42",
+  );
+  expect(() => embeddedPreviewDocumentSrc("https://preview.local/not-a-version/preview"))
+    .toThrow(/exact design version preview url/i);
+  expect(() => embeddedPreviewDocumentSrc(
+    "https://user:secret@preview.local/api/projects/p/design-canvas/nodes/n/versions/v/preview/",
+  )).toThrow(/exact design version preview url/i);
+  expect(() => embeddedPreviewDocumentSrc(
+    "/api/projects/p/design-canvas/nodes/n/versions/v/preview/embed",
+  )).toThrow(/exact design version preview url/i);
+});
+
+test("embedded preview context-menu guards require the private port capability", () => {
+  const message: PreviewChannelMessage = {
+    source: "dezin",
+    type: "embedded-preview-context-menu",
+    protocol: 1,
+    nonce: NONCE,
+    clientX: 24.5,
+    clientY: 48,
+  };
+  expect(isEmbeddedPreviewContextMenuPortMessage(message, NONCE)).toBe(true);
+  expect(isEmbeddedPreviewContextMenuPortMessage({
+    source: "dezin",
+    type: "embedded-preview-context-menu",
+    protocol: 1,
+    nonce: "",
+    clientX: 24.5,
+    clientY: 48,
+  }, NONCE)).toBe(false);
+  expect(isEmbeddedPreviewContextMenuPortMessage({
+    ...message,
+    clientX: Number.NaN,
+  }, NONCE)).toBe(false);
+  expect(isEmbeddedPreviewContextMenuPortMessage(message, "_".repeat(43))).toBe(false);
+});
+
 test("cross-origin preview authorization stays on the parent-created MessageChannel", async () => {
   const frame = document.createElement("iframe");
   document.body.append(frame);
   const frameWindow = frame.contentWindow!;
   const postMessage = vi.spyOn(frameWindow, "postMessage");
   const ready: boolean[] = [];
-  const received: Array<Record<string, unknown>> = [];
+  const received: PreviewChannelMessage[] = [];
+  const iframeRef: { current: HTMLIFrameElement | null } = { current: frame };
   const controller = createPreviewChannelController({
-    iframeRef: { current: frame },
+    iframeRef,
     previewSrc: "http://preview.local/exact-page",
     bridgeNonce: NONCE,
     onMessage: (message) => received.push(message),
@@ -83,21 +135,46 @@ test("cross-origin preview authorization stays on the parent-created MessageChan
   window.dispatchEvent(new MessageEvent("message", {
     data: {
       source: "dezin",
-      type: "prototype-binding-activated",
+      type: "embedded-preview-context-menu",
       nonce: NONCE,
       protocol: 1,
-      bindingId: "binding-0",
-      locator: { designNodeId: "cta" },
-      trigger: "click",
+      clientX: 24,
+      clientY: 48,
     },
     origin: "http://preview.local",
     source: frameWindow,
   }));
   expect(received).toEqual([]);
 
+  childPort!.postMessage({
+    source: "dezin",
+    type: "embedded-preview-context-menu",
+    nonce: NONCE,
+    protocol: 1,
+    clientX: 24,
+    clientY: 48,
+  });
+  await vi.waitFor(() => expect(received).toHaveLength(1));
+  expect(isEmbeddedPreviewContextMenuPortMessage(received[0]!, NONCE)).toBe(true);
+
+  const replacementFrame = document.createElement("iframe");
+  document.body.append(replacementFrame);
+  iframeRef.current = replacementFrame;
+  childPort!.postMessage({
+    source: "dezin",
+    type: "embedded-preview-context-menu",
+    nonce: NONCE,
+    protocol: 1,
+    clientX: 72,
+    clientY: 96,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(received).toHaveLength(1);
+
   controller!.dispose();
   childPort!.close();
   postMessage.mockRestore();
+  replacementFrame.remove();
   frame.remove();
 });
 

@@ -19,18 +19,29 @@ test("Design Canvas owns the full shell flex slot", () => {
 
 test("Design Canvas keeps native titlebar and floating feedback geometry stable", () => {
   expect(css).toMatch(/\.design-canvas-topbar\s*\{[^}]*z-index:\s*50;[^}]*height:\s*36px\s*!important;[^}]*min-height:\s*36px\s*!important;/s);
-  expect(css).toMatch(/\.design-canvas-focus-back\s*\{[^}]*z-index:\s*52;[^}]*top:\s*48px;/s);
+  expect(css).toMatch(/\.design-canvas-focus-back\s*\{[^}]*z-index:\s*52;[^}]*top:\s*12px;[^}]*left:\s*12px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*position:\s*relative;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-notice\s*\{[^}]*position:\s*absolute;/s);
 });
 
 test("selected and keyboard-focused Nodes use a gap outline with discoverable corner brackets", () => {
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*14px;/s);
-  expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:/s);
+  expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-width:\s*1\.5px;[^}]*border-color:\s*white;[^}]*box-shadow:/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 22px 48px/s);
+  expect(css).toMatch(/\[data-node-focus\][^{]*\[data-node-focus-role="source"\]::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{[^}]*\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.24;/s);
   expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
+});
+
+test("marquee selection is solid and leaves a short animated solid ghost", () => {
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__selection\s*\{[^}]*border:\s*1px solid/s);
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__nodesselection-rect\s*\{[^}]*border:\s*1px solid/s);
+  expect(css).not.toMatch(/\.react-flow__(?:nodes)?selection[^}]*dashed/s);
+  expect(css).toMatch(/\.design-canvas-selection-ghost\s*\{[^}]*border:\s*1px solid[^}]*animation:\s*design-canvas-selection-out 180ms/s);
+  expect(css).toContain("@keyframes design-canvas-selection-out");
 });
 
 test("Node previews have no permanent title chrome or zoom-in cursor", () => {
@@ -44,8 +55,11 @@ test("focused Nodes fly above an opaque same-color mask while background Nodes r
   expect(css).toMatch(/\.design-canvas-node\s*\{[^}]*transition:\s*transform[^;]+,[^}]*opacity/s);
   expect(css).toMatch(/\[data-node-focus-role="away"\]\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(var\(--design-node-focus-x\),\s*var\(--design-node-focus-y\),\s*0\)/s);
   expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\]::after\s*\{[^}]*background:\s*inherit;[^}]*opacity:\s*1;/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] > \.react-flow\s*\{[^}]*z-index:\s*46\s*!important;/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] > \.react-flow\s*\{[^}]*z-index:\s*48\s*!important;/s);
   expect(css).toMatch(/\.react-flow__node\.design-canvas-flow-node--focused\s*\{[^}]*z-index:\s*48\s*!important;/s);
+  expect(css).toMatch(/\.design-canvas-surface::after\s*\{[^}]*opacity var\(--design-focus-duration\)[^}]*transform var\(--design-focus-duration\)/s);
+  expect(css).toMatch(/data-node-focus="opening"[^}]*opacity:\s*1;/s);
+  expect(css).toMatch(/data-node-focus="closing"[^}]*opacity:\s*0;/s);
   expect(css).not.toMatch(/\.design-canvas-surface\[data-node-focus\]\s*\{[^}]*background:/s);
   expect(css).toContain('.design-canvas-surface[data-node-focus] .react-flow__background');
   expect(css).toContain('.design-canvas-surface[data-focus-motion="instant"] .design-canvas-node');
@@ -53,21 +67,24 @@ test("focused Nodes fly above an opaque same-color mask while background Nodes r
 });
 
 test("focused Agent fills available height below model-picker overlays", () => {
-  expect(css).toMatch(/\.design-canvas-agent--floating\s*\{[^}]*z-index:\s*49;/s);
+  expect(css).toMatch(/\.design-canvas-agent--floating\s*\{[^}]*z-index:\s*49;[^}]*width:\s*var\(--design-node-agent-width, 352px\);/s);
   expect(css).toMatch(/\.design-canvas-agent--floating\[data-agent-size="focus"\]\s*\{[^}]*height:\s*calc\(100% - 24px\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-agent="open"\] \.design-canvas-focus-actions\s*\{[^}]*left:\s*calc\(50% - \(var\(--design-node-agent-width, 352px\) \+ 24px\) \/ 2\);/s);
 });
 
 test("Agent header is compact and its solid surface does not use backdrop glass", () => {
-  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*46px;[^}]*min-height:\s*46px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*48px;[^}]*min-height:\s*48px;[^}]*padding:\s*0 10px 0 14px;/s);
   expect(css).toMatch(/\.design-canvas-agent__surface\s*\{[^}]*background:\s*var\(--card\);/s);
   expect(css).not.toMatch(/\.design-canvas-agent__surface\s*\{[^}]*backdrop-filter/s);
   expect(css).not.toContain(".design-canvas-agent__mark");
 });
 
 test("Agent composer grows within explicit bounds without a separator above it", () => {
-  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 12px 12px;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 14px 14px;[^}]*background:\s*transparent;/s);
   expect(css).not.toMatch(/\.design-canvas-agent__composer\s*\{[^}]*border-top:/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-shell:focus-within\s*\{[^}]*box-shadow:\s*none;/s);
 });
 
 test("expanded Agent detail never grows a left emphasis rail", () => {
@@ -91,11 +108,23 @@ test("light-mode bottom controls and context menus follow the Spatial surface la
   expect(css).toMatch(/\.design-canvas-tools\s*\{\s*right:\s*12px;\s*bottom:\s*12px;/s);
   expect(css).toMatch(/\.design-canvas-zoom\s*\{\s*bottom:\s*12px;\s*left:\s*12px;/s);
   expect(css).toMatch(/#design-canvas-add\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;[^}]*padding:\s*0;/s);
-  expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\]\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/s);
+  expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\]\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-main-agent\] \.design-canvas-tools\s*\{[^}]*right:\s*calc\(clamp\(380px, 32vw, 492px\) \+ 20px\);/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*\.design-canvas-node\s*\{\s*opacity:\s*0\.45;/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*320ms,\s*360ms;/s);
   expect(css).toMatch(/\.design-node-context-menu\s*\{[^}]*width:\s*284px;[^}]*border-radius:\s*16px;/s);
-  expect(css).toMatch(/\.design-canvas-node:hover\s*\{[^}]*scale\(1\.003\)/s);
+  expect(css).not.toMatch(/\.design-canvas-node:hover(?:\s+\.design-canvas-node__frame)?\s*\{[^}]*\btransform:\s*[^;}]*scale/s);
+});
+
+test("focused preview controls are larger and animate with the focus chrome", () => {
+  expect(css).toMatch(/\.design-canvas-focus-actions\s*\{[^}]*bottom:\s*16px;[^}]*border-radius:\s*17px;[^}]*padding:\s*5px;/s);
+  expect(css).toMatch(/\.design-canvas-focus-actions \[data-slot="button"\]\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px;/s);
+  expect(css).toMatch(/\.design-canvas-focus-dismiss\s*\{[^}]*z-index:\s*47;[^}]*inset:\s*0;/s);
+});
+
+test("Canvas uses the requested neutral background in both color schemes", () => {
+  expect(css).toMatch(/\.design-canvas-surface\s*\{[^}]*background:\s*#e8eaeb;/s);
+  expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*#e8eaeb;/s);
 });
 
 test("Node catalog animation follows the Radix open and closed lifecycle", () => {

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 
+import { focusVisualStateFromTransform } from "./DesignCanvasNode.tsx";
 import {
   focusedNodeTransform,
   NODE_FOCUS_DETAIL_DELAY_MS,
@@ -22,7 +23,14 @@ const nodes = [
   { id: "left", geometry: geometry(-760, -120) },
 ];
 
-test("Node focus motion radiates away from the opened Node along bounded curved paths", () => {
+test("focus interruption reads Chromium matrix3d transforms without snapping", () => {
+  expect(focusVisualStateFromTransform(
+    "matrix3d(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1, 0, 42, 64, 0, 1)",
+    0.75,
+  )).toEqual({ x: 42, y: 64, scaleX: 2, scaleY: 3, opacity: 0.75 });
+});
+
+test("Node focus motion sends surrounding Nodes away on straight paths with stronger displacement nearby", () => {
   const sourceTransform = focusedNodeTransform(nodes[0]!.geometry, { width: 1_280, height: 720 }, { x: 80, y: 40, zoom: 0.8 });
   const motion = nodeFocusMotions(nodes, "focus", "opening", sourceTransform);
   const source = motion.get("focus");
@@ -34,7 +42,8 @@ test("Node focus motion radiates away from the opened Node along bounded curved 
   expect(near?.role).toBe("away");
   expect(near?.shiftX).toBeGreaterThan(0);
   expect(left?.shiftX).toBeLessThan(0);
-  expect(Math.hypot(near?.arcX ?? 0, near?.arcY ?? 0)).toBeGreaterThan(0);
+  expect(near).toMatchObject({ startX: 0, startY: 0, arcX: 0, arcY: 0, startScaleX: 1, startScaleY: 1 });
+  expect(far).toMatchObject({ arcX: 0, arcY: 0, scaleX: 1, scaleY: 1, layoutWidth: null, layoutHeight: null });
   expect(Math.hypot(near?.shiftX ?? 0, near?.shiftY ?? 0)).toBeGreaterThan(
     Math.hypot(far?.shiftX ?? 0, far?.shiftY ?? 0),
   );
@@ -55,40 +64,49 @@ test("closing preserves each flight path so an in-progress opening can reverse w
     expect(after.arcX).toBe(before.arcX);
     expect(after.arcY).toBe(before.arcY);
     expect(after.role).toBe(node.id === "focus" ? "source" : "restoring");
-    if (node.id !== "focus") expect(after.durationMs).toBeLessThan(before.durationMs);
+    expect(after.durationMs).toBe(before.durationMs);
   }
 });
 
-test("focused Node flies to the exact viewport center at a bounded adaptive preview scale without moving the canvas", () => {
+test("focused Node flies to its responsive content slot while preserving a net 1:1 preview scale", () => {
   const node = geometry(1_000, 500, 800, 600);
   const viewport = { x: -180, y: 75, zoom: 0.5 };
-  const transform = focusedNodeTransform(node, { width: 1_600, height: 900 }, viewport);
-  const finalCenterX = (node.x + node.width / 2 + transform.shiftX) * viewport.zoom + viewport.x;
-  const finalCenterY = (node.y + node.height / 2 + transform.shiftY) * viewport.zoom + viewport.y;
+  const transform = focusedNodeTransform(node, { width: 1_600, height: 900 }, viewport, {
+    reservedRight: 0,
+    topInset: 48,
+    bottomInset: 48,
+  });
+  const finalCenterX = (node.x + transform.layoutWidth / 2 + transform.shiftX) * viewport.zoom + viewport.x;
+  const finalCenterY = (node.y + transform.layoutHeight / 2 + transform.shiftY) * viewport.zoom + viewport.y;
 
   expect(finalCenterX).toBeCloseTo(800, 4);
   expect(finalCenterY).toBeCloseTo(450, 4);
-  expect(node.width * viewport.zoom * transform.scale).toBeCloseTo(node.width * 1.28, 4);
-  expect(node.height * viewport.zoom * transform.scale).toBeCloseTo(node.height * 1.28, 4);
+  expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+  expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
+  expect(transform.scale).toBe(transform.scaleX);
+  expect(transform).toMatchObject({ layoutWidth: 1_544, layoutHeight: 804 });
+  expect(transform.startScaleX).toBeCloseTo(800 / 1_544, 4);
+  expect(transform.startScaleY).toBeCloseTo(600 / 804, 4);
 });
 
-test("focused scale adapts continuously to window height while preserving center", () => {
+test("focused layout adapts continuously to window height without scaling its content", () => {
   const node = geometry(240, 160, 800, 600);
   const viewport = { x: 20, y: -30, zoom: 0.6 };
   const short = focusedNodeTransform(node, { width: 1_200, height: 620 }, viewport);
   const tall = focusedNodeTransform(node, { width: 1_200, height: 920 }, viewport);
-  const shortScreenScale = viewport.zoom * short.scale;
-  const tallScreenScale = viewport.zoom * tall.scale;
-
-  expect(shortScreenScale).toBeCloseTo((620 - 112) / 600, 4);
-  expect(tallScreenScale).toBeGreaterThan(shortScreenScale);
-  expect(tallScreenScale).toBeLessThanOrEqual(1.28);
+  expect(short.layoutHeight).toBe(530);
+  expect(tall.layoutHeight).toBe(830);
+  expect(tall.layoutHeight).toBeGreaterThan(short.layoutHeight);
+  expect(short.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+  expect(short.scaleY * viewport.zoom).toBeCloseTo(1, 4);
+  expect(tall.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+  expect(tall.scaleY * viewport.zoom).toBeCloseTo(1, 4);
 });
 
 test("longer flights receive more time so near and far openings keep a consistent perceived rate", () => {
   const viewport = { x: 0, y: 0, zoom: 1 };
-  const near = focusedNodeTransform(geometry(390, 210), { width: 1_200, height: 720 }, viewport);
-  const far = focusedNodeTransform(geometry(-900, -600), { width: 1_200, height: 720 }, viewport);
+  const near = focusedNodeTransform(geometry(28, 18, 768, 630), { width: 1_200, height: 720 }, viewport);
+  const far = focusedNodeTransform(geometry(-900, -600, 768, 630), { width: 1_200, height: 720 }, viewport);
 
   expect(near.durationMs).toBeGreaterThanOrEqual(NODE_FOCUS_FLIGHT_DURATION_MS);
   expect(far.durationMs).toBeGreaterThan(near.durationMs);
@@ -100,7 +118,22 @@ test("sampled focus frames follow a real curve with continuous progress rather t
     [{ id: "focus", geometry: geometry(0, 0) }],
     "focus",
     "opening",
-    { shiftX: 420, shiftY: 120, arcX: -18, arcY: -28, scale: 1.4, durationMs: 500 },
+    {
+      startX: -20,
+      startY: 12,
+      shiftX: 420,
+      shiftY: 120,
+      arcX: -18,
+      arcY: -28,
+      startScaleX: 0.5,
+      startScaleY: 0.75,
+      scaleX: 1.4,
+      scaleY: 1.4,
+      scale: 1.4,
+      layoutWidth: 900,
+      layoutHeight: 700,
+      durationMs: 500,
+    },
   ).get("focus")!;
   const frames = nodeFocusAnimationFrames(motion);
   const translations = frames.map((frame) => {
@@ -119,9 +152,9 @@ test("sampled focus frames follow a real curve with continuous progress rather t
 });
 
 test("focus easing starts promptly, settles smoothly, and delays detail behind the flight", () => {
-  expect(NODE_FOCUS_FLIGHT_DURATION_MS).toBe(420);
-  expect(NODE_FOCUS_MAX_FLIGHT_DURATION_MS).toBe(540);
-  expect(NODE_FOCUS_DETAIL_DELAY_MS).toBe(130);
+  expect(NODE_FOCUS_FLIGHT_DURATION_MS).toBe(380);
+  expect(NODE_FOCUS_MAX_FLIGHT_DURATION_MS).toBe(460);
+  expect(NODE_FOCUS_DETAIL_DELAY_MS).toBe(110);
   expect(NODE_FOCUS_DETAIL_DELAY_MS).toBeLessThan(NODE_FOCUS_FLIGHT_DURATION_MS);
   expect(nodeFocusEase(0)).toBe(0);
   expect(nodeFocusEase(0.25)).toBeGreaterThan(0.25);

@@ -1,8 +1,13 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 export const PREVIEW_BRIDGE_PROTOCOL = 1 as const;
+export const EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE = "embedded-preview-context-menu" as const;
+export const EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE = "embedded-preview-context-menu-ready" as const;
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const MAX_PENDING_MESSAGES = 32;
+const EXACT_DESIGN_VERSION_PREVIEW_PATH = new RegExp(
+  "^/api/projects/[^/]+/design-canvas/nodes/[^/]+/versions/[^/]+/preview/?$",
+);
 
 export type PreviewBridgeAddress =
   | { kind: "invalid" }
@@ -15,6 +20,22 @@ export type PreviewChannelMessage = {
   nonce: string;
   protocol: typeof PREVIEW_BRIDGE_PROTOCOL;
 } & Record<string, unknown>;
+
+export type EmbeddedPreviewContextMenuPortMessage = {
+  source: "dezin";
+  type: typeof EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE;
+  nonce: string;
+  protocol: typeof PREVIEW_BRIDGE_PROTOCOL;
+  clientX: number;
+  clientY: number;
+};
+
+type EmbeddedPreviewContextMenuReadyMessage = {
+  source: "dezin";
+  type: typeof EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE;
+  nonce: string;
+  protocol: typeof PREVIEW_BRIDGE_PROTOCOL;
+};
 
 function parsePreviewUrl(src: string | null | undefined, baseOrigin: string): URL | null {
   const value = src?.trim();
@@ -65,6 +86,53 @@ export function previewDocumentSrc(
   return src.trim().startsWith("/") ? `${url.pathname}${url.search}` : url.href;
 }
 
+/**
+ * Convert only an exact immutable Design Version preview URL into the daemon's
+ * instrumented iframe document URL. Parent-held fragments are never exposed to
+ * the embedded document.
+ */
+export function embeddedPreviewDocumentSrc(
+  src: string,
+  baseOrigin = globalThis.location?.origin ?? "http://localhost",
+): string {
+  const url = parsePreviewUrl(src, baseOrigin);
+  if (url === null || url.username !== "" || url.password !== ""
+    || !EXACT_DESIGN_VERSION_PREVIEW_PATH.test(url.pathname)) {
+    throw new Error("Exact Design Version preview URL is invalid.");
+  }
+  url.pathname = url.pathname.replace(/\/preview\/?$/, "/preview/embed");
+  url.hash = "";
+  return src.trim().startsWith("/") ? `${url.pathname}${url.search}` : url.href;
+}
+
+export function isEmbeddedPreviewContextMenuPortMessage(
+  value: unknown,
+  bridgeNonce: string,
+): value is EmbeddedPreviewContextMenuPortMessage {
+  if (!value || typeof value !== "object" || !NONCE_PATTERN.test(bridgeNonce)) return false;
+  const message = value as Partial<EmbeddedPreviewContextMenuPortMessage>;
+  return message.source === "dezin"
+    && message.nonce === bridgeNonce
+    && message.protocol === PREVIEW_BRIDGE_PROTOCOL
+    && message.type === EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE
+    && typeof message.clientX === "number"
+    && Number.isFinite(message.clientX)
+    && typeof message.clientY === "number"
+    && Number.isFinite(message.clientY);
+}
+
+function isEmbeddedPreviewContextMenuReadyMessage(
+  value: unknown,
+): value is EmbeddedPreviewContextMenuReadyMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<EmbeddedPreviewContextMenuReadyMessage>;
+  return message.source === "dezin"
+    && message.type === EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE
+    && message.protocol === PREVIEW_BRIDGE_PROTOCOL
+    && typeof message.nonce === "string"
+    && NONCE_PATTERN.test(message.nonce);
+}
+
 export function generatePreviewBridgeNonce(): string {
   const bytes = new Uint8Array(32);
   globalThis.crypto.getRandomValues(bytes);
@@ -99,7 +167,7 @@ export function cacheBustedPreviewUrl(
 }
 
 type PreviewParentCommand = { type: string } & Record<string, unknown>;
-type ChannelTransport = { kind: "port"; port: MessagePort };
+type ChannelTransport = { kind: "port"; port: MessagePort; frameWindow: Window };
 
 interface PreviewChannelController {
   connect(): boolean;
@@ -170,7 +238,9 @@ export function createPreviewChannelController({
   };
 
   const accept = (value: unknown, candidate: ChannelTransport, messageGeneration: number): void => {
-    if (disposed || messageGeneration !== generation || !isBridgeMessage(value, bridgeNonce)) return;
+    if (disposed || messageGeneration !== generation
+      || iframeRef.current?.contentWindow !== candidate.frameWindow
+      || !isBridgeMessage(value, bridgeNonce)) return;
     if (value.type === "bridge-ready") {
       if (port !== candidate.port || (transport !== null && transport.port !== candidate.port)) return;
       transport = candidate;
@@ -195,7 +265,8 @@ export function createPreviewChannelController({
       const channel = new MessageChannel();
       port = channel.port1;
       const currentGeneration = generation;
-      port.onmessage = (event) => accept(event.data, { kind: "port", port: channel.port1 }, currentGeneration);
+      const candidate: ChannelTransport = { kind: "port", port: channel.port1, frameWindow };
+      port.onmessage = (event) => accept(event.data, candidate, currentGeneration);
       port.start();
       try {
         frameWindow.postMessage({
@@ -282,4 +353,60 @@ export function usePreviewChannel({
   const send = useCallback((command: PreviewParentCommand) => controllerRef.current?.send(command) ?? false, []);
 
   return { available, ready, generation, connect, send };
+}
+
+/**
+ * Accept the first child-created MessagePort from one instrumented preview
+ * document. The parent deliberately never reconnects on iframe load, so a
+ * document that navigates itself cannot inherit the original document's menu
+ * capability.
+ */
+export function useEmbeddedPreviewContextMenuChannel({
+  iframeRef,
+  previewSrc,
+  enabled,
+  onContextMenu,
+}: {
+  iframeRef: RefObject<HTMLIFrameElement | null>;
+  previewSrc: string | null;
+  enabled: boolean;
+  onContextMenu: (message: EmbeddedPreviewContextMenuPortMessage) => void;
+}): void {
+  const onContextMenuRef = useRef(onContextMenu);
+  onContextMenuRef.current = onContextMenu;
+
+  useLayoutEffect(() => {
+    if (!enabled || previewSrc === null || previewBridgeAddressForSrc(previewSrc).kind === "invalid") return;
+    let disposed = false;
+    let acceptedPort: MessagePort | null = null;
+    let acceptedNonce: string | null = null;
+
+    const receiveReady = (event: MessageEvent<unknown>) => {
+      const frameWindow = iframeRef.current?.contentWindow;
+      if (disposed || !frameWindow || event.source !== frameWindow
+        || !isEmbeddedPreviewContextMenuReadyMessage(event.data)) return;
+      if (acceptedPort !== null || event.ports.length !== 1) {
+        for (const port of event.ports) port.close();
+        return;
+      }
+      const port = event.ports[0]!;
+      acceptedPort = port;
+      acceptedNonce = event.data.nonce;
+      port.onmessage = (messageEvent) => {
+        if (disposed || port !== acceptedPort || acceptedNonce === null
+          || !isEmbeddedPreviewContextMenuPortMessage(messageEvent.data, acceptedNonce)) return;
+        onContextMenuRef.current(messageEvent.data);
+      };
+      port.start();
+    };
+
+    window.addEventListener("message", receiveReady);
+    return () => {
+      disposed = true;
+      window.removeEventListener("message", receiveReady);
+      acceptedPort?.close();
+      acceptedPort = null;
+      acceptedNonce = null;
+    };
+  }, [enabled, iframeRef, previewSrc]);
 }

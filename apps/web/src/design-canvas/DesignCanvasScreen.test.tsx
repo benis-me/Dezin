@@ -4,6 +4,11 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { discardPendingDesignCanvasIntent } from "../lib/pending-design-canvas.ts";
 import type { AgentInfo } from "../lib/api.ts";
+import {
+  EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE,
+  EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE,
+  PREVIEW_BRIDGE_PROTOCOL,
+} from "../lib/preview-channel.ts";
 import type { DesignAgentTurnRequest, DesignCanvasApi } from "./api.ts";
 import { preferredGeneratedNodeGeometry } from "./DesignCanvasNode.tsx";
 import { DesignCanvasScreen } from "./DesignCanvasScreen.tsx";
@@ -482,11 +487,139 @@ test("double-clicking a ready generated Node enters focus with an operable stric
 
   fireEvent.doubleClick(shield);
   await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
-  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Close Node focus" })).toHaveLength(1);
+  expect(document.querySelector(".design-canvas-focus-dismiss")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.getByRole("button", { name: "Desktop preview" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "Tablet preview" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Mobile preview" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Export preview HTML" })).toBeInTheDocument();
+  expect(screen.getByRole("toolbar", { name: "Focused preview tools" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Node Agent/ })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Select Landing page; double click to focus and interact" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Main Agent" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(screen.getByLabelText("Main Agent panel")).toBeInTheDocument();
+});
+
+test("focused previews accept context menus only over their iframe's private MessagePort", async () => {
+  const target = node({
+    id: "page-embedded-menu",
+    name: "Embedded page",
+    state: "ready",
+    currentVersionId: "version-embedded-menu",
+    selectedVersionId: "version-embedded-menu",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getExactVersionPreview).mockResolvedValue({
+    nodeId: target.id,
+    versionId: target.currentVersionId!,
+    url: `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview`,
+  });
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const frame = await screen.findByTitle(`Embedded page, version ${target.currentVersionId}`) as HTMLIFrameElement;
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Embedded page; double click to focus and interact" }));
+  await waitFor(() => expect(frame).toHaveAttribute(
+    "src",
+    `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview/embed`,
+  ));
+  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  expect(frame.contentWindow).not.toBeNull();
+  const nonce = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+  const channel = new MessageChannel();
+  const rejectedChannel = new MessageChannel();
+  const readyMessage = {
+    source: "dezin",
+    type: EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE,
+    protocol: PREVIEW_BRIDGE_PROTOCOL,
+    nonce,
+  };
+  window.dispatchEvent(new MessageEvent("message", {
+    data: readyMessage,
+    source: frame.contentWindow,
+    ports: [channel.port2],
+  }));
+  window.dispatchEvent(new MessageEvent("message", {
+    data: readyMessage,
+    source: frame.contentWindow,
+    ports: [rejectedChannel.port2],
+  }));
+
+  const message = {
+    source: "dezin",
+    type: EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE,
+    protocol: PREVIEW_BRIDGE_PROTOCOL,
+    nonce,
+    clientX: 24,
+    clientY: 30,
+  };
+  window.dispatchEvent(new MessageEvent("message", { data: message, source: window }));
+  expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
+
+  window.dispatchEvent(new MessageEvent("message", { data: message, source: frame.contentWindow }));
+  expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
+
+  rejectedChannel.port1.postMessage(message);
+  expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
+
+  channel.port1.start();
+  channel.port1.postMessage(message);
+  const menu = await screen.findByRole("menu", { name: "Page Node actions" });
+  expect(within(menu).getByRole("menuitem", { name: "Fit this Node" })).toHaveAttribute("data-disabled");
+
+  channel.port1.close();
+  rejectedChannel.port1.close();
+});
+
+test("an uninstrumented preview fallback cannot claim the private context-menu port", async () => {
+  const target = node({
+    id: "page-legacy-preview",
+    name: "Legacy preview",
+    state: "ready",
+    currentVersionId: "version-legacy-preview",
+    selectedVersionId: "version-legacy-preview",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getExactVersionPreview).mockResolvedValue({
+    nodeId: target.id,
+    versionId: target.currentVersionId!,
+    url: "/legacy-preview",
+  });
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const frame = await screen.findByTitle(`Legacy preview, version ${target.currentVersionId}`) as HTMLIFrameElement;
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Legacy preview; double click to focus and interact" }));
+  await waitFor(() => expect(frame).toHaveAttribute("src", "/legacy-preview"));
+  const channel = new MessageChannel();
+  const nonce = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+  window.dispatchEvent(new MessageEvent("message", {
+    data: {
+      source: "dezin",
+      type: EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE,
+      protocol: PREVIEW_BRIDGE_PROTOCOL,
+      nonce,
+    },
+    source: frame.contentWindow,
+    ports: [channel.port2],
+  }));
+  channel.port1.postMessage({
+    source: "dezin",
+    type: EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE,
+    protocol: PREVIEW_BRIDGE_PROTOCOL,
+    nonce,
+    clientX: 24,
+    clientY: 30,
+  });
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
+  channel.port1.close();
 });
 
 test("material Nodes use the selected immutable Version for preview and expose the shared Version selector", async () => {
+  const user = userEvent.setup();
   const material = node({
     id: "image-1",
     kind: "image",
@@ -533,8 +666,18 @@ test("material Nodes use the selected immutable Version for preview and expose t
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   fireEvent.doubleClick(await screen.findByTestId("rf__node-image-1"));
-  expect(await screen.findByLabelText("Version")).toHaveValue("version-image-selected");
-  expect(await screen.findByRole("option", { name: /v1 · direction-v1\.png/ })).toBeInTheDocument();
+  const panel = await screen.findByLabelText("Direction reference Agent panel", { selector: "section" });
+  const versionTrigger = within(panel).getByRole("combobox", { name: "Version" });
+  expect(versionTrigger).toHaveTextContent("V1");
+  expect(versionTrigger.textContent).toBe("V1");
+  expect(versionTrigger.closest("header")).toHaveClass("design-canvas-agent__header");
+  expect(panel.querySelector(".design-canvas-agent__versions")).toBeNull();
+  await user.click(versionTrigger);
+  expect(await screen.findByRole("option", { name: /V1 · direction-v1\.png ·/ })).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("option", { name: /V1 · direction-v1\.png ·/ })).not.toBeInTheDocument());
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "opening");
+  expect(screen.getByRole("button", { name: "Close Node focus" })).toBeInTheDocument();
   expect(await screen.findByRole("img", { name: "Direction reference" })).toHaveAttribute(
     "src",
     "https://preview.local/image-1/version-image-selected",
@@ -791,6 +934,60 @@ test("Agent transcript interleaves cards by creation time and always appends a n
   expect(screen.getByText("Earlier request")).toBeInTheDocument();
 });
 
+test("a submitted Agent turn stays above a Job that appears before the thread refresh", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas());
+  vi.mocked(api.getThread).mockResolvedValue(thread);
+  let resolveSubmit!: () => void;
+  const onSubmit = vi.fn(() => new Promise<void>((resolve) => {
+    resolveSubmit = resolve;
+  }));
+  const thinkingJob: DesignJob = {
+    ...job,
+    id: "job-optimistic-thinking",
+    status: "running",
+    activity: [],
+    createdAt: 1,
+    updatedAt: 1,
+    finishedAt: null,
+  };
+  const panel = (jobs: readonly DesignJob[]) => (
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={jobs}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={onSubmit}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />
+  );
+  const rendered = render(panel([]));
+
+  expect(await screen.findByText("Coordinate the canvas.")).toBeInTheDocument();
+  await user.type(screen.getByRole("textbox", { name: "Main Agent message" }), "Generate a new direction");
+  await user.click(screen.getByRole("button", { name: "Send to Main Agent" }));
+  expect(rendered.container.querySelector(".design-canvas-agent__message[data-role='user']"))
+    .toHaveTextContent("Generate a new direction");
+
+  rendered.rerender(panel([thinkingJob]));
+  await screen.findByRole("status", { name: "Thinking" });
+  const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
+    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+  )];
+  expect(timeline).toHaveLength(2);
+  expect(timeline[0]).toHaveAttribute("data-role", "user");
+  expect(timeline[0]).toHaveTextContent("Generate a new direction");
+  expect(timeline[1]).toHaveAttribute("aria-label", "Thinking");
+
+  resolveSubmit();
+  await waitFor(() => expect(api.getThread).toHaveBeenCalledTimes(2));
+});
+
 test("Canvas Agent accepts any available runtime provider", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas());
@@ -975,7 +1172,12 @@ test("Node and Main Agent composers both fail closed without a compatible runtim
 
 test("A new Agent Job renders one Thinking placeholder, not two", async () => {
   const { api } = createCanvasApi(canvas());
-  render(
+  const thinkingJob = { ...job, id: "job-thinking", status: "running" as const, activity: [], finishedAt: null };
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [{ id: "message-thinking", role: "user", content: "Generate the next direction", jobId: thinkingJob.id, createdAt: 40 }],
+  });
+  const rendered = render(
     <CanvasAgentPanel
       projectId={PROJECT_ID}
       api={api}
@@ -983,7 +1185,7 @@ test("A new Agent Job renders one Thinking placeholder, not two", async () => {
       title="Main Agent"
       subtitle=""
       nodes={[]}
-      jobs={[{ ...job, id: "job-thinking", status: "running", activity: [], finishedAt: null }]}
+      jobs={[thinkingJob]}
       agents={[CLAUDE_AGENT]}
       onSubmit={async () => {}}
       onCancelJob={async () => {}}
@@ -994,6 +1196,12 @@ test("A new Agent Job renders one Thinking placeholder, not two", async () => {
   const thinking = await screen.findByRole("status", { name: "Thinking" });
   expect(within(thinking).getByText("Thinking…")).toBeInTheDocument();
   expect(screen.queryByLabelText("Main Agent · running")).not.toBeInTheDocument();
+  const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
+    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+  )];
+  expect(timeline).toHaveLength(2);
+  expect(timeline[0]).toHaveAttribute("data-role", "user");
+  expect(timeline[1]).toHaveAttribute("aria-label", "Thinking");
 });
 
 test("A completed conversational Main Agent turn renders as a message without an activity card", async () => {

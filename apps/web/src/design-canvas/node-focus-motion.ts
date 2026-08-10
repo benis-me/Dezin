@@ -8,11 +8,20 @@ export type NodeFocusRole = "source" | "away" | "restoring";
 export interface NodeFocusMotion {
   phase: NodeFocusPhase;
   role: NodeFocusRole;
+  startX: number;
+  startY: number;
   shiftX: number;
   shiftY: number;
   arcX: number;
   arcY: number;
+  startScaleX: number;
+  startScaleY: number;
+  scaleX: number;
+  scaleY: number;
+  /** Kept for callers that only need the uniform focused scale. */
   scale: number;
+  layoutWidth: number | null;
+  layoutHeight: number | null;
   durationMs: number;
   delayMs: number;
   fadeDurationMs: number;
@@ -29,17 +38,33 @@ interface SurfaceSize {
 }
 
 export interface FocusedNodeTransform {
+  startX: number;
+  startY: number;
   shiftX: number;
   shiftY: number;
   arcX: number;
   arcY: number;
+  startScaleX: number;
+  startScaleY: number;
+  scaleX: number;
+  scaleY: number;
   scale: number;
+  layoutWidth: number;
+  layoutHeight: number;
   durationMs: number;
 }
 
-export const NODE_FOCUS_FLIGHT_DURATION_MS = 420;
-export const NODE_FOCUS_MAX_FLIGHT_DURATION_MS = 540;
-export const NODE_FOCUS_DETAIL_DELAY_MS = 130;
+export interface FocusedNodeLayoutOptions {
+  reservedRight?: number;
+  targetWidth?: number;
+  horizontalInset?: number;
+  topInset?: number;
+  bottomInset?: number;
+}
+
+export const NODE_FOCUS_FLIGHT_DURATION_MS = 380;
+export const NODE_FOCUS_MAX_FLIGHT_DURATION_MS = 460;
+export const NODE_FOCUS_DETAIL_DELAY_MS = 110;
 
 export function nodeFocusEase(progress: number): number {
   const value = Math.max(0, Math.min(1, progress));
@@ -51,11 +76,19 @@ export function nodeFocusMotions(
   focusedNodeId: string,
   phase: NodeFocusPhase,
   focusedTransform: FocusedNodeTransform = {
+    startX: 0,
+    startY: 0,
     shiftX: 0,
     shiftY: 0,
     arcX: 0,
     arcY: 0,
+    startScaleX: 1,
+    startScaleY: 1,
+    scaleX: 1,
+    scaleY: 1,
     scale: 1,
+    layoutWidth: 0,
+    layoutHeight: 0,
     durationMs: NODE_FOCUS_FLIGHT_DURATION_MS,
   },
 ): ReadonlyMap<string, NodeFocusMotion> {
@@ -71,14 +104,22 @@ export function nodeFocusMotions(
       result.set(node.id, {
         phase,
         role: "source",
+        startX: focusedTransform.startX,
+        startY: focusedTransform.startY,
         shiftX: focusedTransform.shiftX,
         shiftY: focusedTransform.shiftY,
         arcX: focusedTransform.arcX,
         arcY: focusedTransform.arcY,
+        startScaleX: focusedTransform.startScaleX,
+        startScaleY: focusedTransform.startScaleY,
+        scaleX: focusedTransform.scaleX,
+        scaleY: focusedTransform.scaleY,
         scale: focusedTransform.scale,
+        layoutWidth: focusedTransform.layoutWidth || focused.geometry.width,
+        layoutHeight: focusedTransform.layoutHeight || focused.geometry.height,
         durationMs: focusedTransform.durationMs,
         delayMs: 0,
-        fadeDurationMs: 180,
+        fadeDurationMs: 170,
       });
       return;
     }
@@ -91,30 +132,34 @@ export function nodeFocusMotions(
     const direction = nodeDistance > 0.5
       ? { x: dx / nodeDistance, y: dy / nodeDistance }
       : fallbackDirection(node.id, index);
-    const displacement = 44 + (1 - normalizedDistance) * 72;
+    const proximity = (1 - normalizedDistance) ** 1.55;
+    const displacement = 32 + proximity * 112;
     const openingShift = {
       x: Math.round(direction.x * displacement * 100) / 100,
       y: Math.round(direction.y * displacement * 100) / 100,
     };
-    const curve = curvedOffset(openingShift.x, openingShift.y, clamp(displacement * 0.12, 7, 14));
 
     result.set(node.id, {
       phase,
       role: phase === "opening" ? "away" : "restoring",
+      startX: 0,
+      startY: 0,
       shiftX: openingShift.x,
       shiftY: openingShift.y,
-      arcX: curve.x,
-      arcY: curve.y,
+      arcX: 0,
+      arcY: 0,
+      startScaleX: 1,
+      startScaleY: 1,
+      scaleX: 1,
+      scaleY: 1,
       scale: 1,
-      durationMs: phase === "opening"
-        ? Math.round(clamp(320 + displacement, 360, 440))
-        : Math.round(clamp(285 + displacement * 0.9, 325, 405)),
+      layoutWidth: null,
+      layoutHeight: null,
+      durationMs: Math.round(clamp(300 + displacement * 0.72, 330, 405)),
       delayMs: phase === "opening"
-        ? Math.round(normalizedDistance * 42)
-        : Math.round((1 - normalizedDistance) * 14),
-      fadeDurationMs: phase === "opening"
-        ? Math.round(170 + normalizedDistance * 55)
-        : Math.round(140 + normalizedDistance * 35),
+        ? Math.round(normalizedDistance * 28)
+        : 0,
+      fadeDurationMs: Math.round(150 + normalizedDistance * 35),
     });
   });
 
@@ -125,42 +170,61 @@ export function focusedNodeTransform(
   geometry: DesignNode["geometry"],
   surface: SurfaceSize,
   viewport: Viewport,
+  options: FocusedNodeLayoutOptions = {},
 ): FocusedNodeTransform {
   const width = surface.width > 0 ? surface.width : 1_280;
   const height = surface.height > 0 ? surface.height : 720;
   const viewportZoom = Math.max(0.01, viewport.zoom);
-  const availableWidth = Math.max(240, width - 96);
-  const availableHeight = Math.max(180, height - 112);
-  const focusedScreenScale = clamp(
-    Math.min(availableWidth / geometry.width, availableHeight / geometry.height),
-    0.4,
-    1.28,
-  );
-  const centerX = geometry.x + geometry.width / 2;
-  const centerY = geometry.y + geometry.height / 2;
-  const currentScreenCenterX = centerX * viewportZoom + viewport.x;
-  const currentScreenCenterY = centerY * viewportZoom + viewport.y;
+  const horizontalInset = clamp(options.horizontalInset ?? 28, 16, Math.max(16, width / 4));
+  const topInset = clamp(options.topInset ?? 18, 12, Math.max(12, height / 3));
+  const bottomInset = clamp(options.bottomInset ?? 72, 32, Math.max(32, height / 2));
+  const reservedRight = clamp(options.reservedRight ?? 376, 0, Math.max(0, width - 320));
+  const availableWidth = Math.max(280, width - horizontalInset * 2 - reservedRight);
+  const availableHeight = Math.max(200, height - topInset - bottomInset);
+  const layoutWidth = roundMotionValue(clamp(options.targetWidth ?? availableWidth, 280, availableWidth));
+  const layoutHeight = roundMotionValue(availableHeight);
+  const targetCenterX = horizontalInset + availableWidth / 2;
+  const targetCenterY = topInset + availableHeight / 2;
+  const layoutCenterX = geometry.x + layoutWidth / 2;
+  const layoutCenterY = geometry.y + layoutHeight / 2;
+  const currentScreenCenterX = layoutCenterX * viewportZoom + viewport.x;
+  const currentScreenCenterY = layoutCenterY * viewportZoom + viewport.y;
 
-  const screenShiftX = width / 2 - currentScreenCenterX;
-  const screenShiftY = height / 2 - currentScreenCenterY;
+  const screenShiftX = targetCenterX - currentScreenCenterX;
+  const screenShiftY = targetCenterY - currentScreenCenterY;
+  const startX = (geometry.width - layoutWidth) / 2;
+  const startY = (geometry.height - layoutHeight) / 2;
+  const shiftX = screenShiftX / viewportZoom;
+  const shiftY = screenShiftY / viewportZoom;
+  const startScaleX = geometry.width / layoutWidth;
+  const startScaleY = geometry.height / layoutHeight;
+  const focusedScale = 1 / viewportZoom;
   const scaleTravel = Math.hypot(
-    geometry.width * Math.abs(focusedScreenScale - viewportZoom) / 2,
-    geometry.height * Math.abs(focusedScreenScale - viewportZoom) / 2,
+    layoutWidth * Math.abs(focusedScale - startScaleX) * viewportZoom / 2,
+    layoutHeight * Math.abs(focusedScale - startScaleY) * viewportZoom / 2,
   );
-  const screenDistance = Math.hypot(screenShiftX, screenShiftY);
+  const screenDistance = Math.hypot((shiftX - startX) * viewportZoom, (shiftY - startY) * viewportZoom);
   const perceivedTravel = screenDistance + scaleTravel;
   const curve = curvedOffset(
-    screenShiftX / viewportZoom,
-    screenShiftY / viewportZoom,
+    shiftX - startX,
+    shiftY - startY,
     clamp(Math.sqrt(screenDistance) * 1.25 / viewportZoom, 0, 36 / viewportZoom),
   );
 
   return {
-    shiftX: roundMotionValue(screenShiftX / viewportZoom),
-    shiftY: roundMotionValue(screenShiftY / viewportZoom),
+    startX: roundMotionValue(startX),
+    startY: roundMotionValue(startY),
+    shiftX: roundMotionValue(shiftX),
+    shiftY: roundMotionValue(shiftY),
     arcX: roundMotionValue(curve.x),
     arcY: roundMotionValue(curve.y),
-    scale: roundMotionValue(focusedScreenScale / viewportZoom),
+    startScaleX: roundMotionValue(startScaleX),
+    startScaleY: roundMotionValue(startScaleY),
+    scaleX: roundMotionValue(focusedScale),
+    scaleY: roundMotionValue(focusedScale),
+    scale: roundMotionValue(focusedScale),
+    layoutWidth,
+    layoutHeight,
     durationMs: focusFlightDuration(perceivedTravel),
   };
 }
@@ -213,14 +277,15 @@ export function nodeFocusAnimationFrames(
     const eased = nodeFocusEase(offset);
     const progress = fromProgress + (toProgress - fromProgress) * eased;
     const inverse = 1 - progress;
-    const controlX = motion.shiftX * 0.5 + motion.arcX * 2;
-    const controlY = motion.shiftY * 0.5 + motion.arcY * 2;
-    const x = 2 * inverse * progress * controlX + progress * progress * motion.shiftX;
-    const y = 2 * inverse * progress * controlY + progress * progress * motion.shiftY;
-    const scale = 1 + (motion.scale - 1) * progress;
+    const controlX = (motion.startX + motion.shiftX) * 0.5 + motion.arcX * 2;
+    const controlY = (motion.startY + motion.shiftY) * 0.5 + motion.arcY * 2;
+    const x = inverse * inverse * motion.startX + 2 * inverse * progress * controlX + progress * progress * motion.shiftX;
+    const y = inverse * inverse * motion.startY + 2 * inverse * progress * controlY + progress * progress * motion.shiftY;
+    const scaleX = motion.startScaleX + (motion.scaleX - motion.startScaleX) * progress;
+    const scaleY = motion.startScaleY + (motion.scaleY - motion.startScaleY) * progress;
     return {
       offset,
-      transform: `translate3d(${roundMotionValue(x)}px, ${roundMotionValue(y)}px, 0) scale(${roundMotionValue(scale)})`,
+      transform: `translate3d(${roundMotionValue(x)}px, ${roundMotionValue(y)}px, 0) scale(${roundMotionValue(scaleX)}, ${roundMotionValue(scaleY)})`,
       opacity: fades ? roundMotionValue(1 - progress) : 1,
     };
   });

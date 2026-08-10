@@ -8,7 +8,18 @@ import {
   type AgentSearchResult,
 } from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
-import { Button, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import {
+  Button,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/index.ts";
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
@@ -22,7 +33,6 @@ import {
   CircleAlert,
   FileUp,
   LoaderCircle,
-  MessageSquareText,
   Paperclip,
   PanelRightClose,
   X,
@@ -64,8 +74,10 @@ interface FloatingPosition {
   visible: boolean;
 }
 
-const COMPACT_AGENT_SIZE = { width: 352, height: 520 } as const;
-const FOCUSED_AGENT_SIZE = { width: 352, height: 720 } as const;
+export const FLOATING_NODE_AGENT_WIDTH_PX = 352;
+
+const COMPACT_AGENT_SIZE = { width: FLOATING_NODE_AGENT_WIDTH_PX, height: 520 } as const;
+const FOCUSED_AGENT_SIZE = { width: FLOATING_NODE_AGENT_WIDTH_PX, height: 720 } as const;
 
 function boundedEntryOffset(distance: number, limit: number): number {
   if (Math.abs(distance) < 3) return 0;
@@ -241,6 +253,13 @@ interface MainAgentJobGroup {
   jobs: DesignJob[];
 }
 
+interface OptimisticUserTurn {
+  scopeKey: string;
+  message: DesignThread["messages"][number];
+  existingMessageIds: ReadonlySet<string>;
+  existingJobIds: ReadonlySet<string>;
+}
+
 type AgentTimelineItem =
   | { kind: "message"; id: string; createdAt: number; message: DesignThread["messages"][number] }
   | { kind: "main-job-group"; id: string; createdAt: number; group: MainAgentJobGroup }
@@ -294,7 +313,7 @@ function versionOptionLabel(version: DesignNodeVersion): string {
     ? version.fileName ?? version.mimeType ?? "Material"
     : null;
   const timestamp = new Date(version.createdAt).toLocaleString();
-  return `v${version.sequence} · ${materialName ? `${materialName} · ` : ""}${timestamp}`;
+  return `V${version.sequence} · ${materialName ? `${materialName} · ` : ""}${timestamp}`;
 }
 
 function compactActivityText(text: string): string {
@@ -394,6 +413,7 @@ export function CanvasAgentPanel({
   const [threadError, setThreadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [optimisticUserTurn, setOptimisticUserTurn] = useState<OptimisticUserTurn | null>(null);
   const [appendingRevision, setAppendingRevision] = useState(false);
   const [internalAgentSelection, setInternalAgentSelection] = useState<CanvasAgentSelection>(() => ({
     agentCommand: initialAgentCommand,
@@ -407,6 +427,7 @@ export function CanvasAgentPanel({
   const [contextNodeIds, setContextNodeIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
+  const optimisticTurnSequenceRef = useRef(0);
   const threadLoadSequenceRef = useRef(0);
   const loadedThreadScopeRef = useRef<string | null>(null);
   const scopeKey = scope.type === "main" ? "main" : `node:${scope.nodeId}`;
@@ -431,6 +452,18 @@ export function CanvasAgentPanel({
   const transcriptTailKey = relatedJobs.map((job) => (
     `${job.id}:${job.status}:${job.activity.length}:${job.error ?? ""}`
   )).join("|");
+  const requestedVersionId = selectedVersionId ?? versions.at(-1)?.id ?? "";
+  const activeVersion = versions.find((version) => version.id === requestedVersionId) ?? versions.at(-1) ?? null;
+  const activeVersionId = activeVersion?.id ?? "";
+  const visibleOptimisticUserTurn = useMemo(() => {
+    if (!optimisticUserTurn || optimisticUserTurn.scopeKey !== scopeKey) return null;
+    const canonicalMessageArrived = thread?.messages.some((message) => (
+      message.role === "user"
+      && message.content.trim() === optimisticUserTurn.message.content
+      && !optimisticUserTurn.existingMessageIds.has(message.id)
+    )) ?? false;
+    return canonicalMessageArrived ? null : optimisticUserTurn;
+  }, [optimisticUserTurn, scopeKey, thread]);
 
   const loadThread = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++threadLoadSequenceRef.current;
@@ -458,6 +491,10 @@ export function CanvasAgentPanel({
     void loadThread(controller.signal);
     return () => controller.abort();
   }, [loadThread]);
+
+  useEffect(() => {
+    setOptimisticUserTurn(null);
+  }, [scopeKey]);
 
   useEffect(() => {
     const existingIds = new Set(nodes.map((node) => node.id));
@@ -489,6 +526,19 @@ export function CanvasAgentPanel({
   const submit = async () => {
     const prompt = draft.trim();
     if (!prompt || submitting || !activeAgent) return;
+    const optimisticId = `optimistic-user-${++optimisticTurnSequenceRef.current}`;
+    setOptimisticUserTurn({
+      scopeKey,
+      message: {
+        id: optimisticId,
+        role: "user",
+        content: prompt,
+        jobId: null,
+        createdAt: Date.now(),
+      },
+      existingMessageIds: new Set(thread?.messages.map((message) => message.id) ?? []),
+      existingJobIds: new Set(relatedJobs.map((job) => job.id)),
+    });
     setSubmitting(true);
     setThreadError(null);
     try {
@@ -501,6 +551,7 @@ export function CanvasAgentPanel({
       setDraft("");
       await loadThread();
     } catch (problem) {
+      setOptimisticUserTurn((current) => current?.message.id === optimisticId ? null : current);
       setThreadError(problem instanceof Error ? problem.message : String(problem));
     } finally {
       setSubmitting(false);
@@ -508,7 +559,7 @@ export function CanvasAgentPanel({
   };
 
   const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
-  const panelEyebrow = scope.type === "main" ? "Main Agent" : "Node Agent";
+  const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
   return (
     <motion.section
       ref={rootRef}
@@ -517,11 +568,11 @@ export function CanvasAgentPanel({
       data-agent-size={compact ? "compact" : "focus"}
       className={cn("design-canvas-agent", floating && "design-canvas-agent--floating", className)}
       style={{ ...style, transformOrigin: "center center" }}
-      initial={floating && !reduceMotion ? { opacity: 0, x: entryX, y: entryY, scale: compact ? 0.955 : 0.985 } : false}
-      animate={floating ? { opacity: 1, x: 0, y: 0, scale: compact ? 0.975 : 1 } : undefined}
-      exit={floating ? { opacity: 0, x: reduceMotion ? 0 : entryX, y: reduceMotion ? 0 : entryY, scale: compact ? 0.955 : 0.985 } : undefined}
+      initial={floating && !reduceMotion ? { opacity: 0, x: entryX, y: entryY, scale: 0.98 } : false}
+      animate={floating ? { opacity: 1, x: 0, y: 0, scale: 1 } : undefined}
+      exit={floating ? { opacity: 0, x: reduceMotion ? 0 : entryX, y: reduceMotion ? 0 : entryY, scale: 0.985 } : undefined}
       transition={{
-        duration: reduceMotion ? 0 : 0.26,
+        duration: reduceMotion ? 0 : 0.22,
         ease: AGENT_MOTION_EASE,
       }}
       aria-label={`${title} panel`}
@@ -530,90 +581,111 @@ export function CanvasAgentPanel({
       <div className="design-canvas-agent__surface">
       <header className="design-canvas-agent__header">
         <div className="design-canvas-agent__header-copy">
-          <span className="design-canvas-agent__eyebrow">{panelEyebrow}</span>
+          {panelEyebrow ? <span className="design-canvas-agent__eyebrow">{panelEyebrow}</span> : null}
           <h2>{panelTitle}</h2>
           {subtitle ? <p>{subtitle}</p> : null}
         </div>
-        {onClose ? (
+        {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose ? (
           <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon-xs" aria-label={`Close ${title}`} onClick={onClose}>
-                  {floating ? <X aria-hidden /> : <PanelRightClose aria-hidden />}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="left" sideOffset={6}>{floating ? "Hide Agent" : "Close Agent"}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : null}
-      </header>
-
-      {(versions.length > 0 && onSelectVersion) || onAppendMaterialVersion ? (
-        <div className="design-canvas-agent__versions">
-          {versions.length > 0 && onSelectVersion ? (
-            <>
-              <label htmlFor={`${scopeKey}-version`}>Version</label>
-              <div className="relative min-w-0 flex-1">
-                <select
-                  id={`${scopeKey}-version`}
-                  value={selectedVersionId ?? versions.at(-1)?.id ?? ""}
-                  onChange={(event) => {
-                    void onSelectVersion(event.target.value).catch((problem) => {
+            <div className="flex shrink-0 items-center gap-1">
+              {activeVersion && onSelectVersion ? (
+                <Select
+                  value={activeVersionId}
+                  onValueChange={(versionId) => {
+                    if (versionId === activeVersionId) return;
+                    void onSelectVersion(versionId).catch((problem) => {
                       setThreadError(problem instanceof Error ? problem.message : String(problem));
                     });
                   }}
-                  className="h-7 w-full appearance-none rounded-md border border-border bg-background px-2 pr-7 text-[11px] text-foreground outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
                 >
-                  {[...versions].reverse().map((version) => (
-                    <option key={version.id} value={version.id}>{versionOptionLabel(version)}</option>
-                  ))}
-                </select>
-                <ChevronDown aria-hidden className="pointer-events-none absolute right-2 top-2 size-3 text-muted-foreground" />
-              </div>
-            </>
-          ) : (
-            <span className="design-canvas-agent__versions-label">No versions yet</span>
-          )}
-          {onAppendMaterialVersion ? (
-            <>
-              <input
-                ref={revisionInputRef}
-                type="file"
-                accept={materialRevisionAccept}
-                className="hidden"
-                aria-label={`Add revision to ${scopedNode?.name ?? title}`}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = "";
-                  if (!file || appendingRevision) return;
-                  setAppendingRevision(true);
-                  setThreadError(null);
-                  void onAppendMaterialVersion(file).catch((problem) => {
-                    setThreadError(problem instanceof Error ? problem.message : String(problem));
-                  }).finally(() => setAppendingRevision(false));
-                }}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                className="shrink-0"
-                disabled={appendingRevision}
-                onClick={() => revisionInputRef.current?.click()}
-              >
-                {appendingRevision ? <LoaderCircle aria-hidden className="animate-spin" /> : <FileUp aria-hidden />}
-                Add revision
-              </Button>
-            </>
-          ) : null}
-        </div>
-      ) : null}
+                  <SelectTrigger
+                    size="sm"
+                    aria-label="Version"
+                    className="h-7 min-w-[52px] gap-1 rounded-lg border-transparent bg-transparent px-2 text-[10px] font-semibold shadow-none hover:bg-surface-2 [&_svg:not([class*='size-'])]:size-3"
+                  >
+                    <SelectValue>{`V${activeVersion.sequence}`}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent
+                    position="popper"
+                    align="end"
+                    className="w-[min(280px,calc(100vw-24px))] min-w-0 max-w-[calc(100vw-24px)]"
+                  >
+                    {[...versions].reverse().map((version) => (
+                      <SelectItem
+                        key={version.id}
+                        value={version.id}
+                        className="min-w-0 overflow-hidden text-xs [&>span:last-child]:block [&>span:last-child]:min-w-0 [&>span:last-child]:truncate"
+                      >
+                        {versionOptionLabel(version)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+              {onAppendMaterialVersion ? (
+                <>
+                  <input
+                    ref={revisionInputRef}
+                    type="file"
+                    accept={materialRevisionAccept}
+                    className="hidden"
+                    aria-label={`Add revision to ${scopedNode?.name ?? title}`}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (!file || appendingRevision) return;
+                      setAppendingRevision(true);
+                      setThreadError(null);
+                      void onAppendMaterialVersion(file).catch((problem) => {
+                        setThreadError(problem instanceof Error ? problem.message : String(problem));
+                      }).finally(() => setAppendingRevision(false));
+                    }}
+                  />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        className="size-7 rounded-full"
+                        aria-label={`Upload revision for ${scopedNode?.name ?? title}`}
+                        disabled={appendingRevision}
+                        onClick={() => revisionInputRef.current?.click()}
+                      >
+                        {appendingRevision ? <LoaderCircle aria-hidden className="animate-spin" /> : <FileUp aria-hidden />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" sideOffset={6}>Add revision</TooltipContent>
+                  </Tooltip>
+                </>
+              ) : null}
+              {onClose ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="size-7 rounded-full"
+                      aria-label={`Close ${title}`}
+                      onClick={onClose}
+                    >
+                      {floating ? <X aria-hidden /> : <PanelRightClose aria-hidden />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left" sideOffset={6}>{floating ? "Hide Agent" : "Close Agent"}</TooltipContent>
+                </Tooltip>
+              ) : null}
+            </div>
+          </TooltipProvider>
+        ) : null}
+      </header>
 
       <AgentTranscript
         scopeKey={scopeKey}
         scopeType={scope.type}
         thread={thread}
-        threadLoading={threadLoading}
+        optimisticUserTurn={visibleOptimisticUserTurn}
+        threadLoading={threadLoading && visibleOptimisticUserTurn === null}
         relatedJobs={relatedJobs}
         mainJobGroups={mainJobGroups}
         nodeNames={nodeNames}
@@ -622,7 +694,7 @@ export function CanvasAgentPanel({
         onCancelJob={onCancelJob}
         deferTranscriptMs={deferTranscriptMs}
         reduceMotion={reduceMotion === true}
-        tailKey={transcriptTailKey}
+        tailKey={`${transcriptTailKey}|${visibleOptimisticUserTurn?.message.id ?? ""}`}
       />
 
       <div className="design-canvas-agent__composer">
@@ -730,6 +802,7 @@ const AgentTranscript = memo(function AgentTranscript({
   scopeKey,
   scopeType,
   thread,
+  optimisticUserTurn,
   threadLoading,
   relatedJobs,
   mainJobGroups,
@@ -744,6 +817,7 @@ const AgentTranscript = memo(function AgentTranscript({
   scopeKey: string;
   scopeType: DesignThreadScope["type"];
   thread: DesignThread | null;
+  optimisticUserTurn: OptimisticUserTurn | null;
   threadLoading: boolean;
   relatedJobs: readonly DesignJob[];
   mainJobGroups: readonly MainAgentJobGroup[];
@@ -761,7 +835,9 @@ const AgentTranscript = memo(function AgentTranscript({
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
   const messageHistoryLimit = historyPages * TRANSCRIPT_MESSAGE_PAGE_SIZE;
   const jobHistoryLimit = historyPages * (scopeType === "main" ? TRANSCRIPT_JOB_PAGE_SIZE : 2);
-  const threadMessages = thread?.messages ?? [];
+  const threadMessages = optimisticUserTurn
+    ? [...(thread?.messages ?? []), optimisticUserTurn.message]
+    : thread?.messages ?? [];
   const visibleMessages = threadMessages.slice(-messageHistoryLimit);
   const visibleMainJobGroups = mainJobGroups.slice(-jobHistoryLimit);
   const visibleRelatedJobs = relatedJobs.slice(-jobHistoryLimit);
@@ -771,6 +847,12 @@ const AgentTranscript = memo(function AgentTranscript({
       : Math.max(0, relatedJobs.length - visibleRelatedJobs.length));
   const latestRelatedJobId = relatedJobs.at(-1)?.id ?? null;
   const timeline = useMemo<AgentTimelineItem[]>(() => {
+    const userTurnCreatedAt = new Map<string, number>();
+    for (const message of threadMessages) {
+      if (message.role === "user" && message.jobId !== null) {
+        userTurnCreatedAt.set(message.jobId, message.createdAt);
+      }
+    }
     const items: AgentTimelineItem[] = visibleMessages.map((message) => ({
       kind: "message",
       id: `message:${message.id}`,
@@ -781,14 +863,19 @@ const AgentTranscript = memo(function AgentTranscript({
       items.push(...visibleMainJobGroups.map((group) => ({
         kind: "main-job-group" as const,
         id: `main-job-group:${group.parentJobId}`,
-        createdAt: Math.min(...group.jobs.map((job) => job.createdAt)),
+        createdAt: (optimisticUserTurn && !optimisticUserTurn.existingJobIds.has(group.parentJobId)
+          ? optimisticUserTurn.message.createdAt
+          : userTurnCreatedAt.get(group.parentJobId))
+          ?? Math.min(...group.jobs.map((job) => job.createdAt)),
         group,
       })));
     } else {
       items.push(...visibleRelatedJobs.map((job) => ({
         kind: "node-job" as const,
         id: `node-job:${job.id}`,
-        createdAt: job.createdAt,
+        createdAt: (optimisticUserTurn && !optimisticUserTurn.existingJobIds.has(job.id)
+          ? optimisticUserTurn.message.createdAt
+          : userTurnCreatedAt.get(job.id)) ?? job.createdAt,
         job,
       })));
     }
@@ -801,7 +888,7 @@ const AgentTranscript = memo(function AgentTranscript({
       || priority(left) - priority(right)
       || left.id.localeCompare(right.id)
     ));
-  }, [scopeType, visibleMainJobGroups, visibleMessages, visibleRelatedJobs]);
+  }, [optimisticUserTurn, scopeType, threadMessages, visibleMainJobGroups, visibleMessages, visibleRelatedJobs]);
 
   useEffect(() => {
     setHistoryPages(1);
@@ -852,8 +939,12 @@ const AgentTranscript = memo(function AgentTranscript({
           ) : null}
           {threadMessages.length === 0 && relatedJobs.length === 0 ? (
             <div className="design-canvas-agent__empty">
-              <MessageSquareText aria-hidden />
-              <p>Ask this Agent to work from the complete canvas context.</p>
+              <p className="text-[11px] font-medium text-foreground/75">
+                {scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
+              </p>
+              <p className="max-w-[24rem] text-[10px] leading-[1.45] text-muted-foreground/80">
+                Complete canvas context is already available to this Agent.
+              </p>
             </div>
           ) : null}
           {timeline.map((item) => {

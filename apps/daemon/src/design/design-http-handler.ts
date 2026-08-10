@@ -68,10 +68,46 @@ const PREVIEW_CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
-  "navigate-to 'none'",
   "frame-ancestors 'self'",
   "sandbox allow-scripts",
 ].join("; ");
+
+const EMBEDDED_PREVIEW_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' data: blob:",
+  "font-src 'self' data: blob:",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+  "sandbox allow-scripts",
+].join("; ");
+
+const EMBEDDED_PREVIEW_BRIDGE = Buffer.from(
+  [
+    '<script data-dezin-embedded-preview-bridge>(()=>{const apply=Reflect.apply;',
+    'const prevent=Event.prototype.preventDefault,stop=Event.prototype.stopImmediatePropagation;',
+    'const portPost=MessagePort.prototype.postMessage,portStart=MessagePort.prototype.start;',
+    'const parentPost=parent.postMessage,bytes=new Uint8Array(32);crypto.getRandomValues(bytes);',
+    'let binary="";for(const byte of bytes)binary+=String.fromCharCode(byte);',
+    'const nonce=btoa(binary).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/g,"");',
+    'const channel=new MessageChannel();apply(portStart,channel.port1,[]);',
+    'addEventListener("contextmenu",(event)=>{if(!event.isTrusted)return;',
+    'apply(prevent,event,[]);apply(stop,event,[]);',
+    'apply(portPost,channel.port1,[{source:"dezin",type:"embedded-preview-context-menu",',
+    'nonce,protocol:1,clientX:event.clientX,clientY:event.clientY}]);},true);',
+    'apply(parentPost,parent,[{source:"dezin",type:"embedded-preview-context-menu-ready",',
+    'nonce,protocol:1},"*",[channel.port2]]);})();</script>',
+  ].join(""),
+  "utf8",
+);
 
 function requestUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", "http://127.0.0.1");
@@ -180,6 +216,40 @@ function sendImmutableHtml(req: IncomingMessage, res: ServerResponse, html: Buff
     "cache-control": "public, max-age=31536000, immutable",
     etag,
     "content-security-policy": PREVIEW_CSP,
+    "x-content-type-options": "nosniff",
+    "x-dns-prefetch-control": "off",
+    "referrer-policy": "no-referrer",
+  };
+  if (req.headers["if-none-match"] === etag) {
+    const { "content-length": _length, ...notModifiedHeaders } = headers;
+    res.writeHead(304, notModifiedHeaders);
+    res.end();
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(req.method === "HEAD" ? undefined : html);
+}
+
+function instrumentEmbeddedPreview(html: Buffer): Buffer {
+  const source = html.toString("latin1");
+  const doctype = /^\uFEFF?\s*<!doctype\s+html\s*>/i.exec(source);
+  const insertionIndex = doctype !== null ? doctype.index + doctype[0].length : 0;
+  return Buffer.concat([
+    html.subarray(0, insertionIndex),
+    EMBEDDED_PREVIEW_BRIDGE,
+    html.subarray(insertionIndex),
+  ]);
+}
+
+function sendEmbeddedPreviewHtml(req: IncomingMessage, res: ServerResponse, html: Buffer): void {
+  const checksum = createHash("sha256").update(html).digest("hex");
+  const etag = `"sha256-${checksum}"`;
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": String(html.length),
+    "cache-control": "private, no-cache",
+    etag,
+    "content-security-policy": EMBEDDED_PREVIEW_CSP,
     "x-content-type-options": "nosniff",
     "x-dns-prefetch-control": "off",
     "referrer-policy": "no-referrer",
@@ -488,6 +558,19 @@ export async function handleServeDesignVersionPreview(req: IncomingMessage, res:
     throw new HttpError(409, "Design Version changed after integrity verification");
   }
   sendImmutableHtml(req, res, html, resolved.manifest.checksum);
+}
+
+export async function handleServeEmbeddedDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  const resolved = await resolveDesignVersionPreview(d.dataDir, p.id!, p.nodeId!, p.versionId!);
+  if (resolved.kind === "asset") {
+    throw new HttpError(415, "Embedded preview requires an HTML Design Version");
+  }
+  const html = await readFile(resolved.path);
+  if (html.length !== resolved.manifest.bytes
+    || createHash("sha256").update(html).digest("hex") !== resolved.manifest.checksum) {
+    throw new HttpError(409, "Design Version changed after integrity verification");
+  }
+  sendEmbeddedPreviewHtml(req, res, instrumentEmbeddedPreview(html));
 }
 
 export async function handleGetMainDesignThread(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {

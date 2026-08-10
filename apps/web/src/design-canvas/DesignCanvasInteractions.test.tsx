@@ -280,11 +280,13 @@ test("repeated canvas clicks cannot restart or stutter the return flight", async
   });
 
   expect(flowHarness.setViewport).not.toHaveBeenCalled();
-  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
   act(() => {
     flowHarness.props?.onSelectionChange?.({ nodes: [staleSelectedEcho] });
   });
-  expect(flowHarness.props?.nodes[0]?.selected).toBe(false);
+  await waitFor(() => {
+    expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus");
+    expect(flowHarness.props?.nodes[0]?.selected).toBe(false);
+  });
   expect(screen.queryByLabelText("Page A Agent panel")).not.toBeInTheDocument();
   expect(flowHarness.setViewport).not.toHaveBeenCalled();
 });

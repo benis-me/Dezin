@@ -115,6 +115,16 @@ CSP (`connect-src`, `frame-src`, and `object-src` are `none`). Generated HTML
 cannot navigate the parent and cannot rely on a Vite project, package install,
 remote script, or remote stylesheet.
 
+The immutable `/preview` response remains the exact validated Version bytes.
+Focused generated iframes use a separate `/preview/embed` response that repeats
+the Version integrity check, then prepends a capture-phase context-menu bridge
+so iframe and canvas Node menus share one parent-owned surface. The embedded
+document creates a one-document `MessageChannel` capability before artifact
+code runs; the parent accepts only its first private port and never reconnects
+after navigation. Ordinary window messages cannot open the canvas menu. The
+instrumented response is revalidated instead of immutable-cached and has its
+own checksum, ETag, length, and restrictive CSP.
+
 Only the following paths are public reads:
 
 ```text
@@ -246,11 +256,12 @@ untrusted data and cannot change Agent instructions or scope.
 - A single click selects a Node for canvas editing and opens its compact,
   node-scoped Agent without moving the viewport. A double click enters spatial
   focus and expands that same Agent slightly: the Node itself follows a shallow
-  curved flight to the exact usable-screen center and counter-scales to a
-  bounded, viewport-adaptive reading size while the React Flow viewport remains
-  byte-for-byte unchanged. Nearby
-  Nodes move radially outward, then disappear behind an opaque mask whose color
-  is inherited from the canvas, so the canvas base never flashes or changes.
+  Bézier flight into a viewport-adaptive container that nearly fills the usable
+  height while the React Flow viewport remains byte-for-byte unchanged. Generated
+  content is laid out at 100% CSS size rather than visually zoomed; device presets
+  change the responsive container width. Other Nodes travel on straight radial
+  paths, with nearer Nodes moving farther than distant ones, then disappear behind
+  an opaque mask whose duration and ease match the source flight.
   The focused Node is explicitly stacked above that mask. Its exact-Version
   preview receives pointer, keyboard, scrolling, and form input directly. The
   sandbox remains `allow-scripts` without `allow-same-origin`; focus changes
@@ -264,9 +275,11 @@ untrusted data and cannot change Agent instructions or scope.
   restore the Agent. The separate Back
   control exits focus. A Node preview is the object itself and has no permanent
   title bar. The selected-only preview toolbar counter-scales while selection
-  uses one radius-matched offset ring and hover-revealed corner resize brackets
-  instead of a permanent resize box.
-- Every Node panel uses the same Version selector. Material Nodes additionally
+  uses a white radius-matched offset ring, heavier depth, and faint hover-revealed
+  corner resize brackets instead of a permanent resize box. Fixed-ratio material
+  kinds preserve that ratio through corner resize.
+- Every Node panel uses the same compact `Vn` Version selector in its header;
+  timestamps remain in the menu rather than the trigger. Material Nodes additionally
   expose a single-file `Add revision` action; Agent composer attachments still
   create separate context Nodes and never mutate the selected Node implicitly.
   The composer grows between explicit minimum and maximum heights. Historical

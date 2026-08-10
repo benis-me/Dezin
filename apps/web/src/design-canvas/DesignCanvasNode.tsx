@@ -11,7 +11,11 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 
 import { Button } from "../components/ui/Button.tsx";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip.tsx";
-import { previewDocumentSrc } from "../lib/preview-channel.ts";
+import {
+  embeddedPreviewDocumentSrc,
+  previewDocumentSrc,
+  useEmbeddedPreviewContextMenuChannel,
+} from "../lib/preview-channel.ts";
 import { cn } from "../lib/utils.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
@@ -24,15 +28,19 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   projectId: string;
   api: DesignCanvasApi;
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
+  onPreviewContextMenu?: (nodeId: string, clientX: number, clientY: number) => void;
+  onFocusAnimationStart?: (nodeId: string, phase: NodeFocusMotion["phase"], durationMs: number) => void;
+  onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
   focusMotion?: NodeFocusMotion | null;
 }
 
 export type DesignFlowNode = Node<DesignFlowNodeData, "design">;
 
-interface FocusVisualState {
+export interface FocusVisualState {
   x: number;
   y: number;
-  scale: number;
+  scaleX: number;
+  scaleY: number;
   opacity: number;
 }
 
@@ -42,16 +50,50 @@ interface FocusAnimationState {
   pathKey: string;
 }
 
+export function focusVisualStateFromTransform(transform: string, opacity: number): FocusVisualState {
+  if (transform === "none" || transform.trim() === "") {
+    return { x: 0, y: 0, scaleX: 1, scaleY: 1, opacity };
+  }
+  const serialized = transform.match(/^matrix(3d)?\(([^)]+)\)$/);
+  const values = serialized?.[2]?.split(",").map((value) => Number(value.trim())) ?? [];
+  const matrix3d = serialized?.[1] === "3d" && values.length === 16;
+  const matrix2d = serialized?.[1] === undefined && values.length === 6;
+  if (matrix3d || matrix2d) {
+    return {
+      x: matrix3d ? values[12]! : values[4]!,
+      y: matrix3d ? values[13]! : values[5]!,
+      scaleX: values[0]!,
+      scaleY: matrix3d ? values[5]! : values[3]!,
+      opacity,
+    };
+  }
+  if (typeof DOMMatrixReadOnly !== "undefined") {
+    try {
+      const matrix = new DOMMatrixReadOnly(transform);
+      return {
+        x: Number.isFinite(matrix.m41) ? matrix.m41 : 0,
+        y: Number.isFinite(matrix.m42) ? matrix.m42 : 0,
+        scaleX: Number.isFinite(matrix.m11) ? matrix.m11 : 1,
+        scaleY: Number.isFinite(matrix.m22) ? matrix.m22 : 1,
+        opacity,
+      };
+    } catch {
+      // Fall through to the serialization parser used by DOM-light test hosts.
+    }
+  }
+  return {
+    x: 0,
+    y: 0,
+    scaleX: 1,
+    scaleY: 1,
+    opacity,
+  };
+}
+
 function readFocusVisualState(element: HTMLElement): FocusVisualState {
   const computed = getComputedStyle(element);
-  const transform = computed.transform;
-  const matrix = /^matrix\(([-\d.e]+),\s*[-\d.e]+,\s*[-\d.e]+,\s*([-\d.e]+),\s*([-\d.e]+),\s*([-\d.e]+)\)$/.exec(transform);
-  return {
-    x: matrix ? Number(matrix[3]) : 0,
-    y: matrix ? Number(matrix[4]) : 0,
-    scale: matrix ? (Number(matrix[1]) + Number(matrix[2])) / 2 : 1,
-    opacity: Number.parseFloat(computed.opacity) || 0,
-  };
+  const opacity = Number.parseFloat(computed.opacity);
+  return focusVisualStateFromTransform(computed.transform, Number.isFinite(opacity) ? opacity : 1);
 }
 
 function focusVisualFrames(
@@ -68,14 +110,26 @@ function focusVisualFrames(
     const inverse = 1 - progress;
     const x = inverse * inverse * start.x + 2 * inverse * progress * controlX + progress * progress * end.x;
     const y = inverse * inverse * start.y + 2 * inverse * progress * controlY + progress * progress * end.y;
-    const scale = start.scale + (end.scale - start.scale) * progress;
+    const scaleX = start.scaleX + (end.scaleX - start.scaleX) * progress;
+    const scaleY = start.scaleY + (end.scaleY - start.scaleY) * progress;
     const opacity = start.opacity + (end.opacity - start.opacity) * progress;
     return {
       offset,
-      transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})`,
+      transform: `translate3d(${x}px, ${y}px, 0) scale(${scaleX}, ${scaleY})`,
       opacity,
     };
   });
+}
+
+function previewFrameAddress(url: string, embedded: boolean): { src: string; instrumented: boolean } {
+  if (!embedded) return { src: previewDocumentSrc(url), instrumented: false };
+  try {
+    return { src: embeddedPreviewDocumentSrc(url), instrumented: true };
+  } catch {
+    // Non-production adapters and old fixtures can still render exact previews;
+    // only the dedicated immutable endpoint gains the context-menu bridge.
+    return { src: previewDocumentSrc(url), instrumented: false };
+  }
 }
 
 const STATE_LABELS: Record<DesignNode["state"], string> = {
@@ -90,6 +144,7 @@ const STATE_LABELS: Record<DesignNode["state"], string> = {
 };
 
 const LIVE_STATES = new Set<DesignNode["state"]>(["queued", "generating", "validating"]);
+const NODE_ENTERING_DURATION_MS = 1_500;
 
 const GENERATED_PREVIEW_SIZES: Partial<Record<DesignNodeKind, { width: number; height: number }>> = {
   page: { width: 800, height: 600 },
@@ -129,11 +184,15 @@ function useNearViewport(selected: boolean): { ref: React.RefObject<HTMLDivEleme
 
 function NodeCornerResizeControls({
   node,
+  interactive,
+  lockAspectRatio,
   onResize,
   onResizeStart,
   onResizeEnd,
 }: {
   node: DesignNode;
+  interactive: boolean;
+  lockAspectRatio: boolean;
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
   onResizeStart: () => void;
   onResizeEnd: () => void;
@@ -144,7 +203,15 @@ function NodeCornerResizeControls({
       position={position}
       minWidth={280}
       minHeight={200}
-      className="design-canvas-node__resize-control"
+      keepAspectRatio={lockAspectRatio}
+      shouldResize={() => interactive}
+      className={cn(
+        "design-canvas-node__resize-control",
+        interactive
+          ? "design-canvas-node__resize-control--interactive"
+          : "design-canvas-node__resize-control--affordance",
+      )}
+      style={{ pointerEvents: interactive ? "auto" : "none" }}
       onResizeStart={onResizeStart}
       onResizeEnd={(_event, params) => {
         onResizeEnd();
@@ -161,16 +228,50 @@ function NodeCornerResizeControls({
   ));
 }
 
+function useNodeEntering(createdAt: number): boolean {
+  const [entering, setEntering] = useState(() => {
+    const age = Date.now() - createdAt;
+    return age >= 0 && age < NODE_ENTERING_DURATION_MS;
+  });
+
+  useEffect(() => {
+    const age = Date.now() - createdAt;
+    const remaining = NODE_ENTERING_DURATION_MS - age;
+    if (age < 0 || remaining <= 0) {
+      setEntering(false);
+      return;
+    }
+
+    setEntering(true);
+    const timeout = window.setTimeout(() => setEntering(false), remaining);
+    return () => window.clearTimeout(timeout);
+  }, [createdAt]);
+
+  return entering;
+}
+
 export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) {
-  const { node, projectId, api, onResize, focusMotion = null } = data;
+  const {
+    node,
+    projectId,
+    api,
+    onResize,
+    onPreviewContextMenu,
+    onFocusAnimationStart,
+    onFocusAnimationComplete,
+    focusMotion = null,
+  } = data;
   const [resizing, setResizing] = useState(false);
   const { zoom } = useViewport();
   const chromeScale = 1 / Math.max(0.12, zoom);
   const { ref, nearViewport } = useNearViewport(selected);
   const focusAnimationRef = useRef<FocusAnimationState | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const entering = useNodeEntering(node.createdAt);
   const material = isMaterialNodeKind(node.kind);
   const focusInteractive = focusMotion?.phase === "opening" && focusMotion.role === "source";
-  const shouldMountRichPreview = nearViewport || selected || focusInteractive;
+  const focusSource = focusMotion?.role === "source";
+  const shouldMountRichPreview = nearViewport || selected || focusSource;
   const { preview, versionId, loading, error: previewError } = useExactVersionPreview({
     api,
     projectId,
@@ -180,16 +281,38 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
   const catalog = catalogItem(node.kind);
   const hasRichContent = versionId !== null;
   const live = LIVE_STATES.has(node.state);
+  const previewFrameAddressValue = preview && !material
+    ? previewFrameAddress(preview.url, focusSource)
+    : null;
+  useEmbeddedPreviewContextMenuChannel({
+    iframeRef,
+    previewSrc: focusSource ? previewFrameAddressValue?.src ?? null : null,
+    enabled: focusSource && previewFrameAddressValue?.instrumented === true && onPreviewContextMenu !== undefined,
+    onContextMenu: (message) => {
+      const iframe = iframeRef.current;
+      if (!focusSource || !onPreviewContextMenu || !iframe) return;
+      const bounds = iframe.getBoundingClientRect();
+      const scaleX = bounds.width / Math.max(1, iframe.clientWidth);
+      const scaleY = bounds.height / Math.max(1, iframe.clientHeight);
+      onPreviewContextMenu(
+        node.id,
+        bounds.left + Math.max(0, Math.min(bounds.width, message.clientX * scaleX)),
+        bounds.top + Math.max(0, Math.min(bounds.height, message.clientY * scaleY)),
+      );
+    },
+  });
   const previousVersionIdRef = useRef(versionId);
   const focusStyle = focusMotion ? {
+    "--design-node-focus-start-x": `${focusMotion.startX}px`,
+    "--design-node-focus-start-y": `${focusMotion.startY}px`,
     "--design-node-focus-x": `${focusMotion.shiftX}px`,
     "--design-node-focus-y": `${focusMotion.shiftY}px`,
     "--design-node-focus-arc-x": `${focusMotion.arcX}px`,
     "--design-node-focus-arc-y": `${focusMotion.arcY}px`,
-    "--design-node-focus-scale": focusMotion.scale,
-    "--design-node-focus-mid-x": `${focusMotion.shiftX * 0.62 + focusMotion.arcX}px`,
-    "--design-node-focus-mid-y": `${focusMotion.shiftY * 0.62 + focusMotion.arcY}px`,
-    "--design-node-focus-mid-scale": 0.38 + focusMotion.scale * 0.62,
+    "--design-node-focus-start-scale-x": focusMotion.startScaleX,
+    "--design-node-focus-start-scale-y": focusMotion.startScaleY,
+    "--design-node-focus-scale-x": focusMotion.scaleX,
+    "--design-node-focus-scale-y": focusMotion.scaleY,
     "--design-node-focus-duration": `${focusMotion.durationMs}ms`,
     "--design-node-focus-delay": `${focusMotion.delayMs}ms`,
     "--design-node-focus-fade-duration": `${focusMotion.fadeDurationMs}ms`,
@@ -208,39 +331,66 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       focusMotion.shiftY,
       focusMotion.arcX,
       focusMotion.arcY,
-      focusMotion.scale,
+      focusMotion.startX,
+      focusMotion.startY,
+      focusMotion.startScaleX,
+      focusMotion.startScaleY,
+      focusMotion.scaleX,
+      focusMotion.scaleY,
+      focusMotion.layoutWidth,
+      focusMotion.layoutHeight,
       focusMotion.role,
     ].join(":");
     if (running?.target === focusMotion.phase && running.pathKey === pathKey) return;
 
-    const openingTarget: FocusVisualState = {
+    const focusedTarget: FocusVisualState = {
       x: focusMotion.shiftX,
       y: focusMotion.shiftY,
-      scale: focusMotion.scale,
+      scaleX: focusMotion.scaleX,
+      scaleY: focusMotion.scaleY,
       opacity: focusMotion.role === "source" ? 1 : 0,
     };
-    const closingTarget: FocusVisualState = { x: 0, y: 0, scale: 1, opacity: 1 };
+    const canvasTarget: FocusVisualState = {
+      x: focusMotion.startX,
+      y: focusMotion.startY,
+      scaleX: focusMotion.startScaleX,
+      scaleY: focusMotion.startScaleY,
+      opacity: 1,
+    };
     const start = running
       ? readFocusVisualState(element)
       : focusMotion.phase === "opening"
-        ? closingTarget
-        : openingTarget;
-    const end = focusMotion.phase === "opening" ? openingTarget : closingTarget;
+        ? canvasTarget
+        : focusedTarget;
+    const end = focusMotion.phase === "opening" ? focusedTarget : canvasTarget;
     running?.animation.cancel();
     if (focusMotion.durationMs <= 0 || typeof element.animate !== "function") {
       focusAnimationRef.current = null;
-      return;
+      if (focusMotion.role !== "source") return;
+      onFocusAnimationStart?.(node.id, focusMotion.phase, 0);
+      const settleTimer = window.setTimeout(() => {
+        onFocusAnimationComplete?.(node.id, focusMotion.phase);
+      }, 0);
+      return () => window.clearTimeout(settleTimer);
     }
-    const fullTravel = Math.hypot(focusMotion.shiftX, focusMotion.shiftY)
-      + Math.abs(focusMotion.scale - 1) * 240
+    const fullTravel = Math.hypot(focusMotion.shiftX - focusMotion.startX, focusMotion.shiftY - focusMotion.startY)
+      + Math.abs(focusMotion.scaleX - focusMotion.startScaleX) * 180
+      + Math.abs(focusMotion.scaleY - focusMotion.startScaleY) * 180
       + (focusMotion.role === "source" ? 0 : 80);
     const remainingTravel = Math.hypot(end.x - start.x, end.y - start.y)
-      + Math.abs(end.scale - start.scale) * 240
+      + Math.abs(end.scaleX - start.scaleX) * 180
+      + Math.abs(end.scaleY - start.scaleY) * 180
       + Math.abs(end.opacity - start.opacity) * 80;
-    const durationRatio = Math.sqrt(Math.min(1, remainingTravel / Math.max(1, fullTravel)));
+    const travelRatio = Math.min(1, remainingTravel / Math.max(1, fullTravel));
+    const durationRatio = Math.sqrt(travelRatio);
     const durationMs = Math.max(120, Math.round(focusMotion.durationMs * durationRatio));
     const animation = element.animate(
-      focusVisualFrames(start, end, focusMotion.arcX, focusMotion.arcY),
+      focusVisualFrames(
+        start,
+        end,
+        focusMotion.arcX * travelRatio,
+        focusMotion.arcY * travelRatio,
+      ),
       {
         duration: durationMs,
         delay: running ? 0 : focusMotion.delayMs,
@@ -249,7 +399,14 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       },
     );
     focusAnimationRef.current = { animation, target: focusMotion.phase, pathKey };
-  }, [focusMotion, ref]);
+    if (focusMotion.role === "source") {
+      onFocusAnimationStart?.(node.id, focusMotion.phase, durationMs);
+      void animation.finished.then(() => {
+        if (focusAnimationRef.current?.animation !== animation) return;
+        onFocusAnimationComplete?.(node.id, focusMotion.phase);
+      }).catch(() => undefined);
+    }
+  }, [focusMotion, node.id, onFocusAnimationComplete, onFocusAnimationStart, ref]);
 
   useEffect(() => () => {
     focusAnimationRef.current?.animation.cancel();
@@ -282,18 +439,23 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         "design-canvas-node",
         selected && "design-canvas-node--selected",
         resizing && "design-canvas-node--resizing",
+        entering && "design-canvas-node--entering",
         focusInteractive && "design-canvas-node--focus-interactive nodrag nopan",
       )}
-      style={{ width: "100%", height: "100%", ...focusStyle }}
+      style={{
+        width: focusSource && focusMotion.layoutWidth ? focusMotion.layoutWidth : "100%",
+        height: focusSource && focusMotion.layoutHeight ? focusMotion.layoutHeight : "100%",
+        ...focusStyle,
+      }}
     >
-      {selected && !focusInteractive ? (
-        <NodeCornerResizeControls
-          node={node}
-          onResize={onResize}
-          onResizeStart={() => setResizing(true)}
-          onResizeEnd={() => setResizing(false)}
-        />
-      ) : null}
+      <NodeCornerResizeControls
+        node={node}
+        interactive={selected && focusMotion === null}
+        lockAspectRatio={catalog.lockAspectRatio === true}
+        onResize={onResize}
+        onResizeStart={() => setResizing(true)}
+        onResizeEnd={() => setResizing(false)}
+      />
 
       {selected && hasRichContent && !material && !focusInteractive ? (
         <TooltipProvider delayDuration={180}>
@@ -333,9 +495,10 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
                   <MaterialPreview key={preview.url} node={node} url={preview.url} interactive={focusInteractive} />
                 ) : (
                   <iframe
+                    ref={iframeRef}
                     className="design-canvas-node__iframe nodrag nopan"
                     title={`${node.name}, version ${versionId}`}
-                    src={previewDocumentSrc(preview.url)}
+                    src={previewFrameAddressValue?.src ?? previewDocumentSrc(preview.url)}
                     sandbox="allow-scripts"
                     tabIndex={focusInteractive ? 0 : -1}
                   />
@@ -364,7 +527,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             />
           ) : (
             <NodePlaceholder
-              icon="sparkles"
+              tone="empty"
               title={`Create this ${catalog.label.toLocaleLowerCase()}`}
               detail="Select this Node and describe the result in its Agent."
             />
@@ -470,27 +633,31 @@ function MaterialPreview({ node, url, interactive }: { node: DesignNode; url: st
 
 function NodePlaceholder({
   icon,
+  tone,
   title,
   detail,
   action,
 }: {
-  icon: "sparkles" | "loading" | "paused" | "error";
+  icon?: "sparkles" | "loading" | "paused" | "error";
+  tone?: "empty";
   title: string;
   detail: string;
   action?: React.ReactNode;
 }) {
   return (
-    <div className="design-canvas-node__placeholder" data-placeholder={icon}>
+    <div className="design-canvas-node__placeholder" data-placeholder={icon ?? tone} data-tone={tone}>
       <div className="design-canvas-node__placeholder-atmosphere" aria-hidden />
-      <span className="design-canvas-node__placeholder-icon" data-icon={icon}>
-        {icon === "sparkles"
-          ? <Sparkles aria-hidden />
-          : icon === "paused"
-            ? <Play aria-hidden />
-            : icon === "error"
-              ? <CircleAlert aria-hidden />
-              : <LoaderCircle aria-hidden />}
-      </span>
+      {icon ? (
+        <span className="design-canvas-node__placeholder-icon" data-icon={icon}>
+          {icon === "sparkles"
+            ? <Sparkles aria-hidden />
+            : icon === "paused"
+              ? <Play aria-hidden />
+              : icon === "error"
+                ? <CircleAlert aria-hidden />
+                : <LoaderCircle aria-hidden />}
+        </span>
+      ) : null}
       <div className="design-canvas-node__placeholder-copy">
         <p>{title}</p>
         <span>{detail}</span>

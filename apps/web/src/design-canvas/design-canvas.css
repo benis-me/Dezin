@@ -1,6 +1,7 @@
 .design-canvas-root {
   --design-canvas-accent: oklch(0.58 0.18 258);
   --design-canvas-accent-soft: color-mix(in oklch, var(--design-canvas-accent) 10%, transparent);
+  --design-focus-duration: 420ms;
   position: relative;
   display: flex;
   width: 100%;
@@ -24,22 +25,36 @@
   min-height: 0;
   flex: 1;
   overflow: hidden;
-  background: oklch(0.935 0.006 225);
+  background: #e8eaeb;
   transition: background-color 320ms var(--ease-smooth);
 }
-.dark .design-canvas-surface { background: color-mix(in oklch, var(--surface-2) 38%, var(--background)); }
+.dark .design-canvas-surface { background: #e8eaeb; }
 .design-canvas-surface .react-flow__background {
   opacity: 0.16;
   transition: opacity 480ms var(--ease-smooth);
 }
 .design-canvas-surface[data-node-focus] .react-flow__background { opacity: 0; }
-.design-canvas-surface[data-node-focus] > .react-flow { z-index: 46 !important; }
+.design-canvas-surface[data-node-focus] > .react-flow { z-index: 48 !important; }
 
 .design-canvas-surface .react-flow__pane { cursor: default; }
 .design-canvas-surface[data-tool="hand"] .react-flow__pane { cursor: grab; }
 .design-canvas-surface[data-tool="hand"] .react-flow__pane:active { cursor: grabbing; }
-.design-canvas-surface .react-flow__selection { border-color: color-mix(in oklch, var(--design-canvas-accent) 65%, transparent); background: var(--design-canvas-accent-soft); }
-.design-canvas-surface .react-flow__nodesselection-rect { border-color: color-mix(in oklch, var(--design-canvas-accent) 50%, transparent); background: transparent; }
+.design-canvas-surface .react-flow__selection {
+  border: 1px solid color-mix(in oklch, var(--design-canvas-accent) 58%, white);
+  background: color-mix(in oklch, var(--design-canvas-accent) 7%, transparent);
+}
+.design-canvas-surface .react-flow__nodesselection-rect {
+  border: 1px solid color-mix(in oklch, white 78%, var(--design-canvas-accent));
+  background: transparent;
+}
+.design-canvas-selection-ghost {
+  position: absolute;
+  z-index: 21;
+  border: 1px solid color-mix(in oklch, var(--design-canvas-accent) 58%, white);
+  border-radius: 1px;
+  pointer-events: none;
+  animation: design-canvas-selection-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
 .design-canvas-surface .react-flow__node:focus,
 .design-canvas-surface .react-flow__node:focus-visible { outline: none; }
 .design-canvas-surface .react-flow__node:focus-visible .design-canvas-node::after {
@@ -58,7 +73,7 @@
   position: absolute;
   width: 13px;
   height: 13px;
-  border-color: color-mix(in oklch, var(--design-canvas-accent) 78%, var(--foreground));
+  border-color: color-mix(in oklch, white 72%, var(--foreground));
   opacity: 0;
   transform: scale(0.92);
   transition: opacity 120ms cubic-bezier(0.23, 1, 0.32, 1), transform 140ms cubic-bezier(0.23, 1, 0.32, 1), border-color 120ms var(--ease-smooth);
@@ -71,6 +86,16 @@
 .design-canvas-node__resize-control:active .design-canvas-node__resize-corner,
 .design-canvas-node--resizing .design-canvas-node__resize-corner { opacity: 1; transform: scale(1); }
 .design-canvas-node__resize-control:hover .design-canvas-node__resize-corner { border-color: var(--design-canvas-accent); }
+@media (hover: hover) and (pointer: fine) {
+  .design-canvas-node:hover .design-canvas-node__resize-control--affordance .design-canvas-node__resize-corner {
+    opacity: 0.24;
+    transform: scale(1);
+  }
+}
+.design-canvas-node__resize-control--interactive .design-canvas-node__resize-corner {
+  opacity: 0.58;
+  transform: scale(1);
+}
 
 /* Top bar */
 .design-canvas-topbar {
@@ -191,7 +216,7 @@
   animation: design-canvas-notice-in var(--duration-normal) var(--ease-smooth) both;
 }
 
-.design-canvas-tools { right: 12px; bottom: 12px; gap: 8px; }
+.design-canvas-tools { right: 12px; bottom: 12px; gap: 8px; transition: right 260ms var(--ease-smooth), opacity 220ms var(--ease-smooth), transform 280ms var(--ease-smooth); }
 .design-canvas-zoom,
 .design-canvas-tools__modes,
 .design-canvas-tools #design-canvas-add {
@@ -204,18 +229,18 @@
 .design-canvas-add-trigger { display: inline-flex; width: 40px; height: 40px; border-radius: 999px; }
 .design-canvas-tools #design-canvas-add { width: 40px; height: 40px; padding: 0; border-radius: 999px; color: inherit; }
 .design-canvas-tools #design-canvas-add > svg { width: 14px; height: 14px; margin: 0; }
-.design-canvas-zoom { bottom: 12px; left: 12px; gap: 1px; border-radius: 17px; padding: 4px; }
-.design-canvas-zoom [data-slot="button"] { width: 36px; height: 36px; border-radius: 11px; }
+.design-canvas-zoom { bottom: 12px; left: 12px; gap: 1px; border-radius: 15px; padding: 4px; }
+.design-canvas-zoom [data-slot="button"] { width: 32px; height: 32px; border-radius: 10px; }
 .design-canvas-zoom [data-slot="button"] > svg { width: 14px; height: 14px; stroke-width: 1.8; }
 .design-canvas-zoom [data-slot="button"]:disabled { opacity: 0.34; }
-.design-canvas-zoom > output { display: grid; height: 36px; place-items: center; line-height: 1; }
+.design-canvas-zoom > output { display: grid; height: 32px; place-items: center; line-height: 1; }
 .design-canvas-tools [data-slot="button"],
 .design-canvas-zoom [data-slot="button"] { color: inherit; }
 .design-canvas-tools [data-slot="button"]:hover,
 .design-canvas-zoom [data-slot="button"]:hover,
 .design-canvas-tools [data-slot="button"][aria-pressed="true"],
 .design-canvas-tools #design-canvas-add:hover { background: color-mix(in oklch, var(--foreground) 7%, var(--card)); color: var(--foreground); }
-.design-canvas-zoom > output { min-width: 52px; margin: 0 1px; border-radius: 10px; background: color-mix(in oklch, var(--foreground) 4.5%, transparent); color: color-mix(in oklch, var(--foreground) 76%, transparent); font-size: 11.5px; font-weight: 620; font-variant-numeric: tabular-nums; letter-spacing: -0.012em; text-align: center; }
+.design-canvas-zoom > output { min-width: 48px; margin: 0 1px; border-radius: 9px; background: color-mix(in oklch, var(--foreground) 4.5%, transparent); color: color-mix(in oklch, var(--foreground) 72%, transparent); font-size: 11px; font-weight: 620; font-variant-numeric: tabular-nums; letter-spacing: -0.012em; text-align: center; }
 .design-canvas-tools__divider { width: 1px; height: 18px; margin: 0 3px; background: color-mix(in oklch, var(--border) 82%, transparent); }
 .dark .design-canvas-zoom,
 .dark .design-canvas-tools__modes,
@@ -228,7 +253,10 @@
 .dark .design-canvas-tools__divider { background: oklch(1 0 0 / 14%); }
 .design-canvas-tools,
 .design-canvas-zoom {
-  transition: opacity 220ms var(--ease-smooth), transform 280ms var(--ease-smooth);
+  transition: right 260ms var(--ease-smooth), opacity 220ms var(--ease-smooth), transform 280ms var(--ease-smooth);
+}
+.design-canvas-surface[data-main-agent] .design-canvas-tools {
+  right: calc(clamp(380px, 32vw, 492px) + 20px);
 }
 .design-canvas-surface[data-node-focus] .design-canvas-tools,
 .design-canvas-surface[data-node-focus] .design-canvas-zoom {
@@ -239,14 +267,25 @@
 .design-canvas-surface[data-node-focus] .design-canvas-tools,
 .design-canvas-surface[data-node-focus] .design-canvas-zoom { transform: translateY(8px) scale(0.98); }
 
+.design-canvas-focus-dismiss {
+  position: absolute;
+  z-index: 47;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+
 .design-canvas-focus-back {
   position: absolute;
   z-index: 52;
-  top: 48px;
+  top: 12px;
   left: 12px;
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   place-items: center;
   border: 0.5px solid color-mix(in oklch, var(--border) 64%, transparent);
   border-radius: 999px;
@@ -254,8 +293,8 @@
   box-shadow: 0 1px 2px oklch(0.1 0 0 / 0.035), 0 9px 28px oklch(0.1 0 0 / 0.075);
   backdrop-filter: blur(24px) saturate(110%);
 }
-.design-canvas-focus-back > button { width: 32px !important; height: 32px !important; border-radius: 999px !important; }
-.design-canvas-focus-back svg { width: 13px; height: 13px; stroke-width: 1.8; }
+.design-canvas-focus-back > button { width: 36px !important; height: 36px !important; border-radius: 999px !important; }
+.design-canvas-focus-back svg { width: 14px; height: 14px; stroke-width: 1.8; }
 
 .design-canvas-focus-actions {
   position: absolute;
@@ -265,21 +304,25 @@
   display: flex;
   align-items: center;
   border: 0.5px solid color-mix(in oklch, var(--border) 70%, transparent);
-  border-radius: 15px;
-  padding: 4px;
-  transform: translateX(-50%);
+  gap: 1px;
+  border-radius: 17px;
+  padding: 5px;
+  translate: -50% 0;
   background: color-mix(in oklch, var(--card) 86%, transparent);
   box-shadow: 0 1px 2px oklch(0.1 0 0 / 0.035), 0 10px 30px oklch(0.1 0 0 / 0.075);
   color: var(--foreground);
   backdrop-filter: blur(24px) saturate(108%);
   transition: left 300ms var(--ease-smooth), bottom 300ms var(--ease-smooth);
 }
-.design-canvas-surface[data-node-agent="open"] .design-canvas-focus-actions { left: 50%; }
-.design-canvas-focus-actions__divider { width: 1px; height: 16px; margin: 0 2px; background: color-mix(in oklch, var(--border) 82%, transparent); }
-.design-canvas-focus-actions [data-slot="button"] { width: 32px; height: 32px; color: inherit; }
+.design-canvas-surface[data-node-agent="open"] .design-canvas-focus-actions {
+  left: calc(50% - (var(--design-node-agent-width, 352px) + 24px) / 2);
+}
+.design-canvas-focus-actions__devices { display: flex; align-items: center; gap: 1px; }
+.design-canvas-focus-actions__divider { width: 1px; height: 18px; margin: 0 3px; background: color-mix(in oklch, var(--border) 82%, transparent); }
+.design-canvas-focus-actions [data-slot="button"] { width: 38px; height: 38px; border-radius: 11px; color: inherit; }
 .design-canvas-focus-actions [data-slot="button"]:hover,
 .design-canvas-focus-actions [data-slot="button"][aria-pressed="true"] { background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--foreground); }
-.design-canvas-focus-actions svg { width: 13px; height: 13px; stroke-width: 1.8; }
+.design-canvas-focus-actions svg { width: 15px; height: 15px; stroke-width: 1.75; }
 .dark .design-canvas-focus-actions { border-color: oklch(1 0 0 / 12%); background: oklch(0.19 0.006 75 / 94%); color: oklch(0.96 0.003 95); box-shadow: 0 1px 2px oklch(0 0 0 / 0.2), 0 12px 36px oklch(0 0 0 / 0.2); }
 .dark .design-canvas-focus-actions__divider { background: oklch(1 0 0 / 14%); }
 .dark .design-canvas-focus-actions [data-slot="button"]:hover,
@@ -353,11 +396,16 @@
 /* Canvas Nodes: the preview is the object. Metadata stays in the Agent and
    menus instead of consuming a permanent title bar. */
 .design-canvas-node {
+  --design-node-focus-start-x: 0px;
+  --design-node-focus-start-y: 0px;
   --design-node-focus-x: 0px;
   --design-node-focus-y: 0px;
   --design-node-focus-arc-x: 0px;
   --design-node-focus-arc-y: 0px;
-  --design-node-focus-scale: 1;
+  --design-node-focus-start-scale-x: 1;
+  --design-node-focus-start-scale-y: 1;
+  --design-node-focus-scale-x: 1;
+  --design-node-focus-scale-y: 1;
   --design-node-focus-duration: 240ms;
   --design-node-focus-delay: 0ms;
   --design-node-focus-fade-duration: 190ms;
@@ -376,14 +424,15 @@
 }
 .design-canvas-node[data-node-focus-role] { will-change: transform, opacity; }
 .react-flow__node.design-canvas-flow-node--inactive { z-index: 2 !important; pointer-events: none; }
-.react-flow__node.design-canvas-flow-node--focused { z-index: 48 !important; }
+.react-flow__node.design-canvas-flow-node--focused { z-index: 48 !important; pointer-events: none; }
+.react-flow__node.design-canvas-flow-node--focused .design-canvas-node--focus-interactive { pointer-events: auto; }
 .design-canvas-node[data-node-focus-role="source"][data-node-focus-phase="opening"] {
   opacity: 1;
-  transform: translate3d(var(--design-node-focus-x), var(--design-node-focus-y), 0) scale(var(--design-node-focus-scale));
+  transform: translate3d(var(--design-node-focus-x), var(--design-node-focus-y), 0) scale(var(--design-node-focus-scale-x), var(--design-node-focus-scale-y));
 }
 .design-canvas-node[data-node-focus-role="source"][data-node-focus-phase="closing"] {
   opacity: 1;
-  transform: translate3d(0, 0, 0) scale(1);
+  transform: translate3d(var(--design-node-focus-start-x), var(--design-node-focus-start-y), 0) scale(var(--design-node-focus-start-scale-x), var(--design-node-focus-start-scale-y));
 }
 .design-canvas-node[data-node-focus-role="away"] {
   opacity: 0;
@@ -405,12 +454,14 @@
   pointer-events: none;
   transform: scale(1.012);
   transform-origin: center;
-  transition: opacity 190ms var(--ease-smooth), transform 240ms var(--ease-smooth);
+  transition:
+    opacity var(--design-focus-duration) cubic-bezier(0.22, 1, 0.36, 1),
+    transform var(--design-focus-duration) cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform, opacity;
 }
 .dark .design-canvas-surface::after { background: oklch(0.08 0.004 260 / 48%); }
-.design-canvas-surface[data-node-focus="opening"]::after { background: inherit; opacity: 1; transform: scale(1); transition-duration: 480ms, 480ms; }
-.design-canvas-surface[data-node-focus="closing"]::after { background: inherit; opacity: 0; transform: scale(1.006); transition-duration: 480ms, 480ms; }
+.design-canvas-surface[data-node-focus="opening"]::after { background: inherit; opacity: 1; transform: scale(1); }
+.design-canvas-surface[data-node-focus="closing"]::after { background: inherit; opacity: 0; transform: scale(1.006); }
 .design-canvas-surface[data-context-menu-open]:not([data-node-focus])::after { opacity: 1; transform: scale(1); transition-duration: 320ms, 360ms; }
 .design-canvas-surface[data-context-menu-open]:not([data-node-focus]) .design-canvas-node { opacity: 0.45; transform: translate3d(0, 2px, 0) scale(0.992); transition-duration: 300ms; transition-timing-function: var(--ease-smooth); }
 .design-canvas-surface[data-context-menu-open]:not([data-node-focus]) .design-canvas-node--selected { opacity: 1; transform: translate3d(0, 0, 0) scale(0.998); }
@@ -426,8 +477,12 @@
   pointer-events: none;
   transition: border-color 130ms cubic-bezier(0.23, 1, 0.32, 1);
 }
-.design-canvas-node--selected::after { border-color: color-mix(in oklch, var(--design-canvas-accent) 82%, var(--foreground)); }
-.design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"]::after { border-color: transparent; }
+.design-canvas-node--selected::after {
+  border-width: 1.5px;
+  border-color: white;
+  box-shadow: 0 0 0 1px oklch(0.18 0.006 255 / 0.12), 0 10px 30px oklch(0.12 0.008 255 / 0.18);
+}
+.design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"]::after { border-color: transparent; box-shadow: none; }
 .design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"] .design-canvas-node__toolbar,
 .design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"] .design-canvas-node__resize-control { opacity: 0; pointer-events: none; }
 
@@ -460,15 +515,11 @@
   border-radius: 10px;
   background: var(--card);
   box-shadow: 0 2px 5px oklch(0.1 0 0 / 0.045), 0 12px 28px oklch(0.1 0 0 / 0.075);
-  animation: design-canvas-node-frame-in 320ms var(--ease-smooth) both;
   transition: border-color 180ms var(--ease-smooth);
 }
-@media (hover: hover) and (pointer: fine) {
-  .design-canvas-surface:not([data-node-focus]):not([data-context-menu-open]) .design-canvas-node:hover { transform: translate3d(0, 0, 0) scale(1.003); transition-duration: 220ms; }
-  .design-canvas-surface:not([data-node-focus]):not([data-context-menu-open]) .design-canvas-node--selected:hover { transform: translate3d(0, 0, 0) scale(1.002); }
-}
+.design-canvas-node--entering .design-canvas-node__frame { animation: design-canvas-node-frame-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .design-canvas-node:hover .design-canvas-node__frame { border-color: var(--border-strong); }
-.design-canvas-node--selected .design-canvas-node__frame { border-color: color-mix(in oklch, var(--border-strong) 84%, transparent); box-shadow: 0 2px 6px oklch(0.1 0 0 / 0.05), 0 16px 34px oklch(0.1 0 0 / 0.09); }
+.design-canvas-node--selected .design-canvas-node__frame { border-color: color-mix(in oklch, white 88%, var(--border)); box-shadow: 0 3px 10px oklch(0.1 0 0 / 0.09), 0 22px 48px oklch(0.08 0.006 255 / 0.2); }
 .design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"] .design-canvas-node__frame {
   border-color: transparent;
   box-shadow: 0 2px 8px oklch(0.1 0 0 / 0.035);
@@ -514,6 +565,19 @@
   opacity: 0.48;
   pointer-events: none;
 }
+.design-canvas-node__placeholder[data-tone="empty"] {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in oklch, var(--foreground) 1.8%, transparent) 0 1px,
+      transparent 1px 10px
+    ),
+    color-mix(in oklch, var(--surface) 36%, var(--background));
+}
+.design-canvas-node__placeholder[data-tone="empty"]::before,
+.design-canvas-node__placeholder[data-tone="empty"] .design-canvas-node__placeholder-atmosphere { display: none; }
+.design-canvas-node__placeholder[data-tone="empty"] .design-canvas-node__placeholder-copy { opacity: 0.66; }
+.design-canvas-node__placeholder[data-tone="empty"] .design-canvas-node__placeholder-copy p { font-weight: 560; }
 .design-canvas-node__placeholder-atmosphere {
   position: absolute;
   top: 50%;
@@ -621,9 +685,9 @@
   min-height: 0;
   overflow: visible;
   border: 0;
-  border-radius: 18px;
+  border-radius: 16px;
   background: transparent;
-  box-shadow: 0 2px 8px oklch(0.1 0 0 / 0.055), 0 28px 76px oklch(0.1 0 0 / 0.16);
+  box-shadow: 0 2px 7px oklch(0.1 0 0 / 0.045), 0 24px 64px oklch(0.1 0 0 / 0.14);
   color: var(--foreground);
 }
 .design-canvas-agent__surface {
@@ -642,25 +706,26 @@
 .design-canvas-agent--floating {
   position: absolute;
   z-index: 49;
-  width: 352px;
+  width: var(--design-node-agent-width, 352px);
   height: min(520px, calc(100% - 24px));
-  transition: left 340ms var(--ease-smooth), top 340ms var(--ease-smooth), height 380ms var(--ease-smooth);
+  transition: left 260ms cubic-bezier(0.22, 1, 0.36, 1), top 260ms cubic-bezier(0.22, 1, 0.36, 1), height 300ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform, opacity;
 }
 .design-canvas-agent--floating[data-agent-size="focus"] { height: calc(100% - 24px); }
 
 .design-canvas-agent__header {
   display: flex;
-  height: 46px;
-  min-height: 46px;
+  height: 48px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0 9px 0 14px;
+  border-bottom: 0.5px solid color-mix(in oklch, var(--border) 42%, transparent);
+  padding: 0 10px 0 14px;
 }
 .design-canvas-agent__header-copy { display: grid; min-width: 0; gap: 1px; }
 .design-canvas-agent__eyebrow { color: var(--muted-foreground); font-family: var(--font-mono-stack); font-size: 8px; font-weight: 560; letter-spacing: 0.075em; line-height: 1; text-transform: uppercase; }
-.design-canvas-agent__header h2 { overflow: hidden; color: var(--foreground); font-size: 12px; font-weight: 620; letter-spacing: -0.014em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.design-canvas-agent__header h2 { overflow: hidden; color: var(--foreground); font-size: 12.5px; font-weight: 620; letter-spacing: -0.016em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__header h2 + p { overflow: hidden; margin-top: 1px; color: var(--muted-foreground); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__header > button { width: 28px !important; height: 28px !important; border-radius: 999px !important; }
 
@@ -685,7 +750,7 @@
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 18px 16px 24px;
+  padding: 16px 14px 22px;
   scrollbar-width: thin;
 }
 .design-canvas-agent__transcript-placeholder {
@@ -721,8 +786,7 @@
 .design-canvas-agent__history-more span { font-variant-numeric: tabular-nums; }
 .design-canvas-agent__message,
 .design-canvas-agent__activity-group { content-visibility: visible; }
-.design-canvas-agent__empty { display: flex; min-height: 112px; align-items: flex-start; justify-content: flex-end; flex-direction: column; gap: 9px; border: 0.5px solid color-mix(in oklch, var(--border) 56%, transparent); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--surface) 42%, transparent); color: var(--muted-foreground); text-align: left; font-size: 11px; line-height: 1.5; }
-.design-canvas-agent__empty svg { width: 17px; height: 17px; opacity: 0.55; }
+.design-canvas-agent__empty { display: flex; min-height: 136px; align-items: flex-start; justify-content: flex-end; flex-direction: column; gap: 5px; border: 0; border-radius: 12px; padding: 16px; background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--foreground) 1.8%, transparent) 0 1px, transparent 1px 11px), color-mix(in oklch, var(--surface) 30%, transparent); color: var(--muted-foreground); text-align: left; font-size: 11px; line-height: 1.5; }
 .design-canvas-agent__message + .design-canvas-agent__message,
 .design-canvas-agent__message + .design-canvas-agent__activity,
 .design-canvas-agent__activity + .design-canvas-agent__activity,
@@ -851,11 +915,11 @@
 .design-canvas-agent__activity-error-summary:focus-visible { border-radius: 4px; outline: 2px solid color-mix(in oklch, var(--destructive) 35%, transparent); outline-offset: 2px; }
 .design-canvas-agent__activity-error { margin: 0 10px 10px; border-radius: 8px; padding: 7px 8px; background: color-mix(in oklch, var(--destructive) 7%, transparent); color: var(--destructive); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 
-.design-canvas-agent__composer { position: relative; flex: none; padding: 0 12px 12px; background: transparent; }
+.design-canvas-agent__composer { position: relative; flex: none; padding: 0 14px 14px; background: transparent; }
 
-.design-canvas-agent__composer-shell { overflow: hidden; border: 0.5px solid color-mix(in oklch, var(--border) 74%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--surface-2) 58%, var(--card)); box-shadow: 0 2px 8px oklch(0.1 0 0 / 0.045); transition: transform 220ms var(--ease-smooth), border-color 220ms var(--ease-smooth), box-shadow 220ms var(--ease-smooth); }
-.design-canvas-agent__composer-shell:hover { transform: translateY(-1px); border-color: var(--border-strong); box-shadow: 0 5px 16px oklch(0.1 0 0 / 0.07); }
-.design-canvas-agent__composer-shell:focus-within { transform: translateY(-1px); border-color: color-mix(in oklch, var(--design-canvas-accent) 62%, var(--border)); box-shadow: 0 0 0 2px color-mix(in oklch, var(--design-canvas-accent) 13%, transparent), 0 7px 20px oklch(0.1 0 0 / 0.07); }
+.design-canvas-agent__composer-shell { overflow: hidden; border: 0.5px solid color-mix(in oklch, var(--border) 74%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.design-canvas-agent__composer-shell:hover { border-color: var(--border-strong); background: color-mix(in oklch, var(--surface-2) 68%, var(--card)); }
+.design-canvas-agent__composer-shell:focus-within { border-color: color-mix(in oklch, var(--design-canvas-accent) 62%, var(--border)); background: var(--card); box-shadow: none; }
 .design-canvas-agent__mention-anchor { min-width: 0; }
 .design-canvas-agent__composer textarea { display: block; width: 100%; max-height: 160px; min-height: 62px; resize: none; border: 0; background: transparent; padding: 11px 10px 3px; color: var(--foreground); font-size: 12.5px; line-height: 19px; letter-spacing: -0.01em; outline: 0; scrollbar-width: thin; }
 .design-canvas-agent__composer textarea::placeholder { color: color-mix(in oklch, var(--foreground) 48%, transparent); }
@@ -1053,6 +1117,20 @@
 .design-canvas-quick-start__actions strong { font-size: 10.5px; font-weight: 570; }
 .design-canvas-quick-start__actions small { display: none; }
 .design-canvas-quick-start__hint { width: fit-content; margin: 17px auto 0; padding: 0; color: var(--muted-foreground); font-family: var(--font-mono-stack); font-size: 8.5px; letter-spacing: 0.035em; }
+.dark .design-canvas-quick-start { color: oklch(0.23 0.008 250); }
+.dark .design-canvas-quick-start__eyebrow,
+.dark .design-canvas-quick-start h2 + p,
+.dark .design-canvas-quick-start__hint { color: oklch(0.48 0.012 250); }
+.dark .design-canvas-quick-start__mark,
+.dark .design-canvas-quick-start__actions > button > span {
+  border-color: oklch(0.2 0.008 250 / 12%);
+  background: oklch(1 0 0 / 46%);
+  color: oklch(0.42 0.01 250);
+}
+.dark .design-canvas-quick-start__actions > button:hover {
+  border-color: oklch(0.2 0.008 250 / 16%);
+  background: oklch(1 0 0 / 58%);
+}
 
 .design-canvas-topbar { animation: design-canvas-topbar-in 300ms var(--ease-smooth) both; }
 .design-canvas-agent__activity-group,
@@ -1064,7 +1142,8 @@
 @keyframes design-canvas-menu-out { from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } to { opacity: 0; transform: translate3d(0, 4px, 0) scale(0.985); } }
 @keyframes design-canvas-notice-in { from { opacity: 0; transform: translate3d(0, 7px, 0) scale(0.988); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
 @keyframes design-canvas-topbar-in { from { opacity: 0; transform: translate3d(0, -7px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
-@keyframes design-canvas-node-frame-in { from { opacity: 0; transform: translate3d(0, 9px, 0) scale(0.985); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
+@keyframes design-canvas-node-frame-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+@keyframes design-canvas-selection-out { from { opacity: 0.72; transform: scale(1); } to { opacity: 0; transform: scale(1.012); } }
 @keyframes design-canvas-agent-item-in { from { opacity: 0; transform: translate3d(0, 8px, 0) scale(0.992); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
 @keyframes design-canvas-orb-wave { 0%, 60%, 100% { opacity: 0.14; transform: scale(1); } 28% { opacity: 1; transform: scale(1.18); } }
 @keyframes design-canvas-quick-start-in { from { opacity: 0; transform: translate(-50%, -49%); } to { opacity: 1; transform: translate(-50%, -52%); } }
@@ -1082,15 +1161,20 @@
   .design-canvas-topbar__view { display: none; }
   .design-canvas-topbar__identity h1 { max-width: 25vw; font-size: 13px; }
   .design-canvas-topbar__actions button { width: 32px; padding: 0; font-size: 0; }
-  .design-canvas-main-agent { inset: 8px; width: auto; }
+  .design-canvas-main-agent { inset: 8px 8px 60px; width: auto; }
   .design-canvas-main-agent .design-canvas-agent { border: 1px solid color-mix(in oklch, var(--border) 78%, transparent); border-radius: 14px; box-shadow: var(--shadow-pop); }
   .design-canvas-agent--floating,
   .design-canvas-agent--floating[data-agent-size="focus"] { right: 8px !important; bottom: 8px; left: 8px !important; top: auto !important; width: auto !important; height: min(520px, 56%) !important; }
+  .design-canvas-surface[data-node-focus] .design-canvas-focus-actions {
+    left: 50%;
+    bottom: calc(min(520px, 56%) + 16px);
+  }
   .design-canvas-surface[data-node-agent="open"] .design-canvas-focus-actions { bottom: calc(56% + 16px); left: 50%; }
   .design-node-catalog { width: min(480px, calc(100vw - 16px)); }
   .design-node-catalog__grid { grid-template-columns: 1fr; }
   .design-canvas-zoom { display: none; }
-  .design-canvas-tools { right: 8px; bottom: 8px; left: 8px; justify-content: center; }
+  .design-canvas-tools,
+  .design-canvas-surface[data-main-agent] .design-canvas-tools { z-index: 42; right: 8px; bottom: 8px; left: 8px; justify-content: center; }
   .design-canvas-tools__divider { margin: 0 2px; }
   .design-canvas-quick-start { max-width: calc(100% - 28px); }
   .design-canvas-quick-start__actions { grid-template-columns: 1fr; }
@@ -1104,6 +1188,7 @@
   .design-node-catalog,
   .design-node-context-menu,
   .design-canvas-node__frame,
+  .design-canvas-selection-ghost,
   .design-canvas-agent__header,
   .design-canvas-agent__versions,
   .design-canvas-agent__transcript,
@@ -1125,12 +1210,15 @@
   .design-canvas-agent__thinking-label,
   .design-canvas-agent__activity li > span { animation: none !important; }
   .design-canvas-node__resize-corner,
+  .design-canvas-focus-dismiss,
+  .design-canvas-focus-actions,
   .design-canvas-node,
   .design-canvas-surface,
   .design-canvas-surface::after,
   .design-canvas-surface .react-flow__background,
   .design-canvas-tools,
   .design-canvas-zoom,
+  .design-canvas-agent--floating,
   .design-canvas-agent__activity-collapsible,
   .design-canvas-agent__activity-chevron { transition: none !important; }
 }
