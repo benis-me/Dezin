@@ -1,4 +1,7 @@
-import { DESIGN_SCHEMA_VERSION } from "@dezin/design-canvas-contracts";
+import {
+  DESIGN_JOB_TOOL_NAMES,
+  DESIGN_SCHEMA_VERSION,
+} from "@dezin/design-canvas-contracts";
 import type {
   DesignCanvas,
   DesignCanvasIntent,
@@ -11,6 +14,7 @@ import type {
   DesignJobActivity,
   DesignJobKind,
   DesignJobStatus,
+  DesignJobToolName,
   DesignMaterialNodeKind,
   DesignNode,
   DesignNodeGeometry,
@@ -26,6 +30,7 @@ import type {
 
 export {
   DESIGN_GENERATIVE_NODE_KINDS,
+  DESIGN_JOB_TOOL_NAMES,
   DESIGN_MATERIAL_NODE_KINDS,
   DESIGN_NODE_KINDS,
 } from "@dezin/design-canvas-contracts";
@@ -42,6 +47,7 @@ export type {
   DesignJobActivity,
   DesignJobKind,
   DesignJobStatus,
+  DesignJobToolName,
   DesignMaterialNodeKind,
   DesignNode,
   DesignNodeGeometry,

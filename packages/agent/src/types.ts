@@ -8,8 +8,54 @@
 
 export type TurnRole = "user" | "assistant";
 
+/** Stable categories consumed by persisted Design Job activity. */
+export const AGENT_TOOL_NAMES = ["write", "read", "command", "search", "tool"] as const;
+export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
+
+/**
+ * Normalize provider-specific tool names without inspecting their human-readable
+ * summaries. Unknown provider tools intentionally retain the generic category.
+ */
+export function normalizeAgentToolName(name: string): AgentToolName {
+  switch (name.trim()) {
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      return "write";
+    case "Read":
+      return "read";
+    case "Bash":
+      return "command";
+    case "Grep":
+    case "Glob":
+    case "WebSearch":
+      return "search";
+    default:
+      return "tool";
+  }
+}
+
 /** A live step in the agent's process, surfaced to the UI as it streams. */
-export type AgentActivity = { kind: "text"; text: string } | { kind: "tool"; name: string; summary: string };
+export type AgentActivity =
+  | { kind: "text"; text: string }
+  | {
+      kind: "tool";
+      name: string;
+      summary: string;
+      /** Provider-issued correlation id, when the stream exposes one. */
+      toolCallId?: string;
+      /** Bounded JSON serialization of the provider's exact tool input. */
+      toolInput?: string;
+      /** Patch derived only from explicit provider input fields, never from summary text. */
+      diff?: string;
+    }
+  | {
+      kind: "tool-result";
+      toolCallId: string;
+      /** Bounded text emitted by the provider's matching tool_result block. */
+      toolResult: string;
+      toolResultError: boolean;
+    };
 
 /** Raised when a run is cancelled (user Stop / client disconnect) so callers can treat it as
  *  a clean stop rather than a failure, and retries don't kick in. */

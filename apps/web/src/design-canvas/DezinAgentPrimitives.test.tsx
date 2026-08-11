@@ -104,7 +104,7 @@ test("the Dezin primitive stylesheet locks the 324px, radius, row, and motion co
 
   expect(css).toMatch(/\.dezin-agent\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*min-width:\s*0;/s);
   expect(css).toMatch(/\.dezin-agent-(?:loading|thinking|streaming|approval|tool-chips|task-row|recommendation|context|insights)[^{]*\{[^}]*border-radius:\s*10px;/s);
-  expect(css).toMatch(/\.dezin-agent-task-row__trigger\s*\{[^}]*min-height:\s*44px;/s);
+  expect(css).toMatch(/\.dezin-agent-job-disclosure__trigger\s*\{[^}]*min-height:\s*32px;/s);
   expect(css).toMatch(/\.dezin-agent-actions > button\s*\{[^}]*border-radius:\s*8px;/s);
   expect(css).toMatch(/\.dezin-agent-tool-chips__changes > span\s*\{[^}]*border-radius:\s*6px;/s);
   expect(css).toContain("@keyframes dezin-agent-spin");
@@ -298,7 +298,7 @@ test("Thinking exposes an operable disclosure and removes collapsed steps from i
       defaultOpen={false}
       items={[
         { id: "read", text: "Reading the design brief", state: "done" },
-        { id: "build", text: "Building the layout", state: "active", meta: "Hero" },
+        { id: "build", text: "Building the layout", state: "active", meta: "Hero", detail: <code>layout.tsx</code> },
       ]}
     />,
   );
@@ -319,4 +319,8 @@ test("Thinking exposes an operable disclosure and removes collapsed steps from i
   expect(container.querySelector('path[d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"]')).toBeInTheDocument();
   expect(container.querySelector('path[d="M6 9l6 6 6-6"]')).toBeInTheDocument();
   expect(region.querySelector(".dezin-agent-thinking__spinner")).toBeInTheDocument();
+  const stepTrigger = within(region).getByRole("button", { name: /Building the layout/ });
+  fireEvent.click(stepTrigger);
+  expect(stepTrigger).toHaveAttribute("aria-expanded", "true");
+  expect(within(region).getByText("layout.tsx")).toBeVisible();
 });

@@ -15,7 +15,6 @@ import { cn } from "../lib/utils.ts";
 import {
   DezinAgentContext,
   DezinAgentLoadingState,
-  DezinAgentTaskRow,
 } from "../design-canvas/DezinAgentPrimitives.tsx";
 
 interface CitationReference {
@@ -258,15 +257,11 @@ function AgentTaskList({ children, className }: ComponentPropsWithoutRef<"ul">) 
   const allComplete = total > 0 && complete === total;
   return (
     <div className="agent-task-list" data-agent-component="task-list" data-activity-kind="tasks" data-complete={allComplete || undefined}>
-      <DezinAgentTaskRow
-        title="To-dos"
-        meta={`${complete}/${total}`}
-        status={allComplete ? "ready" : "running"}
-        statusLabel={allComplete ? "Completed" : "In progress"}
-        defaultOpen
-      >
-        <ul className={cn("agent-task-list__items", className)}>{children}</ul>
-      </DezinAgentTaskRow>
+      <div className="agent-task-list__summary">
+        <strong>To-dos</strong>
+        <span>{complete}/{total}</span>
+      </div>
+      <ul className={cn("agent-task-list__items", className)}>{children}</ul>
     </div>
   );
 }

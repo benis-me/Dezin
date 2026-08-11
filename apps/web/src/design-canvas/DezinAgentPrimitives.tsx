@@ -67,6 +67,8 @@ export interface DezinAgentThinkingItem {
   id: string;
   text: ReactNode;
   meta?: ReactNode;
+  detail?: ReactNode;
+  kind?: "text" | "tool" | "status";
   state?: "done" | "active" | "pending";
 }
 
@@ -96,6 +98,10 @@ export function DezinAgentThinking({
     onOpenChange?.(next);
   };
 
+  useEffect(() => {
+    if (controlledOpen === undefined) setLocalOpen(active);
+  }, [active, controlledOpen]);
+
   return (
     <section className="dezin-agent dezin-agent-thinking" data-dezin-agent-primitive="thinking" data-active={active || undefined} data-open={open}>
       <button type="button" className="dezin-agent-thinking__trigger" aria-label={label} aria-controls={regionId} aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -105,21 +111,37 @@ export function DezinAgentThinking({
       </button>
       <DisclosureRegion id={regionId} open={open} className="dezin-agent-thinking__region">
         <ol className="dezin-agent-thinking__steps">
-          {items.map((item, index) => {
-            const state = item.state ?? "done";
-            return (
-              <li key={item.id} data-state={state} style={{ "--item-index": index } as CSSProperties}>
-                <span className="dezin-agent-thinking__step-icon" aria-hidden="true">
-                  {state === "done" ? <CheckIcon /> : state === "active" ? <span className="dezin-agent-thinking__spinner" /> : <span className="dezin-agent-thinking__pending-dot" />}
-                </span>
-                <span className="dezin-agent-thinking__step-copy">{item.text}</span>
-                {item.meta === null || item.meta === undefined ? null : <small>{item.meta}</small>}
-              </li>
-            );
-          })}
+          {items.map((item, index) => <ThinkingStep key={item.id} item={item} index={index} />)}
         </ol>
       </DisclosureRegion>
     </section>
+  );
+}
+
+function ThinkingStep({ item, index }: { item: DezinAgentThinkingItem; index: number }) {
+  const regionId = useId();
+  const [open, setOpen] = useState(false);
+  const state = item.state ?? "done";
+  const expandable = item.detail !== null && item.detail !== undefined;
+  const summary = (
+    <>
+      <span className="dezin-agent-thinking__step-icon" aria-hidden="true">
+        {state === "done" ? <CheckIcon /> : state === "active" ? <span className="dezin-agent-thinking__spinner" /> : <span className="dezin-agent-thinking__pending-dot" />}
+      </span>
+      <span className="dezin-agent-thinking__step-copy">{item.text}</span>
+      {item.meta === null || item.meta === undefined ? null : <small>{item.meta}</small>}
+      {expandable ? <ChevronIcon /> : null}
+    </>
+  );
+  return (
+    <li data-state={state} data-kind={item.kind} data-expandable={expandable || undefined} style={{ "--item-index": index } as CSSProperties}>
+      {expandable ? (
+        <button type="button" className="dezin-agent-thinking__step-summary" aria-controls={regionId} aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          {summary}
+        </button>
+      ) : <div className="dezin-agent-thinking__step-summary">{summary}</div>}
+      {expandable ? <DisclosureRegion id={regionId} open={open} className="dezin-agent-thinking__step-region"><div className="dezin-agent-thinking__step-detail">{item.detail}</div></DisclosureRegion> : null}
+    </li>
   );
 }
 
@@ -256,6 +278,8 @@ export interface AgentToolChipItem {
   id: string;
   label: ReactNode;
   detail?: ReactNode;
+  detailMono?: boolean;
+  contentMono?: boolean;
   state?: AgentToolChipState;
   kind?: AgentToolChipKind;
   children?: ReactNode;
@@ -263,9 +287,16 @@ export interface AgentToolChipItem {
 
 export interface AgentFileChange { id: string; path: string; additions?: number; deletions?: number }
 
+export interface DezinAgentToolRowsProps {
+  items: readonly AgentToolChipItem[];
+  changes?: readonly AgentFileChange[];
+  flat?: boolean;
+}
+
 export interface DezinAgentToolGroupProps {
   items: readonly AgentToolChipItem[];
   title?: string;
+  toolCallCount?: number;
   messageCount?: number;
   changes?: readonly AgentFileChange[];
   defaultOpen?: boolean;
@@ -276,6 +307,7 @@ export interface DezinAgentToolGroupProps {
 export function DezinAgentToolGroup({
   items,
   title,
+  toolCallCount,
   messageCount,
   changes = [],
   defaultOpen = true,
@@ -284,19 +316,16 @@ export function DezinAgentToolGroup({
 }: DezinAgentToolGroupProps) {
   const regionId = useId();
   const [localOpen, setLocalOpen] = useState(defaultOpen);
-  const [openRows, setOpenRows] = useState<Set<string>>(() => new Set());
   const open = controlledOpen ?? localOpen;
-  const summary = title ?? `${items.length} tool ${items.length === 1 ? "call" : "calls"}${messageCount === undefined ? "" : `, ${messageCount} ${messageCount === 1 ? "message" : "messages"}`}`;
+  useEffect(() => {
+    if (controlledOpen === undefined) setLocalOpen(defaultOpen);
+  }, [controlledOpen, defaultOpen]);
+  const count = toolCallCount ?? items.length;
+  const summary = title ?? `${count} tool ${count === 1 ? "call" : "calls"}${messageCount === undefined ? "" : `, ${messageCount} ${messageCount === 1 ? "message" : "messages"}`}`;
   const setOpen = (next: boolean) => {
     if (controlledOpen === undefined) setLocalOpen(next);
     onOpenChange?.(next);
   };
-  const toggleRow = (id: string) => setOpenRows((current) => {
-    const next = new Set(current);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-
   return (
     <section className="dezin-agent dezin-agent-tool-chips" data-dezin-agent-primitive="tools" data-open={open}>
       <button type="button" className="dezin-agent-tool-chips__trigger" aria-label={summary} aria-controls={regionId} aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -305,46 +334,63 @@ export function DezinAgentToolGroup({
       </button>
       <DisclosureRegion id={regionId} open={open} className="dezin-agent-tool-chips__region">
         <div className="dezin-agent-tool-chips__clip">
-          <ol className="dezin-agent-tool-chips__items">
-            {items.map((item, index) => {
-              const state = item.state ?? "pending";
-              const detailsId = `${regionId}-${item.id}`;
-              const expanded = item.children !== null && item.children !== undefined && openRows.has(item.id);
-              const row = (
-                <>
-                  <span className="dezin-agent-tool-chips__icon" aria-hidden="true"><ToolIcon kind={item.kind ?? "tool"} state={state} /><ChevronIcon /></span>
-                  <span className="dezin-agent-tool-chips__label">{item.label}</span>
-                  {item.detail === null || item.detail === undefined ? null : <code>{item.detail}</code>}
-                </>
-              );
-              return (
-                <li key={item.id} data-state={state} data-kind={item.kind ?? "tool"} style={{ "--item-index": index } as CSSProperties}>
-                  {item.children === null || item.children === undefined ? (
-                    <div className="dezin-agent-tool-chips__item-summary">{row}</div>
-                  ) : (
-                    <button type="button" className="dezin-agent-tool-chips__item-summary" aria-label={typeof item.label === "string" ? item.label : undefined} aria-controls={detailsId} aria-expanded={expanded} onClick={() => toggleRow(item.id)}>{row}</button>
-                  )}
-                  {item.children === null || item.children === undefined ? null : (
-                    <DisclosureRegion id={detailsId} open={expanded} className="dezin-agent-tool-chips__item-region"><div className="dezin-agent-tool-chips__item-content">{item.children}</div></DisclosureRegion>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
-          {changes.length === 0 ? null : (
-            <div className="dezin-agent-tool-chips__changes" aria-label="Changed files">
-              {changes.map((change, index) => (
-                <span key={change.id} data-file-change style={{ "--item-index": index } as CSSProperties}>
-                  <code className="dezin-agent-tool-chips__change-path" title={change.path}>{change.path}</code>
-                  {change.additions === undefined ? null : <small data-tone="add">+{change.additions}</small>}
-                  {change.deletions === undefined ? null : <small data-tone="delete">−{change.deletions}</small>}
-                </span>
-              ))}
-            </div>
-          )}
+          <DezinAgentToolRows items={items} changes={changes} />
         </div>
       </DisclosureRegion>
     </section>
+  );
+}
+
+export function DezinAgentToolRows({ items, changes = [], flat = false }: DezinAgentToolRowsProps) {
+  const regionId = useId();
+  const [openRows, setOpenRows] = useState<Set<string>>(() => new Set());
+  const toggleRow = (id: string) => setOpenRows((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  return (
+    <div className="dezin-agent dezin-agent-tool-rows" data-dezin-agent-tool-rows="true" data-flat={flat || undefined}>
+      <ol className="dezin-agent-tool-chips__items">
+        {items.map((item, index) => {
+          const state = item.state ?? "pending";
+          const detailsId = `${regionId}-${item.id}`;
+          const expanded = item.children !== null && item.children !== undefined && openRows.has(item.id);
+          const row = (
+            <>
+              <span className="dezin-agent-tool-chips__icon" aria-hidden="true"><ToolIcon kind={item.kind ?? "tool"} state={state} /><ChevronIcon /></span>
+              <span className="dezin-agent-tool-chips__label">{item.label}</span>
+              {item.detail === null || item.detail === undefined ? null : item.detailMono === false
+                ? <span className="dezin-agent-tool-chips__detail">{item.detail}</span>
+                : <code>{item.detail}</code>}
+            </>
+          );
+          return (
+            <li key={item.id} data-state={state} data-kind={item.kind ?? "tool"} style={{ "--item-index": index } as CSSProperties}>
+              {item.children === null || item.children === undefined ? (
+                <div className="dezin-agent-tool-chips__item-summary">{row}</div>
+              ) : (
+                <button type="button" className="dezin-agent-tool-chips__item-summary" aria-label={typeof item.label === "string" ? item.label : undefined} aria-controls={detailsId} aria-expanded={expanded} onClick={() => toggleRow(item.id)}>{row}</button>
+              )}
+              {item.children === null || item.children === undefined ? null : (
+                <DisclosureRegion id={detailsId} open={expanded} className="dezin-agent-tool-chips__item-region"><div className="dezin-agent-tool-chips__item-content" data-content-mono={item.contentMono === false ? "false" : undefined}>{item.children}</div></DisclosureRegion>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      {changes.length === 0 ? null : (
+        <div className="dezin-agent-tool-chips__changes" aria-label="Changed files">
+          {changes.map((change, index) => (
+            <span key={change.id} data-file-change style={{ "--item-index": index } as CSSProperties}>
+              <code className="dezin-agent-tool-chips__change-path" title={change.path}>{change.path}</code>
+              {change.additions === undefined ? null : <small data-tone="add">+{change.additions}</small>}
+              {change.deletions === undefined ? null : <small data-tone="delete">−{change.deletions}</small>}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -382,12 +428,43 @@ export function DezinAgentTaskRow({ title, meta, status, statusLabel = TASK_LABE
   );
   return (
     <article className="dezin-agent dezin-agent-task-row" data-dezin-agent-primitive="task" data-status={status} data-open={open || undefined}>
-      <header>
+      <header className="dezin-agent-task-row__capsule">
         {hasContent ? <button type="button" className="dezin-agent-task-row__trigger" aria-label={`${title} · ${status}`} aria-controls={regionId} aria-expanded={open} onClick={() => setOpen(!open)}>{content}</button> : <div className="dezin-agent-task-row__trigger">{content}</div>}
         {trailing === null || trailing === undefined ? null : <div className="dezin-agent-task-row__trailing">{trailing}</div>}
       </header>
       {hasContent ? <DisclosureRegion id={regionId} open={open} className="dezin-agent-task-row__region"><div className="dezin-agent-task-row__content">{children}</div></DisclosureRegion> : null}
     </article>
+  );
+}
+
+export type DezinAgentJobDisclosureProps = DezinAgentTaskRowProps;
+
+export function DezinAgentJobDisclosure({ title, meta, status, statusLabel = TASK_LABELS[status], children, trailing, defaultOpen = false, open: controlledOpen, onOpenChange }: DezinAgentJobDisclosureProps) {
+  const regionId = useId();
+  const [localOpen, setLocalOpen] = useState(defaultOpen);
+  const hasContent = children !== null && children !== undefined;
+  const open = hasContent && (controlledOpen ?? localOpen);
+  const setOpen = (next: boolean) => {
+    if (!hasContent) return;
+    if (controlledOpen === undefined) setLocalOpen(next);
+    onOpenChange?.(next);
+  };
+  const summary = (
+    <>
+      <TaskStatusMark status={status} />
+      <span className="dezin-agent-job-disclosure__copy"><strong>{title}</strong>{meta === null || meta === undefined ? null : <small>{meta}</small>}</span>
+      <span className="dezin-agent-job-disclosure__status">{statusLabel}</span>
+      {hasContent ? <ChevronIcon /> : null}
+    </>
+  );
+  return (
+    <section className="dezin-agent dezin-agent-job-disclosure" data-dezin-agent-job="true" data-status={status} data-open={open || undefined}>
+      <header className="dezin-agent-job-disclosure__header">
+        {hasContent ? <button type="button" className="dezin-agent-job-disclosure__trigger" aria-label={`${title} · ${status}`} aria-controls={regionId} aria-expanded={open} onClick={() => setOpen(!open)}>{summary}</button> : <div className="dezin-agent-job-disclosure__trigger">{summary}</div>}
+        {trailing === null || trailing === undefined ? null : <div className="dezin-agent-job-disclosure__trailing">{trailing}</div>}
+      </header>
+      {hasContent ? <DisclosureRegion id={regionId} open={open} className="dezin-agent-job-disclosure__region"><div className="dezin-agent-job-disclosure__content">{children}</div></DisclosureRegion> : null}
+    </section>
   );
 }
 
@@ -419,13 +496,15 @@ export function DezinAgentRecommendation({ title, description, confidence, actio
           ))}</div>
         </DisclosureRegion>
       )}
-      <footer className="dezin-agent-recommendation__footer">
-        {confidence ? <ConfidenceMeter confidence={confidence} /> : <span />}
-        <span className="dezin-agent-recommendation__buttons">
-          {alternatives.length > 0 ? <button type="button" className="dezin-agent-recommendation__alternatives-trigger" aria-controls={alternativesId} aria-expanded={open} onClick={() => setOpen((value) => !value)}>Alternatives</button> : null}
-          <AgentActions actions={actions} className="dezin-agent-recommendation__actions" />
-        </span>
-      </footer>
+      {confidence || actions.length > 0 || alternatives.length > 0 ? (
+        <footer className="dezin-agent-recommendation__footer">
+          {confidence ? <ConfidenceMeter confidence={confidence} /> : <span />}
+          <span className="dezin-agent-recommendation__buttons">
+            {alternatives.length > 0 ? <button type="button" className="dezin-agent-recommendation__alternatives-trigger" aria-controls={alternativesId} aria-expanded={open} onClick={() => setOpen((value) => !value)}>Alternatives</button> : null}
+            <AgentActions actions={actions} className="dezin-agent-recommendation__actions" />
+          </span>
+        </footer>
+      ) : null}
     </section>
   );
 }
@@ -509,7 +588,7 @@ function TaskStatusMark({ status }: { status: AgentTaskStatus }) {
   if (status === "failed") return <span className="dezin-agent-task-row__badge" data-tone="red"><CloseIcon /></span>;
   if (status === "cancelled" || status === "superseded") return <span className="dezin-agent-task-row__badge" data-tone="muted"><CloseIcon /></span>;
   const active = status === "running" || status === "validating";
-  return <span className="dezin-agent-task-row__ring" data-active={active || undefined} aria-hidden="true"><svg width="24" height="24"><circle cx="12" cy="12" r="11" /><circle className="dezin-agent-task-row__ring-progress" cx="12" cy="12" r="11" /></svg></span>;
+  return <span className="dezin-agent-task-row__ring" data-active={active || undefined} aria-hidden="true"><svg width="16" height="16"><circle cx="8" cy="8" r="7" /><circle className="dezin-agent-task-row__ring-progress" cx="8" cy="8" r="7" /></svg></span>;
 }
 
 function ConfidenceMeter({ confidence }: { confidence: AgentRecommendationConfidence }) {

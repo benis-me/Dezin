@@ -2,11 +2,14 @@
  * Pure parser for Claude Code's `--output-format stream-json --verbose` output.
  *
  * Each stdout line is a standalone JSON object. We extract the assistant text,
- * any file-writing tool uses, the final result, and the session id. Kept pure
+ * tool uses/results, the final result, and the session id. Kept pure
  * (string in → struct out) so it is unit-tested with fixtures and no `claude` CLI.
  */
 
+import type { AgentActivity } from "./types.ts";
+
 export interface ClaudeToolUse {
+  id: string | null;
   name: string;
   input: Record<string, unknown>;
 }
@@ -91,7 +94,119 @@ export function extractFinalSummary(text: string): FinalSummaryExtraction {
 }
 
 /** A live step in the agent's process, surfaced to the UI as it happens. */
-export type ClaudeActivity = { kind: "text"; text: string } | { kind: "tool"; name: string; summary: string };
+export type ClaudeActivity = AgentActivity;
+
+const TOOL_CALL_ID_MAX_BYTES = 512;
+const TOOL_INPUT_MAX_BYTES = 64 * 1024;
+const TOOL_RESULT_MAX_BYTES = 64 * 1024;
+const TOOL_DIFF_MAX_BYTES = 128 * 1024;
+
+function boundedText(value: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  const marker = "\n… [truncated]";
+  const available = maximumBytes - Buffer.byteLength(marker, "utf8");
+  const output: string[] = [];
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > available) break;
+    output.push(character);
+    bytes += size;
+  }
+  return `${output.join("")}${marker}`;
+}
+
+function validToolCallId(value: unknown): string | undefined {
+  const id = str(value);
+  return id && id.trim() === id && Buffer.byteLength(id, "utf8") <= TOOL_CALL_ID_MAX_BYTES
+    ? id
+    : undefined;
+}
+
+function serializedToolInput(input: Record<string, unknown>): string {
+  const serialized = JSON.stringify(input, null, 2);
+  if (Buffer.byteLength(serialized, "utf8") <= TOOL_INPUT_MAX_BYTES) return serialized;
+  return JSON.stringify({
+    truncated: true,
+    originalBytes: Buffer.byteLength(serialized, "utf8"),
+    preview: boundedText(serialized, 8 * 1024),
+  }, null, 2);
+}
+
+function contentLines(value: string): string[] {
+  if (!value) return [];
+  const lines = value.split("\n");
+  if (value.endsWith("\n")) lines.pop();
+  return lines;
+}
+
+function diffLines(prefix: "-" | "+", lines: readonly string[]): string {
+  return lines.map((line) => `${prefix}${line}`).join("\n");
+}
+
+function diffPath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/[\r\n]/g, "").replace(/^\/+/, "") || "unknown";
+}
+
+function replacementHunk(before: string, after: string): string {
+  const beforeLines = contentLines(before);
+  const afterLines = contentLines(after);
+  return [
+    `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
+    diffLines("-", beforeLines),
+    diffLines("+", afterLines),
+  ].filter(Boolean).join("\n");
+}
+
+/** Exact provider patch projection. It never inspects the human summary or guesses file state. */
+function toolDiff(name: string, input: Record<string, unknown>): string | undefined {
+  const explicit = str(input.diff) ?? str(input.patch);
+  if (explicit) return boundedText(explicit, TOOL_DIFF_MAX_BYTES);
+  const file = diffPath(str(input.file_path) ?? "unknown");
+  if (name === "Edit") {
+    const before = str(input.old_string);
+    const after = str(input.new_string);
+    if (before === null || after === null) return undefined;
+    const budget = Math.floor(TOOL_DIFF_MAX_BYTES / 4);
+    return [
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      replacementHunk(boundedText(before, budget), boundedText(after, budget)),
+    ].join("\n");
+  }
+  if (name === "MultiEdit" && Array.isArray(input.edits)) {
+    const replacementBudget = Math.max(256, Math.floor(TOOL_DIFF_MAX_BYTES / Math.max(4, input.edits.length * 4)));
+    const replacements = input.edits.flatMap((candidate) => {
+      const edit = asObject(candidate);
+      const before = str(edit?.old_string);
+      const after = str(edit?.new_string);
+      return before === null || after === null
+        ? []
+        : [replacementHunk(boundedText(before, replacementBudget), boundedText(after, replacementBudget))];
+    });
+    if (replacements.length > 0) {
+      return boundedText(`--- a/${file}\n+++ b/${file}\n${replacements.join("\n")}`, TOOL_DIFF_MAX_BYTES);
+    }
+  }
+  return undefined;
+}
+
+function toolResultText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() ? boundedText(value, TOOL_RESULT_MAX_BYTES) : null;
+  if (Array.isArray(value)) {
+    const text = value.flatMap((candidate) => {
+      const block = asObject(candidate);
+      const content = str(block?.text) ?? str(block?.content);
+      return content === null ? [] : [content];
+    }).join("\n");
+    if (text.trim()) return boundedText(text, TOOL_RESULT_MAX_BYTES);
+  }
+  if (value !== undefined && value !== null) {
+    const serialized = JSON.stringify(value, null, 2);
+    if (serialized?.trim()) return boundedText(serialized, TOOL_RESULT_MAX_BYTES);
+  }
+  return null;
+}
 
 function base(path: string): string {
   return path.split(/[/\\]/).pop() || path;
@@ -110,8 +225,15 @@ function toolSummary(name: string, input: Record<string, unknown>): string | nul
       const cmd = str(input.command) ?? "";
       return `Running ${cmd.replace(/\s+/g, " ").slice(0, 48)}${cmd.length > 48 ? "…" : ""}`;
     }
+    case "Read":
+      return `Reading ${file ? base(file) : "a file"}`;
+    case "Grep":
+    case "Glob":
+      return "Searching project files";
+    case "WebSearch":
+      return "Searching the web";
     default:
-      return null; // Read/Glob/Grep/TodoWrite/etc. — not worth a step
+      return null;
   }
 }
 
@@ -126,22 +248,43 @@ export function parseClaudeLine(line: string): ClaudeActivity[] {
     return [];
   }
   const obj = asObject(parsed);
-  if (!obj || obj.type !== "assistant") return [];
+  if (!obj || (obj.type !== "assistant" && obj.type !== "user")) return [];
   const content = asObject(obj.message)?.content;
   if (!Array.isArray(content)) return [];
   const out: ClaudeActivity[] = [];
   for (const raw of content) {
     const block = asObject(raw);
     if (!block) continue;
-    if (block.type === "text") {
+    if (obj.type === "assistant" && block.type === "text") {
       const t = str(block.text);
       if (t && t.trim()) out.push({ kind: "text", text: t });
-    } else if (block.type === "tool_use") {
+    } else if (obj.type === "assistant" && block.type === "tool_use") {
       const name = str(block.name);
       if (name) {
-        const summary = toolSummary(name, asObject(block.input) ?? {});
-        if (summary) out.push({ kind: "tool", name, summary });
+        const input = asObject(block.input) ?? {};
+        const summary = toolSummary(name, input);
+        if (summary) {
+          const toolCallId = validToolCallId(block.id);
+          const diff = toolDiff(name, input);
+          out.push({
+            kind: "tool",
+            name,
+            summary,
+            ...(toolCallId === undefined ? {} : { toolCallId }),
+            toolInput: serializedToolInput(input),
+            ...(diff === undefined ? {} : { diff }),
+          });
+        }
       }
+    } else if (obj.type === "user" && block.type === "tool_result") {
+      const toolCallId = validToolCallId(block.tool_use_id);
+      const toolResult = toolResultText(block.content);
+      if (toolCallId !== undefined && toolResult !== null) out.push({
+        kind: "tool-result",
+        toolCallId,
+        toolResult,
+        toolResultError: block.is_error === true,
+      });
     }
   }
   return out;
@@ -218,7 +361,7 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
               if (t) text += t;
             } else if (block.type === "tool_use") {
               const name = str(block.name);
-              if (name) toolUses.push({ name, input: asObject(block.input) ?? {} });
+              if (name) toolUses.push({ id: validToolCallId(block.id) ?? null, name, input: asObject(block.input) ?? {} });
             }
           }
         }

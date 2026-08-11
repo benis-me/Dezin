@@ -177,10 +177,25 @@ export type DesignJobStatus =
   | "cancelled"
   | "superseded";
 
+/** Stable, presentation-safe identity for a persisted Agent tool activity. */
+export const DESIGN_JOB_TOOL_NAMES = ["write", "read", "command", "search", "tool"] as const;
+export type DesignJobToolName = (typeof DESIGN_JOB_TOOL_NAMES)[number];
+
 export interface DesignJobActivity {
   id: string;
   kind: "text" | "tool" | "status";
   text: string;
+  /** Optional so Jobs written before tool identity persistence remain readable. */
+  toolName?: DesignJobToolName;
+  /** Provider-issued id used to attach a later real tool result to this activity. */
+  toolCallId?: string;
+  /** Bounded JSON serialization of the provider's exact tool input. */
+  toolInput?: string;
+  /** Bounded provider tool_result content; absent until/unless the provider emits it. */
+  toolResult?: string;
+  toolResultError?: boolean;
+  /** Exact provider patch projection; never inferred from the activity summary. */
+  diff?: string;
   createdAt: number;
 }
 

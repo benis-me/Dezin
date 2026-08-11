@@ -187,8 +187,6 @@ test("Agent output blocks aggregate by activity type and retain first-activity o
 
   expect(model.activePhase).toBe("progress");
   expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
-    ["context", false],
-    ["loading", true],
     ["trace", false],
     ["search", false],
     ["tool-group", true],
@@ -203,7 +201,7 @@ test("Agent output blocks aggregate by activity type and retain first-activity o
   });
 });
 
-test("terminal Agent output exposes outcome and export metadata with zero active blocks", () => {
+test("a ready export keeps real activity and exposes only real recommendation metadata", () => {
   const model = buildAgentOutputModel(job({
     kind: "implementation-export",
     status: "ready",
@@ -215,8 +213,8 @@ test("terminal Agent output exposes outcome and export metadata with zero active
 
   expect(model.activePhase).toBeNull();
   expect(model.blocks.some((block) => block.active)).toBe(false);
-  expect(model.blocks.map((block) => block.type)).toEqual(["context", "trace", "recommendation", "insights"]);
-  expect(model.blocks[2]).toEqual({
+  expect(model.blocks.map((block) => block.type)).toEqual(["trace", "recommendation"]);
+  expect(model.blocks[1]).toEqual({
     type: "recommendation",
     id: "job-1:recommendation",
     createdAt: 180,
@@ -228,15 +226,9 @@ test("terminal Agent output exposes outcome and export metadata with zero active
     versionId: null,
     exportId: "export-1",
   });
-  expect(model.blocks[3]).toMatchObject({
-    type: "insights",
-    items: expect.arrayContaining([
-      expect.objectContaining({ label: "Export", value: "export-1" }),
-    ]),
-  });
 });
 
-test("failed Agent output exposes explicit error metadata instead of an active phase", () => {
+test("failed Agent output keeps real activity and exposes explicit error metadata", () => {
   const model = buildAgentOutputModel(job({
     kind: "node-generation",
     nodeId: "node-1",
@@ -248,8 +240,8 @@ test("failed Agent output exposes explicit error metadata instead of an active p
   }));
 
   expect(model.activePhase).toBeNull();
-  expect(model.blocks.map((block) => block.type)).toEqual(["context", "tool-group", "approval", "insights"]);
-  expect(model.blocks[2]).toEqual({
+  expect(model.blocks.map((block) => block.type)).toEqual(["approval"]);
+  expect(model.blocks[0]).toEqual({
     type: "approval",
     id: "job-1:approval",
     createdAt: 170,
@@ -261,18 +253,20 @@ test("failed Agent output exposes explicit error metadata instead of an active p
   });
 });
 
-test("an activity-free live Job has one active trace placeholder", () => {
+test("an activity-free live Job has one Loading block and no duplicate Thinking", () => {
   const model = buildAgentOutputModel(job({ activity: [] }));
 
   expect(model.activePhase).toBe("reasoning");
-  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
-  expect(model.blocks[2]).toEqual({
-    type: "trace",
-    id: "job-1:reasoning",
+  expect(model.blocks.map((block) => block.type)).toEqual(["loading"]);
+  expect(model.blocks[0]).toEqual({
+    type: "loading",
+    id: "job-1:loading",
     createdAt: 100,
     active: true,
-    phase: "reasoning",
-    items: [],
+    phase: null,
+    status: "running",
+    label: "Planning the canvas",
+    startedAt: 100,
   });
 });
 
@@ -292,17 +286,15 @@ test("the output registry stays closed and never guesses rich blocks from markdo
     "tool-group",
     "search",
     "image",
-    "context",
     "approval",
     "recommendation",
-    "insights",
   ]);
-  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
-  expect(model.blocks[2]).toMatchObject({
+  expect(model.blocks.map((block) => block.type)).toEqual(["trace"]);
+  expect(model.blocks[0]).toMatchObject({
     type: "trace",
     items: [{ id: "markdown" }],
   });
-  expect(model.blocks.some((block) => block.type === "approval" || block.type === "recommendation" || block.type === "insights"))
+  expect(model.blocks.some((block) => block.type === "approval" || block.type === "recommendation"))
     .toBe(false);
 });
 
@@ -316,8 +308,6 @@ test("the normalized model assigns activePhase to the chronologically latest act
 
   expect(model.activePhase).toBe("progress");
   expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
-    ["context", false],
-    ["loading", true],
     ["trace", false],
     ["tool-group", true],
   ]);
@@ -347,21 +337,21 @@ test("search and image blocks retain renderer-ready metadata while aggregating r
     ],
   }));
 
-  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "image", "search"]);
-  expect(model.blocks[2]).toMatchObject({
+  expect(model.blocks.map((block) => block.type)).toEqual(["image", "search"]);
+  expect(model.blocks[0]).toMatchObject({
     type: "image",
     prompt: "Tokyo after rain",
     active: true,
     items: [{ id: "image-1" }, { id: "image-2" }],
   });
-  expect(model.blocks[3]).toMatchObject({
+  expect(model.blocks[1]).toMatchObject({
     type: "search",
     active: false,
     results: [{ id: "search-1", href: "https://example.com/type", state: "done" }],
   });
 });
 
-test("the production model supplies nine Dezin output patterns from grounded Job facts", () => {
+test("the production model emits only grounded mutually-exclusive Job detail patterns", () => {
   const live = buildAgentOutputModel(job({
     kind: "node-generation",
     nodeId: "node-hero",
@@ -373,17 +363,8 @@ test("the production model supplies nine Dezin output patterns from grounded Job
     activity: [],
   }), { nodeName: "Hero" });
 
-  expect(live.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
+  expect(live.blocks.map((block) => block.type)).toEqual(["loading"]);
   expect(live.blocks[0]).toMatchObject({
-    type: "context",
-    items: [
-      { label: "Target", value: "Hero", detail: "node-hero" },
-      { label: "Canvas snapshot", value: "Revision 42", detail: "Context 01234567" },
-      { label: "Expected head", value: "version-head" },
-      { label: "Runtime", value: "codebuddy", detail: "hy3-ioa" },
-    ],
-  });
-  expect(live.blocks[1]).toMatchObject({
     type: "loading",
     status: "running",
     label: "Generating Hero",
@@ -398,20 +379,12 @@ test("the production model supplies nine Dezin output patterns from grounded Job
     updatedAt: 170,
     finishedAt: 170,
   }), { nodeName: "Hero" });
-  expect(failed.blocks.map((block) => block.type)).toEqual(["context", "tool-group", "approval", "insights"]);
-  expect(failed.blocks[2]).toMatchObject({
+  expect(failed.blocks.map((block) => block.type)).toEqual(["approval"]);
+  expect(failed.blocks[0]).toMatchObject({
     type: "approval",
     title: "Repair this run?",
     detail: "Generated HTML did not pass validation",
     actionLabel: "Repair & retry",
-  });
-  expect(failed.blocks[3]).toMatchObject({
-    type: "insights",
-    items: expect.arrayContaining([
-      expect.objectContaining({ label: "Elapsed", value: "1s" }),
-      expect.objectContaining({ label: "Activity", value: "1 event" }),
-      expect.objectContaining({ label: "Result", value: "Failed" }),
-    ]),
   });
 
   const readyExport = buildAgentOutputModel(job({
@@ -422,8 +395,8 @@ test("the production model supplies nine Dezin output patterns from grounded Job
     updatedAt: 180,
     finishedAt: 180,
   }));
-  expect(readyExport.blocks.map((block) => block.type)).toEqual(["context", "trace", "recommendation", "insights"]);
-  expect(readyExport.blocks[2]).toMatchObject({
+  expect(readyExport.blocks.map((block) => block.type)).toEqual(["trace", "recommendation"]);
+  expect(readyExport.blocks[1]).toMatchObject({
     type: "recommendation",
     title: "Export ready",
     description: "Reveal the verified implementation output in Finder.",
@@ -431,15 +404,37 @@ test("the production model supplies nine Dezin output patterns from grounded Job
     actionLabel: "Reveal export",
   });
 
+  const readyVersion = buildAgentOutputModel(job({
+    kind: "node-generation",
+    status: "ready",
+    versionId: "version-2",
+    updatedAt: 190,
+    finishedAt: 190,
+  }), { nodeName: "Hero" });
+  expect(readyVersion.blocks).toEqual([]);
+
+  const analysisWithoutWireOutput = buildAgentOutputModel(job({
+    kind: "node-analysis",
+    status: "ready",
+    updatedAt: 200,
+    finishedAt: 200,
+  }));
+  expect(analysisWithoutWireOutput.blocks).toEqual([]);
+
+  const ordinaryReady = buildAgentOutputModel(job({
+    status: "ready",
+    updatedAt: 210,
+    finishedAt: 210,
+  }));
+  expect(ordinaryReady.blocks).toEqual([]);
+
   expect(AGENT_OUTPUT_BLOCK_TYPES).toEqual([
     "loading",
     "trace",
     "tool-group",
     "search",
     "image",
-    "context",
     "approval",
     "recommendation",
-    "insights",
   ]);
 });

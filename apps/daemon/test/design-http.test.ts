@@ -1276,6 +1276,7 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     async runTurn(input) {
       const html = "<!doctype html><html><head><style>body{margin:0}</style></head><body>HTTP generated</body></html>";
       await writeFile(join(input.projectDir, "index.html"), html);
+      input.onActivity?.({ kind: "tool", name: "Write", summary: "Writing index.html" });
       return { text: "Published through HTTP.", artifactHtml: html, artifactPath: "index.html" };
     },
   };
@@ -1567,13 +1568,19 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(turnBody.job.runnerId, "http-writing-fake");
     assert.equal(turnBody.job.model, "hy3-ioa");
     const deadline = Date.now() + 2_000;
-    let terminal: { status: string; runnerId: string; model: string | null } | undefined;
+    let terminal: {
+      status: string;
+      runnerId: string;
+      model: string | null;
+      activity: Array<{ kind: string; text: string; toolName?: string }>;
+    } | undefined;
     while (Date.now() < deadline) {
       const jobs = await (await json(`${root}/jobs`)).json() as Array<{
         id: string;
         status: string;
         runnerId: string;
         model: string | null;
+        activity: Array<{ kind: string; text: string; toolName?: string }>;
       }>;
       terminal = jobs.find((job) => job.id === turnBody.job.id);
       if (terminal && !["queued", "running", "validating"].includes(terminal.status)) break;
@@ -1582,6 +1589,9 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(terminal?.status, "ready");
     assert.equal(terminal?.runnerId, turnBody.job.runnerId);
     assert.equal(terminal?.model, turnBody.job.model);
+    assert.ok(terminal?.activity.some((entry) => (
+      entry.kind === "tool" && entry.text === "Writing index.html" && entry.toolName === "write"
+    )));
     const versions = await (await json(`${root}/nodes/node-page/versions`)).json() as Array<{
       jobId: string | null;
       runnerId: string | null;

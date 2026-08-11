@@ -1,25 +1,24 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { Markdown } from "../components/Markdown.tsx";
+import { AgentCodeBlock, AgentFileDiff } from "../components/AgentRichContent.tsx";
 import {
   DezinAgentApproval,
-  DezinAgentContext,
-  DezinAgentInsights,
   DezinAgentLoadingState,
   DezinAgentRecommendation,
   DezinAgentThinking,
   DezinAgentToolGroup,
   type AgentActionSpec,
-  type AgentInsightMetric,
   type AgentToolChipItem,
 } from "./DezinAgentPrimitives.tsx";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
 import {
+  compactActivityText,
   compactJobDuration,
   type AgentApprovalOutputBlock,
-  type AgentContextOutputBlock,
   type AgentImageOutputBlock,
-  type AgentInsightsOutputBlock,
   type AgentLoadingOutputBlock,
+  type AgentOutputActivityItem,
   type AgentOutputBlock,
   type AgentOutputModel,
   type AgentRecommendationOutputBlock,
@@ -45,20 +44,31 @@ export function AgentOutputRenderer({
   retrying = false,
   retryError = null,
 }: AgentOutputRendererProps) {
+  const activityBlocks = model.blocks.filter((block): block is AgentTraceOutputBlock | AgentToolGroupOutputBlock => (
+    block.type === "trace" || block.type === "tool-group"
+  ));
+  const activityAnchorId = activityBlocks[0]?.id;
   return (
     <div className="design-canvas-agent__output" data-agent-component="job-output">
-      {model.blocks.map((block) => (
-        <AgentOutputBlockView
-          key={block.id}
-          block={block}
-          jobId={model.jobId}
-          projectPath={projectPath}
-          onRevealExport={onRevealExport}
-          onRetry={onRetry}
-          retrying={retrying}
-          retryError={retryError}
-        />
-      ))}
+      {model.blocks.map((block) => {
+        if (block.type === "trace" || block.type === "tool-group") {
+          return block.id === activityAnchorId
+            ? <ActivityGroupBlock key={activityAnchorId} blocks={activityBlocks} live={model.activePhase !== null} />
+            : null;
+        }
+        return (
+          <AgentOutputBlockView
+            key={block.id}
+            block={block}
+            jobId={model.jobId}
+            projectPath={projectPath}
+            onRevealExport={onRevealExport}
+            onRetry={onRetry}
+            retrying={retrying}
+            retryError={retryError}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -72,7 +82,7 @@ function AgentOutputBlockView({
   retrying,
   retryError,
 }: {
-  block: AgentOutputBlock;
+  block: Exclude<AgentOutputBlock, AgentTraceOutputBlock | AgentToolGroupOutputBlock>;
   jobId: string;
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
@@ -82,11 +92,8 @@ function AgentOutputBlockView({
 }) {
   switch (block.type) {
     case "loading": return <LoadingBlock block={block} />;
-    case "trace": return <ThinkingBlock block={block} />;
-    case "tool-group": return <ToolGroupBlock block={block} />;
     case "search": return <SearchBlock block={block} />;
     case "image": return <ImageBlock block={block} />;
-    case "context": return <ContextBlock block={block} />;
     case "approval": return (
       <ApprovalBlock
         block={block}
@@ -103,7 +110,6 @@ function AgentOutputBlockView({
         onRevealExport={onRevealExport}
       />
     );
-    case "insights": return <InsightsBlock block={block} />;
     default: return assertNever(block);
   }
 }
@@ -117,29 +123,29 @@ function LoadingBlock({ block }: { block: AgentLoadingOutputBlock }) {
   );
 }
 
-function ThinkingBlock({ block }: { block: AgentTraceOutputBlock }) {
-  const items = block.items.map((item, index) => ({
-    id: item.id,
-    text: item.text,
-    state: block.active && index === block.items.length - 1 ? "active" as const : "done" as const,
-  }));
-  if (items.length === 0) {
-    items.push({ id: `${block.id}:pending`, text: "Preparing the next step", state: "active" });
-  }
-  return (
-    <div data-agent-output-block="trace">
-      <DezinAgentThinking items={items} active={block.active} defaultOpen />
-    </div>
-  );
-}
-
-function ToolGroupBlock({ block }: { block: AgentToolGroupOutputBlock }) {
+function ActivityGroupBlock({
+  blocks,
+  live,
+}: {
+  blocks: readonly (AgentTraceOutputBlock | AgentToolGroupOutputBlock)[];
+  live: boolean;
+}) {
+  const orderedEntries = blocks
+    .flatMap((block) => block.items)
+    .sort((left, right) => left.createdAt - right.createdAt || (left.order ?? 0) - (right.order ?? 0));
+  const entries = orderedEntries.filter((item) => item.kind !== "status");
+  const latestActiveEntry = blocks.find((block) => block.active)?.items.at(-1);
+  const activeItemId = latestActiveEntry?.kind !== "status"
+    ? latestActiveEntry?.id ?? null
+    : null;
+  if (entries.length === 0) return null;
   return (
     <div data-agent-output-block="tool-group">
       <DezinAgentToolGroup
-        items={toolItems(block)}
-        title={`${block.items.length} ${block.items.length === 1 ? "action" : "actions"}`}
-        defaultOpen={block.active}
+        items={activityItems(entries, activeItemId)}
+        toolCallCount={entries.filter((item) => item.kind === "tool").length}
+        messageCount={entries.filter((item) => item.kind !== "tool").length}
+        defaultOpen={live}
       />
     </div>
   );
@@ -183,22 +189,6 @@ function ImageBlock({ block }: { block: AgentImageOutputBlock }) {
         items={[{ id: `${block.id}:image`, text: block.prompt, state: "done" }]}
         durationLabel="Image prepared"
         defaultOpen
-      />
-    </div>
-  );
-}
-
-function ContextBlock({ block }: { block: AgentContextOutputBlock }) {
-  return (
-    <div data-agent-output-block="context">
-      <DezinAgentContext
-        title="Working context"
-        items={block.items.map((item) => ({
-          id: item.id,
-          title: item.label,
-          meta: item.value,
-          summary: item.detail,
-        }))}
       />
     </div>
   );
@@ -297,71 +287,115 @@ function RecommendationBlock({
   );
 }
 
-function InsightsBlock({ block }: { block: AgentInsightsOutputBlock }) {
-  const pages = block.items.map((item) => {
-    const metric: AgentInsightMetric = {
-      id: item.id,
-      label: item.label,
-      value: item.value,
-      tone: item.tone === "positive" ? "success" : item.tone === "critical" ? "danger" : "neutral",
-    };
-    return {
-      id: `${item.id}:page`,
-      title: item.label,
-      description: insightFactDescription(item.label),
-      metrics: [metric],
-    };
-  });
-  return (
-    <div data-agent-output-block="insights">
-      <DezinAgentInsights title={block.title} items={pages} />
-    </div>
-  );
-}
-
-function toolItems(block: AgentToolGroupOutputBlock): AgentToolChipItem[] {
-  const omittedCount = Math.max(0, block.items.length - 7);
-  const visibleItems = block.items.slice(-7);
+function activityItems(entries: readonly AgentOutputActivityItem[], activeItemId: string | null): AgentToolChipItem[] {
+  const omittedCount = Math.max(0, entries.length - 7);
+  const visibleItems = entries.slice(-7);
   return [
     ...(omittedCount > 0 ? [{
-      id: `${block.id}:earlier`,
-      label: `${omittedCount} earlier actions`,
+      id: "earlier-activities",
+      label: `${omittedCount} earlier activities`,
       detail: "Completed",
+      detailMono: false,
       state: "done" as const,
       kind: "tool" as const,
     }] : []),
-    ...visibleItems.map((item, index) => {
-      const { label, detail } = toolPresentation(item.text);
+    ...visibleItems.map((item) => {
+      const rawText = item.rawText?.trim() || item.text;
+      if (item.kind !== "tool") {
+        return {
+          id: item.id,
+          label: "Thinking",
+          detail: compactActivityText(rawText),
+          detailMono: false,
+          contentMono: false,
+          kind: "thinking" as const,
+          state: item.id === activeItemId ? "active" as const : "done" as const,
+          children: <Markdown className="dezin-agent-thinking__detail-markdown">{rawText}</Markdown>,
+        };
+      }
       return {
         id: item.id,
-        label,
-        detail,
-        kind: "tool" as const,
-        state: block.active && index === visibleItems.length - 1 ? "active" as const : "done" as const,
+        label: toolLabel(item.toolName),
+        detail: toolDetail(item),
+        detailMono: item.toolName === "write" || item.toolName === "read" || item.toolName === "command",
+        contentMono: item.toolName !== "read" && item.toolName !== "search",
+        kind: item.toolName ?? "tool" as const,
+        state: item.id === activeItemId ? "active" as const : "done" as const,
+        children: toolActivityDetails(item),
       };
     }),
   ];
 }
 
-function toolPresentation(text: string): {
-  label: string;
-  detail?: string;
-} {
-  const compact = text.replace(/\s+/g, " ").trim();
-  const code = /`([^`]+)`/.exec(compact)?.[1]
-    ?? /((?:[\w.-]+\/)+[\w.-]+|[\w.-]+\.(?:tsx?|jsx?|json|html|css|md|png|jpe?g|webp|svg))\b/i.exec(compact)?.[1];
-  const label = code ? compact.replace(`\`${code}\``, "").replace(code, "").replace(/[·:—-]+\s*$/, "").trim() : compact;
-  return { label: label || compact || "Activity updated", ...(code ? { detail: code } : {}) };
+function toolLabel(toolName: AgentOutputActivityItem["toolName"]): string {
+  switch (toolName) {
+    case "write": return "Write";
+    case "read": return "Read";
+    case "command": return "Command";
+    case "search": return "Search";
+    default: return "Tool";
+  }
 }
 
-function insightFactDescription(label: string): string {
-  switch (label) {
-    case "Elapsed": return "Duration recorded from this Job's persisted lifecycle timestamps.";
-    case "Activity": return "Activity events persisted for this Job.";
-    case "Result": return "Terminal lifecycle state persisted for this Job.";
-    case "Version": return "Immutable version identifier published by this Job.";
-    case "Export": return "Implementation export identifier published by this Job.";
-    default: return "Persisted lifecycle fact for this Job.";
+function parsedToolInput(item: AgentOutputActivityItem): Record<string, unknown> | null {
+  if (!item.toolInput) return null;
+  try {
+    const parsed: unknown = JSON.parse(item.toolInput);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function toolDetail(item: AgentOutputActivityItem): string | undefined {
+  const input = parsedToolInput(item);
+  const structured = input?.file_path ?? input?.path ?? input?.command ?? input?.query ?? input?.pattern;
+  if (typeof structured === "string" && structured.trim()) {
+    return structured.replace(/\s+/g, " ").trim();
+  }
+  const compact = (item.rawText?.trim() || item.text).replace(/\s+/g, " ").trim();
+  return /`([^`]+)`/.exec(compact)?.[1]
+    ?? /((?:[\w.-]+\/)+[\w.-]+|[\w.-]+\.(?:tsx?|jsx?|json|html|css|md|png|jpe?g|webp|svg))\b/i.exec(compact)?.[1];
+}
+
+function toolActivityDetails(item: AgentOutputActivityItem): ReactNode | undefined {
+  if (!item.diff && !item.toolInput && !item.toolResult) return undefined;
+  const input = parsedToolInput(item);
+  const writtenContent = item.toolName === "write" && typeof input?.content === "string"
+    ? input.content
+    : null;
+  return (
+    <div className="dezin-agent-tool-detail" data-tool-kind={item.toolName ?? "tool"} data-tool-result-error={item.toolResultError || undefined}>
+      {item.diff ? <AgentFileDiff code={item.diff} /> : writtenContent !== null ? (
+        <AgentCodeBlock code={writtenContent} language={toolLanguage(input?.file_path)} />
+      ) : item.toolInput ? (
+        <section>
+          <small>Input</small>
+          <pre><code>{prettyToolPayload(item.toolInput)}</code></pre>
+        </section>
+      ) : null}
+      {item.toolResult ? (
+        <section>
+          <small>{item.toolResultError ? "Error" : "Result"}</small>
+          <pre><code>{prettyToolPayload(item.toolResult)}</code></pre>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function toolLanguage(path: unknown): string {
+  if (typeof path !== "string") return "text";
+  return /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase() ?? "text";
+}
+
+function prettyToolPayload(value: string): string {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
   }
 }
 

@@ -110,6 +110,10 @@ test("a Project screen wires a ready Export to the browser-safe path fallback", 
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Main Agent" }));
+    const exportDisclosure = await screen.findByRole("button", { name: "Implementation export · ready" });
+    expect(exportDisclosure).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(exportDisclosure);
+    expect(exportDisclosure).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByTitle("/tmp/dezin-export-project/design/exports/export-ready-1")).toBeInTheDocument();
     const reveal = screen.getByRole("button", { name: "Reveal export" });
     await waitFor(() => expect(reveal).toBeEnabled());

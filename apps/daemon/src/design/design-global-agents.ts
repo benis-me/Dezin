@@ -9,6 +9,7 @@ import {
 import { dirname, join } from "node:path";
 import {
   classifyAgentTurnFailure,
+  normalizeAgentToolName,
   type AgentRunner,
   type AgentTurnResult,
 } from "../../../../packages/agent/src/index.ts";
@@ -44,6 +45,7 @@ import {
   type DesignJobTerminalReceiptPolicy,
   type DesignMainPlanExecution,
   updateDesignJob,
+  updateDesignJobToolActivity,
   updateDesignThreadMessage,
 } from "./design-storage.ts";
 import type {
@@ -507,10 +509,27 @@ async function executeDesignMainTurn(
           signal: controller.signal,
           env: input.env,
           onActivity: (activity) => {
-            activityWrites = activityWrites.then(() => appendDesignJobActivity(input.dataDir, input.projectId, job.id, {
-              kind: activity.kind,
-              text: activity.kind === "tool" ? activity.summary : activity.text,
-            })).then(() => undefined).catch(() => {});
+            activityWrites = activityWrites.then(async () => {
+              if (activity.kind === "tool-result") {
+                await updateDesignJobToolActivity(input.dataDir, input.projectId, job.id, activity);
+                return;
+              }
+              await appendDesignJobActivity(
+                input.dataDir,
+                input.projectId,
+                job.id,
+                activity.kind === "tool"
+                  ? {
+                      kind: "tool",
+                      text: activity.summary,
+                      toolName: normalizeAgentToolName(activity.name),
+                      ...(activity.toolCallId === undefined ? {} : { toolCallId: activity.toolCallId }),
+                      ...(activity.toolInput === undefined ? {} : { toolInput: activity.toolInput }),
+                      ...(activity.diff === undefined ? {} : { diff: activity.diff }),
+                    }
+                  : { kind: "text", text: activity.text },
+              );
+            }).catch(() => {});
           },
         });
       const runProviderTurn = async (message: string, isRepair: boolean): Promise<AgentTurnResult> => {
@@ -623,6 +642,7 @@ async function executeDesignMainTurn(
       await appendDesignJobActivity(input.dataDir, input.projectId, job.id, {
         kind: "tool",
         text: `Applied ${plan.canvasIntents.length} atomic Canvas command${plan.canvasIntents.length === 1 ? "" : "s"}`,
+        toolName: "tool",
       });
     }
     if (!conversationOnly && !applied.applicationReused) await input.executionTestHooks?.afterCanvasPlanApplied?.();
@@ -672,6 +692,7 @@ async function executeDesignMainTurn(
       await appendDesignJobActivity(input.dataDir, input.projectId, job.id, {
         kind: "tool",
         text: `Dispatched ${child.id} to Node ${dispatch.nodeId}`,
+        toolName: "tool",
       });
     }
     const dispatchSummary = plan.dispatches.length === 0

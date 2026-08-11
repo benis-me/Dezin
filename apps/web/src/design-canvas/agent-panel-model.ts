@@ -42,6 +42,15 @@ export interface AgentSearchResultModel {
 export interface AgentOutputActivityItem {
   id: string;
   text: string;
+  kind?: DesignJobActivity["kind"];
+  toolName?: "write" | "read" | "command" | "search" | "tool";
+  toolCallId?: string;
+  toolInput?: string;
+  toolResult?: string;
+  toolResultError?: boolean;
+  diff?: string;
+  rawText?: string;
+  order?: number;
   createdAt: number;
 }
 
@@ -62,6 +71,7 @@ export interface AgentToolGroupOutputBlock extends AgentOutputActivityBlockBase 
   type: "tool-group";
   phase: "progress";
   items: AgentOutputActivityItem[];
+  messageCount: number;
 }
 
 export interface AgentSearchOutputBlock extends AgentOutputActivityBlockBase {
@@ -97,18 +107,6 @@ export interface AgentLoadingOutputBlock {
   startedAt: number;
 }
 
-export interface AgentContextItemModel {
-  id: string;
-  label: string;
-  value: string;
-  detail?: string;
-}
-
-export interface AgentContextOutputBlock extends AgentOutputMetadataBlockBase {
-  type: "context";
-  items: AgentContextItemModel[];
-}
-
 export interface AgentApprovalOutputBlock extends AgentOutputMetadataBlockBase {
   type: "approval";
   title: string;
@@ -125,29 +123,14 @@ export interface AgentRecommendationOutputBlock extends AgentOutputMetadataBlock
   exportId: string | null;
 }
 
-export interface AgentInsightItemModel {
-  id: string;
-  label: string;
-  value: string;
-  tone?: "neutral" | "positive" | "critical";
-}
-
-export interface AgentInsightsOutputBlock extends AgentOutputMetadataBlockBase {
-  type: "insights";
-  title: string;
-  items: AgentInsightItemModel[];
-}
-
 export interface AgentOutputBlockRegistry {
   loading: AgentLoadingOutputBlock;
   trace: AgentTraceOutputBlock;
   "tool-group": AgentToolGroupOutputBlock;
   search: AgentSearchOutputBlock;
   image: AgentImageOutputBlock;
-  context: AgentContextOutputBlock;
   approval: AgentApprovalOutputBlock;
   recommendation: AgentRecommendationOutputBlock;
-  insights: AgentInsightsOutputBlock;
 }
 
 export const AGENT_OUTPUT_BLOCK_TYPES = [
@@ -156,10 +139,8 @@ export const AGENT_OUTPUT_BLOCK_TYPES = [
   "tool-group",
   "search",
   "image",
-  "context",
   "approval",
   "recommendation",
-  "insights",
 ] as const satisfies readonly (keyof AgentOutputBlockRegistry)[];
 
 export type AgentOutputBlockType = (typeof AGENT_OUTPUT_BLOCK_TYPES)[number];
@@ -431,9 +412,19 @@ export function searchResults(
 function outputActivityItem(
   activity: DesignJobActivity,
   compact: boolean,
+  order: number,
 ): AgentOutputActivityItem {
   return {
     id: activity.id,
+    kind: activity.kind,
+    toolName: activity.toolName ?? legacyToolName(activity),
+    ...(activity.toolCallId === undefined ? {} : { toolCallId: activity.toolCallId }),
+    ...(activity.toolInput === undefined ? {} : { toolInput: activity.toolInput }),
+    ...(activity.toolResult === undefined ? {} : { toolResult: activity.toolResult }),
+    ...(activity.toolResultError === undefined ? {} : { toolResultError: activity.toolResultError }),
+    ...(activity.diff === undefined ? {} : { diff: activity.diff }),
+    rawText: activity.text,
+    order,
     text: compact
       ? compactActivityText(activity.text)
       : activity.text.trim() || "Activity updated",
@@ -441,55 +432,20 @@ function outputActivityItem(
   };
 }
 
+function legacyToolName(activity: DesignJobActivity): AgentOutputActivityItem["toolName"] {
+  if (activity.kind !== "tool") return undefined;
+  if (/^(?:Writing|Editing|Applied)\b/.test(activity.text)) return "write";
+  if (/^Reading\b/.test(activity.text)) return "read";
+  if (/^(?:Running|Executed|Executing)\b/.test(activity.text)) return "command";
+  if (/^(?:Searching|Searched|Grep|Glob)\b/.test(activity.text)) return "search";
+  return "tool";
+}
+
 function searchQuery(activities: readonly DesignJobActivity[]): string {
   const first = activities[0];
   if (!first) return "the web";
   return quotedActivityText(first.text)
     ?? (compactActivityText(first.text).replace(/^.*?\bsearch(?:ing|ed)?\b\s*/i, "") || "the web");
-}
-
-function outputContextItems(
-  job: DesignJob,
-  options: BuildAgentOutputModelOptions,
-): AgentContextItemModel[] {
-  const items: AgentContextItemModel[] = [];
-  if (job.nodeId !== null) {
-    items.push({
-      id: `${job.id}:context:target`,
-      label: "Target",
-      value: options.nodeName ?? job.nodeId,
-      ...(options.nodeName ? { detail: job.nodeId } : {}),
-    });
-  }
-  if (job.canvasRevision !== null || job.contextHash !== null) {
-    items.push({
-      id: `${job.id}:context:canvas`,
-      label: "Canvas snapshot",
-      value: job.canvasRevision === null ? "Frozen context" : `Revision ${job.canvasRevision}`,
-      ...(job.contextHash === null ? {} : { detail: `Context ${job.contextHash.slice(0, 8)}` }),
-    });
-  }
-  if (job.expectedHeadVersionId !== null) {
-    items.push({
-      id: `${job.id}:context:head`,
-      label: "Expected head",
-      value: job.expectedHeadVersionId,
-    });
-  }
-  items.push({
-    id: `${job.id}:context:runtime`,
-    label: "Runtime",
-    value: job.runnerId,
-    ...(job.model === null ? {} : { detail: job.model }),
-  });
-  if (job.parentJobId !== null) {
-    items.push({
-      id: `${job.id}:context:lineage`,
-      label: "Orchestrated by",
-      value: job.parentJobId,
-    });
-  }
-  return items;
 }
 
 function loadingLabel(job: DesignJob, nodeName?: string): string {
@@ -502,7 +458,7 @@ function loadingLabel(job: DesignJob, nodeName?: string): string {
   }
 }
 
-function outputRecommendation(job: DesignJob, nodeName?: string): AgentRecommendationOutputBlock {
+function outputRecommendation(job: DesignJob): AgentRecommendationOutputBlock | null {
   const base: AgentOutputMetadataBlockBase = {
     id: `${job.id}:recommendation`,
     createdAt: job.finishedAt ?? job.updatedAt,
@@ -520,56 +476,7 @@ function outputRecommendation(job: DesignJob, nodeName?: string): AgentRecommend
       exportId: job.exportId,
     };
   }
-  if (job.versionId !== null) {
-    return {
-      ...base,
-      type: "recommendation",
-      title: "Version published",
-      description: `${nodeName ?? "The generated result"} is ready to review on the canvas.`,
-      actionLabel: null,
-      versionId: job.versionId,
-      exportId: null,
-    };
-  }
-  return {
-    ...base,
-    type: "recommendation",
-    title: job.kind === "main-agent" ? "Canvas plan complete" : "Task complete",
-    description: job.kind === "main-agent"
-      ? "Review the updated canvas and continue from the result."
-      : "Review the completed result in the conversation.",
-    actionLabel: null,
-    versionId: null,
-    exportId: null,
-  };
-}
-
-function outputInsights(job: DesignJob, durationMs: number): AgentInsightsOutputBlock {
-  const resultTone = job.status === "ready"
-    ? "positive" as const
-    : job.status === "failed"
-      ? "critical" as const
-      : "neutral" as const;
-  const count = job.activity.length;
-  const items: AgentInsightItemModel[] = [
-    { id: `${job.id}:insight:elapsed`, label: "Elapsed", value: compactJobDuration(durationMs) },
-    { id: `${job.id}:insight:activity`, label: "Activity", value: `${count} ${count === 1 ? "event" : "events"}` },
-    { id: `${job.id}:insight:result`, label: "Result", value: jobStatusLabel(job), tone: resultTone },
-  ];
-  if (job.versionId !== null) {
-    items.push({ id: `${job.id}:insight:version`, label: "Version", value: job.versionId, tone: "positive" });
-  } else if (job.exportId !== null) {
-    items.push({ id: `${job.id}:insight:export`, label: "Export", value: job.exportId, tone: resultTone });
-  }
-  return {
-    type: "insights",
-    id: `${job.id}:insights`,
-    createdAt: job.finishedAt ?? job.updatedAt,
-    active: false,
-    phase: null,
-    title: "Run insights",
-    items,
-  };
+  return null;
 }
 
 export function buildAgentOutputModel(
@@ -582,12 +489,17 @@ export function buildAgentOutputModel(
       left.activity.createdAt - right.activity.createdAt || left.index - right.index
     ))
     .map(({ activity }) => activity);
-  const active = job.status === "queued" || job.status === "running" || job.status === "validating";
+  const activeStatus: AgentLoadingOutputBlock["status"] | null = job.status === "queued"
+    || job.status === "running"
+    || job.status === "validating"
+    ? job.status
+    : null;
   const latestActivity = orderedActivities.at(-1);
-  const activePhase = !active
+  const activePhase = activeStatus === null
     ? null
     : latestActivity === undefined ? "reasoning" : activityPhase(latestActivity);
   const activitiesByPhase = new Map<AgentActivityPhase, DesignJobActivity[]>();
+  const activityOrder = new Map(orderedActivities.map((activity, index) => [activity.id, index]));
   for (const activity of orderedActivities) {
     const phase = activityPhase(activity);
     const grouped = activitiesByPhase.get(phase);
@@ -595,40 +507,22 @@ export function buildAgentOutputModel(
     else activitiesByPhase.set(phase, [activity]);
   }
   const blocks: AgentOutputBlock[] = [];
-  const contextItems = outputContextItems(job, options);
-  if (contextItems.length > 0) {
-    blocks.push({
-      type: "context",
-      id: `${job.id}:context`,
-      createdAt: job.createdAt,
-      active: false,
-      phase: null,
-      items: contextItems,
-    });
-  }
-  if (job.status === "queued" || job.status === "running" || job.status === "validating") {
+  const hasPresentableActivity = orderedActivities.some((activity) => activity.kind !== "status");
+  if (activeStatus !== null && !hasPresentableActivity) {
     blocks.push({
       type: "loading",
       id: `${job.id}:loading`,
       createdAt: job.createdAt,
       active: true,
       phase: null,
-      status: job.status,
+      status: activeStatus,
       label: loadingLabel(job, options.nodeName),
       startedAt: job.createdAt,
     });
-  }
-  if (orderedActivities.length === 0 && activePhase === "reasoning") {
-    blocks.push({
-      type: "trace",
-      id: `${job.id}:reasoning`,
-      createdAt: job.createdAt,
-      active: true,
-      phase: "reasoning",
-      items: [],
-    });
+    return { jobId: job.id, activePhase, blocks };
   }
   for (const [phase, activities] of activitiesByPhase) {
+    if (activities.every((activity) => activity.kind === "status")) continue;
     const base = {
       id: `${job.id}:${phase}`,
       createdAt: activities[0]!.createdAt,
@@ -640,7 +534,7 @@ export function buildAgentOutputModel(
           ...base,
           type: "trace",
           phase,
-          items: activities.map((activity) => outputActivityItem(activity, false)),
+          items: activities.map((activity) => outputActivityItem(activity, false, activityOrder.get(activity.id) ?? 0)),
         });
         break;
       case "progress":
@@ -648,7 +542,8 @@ export function buildAgentOutputModel(
           ...base,
           type: "tool-group",
           phase,
-          items: activities.map((activity) => outputActivityItem(activity, true)),
+          items: activities.map((activity) => outputActivityItem(activity, true, activityOrder.get(activity.id) ?? 0)),
+          messageCount: orderedActivities.filter((activity) => activity.kind !== "tool").length,
         });
         break;
       case "search":
@@ -657,7 +552,7 @@ export function buildAgentOutputModel(
           type: "search",
           phase,
           query: searchQuery(activities),
-          items: activities.map((activity) => outputActivityItem(activity, true)),
+          items: activities.map((activity) => outputActivityItem(activity, true, activityOrder.get(activity.id) ?? 0)),
           results: searchResults(activities, activePhase === phase),
         });
         break;
@@ -668,13 +563,12 @@ export function buildAgentOutputModel(
           type: "image",
           phase,
           prompt: quotedActivityText(latest.text) ?? compactActivityText(latest.text),
-          items: activities.map((activity) => outputActivityItem(activity, true)),
+          items: activities.map((activity) => outputActivityItem(activity, true, activityOrder.get(activity.id) ?? 0)),
         });
         break;
       }
     }
   }
-  const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
   if (job.status === "failed") {
     blocks.push({
       type: "approval",
@@ -687,10 +581,8 @@ export function buildAgentOutputModel(
       actionLabel: jobRetryLabel(job),
     });
   } else if (job.status === "ready") {
-    blocks.push(outputRecommendation(job, options.nodeName));
-  }
-  if (!active) {
-    blocks.push(outputInsights(job, durationMs));
+    const recommendation = outputRecommendation(job);
+    if (recommendation !== null) blocks.push(recommendation);
   }
   return { jobId: job.id, activePhase, blocks };
 }

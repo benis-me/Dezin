@@ -227,7 +227,12 @@ test("Main Agent atomically applies Canvas commands and exposes best-effort chil
     assert.equal(parent.status, "ready");
     assert.equal(parent.runnerId, started.job.runnerId);
     assert.equal(parent.model, "runtime-main-model");
-    assert.ok(parent.activity.some((entry) => /Applied 2 atomic Canvas commands/.test(entry.text)));
+    assert.ok(parent.activity.some((entry) => (
+      entry.kind === "tool" && entry.toolName === "tool" && /Applied 2 atomic Canvas commands/.test(entry.text)
+    )));
+    assert.ok(parent.activity.some((entry) => (
+      entry.kind === "tool" && entry.toolName === "tool" && /Dispatched .* to Node node-component/.test(entry.text)
+    )));
     assert.ok(parent.activity.some((entry) => /Scoped Agent dispatch failed.*node-page.*provider unavailable/.test(entry.text)));
     const thread = await getDesignThread(dataDir, projectId, { type: "main" });
     const reply = thread.messages.at(-1);

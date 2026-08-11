@@ -135,6 +135,7 @@ export const listDesignJobs = ledgerState.listDesignJobs;
 export const recoverInterruptedDesignJobs = ledgerState.recoverInterruptedDesignJobs;
 export const updateDesignJob = ledgerState.updateDesignJob;
 export const appendDesignJobActivity = ledgerState.appendDesignJobActivity;
+export const updateDesignJobToolActivity = ledgerState.updateDesignJobToolActivity;
 export const cancelDesignJob = ledgerState.cancelDesignJob;
 export const requestDesignJobCancellation = ledgerState.requestDesignJobCancellation;
 

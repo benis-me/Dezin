@@ -48,7 +48,7 @@ import {
   type OptimisticUserTurn,
 } from "./agent-panel-model.ts";
 import { AgentOutputRenderer } from "./AgentOutputRenderer.tsx";
-import { DezinAgentLoadingState, DezinAgentTaskRow } from "./DezinAgentPrimitives.tsx";
+import { DezinAgentJobDisclosure, DezinAgentLoadingState } from "./DezinAgentPrimitives.tsx";
 import { type DesignCanvasApi } from "./api.ts";
 import { NodeMentionInput } from "./NodeMentionInput.tsx";
 import type {
@@ -845,10 +845,16 @@ function AgentActivityCard({
 }) {
   const reduceMotion = usePrefersReducedMotion();
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
-  const [expanded, setExpanded] = useState(active || initiallyExpanded);
+  const [expanded, setExpanded] = useState(active || (job.status === "failed" && initiallyExpanded));
   useEffect(() => {
-    if (active || initiallyExpanded) setExpanded(true);
-  }, [active, initiallyExpanded]);
+    if (active) {
+      setExpanded(true);
+    } else if (job.status === "ready" || job.status === "cancelled" || job.status === "superseded") {
+      setExpanded(false);
+    } else if (job.status === "failed" && initiallyExpanded) {
+      setExpanded(true);
+    }
+  }, [active, initiallyExpanded, job.status]);
   const kindLabel = job.kind === "node-generation"
     ? "Node generation"
     : job.kind === "node-analysis"
@@ -878,6 +884,8 @@ function AgentActivityCard({
     onRetry,
   });
   const outputModel = buildAgentOutputModel(job, { nodeName });
+  const hasOutput = outputModel.blocks.length > 0;
+  const hasDetails = hasOutput || stopError !== null;
   const taskMeta = [kindLabel, job.model].filter(Boolean).join(" · ");
   return (
     <div
@@ -889,7 +897,7 @@ function AgentActivityCard({
       <span className="agent-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
         {displayLabel}: {job.status}
       </span>
-      <DezinAgentTaskRow
+      <DezinAgentJobDisclosure
         title={displayLabel}
         meta={taskMeta}
         status={job.status}
@@ -913,21 +921,27 @@ function AgentActivityCard({
           </Button>
         ) : null}
       >
-        {stopError ? (
-          <div className="design-canvas-agent__job-error" role="alert">
-            <CircleAlert aria-hidden />
-            <p>{stopError}</p>
-          </div>
+        {hasDetails ? (
+          <>
+            {stopError ? (
+              <div className="design-canvas-agent__job-error" role="alert">
+                <CircleAlert aria-hidden />
+                <p>{stopError}</p>
+              </div>
+            ) : null}
+            {hasOutput ? (
+              <AgentOutputRenderer
+                model={outputModel}
+                projectPath={projectPath}
+                onRevealExport={onRevealExport}
+                onRetry={onRetry ? async () => retry() : undefined}
+                retrying={retrying}
+                retryError={retryError}
+              />
+            ) : null}
+          </>
         ) : null}
-        <AgentOutputRenderer
-          model={outputModel}
-          projectPath={projectPath}
-          onRevealExport={onRevealExport}
-          onRetry={onRetry ? async () => retry() : undefined}
-          retrying={retrying}
-          retryError={retryError}
-        />
-      </DezinAgentTaskRow>
+      </DezinAgentJobDisclosure>
     </div>
   );
 }

@@ -885,7 +885,7 @@
   will-change: transform, opacity;
 }
 .design-canvas-main-agent .design-canvas-agent {
-  box-shadow: 0 2px 7px oklch(0.1 0 0 / 0.055), 0 22px 64px oklch(0.1 0 0 / 0.13);
+  box-shadow: none;
 }
 
 .design-canvas-agent {
@@ -898,7 +898,7 @@
   border: 0;
   border-radius: 16px;
   background: transparent;
-  box-shadow: 0 2px 7px oklch(0.1 0 0 / 0.045), 0 24px 64px oklch(0.1 0 0 / 0.14);
+  box-shadow: none;
   color: var(--foreground);
 }
 .design-canvas-agent__surface {
@@ -1075,7 +1075,7 @@
   max-width: calc(100vw - 20px);
   border-radius: 11px;
   padding: 5px;
-  box-shadow: 0 16px 42px oklch(0.1 0 0 / 0.15), 0 2px 6px oklch(0.1 0 0 / 0.04);
+  box-shadow: 0 4px 14px oklch(0.1 0 0 / 0.07);
   transform-origin: bottom center;
 }
 .design-canvas-agent__mention-menu-heading {
@@ -1129,7 +1129,7 @@
   border-radius: 11px;
   padding: 9px 7px 9px 10px;
   background: color-mix(in oklch, var(--card) 97%, transparent);
-  box-shadow: 0 12px 34px oklch(0.1 0 0 / 0.13);
+  box-shadow: 0 4px 14px oklch(0.1 0 0 / 0.07);
   color: var(--foreground);
   font-size: 12px;
   line-height: 1.45;
@@ -1326,7 +1326,7 @@
   .design-canvas-topbar__identity h1 { max-width: 25vw; font-size: 13px; }
   .design-canvas-topbar__actions button { width: 32px; padding: 0; font-size: 0; }
   .design-canvas-main-agent { inset: 8px 8px 60px; width: auto; }
-  .design-canvas-main-agent .design-canvas-agent { border: 1px solid color-mix(in oklch, var(--border) 78%, transparent); border-radius: 14px; box-shadow: var(--shadow-pop); }
+  .design-canvas-main-agent .design-canvas-agent { border: 1px solid color-mix(in oklch, var(--border) 78%, transparent); border-radius: 14px; box-shadow: none; }
   .design-canvas-agent--floating,
   .design-canvas-agent--floating[data-agent-size="focus"] { right: 8px !important; bottom: 8px; left: 8px !important; top: auto !important; width: auto !important; height: min(520px, 56%) !important; }
   .design-canvas-surface[data-node-focus] .design-canvas-focus-actions {

@@ -4,6 +4,8 @@
  */
 
 export type {
+  AgentActivity,
+  AgentToolName,
   AgentRunner,
   AgentTurnInput,
   AgentTurnResult,
@@ -11,11 +13,13 @@ export type {
   TurnRole,
 } from "./types.ts";
 export {
+  AGENT_TOOL_NAMES,
   AbortError,
   AgentExecutionIdentityError,
   AgentTurnError,
   abortError,
   isAbortError,
+  normalizeAgentToolName,
 } from "./types.ts";
 export { FakeRunner, type FakeRunnerOptions } from "./fake-runner.ts";
 export {

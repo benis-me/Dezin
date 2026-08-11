@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DESIGN_GENERATIVE_NODE_KINDS,
+  DESIGN_JOB_TOOL_NAMES,
   DESIGN_MATERIAL_NODE_KINDS,
   DESIGN_NODE_KINDS,
   DESIGN_PROJECT_BOOTSTRAP_SCHEMA_VERSION,
@@ -15,6 +16,7 @@ import type {
   DesignGenerativeNodeKind,
   DesignJob,
   DesignJobRetryResult,
+  DesignJobToolName,
   DesignMaterialNodeKind,
   DesignNode,
   DesignNodeKind,
@@ -47,10 +49,12 @@ type ExpectedGenerativeKind =
   | "knowledge";
 type ExpectedMaterialKind = "image" | "video" | "document" | "file";
 type ExpectedNodeKind = ExpectedGenerativeKind | ExpectedMaterialKind;
+type ExpectedJobToolName = "write" | "read" | "command" | "search" | "tool";
 
 type GenerativeKindsAreExact = Expect<Equal<DesignGenerativeNodeKind, ExpectedGenerativeKind>>;
 type MaterialKindsAreExact = Expect<Equal<DesignMaterialNodeKind, ExpectedMaterialKind>>;
 type NodeKindsAreExact = Expect<Equal<DesignNodeKind, ExpectedNodeKind>>;
+type JobToolNamesAreExact = Expect<Equal<DesignJobToolName, ExpectedJobToolName>>;
 type NodeHasNoUnprojectedLastReady = Expect<
   Equal<"lastReadyVersionId" extends keyof DesignNode ? true : false, false>
 >;
@@ -141,7 +145,21 @@ const job = {
   error: null,
   cancelRequested: false,
   conversationOnly: false,
-  activity: [{ id: "activity-1", kind: "status", text: "Ready", createdAt: 2 }],
+  activity: [
+    { id: "activity-1", kind: "status", text: "Ready", createdAt: 2 },
+    {
+      id: "activity-2",
+      kind: "tool",
+      text: "Writing index.html",
+      toolName: "write",
+      toolCallId: "tool-write-1",
+      toolInput: "{\"file_path\":\"index.html\"}",
+      toolResult: "File written",
+      toolResultError: false,
+      diff: "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,1 @@\n+<main />",
+      createdAt: 2,
+    },
+  ],
   createdAt: 1,
   updatedAt: 2,
   finishedAt: 2,
@@ -215,6 +233,7 @@ const figmaCanvasImport = { canvas, import: figmaImport } satisfies FigmaCanvasI
 void (0 as unknown as GenerativeKindsAreExact);
 void (0 as unknown as MaterialKindsAreExact);
 void (0 as unknown as NodeKindsAreExact);
+void (0 as unknown as JobToolNamesAreExact);
 void (0 as unknown as NodeHasNoUnprojectedLastReady);
 void (0 as unknown as CanvasSchemaVersionIsExact);
 void (0 as unknown as JobAuthorityIsRequired);
@@ -239,6 +258,7 @@ test("node kind partitions are exact, ordered, and exhaustive", () => {
 
 test("representative wire DTOs retain their public shape", () => {
   assert.equal(DESIGN_SCHEMA_VERSION, 2);
+  assert.deepEqual(DESIGN_JOB_TOOL_NAMES, ["write", "read", "command", "search", "tool"]);
   assert.equal(canvas.nodes[0]?.currentVersionId, version.id);
   assert.equal(turn.job.versionId, version.id);
   assert.equal(figmaCanvasImport.canvas.projectId, figmaCanvasImport.import.manifest.projectId);

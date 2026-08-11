@@ -658,7 +658,20 @@ class WritingRunner implements AgentRunner {
     assert.equal(duplicateImage.assetPath, image.assetPath);
     const html = "<!doctype html><html><head><title>Generated page</title><style>body{margin:0}</style></head><body><main data-design-node-id=\"hero\">Generated</main></body></html>";
     await writeFile(join(input.projectDir, "index.html"), html);
-    input.onActivity?.({ kind: "tool", name: "Write", summary: "Writing index.html" });
+    input.onActivity?.({
+      kind: "tool",
+      name: "Write",
+      summary: "Writing index.html",
+      toolCallId: "tool-write-index",
+      toolInput: "{\"file_path\":\"index.html\"}",
+      diff: "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,1 @@\n+<!doctype html>",
+    });
+    input.onActivity?.({
+      kind: "tool-result",
+      toolCallId: "tool-write-index",
+      toolResult: "File written",
+      toolResultError: false,
+    });
     return {
       text: "Generated the page.",
       artifactHtml: html,
@@ -757,7 +770,14 @@ test("a Node Agent owns one staged HTML output and publishes an immutable versio
     const persisted = await getDesignJob(dataDir, projectId, completed.id);
     assert.equal(persisted.runnerId, "writing-fake");
     assert.equal(persisted.model, "runtime-fixture-model");
-    assert.ok(persisted.activity.some((entry) => entry.text === "Writing index.html"));
+    assert.ok(persisted.activity.some((entry) => (
+      entry.text === "Writing index.html" && entry.toolName === "write"
+      && entry.toolCallId === "tool-write-index"
+      && entry.toolInput === "{\"file_path\":\"index.html\"}"
+      && entry.toolResult === "File written" && entry.toolResultError === false
+      && entry.diff?.startsWith("--- /dev/null\n+++ b/index.html")
+    )));
+    assert.equal(persisted.activity.filter((entry) => entry.toolCallId === "tool-write-index").length, 1);
     const [version] = (await listDesignVersions(dataDir, projectId, "node-page"))
       .filter((candidate) => candidate.id === completed.versionId);
     assert.equal(version?.runnerId, persisted.runnerId);

@@ -5,7 +5,8 @@ import { expect, test, vi } from "vitest";
 import { AgentOutputRenderer } from "./AgentOutputRenderer.tsx";
 import type { AgentOutputModel } from "./agent-panel-model.ts";
 
-test("the typed output registry is the only ordered renderer input for Trace and Tool primitives", () => {
+test("the typed output registry renders Thinking and real tool details in one activity disclosure", async () => {
+  const user = userEvent.setup();
   const model: AgentOutputModel = {
     jobId: "job-live",
     activePhase: "progress",
@@ -43,9 +44,18 @@ test("the typed output registry is the only ordered renderer input for Trace and
         createdAt: 4,
         active: true,
         phase: "progress",
+        messageCount: 3,
         items: [
-          { id: "read", text: "Read design/project.json", createdAt: 4 },
-          { id: "write", text: "Write components.json", createdAt: 5 },
+          { id: "read", text: "Read design/project.json", kind: "tool", toolName: "read", rawText: "Read design/project.json", createdAt: 4 },
+          {
+            id: "write",
+            text: "Write components.json",
+            kind: "tool",
+            toolName: "write",
+            toolInput: JSON.stringify({ file_path: "components.json", content: "export const hero = true;" }),
+            rawText: "Write components.json",
+            createdAt: 5,
+          },
         ],
       },
     ],
@@ -55,49 +65,42 @@ test("the typed output registry is the only ordered renderer input for Trace and
 
   expect([...container.querySelectorAll("[data-agent-output-block]")].map((block) => (
     block.getAttribute("data-agent-output-block")
-  ))).toEqual(["trace", "search", "image", "tool-group"]);
-  expect(container.querySelectorAll('[data-dezin-agent-primitive="thinking"]')).toHaveLength(3);
+  ))).toEqual(["tool-group", "search", "image"]);
+  expect(container.querySelectorAll('[data-dezin-agent-primitive="thinking"]')).toHaveLength(2);
   const toolGroup = container.querySelector<HTMLElement>('[data-dezin-agent-primitive="tools"]')!;
-  expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.state)).toEqual(["done", "active"]);
-  expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.kind)).toEqual(["tool", "tool"]);
+  expect(within(toolGroup).getByRole("button", { name: "2 tool calls, 1 message" })).toBeInTheDocument();
+  expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.state)).toEqual(["done", "done", "active"]);
+  expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.kind)).toEqual(["thinking", "read", "write"]);
+  expect(within(toolGroup).getByRole("button", { name: "Thinking" })).toHaveAttribute("aria-expanded", "false");
+  await user.click(within(toolGroup).getByRole("button", { name: "Write" }));
+  expect(within(toolGroup).getByRole("figure")).toHaveAttribute("data-agent-component", "code-block");
+  expect(within(toolGroup).getByText("export const hero = true;")).toBeInTheDocument();
 });
 
-test("an empty live registry still renders a typed Thinking Trace", () => {
+test("an activity-free live registry renders only Loading", () => {
   const { container } = render(<AgentOutputRenderer model={{
     jobId: "job-empty-live",
     activePhase: "reasoning",
     blocks: [{
-      type: "trace",
-      id: "job-empty-live:reasoning",
+      type: "loading",
+      id: "job-empty-live:loading",
       createdAt: 1,
       active: true,
-      phase: "reasoning",
-      items: [],
+      phase: null,
+      status: "running",
+      label: "Planning the canvas",
+      startedAt: 1,
     }],
   }} />);
 
-  const trace = container.querySelector('[data-agent-output-block="trace"]');
-  expect(trace?.querySelector('[data-dezin-agent-primitive="thinking"]')).toBeInTheDocument();
-  expect(trace).toHaveTextContent("Thinking");
+  expect(container.querySelector('[data-agent-output-block="loading"]')).toHaveTextContent("Planning the canvas");
+  expect(container.querySelector('[data-dezin-agent-primitive="thinking"]')).toBeNull();
 });
 
-test("terminal output renders Dezin recommendation, approval, insights, and real actions", async () => {
+test("terminal output renders only grounded recommendation and approval actions", async () => {
   const user = userEvent.setup();
   const onRevealExport = vi.fn(async () => "revealed" as const);
   const onRetry = vi.fn(async () => {});
-  const insights = {
-    type: "insights" as const,
-    id: "job-export:insights",
-    createdAt: 8,
-    active: false as const,
-    phase: null,
-    title: "Run insights",
-    items: [
-      { id: "elapsed", label: "Elapsed", value: "7s", tone: "positive" as const },
-      { id: "activity", label: "Activity", value: "4 events" },
-      { id: "result", label: "Result", value: "Complete", tone: "positive" as const },
-    ],
-  };
   const model: AgentOutputModel = {
     jobId: "job-export",
     activePhase: null,
@@ -114,7 +117,6 @@ test("terminal output renders Dezin recommendation, approval, insights, and real
         versionId: null,
         exportId: "export-1",
       },
-      insights,
     ],
   };
 
@@ -132,14 +134,6 @@ test("terminal output renders Dezin recommendation, approval, insights, and real
   expect(onRevealExport).toHaveBeenCalledWith("export-1");
   expect(await screen.findByText("Opened in Finder.")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Revealed" })).toBeInTheDocument();
-  expect(screen.getByText("Run insights").closest('[data-dezin-agent-primitive="insights"]')).toHaveTextContent("3");
-  expect(screen.getAllByText("Elapsed")).toHaveLength(2);
-  expect(screen.getByText("7s")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Next insight" }));
-  expect(screen.getByText("4 events").closest('[data-dezin-agent-primitive="insights"]')).toHaveTextContent(
-    "Activity events persisted for this Job.",
-  );
-  expect(screen.getByText("4 events")).toBeInTheDocument();
 
   rerender(<AgentOutputRenderer model={{
     jobId: "job-failed",
@@ -158,106 +152,4 @@ test("terminal output renders Dezin recommendation, approval, insights, and real
   expect(screen.getByText("Generated HTML did not pass validation")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Repair & retry" }));
   expect(onRetry).toHaveBeenCalledWith("job-failed");
-});
-
-test("the production renderer uses every grounded Dezin output primitive", async () => {
-  const user = userEvent.setup();
-  const onRetry = vi.fn(async () => {});
-  const onRevealExport = vi.fn(async () => "revealed" as const);
-  const model: AgentOutputModel = {
-    jobId: "job-beautiful",
-    activePhase: "progress",
-    blocks: [
-      {
-        type: "context",
-        id: "context",
-        createdAt: 1,
-        active: false,
-        phase: null,
-        items: [{ id: "target", label: "Target", value: "Hero", detail: "node-hero" }],
-      },
-      {
-        type: "loading",
-        id: "loading",
-        createdAt: 1,
-        active: true,
-        phase: null,
-        status: "running",
-        label: "Generating Hero",
-        startedAt: 1,
-      },
-      {
-        type: "trace",
-        id: "trace",
-        createdAt: 2,
-        active: false,
-        phase: "reasoning",
-        items: [{ id: "thought", text: "Inspecting the hierarchy", createdAt: 2 }],
-      },
-      {
-        type: "tool-group",
-        id: "tools",
-        createdAt: 3,
-        active: true,
-        phase: "progress",
-        items: [{ id: "read", text: "Read design/project.json", createdAt: 3 }],
-      },
-      {
-        type: "approval",
-        id: "approval",
-        createdAt: 4,
-        active: false,
-        phase: null,
-        title: "Repair this run?",
-        detail: "Generated HTML did not pass validation",
-        actionLabel: "Repair & retry",
-      },
-      {
-        type: "recommendation",
-        id: "recommendation",
-        createdAt: 5,
-        active: false,
-        phase: null,
-        title: "Export ready",
-        description: "Reveal the verified implementation output in Finder.",
-        actionLabel: "Reveal export",
-        versionId: null,
-        exportId: "export-1",
-      },
-      {
-        type: "insights",
-        id: "insights",
-        createdAt: 6,
-        active: false,
-        phase: null,
-        title: "Run insights",
-        items: [{ id: "elapsed", label: "Elapsed", value: "8s" }],
-      },
-    ],
-  };
-
-  const { container } = render(
-    <AgentOutputRenderer
-      model={model}
-      projectPath="/tmp/editorial"
-      onRetry={onRetry}
-      onRevealExport={onRevealExport}
-    />,
-  );
-
-  expect([...container.querySelectorAll("[data-dezin-agent-primitive]")].map((element) => (
-    element.getAttribute("data-dezin-agent-primitive")
-  ))).toEqual([
-    "context",
-    "loading",
-    "thinking",
-    "tools",
-    "approval",
-    "recommendation",
-    "insights",
-  ]);
-  await user.click(screen.getByRole("button", { name: "Repair & retry" }));
-  expect(onRetry).toHaveBeenCalledWith("job-beautiful");
-  await user.click(screen.getByRole("button", { name: "Reveal export" }));
-  expect(onRevealExport).toHaveBeenCalledWith("export-1");
 });

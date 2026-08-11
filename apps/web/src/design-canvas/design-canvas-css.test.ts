@@ -133,10 +133,11 @@ test("Agent composer grows within explicit bounds without a separator above it",
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam:focus-within \.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*color-mix\(in oklch, var\(--design-canvas-accent\) 48%, var\(--border-strong\)\);/s);
 });
 
-test("Agent execution uses bordered Task Rows without decorative left rails", () => {
+test("Agent execution uses a flat Tool-style disclosure without a Task capsule", () => {
   expect(css).toMatch(/\.design-canvas-agent__activity-group\s*\{[^}]*overflow:\s*visible;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\s*\{[^}]*border-radius:\s*22px;[^}]*background:\s*var\(--dz-surface\);[^}]*box-shadow:/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-open\]\s*\{[^}]*border-radius:\s*14px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure\s*\{[^}]*overflow:\s*visible;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure__trigger\s*\{[^}]*min-height:\s*32px;[^}]*overflow:\s*visible;[^}]*border-radius:\s*8px;[^}]*background:\s*transparent;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure__content\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(primitivesCss).not.toContain("__rail");
 });
 
@@ -150,16 +151,16 @@ test("Agent disclosure rows keep every expanded glyph and body on the 29px edito
   expect({ outputColumnWidth, traceIconX, traceTextX, searchTextX, toolChipIconX, toolChipTextX })
     .toEqual({ outputColumnWidth: 324, traceIconX: 29, traceTextX: 50, searchTextX: 50, toolChipIconX: 29, toolChipTextX: 50 });
   expect(primitivesCss).toMatch(/\.dezin-agent-thinking__steps\s*\{[^}]*padding:\s*4px 0 4px 29px;/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-thinking__steps li\s*\{[^}]*grid-template-columns:\s*14px minmax\(0,1fr\) auto;[^}]*gap:\s*8px;/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row__content\s*\{[^}]*padding:\s*9px 12px 11px 50px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking__step-summary\s*\{[^}]*grid-template-columns:\s*14px minmax\(0,1fr\) auto auto;[^}]*gap:\s*8px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure__content\s*\{[^}]*padding:\s*4px 0 2px 22px;/s);
   expect(primitivesCss).toMatch(/\.dezin-agent-tool-chips__item-summary\s*\{[^}]*height:\s*28px;[^}]*gap:\s*8px;/s);
   expect(primitivesCss).not.toContain("agent-web-search__rail");
 });
 
 test("Agent Job status stays in its glyph rather than tinting whole cards", () => {
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-status="ready"\] \.dezin-agent-task-row__status-label\s*\{[^}]*color:\s*var\(--dz-green\);/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-status="failed"\] \.dezin-agent-task-row__status-label\s*\{[^}]*color:\s*var\(--dz-red\);/s);
-  expect(primitivesCss).not.toMatch(/\.dezin-agent-task-row\[data-status="failed"\]\s*\{[^}]*background:[^;}]*var\(--dz-red\)/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure\[data-status="ready"\] \.dezin-agent-job-disclosure__status\s*\{[^}]*color:\s*var\(--dz-green\);/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure\[data-status="failed"\] \.dezin-agent-job-disclosure__status\s*\{[^}]*color:\s*var\(--dz-red\);/s);
+  expect(primitivesCss).not.toMatch(/\.dezin-agent-job-disclosure\[data-status="failed"\]\s*\{[^}]*background:[^;}]*var\(--dz-red\)/s);
 });
 
 test("Agent transcript restores the original right-aligned Canvas user bubble", () => {
@@ -310,6 +311,6 @@ test("Agent activity cards keep Thinking compact, complete, and visually quiet",
   expect(primitivesCss).toMatch(/\.dezin-agent-thinking\s*\{[^}]*font-size:\s*12\.5px;[^}]*line-height:\s*18\.75px;/s);
   expect(primitivesCss).toMatch(/\.dezin-agent-thinking__trigger\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
   expect(primitivesCss).toMatch(/\.dezin-agent-thinking\[data-active\] \.dezin-agent-thinking__trigger > span\s*\{[^}]*animation:\s*dezin-agent-shimmer 1\.4s linear infinite;/s);
-  expect(primitivesCss).toMatch(/\.dezin-agent-task-row > header\s*\{[^}]*min-height:\s*44px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-job-disclosure__trigger\s*\{[^}]*min-height:\s*32px;/s);
   expect(primitivesCss).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation-duration:\s*\.001ms !important;/s);
 });

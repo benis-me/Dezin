@@ -10,6 +10,7 @@ import {
   DesignRevisionConflictError,
   MAX_DESIGN_ASSET_BYTES,
   MAX_DESIGN_CONTEXT_BYTES,
+  appendDesignJobActivity,
   assertDesignFrozenContextBudget,
   buildPortableDesignVersionHtml,
   cancelDesignJob,
@@ -35,6 +36,7 @@ import {
   storeDesignAsset,
   undoDesignCanvas,
   updateDesignJob,
+  updateDesignJobToolActivity,
   updateDesignThreadMessage,
   validateDesignExportJavaScript,
   validateDesignExportCss,
@@ -3874,12 +3876,65 @@ test("persisted Design Version, Thread, and Job records reject unbounded or unex
       model: "fixture-model",
       nodeId: "node-page",
     });
+    await assert.rejects(
+      appendDesignJobActivity(
+        dataDir,
+        projectId,
+        created.job.id,
+        { kind: "tool", text: "Missing identity" } as unknown as Parameters<typeof appendDesignJobActivity>[3],
+      ),
+      /invalid/i,
+    );
+    const appended = await appendDesignJobActivity(dataDir, projectId, created.job.id, {
+      kind: "tool",
+      text: "Writing index.html",
+      toolName: "write",
+      toolCallId: "tool-write-1",
+      toolInput: "{\"file_path\":\"index.html\"}",
+      diff: "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,1 @@\n+<main />",
+    });
+    assert.equal(appended.activity.at(-1)?.toolName, "write");
+    const withResult = await updateDesignJobToolActivity(dataDir, projectId, created.job.id, {
+      toolCallId: "tool-write-1",
+      toolResult: "File written",
+      toolResultError: false,
+    });
+    assert.equal(withResult.activity.at(-1)?.toolResult, "File written");
     const jobPath = join(dataDir, "projects", projectId, "design", "jobs", `${created.job.id}.json`);
     const { runnerId: _runnerId, ...missingRunnerId } = created.job;
     await writeFile(jobPath, `${JSON.stringify(missingRunnerId)}\n`);
     await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
     const { model: _model, ...missingModel } = created.job;
     await writeFile(jobPath, `${JSON.stringify(missingModel)}\n`);
+    await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
+    const legacyToolActivity = {
+      ...created.job,
+      activity: [{ id: "activity-legacy", kind: "tool", text: "Legacy tool step", createdAt: created.job.createdAt }],
+    };
+    await writeFile(jobPath, `${JSON.stringify(legacyToolActivity)}\n`);
+    assert.equal((await getDesignJob(dataDir, projectId, created.job.id)).activity[0]?.toolName, undefined);
+    await writeFile(jobPath, `${JSON.stringify({
+      ...created.job,
+      activity: [{
+        id: "activity-bad-tool-name",
+        kind: "tool",
+        text: "Unknown category",
+        toolName: "shell",
+        createdAt: created.job.createdAt,
+      }],
+    })}\n`);
+    await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
+    await writeFile(jobPath, `${JSON.stringify({
+      ...created.job,
+      activity: [{
+        id: "activity-oversized-tool-input",
+        kind: "tool",
+        text: "Oversized input",
+        toolName: "write",
+        toolInput: "x".repeat(64 * 1024 + 1),
+        createdAt: created.job.createdAt,
+      }],
+    })}\n`);
     await assert.rejects(getDesignJob(dataDir, projectId, created.job.id), /invalid|corrupt/i);
     await writeFile(jobPath, `${JSON.stringify({
       ...created.job,

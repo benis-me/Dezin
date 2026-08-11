@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import {
   AgentArtifactError,
   classifyAgentTurnFailure,
+  normalizeAgentToolName,
   type AgentRunner,
   type AgentTurnInput,
   type ProcessSpawner,
@@ -39,6 +40,7 @@ import {
   resolveDesignAssetFile,
   resolveDesignVersionFile,
   updateDesignJob,
+  updateDesignJobToolActivity,
   updateDesignThreadMessage,
   validateDesignHtml,
   type DesignVersionPublicationTestHooks,
@@ -504,10 +506,25 @@ async function executeDesignNodeTurn(
           env: input.env,
           onActivity: (activity) => {
             activityWrites = activityWrites.then(async () => {
-              await appendDesignJobActivity(input.dataDir, input.projectId, job.id, {
-                kind: activity.kind,
-                text: activity.kind === "tool" ? activity.summary : activity.text,
-              });
+              if (activity.kind === "tool-result") {
+                await updateDesignJobToolActivity(input.dataDir, input.projectId, job.id, activity);
+                return;
+              }
+              await appendDesignJobActivity(
+                input.dataDir,
+                input.projectId,
+                job.id,
+                activity.kind === "tool"
+                  ? {
+                      kind: "tool",
+                      text: activity.summary,
+                      toolName: normalizeAgentToolName(activity.name),
+                      ...(activity.toolCallId === undefined ? {} : { toolCallId: activity.toolCallId }),
+                      ...(activity.toolInput === undefined ? {} : { toolInput: activity.toolInput }),
+                      ...(activity.diff === undefined ? {} : { diff: activity.diff }),
+                    }
+                  : { kind: "text", text: activity.text },
+              );
             }).catch(() => {});
           },
         });

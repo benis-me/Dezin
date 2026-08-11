@@ -3,6 +3,7 @@ import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DESIGN_GENERATIVE_NODE_KINDS,
+  DESIGN_JOB_TOOL_NAMES,
   DESIGN_SCHEMA_VERSION,
   type DesignCanvas,
   type DesignFrozenContext,
@@ -11,6 +12,7 @@ import {
   type DesignJobActivity,
   type DesignJobKind,
   type DesignJobStatus,
+  type DesignJobToolName,
   type DesignNode,
   type DesignNodeState,
   type DesignProjectFile,
@@ -50,6 +52,21 @@ import {
   writeAtomicJson,
   writeAuthorityJson,
 } from "./design-storage-primitives.ts";
+
+const DESIGN_JOB_TOOL_CALL_ID_MAX_BYTES = 512;
+const DESIGN_JOB_TOOL_INPUT_MAX_BYTES = 64 * 1024;
+const DESIGN_JOB_TOOL_RESULT_MAX_BYTES = 64 * 1024;
+const DESIGN_JOB_TOOL_DIFF_MAX_BYTES = 128 * 1024;
+
+function validDesignJobToolInput(value: unknown): value is string {
+  if (!validStoredText(value, DESIGN_JOB_TOOL_INPUT_MAX_BYTES)) return false;
+  try {
+    const parsed = JSON.parse(value as string);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
 
 export interface DesignMainPlanExecution {
   executionId: string;
@@ -694,10 +711,34 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     }
     const activityIds = new Set<string>();
     for (const [index, entry] of job.activity.entries()) {
-      const activity = storedRecord(entry, `Design Job ${expectedId} activity ${index}`, ["id", "kind", "text", "createdAt"]);
+      const activity = storedRecord(entry, `Design Job ${expectedId} activity ${index}`, [
+        "id", "kind", "text", "toolName", "toolCallId", "toolInput", "toolResult", "toolResultError", "diff",
+        "createdAt",
+      ]);
+      const activityKind = String(activity.kind);
+      const hasToolDetails = activity.toolName !== undefined || activity.toolCallId !== undefined
+        || activity.toolInput !== undefined || activity.toolResult !== undefined
+        || activity.toolResultError !== undefined || activity.diff !== undefined;
+      const hasToolPayload = activity.toolCallId !== undefined || activity.toolInput !== undefined
+        || activity.toolResult !== undefined || activity.toolResultError !== undefined || activity.diff !== undefined;
       if (typeof activity.id !== "string" || !SAFE_SEGMENT.test(activity.id) || activityIds.has(activity.id)
-        || !["text", "tool", "status"].includes(String(activity.kind))
+        || !["text", "tool", "status"].includes(activityKind)
         || !validStoredText(activity.text, 16_384) || (activity.text as string).trim() !== activity.text
+        || (hasToolDetails && activityKind !== "tool")
+        || (hasToolPayload && activity.toolName === undefined)
+        || (activity.toolName !== undefined
+          && !DESIGN_JOB_TOOL_NAMES.includes(activity.toolName as DesignJobToolName))
+        || (activity.toolCallId !== undefined && (!validStoredText(
+          activity.toolCallId,
+          DESIGN_JOB_TOOL_CALL_ID_MAX_BYTES,
+        ) || (activity.toolCallId as string).trim() !== activity.toolCallId))
+        || (activity.toolInput !== undefined && !validDesignJobToolInput(activity.toolInput))
+        || (activity.toolResult !== undefined
+          && !validStoredText(activity.toolResult, DESIGN_JOB_TOOL_RESULT_MAX_BYTES))
+        || !(activity.toolResultError === undefined || typeof activity.toolResultError === "boolean")
+        || (activity.toolResultError !== undefined && activity.toolResult === undefined)
+        || (activity.toolResult !== undefined && activity.toolCallId === undefined)
+        || (activity.diff !== undefined && !validStoredText(activity.diff, DESIGN_JOB_TOOL_DIFF_MAX_BYTES))
         || !validStoredTimestamp(activity.createdAt)) {
         throw new DesignStorageError("corrupt", `Design Job ${expectedId} activity ${index} is invalid`);
       }
@@ -1726,20 +1767,77 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     dataDir: string,
     projectId: string,
     jobId: string,
-    input: { kind: DesignJobActivity["kind"]; text: string },
+    input:
+      | {
+          kind: "tool";
+          text: string;
+          toolName: DesignJobToolName;
+          toolCallId?: string;
+          toolInput?: string;
+          diff?: string;
+        }
+      | { kind: Exclude<DesignJobActivity["kind"], "tool">; text: string; toolName?: never },
     now?: number,
   ): Promise<DesignJob> {
     const root = designRoot(dataDir, projectId);
     return withProjectLock(root, async () => {
       const job = await readJob(root, safeSegment(jobId, "Job id"));
       if (!["text", "tool", "status"].includes(input?.kind) || typeof input?.text !== "string"
-        || !input.text.trim() || Buffer.byteLength(input.text, "utf8") > 16_384) {
+        || !input.text.trim() || Buffer.byteLength(input.text, "utf8") > 16_384
+        || (input.kind === "tool"
+          ? (!DESIGN_JOB_TOOL_NAMES.includes(input.toolName)
+            || (input.toolCallId !== undefined && (!validStoredText(
+              input.toolCallId,
+              DESIGN_JOB_TOOL_CALL_ID_MAX_BYTES,
+            ) || input.toolCallId.trim() !== input.toolCallId))
+            || (input.toolInput !== undefined && !validDesignJobToolInput(input.toolInput))
+            || (input.diff !== undefined && !validStoredText(input.diff, DESIGN_JOB_TOOL_DIFF_MAX_BYTES)))
+          : input.toolName !== undefined)) {
         throw new DesignStorageError("invalid-input", "Design Job activity is invalid");
       }
       const timestamp = nowValue(now);
-      job.activity.push({ id: `activity-${randomUUID()}`, kind: input.kind, text: input.text.trim(), createdAt: timestamp });
+      job.activity.push({
+        id: `activity-${randomUUID()}`,
+        kind: input.kind,
+        text: input.text.trim(),
+        ...(input.toolName === undefined ? {} : { toolName: input.toolName }),
+        ...(input.kind !== "tool" || input.toolCallId === undefined ? {} : { toolCallId: input.toolCallId }),
+        ...(input.kind !== "tool" || input.toolInput === undefined ? {} : { toolInput: input.toolInput }),
+        ...(input.kind !== "tool" || input.diff === undefined ? {} : { diff: input.diff }),
+        createdAt: timestamp,
+      });
       job.activity = job.activity.slice(-MAX_JOB_ACTIVITY);
       job.updatedAt = timestamp;
+      await writeAuthorityJson(root, jobFilePath(root, job.id), job, ["jobs"]);
+      return job;
+    });
+  }
+
+  async function updateDesignJobToolActivity(
+    dataDir: string,
+    projectId: string,
+    jobId: string,
+    input: { toolCallId: string; toolResult: string; toolResultError: boolean },
+    now?: number,
+  ): Promise<DesignJob> {
+    const root = designRoot(dataDir, projectId);
+    return withProjectLock(root, async () => {
+      const job = await readJob(root, safeSegment(jobId, "Job id"));
+      if (!validStoredText(input?.toolCallId, DESIGN_JOB_TOOL_CALL_ID_MAX_BYTES)
+        || input.toolCallId.trim() !== input.toolCallId
+        || !validStoredText(input?.toolResult, DESIGN_JOB_TOOL_RESULT_MAX_BYTES)
+        || typeof input?.toolResultError !== "boolean") {
+        throw new DesignStorageError("invalid-input", "Design Job tool result is invalid");
+      }
+      const activity = job.activity.findLast((entry) => (
+        entry.kind === "tool" && entry.toolCallId === input.toolCallId
+      ));
+      if (activity === undefined) {
+        throw new DesignStorageError("not-found", `Design Job tool call ${input.toolCallId} was not found`);
+      }
+      activity.toolResult = input.toolResult;
+      activity.toolResultError = input.toolResultError;
+      job.updatedAt = nowValue(now);
       await writeAuthorityJson(root, jobFilePath(root, job.id), job, ["jobs"]);
       return job;
     });
@@ -1839,6 +1937,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     requestDesignJobCancellation,
     reserveDesignMainPlanExecution,
     updateDesignJob,
+    updateDesignJobToolActivity,
     updateDesignThreadMessage,
   };
 }
