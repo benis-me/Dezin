@@ -82,6 +82,53 @@ test("Home bootstrap posts one durable Project request", async () => {
   );
 });
 
+test("Figma import posts only the frozen import DTO and supports cancellation", async () => {
+  const result = { project: PROJECT, import: { manifest: { importId: "figma-1" }, reused: false } };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(result, 201));
+  const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
+  const controller = new AbortController();
+  const input = {
+    schemaVersion: 1 as const,
+    idempotencyKey: "figma-web-0001",
+    url: "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+    nodeIds: ["12:34"],
+    rightsAcknowledged: true as const,
+  };
+
+  await expect(api.importFigmaProject(input, controller.signal)).resolves.toEqual(result);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://daemon/api/projects/imports/figma",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify(input),
+      signal: controller.signal,
+    }),
+  );
+});
+
+test("Figma credential lifecycle keeps the PAT on its dedicated local-daemon endpoint", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async (_input, init) => jsonResponse({
+    configured: init?.method !== "DELETE",
+    source: init?.method === "DELETE" ? null : "local",
+  }));
+  const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
+  const controller = new AbortController();
+
+  await api.getFigmaCredential(controller.signal);
+  await api.setFigmaCredential({ token: "figd_secret" }, controller.signal);
+  await api.forgetFigmaCredential(controller.signal);
+
+  expect(fetchImpl.mock.calls).toEqual([
+    ["http://daemon/api/figma/credential", expect.objectContaining({ signal: controller.signal })],
+    ["http://daemon/api/figma/credential", expect.objectContaining({
+      method: "PUT",
+      body: JSON.stringify({ token: "figd_secret" }),
+      signal: controller.signal,
+    })],
+    ["http://daemon/api/figma/credential", expect.objectContaining({ method: "DELETE", signal: controller.signal })],
+  ]);
+});
+
 test("current project lifecycle endpoints encode project ids", async () => {
   const fetchImpl = vi.fn<FetchLike>(async (_input, init) =>
     init?.method === "DELETE" ? new Response(null, { status: 204 }) : jsonResponse(PROJECT));

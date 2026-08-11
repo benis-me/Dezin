@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { DesignStorageError, initializeDesignProject } from "./design-storage.ts";
+import {
+  ensureDurableDirectory,
+  syncDesignDirectory,
+  writeAtomicJson,
+} from "./design-storage-primitives.ts";
 import { DESIGN_SCHEMA_VERSION } from "./design-types.ts";
 
 const DESIGN_PROJECT_METADATA_SCHEMA_VERSION = 1;
@@ -114,16 +119,6 @@ async function regularFile(path: string): Promise<boolean> {
   }
 }
 
-async function writeAtomicJson(path: string, value: unknown): Promise<void> {
-  const pending = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(pending, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    await rename(pending, path);
-  } finally {
-    await rm(pending, { force: true }).catch(() => {});
-  }
-}
-
 async function withMetadataLock<T>(dataDir: string, projectId: string, fn: () => Promise<T>): Promise<T> {
   const key = metadataPath(dataDir, projectId);
   const prior = metadataLocks.get(key) ?? Promise.resolve();
@@ -186,12 +181,14 @@ export async function createDesignProject(
 ): Promise<DesignProjectMetadata> {
   const name = projectName(input?.name);
   const createdAt = timestamp(now, "createdAt");
-  await mkdir(join(dataDir, "projects"), { recursive: true });
+  const projectsRoot = join(dataDir, "projects");
+  await ensureDurableDirectory(projectsRoot);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const projectId = randomUUID();
     const root = projectRoot(dataDir, projectId);
     try {
       await mkdir(root, { recursive: false });
+      await syncDesignDirectory(projectsRoot);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "EEXIST") continue;
       throw error;
@@ -206,11 +203,13 @@ export async function createDesignProject(
     };
     try {
       await mkdir(join(root, "design"), { recursive: false });
+      await syncDesignDirectory(root);
       await writeAtomicJson(metadataPath(dataDir, projectId), metadata);
       await initializeDesignProject(dataDir, projectId, createdAt);
       return metadata;
     } catch (error) {
       await rm(root, { recursive: true, force: true }).catch(() => {});
+      await syncDesignDirectory(projectsRoot).catch(() => {});
       throw error;
     }
   }
@@ -231,9 +230,9 @@ export async function ensureDesignProjectAtId(
   const createdAt = timestamp(input?.createdAt, "createdAt");
   return withMetadataLock(dataDir, projectId, async () => {
     const root = projectRoot(dataDir, projectId);
-    await mkdir(join(dataDir, "projects"), { recursive: true });
-    await mkdir(root, { recursive: true });
-    await mkdir(designRoot(dataDir, projectId), { recursive: true });
+    await ensureDurableDirectory(join(dataDir, "projects"));
+    await ensureDurableDirectory(root);
+    await ensureDurableDirectory(designRoot(dataDir, projectId));
 
     const current = await readMetadata(dataDir, projectId);
     if (current !== null && (

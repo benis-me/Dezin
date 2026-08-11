@@ -52,6 +52,7 @@ import {
   assertStoredBundleFiles,
   assetRoot,
   designRoot,
+  ensureDurableDirectory,
   exists,
   jobFilePath,
   nodeRoot,
@@ -62,11 +63,13 @@ import {
   safeBundlePath,
   safeSegment,
   storedRecord,
+  syncDesignDirectory,
   validStoredNullableId,
   validStoredText,
   validStoredTimestamp,
   validStoredViewport,
   withProjectLock,
+  writeAtomic,
   writeAtomicJson,
   writeAuthorityJson,
 } from "./design-storage-primitives.ts";
@@ -106,6 +109,8 @@ export interface DesignAssetImportTestHooks extends DesignAssetPayloadReadTestHo
   simulateProcessCrash?: boolean;
   /** Test-only: lower (never raise) the production batch budget. */
   assetBatchByteLimit?: number;
+  /** Test-only proof point emitted only after each phase's file and directory fsyncs complete. */
+  afterDurablePhase?: (phase: DesignAssetImportPhase) => void | Promise<void>;
   afterPhase?: (phase: DesignAssetImportPhase) => void | Promise<void>;
 }
 
@@ -817,18 +822,16 @@ export function createDesignAssetVersionPublication(
 
   async function stagePreparedDesignAsset(directory: string, prepared: PreparedDesignAsset): Promise<void> {
     if (prepared.existing) return;
-    await mkdir(directory, { recursive: true });
+    await ensureDurableDirectory(directory);
     try {
-      await writeFile(join(directory, prepared.manifest.fileName), prepared.bytes, { flag: "wx", mode: 0o600 });
+      await writeAtomic(join(directory, prepared.manifest.fileName), prepared.bytes);
       for (const payload of prepared.bundlePayloads) {
         const path = join(directory, ...payload.file.path.split("/"));
-        await mkdir(resolve(path, ".."), { recursive: true });
-        await writeFile(path, payload.bytes, { flag: "wx", mode: 0o600 });
+        await writeAtomic(path, payload.bytes);
       }
-      await writeFile(
+      await writeAtomic(
         join(directory, "manifest.json"),
         `${JSON.stringify(prepared.manifest, null, 2)}\n`,
-        { flag: "wx", mode: 0o600 },
       );
     } catch (error) {
       await rm(directory, { recursive: true, force: true }).catch(() => {});
@@ -1097,26 +1100,34 @@ export function createDesignAssetVersionPublication(
     transactionRoot: string,
     transaction: DesignAssetImportTransaction,
   ): Promise<void> {
-    if (transaction.idempotency === undefined || transaction.idempotency === null) {
+    const transactionsRoot = resolve(transactionRoot, "..");
+    const removeTransaction = async (): Promise<void> => {
       await rm(transactionRoot, { recursive: true, force: true });
+      await syncDesignDirectory(transactionsRoot);
+    };
+    if (transaction.idempotency === undefined || transaction.idempotency === null) {
+      await removeTransaction();
       return;
     }
     if (transaction.canvasAfter === undefined) {
       throw new DesignStorageError("corrupt", "Idempotent Design Asset import is missing its exact result");
     }
     const receiptPath = assetImportReceiptPath(root, transaction.idempotency.receiptId);
-    await mkdir(assetImportReceiptsRoot(root), { recursive: true });
+    const receiptsRoot = assetImportReceiptsRoot(root);
+    await ensureDurableDirectory(receiptsRoot);
     if (await exists(receiptPath)) {
       const prior = await readJson<DesignAssetImportTransaction>(receiptPath, "Design Asset import receipt");
       assertAssetImportTransaction(prior, transaction.projectId);
       if (prior.checksum !== transaction.checksum) {
         throw new DesignStorageError("corrupt", "Design Asset import receipt diverges from its committed WAL");
       }
-      await rm(transactionRoot, { recursive: true, force: true });
+      await removeTransaction();
       return;
     }
     await rename(join(transactionRoot, "transaction.json"), receiptPath);
-    await rm(transactionRoot, { recursive: true, force: true });
+    await syncDesignDirectory(transactionRoot);
+    await syncDesignDirectory(receiptsRoot);
+    await removeTransaction();
   }
 
   function assetImportBindingIsCommitted(
@@ -1156,6 +1167,7 @@ export function createDesignAssetVersionPublication(
       const transactionPath = join(transactionRoot, "transaction.json");
       if (!(await exists(transactionPath))) {
         await rm(transactionRoot, { recursive: true, force: true });
+        await syncDesignDirectory(transactionsRoot);
         continue;
       }
       const transaction = await readJson<DesignAssetImportTransaction>(transactionPath, "Design Asset import transaction");
@@ -1182,6 +1194,7 @@ export function createDesignAssetVersionPublication(
           if (await exists(target)) {
             await verifyMaterialVersionManifestDirectory(target, binding.manifest);
             await rm(target, { recursive: true, force: true });
+            await syncDesignDirectory(resolve(target, ".."));
           }
         }
         const referencedAssetIds = new Set(project.nodes.flatMap((node) => node.assetId ? [node.assetId] : []));
@@ -1197,12 +1210,14 @@ export function createDesignAssetVersionPublication(
               throw new DesignStorageError("corrupt", "Interrupted Design Asset import Asset diverges from its WAL");
             }
             await rm(target, { recursive: true, force: true });
+            await syncDesignDirectory(join(root, "assets"));
           }
         }
       } else {
         throw new DesignStorageError("corrupt", "Design Asset import WAL revision authority is invalid");
       }
       await rm(transactionRoot, { recursive: true, force: true });
+      await syncDesignDirectory(transactionsRoot);
     }
   }
 
@@ -1275,11 +1290,10 @@ export function createDesignAssetVersionPublication(
     directory: string,
     manifest: DesignVersionManifest,
   ): Promise<void> {
-    await mkdir(directory, { recursive: true });
-    await writeFile(
+    await ensureDurableDirectory(directory);
+    await writeAtomic(
       join(directory, "manifest.json"),
       `${JSON.stringify(manifest, null, 2)}\n`,
-      { flag: "wx", mode: 0o600 },
     );
   }
 
@@ -1457,22 +1471,35 @@ export function createDesignAssetVersionPublication(
         };
         await writeAtomicJson(join(transactionRoot, "transaction.json"), transaction);
         markerWritten = true;
+        await hooks?.afterDurablePhase?.("marker");
         await hooks?.afterPhase?.("marker");
         for (const assetId of createdAssetIds) {
           await rename(join(transactionRoot, "assets", assetId), assetRoot(root, assetId));
         }
+        if (createdAssetIds.size > 0) {
+          await syncDesignDirectory(join(transactionRoot, "assets"));
+          await syncDesignDirectory(join(root, "assets"));
+        }
+        await hooks?.afterDurablePhase?.("assets");
         await hooks?.afterPhase?.("assets");
         for (const binding of bindings) {
-          await mkdir(join(nodeRoot(root, binding.nodeId), "versions"), { recursive: true });
+          const targetParent = join(nodeRoot(root, binding.nodeId), "versions");
+          const sourceParent = join(transactionRoot, "versions", binding.nodeId);
+          await ensureDurableDirectory(targetParent);
           await rename(
-            join(transactionRoot, "versions", binding.nodeId, binding.manifest.id),
+            join(sourceParent, binding.manifest.id),
             versionRoot(root, binding.nodeId, binding.manifest.id),
           );
+          await syncDesignDirectory(sourceParent);
+          await syncDesignDirectory(targetParent);
         }
+        await hooks?.afterDurablePhase?.("versions");
         await hooks?.afterPhase?.("versions");
         await writeAuthorityJson(root, projectFilePath(root), project, ["canvas"]);
+        await hooks?.afterDurablePhase?.("canvas");
         await hooks?.afterPhase?.("canvas");
         await finalizeAssetImportTransactionUnlocked(root, transactionRoot, transaction);
+        await hooks?.afterDurablePhase?.("receipt");
         await hooks?.afterPhase?.("receipt");
         const committedCanvas = canvas(project, nodes);
         return {

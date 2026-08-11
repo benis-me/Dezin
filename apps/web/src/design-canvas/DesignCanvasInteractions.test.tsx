@@ -488,7 +488,7 @@ test("a closing flight ignores adjacent Node double-clicks until the canvas is r
   expect(flowHarness.setViewport).not.toHaveBeenCalled();
   expect(screen.queryByLabelText("Page B Agent panel")).not.toBeInTheDocument();
   await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
-  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument());
 });
 
 test("double-clicking the same Node reverses an interrupted closing flight in place", async () => {

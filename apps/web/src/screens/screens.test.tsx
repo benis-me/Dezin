@@ -13,7 +13,7 @@ import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
-import { type Settings } from "../lib/api.ts";
+import { ApiError, type Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { VALID_PNG_BASE64, validPngFile } from "../test/image-fixtures.ts";
@@ -23,6 +23,7 @@ import { takePendingComposer } from "../lib/pending-composer.ts";
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
   localStorage.removeItem("dezin.home.composer");
+  localStorage.removeItem("dezin:figma-import-intent:v1");
   cleanup();
 });
 
@@ -87,6 +88,427 @@ function deferred<T>() {
 test("HomeScreen shows an empty state with no projects", () => {
   renderWithApi(<HomeScreen projects={[]} />);
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
+});
+
+test("HomeScreen exposes Figma import as a first-class action", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  expect(screen.getByRole("dialog", { name: "Import from Figma" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Figma file URL" })).toHaveFocus();
+  expect(screen.getByText(/Design\.md, tokens\.json, and components\.json/)).toBeInTheDocument();
+  expect(screen.getByText(/not a pixel-perfect clone.*restricted Variables are marked incomplete/)).toBeInTheDocument();
+  expect(screen.getByText("Your Figma credential stays in the local Dezin daemon.")).toBeInTheDocument();
+});
+
+test("Figma import restores focus to its Home action after Cancel and Escape", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+  const opener = screen.getByRole("button", { name: "Import from Figma" });
+
+  await user.click(opener);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).toBeNull());
+  expect(opener).toHaveFocus();
+
+  await user.click(opener);
+  expect(screen.getByRole("dialog", { name: "Import from Figma" })).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).toBeNull());
+  expect(opener).toHaveFocus();
+});
+
+test("Figma import extracts an optional Node selection and requires rights acknowledgement", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  const importButton = screen.getByRole("button", { name: "Import project" });
+  expect(importButton).toBeDisabled();
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+  );
+
+  expect(screen.getByText("Node 12:34")).toBeInTheDocument();
+  expect(importButton).toBeDisabled();
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  expect(importButton).toBeEnabled();
+});
+
+test("Figma import checks local credential status and asks for a PAT only when missing", async () => {
+  const user = userEvent.setup();
+  const getFigmaCredential = vi.fn(async () => ({ configured: false as const, source: null }));
+  renderWithApi(<HomeScreen projects={[]} />, { getFigmaCredential });
+
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  expect(await screen.findByLabelText("Figma personal access token")).toHaveAttribute("type", "password");
+  expect(screen.getByText("Stored only in the local Dezin daemon. Never written to the Project or Canvas.")).toBeInTheDocument();
+  expect(screen.getByText(/file_content:read.*file_metadata:read/)).toBeInTheDocument();
+  expect(screen.getByText(/file_variables:read.*optional/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Figma token scope guide" })).toHaveAttribute("rel", expect.stringContaining("noopener"));
+  expect(getFigmaCredential).toHaveBeenCalledTimes(1);
+});
+
+test("Figma import dialog reserves viewport gutters and caps its height", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  expect(screen.getByRole("dialog", { name: "Import from Figma" })).toHaveClass(
+    "w-[calc(100%-2rem)]",
+    "max-w-lg",
+    "max-h-[calc(100dvh-2rem)]",
+  );
+});
+
+test("Figma import keeps missing-credential controls keyboard reachable in its bounded scroll layout", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />, {
+    getFigmaCredential: async () => ({ configured: false, source: null }),
+  });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  const url = screen.getByRole("textbox", { name: "Figma file URL" });
+  await user.type(url, "https://www.figma.com/design/AbCdEf123456/Checkout");
+  const token = await screen.findByLabelText("Figma personal access token");
+  const details = screen.getByRole("region", { name: "Figma import details" });
+  const cancel = screen.getByRole("button", { name: "Cancel" });
+
+  expect(details).toHaveClass("min-h-0", "flex-1", "overflow-y-auto", "overscroll-contain");
+  expect(within(details).queryByRole("heading", { name: "Import from Figma" })).toBeNull();
+  expect(details).not.toContainElement(cancel);
+
+  url.focus();
+  await user.tab();
+  expect(token).toHaveFocus();
+  await user.type(token, "test-token");
+  await user.tab();
+  expect(screen.getByRole("link", { name: "Figma token scope guide" })).toHaveFocus();
+  await user.tab();
+  const rights = screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" });
+  expect(rights).toHaveFocus();
+  await user.keyboard(" ");
+  await user.tab();
+  expect(cancel).toHaveFocus();
+  await user.tab();
+  expect(screen.getByRole("button", { name: "Import project" })).toHaveFocus();
+});
+
+test("Figma import saves a missing PAT before one idempotent import and opens the new project", async () => {
+  const user = userEvent.setup();
+  const order: string[] = [];
+  const onOpenProject = vi.fn();
+  const setFigmaCredential = vi.fn(async ({ token }: { token: string }) => {
+    order.push(`credential:${token}`);
+    return { configured: true as const, source: "local" as const };
+  });
+  const fallbackApi = makeFakeApi();
+  const importFigmaProject = vi.fn(async (input: Parameters<typeof fallbackApi.importFigmaProject>[0]) => {
+    order.push("import");
+    return fallbackApi.importFigmaProject(input);
+  });
+  renderWithApi(<HomeScreen projects={[]} onOpenProject={onOpenProject} />, {
+    getFigmaCredential: async () => ({ configured: false, source: null }),
+    setFigmaCredential,
+    importFigmaProject,
+  });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+  );
+  await user.type(await screen.findByLabelText("Figma personal access token"), "figd_local_secret");
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+
+  const importButton = screen.getByRole("button", { name: "Import project" });
+  fireEvent.click(importButton);
+  fireEvent.click(importButton);
+
+  await waitFor(() => expect(onOpenProject).toHaveBeenCalledWith("project-figma"));
+  expect(order).toEqual(["credential:figd_local_secret", "import"]);
+  expect(setFigmaCredential).toHaveBeenCalledTimes(1);
+  expect(importFigmaProject).toHaveBeenCalledTimes(1);
+  expect(importFigmaProject).toHaveBeenCalledWith(expect.objectContaining({
+    schemaVersion: 1,
+    idempotencyKey: expect.stringMatching(/^figma-/),
+    url: "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+    nodeIds: ["12:34"],
+    rightsAcknowledged: true,
+  }), expect.any(AbortSignal));
+  expect(setFigmaCredential.mock.calls[0]?.[0]).toEqual({ token: "figd_local_secret" });
+
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  expect(screen.getByRole("textbox", { name: "Figma file URL" })).toHaveValue("");
+  expect(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" })).not.toBeChecked();
+});
+
+test("retrying an ambiguous Figma failure reuses the same bounded idempotency key", async () => {
+  const user = userEvent.setup();
+  const fallbackApi = makeFakeApi();
+  const onOpenProject = vi.fn();
+  const importFigmaProject = vi.fn()
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockImplementation((input) => fallbackApi.importFigmaProject(input));
+  renderWithApi(<HomeScreen projects={[]} onOpenProject={onOpenProject} />, { importFigmaProject });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't import this Figma file");
+
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+  await waitFor(() => expect(onOpenProject).toHaveBeenCalledWith("project-figma"));
+
+  const firstKey = importFigmaProject.mock.calls[0]?.[0].idempotencyKey;
+  const retryKey = importFigmaProject.mock.calls[1]?.[0].idempotencyKey;
+  expect(firstKey).toMatch(/^figma-/);
+  expect(retryKey).toBe(firstKey);
+  expect(firstKey?.length).toBeLessThan(128);
+});
+
+test("the same pending Figma submission reuses its opaque idempotency key after a renderer restart", async () => {
+  localStorage.removeItem("dezin:figma-import-intent:v1");
+  const fallbackApi = makeFakeApi();
+  const importFigmaProject = vi.fn(async (_input: Parameters<typeof fallbackApi.importFigmaProject>[0]) => {
+    throw new Error("connection lost");
+  });
+  const submit = async (): Promise<void> => {
+    const user = userEvent.setup();
+    const rendered = renderWithApi(<HomeScreen projects={[]} />, { importFigmaProject });
+    await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Figma file URL" }),
+      "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+    );
+    await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+    await user.click(screen.getByRole("button", { name: "Import project" }));
+    await screen.findByRole("alert");
+    rendered.unmount();
+  };
+
+  await submit();
+  await submit();
+
+  const firstKey = importFigmaProject.mock.calls[0]?.[0].idempotencyKey;
+  const restartedKey = importFigmaProject.mock.calls[1]?.[0].idempotencyKey;
+  expect(firstKey).toMatch(/^figma-[A-Za-z0-9._:-]+$/);
+  expect(restartedKey).toBe(firstKey);
+  localStorage.removeItem("dezin:figma-import-intent:v1");
+});
+
+test("a completed Figma import clears its pending key so a later refresh is a new intent", async () => {
+  localStorage.removeItem("dezin:figma-import-intent:v1");
+  const user = userEvent.setup();
+  const fallbackApi = makeFakeApi();
+  const importFigmaProject = vi.fn((input) => fallbackApi.importFigmaProject(input));
+  renderWithApi(<HomeScreen projects={[]} onOpenProject={() => undefined} />, { importFigmaProject });
+  const submit = async (): Promise<void> => {
+    await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Figma file URL" }),
+      "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
+    );
+    await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+    await user.click(screen.getByRole("button", { name: "Import project" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).toBeNull());
+  };
+
+  await submit();
+  await submit();
+
+  expect(importFigmaProject).toHaveBeenCalledTimes(2);
+  expect(importFigmaProject.mock.calls[1]?.[0].idempotencyKey)
+    .not.toBe(importFigmaProject.mock.calls[0]?.[0].idempotencyKey);
+  localStorage.removeItem("dezin:figma-import-intent:v1");
+});
+
+test("Figma import can forget a locally stored credential without exposing its value", async () => {
+  const user = userEvent.setup();
+  const forgetFigmaCredential = vi.fn(async () => ({ configured: false as const, source: null }));
+  renderWithApi(<HomeScreen projects={[]} />, {
+    getFigmaCredential: async () => ({ configured: true, source: "local" }),
+    forgetFigmaCredential,
+  });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  expect(await screen.findByText("Personal access token stored locally")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Figma personal access token")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Forget credential" }));
+
+  expect(await screen.findByLabelText("Figma personal access token")).toBeInTheDocument();
+  expect(forgetFigmaCredential).toHaveBeenCalledTimes(1);
+});
+
+test("Figma import preview matches the daemon's supported file and branch URL boundary", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  const url = screen.getByRole("textbox", { name: "Figma file URL" });
+  const importButton = screen.getByRole("button", { name: "Import project" });
+
+  for (const supported of [
+    "https://www.figma.com/design/MainKey1/Product-System",
+    "https://www.figma.com/file/FileKey1/Legacy-File",
+    "https://www.figma.com/board/BoardKey1/Workshop",
+    "https://www.figma.com/slides/SlideKey1/Quarterly",
+    "https://www.figma.com/design/MainKey1/branch/BranchKey2/Branch-Name",
+  ]) {
+    await user.clear(url);
+    await user.type(url, supported);
+    expect(importButton).toBeEnabled();
+  }
+
+  for (const unsupported of [
+    "https://www.figma.com/proto/ProtoKey1/Prototype",
+    "https://www.figma.com/design/MainKey1/bad%slug",
+    "https://www.figma.com/design/MainKey1/Product%2FNested",
+    "https://www.figma.com/design/MainKey1/Product%5CNested",
+    "https://www.figma.com/design/MainKey1/Versioned?version-id=123:456",
+  ]) {
+    await user.clear(url);
+    await user.type(url, unsupported);
+    expect(importButton).toBeDisabled();
+  }
+});
+
+test("closing a running Figma import aborts it without opening a project", async () => {
+  const user = userEvent.setup();
+  const onOpenProject = vi.fn();
+  let requestSignal: AbortSignal | undefined;
+  const importFigmaProject = vi.fn((_input, signal?: AbortSignal) => new Promise<never>((_resolve, reject) => {
+    requestSignal = signal;
+    signal?.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+  }));
+  renderWithApi(<HomeScreen projects={[]} onOpenProject={onOpenProject} />, { importFigmaProject });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+  await user.click(await screen.findByRole("button", { name: "Cancel import" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).toBeNull());
+  expect(requestSignal?.aborted).toBe(true);
+  expect(importFigmaProject).toHaveBeenCalledTimes(1);
+  expect(onOpenProject).not.toHaveBeenCalled();
+});
+
+test("Figma import turns a missing-credential response into actionable local setup", async () => {
+  const user = userEvent.setup();
+  const importFigmaProject = vi.fn(async () => {
+    throw new ApiError(
+      503,
+      "Figma access is not configured. Add a Figma personal access token in Dezin or set FIGMA_ACCESS_TOKEN.",
+    );
+  });
+  renderWithApi(<HomeScreen projects={[]} />, { importFigmaProject });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("FIGMA_ACCESS_TOKEN");
+  expect(screen.getByLabelText("Figma personal access token")).toBeInTheDocument();
+});
+
+test("a rejected stored Figma credential keeps the Forget path available", async () => {
+  const user = userEvent.setup();
+  const importFigmaProject = vi.fn(async () => {
+    throw new ApiError(403, "Figma rejected this personal access token or its scopes.");
+  });
+  renderWithApi(<HomeScreen projects={[]} />, { importFigmaProject });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Figma rejected this personal access token");
+  expect(screen.getByRole("button", { name: "Forget credential" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Figma personal access token")).toBeNull();
+});
+
+test("Figma import explains an invalid or credential-bearing link before submission", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[]} />);
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  const url = screen.getByRole("textbox", { name: "Figma file URL" });
+
+  await user.type(url, "https://secret@www.figma.com:444/design/MainKey1/File#fragment");
+  await user.tab();
+
+  expect(url).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByText("Use a credential-free https://www.figma.com design, file, board, or slides link.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Import project" })).toBeDisabled();
+
+  await user.clear(url);
+  await user.type(url, "https://www.figma.com/design/MainKey1/Versioned?version-id=123:456");
+  expect(screen.getByText("Version-specific Figma links aren't supported. Remove version-id to import the current file.")).toBeInTheDocument();
+});
+
+test("a successful Figma import surfaces incomplete Variables metadata before opening the project", async () => {
+  const user = userEvent.setup();
+  const fallbackApi = makeFakeApi();
+  const onOpenProject = vi.fn();
+  const importFigmaProject = vi.fn(async (input: Parameters<typeof fallbackApi.importFigmaProject>[0]) => {
+    const result = await fallbackApi.importFigmaProject(input);
+    return {
+      ...result,
+      import: {
+        ...result.import,
+        manifest: {
+          ...result.import.manifest,
+          tokenAuthority: "style-values-inferred" as const,
+          incomplete: ["Figma Variables were unavailable"],
+          warnings: ["Tokens were inferred from styles"],
+        },
+      },
+    };
+  });
+  renderWithApiToastAndAgents(<HomeScreen projects={[]} onOpenProject={onOpenProject} />, { importFigmaProject });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import project" }));
+
+  expect(await screen.findByText(
+    "Figma imported with limited metadata: Figma Variables were unavailable; Tokens were inferred from styles",
+  )).toBeInTheDocument();
+  expect(onOpenProject).toHaveBeenCalledWith("project-figma");
+});
+
+test("Figma credential status failures are explicit and retryable", async () => {
+  const user = userEvent.setup();
+  const getFigmaCredential = vi.fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce({ configured: true, source: "local" });
+  renderWithApi(<HomeScreen projects={[]} />, { getFigmaCredential });
+  await user.click(screen.getByRole("button", { name: "Import from Figma" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't check Figma access");
+  await user.click(screen.getByRole("button", { name: "Retry Figma access" }));
+
+  expect(await screen.findByText("Personal access token stored locally")).toBeInTheDocument();
+  expect(getFigmaCredential).toHaveBeenCalledTimes(2);
 });
 
 test("HomeScreen exposes a retryable alert after the first project load fails", async () => {

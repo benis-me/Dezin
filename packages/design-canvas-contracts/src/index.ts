@@ -277,6 +277,74 @@ export interface DesignProjectBootstrapResult {
   reused: boolean;
 }
 
+export const FIGMA_IMPORT_SCHEMA_VERSION = 1 as const;
+
+export interface FigmaImportInput {
+  schemaVersion: typeof FIGMA_IMPORT_SCHEMA_VERSION;
+  idempotencyKey: string;
+  url: string;
+  name?: string;
+  nodeIds?: string[];
+  depth?: number;
+  rightsAcknowledged: true;
+}
+
+export interface FigmaImportArtifactManifest {
+  kind: "raw-file" | "raw-variables" | "design-document" | "tokens" | "components";
+  path: string;
+  mimeType: string;
+  sha256: string;
+  bytes: number;
+  nodeId: string | null;
+}
+
+export interface FigmaImportManifest {
+  schemaVersion: typeof FIGMA_IMPORT_SCHEMA_VERSION;
+  importId: string;
+  projectId: string;
+  source: {
+    normalizedUrl: string;
+    fileType: "design" | "file" | "board" | "slides";
+    fileKey: string;
+    branchKey: string | null;
+    fileName: string;
+    requestedVersionId: string | null;
+    resolvedVersion: string;
+    selectedNodeIds: string[];
+    depth: number;
+  };
+  access: {
+    editorType: string | null;
+    role: string | null;
+    linkAccess: string | null;
+  };
+  credential: {
+    mode: "personal-access-token";
+    /** Stable non-secret digest label; never the PAT itself. */
+    subject: string;
+  };
+  tokenAuthority: "figma-variables-exact" | "style-values-inferred" | "not-applicable";
+  artifacts: FigmaImportArtifactManifest[];
+  incomplete: string[];
+  warnings: string[];
+  canvasRevision: number;
+  createdAt: number;
+}
+
+export interface FigmaImportResult {
+  manifest: FigmaImportManifest;
+  reused: boolean;
+}
+
+export interface FigmaCredentialStatus {
+  configured: boolean;
+  source: "environment" | "local" | null;
+}
+
+export interface FigmaCredentialPutInput {
+  token: string;
+}
+
 export interface DesignAgentTurnResult {
   thread: DesignThread;
   job: DesignJob;

@@ -7,6 +7,7 @@ import {
   DESIGN_NODE_KINDS,
   DESIGN_PROJECT_BOOTSTRAP_SCHEMA_VERSION,
   DESIGN_SCHEMA_VERSION,
+  FIGMA_IMPORT_SCHEMA_VERSION,
 } from "../src/index.ts";
 import type {
   DesignAgentTurnResult,
@@ -22,6 +23,9 @@ import type {
   DesignProjectBootstrapJob,
   DesignProjectBootstrapResult,
   DesignThread,
+  FigmaImportInput,
+  FigmaImportManifest,
+  FigmaImportResult,
 } from "../src/index.ts";
 
 type Equal<Left, Right> =
@@ -164,6 +168,46 @@ const bootstrapJob = {
   updatedAt: 2,
 } satisfies DesignProjectBootstrapJob;
 const bootstrap = { job: bootstrapJob, reused: false } satisfies DesignProjectBootstrapResult;
+const figmaInput = {
+  schemaVersion: 1,
+  idempotencyKey: "figma-contract-1",
+  url: "https://www.figma.com/design/AbC123xyZ/Product-System?node-id=1-2",
+  nodeIds: ["1:2"],
+  depth: 4,
+  rightsAcknowledged: true,
+} satisfies FigmaImportInput;
+const figmaManifest = {
+  schemaVersion: 1,
+  importId: "figma-import-1",
+  projectId: "project-1",
+  source: {
+    normalizedUrl: "https://www.figma.com/design/AbC123xyZ/Product-System?node-id=1%3A2",
+    fileType: "design",
+    fileKey: "AbC123xyZ",
+    branchKey: null,
+    fileName: "Product System",
+    requestedVersionId: null,
+    resolvedVersion: "42",
+    selectedNodeIds: ["1:2"],
+    depth: 4,
+  },
+  access: { editorType: "figma", role: "viewer", linkAccess: "view" },
+  credential: { mode: "personal-access-token", subject: "pat-0123456789abcdef" },
+  artifacts: [{
+    kind: "design-document",
+    path: "derived/Design.md",
+    mimeType: "text/markdown",
+    sha256: "0".repeat(64),
+    bytes: 10,
+    nodeId: "figma-design-import-1",
+  }],
+  incomplete: [],
+  warnings: [],
+  tokenAuthority: "figma-variables-exact",
+  canvasRevision: 1,
+  createdAt: 1,
+} satisfies FigmaImportManifest;
+const figmaImport = { manifest: figmaManifest, reused: false } satisfies FigmaImportResult;
 
 void (0 as unknown as GenerativeKindsAreExact);
 void (0 as unknown as MaterialKindsAreExact);
@@ -201,4 +245,7 @@ test("representative wire DTOs retain their public shape", () => {
   assert.equal(DESIGN_PROJECT_BOOTSTRAP_SCHEMA_VERSION, 1);
   assert.equal(bootstrap.job.projectId, "project-1");
   assert.equal(bootstrapInput.items.length, 0);
+  assert.equal(FIGMA_IMPORT_SCHEMA_VERSION, 1);
+  assert.equal(figmaInput.rightsAcknowledged, true);
+  assert.equal(figmaImport.manifest.source.resolvedVersion, "42");
 });

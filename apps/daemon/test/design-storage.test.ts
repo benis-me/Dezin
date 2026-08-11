@@ -3195,7 +3195,7 @@ test("Asset batches atomically bind material Nodes, roll back failures, and reco
 });
 
 test("idempotent Asset batches replay the exact committed Canvas and recover commit-receipt crashes", async (t) => {
-  for (const phase of ["marker", "canvas", "receipt"] as const) {
+  for (const phase of ["marker", "assets", "versions", "canvas", "receipt"] as const) {
     await t.test(phase, async () => {
       const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-asset-receipt-${phase}-`));
       const projectId = `project-asset-receipt-${phase}`;
@@ -3213,10 +3213,19 @@ test("idempotent Asset batches replay the exact committed Canvas and recover com
       };
       try {
         await initializeDesignProject(dataDir, projectId);
+        const durablePhases: string[] = [];
         await assert.rejects(
           Reflect.apply(ensureDesignCanvasAssetBatch, undefined, [dataDir, projectId, input, 100, {
             simulateProcessCrash: true,
+            afterDurablePhase: (completed: string) => {
+              durablePhases.push(completed);
+            },
             afterPhase: (completed: string) => {
+              assert.equal(
+                durablePhases.at(-1),
+                completed,
+                `${completed} may not be observable until its files and directory entries are durable`,
+              );
               if (completed === phase) throw new Error(`simulated Asset receipt exit after ${phase}`);
             },
           }]),
@@ -3224,7 +3233,7 @@ test("idempotent Asset batches replay the exact committed Canvas and recover com
         );
 
         const recovered = await ensureDesignCanvasAssetBatch(dataDir, projectId, input, 200);
-        assert.equal(recovered.reused, phase !== "marker");
+        assert.equal(recovered.reused, phase === "canvas" || phase === "receipt");
         assert.equal(recovered.canvas.revision, 1);
         assert.deepEqual(recovered.canvas.nodeOrder, [`node-${phase}`]);
         assert.equal((await listDesignVersions(dataDir, projectId, `node-${phase}`)).length, 1);

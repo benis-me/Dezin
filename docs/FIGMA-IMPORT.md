@@ -1,145 +1,165 @@
-# Figma import architecture research
+# Figma URL import
 
-**Status:** researched, not implemented. Dezin currently has no Figma URL
-parser, OAuth/PAT connection, REST client, import endpoint, `design/imports/`
-store, or native bundle Version. Everything below is a proposed contract and
-delivery sequence, not a shipped product capability.
+**Status:** the first filesystem-authoritative import slice is implemented.
+Dezin can create a new Design Project from an authorized Figma file URL and
+publish three material Canvas artifacts: `Design.md`, `tokens.json`, and
+`components.json`. This is a deterministic analysis import, not a pixel-perfect
+Figma clone.
 
-Dezin's Figma import must preserve filesystem authority. A Figma URL is an
-external source reference, not a durable Node payload: every imported response,
-render, and image fill must be pinned to one exact Figma version, hashed, and
-committed atomically before it can become Canvas context.
+## Supported input
 
-## Proposed input
+The Home screen accepts these credential-free HTTPS URL forms:
 
-The planned parser accepts the official Figma file URL shape
-`https://www.figma.com/:file_type/:file_key/:file_name` and its optional
-`node-id`. It normalizes URL node IDs such as `5-3` to REST IDs such as `5:3`,
-then retains the branch key, requested version, selected node IDs, and normalized
-source URL. The Figma response remains authoritative for `editorType`, access
-role, `linkAccess`, and resolved file version; URL text is never trusted for
-those fields.
+- `https://www.figma.com/design/<file-key>/<name>`
+- `https://www.figma.com/file/<file-key>/<name>`
+- `https://www.figma.com/board/<file-key>/<name>`
+- `https://www.figma.com/slides/<file-key>/<name>`
+- `https://www.figma.com/design/<main-key>/branch/<branch-key>/<name>`
 
-The official Files API exposes the document tree, local components, component
-sets, styles, layout and annotation data. Selected subtrees should be fetched
-with `ids` and bounded `depth` rather than downloading an unbounded file by
-default:
+An optional `node-id` is normalized from URL form such as `5-3` to REST form
+`5:3`. Explicit Node selections are bounded, de-duplicated, sorted, and must
+agree with the URL. Proto, Site, Buzz, credential-bearing URLs, fragments,
+encoded path separators, and malformed identities fail closed.
 
-- [Files endpoints](https://developers.figma.com/docs/rest-api/file-endpoints/)
-- [File node types](https://developers.figma.com/docs/rest-api/file-node-types/)
-- [Components and styles endpoints](https://developers.figma.com/docs/rest-api/component-endpoints/)
+Historical `version-id` URLs are intentionally rejected in this slice. The
+Variables endpoint cannot be pinned to that historical Version, so accepting
+one would falsely claim an exact token snapshot.
 
-## Authentication and permissions
+The daemon is the parsing authority. The Web parser only provides a conservative
+preview. While an import is unconfirmed, the renderer persists only an opaque
+random idempotency key and the SHA-256 of its canonical submission fingerprint;
+it stores neither the Figma URL nor the PAT. An ambiguous retry or renderer
+restart reuses that pending key. Confirmed success clears it, so a later explicit
+import of the same URL can capture a newer Figma Version.
 
-The proposed product integration uses OAuth authorization-code flow with S256
-PKCE and an external browser.
-The minimum scope is `file_content:read`; metadata, version history, libraries,
-variables, and webhooks are requested only when their feature is enabled. A
-personal access token is acceptable only for an explicit local-development
-mode. Tokens belong in the macOS Keychain or daemon secret store and must never
-be written into Canvas JSON, Job context, Version payloads, or exports.
+Official identity and query semantics are documented by Figma's
+[File endpoints](https://developers.figma.com/docs/rest-api/file-endpoints/) and
+[Node ID contract](https://developers.figma.com/docs/plugins/api/properties/nodes-id/).
 
-- [Authentication](https://developers.figma.com/docs/rest-api/authentication/)
-- [OAuth apps](https://developers.figma.com/docs/rest-api/oauth-apps/)
-- [OAuth scopes](https://developers.figma.com/docs/rest-api/scopes/)
+## Authentication
 
-The Variables REST API is Enterprise-only. Official endpoint requirements also
-limit it to full members; reads require view access and `file_variables:read`,
-while writes require edit access and `file_variables:write`. When that API is
-unavailable, the proposed importer may derive observed values from node
-properties and bound-variable references, but the result must be marked
-incomplete and must not masquerade as the file's token authority.
+The first slice uses a Figma personal access token (PAT):
 
-- [Variables API](https://developers.figma.com/docs/rest-api/variables/)
-- [Variables endpoints](https://developers.figma.com/docs/rest-api/variables-endpoints/)
+- `FIGMA_ACCESS_TOKEN` takes precedence when set for the local daemon.
+- Otherwise the user can store or forget a PAT from the import dialog.
+- The daemon secret directory is private (`0700`) and the token file is `0600`.
+- Credential status returns only `configured` and `source`; the token is never
+  echoed to the renderer.
+- The PAT is never accepted in an import request, Project, Canvas, manifest,
+  derived artifact, error response, or non-secret receipt.
 
-## Immutable import record
+Required access is `file_content:read` plus `file_metadata:read`.
+`file_variables:read` is optional and only enables exact Variables when the
+account and plan permit it. See Figma's
+[authentication](https://developers.figma.com/docs/rest-api/authentication/),
+[PAT](https://developers.figma.com/docs/rest-api/personal-access-tokens/), and
+[scope](https://developers.figma.com/docs/rest-api/scopes/) documentation.
 
-Each proposed successful import creates a new `importId` rather than
-overwriting an older snapshot:
+OAuth is not shipped. Figma's token exchange and refresh still require a client
+secret, so a future desktop OAuth flow must use the system browser and a
+server-side secret/callback; it must not embed that secret or authenticate in a
+WebView. See [OAuth apps](https://developers.figma.com/docs/rest-api/oauth-apps/).
+
+## Exact snapshot pipeline
+
+For one accepted import Dezin performs a bounded, version-fenced round:
+
+1. Read `/files/:key/meta` as metadata fence `M0`.
+2. Read `/files/:key` at exact Version `V`, with bounded `ids`, `depth`, and
+   `branch_data` when applicable.
+3. Read local Variables when applicable and authorized.
+4. Read metadata fence `M1`.
+5. Accept only when `M0 == V == M1`; one whole-round restart is allowed when
+   the file changes during capture.
+
+The REST client uses only the fixed official API origin, refuses redirects,
+bounds response bytes and structural complexity, applies a per-attempt deadline,
+and only retries `429` inside a short, explicit `Retry-After` window. Caller
+cancellation remains an `AbortError`.
+
+Design branches are fetched by branch identity and must close back to the
+requested main file through `mainFileKey`. Metadata, file, editor type, and
+Version identities are validated before they can become authority.
+
+## Published authority
+
+Every successful import owns an immutable directory:
 
 ```text
-design/imports/<importId>/
+projects/<project-id>/design/imports/<import-id>/
   manifest.json
   raw/file.json
-  raw/nodes/*.json
+  raw/variables.json       # only when exact Variables are available
   derived/Design.md
-  derived/tokens/*.json
-  derived/components/*.json
-  previews/<nodeId>.<png|svg>
+  derived/tokens.json
+  derived/components.json
 ```
 
-Binary payloads continue to use the existing content-addressed Asset store. The
-manifest records the normalized URL, file/branch/version IDs, selected node IDs,
-non-secret credential subject, granted scopes, access snapshot, response and
-blob SHA-256 values, importer/mapping schema versions, missing dependencies,
-and the user's acknowledgement that they have rights to process the file.
+The three derived files are also published atomically into one Canvas revision:
 
-Figma's rendered-image URLs expire after 30 days and image-fill URLs after no
-more than 14 days. The import transaction must download them before expiry,
-verify MIME type and magic bytes, hash them, and store them locally; a remote
-URL can never be Version authority.
+| Artifact | Canvas kind | Meaning |
+| --- | --- | --- |
+| `Design.md` | Document | File/editor metadata, selected structure, extracted facts, warnings, and incomplete areas |
+| `tokens.json` | File | Exact Variables when authorized, otherwise explicitly inferred style evidence |
+| `components.json` | File | Deterministic local component, component-set, and style records |
 
-## Atomic pipeline
+`tokenAuthority` is one of `figma-variables-exact`,
+`style-values-inferred`, or `not-applicable`. A Variables `403`/`404` is recorded
+as incomplete evidence and never masquerades as exact token authority. Figma's
+Variables REST API has additional plan, membership, permission, and scope
+requirements; see [Variables](https://developers.figma.com/docs/rest-api/variables/)
+and [Variables endpoints](https://developers.figma.com/docs/rest-api/variables-endpoints/).
 
-1. Strictly parse and normalize the URL locally.
-2. Preflight credentials, scopes, file access, selected nodes, and import limits.
-3. Resolve and lock one exact Figma file version.
-4. Fetch selected subtrees, styles, images, and permitted variables in bounded
-   batches while respecting `429 Retry-After`.
-5. Write every response and downloaded asset to a transaction staging directory.
-6. Run a deterministic normalizer; AI may explain or enrich the result but may
-   not invent source facts or alter the raw snapshot.
-7. Atomically commit the import manifest, derived artifacts, assets, and one
-   Canvas revision. Failure leaves no partial Nodes.
-8. A refresh or webhook creates a new immutable import revision and a visible
-   diff; it never mutates the prior snapshot in place.
+Raw and derived JSON are canonicalized and checksum-bound. Untrusted names are
+rendered as Markdown plaintext. Temporary/signed render, thumbnail, download,
+and CDN URLs are removed from nested values, keys, embedded semantic text,
+titles, manifests, and derived files. The normalized public Figma source URL is
+the only remote URL retained as provenance.
 
-Figma's `FILE_UPDATE` webhook is a delayed dirty signal, not a realtime diff.
-`FILE_VERSION_UPDATE` is preferable for explicitly named versions. Webhook
-passcodes must be verified before scheduling a refresh.
+## Durability and replay
 
-- [Webhook events](https://developers.figma.com/docs/rest-api/webhooks-events/)
-- [Webhook security](https://developers.figma.com/docs/rest-api/webhooks-security/)
-- [Rate limits](https://developers.figma.com/docs/rest-api/rate-limits/)
+The import is a daemon-owned, cross-process transaction:
 
-## Semantic mapping
+- One idempotency key binds one normalized request; rebinding returns `409`
+  before credential or network access.
+- Cross-process tickets serialize the same receipt, are cancellable while
+  waiting, and use owner identity plus fencing so an old process cannot delete
+  or publish over a replacement.
+- Accepted receipts, snapshot publication, Project creation, the Asset batch,
+  final import publication, and phase advancement are fsync-ordered.
+- Restart recovery adopts an already-renamed snapshot and rolls
+  `snapshot-staged` or later phases forward without Figma or PAT access.
+- Ready replay verifies every immutable artifact byte and returns the original
+  Project/import with no remote request.
+- The Project is protected by the runtime operation lease while it is being
+  materialized, so concurrent deletion cannot tear down an active import.
 
-- Raw source manifest and selected JSON become a material Document/File Node.
-- Sections and frames become user-confirmed Page, Layout, or Component candidates;
-  the importer never assumes every frame is a page.
-- Component sets become variant groups. Components retain property definitions,
-  instance overrides, constraints, auto-layout fields, annotations, source node
-  IDs, and stable component keys.
-- Variable collections become token sets and modes become themes. Aliases remain
-  references with cycle and missing-remote diagnostics.
-- Published styles map to composite color, typography, effect, or grid tokens.
-  Observed colors and sizes are evidence, not automatically declared tokens.
-- `Design.md` clearly separates extracted Figma facts from Dezin inference,
-  including unresolved dependencies and permission gaps.
-- Image-fill assets and rendered node previews remain distinct payloads with
-  exact export format, scale, node ID, and file version provenance.
+HTTP endpoints:
 
-The current Canvas Version model only supports `html | asset`. A complete
-semantic import therefore requires bundle Versions that can authoritatively
-carry Markdown, JSON, CSS, component contracts, preview HTML, and pinned assets.
-Until that schema exists, derived `Design.md` and token/component JSON must be
-material Documents/Files and must not be presented as native generative Nodes.
+```text
+GET    /api/figma/credential
+PUT    /api/figma/credential
+DELETE /api/figma/credential
+POST   /api/projects/imports/figma
+```
 
-## Delivery phases
+The import endpoint returns `201` for the first completion, `200` for exact
+replay, and `409` for idempotency conflict or corrupt authority.
 
-1. URL parser, import manifest/schema, deterministic normalizer, budgets, and
-   offline fixtures.
-2. OAuth/PAT read path, exact-version selected subtree, local image/SVG capture,
-   and atomic material-node import.
-3. Bundle Version schema and native `design-document`, `design-tokens`, and
-   `component` semantic artifacts/editors.
-4. Enterprise Variables and library dependency resolution with explicit
-   incomplete diagnostics.
-5. User-confirmed immutable refresh/diff, optionally triggered by webhooks.
-6. Optional, explicitly authorized write-back of Dezin links/status. A public
-   integration needs privacy and Figma Developer Terms review before release.
+## Deliberate limitations
 
-REST is the primary import authority. A Figma plugin can later enhance the
-currently open file or provide an explicit write-back channel, but it cannot be
-the background cross-file source of truth.
+This slice does **not** yet:
+
+- download Figma image fills, rendered previews, fonts, or other expiring binary
+  resources;
+- recreate a pixel-identical editable page or native Dezin Component/Token
+  bundle;
+- resolve remote libraries and aliases beyond the selected file snapshot;
+- refresh, diff, subscribe to webhooks, or write anything back to Figma;
+- authenticate through OAuth.
+
+Those capabilities require immutable binary capture, native bundle Versions,
+explicit refresh/diff UX, and additional privacy/Figma Developer Terms review.
+REST remains the source authority; a future Figma plugin may enhance the open
+file or provide an explicit write-back channel, but cannot replace durable
+cross-file import authority.

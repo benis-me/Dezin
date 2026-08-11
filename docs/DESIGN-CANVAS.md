@@ -56,8 +56,11 @@ Their prompt and presentation contracts differ, but Markdown, token JSON/CSS,
 component contracts, research sources, and knowledge facts are not yet separate
 filesystem authority. They must not be described as native semantic artifacts
 until bundle Versions can carry those typed payloads alongside preview HTML and
-pinned assets. The proposed Figma mapping and bundle migration are documented
-in [FIGMA-IMPORT.md](./FIGMA-IMPORT.md).
+pinned assets. The first Figma URL import now publishes `Design.md`,
+`tokens.json`, and `components.json` as checksum-bound material Document/File
+Nodes. It deliberately does not claim native semantic bundles or a pixel-perfect
+clone. The exact input, credential, Version fence, durability, and remaining
+binary/OAuth/refresh work are documented in [FIGMA-IMPORT.md](./FIGMA-IMPORT.md).
 
 ## On-disk layout
 

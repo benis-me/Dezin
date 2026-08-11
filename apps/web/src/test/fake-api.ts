@@ -125,6 +125,42 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
         },
       };
     },
+    importFigmaProject: async (input) => {
+      const project = fakeProject("project-figma", { name: "Figma import" });
+      return {
+        project,
+        import: {
+          manifest: {
+            schemaVersion: 1,
+            importId: input.idempotencyKey,
+            projectId: project.id,
+            source: {
+              normalizedUrl: input.url,
+              fileType: "design",
+              fileKey: "AbCdEf123456",
+              branchKey: null,
+              fileName: "Figma import",
+              requestedVersionId: null,
+              resolvedVersion: "1",
+              selectedNodeIds: input.nodeIds ?? [],
+              depth: input.depth ?? 4,
+            },
+            access: { editorType: null, role: null, linkAccess: null },
+            credential: { mode: "personal-access-token", subject: "fake" },
+            tokenAuthority: "style-values-inferred",
+            artifacts: [],
+            incomplete: [],
+            warnings: [],
+            canvasRevision: 1,
+            createdAt: NOW,
+          },
+          reused: false,
+        },
+      };
+    },
+    getFigmaCredential: async () => ({ configured: true, source: "local" }),
+    setFigmaCredential: async () => ({ configured: true, source: "local" }),
+    forgetFigmaCredential: async () => ({ configured: false, source: null }),
     generateProjectTitle: async (id) => fakeProject(id),
     getProject: async (id) => fakeProject(id),
     patchProject: async (id, patch) => fakeProject(id, patch),

@@ -34,6 +34,7 @@ import {
   validStoredViewport,
   withProjectLock,
   writeAuthorityJson,
+  ensureDurableDirectory,
 } from "./design-storage-primitives.ts";
 
 export interface DesignCanvasStateSources {
@@ -122,15 +123,17 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
   }
 
   async function ensureDesignDirectories(root: string): Promise<void> {
-    await Promise.all([
-      mkdir(join(root, "nodes"), { recursive: true }),
-      mkdir(join(root, "assets"), { recursive: true }),
-      mkdir(join(root, "agents", "main"), { recursive: true }),
-      mkdir(join(root, "agents", "main", "executions"), { recursive: true }),
-      mkdir(join(root, "jobs"), { recursive: true }),
-      mkdir(join(root, "exports"), { recursive: true }),
-      mkdir(join(root, "transactions", "publications"), { recursive: true }),
-    ]);
+    for (const path of [
+      join(root, "nodes"),
+      join(root, "assets"),
+      join(root, "agents"),
+      join(root, "agents", "main"),
+      join(root, "agents", "main", "executions"),
+      join(root, "jobs"),
+      join(root, "exports"),
+      join(root, "transactions"),
+      join(root, "transactions", "publications"),
+    ]) await ensureDurableDirectory(path);
   }
 
   async function initializeUnlocked(root: string, projectId: string, now?: number): Promise<DesignCanvas> {

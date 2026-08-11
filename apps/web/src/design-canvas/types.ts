@@ -3,6 +3,7 @@ export {
   DESIGN_MATERIAL_NODE_KINDS,
   DESIGN_NODE_KINDS,
   DESIGN_PROJECT_BOOTSTRAP_SCHEMA_VERSION,
+  FIGMA_IMPORT_SCHEMA_VERSION,
 } from "@dezin/design-canvas-contracts";
 
 export type {
@@ -40,6 +41,10 @@ export type {
   DesignThreadRole,
   DesignThreadScope,
   DesignViewport,
+  FigmaCredentialPutInput,
+  FigmaCredentialStatus,
+  FigmaImportInput,
+  FigmaImportResult,
   NewDesignNode,
 } from "@dezin/design-canvas-contracts";
 

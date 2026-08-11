@@ -11,6 +11,10 @@ import type {
   DesignProjectBootstrapInput,
   DesignProjectBootstrapResult,
   DesignThread,
+  FigmaCredentialPutInput,
+  FigmaCredentialStatus,
+  FigmaImportInput,
+  FigmaImportResult,
 } from "../design-canvas/types.ts";
 
 export type {
@@ -59,6 +63,11 @@ export interface CreateProjectInput {
 export interface BootstrapDesignProjectResponse {
   project: Project;
   bootstrap: DesignProjectBootstrapResult;
+}
+
+export interface FigmaImportProjectResponse {
+  project: Project;
+  import: FigmaImportResult;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -549,6 +558,10 @@ export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
   bootstrapDesignProject(input: DesignProjectBootstrapInput): Promise<BootstrapDesignProjectResponse>;
+  importFigmaProject(input: FigmaImportInput, signal?: AbortSignal): Promise<FigmaImportProjectResponse>;
+  getFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
+  setFigmaCredential(input: FigmaCredentialPutInput, signal?: AbortSignal): Promise<FigmaCredentialStatus>;
+  forgetFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
   generateProjectTitle(id: string, brief: string): Promise<Project>;
   getProject(id: string): Promise<Project>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
@@ -783,6 +796,13 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     bootstrapDesignProject: (input) =>
       json<BootstrapDesignProjectResponse>("/api/projects/bootstrap", jsonInit("POST", input)),
+    importFigmaProject: (input, signal) =>
+      json<FigmaImportProjectResponse>("/api/projects/imports/figma", { ...jsonInit("POST", input), signal }),
+    getFigmaCredential: (signal) => json<FigmaCredentialStatus>("/api/figma/credential", { signal }),
+    setFigmaCredential: (input, signal) =>
+      json<FigmaCredentialStatus>("/api/figma/credential", { ...jsonInit("PUT", input), signal }),
+    forgetFigmaCredential: (signal) =>
+      json<FigmaCredentialStatus>("/api/figma/credential", { method: "DELETE", signal }),
     generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
     getDesignCanvas: (projectId, signal) =>

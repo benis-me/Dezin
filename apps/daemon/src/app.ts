@@ -107,6 +107,17 @@ import {
 } from "./design/design-project-bootstrap-http.ts";
 import { recoverDesignProjectBootstraps } from "./design/design-project-bootstrap.ts";
 import { createProductionDesignProjectBootstrapPorts } from "./design/design-project-bootstrap-adapter.ts";
+import {
+  handleDeleteFigmaCredential,
+  handleGetFigmaCredential,
+  handleImportFigmaProject,
+  handlePutFigmaCredential,
+  type FigmaCredentialProvider,
+  type FigmaProjectLease,
+} from "./design/figma-import-http.ts";
+import { recoverFigmaImports } from "./design/figma-import.ts";
+import { resolveFigmaCredential } from "./design/figma-credential-store.ts";
+import { createFigmaRestClient, type FigmaRestClient } from "./design/figma-rest-client.ts";
 
 export interface AppDeps {
   store: Store;
@@ -145,6 +156,14 @@ export interface AppDeps {
   designStartupRecovery?: () => Promise<void>;
   /** Durable Home bootstrap execution supplied by the Design Asset and Agent ledger adapters. */
   designProjectBootstrapPorts?: DesignProjectBootstrapExecutionPorts;
+  /** Optional deterministic Figma REST seam; production uses the fixed official API origin. */
+  figmaClient?: FigmaRestClient;
+  /** Optional deterministic credential seam; production resolves environment/local daemon secrets. */
+  figmaCredentialProvider?: FigmaCredentialProvider;
+  /** Project-lifecycle admission held from a Figma receipt's reserved identity through publication. */
+  withFigmaProjectLease?: FigmaProjectLease;
+  /** Test-only deterministic pause before a leased Figma Project response is projected. */
+  beforeFigmaProjectResponse?: (projectId: string) => void | Promise<void>;
 }
 
 type Handler = (
@@ -282,6 +301,19 @@ const REQUEST_LIFETIME_ONLY_SIGNAL = new AbortController().signal;
 
 const routes: Route[] = [
   { method: "POST", pattern: "/api/projects/bootstrap", handler: handleBootstrapDesignProject },
+  { method: "GET", pattern: "/api/figma/credential", handler: handleGetFigmaCredential },
+  { method: "PUT", pattern: "/api/figma/credential", handler: handlePutFigmaCredential },
+  { method: "DELETE", pattern: "/api/figma/credential", handler: handleDeleteFigmaCredential },
+  {
+    method: "POST",
+    pattern: "/api/projects/imports/figma",
+    handler: (req, res, params, deps) => withRequestAbortSignal(
+      req,
+      res,
+      REQUEST_LIFETIME_ONLY_SIGNAL,
+      (signal) => handleImportFigmaProject(req, res, params, deps, signal),
+    ),
+  },
   { method: "GET", pattern: "/api/projects/:id/design-canvas", handler: handleGetDesignCanvas },
   {
     method: "GET",
@@ -989,6 +1021,14 @@ export function createApp(deps: AppDeps): http.Server {
     runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor(deps),
   };
   appDeps.designProjectBootstrapPorts ??= createProductionDesignProjectBootstrapPorts(appDeps);
+  appDeps.withFigmaProjectLease ??= async (projectId, operation) => {
+    const lease = appDeps.runtimeSupervisor!.acquireOperationLease({ projectId });
+    try {
+      return await operation();
+    } finally {
+      lease.release();
+    }
+  };
   const webDir = appDeps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
@@ -1004,6 +1044,13 @@ export function createApp(deps: AppDeps): http.Server {
           ensureProject: (project) => ensureDesignProjectAtId(appDeps.dataDir, project).then(() => undefined),
           ...appDeps.designProjectBootstrapPorts!,
         },
+      });
+      await recoverFigmaImports({
+        dataDir: appDeps.dataDir,
+        client: appDeps.figmaClient ?? createFigmaRestClient(),
+        credentialProvider: appDeps.figmaCredentialProvider
+          ?? (() => resolveFigmaCredential({ dataDir: appDeps.dataDir })),
+        withProjectLease: appDeps.withFigmaProjectLease,
       });
     })
     .then(
@@ -1038,6 +1085,7 @@ export function createApp(deps: AppDeps): http.Server {
         const needsDesignRecovery = route.pattern.includes("/design-canvas")
           || route.pattern === "/api/projects"
           || route.pattern === "/api/projects/bootstrap"
+          || route.pattern === "/api/projects/imports/figma"
           || route.pattern === "/api/projects/:id"
           || route.pattern === "/api/projects/:id/title";
         if (needsDesignRecovery) {

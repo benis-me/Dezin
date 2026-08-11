@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { Dialog as ShDialog, DialogContent, DialogTitle } from "./Dialog.tsx";
 import { cn } from "@/lib/utils.ts";
 
@@ -14,6 +14,7 @@ export function Dialog({
   className = "",
   align = "center",
   showClose = false,
+  returnFocusRef,
 }: {
   open: boolean;
   onClose: () => void;
@@ -23,12 +24,17 @@ export function Dialog({
   align?: "center" | "top";
   autoFocus?: boolean;
   showClose?: boolean;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
   return (
     <ShDialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         showCloseButton={showClose}
         aria-label={label}
+        onCloseAutoFocus={returnFocusRef === undefined ? undefined : (event) => {
+          event.preventDefault();
+          returnFocusRef.current?.focus({ preventScroll: true });
+        }}
         className={cn("gap-0 overflow-hidden p-0", align === "top" && "top-[12vh] translate-y-0", className)}
       >
         <DialogTitle className="sr-only">{label ?? "Dialog"}</DialogTitle>

@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
+  lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
   rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
   DesignAssetBundleFile,
   DesignInvalidationTopic,
@@ -216,16 +218,78 @@ export async function readJson<T>(path: string, label: string): Promise<T> {
   }
 }
 
-export async function writeAtomic(path: string, bytes: string | Uint8Array): Promise<void> {
-  const parent = resolve(path, "..");
-  await mkdir(parent, { recursive: true });
-  const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`);
+export interface DesignDurabilityTestHooks {
+  afterDirectoryDurable?: (path: string, parent: string) => void | Promise<void>;
+  afterAtomicPhase?: (
+    phase: "temporary-file-synced" | "parent-directory-synced",
+    path: string,
+  ) => void | Promise<void>;
+}
+
+export async function syncDesignDirectory(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY);
   try {
-    await writeFile(temporary, bytes, { mode: 0o600 });
-    await rename(temporary, path);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function ensureDurableDirectory(
+  inputPath: string,
+  testHooks?: DesignDurabilityTestHooks,
+): Promise<void> {
+  const path = resolve(inputPath);
+  try {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new DesignStorageError("corrupt", "Design authority directory must be a regular directory");
+    }
+    return;
   } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  const parent = dirname(path);
+  if (parent === path) throw new DesignStorageError("corrupt", "Design authority directory root is unavailable");
+  await ensureDurableDirectory(parent, testHooks);
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+  }
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new DesignStorageError("corrupt", "Design authority directory must be a regular directory");
+  }
+  await syncDesignDirectory(parent);
+  await testHooks?.afterDirectoryDurable?.(path, parent);
+}
+
+export async function writeAtomic(
+  path: string,
+  bytes: string | Uint8Array,
+  testHooks?: DesignDurabilityTestHooks,
+): Promise<void> {
+  const parent = resolve(path, "..");
+  await ensureDurableDirectory(parent, testHooks);
+  const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await testHooks?.afterAtomicPhase?.("temporary-file-synced", path);
+    await rename(temporary, path);
+    await syncDesignDirectory(parent);
+    await testHooks?.afterAtomicPhase?.("parent-directory-synced", path);
+  } catch (error) {
+    await handle?.close().catch(() => {});
     await rm(temporary, { force: true }).catch(() => {});
     throw error;
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
   }
 }
 
