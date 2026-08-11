@@ -494,9 +494,8 @@ test("Agent panels preserve the native context menu without opening the canvas N
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   const mainPanel = screen.getByLabelText("Main Agent panel");
   const composer = within(mainPanel).getByRole("textbox", { name: "Main Agent message" });
-  expect(composer.closest(".design-canvas-agent__composer-shell")).toHaveAttribute(
+  expect(composer.closest(".design-canvas-agent__composer-shell")).not.toHaveAttribute(
     "data-agent-component",
-    "prompt-bar",
   );
   const beam = composer.closest<HTMLElement>(".design-canvas-agent__composer-beam");
   expect(beam?.style.getPropertyValue("--beam-strength")).toBe("0.56");

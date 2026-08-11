@@ -559,7 +559,7 @@ export function CanvasAgentPanel({
             if (!event.currentTarget.contains(event.relatedTarget)) setComposerFocused(false);
           }}
         >
-          <div className="design-canvas-agent__composer-shell" data-agent-component="prompt-bar">
+          <div className="design-canvas-agent__composer-shell">
             <NodeMentionInput
               nodes={nodes}
               excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
