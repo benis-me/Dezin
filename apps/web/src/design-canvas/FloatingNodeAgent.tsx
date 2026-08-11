@@ -689,7 +689,7 @@ const AgentTranscript = memo(function AgentTranscript({
     presentableMessages,
     reservedMainReplies,
     hiddenTranscriptCount,
-    latestRelatedJobId,
+    latestVisibleJobId,
     timeline,
   } = buildAgentTranscriptPage({
     scopeKey,
@@ -761,7 +761,7 @@ const AgentTranscript = memo(function AgentTranscript({
               onCancelJob={onCancelJob}
               onRetryJob={onRetryJob}
               reduceMotion={reduceMotion}
-              latestRelatedJobId={latestRelatedJobId}
+              latestVisibleJobId={latestVisibleJobId}
             />
           );
         }
@@ -774,6 +774,7 @@ const AgentTranscript = memo(function AgentTranscript({
             onRevealExport={onRevealExport}
             onCancel={onCancelJob}
             onRetry={onRetryJob}
+            initiallyExpanded={item.job.id === latestVisibleJobId}
           />
         );
       })}
@@ -789,7 +790,7 @@ function MainAgentJobGroupView({
   onCancelJob,
   onRetryJob,
   reduceMotion,
-  latestRelatedJobId,
+  latestVisibleJobId,
 }: {
   group: MainAgentJobGroup;
   nodeNames: ReadonlyMap<string, string>;
@@ -798,7 +799,7 @@ function MainAgentJobGroupView({
   onCancelJob: (jobId: string) => Promise<void>;
   onRetryJob?: (jobId: string) => Promise<void>;
   reduceMotion: boolean;
-  latestRelatedJobId: string | null;
+  latestVisibleJobId: string | null;
 }) {
   const mainJob = group.jobs.find((job) => job.kind === "main-agent") ?? null;
   const workJobs = group.jobs.filter((job) => job.kind !== "main-agent");
@@ -881,7 +882,7 @@ function MainAgentJobGroupView({
           onRevealExport={onRevealExport}
           onCancel={onCancelJob}
           onRetry={onRetryJob}
-          initiallyExpanded={job.id === latestRelatedJobId && job.kind === "implementation-export" && job.status === "ready"}
+          initiallyExpanded={job.id === latestVisibleJobId}
         />
       ))}
     </section>

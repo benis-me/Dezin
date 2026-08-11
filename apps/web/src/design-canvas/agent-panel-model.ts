@@ -140,7 +140,7 @@ export interface AgentTranscriptPage {
   presentableMessages: DesignThread["messages"];
   reservedMainReplies: DesignThread["messages"];
   hiddenTranscriptCount: number;
-  latestRelatedJobId: string | null;
+  latestVisibleJobId: string | null;
   timeline: AgentTimelineItem[];
 }
 
@@ -250,7 +250,6 @@ export function buildAgentTranscriptPage({
     + (scopeType === "main"
       ? Math.max(0, mainJobGroups.length - visibleMainJobGroups.length)
       : Math.max(0, relatedJobs.length - visibleRelatedJobs.length));
-  const latestRelatedJobId = relatedJobs.at(-1)?.id ?? null;
   const userTurnCreatedAt = new Map<string, number>();
   for (const message of threadMessages) {
     if (message.role === "user" && message.jobId !== null) {
@@ -302,11 +301,20 @@ export function buildAgentTranscriptPage({
     || priority(left) - priority(right)
     || left.id.localeCompare(right.id)
   ));
+  let latestVisibleJobId: string | null = null;
+  for (let index = timeline.length - 1; index >= 0 && latestVisibleJobId === null; index -= 1) {
+    const item = timeline[index]!;
+    if (item.kind === "node-job") {
+      latestVisibleJobId = item.job.id;
+    } else if (item.kind === "main-job-group") {
+      latestVisibleJobId = item.group.jobs.filter((job) => job.kind !== "main-agent").at(-1)?.id ?? null;
+    }
+  }
   return {
     presentableMessages,
     reservedMainReplies,
     hiddenTranscriptCount,
-    latestRelatedJobId,
+    latestVisibleJobId,
     timeline,
   };
 }

@@ -2003,6 +2003,56 @@ test("A completed conversational Main Agent turn renders as a message without an
   expect(screen.queryByText("Canvas plan")).not.toBeInTheDocument();
 });
 
+test("Main Agent expands the latest visible Job when a newer conversation-only turn has no task row", async () => {
+  const exportJob: DesignJob = {
+    ...job,
+    id: "job-visible-export",
+    kind: "implementation-export",
+    status: "cancelled",
+    exportId: "export-visible",
+    createdAt: 10,
+    updatedAt: 12,
+    finishedAt: 12,
+  };
+  const conversationJob: DesignJob = {
+    ...job,
+    id: "job-later-conversation",
+    conversationOnly: true,
+    createdAt: 20,
+    updatedAt: 22,
+    finishedAt: 22,
+  };
+  const { api } = createCanvasApi(canvas());
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [
+      { id: "message-later-user", role: "user", content: "Any other ideas?", jobId: conversationJob.id, createdAt: 20 },
+      { id: "message-later-assistant", role: "assistant", content: "Try a quieter direction.", jobId: conversationJob.id, createdAt: 21 },
+    ],
+  });
+
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle=""
+      nodes={[]}
+      jobs={[exportJob, conversationJob]}
+      agents={[CLAUDE_AGENT]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  const exportCard = await screen.findByLabelText("Implementation export · cancelled");
+  expect(within(exportCard).getByRole("button", { name: /Implementation export/ }))
+    .toHaveAttribute("aria-expanded", "true");
+  expect(screen.queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
+});
+
 test("Node Agent activity stays chronological so a successful retry is the visible tail", async () => {
   const target = node();
   const failed: DesignJob = {
@@ -2042,7 +2092,13 @@ test("Node Agent activity stays chronological so a successful retry is the visib
   );
 
   const failedCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${failed.id}"]`)!;
+  const readyCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${ready.id}"]`)!;
   expect(failedCard).toHaveAttribute("data-agent-component", "task-row");
+  expect(within(failedCard).getByRole("button", { name: /Landing page generation/ }))
+    .toHaveAttribute("aria-expanded", "false");
+  expect(within(readyCard).getByRole("button", { name: /Landing page generation/ }))
+    .toHaveAttribute("aria-expanded", "true");
+  expect(readyCard).not.toHaveAttribute("data-collapsed");
   expect(within(failedCard).queryByText("Older attempt failed")).not.toBeInTheDocument();
   fireEvent.click(failedCard.querySelector<HTMLButtonElement>(".design-canvas-agent__activity-toggle")!);
   expect(await within(failedCard).findByText("Older attempt failed")).toBeInTheDocument();
@@ -2087,9 +2143,9 @@ test("a failed Node Job exposes Repair & retry with visible retryable failure fe
 
   const retry = await screen.findByRole("button", { name: "Repair & retry Landing page generation" });
   await user.click(retry);
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  expect(await screen.findByText(
     "Couldn't retry Landing page generation. The failed Job could not be reopened",
-  );
+  )).toBeInTheDocument();
   expect(retry).toBeEnabled();
 
   await user.click(retry);
@@ -2224,7 +2280,9 @@ test("Main Agent keeps compact failed and cancelled parent outcomes with or with
   const cancelledOutcome = cancelledGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
   expect(cancelledOutcome).toHaveTextContent("Cancelled");
   expect(within(cancelledGroup).queryByText(/Cancellation internals/)).not.toBeInTheDocument();
-  expect(within(cancelledGroup).getByLabelText("Node generation · Checkout · ready")).toBeInTheDocument();
+  const latestChild = within(cancelledGroup).getByLabelText("Node generation · Checkout · ready");
+  expect(within(latestChild).getByRole("button", { name: /Checkout generation/ }))
+    .toHaveAttribute("aria-expanded", "true");
 });
 
 test.each(["ready", "failed", "cancelled"] as const)(
@@ -2264,7 +2322,8 @@ test.each(["ready", "failed", "cancelled"] as const)(
     );
 
     const record = await screen.findByLabelText(`Node generation · Phase node · ${status}`);
-    fireEvent.click(within(record).getByRole("button", { name: /Phase node generation/ }));
+    expect(within(record).getByRole("button", { name: /Phase node generation/ }))
+      .toHaveAttribute("aria-expanded", "true");
     await waitFor(() => expect(record.querySelector('[data-activity-kind="thinking"]')).toBeInTheDocument());
     const reasoning = record.querySelector<HTMLElement>('[data-activity-kind="thinking"]')!;
     expect(reasoning).not.toHaveAttribute("data-active");
