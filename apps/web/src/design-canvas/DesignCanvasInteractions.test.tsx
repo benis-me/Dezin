@@ -24,12 +24,35 @@ const flowHarness = vi.hoisted(() => ({
   zoomOut: vi.fn(),
   moveEndDelayMs: null as number | null,
 }));
-const motionHarness = vi.hoisted(() => ({ reduced: false }));
+const reducedMotionHarness = vi.hoisted(() => ({
+  reduced: false,
+  listeners: new Set<(event: MediaQueryListEvent) => void>(),
+}));
 
-vi.mock("motion/react", async () => {
-  const actual = await vi.importActual<typeof import("motion/react")>("motion/react");
-  return { ...actual, useReducedMotion: () => motionHarness.reduced };
-});
+function reducedMotionMediaQuery(query: string): MediaQueryList {
+  return {
+    get matches() {
+      return query === "(prefers-reduced-motion: reduce)" && reducedMotionHarness.reduced;
+    },
+    media: query,
+    onchange: null,
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "change") reducedMotionHarness.listeners.add(listener as (event: MediaQueryListEvent) => void);
+    },
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "change") reducedMotionHarness.listeners.delete(listener as (event: MediaQueryListEvent) => void);
+    },
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: () => true,
+  } as unknown as MediaQueryList;
+}
+
+function setReducedMotion(reduced: boolean): void {
+  reducedMotionHarness.reduced = reduced;
+  const event = { matches: reduced, media: "(prefers-reduced-motion: reduce)" } as MediaQueryListEvent;
+  for (const listener of reducedMotionHarness.listeners) listener(event);
+}
 
 vi.mock("@xyflow/react", async () => {
   const actual = await vi.importActual<typeof import("@xyflow/react")>("@xyflow/react");
@@ -199,11 +222,14 @@ beforeEach(() => {
   flowHarness.zoomIn.mockClear();
   flowHarness.zoomOut.mockClear();
   flowHarness.moveEndDelayMs = null;
-  motionHarness.reduced = false;
+  reducedMotionHarness.reduced = false;
+  reducedMotionHarness.listeners.clear();
+  vi.stubGlobal("matchMedia", vi.fn(reducedMotionMediaQuery));
 });
 
 afterEach(() => {
   vi.clearAllTimers();
+  vi.unstubAllGlobals();
 });
 
 test("single-click selects while double-click flies only the Node and its neighbors above a stable viewport", async () => {
@@ -479,7 +505,7 @@ test("Escape dismisses transient Agent controls before reversing an in-progress 
 });
 
 test("reduced motion makes Node focus, canvas Fit, and Zoom navigation immediate", async () => {
-  motionHarness.reduced = true;
+  setReducedMotion(true);
   const { api } = createApi(designCanvas([designNode("page-a", 80)]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
   await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
@@ -506,6 +532,33 @@ test("reduced motion makes Node focus, canvas Fit, and Zoom navigation immediate
   expect(flowHarness.zoomIn).toHaveBeenCalledWith({ duration: 0 });
   fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
   expect(flowHarness.zoomOut).toHaveBeenCalledWith({ duration: 0 });
+});
+
+test("switching reduced motion on during a Node flight removes remaining spatial motion and closes immediately", async () => {
+  const nodeA = designNode("page-a", 80);
+  const nodeB = designNode("page-b", 760);
+  const { api } = createApi(designCanvas([nodeA, nodeB]));
+  const view = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(2));
+
+  act(() => {
+    flowHarness.props?.onNodeDoubleClick?.(new MouseEvent("dblclick"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(flowHarness.props?.nodes[0]?.data.focusMotion?.durationMs).toBeGreaterThan(0));
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focus-motion", "animated");
+
+  act(() => setReducedMotion(true));
+  view.rerender(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions reduced" api={api} agents={[CLAUDE_AGENT]} />);
+
+  await waitFor(() => {
+    expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focus-motion", "instant");
+    expect(flowHarness.props?.nodes[0]?.data.focusMotion).toMatchObject({ role: "source", durationMs: 0 });
+    expect(flowHarness.props?.nodes[1]?.data.focusMotion).toMatchObject({ role: "away", durationMs: 0 });
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(screen.queryByRole("button", { name: "Close Node focus" })).not.toBeInTheDocument();
 });
 
 test("completed multi-select drags persist one geometry batch and keyboard position changes do not need drag-stop", async () => {

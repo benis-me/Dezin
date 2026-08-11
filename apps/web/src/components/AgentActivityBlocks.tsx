@@ -1,17 +1,38 @@
-import { Check, ChevronDown, CircleDashed, ExternalLink, Globe2, ListChecks, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, ChevronDown, Circle, CircleAlert, CircleDashed, ExternalLink, Globe2, ImageIcon, ListChecks, LoaderCircle, Search } from "lucide-react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+
+import { AgentCollapsible } from "./AgentCollapsible.tsx";
 
 export interface AgentReasoningItem {
   id: string;
   text: string;
 }
 
-function durationLabel(durationMs: number): string {
-  const seconds = Math.max(1, Math.round(durationMs / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+const INITIAL_REASONING_WINDOW = 24;
+
+export function AgentActivityHeaderContent({
+  icon,
+  label,
+  meta,
+  state = "idle",
+  animated = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  meta?: ReactNode;
+  state?: "idle" | "active" | "complete" | "failed";
+  animated?: boolean;
+}) {
+  return (
+    <>
+      <span className="agent-activity-card__marker" data-state={state} aria-hidden>{icon}</span>
+      <span className="agent-activity-card__summary">
+        <span className={animated ? "agent-activity-card__label agent-thinking-state" : "agent-activity-card__label"}>{label}</span>
+        {meta === null || meta === undefined ? null : <span className="agent-activity-card__meta">{meta}</span>}
+      </span>
+      <ChevronDown className="agent-activity-card__chevron" aria-hidden />
+    </>
+  );
 }
 
 export function AgentThinkingState({ label = "Thinking" }: { label?: string }) {
@@ -21,32 +42,60 @@ export function AgentThinkingState({ label = "Thinking" }: { label?: string }) {
 export function AgentReasoning({
   items,
   active,
-  durationMs,
 }: {
   items: readonly AgentReasoningItem[];
   active: boolean;
   durationMs: number;
 }) {
   const [open, setOpen] = useState(active);
+  const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_REASONING_WINDOW);
+  const detailsId = useId();
   useEffect(() => {
     if (active) setOpen(true);
   }, [active]);
   if (items.length === 0) return active ? <AgentThinkingState /> : null;
-  const visibleItems = items.slice(-8);
+  const boundedVisibleItemCount = Math.min(
+    items.length,
+    Math.max(INITIAL_REASONING_WINDOW, visibleItemCount),
+  );
+  const hiddenItemCount = Math.max(0, items.length - boundedVisibleItemCount);
+  const revealItemCount = Math.min(hiddenItemCount, boundedVisibleItemCount);
+  const visibleItems = items.slice(-boundedVisibleItemCount);
   return (
-    <section className="agent-reasoning" data-agent-component="thinking-reasoning" data-active={active || undefined} data-collapsed={!open || undefined}>
-      <button type="button" className="agent-reasoning__header" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <span className={active ? "agent-thinking-state" : undefined}>{active ? "Thinking" : "Thought"}</span>
-        {!active ? <span className="agent-reasoning__duration">for {durationLabel(durationMs)}</span> : null}
-        <ChevronDown aria-hidden />
+    <section className="agent-activity-card agent-reasoning" data-agent-component="thinking-reasoning" data-activity-kind="thinking" data-active={active || undefined} data-collapsed={!open || undefined}>
+      <button type="button" className="agent-activity-card__header agent-reasoning__header" aria-label="Thinking" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <AgentActivityHeaderContent
+          icon={active ? <span className="agent-activity-card__pulse" /> : <Check />}
+          label="Thinking"
+          meta={active ? "Live" : "Completed"}
+          state={active ? "active" : "complete"}
+          animated={active}
+        />
       </button>
-      <div className="agent-reasoning__collapsible" data-collapsed={!open || undefined}>
-        <div>
-          <div className="agent-reasoning__viewport">
-            {visibleItems.map((item) => <p key={item.id}>{item.text}</p>)}
-          </div>
+      <AgentCollapsible
+        id={detailsId}
+        className="agent-reasoning__collapsible"
+        open={open}
+      >
+        <div className="agent-reasoning__viewport">
+          {hiddenItemCount > 0 ? (
+            <button
+              type="button"
+              className="agent-reasoning__history-button"
+              onClick={() => setVisibleItemCount((current) => {
+                const boundedCurrent = Math.min(
+                  items.length,
+                  Math.max(INITIAL_REASONING_WINDOW, current),
+                );
+                return Math.min(items.length, boundedCurrent * 2);
+              })}
+            >
+              Show earlier Thinking (+{revealItemCount} · {hiddenItemCount} remaining)
+            </button>
+          ) : null}
+          {visibleItems.map((item) => <p key={item.id}>{item.text}</p>)}
         </div>
-      </div>
+      </AgentCollapsible>
     </section>
   );
 }
@@ -61,39 +110,52 @@ export function AgentProgressList({
   items,
   title = "Actions",
   defaultOpen = true,
+  completionTone = "auto",
 }: {
   items: readonly AgentProgressItem[];
   title?: string;
   defaultOpen?: boolean;
+  completionTone?: "auto" | "neutral";
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const detailsId = useId();
   if (items.length === 0) return null;
   const complete = items.filter((item) => item.state === "done").length;
+  const active = items.some((item) => item.state === "active");
   const allComplete = complete === items.length;
+  const showCompleteTone = allComplete && completionTone === "auto";
   return (
-    <section className="agent-progress" data-agent-component="to-do-list" data-collapsed={!open || undefined} data-complete={allComplete || undefined}>
-      <button type="button" className="agent-progress__header" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <span className="agent-progress__header-icon" data-complete={allComplete || undefined}>
-          {allComplete ? <Check aria-hidden /> : <ListChecks aria-hidden />}
-          <ChevronDown className="agent-progress__chevron" aria-hidden />
-        </span>
-        <span>{title}</span>
-        <span className="agent-progress__count">{complete}/{items.length}</span>
+    <section className="agent-activity-card agent-progress" data-agent-component="to-do-list" data-activity-kind="actions" data-active={active || undefined} data-collapsed={!open || undefined} data-complete={showCompleteTone || undefined}>
+      <button type="button" className="agent-activity-card__header agent-progress__header" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <AgentActivityHeaderContent
+          icon={allComplete ? <Check /> : <ListChecks />}
+          label={title}
+          meta={allComplete && completionTone === "neutral" ? `${complete} steps completed` : `${complete}/${items.length}`}
+          state={showCompleteTone ? "complete" : "idle"}
+        />
       </button>
-      <div className="agent-progress__collapsible" data-collapsed={!open || undefined}>
-        <div>
-          <ol className="agent-progress__items">
-            {items.map((item) => (
-              <li key={item.id} data-state={item.state}>
-                <span className="agent-progress__state" aria-hidden>
-                  {item.state === "done" ? <Check /> : item.state === "active" ? <ExternalLink /> : <CircleDashed />}
-                </span>
-                <span>{item.text}</span>
-              </li>
-            ))}
-          </ol>
-        </div>
-      </div>
+      <AgentCollapsible
+        id={detailsId}
+        className="agent-progress__collapsible"
+        open={open}
+      >
+        <ol className="agent-progress__items">
+          {items.map((item) => (
+            <li key={item.id} data-state={item.state}>
+              <span className="agent-progress__state" aria-hidden>
+                {item.state === "done"
+                  ? <Check />
+                  : item.state === "active"
+                    ? <LoaderCircle />
+                    : item.state === "failed"
+                      ? <CircleAlert />
+                      : <Circle />}
+              </span>
+              <span><span className="agent-visually-hidden">{item.state === "done" ? "Complete:" : item.state === "active" ? "Active:" : item.state === "failed" ? "Failed:" : "Pending:"}</span>{item.text}</span>
+            </li>
+          ))}
+        </ol>
+      </AgentCollapsible>
     </section>
   );
 }
@@ -115,50 +177,60 @@ export function AgentWebSearch({
   active: boolean;
 }) {
   const [open, setOpen] = useState(true);
+  const detailsId = useId();
   const normalizedResults = useMemo(() => results.length > 0 ? results : [{
     id: "search",
     title: active ? "Looking for relevant sources" : "Search complete",
     state: active ? "loading" as const : "done" as const,
   }], [active, results]);
   return (
-    <section className="agent-web-search" data-agent-component="web-search" data-active={active || undefined} data-collapsed={!open || undefined}>
-      <header className="agent-web-search__header">
-        <Search aria-hidden />
-        <span className={active ? "agent-web-search__label agent-thinking-state" : "agent-web-search__label"}>
-          {active ? "Searching" : "Searched"} <span>“{query}”</span>
-        </span>
-        <button type="button" aria-label="Toggle search results" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-          <ChevronDown aria-hidden />
-        </button>
-      </header>
-      <div className="agent-web-search__collapsible" data-collapsed={!open || undefined}>
-        <div>
-          <div className="agent-web-search__results">
-            <span className="agent-web-search__rail" aria-hidden />
-            <ul>
-              {normalizedResults.map((result) => {
-                const state = result.state ?? (active ? "loading" : "done");
-                const host = result.href ? safeSearchHost(result.href) : null;
-                const content = (
-                  <>
-                    <span className="agent-web-search__status" aria-hidden>
-                      {state === "done" ? <Check /> : state === "loading" ? <Globe2 /> : <CircleDashed />}
-                    </span>
-                    <span className="agent-web-search__title">{result.title}</span>
-                    {host ? <><span className="agent-web-search__separator" aria-hidden>·</span><span className="agent-web-search__host">{host}</span></> : null}
-                    {result.href ? <ExternalLink className="agent-web-search__arrow" aria-hidden /> : null}
-                  </>
-                );
-                return (
-                  <li key={result.id} data-state={state}>
-                    {result.href ? <a href={result.href} target="_blank" rel="noreferrer">{content}</a> : <span>{content}</span>}
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
+    <section className="agent-activity-card agent-web-search" data-agent-component="web-search" data-activity-kind="search" data-active={active || undefined} data-collapsed={!open || undefined}>
+      <button
+        type="button"
+        className="agent-activity-card__header agent-web-search__header"
+        aria-label={`${active ? "Searching" : "Search"}: ${query}`}
+        aria-controls={detailsId}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <AgentActivityHeaderContent
+          icon={<Search />}
+          label={active ? "Searching" : "Search"}
+          meta={<>“{query}”</>}
+          state={active ? "active" : "complete"}
+          animated={active}
+        />
+      </button>
+      <AgentCollapsible
+        id={detailsId}
+        className="agent-web-search__collapsible"
+        open={open}
+      >
+        <div className="agent-web-search__results">
+          <span className="agent-web-search__rail" aria-hidden />
+          <ul>
+            {normalizedResults.map((result) => {
+              const state = result.state ?? (active ? "loading" : "done");
+              const host = result.href ? safeSearchHost(result.href) : null;
+              const content = (
+                <>
+                  <span className="agent-web-search__status" aria-hidden>
+                    {state === "done" ? <Check /> : state === "loading" ? <Globe2 /> : <CircleDashed />}
+                  </span>
+                  <span className="agent-web-search__title">{result.title}</span>
+                  {host ? <><span className="agent-web-search__separator" aria-hidden>·</span><span className="agent-web-search__host">{host}</span></> : null}
+                  {result.href ? <ExternalLink className="agent-web-search__arrow" aria-hidden /> : null}
+                </>
+              );
+              return (
+                <li key={result.id} data-state={state}>
+                  {result.href ? <a href={result.href} target="_blank" rel="noreferrer">{content}</a> : <span>{content}</span>}
+                </li>
+              );
+            })}
+          </ul>
         </div>
-      </div>
+      </AgentCollapsible>
     </section>
   );
 }
@@ -173,22 +245,43 @@ function safeSearchHost(href: string): string {
 
 export function AgentImageGenerationState({
   prompt,
-  resolution = "Generating",
+  resolution,
+  active = true,
 }: {
   prompt: string;
   resolution?: string;
+  active?: boolean;
 }) {
+  const [open, setOpen] = useState(true);
+  const detailsId = useId();
+  const statusLabel = resolution ?? (active ? "Generating" : "Completed");
   return (
-    <figure className="agent-image-generation-state" data-agent-component="image-generation">
-      <div className="agent-image-generation-state__canvas" role="img" aria-label="Generating image">
-        <span className="agent-image-generation-state__dots" aria-hidden />
-        <span className="agent-image-generation-state__glow" aria-hidden />
-        <span className="agent-image-generation-state__resolution">{resolution}</span>
-      </div>
-      <figcaption>
-        <AgentThinkingState label="Generating image" />
-        <span>“{prompt}”</span>
-      </figcaption>
+    <figure className="agent-activity-card agent-image-generation-state" data-agent-component="image-generation" data-activity-kind="image-generation" data-active={active || undefined} data-collapsed={!open || undefined}>
+      <button
+        type="button"
+        className="agent-activity-card__header agent-image-generation-state__header"
+        aria-label={`Image generation: ${statusLabel}`}
+        aria-controls={detailsId}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <AgentActivityHeaderContent
+          icon={<ImageIcon />}
+          label="Image generation"
+          meta={statusLabel}
+          state={active ? "active" : "complete"}
+          animated={active}
+        />
+      </button>
+      <AgentCollapsible id={detailsId} className="agent-image-generation-state__collapsible" open={open}>
+        <div className="agent-image-generation-state__body">
+          <div className="agent-image-generation-state__canvas" role="img" aria-label={active ? "Generating image" : "Completed image generation activity"}>
+            <span className="agent-image-generation-state__dots" aria-hidden />
+            <span className="agent-image-generation-state__glow" aria-hidden />
+          </div>
+          <figcaption>“{prompt}”</figcaption>
+        </div>
+      </AgentCollapsible>
     </figure>
   );
 }

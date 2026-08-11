@@ -7,6 +7,22 @@ export interface ArtifactSnapshot {
   html: string | null;
 }
 
+export type AgentArtifactFailureReason = "missing" | "empty" | "unchanged";
+
+/** A successful provider turn that did not leave the required artifact in a publishable state. */
+export class AgentArtifactError extends Error {
+  readonly code = "AGENT_ARTIFACT_INCOMPLETE";
+  readonly reason: AgentArtifactFailureReason;
+  readonly artifactPath: string;
+
+  constructor(label: string, artifactPath: string, reason: AgentArtifactFailureReason) {
+    super(`${label} artifact ${reason === "unchanged" ? "not updated" : reason}: ${artifactPath}`);
+    this.name = "AgentArtifactError";
+    this.reason = reason;
+    this.artifactPath = artifactPath;
+  }
+}
+
 export async function readArtifactSnapshot(projectDir: string, artifactPath: string): Promise<ArtifactSnapshot> {
   try {
     return { exists: true, html: await readFile(join(projectDir, artifactPath), "utf8") };
@@ -34,13 +50,13 @@ export async function readUpdatedArtifactHtml(
 ): Promise<string> {
   const after = await readArtifactSnapshot(projectDir, artifactPath);
   if (!after.exists || after.html === null) {
-    throw new Error(`${label} artifact missing: ${artifactPath}`);
+    throw new AgentArtifactError(label, artifactPath, "missing");
   }
   if (!after.html.trim()) {
-    throw new Error(`${label} artifact empty: ${artifactPath}`);
+    throw new AgentArtifactError(label, artifactPath, "empty");
   }
   if ((options.enforceArtifactUpdate ?? true) && before.exists && after.html === before.html) {
-    throw new Error(`${label} artifact not updated: ${artifactPath}`);
+    throw new AgentArtifactError(label, artifactPath, "unchanged");
   }
   return after.html;
 }

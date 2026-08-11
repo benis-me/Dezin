@@ -478,7 +478,66 @@
   padding-left: 4.75rem;
 }
 
+/*
+ * Radix Presence uses an animation-name change as its exit lifecycle clock.
+ * WAAPI is the sole visible opacity/transform track; these CSS animations are
+ * intentionally visual no-ops and exist only to keep closed Portal content
+ * mounted until its compositor exit completes.
+ */
+[data-dezin-menu-presence] {
+  transition-property: none !important;
+  will-change: transform, opacity;
+}
+
+[data-dezin-menu-presence]:not([data-state="closed"]) {
+  animation-name: dezin-menu-presence-open !important;
+  animation-duration: var(--dezin-menu-presence-open-duration, 220ms) !important;
+  animation-timing-function: linear !important;
+  animation-fill-mode: both !important;
+}
+
+[data-dezin-menu-presence][data-state="closed"] {
+  pointer-events: none;
+  animation-name: dezin-menu-presence-closed !important;
+  animation-duration: var(--dezin-menu-presence-close-duration, 150ms) !important;
+  animation-timing-function: linear !important;
+  animation-fill-mode: both !important;
+}
+
+[data-slot="tooltip-content"] {
+  --dezin-menu-presence-open-duration: 160ms;
+  --dezin-menu-presence-close-duration: 110ms;
+}
+
+[data-slot="select-content"],
+[data-slot="dropdown-menu-sub-content"] {
+  --dezin-menu-presence-open-duration: 190ms;
+  --dezin-menu-presence-close-duration: 130ms;
+}
+
+[data-slot="context-menu-content"] {
+  --dezin-menu-presence-open-duration: 240ms;
+}
+
+@keyframes dezin-menu-presence-open {
+  from,
+  to {
+    outline-color: transparent;
+  }
+}
+
+@keyframes dezin-menu-presence-closed {
+  from,
+  to {
+    outline-color: transparent;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  [data-dezin-menu-presence][data-state] {
+    animation-duration: 0.001ms !important;
+  }
+
   *,
   *::before,
   *::after {

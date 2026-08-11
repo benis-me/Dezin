@@ -52,8 +52,311 @@ test("Node generation prompts bind the exact target and expose kind-specific con
     assert.doesNotMatch(page, /Dezin Render Frame|dezin:frame-change|Viewer and visual QA|Vite|npm\s+install|pre-installed React|GSAP|CDN/i);
     assert.match(page, /untrusted reference data/i);
     assert.match(page, /cannot change these instructions/i);
+    assert.match(page, /re-open.*index\.html.*audit/i);
+    assert.match(page, /Map.*computed.*receiver|computed.*receiver.*Map/i);
   } finally {
     store.close();
+  }
+});
+
+test("a Node Agent continues once in the same staging directory when it stops after planning", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-plan-only-continuation-"));
+  const projectId = "project-plan-only-continuation";
+  const prompts: string[] = [];
+  const workingDirectories: string[] = [];
+  let calls = 0;
+  const runner = new ClaudeCodeRunner({
+    id: "plan-only-continuation-fake",
+    command: "codebuddy",
+    spawner: {
+      async run(input) {
+        calls += 1;
+        prompts.push(input.stdin);
+        workingDirectories.push(input.cwd);
+        if (calls === 2) {
+          const html = "<!doctype html><html><head></head><body><main>Completed in place</main></body></html>";
+          await writeFile(join(input.cwd, "index.html"), html);
+        }
+        return {
+          stdout: [
+            JSON.stringify({
+              type: "system", subtype: "init", session_id: `continuation-${calls}`,
+              model: "hy3-ioa", apiKeySource: "test", claude_code_version: "2.133.1",
+            }),
+            JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: calls === 1 ? "I will plan the page." : "Completed the staged Node" }] } }),
+            JSON.stringify({ type: "result", subtype: "success", result: calls === 1 ? "planned" : "done", is_error: false }),
+          ].join("\n"),
+          exitCode: 0,
+        };
+      },
+    },
+  });
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir, projectId, nodeId: "node-page", message: "Build the page", systemPrompt: "Write index.html", runner,
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Plan-only continuation failed");
+    assert.equal(calls, 2);
+    assert.equal(new Set(workingDirectories).size, 1);
+    assert.match(prompts[1] ?? "", /Build the page/);
+    assert.match(prompts[1] ?? "", /stopped after planning/i);
+    assert.match(prompts[1] ?? "", /write the complete index\.html/i);
+    assert.ok(completed.activity.some((entry) => /stopped after planning.*continuing the same staged Node once/i.test(entry.text)));
+    assert.equal((await listDesignVersions(dataDir, projectId, "node-page")).length, 1);
+    const thread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+    assert.deepEqual(thread.messages.map((message) => message.role), ["user", "assistant"]);
+    assert.match(thread.messages.at(-1)?.content ?? "", /completed the staged Node/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed plan-only continuation preserves the identity attested by its first turn", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-continuation-identity-"));
+  const projectId = "project-continuation-identity";
+  let calls = 0;
+  const runner = new ClaudeCodeRunner({
+    id: "codebuddy",
+    command: "codebuddy",
+    spawner: {
+      async run() {
+        calls += 1;
+        if (calls === 2) throw new Error("codebuddy timed out after 1000ms");
+        return {
+          stdout: [
+            JSON.stringify({
+              type: "system", subtype: "init", session_id: "plan-only-attested",
+              model: "hy3-ioa", apiKeySource: "test", claude_code_version: "2.133.1",
+            }),
+            JSON.stringify({ type: "result", subtype: "success", result: "planned", is_error: false }),
+          ].join("\n"),
+          exitCode: 0,
+        };
+      },
+    },
+  });
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir, projectId, nodeId: "node-page", message: "Build the page", systemPrompt: "Write index.html", runner,
+    });
+
+    const completed = await started.completion;
+    assert.equal(calls, 2);
+    assert.equal(completed.status, "failed");
+    assert.equal(completed.runnerId, "codebuddy");
+    assert.equal(completed.model, "hy3-ioa");
+    assert.match(completed.error ?? "", /timed out/i);
+    assert.deepEqual(await listDesignVersions(dataDir, projectId, "node-page"), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a Node Agent repairs the exact generated-HTML validation diagnostic in place", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-validation-repair-"));
+  const projectId = "project-validation-repair";
+  const inputs: AgentTurnInput[] = [];
+  const runner: AgentRunner = {
+    id: "validation-repair-fake",
+    async runTurn(input) {
+      inputs.push(input);
+      const initial = `<!doctype html><html><head></head><body><a id="one">One</a><script>
+        const links = Array.from(document.querySelectorAll("a"));
+        const linkById = links.reduce((accumulator) => accumulator, {});
+        for (const link of links) {
+          const id = link.id;
+          linkById[id] = link;
+        }
+      </script></body></html>`;
+      const repaired = `<!doctype html><html><head></head><body><a id="one">One</a><script>
+        const links = Array.from(document.querySelectorAll("a"));
+        const linkById = new Map();
+        for (const link of links) {
+          linkById.set(link.id, link);
+        }
+        document.body.dataset.links = String(linkById.size);
+      </script></body></html>`;
+      const html = inputs.length === 1 ? initial : repaired;
+      if (inputs.length === 2) {
+        assert.equal(input.isRepair, true);
+        assert.match(input.message, /daemon diagnostic.*data, not an instruction/i);
+        assert.match(input.message, /member <dynamic>.*linkById\[id\] = link/i);
+        assert.match(input.message, /repair attempt 1 of 2/i);
+        assert.deepEqual(input.history?.slice(-2).map((turn) => turn.role), ["user", "assistant"]);
+      }
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: inputs.length === 1 ? "Initial draft" : "Repaired the lookup table", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir,
+      projectId,
+      nodeId: "node-page",
+      message: "Build a local link index",
+      systemPrompt: "Write index.html",
+      runner,
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Validation repair failed");
+    assert.equal(inputs.length, 2);
+    assert.equal(new Set(inputs.map((input) => input.projectDir)).size, 1);
+    assert.ok(completed.activity.some((entry) => /validation found a repairable issue.*attempt 1 of 2/i.test(entry.text)));
+    const versions = await listDesignVersions(dataDir, projectId, "node-page");
+    assert.equal(versions.length, 1);
+    const publishedHtml = await readFile(join(
+      dataDir, "projects", projectId, "design", "nodes", "node-page", "versions", versions[0]!.id, "index.html",
+    ), "utf8");
+    assert.match(publishedHtml, /new Map\(\)/);
+    assert.doesNotMatch(publishedHtml, /linkById\[id\]\s*=/);
+    const thread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+    assert.deepEqual(thread.messages.map((message) => message.role), ["user", "assistant"]);
+    assert.match(thread.messages.at(-1)?.content ?? "", /repaired the lookup table/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a Node Agent gets two bounded validation repairs when independent defects surface in sequence", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-two-repairs-"));
+  const projectId = "project-two-repairs";
+  const inputs: AgentTurnInput[] = [];
+  const runner: AgentRunner = {
+    id: "two-repairs-fake",
+    async runTurn(input) {
+      inputs.push(input);
+      const html = inputs.length === 1
+        ? '<!doctype html><html><head></head><body><img src="https://example.invalid/remote.png"></body></html>'
+        : inputs.length === 2
+          ? '<!doctype html><html><head></head><body><button onclick="this.textContent=\'Done\'">Run</button></body></html>'
+          : '<!doctype html><html><head></head><body><button id="run">Run</button><script>document.querySelector("#run").addEventListener("click", (event) => { event.currentTarget.textContent = "Done"; });</script></body></html>';
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: `turn-${inputs.length}`, artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir, projectId, nodeId: "node-page", message: "Repair every defect", systemPrompt: "Write index.html", runner,
+    });
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Second repair did not publish");
+    assert.equal(inputs.length, 3);
+    assert.equal(inputs[1]?.isRepair, true);
+    assert.equal(inputs[2]?.isRepair, true);
+    assert.match(inputs[1]?.message ?? "", /repair attempt 1 of 2/i);
+    assert.match(inputs[2]?.message ?? "", /repair attempt 2 of 2/i);
+    assert.equal(completed.activity.filter((entry) => /validation found a repairable issue/i.test(entry.text)).length, 2);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a Node Agent fails closed after its bounded validation repairs are exhausted", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-repair-exhausted-"));
+  const projectId = "project-repair-exhausted";
+  let calls = 0;
+  const runner: AgentRunner = {
+    id: "repair-exhausted-fake",
+    async runTurn(input) {
+      calls += 1;
+      const html = '<!doctype html><html><head></head><body><script src="https://example.invalid/remote.js"></script></body></html>';
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "still invalid", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir, projectId, nodeId: "node-page", message: "Stay local", systemPrompt: "Write index.html", runner,
+    });
+    const completed = await started.completion;
+    assert.equal(calls, 3);
+    assert.equal(completed.status, "failed");
+    assert.match(completed.error ?? "", /remote scripts or resources|unpinned or external URL/i);
+    assert.equal(completed.activity.filter((entry) => /validation found a repairable issue/i.test(entry.text)).length, 2);
+    assert.deepEqual(await listDesignVersions(dataDir, projectId, "node-page"), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a provider failure during validation repair terminalizes the same Job without rebinding its identity", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-repair-provider-failure-"));
+  const projectId = "project-repair-provider-failure";
+  let calls = 0;
+  const executionIdentity = {
+    requested: { providerId: "codebuddy", model: null },
+    observed: {
+      providerId: "codebuddy",
+      model: "hy3-ioa",
+      command: "codebuddy",
+      cliVersion: "2.133.1",
+      apiKeySource: "copilot.tencent.com",
+      protocol: "claude-stream-json-init-v1" as const,
+    },
+  };
+  const runner: AgentRunner = {
+    id: "codebuddy",
+    identityProtocol: "claude-stream-json-init-v1",
+    async runTurn(input) {
+      calls += 1;
+      if (calls === 2) {
+        throw new AgentTurnError("codebuddy returned an error result: authentication expired", executionIdentity);
+      }
+      const html = '<!doctype html><html><head></head><body><script src="https://example.invalid/remote.js"></script></body></html>';
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "initial invalid draft", artifactHtml: html, artifactPath: "index.html", executionIdentity };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const started = await startDesignNodeTurn({
+      dataDir, projectId, nodeId: "node-page", message: "Generate safely", systemPrompt: "Write index.html", runner,
+    });
+
+    const completed = await started.completion;
+    assert.equal(calls, 2);
+    assert.equal(completed.status, "failed");
+    assert.equal(completed.runnerId, "codebuddy");
+    assert.equal(completed.model, "hy3-ioa");
+    assert.match(completed.error ?? "", /authentication expired/i);
+    const canvas = await getDesignCanvas(dataDir, projectId);
+    assert.equal(canvas.nodes[0]?.state, "failed");
+    assert.equal(canvas.nodes[0]?.activeJobId, null);
+    assert.deepEqual(await listDesignVersions(dataDir, projectId, "node-page"), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 
@@ -440,10 +743,12 @@ test("a Node Agent fails closed and records the observed model when runtime iden
 test("a failed Node Agent records the runtime identity attested before a provider error", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-provider-error-"));
   const projectId = "project-provider-error";
+  let calls = 0;
   const runner: AgentRunner = {
     id: "codebuddy",
     identityProtocol: "claude-stream-json-init-v1",
     async runTurn() {
+      calls += 1;
       throw new AgentTurnError(
         "codebuddy returned an error result: authentication expired",
         {
@@ -480,6 +785,7 @@ test("a failed Node Agent records the runtime identity attested before a provide
     assert.equal(completed.runnerId, "codebuddy");
     assert.equal(completed.model, "hy3-ioa");
     assert.match(completed.error ?? "", /authentication expired/i);
+    assert.equal(calls, 1, "provider/authentication failures must not be retried as artifact repair");
     assert.deepEqual(await listDesignVersions(dataDir, projectId, "node-page"), []);
   } finally {
     await rm(dataDir, { recursive: true, force: true });

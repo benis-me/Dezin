@@ -396,6 +396,7 @@ export class ClaudeCodeRunner implements AgentRunner {
       throw new AgentTurnError(
         error instanceof Error ? error.message : `${command} turn failed`,
         executionIdentity,
+        { cause: error },
       );
     }
   }

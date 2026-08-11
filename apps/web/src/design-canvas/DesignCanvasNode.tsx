@@ -16,6 +16,7 @@ import {
   useEmbeddedPreviewContextMenuChannel,
 } from "../lib/preview-channel.ts";
 import { cn } from "../lib/utils.ts";
+import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import { useExactVersionMetadata } from "./exact-version-metadata.ts";
@@ -23,6 +24,7 @@ import { nodeFocusEase, type NodeFocusMotion } from "./node-focus-motion.ts";
 import { TypedMaterialSurface } from "./TypedMaterialSurface.tsx";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
+import "./generation-particles.css";
 
 export interface DesignFlowNodeData extends Record<string, unknown> {
   node: DesignNode;
@@ -34,7 +36,14 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   onPreviewContextMenu?: (nodeId: string, clientX: number, clientY: number) => void;
   onFocusAnimationStart?: (nodeId: string, phase: NodeFocusMotion["phase"], durationMs: number) => void;
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
+  contentLayout?: DesignNodeContentLayout | null;
   focusMotion?: NodeFocusMotion | null;
+}
+
+export interface DesignNodeContentLayout {
+  width: number;
+  height: number;
+  canvasScale: number;
 }
 
 export type DesignFlowNode = Node<DesignFlowNodeData, "design">;
@@ -45,14 +54,14 @@ export interface FocusVisualState {
   scaleX: number;
   scaleY: number;
   opacity: number;
-  width?: number;
-  height?: number;
 }
 
 interface FocusAnimationState {
   animation: Animation;
   target: NodeFocusMotion["phase"];
   pathKey: string;
+  layoutWidth: number | null;
+  layoutHeight: number | null;
 }
 
 export function focusVisualStateFromTransform(transform: string, opacity: number): FocusVisualState {
@@ -95,15 +104,28 @@ export function focusVisualStateFromTransform(transform: string, opacity: number
   };
 }
 
+export function rebaseFocusVisualState(
+  state: FocusVisualState,
+  previousLayout: { width: number; height: number },
+  nextLayout: { width: number; height: number },
+): FocusVisualState {
+  if (previousLayout.width <= 0 || previousLayout.height <= 0 || nextLayout.width <= 0 || nextLayout.height <= 0) {
+    return state;
+  }
+  return {
+    ...state,
+    x: state.x + (previousLayout.width - nextLayout.width) / 2,
+    y: state.y + (previousLayout.height - nextLayout.height) / 2,
+    scaleX: state.scaleX * previousLayout.width / nextLayout.width,
+    scaleY: state.scaleY * previousLayout.height / nextLayout.height,
+  };
+}
+
 function readFocusVisualState(element: HTMLElement): FocusVisualState {
   const computed = getComputedStyle(element);
   const opacity = Number.parseFloat(computed.opacity);
-  const width = Number.parseFloat(computed.width);
-  const height = Number.parseFloat(computed.height);
   return {
     ...focusVisualStateFromTransform(computed.transform, Number.isFinite(opacity) ? opacity : 1),
-    width: Number.isFinite(width) ? width : element.offsetWidth,
-    height: Number.isFinite(height) ? height : element.offsetHeight,
   };
 }
 
@@ -124,18 +146,10 @@ export function focusVisualFrames(
     const scaleX = start.scaleX + (end.scaleX - start.scaleX) * progress;
     const scaleY = start.scaleY + (end.scaleY - start.scaleY) * progress;
     const opacity = start.opacity + (end.opacity - start.opacity) * progress;
-    const width = start.width !== undefined && end.width !== undefined
-      ? start.width + (end.width - start.width) * progress
-      : undefined;
-    const height = start.height !== undefined && end.height !== undefined
-      ? start.height + (end.height - start.height) * progress
-      : undefined;
     return {
       offset,
       transform: `translate3d(${x}px, ${y}px, 0) scale(${scaleX}, ${scaleY})`,
       opacity,
-      ...(width === undefined ? {} : { width: `${width}px` }),
-      ...(height === undefined ? {} : { height: `${height}px` }),
     };
   });
 }
@@ -284,9 +298,11 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     onPreviewContextMenu,
     onFocusAnimationStart,
     onFocusAnimationComplete,
+    contentLayout = null,
     focusMotion = null,
   } = data;
   const [resizing, setResizing] = useState(false);
+  const reduceMotion = usePrefersReducedMotion();
   const { zoom } = useViewport();
   const chromeScale = 1 / Math.max(0.12, zoom);
   const { ref, nearViewport } = useNearViewport(selected);
@@ -312,7 +328,10 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
   });
   const catalog = catalogItem(node.kind);
   const hasRichContent = versionId !== null;
+  const contentPlaneActive = preview !== null && contentLayout !== null;
   const live = LIVE_STATES.has(node.state);
+  const generationSeed = `${node.id}:${node.activeJobId ?? "pending"}`;
+  const generationMotionActive = nearViewport || selected || focusSource;
   const previewFrameAddressValue = preview && !material
     ? previewFrameAddress(preview.url)
     : null;
@@ -373,9 +392,12 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       focusMotion.startHeight,
       focusMotion.layoutWidth,
       focusMotion.layoutHeight,
+      focusMotion.durationMs,
+      focusMotion.delayMs,
+      focusMotion.fadeDurationMs,
       focusMotion.role,
     ].join(":");
-    if (running?.target === focusMotion.phase && running.pathKey === pathKey) return;
+    if (!reduceMotion && running?.target === focusMotion.phase && running.pathKey === pathKey) return;
 
     const focusedTarget: FocusVisualState = {
       x: focusMotion.shiftX,
@@ -383,8 +405,6 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       scaleX: focusMotion.scaleX,
       scaleY: focusMotion.scaleY,
       opacity: focusMotion.role === "source" ? 1 : 0,
-      width: focusMotion.layoutWidth ?? undefined,
-      height: focusMotion.layoutHeight ?? undefined,
     };
     const canvasTarget: FocusVisualState = {
       x: focusMotion.startX,
@@ -392,17 +412,27 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       scaleX: focusMotion.startScaleX,
       scaleY: focusMotion.startScaleY,
       opacity: 1,
-      width: focusMotion.startWidth ?? undefined,
-      height: focusMotion.startHeight ?? undefined,
     };
-    const start = running
-      ? readFocusVisualState(element)
+    const liveStart = running ? readFocusVisualState(element) : null;
+    const start = liveStart
+      ? focusMotion.role === "source"
+        && running !== null
+        && running.layoutWidth !== null
+        && running.layoutHeight !== null
+        && focusMotion.layoutWidth !== null
+        && focusMotion.layoutHeight !== null
+        ? rebaseFocusVisualState(
+            liveStart,
+            { width: running.layoutWidth, height: running.layoutHeight },
+            { width: focusMotion.layoutWidth, height: focusMotion.layoutHeight },
+          )
+        : liveStart
       : focusMotion.phase === "opening"
         ? canvasTarget
         : focusedTarget;
     const end = focusMotion.phase === "opening" ? focusedTarget : canvasTarget;
     running?.animation.cancel();
-    if (focusMotion.durationMs <= 0 || typeof element.animate !== "function") {
+    if (reduceMotion || focusMotion.durationMs <= 0 || typeof element.animate !== "function") {
       focusAnimationRef.current = null;
       if (focusMotion.role !== "source") return;
       onFocusAnimationStart?.(node.id, focusMotion.phase, 0);
@@ -411,24 +441,13 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       }, 0);
       return () => window.clearTimeout(settleTimer);
     }
-    const fullSizeTravel = focusMotion.startWidth !== null && focusMotion.layoutWidth !== null
-      && focusMotion.startHeight !== null && focusMotion.layoutHeight !== null
-      ? Math.abs(focusMotion.layoutWidth - focusMotion.startWidth) * 0.35
-        + Math.abs(focusMotion.layoutHeight - focusMotion.startHeight) * 0.35
-      : 0;
-    const remainingSizeTravel = start.width !== undefined && end.width !== undefined
-      && start.height !== undefined && end.height !== undefined
-      ? Math.abs(end.width - start.width) * 0.35 + Math.abs(end.height - start.height) * 0.35
-      : 0;
     const fullTravel = Math.hypot(focusMotion.shiftX - focusMotion.startX, focusMotion.shiftY - focusMotion.startY)
       + Math.abs(focusMotion.scaleX - focusMotion.startScaleX) * 180
       + Math.abs(focusMotion.scaleY - focusMotion.startScaleY) * 180
-      + fullSizeTravel
       + (focusMotion.role === "source" ? 0 : 80);
     const remainingTravel = Math.hypot(end.x - start.x, end.y - start.y)
       + Math.abs(end.scaleX - start.scaleX) * 180
       + Math.abs(end.scaleY - start.scaleY) * 180
-      + remainingSizeTravel
       + Math.abs(end.opacity - start.opacity) * 80;
     const travelRatio = Math.min(1, remainingTravel / Math.max(1, fullTravel));
     const durationRatio = Math.sqrt(travelRatio);
@@ -447,7 +466,13 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         fill: "both",
       },
     );
-    focusAnimationRef.current = { animation, target: focusMotion.phase, pathKey };
+    focusAnimationRef.current = {
+      animation,
+      target: focusMotion.phase,
+      pathKey,
+      layoutWidth: focusMotion.layoutWidth,
+      layoutHeight: focusMotion.layoutHeight,
+    };
     if (focusMotion.role === "source") {
       onFocusAnimationStart?.(node.id, focusMotion.phase, durationMs);
       void animation.finished.then(() => {
@@ -455,7 +480,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         onFocusAnimationComplete?.(node.id, focusMotion.phase);
       }).catch(() => undefined);
     }
-  }, [focusMotion, node.id, onFocusAnimationComplete, onFocusAnimationStart, ref]);
+  }, [focusMotion, node.id, onFocusAnimationComplete, onFocusAnimationStart, reduceMotion, ref]);
 
   useEffect(() => () => {
     focusAnimationRef.current?.animation.cancel();
@@ -493,14 +518,10 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       )}
       style={{
         width: focusSource
-          ? focusMotion.phase === "closing"
-            ? focusMotion.startWidth ?? "100%"
-            : focusMotion.layoutWidth ?? "100%"
+          ? focusMotion.layoutWidth ?? "100%"
           : "100%",
         height: focusSource
-          ? focusMotion.phase === "closing"
-            ? focusMotion.startHeight ?? "100%"
-            : focusMotion.layoutHeight ?? "100%"
+          ? focusMotion.layoutHeight ?? "100%"
           : "100%",
         ...focusStyle,
       }}
@@ -546,60 +567,80 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
 
       <div className="design-canvas-node__frame">
         <div className="design-canvas-node__body">
-          {versionId ? (
-            shouldMountRichPreview ? (
-              preview ? (
-                material ? (
-                  <MaterialPreview
-                    key={preview.url}
-                    node={node}
-                    projectId={projectId}
-                    api={api}
-                    versionId={versionId}
-                    url={preview.url}
-                    focusMotion={focusMotion}
-                    onAppendMaterialVersion={onAppendMaterialVersion}
-                    onContentAspectRatio={onContentAspectRatio}
-                  />
+          <div
+            className={cn(
+              "design-canvas-node__content",
+              contentPlaneActive && "design-canvas-node__content-plane",
+            )}
+            data-content-plane-state={contentPlaneActive ? focusSource ? "focus" : "canvas" : undefined}
+            style={contentPlaneActive ? {
+              width: `calc(${contentLayout.width}px - 2px)`,
+              height: `calc(${contentLayout.height}px - 2px)`,
+              transform: focusSource
+                ? "translate3d(0, 0, 0) scale(1)"
+                : `translate3d(0, 0, 0) scale(${contentLayout.canvasScale})`,
+            } : undefined}
+          >
+            {versionId ? (
+              shouldMountRichPreview ? (
+                preview ? (
+                  material ? (
+                    <MaterialPreview
+                      key={preview.url}
+                      node={node}
+                      projectId={projectId}
+                      api={api}
+                      versionId={versionId}
+                      url={preview.url}
+                      focusMotion={focusMotion}
+                      onAppendMaterialVersion={onAppendMaterialVersion}
+                      onContentAspectRatio={onContentAspectRatio}
+                    />
+                  ) : (
+                    <iframe
+                      ref={iframeRef}
+                      className="design-canvas-node__iframe nodrag nopan"
+                      title={`${node.name}, version ${versionId}`}
+                      src={previewFrameAddressValue?.src ?? previewDocumentSrc(preview.url)}
+                      sandbox="allow-scripts"
+                      tabIndex={focusInteractive ? 0 : -1}
+                    />
+                  )
                 ) : (
-                  <iframe
-                    ref={iframeRef}
-                    className="design-canvas-node__iframe nodrag nopan"
-                    title={`${node.name}, version ${versionId}`}
-                    src={previewFrameAddressValue?.src ?? previewDocumentSrc(preview.url)}
-                    sandbox="allow-scripts"
-                    tabIndex={focusInteractive ? 0 : -1}
+                  <NodePlaceholder
+                    icon={loading ? "loading" : "error"}
+                    title={loading ? "Opening this version" : "Preview unavailable"}
+                    detail={previewError ?? `Version ${versionId}`}
                   />
                 )
               ) : (
-                <NodePlaceholder
-                  icon={loading ? "loading" : "error"}
-                  title={loading ? "Opening this version" : "Preview unavailable"}
-                  detail={previewError ?? `Version ${versionId}`}
-                />
+                <NodePlaceholder icon="paused" title="Preview paused" detail="It will resume when this Node returns to view." />
               )
+            ) : live ? (
+              <NodeWorkingPlaceholder
+                state={node.state}
+                label={catalog.label}
+                generationSeed={generationSeed}
+                motionActive={generationMotionActive}
+              />
+            ) : node.state === "failed" ? (
+              <NodePlaceholder icon="error" title="Generation needs attention" detail={node.error ?? "Open the Agent to review the failed run."} />
+            ) : node.state === "cancelled" || node.state === "superseded" ? (
+              <NodePlaceholder icon="paused" title={STATE_LABELS[node.state]} detail="Open the Agent when you are ready to continue." />
+            ) : material ? (
+              <NodePlaceholder
+                icon="sparkles"
+                title="Add the first revision"
+                detail="Select this Node, then add a local revision from its Agent."
+              />
             ) : (
-              <NodePlaceholder icon="paused" title="Preview paused" detail="It will resume when this Node returns to view." />
-            )
-          ) : live ? (
-            <NodeWorkingPlaceholder state={node.state} label={catalog.label} />
-          ) : node.state === "failed" ? (
-            <NodePlaceholder icon="error" title="Generation needs attention" detail={node.error ?? "Open the Agent to review the failed run."} />
-          ) : node.state === "cancelled" || node.state === "superseded" ? (
-            <NodePlaceholder icon="paused" title={STATE_LABELS[node.state]} detail="Open the Agent when you are ready to continue." />
-          ) : material ? (
-            <NodePlaceholder
-              icon="sparkles"
-              title="Add the first revision"
-              detail="Select this Node, then add a local revision from its Agent."
-            />
-          ) : (
-            <NodePlaceholder
-              tone="empty"
-              title={`Create this ${catalog.label.toLocaleLowerCase()}`}
-              detail="Select this Node and describe the result in its Agent."
-            />
-          )}
+              <NodePlaceholder
+                tone="empty"
+                title={`Create this ${catalog.label.toLocaleLowerCase()}`}
+                detail="Select this Node and describe the result in its Agent."
+              />
+            )}
+          </div>
 
           {hasRichContent && !focusInteractive ? (
             <button
@@ -609,7 +650,13 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             />
           ) : null}
 
-          {live && hasRichContent ? <NodeGenerationStatus state={node.state} /> : null}
+          {live && hasRichContent ? (
+            <NodeGenerationStatus
+              state={node.state}
+              generationSeed={generationSeed}
+              motionActive={generationMotionActive}
+            />
+          ) : null}
 
           {(node.state === "failed" || node.state === "cancelled" || node.state === "superseded") && hasRichContent ? (
             <div className="design-canvas-node__failure" role="status">
@@ -623,7 +670,17 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
   );
 }
 
-export function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["state"]; label: string }) {
+export function NodeWorkingPlaceholder({
+  state,
+  label,
+  generationSeed = "generation-preview",
+  motionActive = true,
+}: {
+  state: DesignNode["state"];
+  label: string;
+  generationSeed?: string;
+  motionActive?: boolean;
+}) {
   const title = state === "queued"
     ? "Waiting to begin"
     : state === "validating"
@@ -635,8 +692,13 @@ export function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["st
       ? "Checking the single-file result before it becomes a version."
       : "The Agent is composing a new single-file design from the canvas context.";
   return (
-    <div className="design-canvas-node__generation" data-generation-state={state} role="status">
-      <GenerationDotField />
+    <div
+      className="design-canvas-node__generation"
+      data-generation-state={state}
+      data-generation-motion={motionActive ? "active" : "paused"}
+      role="status"
+    >
+      <GenerationDotField key={generationSeed} generationSeed={generationSeed} motionActive={motionActive} />
       <div className="design-canvas-node__generation-copy">
         <p>{title}</p>
         <span>{detail}</span>
@@ -645,16 +707,120 @@ export function NodeWorkingPlaceholder({ state, label }: { state: DesignNode["st
   );
 }
 
-export function NodeGenerationStatus({ state }: { state: DesignNode["state"] }) {
+export function NodeGenerationStatus({
+  state,
+  generationSeed = "generation-preview",
+  motionActive = true,
+}: {
+  state: DesignNode["state"];
+  generationSeed?: string;
+  motionActive?: boolean;
+}) {
   return (
-    <div className="design-canvas-node__working-badge" data-generation-state={state} role="status">
-      <GenerationDotField compact />
+    <div
+      className="design-canvas-node__working-badge"
+      data-generation-state={state}
+      data-generation-motion={motionActive ? "active" : "paused"}
+      role="status"
+    >
+      <GenerationDotField key={generationSeed} compact generationSeed={generationSeed} motionActive={motionActive} />
       <span>{state === "validating" ? "Preparing the next preview" : "Creating the next version"}</span>
     </div>
   );
 }
 
-function GenerationDotField({ compact = false }: { compact?: boolean }) {
+interface GenerationParticleStyle extends CSSProperties {
+  [property: `--generation-particle-${string}`]: string | number | undefined;
+}
+
+function stableGenerationUnit(seed: string, particleIndex: number, channel: string): number {
+  const input = `${seed}\u001f${particleIndex}\u001f${channel}`;
+  let hash = 2_166_136_261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  hash ^= hash >>> 16;
+  hash = Math.imul(hash, 0x85ebca6b);
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 0xc2b2ae35);
+  hash ^= hash >>> 16;
+  return (hash >>> 0) / 4_294_967_296;
+}
+
+function stableGenerationRange(
+  seed: string,
+  particleIndex: number,
+  channel: string,
+  minimum: number,
+  maximum: number,
+): number {
+  return minimum + stableGenerationUnit(seed, particleIndex, channel) * (maximum - minimum);
+}
+
+function rounded(value: number, precision = 2): number {
+  const scale = 10 ** precision;
+  return Math.round(value * scale) / scale;
+}
+
+function generationParticleStyle(
+  generationSeed: string,
+  particleIndex: number,
+  compact: boolean,
+): GenerationParticleStyle {
+  const seed = generationSeed || "generation-preview";
+  const drift = compact ? 6 : 20;
+  const duration = Math.round(stableGenerationRange(
+    seed,
+    particleIndex,
+    "duration",
+    compact ? 2_900 : 3_800,
+    compact ? 5_100 : 7_200,
+  ));
+  const opacity = rounded(stableGenerationRange(
+    seed,
+    particleIndex,
+    "opacity",
+    compact ? 0.24 : 0.18,
+    compact ? 0.62 : 0.58,
+  ));
+  const style: GenerationParticleStyle = {
+    "--generation-particle-delay": `${-Math.round(duration * stableGenerationUnit(seed, particleIndex, "delay"))}ms`,
+    "--generation-particle-duration": `${duration}ms`,
+    "--generation-particle-origin-x": `${rounded(stableGenerationRange(seed, particleIndex, "origin-x", 6, 94), 1)}%`,
+    "--generation-particle-origin-y": `${rounded(stableGenerationRange(seed, particleIndex, "origin-y", 7, 91), 1)}%`,
+    "--generation-particle-size": `${rounded(
+      stableGenerationRange(seed, particleIndex, "size", compact ? 1.4 : 1.8, compact ? 2.8 : 4.6),
+      1,
+    )}px`,
+    "--generation-particle-opacity": opacity,
+    "--generation-particle-opacity-low": rounded(opacity * 0.46),
+    "--generation-particle-static-opacity": rounded(opacity * 0.55),
+    "--generation-particle-scale": rounded(stableGenerationRange(seed, particleIndex, "scale", 0.88, 1.16)),
+  };
+  for (let waypoint = 1; waypoint <= 3; waypoint += 1) {
+    style[`--generation-particle-x-${waypoint}`] = `${rounded(
+      stableGenerationRange(seed, particleIndex, `x-${waypoint}`, -drift, drift),
+      1,
+    )}px`;
+    style[`--generation-particle-y-${waypoint}`] = `${rounded(
+      stableGenerationRange(seed, particleIndex, `y-${waypoint}`, -drift, drift),
+      1,
+    )}px`;
+  }
+  return style;
+}
+
+function GenerationDotField({
+  compact = false,
+  generationSeed,
+  motionActive,
+}: {
+  compact?: boolean;
+  generationSeed: string;
+  motionActive: boolean;
+}) {
+  const particleCount = motionActive ? compact ? 7 : 14 : compact ? 3 : 4;
   return (
     <span
       className={compact ? "design-canvas-node__working-dots" : "design-canvas-node__generation-dots"}
@@ -662,6 +828,15 @@ function GenerationDotField({ compact = false }: { compact?: boolean }) {
     >
       <span className="design-canvas-node__generation-field" />
       <span className="design-canvas-node__generation-glow" />
+      <span className="design-canvas-node__generation-particles">
+        {Array.from({ length: particleCount }, (_, particleIndex) => (
+          <span
+            key={particleIndex}
+            className="design-canvas-node__generation-particle"
+            style={generationParticleStyle(generationSeed, particleIndex, compact)}
+          />
+        ))}
+      </span>
     </span>
   );
 }

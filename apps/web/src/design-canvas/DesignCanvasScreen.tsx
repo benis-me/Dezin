@@ -15,7 +15,7 @@ import {
   type ReactFlowInstance,
   type Viewport,
 } from "@xyflow/react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowLeft,
   Bot,
@@ -70,10 +70,15 @@ import type { AgentInfo } from "../lib/api.ts";
 import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { previewDocumentSrc } from "../lib/preview-channel.ts";
+import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { arrangeDesignNodes } from "./auto-layout.ts";
 import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
-import { DesignCanvasNode, type DesignFlowNode } from "./DesignCanvasNode.tsx";
+import {
+  DesignCanvasNode,
+  type DesignFlowNode,
+  type DesignNodeContentLayout,
+} from "./DesignCanvasNode.tsx";
 import { readExactVersionMetadata, useExactVersionMetadata } from "./exact-version-metadata.ts";
 import {
   focusedNodeLayoutMode,
@@ -102,8 +107,42 @@ const EMPTY_EDGES: Edge[] = [];
 const SELECT_PAN_BUTTONS = [1];
 const MULTI_SELECTION_KEYS = ["Meta", "Control", "Shift"];
 const PRO_OPTIONS = { hideAttribution: true } as const;
-const CANVAS_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
-const CANVAS_MOTION_EASE_IN_OUT: [number, number, number, number] = [0.22, 1, 0.36, 1];
+const CANVAS_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
+
+const SPATIAL_FOCUS_MOTION_SELECTOR = [
+  ".design-canvas-node[data-node-focus-role]",
+  ".design-canvas-focus-dismiss",
+  ".design-canvas-focus-back",
+  ".design-canvas-focus-actions",
+  ".design-canvas-topbar__leading",
+  ".design-canvas-topbar__actions",
+  ".design-canvas-tools",
+  ".design-canvas-zoom",
+  ".design-canvas-agent--floating",
+].join(",");
+
+export function cancelSpatialFocusAnimations(root: Element): number {
+  if (typeof root.getAnimations !== "function") return 0;
+  let cancelled = 0;
+  for (const animation of root.getAnimations({ subtree: true })) {
+    const target = animation.effect && "target" in animation.effect
+      ? animation.effect.target
+      : null;
+    if (!(target instanceof Element)) continue;
+    if (!target.matches(SPATIAL_FOCUS_MOTION_SELECTOR)
+      && !target.closest(".design-canvas-node[data-node-focus-role]")) continue;
+    try {
+      animation.finish();
+      animation.commitStyles();
+    } catch {
+      // A delayed animation can be non-finishable; cancelling still reveals
+      // the static target state committed by React and focus CSS.
+    }
+    animation.cancel();
+    cancelled += 1;
+  }
+  return cancelled;
+}
 
 function isLiveJobStatus(status: DesignJobStatus): boolean {
   return status === "queued" || status === "running" || status === "validating";
@@ -115,10 +154,20 @@ interface ContextMenuState {
   targetNode: DesignNode | null;
 }
 
-interface NodeFocusTransition {
+export interface NodeFocusTransition {
   nodeId: string;
   phase: NodeFocusPhase;
   durationMs: number;
+}
+
+export function synchronizeFocusTransitionDuration(
+  current: NodeFocusTransition | null,
+  nodeId: string,
+  phase: NodeFocusPhase,
+  durationMs: number,
+): NodeFocusTransition | null {
+  if (!current || current.nodeId !== nodeId || current.phase !== phase) return current;
+  return { ...current, durationMs: Math.max(0, Math.round(durationMs)) };
 }
 
 type FocusedPreviewDevice = "desktop" | "tablet" | "mobile";
@@ -201,7 +250,7 @@ export function DesignCanvasScreen({
   onRevealExport,
   onExportReady,
 }: DesignCanvasScreenProps) {
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = usePrefersReducedMotion();
   const controller = useDesignCanvasController({ projectId, api, onExportReady });
   const { canvas } = controller;
   const surfaceRef = useRef<HTMLElement | null>(null);
@@ -209,6 +258,7 @@ export function DesignCanvasScreen({
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
   const pendingRevisionNodeIdRef = useRef<string | null>(null);
   const pendingContextTargetRef = useRef<string | null>(null);
+  const contextMenuActiveRef = useRef(false);
   const nodePanelRef = useRef<HTMLElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<DesignFlowNode> | null>(null);
   const flowNodesRef = useRef<DesignFlowNode[]>([]);
@@ -233,6 +283,7 @@ export function DesignCanvasScreen({
   const focusFinishTimerRef = useRef<number | null>(null);
   const focusReleaseTimerRef = useRef<number | null>(null);
   const focusCloseCompletionRef = useRef<{ nodeId: string; finish: () => void } | null>(null);
+  const previewDeviceByNodeRef = useRef(new Map<string, FocusedPreviewDevice>());
   const selectionGhostTimerRef = useRef<number | null>(null);
   const selectionRectRef = useRef<Omit<SelectionGhost, "id"> | null>(null);
   const selectionGhostSequenceRef = useRef(0);
@@ -266,6 +317,7 @@ export function DesignCanvasScreen({
   const [versionsNodeId, setVersionsNodeId] = useState<string | null>(null);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [contentAspectRatios, setContentAspectRatios] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const focusMotionAllowed = focusMotionEnabled && !reduceMotion;
   const availableDesignAgents = useMemo(
     () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
     [agents],
@@ -312,6 +364,10 @@ export function DesignCanvasScreen({
     enabled: focusedCanvasNode !== null,
   }).metadata;
   const focusActive = focusTransition !== null;
+  const chooseFocusedPreviewDevice = useCallback((device: FocusedPreviewDevice) => {
+    if (focusTransition) previewDeviceByNodeRef.current.set(focusTransition.nodeId, device);
+    setFocusedPreviewDevice(device);
+  }, [focusTransition]);
   const historyLocked = useMemo(() => (
     (canvas?.nodes.some((node) => node.activeJobId !== null) ?? false)
       || controller.jobs.some((job) => job.nodeId !== null && isLiveJobStatus(job.status))
@@ -369,7 +425,9 @@ export function DesignCanvasScreen({
     const sequence = focusTransitionSequenceRef.current + 1;
     focusTransitionSequenceRef.current = sequence;
     setFocusMotionEnabled(motionEnabled);
-    setFocusedPreviewDevice("desktop");
+    const previewDevice = previewDeviceByNodeRef.current.get(nodeId) ?? "desktop";
+    previewDeviceByNodeRef.current.set(nodeId, previewDevice);
+    setFocusedPreviewDevice(previewDevice);
     setFocusPreviewExporting(false);
     setMainAgentOpen(false);
     setFocusedNodeId(nodeId);
@@ -504,7 +562,9 @@ export function DesignCanvasScreen({
       return next;
     });
     const source = canvas?.nodes.find((node) => node.id === nodeId);
-    if (!source || source.kind !== "image" || resizingNodeIdsRef.current.has(nodeId)) return;
+    if (!source
+      || (source.kind !== "image" && source.kind !== "video")
+      || resizingNodeIdsRef.current.has(nodeId)) return;
     const pending = pendingNodeGeometriesRef.current.get(nodeId);
     const currentGeometry = pending ?? source.geometry;
     if (Math.abs(currentGeometry.width / currentGeometry.height - aspectRatio) < 0.0001) return;
@@ -513,13 +573,11 @@ export function DesignCanvasScreen({
   }, [canvas?.nodes, persistNodeResize]);
 
   const onFocusAnimationStart = useCallback((nodeId: string, phase: NodeFocusPhase, durationMs: number) => {
+    const sharedDurationMs = Math.max(0, Math.round(durationMs));
+    setFocusTransition((current) => synchronizeFocusTransitionDuration(current, nodeId, phase, sharedDurationMs));
     if (phase !== "closing") return;
     const completion = focusCloseCompletionRef.current;
     if (!completion || completion.nodeId !== nodeId) return;
-    const sharedDurationMs = Math.max(0, Math.round(durationMs));
-    setFocusTransition((current) => current?.nodeId === nodeId && current.phase === phase
-      ? { ...current, durationMs: sharedDurationMs }
-      : current);
     if (focusFinishTimerRef.current !== null) window.clearTimeout(focusFinishTimerRef.current);
     focusFinishTimerRef.current = window.setTimeout(
       completion.finish,
@@ -625,19 +683,37 @@ export function DesignCanvasScreen({
     }
     const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
     const activeViewport = focusViewportLockRef.current ?? flowRef.current?.getViewport() ?? canvas.viewport;
-    const measuredSourceTransform = focusedCanvasNode && surfaceBounds
-      ? focusedNodeTransform(
-          focusedCanvasNode.geometry,
+    const contentLayouts = new Map<string, DesignNodeContentLayout>();
+    const measuredTransforms = new Map<string, ReturnType<typeof focusedNodeTransform>>();
+    if (surfaceBounds) {
+      for (const node of canvas.nodes) {
+        const versionId = previewVersionIdForNode(node);
+        const metadata = node.id === focusedCanvasNode?.id
+          ? focusedVersionMetadata
+          : readExactVersionMetadata({ api, projectId, nodeId: node.id, versionId });
+        const device = previewDeviceByNodeRef.current.get(node.id) ?? "desktop";
+        const transform = focusedNodeTransform(
+          node.geometry,
           { width: surfaceBounds.width, height: surfaceBounds.height },
           activeViewport,
           focusedLayoutOptions(
             surfaceBounds,
-            focusedCanvasNode,
-            FOCUSED_PREVIEW_WIDTHS[focusedPreviewDevice],
-            contentAspectRatios.get(focusedCanvasNode.id),
-            focusedVersionMetadata,
+            node,
+            FOCUSED_PREVIEW_WIDTHS[device],
+            contentAspectRatios.get(node.id),
+            metadata,
           ),
-        )
+        );
+        measuredTransforms.set(node.id, transform);
+        contentLayouts.set(node.id, {
+          width: transform.layoutWidth,
+          height: transform.layoutHeight,
+          canvasScale: transform.startScaleX,
+        });
+      }
+    }
+    const measuredSourceTransform = focusedCanvasNode
+      ? measuredTransforms.get(focusedCanvasNode.id)
       : undefined;
     const previousSourceMotion = focusTransition
       ? flowNodesRef.current.find((node) => node.id === focusTransition.nodeId)?.data.focusMotion ?? null
@@ -648,7 +724,7 @@ export function DesignCanvasScreen({
     const measuredFocusMotions = focusTransition
       ? nodeFocusMotions(canvas.nodes, focusTransition.nodeId, focusTransition.phase, sourceTransform)
       : new Map<string, NodeFocusMotion>();
-    const focusMotions = focusMotionEnabled
+    const focusMotions = focusMotionAllowed
       ? measuredFocusMotions
       : new Map([...measuredFocusMotions].map(([nodeId, motion]) => [nodeId, {
           ...motion,
@@ -679,6 +755,7 @@ export function DesignCanvasScreen({
       onFocusAnimationStart,
       onFocusAnimationComplete,
       selected,
+      contentLayouts,
       focusMotions,
     );
     const nextFlowNodes = canonicalFlowNodes.map((canonicalNode) => {
@@ -700,6 +777,7 @@ export function DesignCanvasScreen({
         && (existing.width ?? authoritativeNode.geometry.width) === localGeometry.width
         && (existing.height ?? authoritativeNode.geometry.height) === localGeometry.height
         && sameDesignNode(existing.data.node, displayedNode)
+        && sameContentLayout(existing.data.contentLayout, canonicalNode.data.contentLayout)
         && sameNodeFocusMotion(existing.data.focusMotion, canonicalNode.data.focusMotion)
         && existing.data.api === api
         && existing.data.onResize === persistNodeResize
@@ -729,7 +807,20 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusedVersionMetadata, focusMotionEnabled, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+  }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+
+  useLayoutEffect(() => {
+    if (!reduceMotion || !focusTransition || !focusMotionEnabled) return;
+    // Keep this focus session instant even if the preference is switched back
+    // before it closes; otherwise the remaining flight would restart.
+    setFocusMotionEnabled(false);
+    const root = surfaceRef.current?.closest(".design-canvas-root");
+    if (!root) return;
+    const settle = () => cancelSpatialFocusAnimations(root);
+    settle();
+    queueMicrotask(settle);
+    window.requestAnimationFrame(settle);
+  }, [focusMotionEnabled, focusTransition, reduceMotion]);
 
   const onFlowInit = useCallback((instance: ReactFlowInstance<DesignFlowNode>) => {
     flowRef.current = instance;
@@ -881,8 +972,9 @@ export function DesignCanvasScreen({
       }
     }
     const contextGuardedNodeId = contextSelectionGuardRef.current;
-    const suppressPanel = contextGuardedNodeId !== null && next.length === 1 && next[0] === contextGuardedNodeId;
-    if (suppressPanel) {
+    const guardSuppressesPanel = contextGuardedNodeId !== null && next.length === 1 && next[0] === contextGuardedNodeId;
+    const suppressPanel = contextMenuActiveRef.current || guardSuppressesPanel;
+    if (guardSuppressesPanel && !contextMenuActiveRef.current) {
       contextSelectionGuardRef.current = null;
       if (contextSelectionGuardFrameRef.current !== null) {
         window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
@@ -1135,6 +1227,12 @@ export function DesignCanvasScreen({
       window.clearTimeout(focusPanelTimerRef.current);
       focusPanelTimerRef.current = null;
     }
+    const panel = nodePanelRef.current;
+    if (panel) {
+      panel.setAttribute("aria-hidden", "true");
+      panel.setAttribute("inert", "");
+      panel.style.pointerEvents = "none";
+    }
     setFocusedPanelNodeId(null);
   }, []);
 
@@ -1171,6 +1269,8 @@ export function DesignCanvasScreen({
       : null;
     const targetNodeId = pendingContextTargetRef.current ?? domNodeId ?? focusTransition?.nodeId ?? null;
     pendingContextTargetRef.current = null;
+    contextMenuActiveRef.current = true;
+    setContextMenuOpen(true);
     hideNodeAgentForContextMenu();
     const position = flowRef.current?.screenToFlowPosition({
       x: event.clientX,
@@ -1454,6 +1554,7 @@ export function DesignCanvasScreen({
       <ContextMenu
         modal={false}
         onOpenChange={(open) => {
+          contextMenuActiveRef.current = open;
           setContextMenuOpen(open);
           if (open) hideNodeAgentForContextMenu();
         }}
@@ -1469,7 +1570,7 @@ export function DesignCanvasScreen({
             data-preview-device={focusTransition ? focusedPreviewDevice : undefined}
             data-focused-content={focusTransition ? focusedContentLayoutMode ?? undefined : undefined}
             data-context-menu-open={contextMenuOpen || undefined}
-            data-focus-motion={focusMotionEnabled ? "animated" : "instant"}
+            data-focus-motion={focusMotionAllowed ? "animated" : "instant"}
             style={{
               "--design-focus-duration": `${activeFocusDurationMs}ms`,
               "--design-node-agent-width": `${FLOATING_NODE_AGENT_WIDTH_PX}px`,
@@ -1504,11 +1605,11 @@ export function DesignCanvasScreen({
               key={`focus-dismiss-${focusTransition.nodeId}`}
               className="design-canvas-focus-dismiss"
               aria-hidden
-              initial={focusMotionEnabled ? { opacity: 0 } : false}
+              initial={focusMotionAllowed ? { opacity: 0 } : false}
               animate={{ opacity: focusTransition.phase === "closing" ? 0 : 1 }}
               exit={{ opacity: 0 }}
               transition={{
-                duration: focusMotionEnabled ? activeFocusDurationMs / 1_000 : 0,
+                duration: focusMotionAllowed ? activeFocusDurationMs / 1_000 : 0,
                 ease: CANVAS_MOTION_EASE,
               }}
               onClick={() => closeNodeFocus()}
@@ -1531,110 +1632,131 @@ export function DesignCanvasScreen({
         ) : null}
 
         <AnimatePresence initial={false}>
-        {focusTransition ? (
-          <motion.div
-            key={`focus-back-${focusTransition.nodeId}`}
-            className="design-canvas-focus-back"
-            initial={focusMotionEnabled ? { opacity: 0, x: -6, scale: 0.96 } : false}
-            animate={focusTransition.phase === "closing"
-              ? { opacity: 0, x: -5, scale: 0.97 }
-              : { opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: -5, scale: 0.97 }}
-            transition={{
-              duration: focusMotionEnabled ? 0.2 : 0,
-              delay: focusMotionEnabled && focusTransition.phase === "opening" ? 0.08 : 0,
-              ease: CANVAS_MOTION_EASE,
-            }}
-          >
-            <TooltipProvider delayDuration={120}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button type="button" variant="ghost" size="icon-sm" aria-label="Close Node focus" onClick={() => closeNodeFocus()}>
-                    <ArrowLeft aria-hidden />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="right" sideOffset={6}>Back to canvas</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </motion.div>
-        ) : null}
+          {focusTransition ? (
+            <motion.div
+              key={`focus-back-${focusTransition.nodeId}`}
+              className="design-canvas-focus-back"
+              initial={focusMotionAllowed ? { opacity: 0, transform: "translate3d(-6px, 0px, 0px) scale(0.96)" } : false}
+              animate={focusTransition.phase === "closing"
+                ? {
+                    opacity: 0,
+                    transform: "translate3d(-5px, 0px, 0px) scale(0.97)",
+                    transition: { duration: focusMotionAllowed ? 0.13 : 0, ease: CANVAS_MOTION_EASE },
+                  }
+                : {
+                    opacity: 1,
+                    transform: "translate3d(0px, 0px, 0px) scale(1)",
+                    transition: {
+                      duration: focusMotionAllowed ? 0.18 : 0,
+                      delay: focusMotionAllowed ? 0.08 : 0,
+                      ease: CANVAS_MOTION_EASE,
+                    },
+                  }}
+              exit={{
+                opacity: 0,
+                transform: "translate3d(-5px, 0px, 0px) scale(0.97)",
+                transition: { duration: focusMotionAllowed ? 0.13 : 0, ease: CANVAS_MOTION_EASE },
+              }}
+            >
+              <TooltipProvider delayDuration={120}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="button" variant="ghost" size="icon-sm" aria-label="Close Node focus" onClick={() => closeNodeFocus()}>
+                      <ArrowLeft aria-hidden />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right" sideOffset={6}>Back to canvas</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </motion.div>
+          ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-        {focusTransition ? (
+          {focusTransition ? (
             <motion.div
               key={`focus-actions-${focusTransition.nodeId}`}
               className="design-canvas-focus-actions"
               role="toolbar"
               aria-label="Focused preview tools"
-            initial={focusMotionEnabled ? { opacity: 0, y: 7, scale: 0.98 } : false}
-            animate={focusTransition.phase === "closing"
-              ? { opacity: 0, y: 6, scale: 0.98 }
-              : { opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{
-              duration: focusMotionEnabled ? 0.22 : 0,
-              delay: focusMotionEnabled && focusTransition.phase === "opening" ? 0.12 : 0,
-              ease: CANVAS_MOTION_EASE,
-            }}
-          >
-            <TooltipProvider delayDuration={120}>
-              {focusedPreviewToolsVisible ? (
-                <span className="design-canvas-focus-actions__devices" role="group" aria-label="Preview device">
+              initial={focusMotionAllowed ? { opacity: 0, transform: "translate3d(0px, 7px, 0px) scale(0.98)" } : false}
+              animate={focusTransition.phase === "closing"
+                ? {
+                    opacity: 0,
+                    transform: "translate3d(0px, 6px, 0px) scale(0.98)",
+                    transition: { duration: focusMotionAllowed ? 0.2 : 0, ease: CANVAS_MOTION_EASE },
+                  }
+                : {
+                    opacity: 1,
+                    transform: "translate3d(0px, 0px, 0px) scale(1)",
+                    transition: {
+                      duration: focusMotionAllowed ? 0.26 : 0,
+                      delay: focusMotionAllowed ? 0.1 : 0,
+                      ease: CANVAS_MOTION_EASE,
+                    },
+                  }}
+              exit={{
+                opacity: 0,
+                transform: "translate3d(0px, 6px, 0px) scale(0.98)",
+                transition: { duration: focusMotionAllowed ? 0.2 : 0, ease: CANVAS_MOTION_EASE },
+              }}
+            >
+              <TooltipProvider delayDuration={120}>
+                {focusedPreviewToolsVisible ? (
+                  <span className="design-canvas-focus-actions__devices" role="group" aria-label="Preview device">
+                    <CanvasToolButton
+                      label="Desktop preview"
+                      active={focusedPreviewDevice === "desktop"}
+                      onClick={() => chooseFocusedPreviewDevice("desktop")}
+                    >
+                      <Monitor aria-hidden />
+                    </CanvasToolButton>
+                    <CanvasToolButton
+                      label="Tablet preview"
+                      active={focusedPreviewDevice === "tablet"}
+                      onClick={() => chooseFocusedPreviewDevice("tablet")}
+                    >
+                      <Tablet aria-hidden />
+                    </CanvasToolButton>
+                    <CanvasToolButton
+                      label="Mobile preview"
+                      active={focusedPreviewDevice === "mobile"}
+                      onClick={() => chooseFocusedPreviewDevice("mobile")}
+                    >
+                      <Smartphone aria-hidden />
+                    </CanvasToolButton>
+                  </span>
+                ) : null}
+                {focusedPreviewToolsVisible ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
+                {focusedPreviewToolsVisible ? (
                   <CanvasToolButton
-                    label="Desktop preview"
-                    active={focusedPreviewDevice === "desktop"}
-                    onClick={() => setFocusedPreviewDevice("desktop")}
+                    label={focusPreviewExporting ? "Exporting preview" : "Export preview HTML"}
+                    disabled={focusPreviewExporting}
+                    onClick={() => void exportFocusedPreview().catch(() => undefined)}
                   >
-                    <Monitor aria-hidden />
+                    {focusPreviewExporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Download aria-hidden />}
                   </CanvasToolButton>
-                  <CanvasToolButton
-                    label="Tablet preview"
-                    active={focusedPreviewDevice === "tablet"}
-                    onClick={() => setFocusedPreviewDevice("tablet")}
-                  >
-                    <Tablet aria-hidden />
-                  </CanvasToolButton>
-                  <CanvasToolButton
-                    label="Mobile preview"
-                    active={focusedPreviewDevice === "mobile"}
-                    onClick={() => setFocusedPreviewDevice("mobile")}
-                  >
-                    <Smartphone aria-hidden />
-                  </CanvasToolButton>
-                </span>
-              ) : null}
-              {focusedPreviewToolsVisible ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
-              {focusedPreviewToolsVisible ? (
-                <CanvasToolButton
-                  label={focusPreviewExporting ? "Exporting preview" : "Export preview HTML"}
-                  disabled={focusPreviewExporting}
-                  onClick={() => void exportFocusedPreview().catch(() => undefined)}
-                >
-                  {focusPreviewExporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Download aria-hidden />}
-                </CanvasToolButton>
-              ) : null}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={focusedPanelNodeId === focusTransition.nodeId ? "Hide Node Agent" : "Show Node Agent"}
-                    aria-pressed={focusedPanelNodeId === focusTransition.nodeId}
-                    onClick={() => setFocusedNodeAgentVisible(focusedPanelNodeId !== focusTransition.nodeId)}
-                  >
-                    <Bot aria-hidden />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top" sideOffset={7}>
-                  {focusedPanelNodeId === focusTransition.nodeId ? "Hide Agent" : "Show Agent"}
-                </TooltipContent>
-              </Tooltip>
-
-            </TooltipProvider>
-          </motion.div>
-        ) : null}
+                ) : null}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={focusedPanelNodeId === focusTransition.nodeId ? "Hide Node Agent" : "Show Node Agent"}
+                      aria-pressed={focusedPanelNodeId === focusTransition.nodeId}
+                      onClick={() => setFocusedNodeAgentVisible(focusedPanelNodeId !== focusTransition.nodeId)}
+                    >
+                      <Bot aria-hidden />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={7}>
+                    {focusedPanelNodeId === focusTransition.nodeId ? "Hide Agent" : "Show Agent"}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </motion.div>
+          ) : null}
         </AnimatePresence>
 
         {canvas && canvas.nodes.length === 0 && controller.loadState === "ready" ? (
@@ -1711,8 +1833,9 @@ export function DesignCanvasScreen({
           </TooltipProvider>
         ) : null}
 
-        <AnimatePresence>
-          {selectedNode && floatingPosition.visible && floatingPosition.nodeId === selectedNode.id ? (
+        {contextMenuOpen ? null : (
+          <AnimatePresence>
+            {selectedNode && floatingPosition.visible && floatingPosition.nodeId === selectedNode.id ? (
             <CanvasAgentPanel
             key={selectedNode.id}
             rootRef={nodePanelRef}
@@ -1720,7 +1843,7 @@ export function DesignCanvasScreen({
             compact={!focusedNodeId}
             entryX={floatingPosition.entryX}
             entryY={floatingPosition.entryY}
-            deferTranscriptMs={focusMotionEnabled ? NODE_FOCUS_FLIGHT_DURATION_MS - NODE_FOCUS_DETAIL_DELAY_MS : 0}
+            deferTranscriptMs={focusMotionAllowed ? NODE_FOCUS_FLIGHT_DURATION_MS - NODE_FOCUS_DETAIL_DELAY_MS : 0}
             projectId={projectId}
             api={api}
             scope={{ type: "node", nodeId: selectedNode.id }}
@@ -1756,23 +1879,24 @@ export function DesignCanvasScreen({
               pointerEvents: floatingPosition.visible ? "auto" : "none",
             }}
             />
-          ) : null}
-        </AnimatePresence>
+            ) : null}
+          </AnimatePresence>
+        )}
 
         <AnimatePresence initial={false}>
           {mainAgentOpen ? (
             <motion.div
               key="main-agent"
               className="design-canvas-main-agent"
-              initial={reduceMotion ? false : { opacity: 0, x: 18 }}
+              initial={reduceMotion ? false : { opacity: 0, transform: "translate3d(18px, 0px, 0px) scale(0.985)" }}
               animate={{
                 opacity: 1,
-                x: 0,
-                transition: { duration: reduceMotion ? 0 : 0.24, ease: CANVAS_MOTION_EASE_IN_OUT },
+                transform: "translate3d(0px, 0px, 0px) scale(1)",
+                transition: { duration: reduceMotion ? 0 : 0.24, ease: CANVAS_MOTION_EASE },
               }}
               exit={{
                 opacity: 0,
-                x: reduceMotion ? 0 : 14,
+                transform: reduceMotion ? "translate3d(0px, 0px, 0px) scale(1)" : "translate3d(14px, 0px, 0px) scale(0.99)",
                 transition: { duration: reduceMotion ? 0 : 0.18, ease: CANVAS_MOTION_EASE },
               }}
             >
@@ -2021,7 +2145,6 @@ function HeaderIconAction({
             className="design-canvas-topbar__icon-action"
             aria-label={label}
             aria-pressed={active === undefined ? undefined : active}
-            title={tooltip}
             disabled={disabled}
             onClick={onClick}
           >
@@ -2078,10 +2201,12 @@ function canvasToFlowNodes(
   onFocusAnimationStart: (nodeId: string, phase: NodeFocusPhase, durationMs: number) => void,
   onFocusAnimationComplete: (nodeId: string, phase: NodeFocusPhase) => void,
   selectedIds: ReadonlySet<string>,
+  contentLayouts: ReadonlyMap<string, DesignNodeContentLayout>,
   focusMotions: ReadonlyMap<string, NodeFocusMotion>,
 ): DesignFlowNode[] {
   return nodes.map((node) => {
     const focusMotion = focusMotions.get(node.id) ?? null;
+    const contentLayout = contentLayouts.get(node.id) ?? null;
     return {
     id: node.id,
     type: "design",
@@ -2104,6 +2229,7 @@ function canvasToFlowNodes(
       onPreviewContextMenu,
       onFocusAnimationStart,
       onFocusAnimationComplete,
+      contentLayout,
       focusMotion,
     },
   };
@@ -2175,6 +2301,16 @@ function sameNodeFocusMotion(left: NodeFocusMotion | null | undefined, right: No
     && left.durationMs === right.durationMs
     && left.delayMs === right.delayMs
     && left.fadeDurationMs === right.fadeDurationMs;
+}
+
+function sameContentLayout(
+  left: DesignNodeContentLayout | null | undefined,
+  right: DesignNodeContentLayout | null | undefined,
+): boolean {
+  if (!left || !right) return left === right || (left == null && right == null);
+  return left.width === right.width
+    && left.height === right.height
+    && left.canvasScale === right.canvasScale;
 }
 
 function sameViewport(left: Viewport | null, right: Viewport | null): boolean {

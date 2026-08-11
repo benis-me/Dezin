@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -108,7 +108,7 @@ describe("TypedMaterialSurface", () => {
   });
 
   test("renders code with TanStack Highlight and reveals an editor after focus flight", async () => {
-    mockFileResponse("export const answer: number = 42\n");
+    mockFileResponse("export const answer: number = 42\nconsole.log(answer)\n");
     const codeNode = { ...node, id: "material-code", kind: "file" as const, name: "answer.ts" };
     const append = vi.fn(async (_nodeId: string, _file: File): Promise<void> => undefined);
     const { container, rerender } = render(
@@ -125,6 +125,9 @@ describe("TypedMaterialSurface", () => {
 
     await waitFor(() => expect(container.querySelector(".th-code--ts")).not.toBeNull());
     expect(container.querySelector(".th-keyword")).toHaveTextContent("export");
+    const viewerHighlight = container.querySelector(".design-typed-material__highlight");
+    expect(viewerHighlight?.querySelector('.th-line[data-line="1"]')).toHaveTextContent("export const answer");
+    expect(viewerHighlight?.querySelector('.th-line[data-line="2"]')).toHaveTextContent("console.log(answer)");
 
     rerender(
       <TypedMaterialSurface
@@ -139,10 +142,12 @@ describe("TypedMaterialSurface", () => {
     );
 
     const editor = await screen.findByRole("textbox", { name: "Edit answer.ts" });
-    expect(editor).toHaveValue("export const answer: number = 42\n");
+    expect(editor).toHaveValue("export const answer: number = 42\nconsole.log(answer)\n");
     const editorHighlight = container.querySelector(".design-typed-material__editor-highlight");
     expect(editorHighlight).not.toBeNull();
     expect(editorHighlight?.querySelector(".th-keyword")).toHaveTextContent("export");
+    expect(editorHighlight?.querySelector('.th-line[data-line="1"]')).toHaveTextContent("export const answer");
+    expect(editorHighlight?.querySelector('.th-line[data-line="2"]')).toHaveTextContent("console.log(answer)");
     expect(editor).toHaveAttribute("data-syntax-highlighted", "true");
     await userEvent.type(editor, "// saved");
     await userEvent.click(screen.getByRole("button", { name: "Save revision" }));
@@ -185,6 +190,64 @@ describe("TypedMaterialSurface", () => {
     const editor = await screen.findByRole("textbox", { name: `Edit ${fileName}` });
     expect(editor).toHaveValue(content);
     highlight.mockRestore();
+  });
+
+  test("keeps the same visible code lines while entering and leaving the editor", async () => {
+    mockFileResponse("one\ntwo\nthree\nfour\nfive\nsix\n");
+    const codeNode = { ...node, id: "material-scroll", kind: "file" as const, name: "scroll.ts" };
+    const metadata = { ...version("scroll.ts", "text/typescript"), nodeId: codeNode.id };
+    const { container, rerender } = render(
+      <TypedMaterialSurface
+        api={apiFor(metadata)}
+        projectId="project-scroll"
+        node={codeNode}
+        versionId="version-one"
+        url="/exact/scroll"
+        focusMotion={null}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelector(".design-typed-material__highlight")).not.toBeNull());
+    const viewer = container.querySelector<HTMLDivElement>(".design-typed-material__viewer");
+    expect(viewer).not.toBeNull();
+    viewer!.scrollTop = 48;
+    viewer!.scrollLeft = 11;
+
+    rerender(
+      <TypedMaterialSurface
+        api={apiFor(metadata)}
+        projectId="project-scroll"
+        node={codeNode}
+        versionId="version-one"
+        url="/exact/scroll"
+        focusMotion={focusMotion()}
+      />,
+    );
+
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Edit scroll.ts" });
+    expect(editor.scrollTop).toBe(48);
+    expect(editor.scrollLeft).toBe(11);
+
+    editor.scrollTop = 96;
+    editor.scrollLeft = 23;
+    fireEvent.scroll(editor);
+    expect(viewer!.scrollTop).toBe(96);
+    expect(viewer!.scrollLeft).toBe(23);
+
+    rerender(
+      <TypedMaterialSurface
+        api={apiFor(metadata)}
+        projectId="project-scroll"
+        node={codeNode}
+        versionId="version-one"
+        url="/exact/scroll"
+        focusMotion={{ ...focusMotion(), phase: "closing" }}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelector(".design-typed-material")).not.toHaveAttribute("data-editor-visible"));
+    expect(viewer!.scrollTop).toBe(96);
+    expect(viewer!.scrollLeft).toBe(23);
   });
 
   test("a new exact version identity discards an unsaved draft before it can be saved", async () => {

@@ -8,9 +8,76 @@ import { cn } from "@/lib/utils"
 import { useInterruptiblePresenceMotion } from "./use-interruptible-presence-motion"
 
 function DropdownMenu({
+  open: controlledOpen,
+  defaultOpen,
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
-  return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false)
+  const open = controlledOpen ?? uncontrolledOpen
+  const openRef = React.useRef(open)
+  const closingUntilRef = React.useRef(0)
+  const pointerIsDownRef = React.useRef(false)
+  const suppressSameGestureDismissRef = React.useRef(false)
+  const releaseTimerRef = React.useRef<number | null>(null)
+  openRef.current = open
+
+  React.useEffect(() => {
+    const clearReleaseTimer = () => {
+      if (releaseTimerRef.current !== null) {
+        window.clearTimeout(releaseTimerRef.current)
+        releaseTimerRef.current = null
+      }
+    }
+    const handlePointerDown = () => {
+      pointerIsDownRef.current = true
+    }
+    const handlePointerEnd = () => {
+      pointerIsDownRef.current = false
+      clearReleaseTimer()
+      // Keep the guard through the rest of the native pointer gesture. Radix's
+      // retained DismissableLayer receives its outside event after the Trigger
+      // has requested reopen, but before pointerup/click has fully unwound.
+      releaseTimerRef.current = window.setTimeout(() => {
+        suppressSameGestureDismissRef.current = false
+        releaseTimerRef.current = null
+      }, 0)
+    }
+    document.addEventListener("pointerdown", handlePointerDown, true)
+    document.addEventListener("pointerup", handlePointerEnd, true)
+    document.addEventListener("pointercancel", handlePointerEnd, true)
+    return () => {
+      clearReleaseTimer()
+      document.removeEventListener("pointerdown", handlePointerDown, true)
+      document.removeEventListener("pointerup", handlePointerEnd, true)
+      document.removeEventListener("pointercancel", handlePointerEnd, true)
+    }
+  }, [])
+
+  const handleOpenChange = React.useCallback((nextOpen: boolean) => {
+    const now = performance.now()
+    if (nextOpen) {
+      const isPointerReversal = !openRef.current
+        && pointerIsDownRef.current
+        && now < closingUntilRef.current
+      if (isPointerReversal) suppressSameGestureDismissRef.current = true
+    } else {
+      if (suppressSameGestureDismissRef.current) return
+      closingUntilRef.current = now + 150
+    }
+    openRef.current = nextOpen
+    if (controlledOpen === undefined) setUncontrolledOpen(nextOpen)
+    onOpenChange?.(nextOpen)
+  }, [controlledOpen, onOpenChange])
+
+  return (
+    <DropdownMenuPrimitive.Root
+      data-slot="dropdown-menu"
+      open={open}
+      onOpenChange={handleOpenChange}
+      {...props}
+    />
+  )
 }
 
 function DropdownMenuPortal({
@@ -47,9 +114,10 @@ function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         ref={motionRef}
         data-slot="dropdown-menu-content"
+        data-dezin-menu-presence=""
         sideOffset={sideOffset}
         className={cn(
-          "z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border-[0.5px] border-border/80 bg-popover/95 p-1.5 text-popover-foreground shadow-pop backdrop-blur-xl ease-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:duration-150 data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.985] data-[state=open]:animate-in data-[state=open]:duration-220 data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.975]",
+          "z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border-[0.5px] border-border/80 bg-popover/95 p-1.5 text-popover-foreground shadow-pop backdrop-blur-xl",
           className
         )}
         {...props}
@@ -81,7 +149,7 @@ function DropdownMenuItem({
       data-inset={inset}
       data-variant={variant}
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-hidden select-none transition-[transform,background-color,color] duration-180 ease-out focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[inset]:pl-8 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-[variant=destructive]:focus:text-destructive dark:data-[variant=destructive]:focus:bg-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground data-[variant=destructive]:*:[svg]:text-destructive!",
+        "relative flex cursor-default items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-hidden select-none transition-[transform,background-color,color] duration-150 ease-[var(--ease-smooth)] active:scale-[0.985] motion-reduce:active:scale-100 focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[inset]:pl-8 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-[variant=destructive]:focus:text-destructive dark:data-[variant=destructive]:focus:bg-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground data-[variant=destructive]:*:[svg]:text-destructive!",
         className
       )}
       {...props}
@@ -231,13 +299,21 @@ function DropdownMenuSubTrigger({
 
 function DropdownMenuSubContent({
   className,
+  ref,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+  const motionRef = useInterruptiblePresenceMotion<HTMLDivElement>(ref, {
+    openDurationMs: 190,
+    closeDurationMs: 130,
+    distancePx: 5,
+  })
   return (
     <DropdownMenuPrimitive.SubContent
+      ref={motionRef}
       data-slot="dropdown-menu-sub-content"
+      data-dezin-menu-presence=""
       className={cn(
-        "z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
+        "z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg",
         className
       )}
       {...props}

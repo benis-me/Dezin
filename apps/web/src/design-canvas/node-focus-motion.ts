@@ -79,13 +79,30 @@ export interface FocusedNodeLayoutOptions {
   bottomInset?: number;
 }
 
+// Focus is an occasional, viewport-scale spatial transition (modal tier), so
+// its 380-460ms travel budget is intentional; high-frequency canvas controls
+// remain immediate or sub-300ms.
 export const NODE_FOCUS_FLIGHT_DURATION_MS = 380;
 export const NODE_FOCUS_MAX_FLIGHT_DURATION_MS = 460;
 export const NODE_FOCUS_DETAIL_DELAY_MS = 110;
 
 export function nodeFocusEase(progress: number): number {
   const value = Math.max(0, Math.min(1, progress));
-  return 1 - ((1 - value) ** 3);
+  if (value === 0 || value === 1) return value;
+
+  // Strong ease-out from Emil Kowalski's interaction curve. Resolve the
+  // cubic-bezier's x coordinate so callers receive the same timing whether
+  // they use React Flow, WAAPI samples, or a pure function.
+  let lower = 0;
+  let upper = 1;
+  let parameter = value;
+  for (let iteration = 0; iteration < 18; iteration += 1) {
+    const x = cubicBezierCoordinate(parameter, 0.23, 0.32);
+    if (x < value) lower = parameter;
+    else upper = parameter;
+    parameter = (lower + upper) / 2;
+  }
+  return cubicBezierCoordinate(parameter, 1, 1);
 }
 
 /**
@@ -250,12 +267,15 @@ export function focusedNodeTransform(
 
   const screenShiftX = targetCenterX - currentScreenCenterX;
   const screenShiftY = targetCenterY - currentScreenCenterY;
-  const startX = 0;
-  const startY = 0;
+  // FLIP the canonical card into the focused layout. The focused dimensions
+  // can be committed before the first paint while these compositor-only
+  // transforms preserve the exact canvas presentation at progress zero.
+  const startX = (geometry.width - layoutWidth) / 2;
+  const startY = (geometry.height - layoutHeight) / 2;
   const shiftX = screenShiftX / viewportZoom;
   const shiftY = screenShiftY / viewportZoom;
-  const startScaleX = 1;
-  const startScaleY = 1;
+  const startScaleX = geometry.width / layoutWidth;
+  const startScaleY = geometry.height / layoutHeight;
   const focusedScale = 1 / viewportZoom;
   const scaleTravel = Math.hypot(
     Math.abs(layoutWidth - geometry.width * viewportZoom) / 2,
@@ -301,10 +321,11 @@ function focusedLayoutSize(
 ): { layoutWidth: number; layoutHeight: number } {
   const mode = options.layoutMode ?? "web";
   if (mode === "web") {
-    return {
-      layoutWidth: roundMotionValue(clamp(options.targetWidth ?? available.width, 280, available.width)),
-      layoutHeight: roundMotionValue(clamp(options.targetHeight ?? available.height, 200, available.height)),
-    };
+    return containedLayoutSize(
+      geometry,
+      Math.min(available.width, options.targetWidth ?? Number.POSITIVE_INFINITY),
+      Math.min(available.height, options.targetHeight ?? Number.POSITIVE_INFINITY),
+    );
   }
 
   if (mode === "document" || mode === "code") {
@@ -312,10 +333,7 @@ function focusedLayoutSize(
     const defaultHeight = mode === "document" ? 760 : 720;
     const maximumWidth = Math.min(available.width, options.maxWidth ?? defaultWidth);
     const maximumHeight = Math.min(available.height, options.maxHeight ?? defaultHeight);
-    return {
-      layoutWidth: roundMotionValue(clamp(options.targetWidth ?? maximumWidth, 280, maximumWidth)),
-      layoutHeight: roundMotionValue(clamp(options.targetHeight ?? maximumHeight, 200, maximumHeight)),
-    };
+    return containedLayoutSize(geometry, maximumWidth, maximumHeight);
   }
 
   const defaultMaxWidth = mode === "media" ? 760 : 960;
@@ -323,13 +341,29 @@ function focusedLayoutSize(
   const maximumScale = mode === "media" ? 1.55 : 1.35;
   const maximumWidth = Math.min(available.width, options.maxWidth ?? defaultMaxWidth, options.targetWidth ?? Number.POSITIVE_INFINITY);
   const maximumHeight = Math.min(available.height, options.maxHeight ?? defaultMaxHeight, options.targetHeight ?? Number.POSITIVE_INFINITY);
-  const aspectRatio = Number.isFinite(options.contentAspectRatio) && (options.contentAspectRatio ?? 0) > 0
-    ? clamp(options.contentAspectRatio!, 0.05, 20)
-    : clamp(geometry.width / Math.max(1, geometry.height), 0.05, 20);
-  const basisWidth = Math.max(1, geometry.width);
-  const basisHeight = basisWidth / aspectRatio;
-  const scale = Math.min(maximumScale, maximumWidth / basisWidth, maximumHeight / basisHeight);
+  // The outer FLIP must retain the canonical card's aspect ratio. Intrinsic
+  // media is contained inside that stable coordinate space until its metadata
+  // updates the canonical geometry; using its ratio here would make the outer
+  // start scales non-uniform and visibly stretch the media on focus handoff.
+  const aspectRatio = mode === "media"
+    ? clamp(geometry.width / Math.max(1, geometry.height), 0.05, 20)
+    : Number.isFinite(options.contentAspectRatio) && (options.contentAspectRatio ?? 0) > 0
+      ? clamp(options.contentAspectRatio!, 0.05, 20)
+      : clamp(geometry.width / Math.max(1, geometry.height), 0.05, 20);
+  return containedLayoutSize(geometry, maximumWidth, maximumHeight, maximumScale, aspectRatio);
+}
 
+function containedLayoutSize(
+  geometry: DesignNode["geometry"],
+  maximumWidth: number,
+  maximumHeight: number,
+  maximumScale = Number.POSITIVE_INFINITY,
+  aspectRatio = geometry.width / Math.max(1, geometry.height),
+): { layoutWidth: number; layoutHeight: number } {
+  const ratio = clamp(aspectRatio, 0.05, 20);
+  const basisWidth = Math.max(1, geometry.width);
+  const basisHeight = basisWidth / ratio;
+  const scale = Math.min(maximumScale, maximumWidth / basisWidth, maximumHeight / basisHeight);
   return {
     layoutWidth: roundMotionValue(basisWidth * scale),
     layoutHeight: roundMotionValue(basisHeight * scale),
@@ -379,8 +413,6 @@ export interface NodeFocusAnimationFrame {
   offset: number;
   transform: string;
   opacity: number;
-  width: number | null;
-  height: number | null;
 }
 
 export function nodeFocusAnimationFrames(
@@ -401,18 +433,10 @@ export function nodeFocusAnimationFrames(
     const y = inverse * inverse * motion.startY + 2 * inverse * progress * controlY + progress * progress * motion.shiftY;
     const scaleX = motion.startScaleX + (motion.scaleX - motion.startScaleX) * progress;
     const scaleY = motion.startScaleY + (motion.scaleY - motion.startScaleY) * progress;
-    const width = motion.startWidth !== null && motion.layoutWidth !== null
-      ? motion.startWidth + (motion.layoutWidth - motion.startWidth) * progress
-      : null;
-    const height = motion.startHeight !== null && motion.layoutHeight !== null
-      ? motion.startHeight + (motion.layoutHeight - motion.startHeight) * progress
-      : null;
     return {
       offset,
       transform: `translate3d(${roundMotionValue(x)}px, ${roundMotionValue(y)}px, 0) scale(${roundMotionValue(scaleX)}, ${roundMotionValue(scaleY)})`,
       opacity: fades ? roundMotionValue(1 - progress) : 1,
-      width: width === null ? null : roundMotionValue(width),
-      height: height === null ? null : roundMotionValue(height),
     };
   });
 }
@@ -427,6 +451,13 @@ export function focusFlightDuration(perceivedTravel: number): number {
 
 function roundMotionValue(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function cubicBezierCoordinate(parameter: number, first: number, second: number): number {
+  const inverse = 1 - parameter;
+  return 3 * inverse * inverse * parameter * first
+    + 3 * inverse * parameter * parameter * second
+    + parameter * parameter * parameter;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

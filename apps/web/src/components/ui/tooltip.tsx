@@ -43,15 +43,17 @@ function TooltipContent({
     closeDurationMs: 110,
     distancePx: 5,
     openScale: 0.98,
+    skipAnimationOnInstantOpen: true,
   })
   return (
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Content
         ref={motionRef}
         data-slot="tooltip-content"
+        data-dezin-menu-presence=""
         sideOffset={sideOffset}
         className={cn(
-          "z-50 w-fit origin-(--radix-tooltip-content-transform-origin) animate-in rounded-lg border border-white/8 bg-neutral-900/95 px-2.5 py-1.5 text-[10px] font-medium text-balance text-neutral-100 shadow-pop backdrop-blur-xl ease-out fade-in-0 zoom-in-[0.98] duration-160 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:duration-110 data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.985]",
+          "z-50 w-fit origin-(--radix-tooltip-content-transform-origin) rounded-lg border border-white/8 bg-neutral-900/95 px-2.5 py-1.5 text-[10px] font-medium text-balance text-neutral-100 shadow-pop backdrop-blur-xl",
           className
         )}
         {...props}

@@ -1,5 +1,14 @@
 import { Code2, ExternalLink, FileText, RotateCcw, Save } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+  type RefObject,
+} from "react";
 
 import { Markdown } from "../components/Markdown.tsx";
 import { Button } from "../components/ui/Button.tsx";
@@ -200,7 +209,19 @@ function FileFallback({
   );
 }
 
-function HighlightedSource({ content, presentation }: { content: string; presentation: TypedMaterialPresentation }) {
+function HighlightedSource({
+  content,
+  presentation,
+  className = "design-typed-material__highlight",
+  elementRef,
+  ariaHidden,
+}: {
+  content: string;
+  presentation: TypedMaterialPresentation;
+  className?: string;
+  elementRef?: Ref<HTMLDivElement>;
+  ariaHidden?: boolean;
+}) {
   const language = presentation.language ?? "plaintext";
   const html = useMemo(
     () => typedMaterialHighlighter.highlight(content, { lang: language, lineNumbers: true }).html,
@@ -208,7 +229,9 @@ function HighlightedSource({ content, presentation }: { content: string; present
   );
   return (
     <div
-      className="design-typed-material__highlight"
+      ref={elementRef}
+      className={className}
+      aria-hidden={ariaHidden}
       // TanStack Highlight escapes source bytes and emits only its stable th-* token tree.
       dangerouslySetInnerHTML={{ __html: html }}
     />
@@ -232,32 +255,40 @@ export function TextEditor({
   active,
   syntaxHighlighting = descriptor.presentation.kind === "code",
   onAppendMaterialVersion,
+  viewerRef,
 }: {
   descriptor: TextMaterialDescriptor;
   content: string;
   active: boolean;
   syntaxHighlighting?: boolean;
   onAppendMaterialVersion?: (file: File) => Promise<void>;
+  viewerRef?: RefObject<HTMLDivElement | null>;
 }) {
   const [draft, setDraft] = useState(content);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const highlightRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const deferredDraft = useDeferredValue(draft);
-  const highlightedEditorHtml = useMemo(() => (
-    syntaxHighlighting
-      ? typedMaterialHighlighter.highlight(deferredDraft, {
-          lang: descriptor.presentation.language ?? "plaintext",
-          lineNumbers: false,
-        }).html
-      : null
-  ), [deferredDraft, descriptor.presentation.language, syntaxHighlighting]);
   const changed = draft !== content;
   const editable = onAppendMaterialVersion !== undefined;
 
   useEffect(() => {
     if (!changed) setDraft(content);
   }, [changed, content]);
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    const textarea = textareaRef.current;
+    const viewer = viewerRef?.current;
+    if (!textarea || !viewer) return;
+    textarea.scrollTop = viewer.scrollTop;
+    textarea.scrollLeft = viewer.scrollLeft;
+    if (highlightRef.current) {
+      highlightRef.current.scrollTop = viewer.scrollTop;
+      highlightRef.current.scrollLeft = viewer.scrollLeft;
+    }
+  }, [active, viewerRef]);
 
   const save = async () => {
     if (!onAppendMaterialVersion || !changed || saving) return;
@@ -318,15 +349,17 @@ export function TextEditor({
         </div>
       </header>
       <div className="design-typed-material__editor-code">
-        {highlightedEditorHtml ? (
-          <div
-            ref={highlightRef}
-            aria-hidden
+        {syntaxHighlighting ? (
+          <HighlightedSource
+            content={deferredDraft}
+            presentation={descriptor.presentation}
             className="design-typed-material__editor-highlight"
-            dangerouslySetInnerHTML={{ __html: highlightedEditorHtml }}
+            elementRef={highlightRef}
+            ariaHidden
           />
         ) : null}
         <textarea
+          ref={textareaRef}
           className="design-typed-material__textarea nodrag nopan nowheel"
           aria-label={`Edit ${descriptor.fileName}`}
           data-syntax-highlighted={syntaxHighlighting ? "true" : undefined}
@@ -337,9 +370,15 @@ export function TextEditor({
           onChange={(event) => setDraft(event.target.value)}
           onScroll={(event) => {
             const highlight = highlightRef.current;
-            if (!highlight) return;
-            highlight.scrollTop = event.currentTarget.scrollTop;
-            highlight.scrollLeft = event.currentTarget.scrollLeft;
+            if (highlight) {
+              highlight.scrollTop = event.currentTarget.scrollTop;
+              highlight.scrollLeft = event.currentTarget.scrollLeft;
+            }
+            const viewer = viewerRef?.current;
+            if (viewer) {
+              viewer.scrollTop = event.currentTarget.scrollTop;
+              viewer.scrollLeft = event.currentTarget.scrollLeft;
+            }
           }}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "s") {
@@ -373,6 +412,7 @@ export function TypedMaterialSurface({
 }) {
   const state = useTextMaterial({ api, projectId, node, versionId, url });
   const editorVisible = useEditorReveal(focusMotion);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
 
   if (state.status === "loading") {
     return <FileFallback descriptor={state.descriptor} url={url} detail="Reading the exact file revision…" />;
@@ -393,7 +433,7 @@ export function TypedMaterialSurface({
       data-rich-rendering={richRenderingAllowed ? "enabled" : "paused"}
       data-editor-visible={editorVisible || undefined}
     >
-      <div className="design-typed-material__viewer">
+      <div ref={viewerRef} className="design-typed-material__viewer">
         {!richRenderingAllowed ? (
           <LightweightTextPreview content={state.content} bytes={contentBytes} />
         ) : state.descriptor.presentation.kind === "markdown" ? (
@@ -408,6 +448,7 @@ export function TypedMaterialSurface({
           descriptor={state.descriptor}
           content={state.content}
           active={editorVisible}
+          viewerRef={viewerRef}
           syntaxHighlighting={richRenderingAllowed && state.descriptor.presentation.kind === "code"}
           onAppendMaterialVersion={onAppendMaterialVersion
             ? (file) => onAppendMaterialVersion(node.id, file)

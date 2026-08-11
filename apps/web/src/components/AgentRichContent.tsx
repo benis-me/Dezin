@@ -1,8 +1,9 @@
-import { Check, ChevronDown, Code2, Copy, ExternalLink, ImageIcon, ListTodo } from "lucide-react";
+import { Check, Code2, Copy, ExternalLink, ImageIcon, ListTodo } from "lucide-react";
 import {
   Children,
   isValidElement,
   useEffect,
+  useId,
   useMemo,
   useState,
   type ComponentPropsWithoutRef,
@@ -12,6 +13,8 @@ import type { Components } from "streamdown";
 
 import { explicitExternalImageHref, localPassiveImageSource } from "../lib/local-media-url.ts";
 import { cn } from "../lib/utils.ts";
+import { AgentActivityHeaderContent } from "./AgentActivityBlocks.tsx";
+import { AgentCollapsible } from "./AgentCollapsible.tsx";
 
 interface CitationReference {
   number: string;
@@ -231,25 +234,24 @@ function taskChecks(node: ReactNode): boolean[] {
 
 function AgentTaskList({ children, className }: ComponentPropsWithoutRef<"ul">) {
   const [open, setOpen] = useState(true);
+  const detailsId = useId();
   const checks = taskChecks(children);
   const complete = checks.filter(Boolean).length;
   const total = checks.length;
   const allComplete = total > 0 && complete === total;
   return (
-    <section className="agent-task-list" data-agent-component="task-list" data-collapsed={!open || undefined} data-complete={allComplete || undefined}>
-      <button type="button" className="agent-task-list__header" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <span className="agent-task-list__icon" data-complete={allComplete || undefined}>
-          {allComplete ? <Check aria-hidden /> : <ListTodo aria-hidden />}
-          <ChevronDown className="agent-task-list__chevron" aria-hidden />
-        </span>
-        <span>To-dos</span>
-        <span className="agent-task-list__count">{complete}/{total}</span>
+    <section className="agent-activity-card agent-task-list" data-agent-component="task-list" data-activity-kind="tasks" data-collapsed={!open || undefined} data-complete={allComplete || undefined}>
+      <button type="button" className="agent-activity-card__header agent-task-list__header" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <AgentActivityHeaderContent
+          icon={allComplete ? <Check /> : <ListTodo />}
+          label="To-dos"
+          meta={`${complete}/${total}`}
+          state={allComplete ? "complete" : "idle"}
+        />
       </button>
-      <div className="agent-task-list__collapsible" data-collapsed={!open || undefined}>
-        <div>
-          <ul className={cn("agent-task-list__items", className)}>{children}</ul>
-        </div>
-      </div>
+      <AgentCollapsible id={detailsId} className="agent-task-list__collapsible" open={open}>
+        <ul className={cn("agent-task-list__items", className)}>{children}</ul>
+      </AgentCollapsible>
     </section>
   );
 }

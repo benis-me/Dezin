@@ -1,0 +1,78 @@
+.design-canvas-node__generation-particles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  contain: paint;
+}
+
+.design-canvas-node__generation-particle {
+  position: absolute;
+  top: var(--generation-particle-origin-y);
+  left: var(--generation-particle-origin-x);
+  width: var(--generation-particle-size);
+  height: var(--generation-particle-size);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 70%, var(--design-canvas-accent));
+  opacity: 0;
+  transform: translate3d(0, 0, 0) scale(0.72);
+  animation: design-canvas-generation-particle-drift
+    var(--generation-particle-duration)
+    cubic-bezier(0.45, 0, 0.2, 1)
+    var(--generation-particle-delay)
+    infinite both;
+}
+
+.design-canvas-node__working-dots .design-canvas-node__generation-particle {
+  background: color-mix(in oklch, var(--foreground) 80%, var(--design-canvas-accent));
+}
+
+[data-generation-motion="paused"] .design-canvas-node__generation-particle {
+  animation: none !important;
+  opacity: var(--generation-particle-static-opacity);
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+[data-generation-motion="paused"] .design-canvas-node__generation-glow {
+  animation: none !important;
+  opacity: 0.24;
+  transform: none;
+  will-change: auto;
+}
+
+@keyframes design-canvas-generation-particle-drift {
+  0%,
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.72);
+  }
+  14% {
+    opacity: var(--generation-particle-opacity-low);
+  }
+  34% {
+    opacity: var(--generation-particle-opacity);
+    transform: translate3d(var(--generation-particle-x-1), var(--generation-particle-y-1), 0)
+      scale(var(--generation-particle-scale));
+  }
+  61% {
+    opacity: var(--generation-particle-opacity-low);
+    transform: translate3d(var(--generation-particle-x-2), var(--generation-particle-y-2), 0) scale(0.92);
+  }
+  82% {
+    opacity: var(--generation-particle-opacity);
+    transform: translate3d(var(--generation-particle-x-3), var(--generation-particle-y-3), 0)
+      scale(var(--generation-particle-scale));
+  }
+  94% {
+    opacity: var(--generation-particle-opacity-low);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .design-canvas-node__generation-particle {
+    animation: none !important;
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: var(--generation-particle-static-opacity);
+  }
+}

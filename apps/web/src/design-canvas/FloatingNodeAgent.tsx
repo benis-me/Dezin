@@ -1,4 +1,5 @@
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
+import { AgentCollapsible } from "../components/AgentCollapsible.tsx";
 import {
   AgentImageGenerationState,
   AgentProgressList,
@@ -23,9 +24,10 @@ import {
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
+import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { cn } from "../lib/utils.ts";
 import { BorderBeam } from "border-beam";
-import { motion, useReducedMotion } from "motion/react";
+import { motion } from "motion/react";
 import {
   ArrowUp,
   Check,
@@ -36,12 +38,14 @@ import {
   LoaderCircle,
   Paperclip,
   PanelRightClose,
+  Square,
   X,
 } from "lucide-react";
 import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -61,8 +65,8 @@ import type {
   DesignThreadScope,
 } from "./types.ts";
 
-const AGENT_MOTION_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
-const AGENT_MOTION_EASE_IN_OUT: [number, number, number, number] = [0.66, 0, 0.34, 1];
+const AGENT_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
+const AGENT_MORPH_EASE: [number, number, number, number] = [0.77, 0, 0.175, 1];
 const TRANSCRIPT_MESSAGE_PAGE_SIZE = 12;
 const TRANSCRIPT_JOB_PAGE_SIZE = 6;
 const RESERVED_MAIN_AGENT_QUEUED_REPLY =
@@ -85,6 +89,13 @@ const FOCUSED_AGENT_SIZE = { width: FLOATING_NODE_AGENT_WIDTH_PX, height: 720 } 
 function boundedEntryOffset(distance: number, limit: number): number {
   if (Math.abs(distance) < 3) return 0;
   return Math.max(-limit, Math.min(limit, distance));
+}
+
+export function floatingAgentTransform(x: number, y: number, scale: number): string {
+  // Motion interpolates complex transform strings token by token. Keeping units
+  // on both zero and non-zero endpoints prevents intermediate translate values
+  // from losing `px` and becoming invalid CSS in Chromium.
+  return `translate3d(${x}px, ${y}px, 0px) scale(${scale})`;
 }
 
 export function useFloatingNodePanel({
@@ -175,7 +186,7 @@ export function useFloatingNodePanel({
     });
     const nodeCenterX = nodeRect.left - hostRect.left + nodeRect.width / 2;
     const nodeCenterY = nodeRect.top - hostRect.top + nodeRect.height / 2;
-    const entryX = boundedEntryOffset(nodeCenterX - (resolved.left + panelWidth / 2), 18);
+    const entryX = boundedEntryOffset(nodeCenterX - (resolved.left + panelWidth / 2), 8);
     const entryY = boundedEntryOffset(nodeCenterY - (resolved.top + panelHeight / 2), 12);
     const next = { nodeId, ...resolved, entryX, entryY, visible: true };
     setPosition((current) => (
@@ -279,10 +290,29 @@ export function composerBeamActive(focused: boolean, reduceMotion: boolean | nul
   return focused && reduceMotion !== true;
 }
 
-function boundedTurnLabel(thread: DesignThread | null, job: DesignJob): string {
-  const prompt = thread?.messages.find((message) => message.jobId === job.id && message.role === "user")?.content.trim();
-  if (prompt) return prompt.length > 72 ? `${prompt.slice(0, 72)}…` : prompt;
-  return job.kind === "implementation-export" ? `Export · ${job.exportId ?? job.id}` : "Canvas activity";
+function useApplicationBeamTheme(): "dark" | "light" {
+  const readTheme = () => (
+    typeof document !== "undefined" && document.documentElement.classList.contains("dark")
+      ? "dark" as const
+      : "light" as const
+  );
+  const [theme, setTheme] = useState<"dark" | "light">(readTheme);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
+    const root = document.documentElement;
+    const updateTheme = () => setTheme(readTheme());
+    updateTheme();
+    const observer = new MutationObserver(updateTheme);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
+  return theme;
+}
+
+function mainAgentGroupLabel(job: DesignJob): string {
+  return job.kind === "implementation-export" ? "Implementation export" : "Canvas execution";
 }
 
 function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | null): MainAgentJobGroup[] {
@@ -306,7 +336,7 @@ function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | n
       && hasAssistantReply;
     return conversationOnly ? [] : [{
       parentJobId: parent.id,
-      label: boundedTurnLabel(thread, parent),
+      label: mainAgentGroupLabel(parent),
       jobs: [parent, ...groupedChildren],
     }];
   });
@@ -315,7 +345,7 @@ function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | n
     if (visibleParents.has(parentJobId)) continue;
     groups.push({
       parentJobId,
-      label: `Canvas activity · ${parentJobId}`,
+      label: "Canvas execution",
       jobs: orphanedChildren,
     });
   }
@@ -347,6 +377,21 @@ function isWebSearchActivity(activity: DesignJobActivity): boolean {
 
 function isImageGenerationActivity(activity: DesignJobActivity): boolean {
   return /\b(?:generating|generate|rendering)\s+(?:an?\s+)?image\b/i.test(activity.text);
+}
+
+function isReasoningActivity(activity: DesignJobActivity): boolean {
+  return activity.kind === "text"
+    && !isWebSearchActivity(activity)
+    && !isImageGenerationActivity(activity);
+}
+
+type AgentActivityPhase = "reasoning" | "progress" | "search" | "image";
+
+function activityPhase(activity: DesignJobActivity): AgentActivityPhase {
+  if (isWebSearchActivity(activity)) return "search";
+  if (isImageGenerationActivity(activity)) return "image";
+  if (isReasoningActivity(activity)) return "reasoning";
+  return "progress";
 }
 
 function quotedActivityText(text: string): string | null {
@@ -420,7 +465,8 @@ export function CanvasAgentPanel({
   entryY = 8,
   rootRef,
 }: CanvasAgentPanelProps) {
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = usePrefersReducedMotion();
+  const composerBeamTheme = useApplicationBeamTheme();
   const [composerFocused, setComposerFocused] = useState(false);
   const [thread, setThread] = useState<DesignThread | null>(null);
   const [threadLoading, setThreadLoading] = useState(true);
@@ -574,20 +620,40 @@ export function CanvasAgentPanel({
 
   const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
   const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
+  const panelTransformOrigin = floating
+    ? `${entryX < -1 ? "left" : entryX > 1 ? "right" : "center"} ${entryY < -1 ? "top" : entryY > 1 ? "bottom" : "center"}`
+    : "center center";
+  const panelEntryTransform = floatingAgentTransform(entryX, entryY, 0.98);
+  const panelOpenTransform = floatingAgentTransform(0, 0, 1);
+  const panelExitTransform = floatingAgentTransform(
+    reduceMotion ? 0 : entryX,
+    reduceMotion ? 0 : entryY,
+    1,
+  );
   return (
     <motion.section
       ref={rootRef}
+      layout={floating && !reduceMotion ? "position" : false}
       data-canvas-agent-panel
       data-agent-scope={scopeKey}
       data-agent-size={compact ? "compact" : "focus"}
       className={cn("design-canvas-agent", floating && "design-canvas-agent--floating", className)}
-      style={{ ...style, transformOrigin: "center center" }}
-      initial={floating && !reduceMotion ? { opacity: 0, x: entryX, y: entryY, scale: 0.98 } : false}
-      animate={floating ? { opacity: 1, x: 0, y: 0, scale: 1 } : undefined}
-      exit={floating ? { opacity: 0, x: reduceMotion ? 0 : entryX, y: reduceMotion ? 0 : entryY, scale: 0.985 } : undefined}
+      style={{ ...style, transformOrigin: panelTransformOrigin }}
+      initial={floating && !reduceMotion ? { opacity: 0, transform: panelEntryTransform } : false}
+      animate={floating ? {
+        opacity: 1,
+        transform: panelOpenTransform,
+        transition: { duration: reduceMotion ? 0 : 0.22, ease: AGENT_MOTION_EASE },
+      } : undefined}
+      exit={floating ? {
+        opacity: 0,
+        transform: panelExitTransform,
+        transition: { duration: reduceMotion ? 0 : 0.13, ease: AGENT_MOTION_EASE },
+      } : undefined}
       transition={{
         duration: reduceMotion ? 0 : 0.22,
         ease: AGENT_MOTION_EASE,
+        layout: { duration: reduceMotion ? 0 : 0.28, ease: AGENT_MORPH_EASE },
       }}
       aria-label={`${title} panel`}
       onContextMenu={(event) => event.stopPropagation()}
@@ -601,7 +667,7 @@ export function CanvasAgentPanel({
         </div>
         {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose ? (
           <TooltipProvider delayDuration={120}>
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="design-canvas-agent__header-controls">
               {activeVersion && onSelectVersion ? (
                 <Select
                   value={activeVersionId}
@@ -666,7 +732,7 @@ export function CanvasAgentPanel({
                         disabled={appendingRevision}
                         onClick={() => revisionInputRef.current?.click()}
                       >
-                        {appendingRevision ? <LoaderCircle aria-hidden className="animate-spin" /> : <FileUp aria-hidden />}
+                        {appendingRevision ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : <FileUp aria-hidden />}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" sideOffset={6}>Add revision</TooltipContent>
@@ -730,15 +796,16 @@ export function CanvasAgentPanel({
         <BorderBeam
           active={composerBeamActive(composerFocused, reduceMotion)}
           borderRadius={14}
-          brightness={1.08}
+          brightness={1.22}
           className="design-canvas-agent__composer-beam"
           colorVariant="colorful"
-          duration={2.35}
-          hueRange={18}
-          saturation={0.9}
+          data-beam-theme={composerBeamTheme}
+          duration={2.18}
+          hueRange={22}
+          saturation={1.05}
           staticColors={reduceMotion === true}
-          strength={0.28}
-          theme="auto"
+          strength={0.56}
+          theme={composerBeamTheme}
           onFocusCapture={() => setComposerFocused(true)}
           onBlurCapture={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget)) setComposerFocused(false);
@@ -805,7 +872,7 @@ export function CanvasAgentPanel({
                 onClick={() => void submit()}
                 className="size-7"
               >
-                {submitting ? <LoaderCircle aria-hidden className="animate-spin" /> : <ArrowUp aria-hidden />}
+                {submitting ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : <ArrowUp aria-hidden />}
               </Button>
             </div>
           </div>
@@ -814,8 +881,8 @@ export function CanvasAgentPanel({
           <motion.div
             role="alert"
             className="design-canvas-agent__composer-notice"
-            initial={reduceMotion ? false : { opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={reduceMotion ? false : { opacity: 0, transform: "translate3d(0px, 5px, 0px) scale(0.98)" }}
+            animate={{ opacity: 1, transform: "translate3d(0px, 0px, 0px) scale(1)" }}
             transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
           >
             <CircleAlert aria-hidden />
@@ -861,6 +928,7 @@ const AgentTranscript = memo(function AgentTranscript({
   const [historyPages, setHistoryPages] = useState(1);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
+  const followTailRef = useRef(true);
   const messageHistoryLimit = historyPages * TRANSCRIPT_MESSAGE_PAGE_SIZE;
   const jobHistoryLimit = historyPages * (scopeType === "main" ? TRANSCRIPT_JOB_PAGE_SIZE : 2);
   const threadMatchesScope = thread !== null && (
@@ -943,6 +1011,7 @@ const AgentTranscript = memo(function AgentTranscript({
   useEffect(() => {
     setHistoryPages(1);
     restoreScrollRef.current = null;
+    followTailRef.current = true;
   }, [scopeKey]);
 
   useEffect(() => {
@@ -952,16 +1021,24 @@ const AgentTranscript = memo(function AgentTranscript({
     if (restore) {
       transcript.scrollTop = restore.top + transcript.scrollHeight - restore.height;
       restoreScrollRef.current = null;
-    } else {
+    } else if (followTailRef.current || optimisticUserTurn !== null) {
       transcript.scrollTop = transcript.scrollHeight;
+      followTailRef.current = true;
     }
-  }, [historyPages, tailKey, thread?.messages.length, thread?.updatedAt]);
+  }, [historyPages, optimisticUserTurn, tailKey, thread?.messages.length, thread?.updatedAt]);
 
   return (
     <div
       ref={transcriptRef}
       className="design-canvas-agent__transcript"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
       aria-busy={threadLoading || undefined}
+      onScroll={(event) => {
+        const transcript = event.currentTarget;
+        followTailRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= 56;
+      }}
     >
       {hiddenTranscriptCount > 0 ? (
         <button
@@ -981,7 +1058,7 @@ const AgentTranscript = memo(function AgentTranscript({
           <p className="text-[11px] font-medium text-foreground/75">
             {scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
           </p>
-          <p className="max-w-[24rem] text-[10px] leading-[1.45] text-muted-foreground/80">
+          <p className="max-w-[24rem] text-[10.5px] leading-[1.45] text-muted-foreground">
             Complete canvas context is already available to this Agent.
           </p>
         </div>
@@ -993,20 +1070,17 @@ const AgentTranscript = memo(function AgentTranscript({
         if (item.kind === "message") {
           const { message } = item;
           return (
-            <motion.article
+            <article
               key={item.id}
               className="design-canvas-agent__message"
               data-role={message.role}
-              initial={reduceMotion ? false : { opacity: 0, y: 8, x: message.role === "user" ? 5 : -3 }}
-              animate={{ opacity: 1, y: 0, x: 0 }}
-              transition={{ duration: reduceMotion ? 0 : 0.28, ease: AGENT_MOTION_EASE }}
             >
               <div className="design-canvas-agent__message-meta">
-                <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Agent" : message.role}</span>
-                <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                <span>{message.role === "user" ? "Prompt" : message.role === "assistant" ? "Response" : message.role === "system" ? "System" : "Tool"}</span>
+                <time dateTime={new Date(message.createdAt).toISOString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
               </div>
               <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
-            </motion.article>
+            </article>
           );
         }
         if (item.kind === "main-job-group") {
@@ -1058,30 +1132,44 @@ function MainAgentJobGroupView({
   const mainJob = group.jobs.find((job) => job.kind === "main-agent") ?? null;
   const workJobs = group.jobs.filter((job) => job.kind !== "main-agent");
   const mainActive = mainJob !== null && ["queued", "running", "validating"].includes(mainJob.status);
+  const mainTerminalOutcome = mainJob !== null && ["failed", "cancelled", "superseded"].includes(mainJob.status)
+    ? mainJob
+    : null;
   if (workJobs.length === 0) {
     if (mainActive) return <AgentThinkingIndicator reduceMotion={reduceMotion} />;
-    if (mainJob?.status !== "failed") return null;
-    return (
-      <AgentActivityCard
-        job={mainJob}
-        projectPath={projectPath}
-        onRevealExport={onRevealExport}
-        onCancel={onCancelJob}
-      />
-    );
+    if (!mainTerminalOutcome) return null;
   }
   const childCount = workJobs.filter((job) => job.nodeId !== null).length;
+  const childLabel = childCount > 0 ? `${childCount} ${childCount === 1 ? "child Agent" : "child Agents"}` : null;
+  const showGroupHeader = childLabel !== null || mainTerminalOutcome !== null || workJobs.length > 1;
   return (
     <section
       className="design-canvas-agent__activity-group"
-      aria-label={group.label}
+      aria-label={childLabel ? `${group.label} · ${childLabel}` : group.label}
       data-parent-job-id={group.parentJobId}
     >
-      <header className="design-canvas-agent__activity-group-header">
-        <p>{group.label}</p>
-        {childCount > 0 ? <span>{childCount} {childCount === 1 ? "child Agent" : "child Agents"}</span> : null}
-      </header>
+      {showGroupHeader ? (
+        <header className="design-canvas-agent__activity-group-header">
+          <p>{group.label}</p>
+          {childLabel ? <span>{childLabel}</span> : null}
+        </header>
+      ) : null}
       {mainActive ? <AgentThinkingIndicator reduceMotion={reduceMotion} /> : null}
+      {mainTerminalOutcome ? (
+        <div
+          className="design-canvas-agent__activity-group-outcome"
+          data-status={mainTerminalOutcome.status}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {mainTerminalOutcome.status === "failed" ? <CircleAlert aria-hidden /> : <Circle aria-hidden />}
+          <strong>{jobStatusLabel(mainTerminalOutcome)}</strong>
+          {mainTerminalOutcome.status === "failed" && mainTerminalOutcome.error
+            ? <span>{compactActivityText(mainTerminalOutcome.error)}</span>
+            : null}
+        </div>
+      ) : null}
       {workJobs.map((job) => (
         <AgentActivityCard
           key={job.id}
@@ -1103,12 +1191,12 @@ function AgentThinkingIndicator({ reduceMotion }: { reduceMotion: boolean }) {
       className="design-canvas-agent__thinking"
       role="status"
       aria-label="Thinking"
-      initial={reduceMotion ? false : { opacity: 0, x: -4, y: 4 }}
-      animate={{ opacity: 1, x: 0, y: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.26, ease: AGENT_MOTION_EASE }}
+      initial={reduceMotion ? false : { opacity: 0, transform: "translate3d(-4px, 4px, 0px) scale(0.98)" }}
+      animate={{ opacity: 1, transform: "translate3d(0px, 0px, 0px) scale(1)" }}
+      transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
     >
       <span className="design-canvas-agent__thinking-orb" aria-hidden>
-        {Array.from({ length: 9 }, (_, index) => <span key={index} />)}
+        {Array.from({ length: 3 }, (_, index) => <span key={index} />)}
       </span>
       <span className="design-canvas-agent__thinking-label">Thinking…</span>
     </motion.div>
@@ -1130,9 +1218,11 @@ function AgentActivityCard({
   onCancel: (jobId: string) => Promise<void>;
   initiallyExpanded?: boolean;
 }) {
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = usePrefersReducedMotion();
   const [revealFeedback, setRevealFeedback] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const detailsId = useId();
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
   const [expanded, setExpanded] = useState(active || initiallyExpanded);
   useEffect(() => {
@@ -1160,8 +1250,16 @@ function AgentActivityCard({
   const searchActivities = job.activity.filter(isWebSearchActivity);
   const imageActivity = [...job.activity].reverse().find(isImageGenerationActivity) ?? null;
   const reasoningItems = job.activity
-    .filter((activity) => activity.kind === "text" && !isWebSearchActivity(activity) && !isImageGenerationActivity(activity))
-    .map((activity) => ({ id: activity.id, text: compactActivityText(activity.text) }));
+    .filter(isReasoningActivity)
+    .map((activity) => ({ id: activity.id, text: activity.text.trim() || "Activity updated" }));
+  const latestActivity = job.activity.at(-1);
+  const activePhase: AgentActivityPhase | null = active
+    ? latestActivity === undefined ? "reasoning" : activityPhase(latestActivity)
+    : null;
+  const reasoningActive = activePhase === "reasoning";
+  const progressActive = activePhase === "progress";
+  const searchActive = activePhase === "search";
+  const imageActive = activePhase === "image";
   const progressActivities = job.activity.filter((activity) => (
     activity.kind !== "text" && !isWebSearchActivity(activity) && !isImageGenerationActivity(activity)
   ));
@@ -1178,7 +1276,7 @@ function AgentActivityCard({
       text: compactActivityText(activity.text),
       state: job.status === "failed" && index === visibleProgressActivities.length - 1
         ? "failed" as const
-        : active && index === visibleProgressActivities.length - 1
+        : progressActive && index === visibleProgressActivities.length - 1
           ? "active" as const
           : "done" as const,
     })),
@@ -1199,32 +1297,18 @@ function AgentActivityCard({
       data-job-id={job.id}
       data-node-id={job.nodeId ?? undefined}
       data-parent-job-id={job.parentJobId ?? undefined}
+      data-agent-component="execution-log"
       aria-label={`${label} · ${job.status}`}
     >
-      {active ? (
-        <motion.span
-          className="design-canvas-agent__activity-live-beam"
-          aria-hidden
-          initial={false}
-          animate={reduceMotion
-            ? { opacity: 0 }
-            : { x: ["-150%", "430%"], opacity: [0, 0.82, 0.82, 0] }}
-          transition={reduceMotion ? { duration: 0 } : {
-            duration: 2.6,
-            ease: AGENT_MOTION_EASE_IN_OUT,
-            repeat: Number.POSITIVE_INFINITY,
-            repeatDelay: 0.8,
-            times: [0, 0.18, 0.72, 1],
-          }}
-        />
-      ) : null}
+      <span className="agent-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+        {displayLabel}: {jobStatusLabel(job)}
+      </span>
       <header>
-        <motion.button
+        <button
           type="button"
           className="design-canvas-agent__activity-toggle"
+          aria-controls={detailsId}
           aria-expanded={expanded}
-          whileTap={reduceMotion ? undefined : { scale: 0.985 }}
-          transition={{ duration: 0.12, ease: AGENT_MOTION_EASE }}
           onClick={() => setExpanded((current) => !current)}
         >
           <span className="design-canvas-agent__activity-status" data-status={job.status} aria-hidden>
@@ -1246,49 +1330,51 @@ function AgentActivityCard({
           <motion.span
             className="design-canvas-agent__activity-chevron"
             aria-hidden
-            animate={{ rotate: expanded ? 0 : -90 }}
-            transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
+            animate={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
+            transition={{ duration: reduceMotion ? 0 : 0.16, ease: AGENT_MOTION_EASE }}
           >
             <ChevronDown />
           </motion.span>
-        </motion.button>
+        </button>
         {active ? (
           <Button
             type="button"
             size="xs"
             variant="ghost"
             className="design-canvas-agent__activity-stop"
+            aria-label={`${stopping ? "Stopping" : "Stop"} ${displayLabel}`}
+            aria-busy={stopping || undefined}
+            disabled={stopping}
             onClick={() => {
-              void onCancel(job.id).catch(() => undefined);
+              if (stopping) return;
+              setStopping(true);
+              void onCancel(job.id).catch(() => undefined).finally(() => setStopping(false));
             }}
           >
-            <X aria-hidden />Stop
+            {stopping
+              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
+              : <Square aria-hidden fill="currentColor" />}
+            <span>{stopping ? "Stopping" : "Stop"}</span>
           </Button>
         ) : null}
       </header>
-      {job.error && !expanded ? (
-        <button
-          type="button"
-          className="design-canvas-agent__activity-error-summary"
-          title={job.error}
-          onClick={() => setExpanded(true)}
-        >
-          {compactActivityText(job.error)}
-        </button>
-      ) : null}
-      <div className="design-canvas-agent__activity-collapsible" data-collapsed={!expanded || undefined}>
-        <div>
+      <AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>
+        <>
           <div className="design-canvas-agent__activity-body">
-            <AgentReasoning items={reasoningItems} active={active} durationMs={durationMs} />
+            <AgentReasoning items={reasoningItems} active={reasoningActive} durationMs={durationMs} />
             {searchQuery ? (
-              <AgentWebSearch query={searchQuery} results={searchResults(searchActivities, active)} active={active} />
+              <AgentWebSearch query={searchQuery} results={searchResults(searchActivities, searchActive)} active={searchActive} />
             ) : null}
-            {active && imagePrompt ? <AgentImageGenerationState prompt={imagePrompt} /> : null}
-            <AgentProgressList items={progressItems} defaultOpen={active || job.status === "failed"} />
+            {imagePrompt ? <AgentImageGenerationState prompt={imagePrompt} active={imageActive} /> : null}
+            <AgentProgressList
+              items={progressItems}
+              defaultOpen={active || job.status === "failed"}
+              completionTone={job.status === "ready" ? "auto" : "neutral"}
+            />
           </div>
           {job.kind === "implementation-export" && job.exportId ? (
             <div className="design-canvas-agent__activity-result">
-              <p>{job.status === "ready" ? "Export ready" : "Export"} · {job.exportId}</p>
+              <p>{job.status === "ready" ? "Export ready" : "Export"}</p>
               {job.status === "ready" ? (
                 <>
                   {exportPath ? (
@@ -1315,7 +1401,7 @@ function AgentActivityCard({
                         }).finally(() => setRevealing(false));
                       }}
                     >
-                      {revealing ? <LoaderCircle aria-hidden className="animate-spin" /> : null}
+                      {revealing ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : null}
                       Reveal export
                     </Button>
                     {revealFeedback ? <output role="status">{revealFeedback}</output> : null}
@@ -1324,11 +1410,14 @@ function AgentActivityCard({
               ) : null}
             </div>
           ) : null}
-          {job.error ? (
-            <p className="design-canvas-agent__activity-error" aria-hidden={!expanded}>{job.error}</p>
+          {job.status === "failed" && job.error ? (
+            <div className="design-canvas-agent__activity-error" aria-hidden={!expanded}>
+              <CircleAlert aria-hidden />
+              <p>{job.error}</p>
+            </div>
           ) : null}
-        </div>
-      </div>
+        </>
+      </AgentCollapsible>
     </article>
   );
 }

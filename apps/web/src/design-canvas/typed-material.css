@@ -70,7 +70,8 @@
   white-space: pre;
 }
 
-.design-typed-material__highlight {
+.design-typed-material__highlight,
+.design-typed-material__editor-highlight {
   min-width: 100%;
   min-height: 100%;
   background:
@@ -78,7 +79,7 @@
     var(--background);
 }
 
-.design-typed-material__highlight .th-code {
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-code {
   min-width: max-content;
   min-height: 100%;
   margin: 0;
@@ -92,8 +93,8 @@
   tab-size: 2;
 }
 
-.design-typed-material__highlight .th-line { display: block; min-height: 1lh; }
-.design-typed-material__highlight .th-line::before {
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-line { display: block; min-height: 1lh; }
+:where(.design-typed-material__highlight, .design-typed-material__editor-highlight) .th-line::before {
   display: inline-block;
   width: 34px;
   box-sizing: border-box;
@@ -134,10 +135,9 @@
 
 .design-typed-material__editor {
   z-index: 2;
-  display: grid;
+  display: block;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--background);
   opacity: 0;
@@ -147,15 +147,24 @@
 .design-typed-material__editor[data-visible] { opacity: 1; pointer-events: auto; }
 
 .design-typed-material__editor-header {
+  position: absolute;
+  z-index: 3;
+  top: 6px;
+  right: 6px;
   display: flex;
+  width: fit-content;
+  max-width: calc(100% - 48px);
   min-width: 0;
-  min-height: 38px;
+  min-height: 32px;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  border-bottom: 1px solid color-mix(in oklch, var(--border) 76%, transparent);
-  padding: 4px 6px 4px 12px;
-  background: color-mix(in oklch, var(--card) 94%, transparent);
+  gap: 8px;
+  border: 1px solid color-mix(in oklch, var(--border) 68%, transparent);
+  border-radius: 10px;
+  padding: 3px 4px 3px 9px;
+  background: color-mix(in oklch, var(--card) 88%, transparent);
+  box-shadow: 0 5px 18px oklch(0.12 0.01 255 / 0.08);
+  backdrop-filter: blur(18px) saturate(108%);
 }
 
 .design-typed-material__identity,
@@ -181,7 +190,8 @@
 .design-typed-material__editor-actions button svg { width: 13px; height: 13px; }
 
 .design-typed-material__editor-code {
-  position: relative;
+  position: absolute;
+  inset: 0;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -196,20 +206,6 @@
   pointer-events: none;
 }
 
-.design-typed-material__editor-highlight .th-code {
-  min-width: max-content;
-  min-height: 100%;
-  margin: 0;
-  padding: 14px 16px;
-  background: transparent;
-  color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground));
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 12.5px;
-  font-variant-ligatures: none;
-  line-height: 1.55;
-  tab-size: 2;
-}
-
 .design-typed-material__textarea {
   position: relative;
   z-index: 2;
@@ -221,19 +217,20 @@
   border: 0;
   border-radius: 0;
   outline: 0;
-  padding: 14px 16px;
+  padding: 10px 14px 14px;
   background: var(--background);
   box-shadow: none;
   color: var(--foreground);
   caret-color: var(--foreground);
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 12.5px;
+  font-size: clamp(10.5px, 0.86vw, 12.5px);
   font-variant-ligatures: none;
-  line-height: 1.55;
+  line-height: 1.52;
   tab-size: 2;
   white-space: pre;
 }
 .design-typed-material__textarea[data-syntax-highlighted="true"] {
+  padding-left: 34px;
   background: transparent;
   color: transparent;
   -webkit-text-fill-color: transparent;
@@ -260,11 +257,27 @@
 @media (max-width: 560px) {
   .design-typed-material__identity > small,
   .design-typed-material__read-only { display: none; }
-  .design-typed-material__editor-header { padding-left: 10px; }
+  .design-typed-material__editor-header { max-width: calc(100% - 42px); }
   .design-typed-material__editor-actions button:not(:last-child) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .design-typed-material__viewer,
   .design-typed-material__editor { transition: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .design-typed-material__editor-header {
+    background: var(--card);
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .design-typed-material__editor-header {
+    border-color: var(--foreground);
+    background: var(--card);
+    box-shadow: none;
+    backdrop-filter: none;
+  }
 }

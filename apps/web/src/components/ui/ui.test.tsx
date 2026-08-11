@@ -25,6 +25,13 @@ test("Button renders its variant/size and forwards onClick", () => {
   );
   fireEvent.click(screen.getByRole("button", { name: "Go" }));
   expect(onClick).toHaveBeenCalledOnce();
+  expect(screen.getByRole("button", { name: "Go" })).toHaveClass(
+    "transition-[transform,background-color,border-color,color,box-shadow]",
+    "duration-150",
+    "ease-[var(--ease-smooth)]",
+    "active:scale-[0.985]",
+    "motion-reduce:active:scale-100",
+  );
 });
 
 test("Tabs reports the chosen value", () => {
@@ -127,6 +134,9 @@ test("Picker (shadcn Select) opens and reports the chosen value", async () => {
   );
   expect(screen.queryByRole("option", { name: "Beta" })).toBeNull();
   await user.click(screen.getByRole("combobox", { name: "Type" }));
+  expect(screen.getByRole("listbox")).toHaveClass("origin-(--radix-select-content-transform-origin)");
+  expect(screen.getByRole("listbox")).toHaveAttribute("data-dezin-menu-presence");
+  expect(screen.getByRole("listbox").className).not.toMatch(/(?:animate-in|animate-out|fade-in-0|fade-out-0)/);
   await user.click(screen.getByRole("option", { name: "Beta" }));
   expect(onChange).toHaveBeenCalledWith("b");
 });

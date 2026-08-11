@@ -83,8 +83,8 @@ export class AgentTurnError extends Error {
   readonly code = "AGENT_TURN_FAILED";
   readonly executionIdentity: AgentExecutionIdentity;
 
-  constructor(message: string, executionIdentity: AgentExecutionIdentity) {
-    super(message);
+  constructor(message: string, executionIdentity: AgentExecutionIdentity, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "AgentTurnError";
     this.executionIdentity = executionIdentity;
   }

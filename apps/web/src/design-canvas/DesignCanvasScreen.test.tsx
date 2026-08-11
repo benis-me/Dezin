@@ -11,8 +11,12 @@ import {
 } from "../lib/preview-channel.ts";
 import type { DesignAgentTurnRequest, DesignCanvasApi } from "./api.ts";
 import { preferredGeneratedNodeGeometry } from "./DesignCanvasNode.tsx";
-import { DesignCanvasScreen } from "./DesignCanvasScreen.tsx";
-import { CanvasAgentPanel, composerBeamActive } from "./FloatingNodeAgent.tsx";
+import {
+  cancelSpatialFocusAnimations,
+  DesignCanvasScreen,
+  synchronizeFocusTransitionDuration,
+} from "./DesignCanvasScreen.tsx";
+import { CanvasAgentPanel, composerBeamActive, floatingAgentTransform } from "./FloatingNodeAgent.tsx";
 import type {
   DesignAgentTurnResult,
   DesignCanvas,
@@ -41,6 +45,66 @@ const CODEBUDDY_AGENT: AgentInfo = {
   version: "1",
   models: ["hy3-ioa"],
 };
+
+test("focus chrome adopts the actual remaining duration for opening reversals", () => {
+  const opening = { nodeId: "page-1", phase: "opening" as const, durationMs: 420 };
+  expect(synchronizeFocusTransitionDuration(opening, "page-1", "opening", 137.4)).toEqual({
+    nodeId: "page-1",
+    phase: "opening",
+    durationMs: 137,
+  });
+  expect(synchronizeFocusTransitionDuration(opening, "page-2", "opening", 80)).toBe(opening);
+  expect(synchronizeFocusTransitionDuration(opening, "page-1", "closing", 80)).toBe(opening);
+});
+
+test("reduced-motion focus settling finishes and removes only spatial focus animations", () => {
+  const root = document.createElement("main");
+  const focusedNode = document.createElement("div");
+  focusedNode.className = "design-canvas-node";
+  focusedNode.dataset.nodeFocusRole = "source";
+  const frame = document.createElement("div");
+  frame.className = "design-canvas-node__frame";
+  focusedNode.append(frame);
+  const dismiss = document.createElement("div");
+  dismiss.className = "design-canvas-focus-dismiss";
+  const generation = document.createElement("div");
+  generation.className = "design-canvas-node__generation-glow";
+  root.append(focusedNode, dismiss, generation);
+
+  const spatialAnimations = [frame, dismiss].map((target) => ({
+    effect: { target },
+    finish: vi.fn(),
+    commitStyles: vi.fn(),
+    cancel: vi.fn(),
+  }));
+  const statusAnimation = {
+    effect: { target: generation },
+    finish: vi.fn(),
+    commitStyles: vi.fn(),
+    cancel: vi.fn(),
+  };
+  Object.defineProperty(root, "getAnimations", {
+    configurable: true,
+    value: () => [...spatialAnimations, statusAnimation],
+  });
+
+  expect(cancelSpatialFocusAnimations(root)).toBe(2);
+  for (const animation of spatialAnimations) {
+    expect(animation.finish).toHaveBeenCalledOnce();
+    expect(animation.commitStyles).toHaveBeenCalledOnce();
+    expect(animation.cancel).toHaveBeenCalledOnce();
+  }
+  expect(statusAnimation.cancel).not.toHaveBeenCalled();
+});
+
+test("floating Agent transform endpoints keep length units through Motion interpolation", () => {
+  expect(floatingAgentTransform(-6.25, 8.5, 0.98)).toBe(
+    "translate3d(-6.25px, 8.5px, 0px) scale(0.98)",
+  );
+  expect(floatingAgentTransform(0, 0, 1)).toBe(
+    "translate3d(0px, 0px, 0px) scale(1)",
+  );
+});
 
 function node(overrides: Partial<DesignNode> = {}): DesignNode {
   return {
@@ -322,7 +386,14 @@ test("topbar project actions are independent icon buttons and the Project name i
   expect(iconActions.map((button) => button.getAttribute("aria-label"))).toEqual(["Main Agent", "Export code", "Settings"]);
   expect(iconActions.every((button) => button.textContent === "")).toBe(true);
   expect(iconActions.every((button) => button.getAttribute("data-size") === "icon-sm")).toBe(true);
+  expect(iconActions.every((button) => !button.hasAttribute("title"))).toBe(true);
   expect(screen.queryByRole("group", { name: "Design actions" })).not.toBeInTheDocument();
+
+  const settingsAction = within(actions).getByRole("button", { name: "Settings" });
+  await user.hover(settingsAction);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("Settings");
+  await user.unhover(settingsAction);
+  await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
 
   await user.click(screen.getByRole("button", { name: /Rename project: Editorial/ }));
   const nameInput = screen.getByRole("textbox", { name: "Project name" });
@@ -363,7 +434,20 @@ test("Agent panels preserve the native context menu without opening the canvas N
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   const mainPanel = screen.getByLabelText("Main Agent panel");
   const composer = within(mainPanel).getByRole("textbox", { name: "Main Agent message" });
-  const beam = composer.closest(".design-canvas-agent__composer-beam");
+  const beam = composer.closest<HTMLElement>(".design-canvas-agent__composer-beam");
+  expect(beam?.style.getPropertyValue("--beam-strength")).toBe("0.56");
+  expect(beam).toHaveAttribute(
+    "data-beam-theme",
+    document.documentElement.classList.contains("dark") ? "dark" : "light",
+  );
+  const initiallyDark = document.documentElement.classList.contains("dark");
+  try {
+    document.documentElement.classList.toggle("dark", !initiallyDark);
+    await waitFor(() => expect(beam).toHaveAttribute("data-beam-theme", initiallyDark ? "light" : "dark"));
+  } finally {
+    document.documentElement.classList.toggle("dark", initiallyDark);
+  }
+  await waitFor(() => expect(beam).toHaveAttribute("data-beam-theme", initiallyDark ? "dark" : "light"));
   expect(beam).not.toHaveAttribute("data-active");
   fireEvent.focus(composer);
   await waitFor(() => expect(beam).toHaveAttribute("data-active"));
@@ -375,7 +459,7 @@ test("Agent panels preserve the native context menu without opening the canvas N
   expect(screen.queryByRole("menu", { name: "Add Design node" })).not.toBeInTheDocument();
 });
 
-test("Agent composer keeps its focused surface but disables the traveling Beam for reduced motion", () => {
+test("Agent composer keeps a visible static Beam focus boundary for reduced motion", () => {
   expect(composerBeamActive(false, false)).toBe(false);
   expect(composerBeamActive(true, false)).toBe(true);
   expect(composerBeamActive(true, null)).toBe(true);
@@ -409,8 +493,8 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   expect(screen.queryByRole("button", { name: "Delete Checkout" })).not.toBeInTheDocument();
 
   fireEvent.contextMenu(screen.getByTestId("rf__node-page-menu"), { clientX: 180, clientY: 180 });
+  expect(screen.queryByLabelText("Checkout Agent panel", { selector: "section" })).not.toBeInTheDocument();
   const pageMenu = await screen.findByRole("menu", { name: "Page Node actions" });
-  await waitFor(() => expect(screen.queryByLabelText("Checkout Agent panel", { selector: "section" })).not.toBeInTheDocument());
   expect(within(pageMenu).getByRole("menuitem", { name: "Create page with Agent" })).toBeInTheDocument();
   expect(within(pageMenu).queryByRole("menuitem", { name: /revision/ })).not.toBeInTheDocument();
   fireEvent.keyDown(document, { key: "Escape" });
@@ -420,6 +504,36 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   expect(within(imageMenu).getByRole("menuitem", { name: "Inspect image with Agent" })).toBeInTheDocument();
   expect(within(imageMenu).getByRole("menuitem", { name: "Add image revision…" })).toBeInTheDocument();
   expect(within(imageMenu).queryByRole("menuitem", { name: /Create page/ })).not.toBeInTheDocument();
+});
+
+test("a selected Node keeps the same Agent panel DOM while its position morphs into focus", async () => {
+  const target = node({ id: "page-panel-morph", name: "Panel morph" });
+  const { api } = createCanvasApi(canvas([target]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const flowNode = await screen.findByTestId("rf__node-page-panel-morph");
+  fireEvent.click(flowNode);
+  const compactPanel = await screen.findByLabelText("Panel morph Agent panel", { selector: "section" });
+  expect(compactPanel).toHaveAttribute("data-agent-size", "compact");
+
+  fireEvent.doubleClick(flowNode);
+  await waitFor(() => expect(compactPanel).toHaveAttribute("data-agent-size", "focus"));
+  expect(screen.getByLabelText("Panel morph Agent panel", { selector: "section" })).toBe(compactPanel);
+});
+
+test("opening a context menu cancels a pending focused Node Agent reveal", async () => {
+  const target = node({ id: "page-context-focus", name: "Focus context" });
+  const { api } = createCanvasApi(canvas([target]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const flowNode = await screen.findByTestId("rf__node-page-context-focus");
+  fireEvent.doubleClick(flowNode);
+  fireEvent.contextMenu(flowNode, { clientX: 180, clientY: 180 });
+
+  expect(screen.queryByLabelText("Focus context Agent panel", { selector: "section" })).not.toBeInTheDocument();
+  expect(await screen.findByRole("menu", { name: "Page Node actions" })).toBeInTheDocument();
+  await new Promise((resolve) => window.setTimeout(resolve, 180));
+  expect(screen.queryByLabelText("Focus context Agent panel", { selector: "section" })).not.toBeInTheDocument();
 });
 
 test("dismissing a Node context menu never swaps its closing content to the Canvas catalog", async () => {
@@ -560,6 +674,265 @@ test("exact iframe identity and src stay stable across focus open and close", as
   expect(screen.getByTitle(`Stateful page, version ${target.currentVersionId}`)).toBe(frame);
   expect(frame).toHaveAttribute("src", embeddedUrl);
   expect(frame).toHaveAttribute("tabindex", "-1");
+});
+
+test("the iframe keeps one logical renderer viewport across canvas, focus, and the closing handoff", async () => {
+  const target = node({
+    id: "page-stable-renderer-viewport",
+    name: "Stable renderer page",
+    state: "ready",
+    currentVersionId: "version-stable-renderer-viewport",
+    selectedVersionId: "version-stable-renderer-viewport",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const frame = await screen.findByTitle(`Stable renderer page, version ${target.currentVersionId}`) as HTMLIFrameElement;
+  const canvasPlane = frame.closest<HTMLElement>(".design-canvas-node__content-plane");
+  expect(canvasPlane).not.toBeNull();
+  const logicalWidth = canvasPlane!.style.width;
+  const logicalHeight = canvasPlane!.style.height;
+  expect(logicalWidth).toMatch(/^calc\(.+px\)$/);
+  expect(logicalHeight).toMatch(/^calc\(.+px\)$/);
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "canvas");
+
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Stable renderer page; double click to focus and interact" }));
+  await waitFor(() => expect(frame).toHaveAttribute("tabindex", "0"));
+  expect(frame.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
+  expect(canvasPlane!.style.width).toBe(logicalWidth);
+  expect(canvasPlane!.style.height).toBe(logicalHeight);
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "focus");
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(screen.getByTitle(`Stable renderer page, version ${target.currentVersionId}`)).toBe(frame);
+  expect(frame.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
+  expect(canvasPlane!.style.width).toBe(logicalWidth);
+  expect(canvasPlane!.style.height).toBe(logicalHeight);
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "canvas");
+});
+
+test("a special-ratio video keeps one logical media plane through focus and the closing handoff", async () => {
+  const target = node({
+    id: "video-stable-renderer-viewport",
+    kind: "video",
+    name: "Ultrawide motion reference",
+    geometry: { x: 80, y: 80, width: 400, height: 300 },
+    state: "ready",
+    assetId: "asset-video-stable-renderer",
+    currentVersionId: "version-video-stable-renderer",
+    selectedVersionId: "version-video-stable-renderer",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const video = await waitFor(() => {
+    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+    expect(element).not.toBeNull();
+    return element!;
+  });
+  Object.defineProperties(video, {
+    videoWidth: { configurable: true, value: 2_560 },
+    videoHeight: { configurable: true, value: 1_080 },
+  });
+  fireEvent.loadedMetadata(video);
+  await waitFor(() => expect(api.applyIntents).toHaveBeenCalledWith(PROJECT_ID, {
+    baseRevision: 1,
+    intents: [{
+      type: "update-node",
+      nodeId: target.id,
+      patch: { geometry: { x: 80, y: 80, width: 420, height: 177.188 } },
+    }],
+  }));
+
+  const canvasPlane = video.closest<HTMLElement>(".design-canvas-node__content-plane");
+  expect(canvasPlane).not.toBeNull();
+  const logicalWidth = canvasPlane!.style.width;
+  const logicalHeight = canvasPlane!.style.height;
+  const canvasTransform = canvasPlane!.style.transform;
+  const canvasScale = Number(/scale\(([^)]+)\)/.exec(canvasTransform)?.[1]);
+  expect(canvasScale).toBeGreaterThan(0);
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "canvas");
+
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Ultrawide motion reference; double click to focus and interact" }));
+  await waitFor(() => expect(canvasPlane).toHaveAttribute("data-content-plane-state", "focus"));
+  const source = video.closest<HTMLElement>(".design-canvas-node");
+  const startScaleX = Number(source?.style.getPropertyValue("--design-node-focus-start-scale-x"));
+  const startScaleY = Number(source?.style.getPropertyValue("--design-node-focus-start-scale-y"));
+  expect(startScaleX).toBeCloseTo(canvasScale, 4);
+  expect(startScaleY).toBeCloseTo(canvasScale, 4);
+  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+  expect(video.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
+  expect(canvasPlane!.style.width).toBe(logicalWidth);
+  expect(canvasPlane!.style.height).toBe(logicalHeight);
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Node focus" }));
+  expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-node-focus", "closing");
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "focus");
+  expect(canvasPlane!.style.width).toBe(logicalWidth);
+  expect(canvasPlane!.style.height).toBe(logicalHeight);
+  await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
+  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+  expect(video.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
+  expect(canvasPlane!.style.width).toBe(logicalWidth);
+  expect(canvasPlane!.style.height).toBe(logicalHeight);
+  expect(canvasPlane!.style.transform).toBe(canvasTransform);
+  expect(canvasPlane).toHaveAttribute("data-content-plane-state", "canvas");
+});
+
+test("video metadata arriving during an active focus flight rebases from the same visual rect", async () => {
+  const target = node({
+    id: "video-flight-metadata",
+    kind: "video",
+    name: "Flight metadata video",
+    geometry: { x: 80, y: 80, width: 400, height: 300 },
+    state: "ready",
+    assetId: "asset-video-flight-metadata",
+    currentVersionId: "version-video-flight-metadata",
+    selectedVersionId: "version-video-flight-metadata",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  const originalAnimate = HTMLElement.prototype.animate;
+  const nodeAnimations: Array<{
+    target: HTMLElement;
+    frames: Keyframe[];
+    cancel: ReturnType<typeof vi.fn>;
+  }> = [];
+  Object.defineProperty(HTMLElement.prototype, "animate", {
+    configurable: true,
+    value: function animate(
+      this: HTMLElement,
+      keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
+    ): Animation {
+      const cancel = vi.fn();
+      if (this.classList.contains("design-canvas-node")) {
+        nodeAnimations.push({
+          target: this,
+          frames: Array.isArray(keyframes) ? keyframes : [],
+          cancel,
+        });
+      }
+      return {
+        cancel,
+        finished: new Promise<Animation>(() => undefined),
+      } as unknown as Animation;
+    },
+  });
+
+  try {
+    const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+    const video = await waitFor(() => {
+      const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const plane = video.closest<HTMLElement>(".design-canvas-node__content-plane")!;
+    const source = video.closest<HTMLElement>(".design-canvas-node")!;
+
+    fireEvent.doubleClick(screen.getByRole("button", { name: "Select Flight metadata video; double click to focus and interact" }));
+    await waitFor(() => expect(nodeAnimations).toHaveLength(1));
+    const previousLayout = {
+      width: Number.parseFloat(source.style.width),
+      height: Number.parseFloat(source.style.height),
+    };
+    const live = { x: 140, y: 80, scaleX: 0.82, scaleY: 0.78 };
+    source.style.transform = `matrix(${live.scaleX}, 0, 0, ${live.scaleY}, ${live.x}, ${live.y})`;
+
+    Object.defineProperties(video, {
+      videoWidth: { configurable: true, value: 2_560 },
+      videoHeight: { configurable: true, value: 1_080 },
+    });
+    fireEvent.loadedMetadata(video);
+    await waitFor(() => expect(nodeAnimations).toHaveLength(2));
+
+    const nextLayout = {
+      width: Number.parseFloat(source.style.width),
+      height: Number.parseFloat(source.style.height),
+    };
+    const firstRebasedFrame = nodeAnimations[1]!.frames[0]!;
+    const match = /translate3d\(([-\d.]+)px, ([-\d.]+)px, 0\) scale\(([-\d.]+), ([-\d.]+)\)/
+      .exec(String(firstRebasedFrame.transform));
+    expect(match).not.toBeNull();
+    const rebased = {
+      x: Number(match![1]),
+      y: Number(match![2]),
+      scaleX: Number(match![3]),
+      scaleY: Number(match![4]),
+    };
+
+    expect(nextLayout.width * rebased.scaleX).toBeCloseTo(previousLayout.width * live.scaleX, 4);
+    expect(nextLayout.height * rebased.scaleY).toBeCloseTo(previousLayout.height * live.scaleY, 4);
+    expect(nextLayout.width / 2 + rebased.x).toBeCloseTo(previousLayout.width / 2 + live.x, 4);
+    expect(nextLayout.height / 2 + rebased.y).toBeCloseTo(previousLayout.height / 2 + live.y, 4);
+    expect(nodeAnimations[0]!.cancel).toHaveBeenCalledOnce();
+    expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+    expect(video.closest(".design-canvas-node__content-plane")).toBe(plane);
+    expect(video.closest(".design-canvas-node")).toBe(source);
+  } finally {
+    if (originalAnimate) {
+      Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: originalAnimate });
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "animate");
+    }
+  }
+});
+
+test("undoing automatic video ratio correction restores geometry and keeps the next focus uniform", async () => {
+  const target = node({
+    id: "video-ratio-undo",
+    kind: "video",
+    name: "Undo ratio video",
+    geometry: { x: 80, y: 80, width: 400, height: 300 },
+    state: "ready",
+    assetId: "asset-video-ratio-undo",
+    currentVersionId: "version-video-ratio-undo",
+    selectedVersionId: "version-video-ratio-undo",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.undo).mockImplementation(async (_projectId, revision) => canvas([target], revision + 1, 0, 1));
+  const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+  const video = await waitFor(() => {
+    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+    expect(element).not.toBeNull();
+    return element!;
+  });
+  const plane = video.closest<HTMLElement>(".design-canvas-node__content-plane")!;
+  const originalLogicalSize = { width: plane.style.width, height: plane.style.height };
+
+  Object.defineProperties(video, {
+    videoWidth: { configurable: true, value: 2_560 },
+    videoHeight: { configurable: true, value: 1_080 },
+  });
+  fireEvent.loadedMetadata(video);
+  await waitFor(() => expect(api.applyIntents).toHaveBeenCalledWith(PROJECT_ID, {
+    baseRevision: 1,
+    intents: [{
+      type: "update-node",
+      nodeId: target.id,
+      patch: { geometry: { x: 80, y: 80, width: 420, height: 177.188 } },
+    }],
+  }));
+  await waitFor(() => expect(plane.style.height).not.toBe(originalLogicalSize.height));
+
+  fireEvent.keyDown(window, { key: "z", metaKey: true });
+  await waitFor(() => expect(api.undo).toHaveBeenCalledWith(PROJECT_ID, 2));
+  await waitFor(() => {
+    expect(plane.style.width).toBe(originalLogicalSize.width);
+    expect(plane.style.height).toBe(originalLogicalSize.height);
+  });
+  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+
+  const canvasScale = Number(/scale\(([^)]+)\)/.exec(plane.style.transform)?.[1]);
+  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Undo ratio video; double click to focus and interact" }));
+  await waitFor(() => expect(plane).toHaveAttribute("data-content-plane-state", "focus"));
+  const source = video.closest<HTMLElement>(".design-canvas-node")!;
+  expect(Number(source.style.getPropertyValue("--design-node-focus-start-scale-x"))).toBeCloseTo(canvasScale, 4);
+  expect(Number(source.style.getPropertyValue("--design-node-focus-start-scale-y"))).toBeCloseTo(canvasScale, 4);
+  expect(video.closest(".design-canvas-node__content-plane")).toBe(plane);
 });
 
 test.each([
@@ -1510,12 +1883,15 @@ test("Node Agent activity stays chronological so a successful retry is the visib
     />,
   );
 
-  expect(await screen.findAllByText("Older attempt failed")).toHaveLength(2);
+  const failedCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${failed.id}"]`)!;
+  expect(within(failedCard).queryByText("Older attempt failed")).not.toBeInTheDocument();
+  fireEvent.click(failedCard.querySelector<HTMLButtonElement>(".design-canvas-agent__activity-toggle")!);
+  expect(await within(failedCard).findByText("Older attempt failed")).toBeInTheDocument();
   expect([...rendered.container.querySelectorAll<HTMLElement>("[data-job-id]")]
     .map((element) => element.dataset.jobId)).toEqual([failed.id, ready.id]);
 });
 
-test("Main Agent groups delegated work without wrapping ordinary turns in cards", async () => {
+test("Main Agent groups delegated work under semantic execution labels without repeating prompts", async () => {
   const childNodes = ["Checkout", "Header", "Pricing", "FAQ", "Footer", "Account", "Search"].map((name, index) => (
     node({ id: `node-${index + 1}`, name })
   ));
@@ -1555,9 +1931,11 @@ test("Main Agent groups delegated work without wrapping ordinary turns in cards"
     />,
   );
 
-  const firstTurn = await screen.findByLabelText("Build six launch surfaces");
+  const firstTurn = await screen.findByLabelText("Canvas execution · 6 child Agents");
   expect(firstTurn).toHaveAttribute("data-parent-job-id", parentA.id);
   expect(within(firstTurn).getByText("6 child Agents")).toBeInTheDocument();
+  expect(within(firstTurn).getByText("Canvas execution")).toBeInTheDocument();
+  expect(within(firstTurn).queryByText("Build six launch surfaces")).not.toBeInTheDocument();
   expect(within(firstTurn).queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
   for (const target of childNodes.slice(0, 6)) {
     const activity = within(firstTurn).getByLabelText(`Node generation · ${target.name} · queued`);
@@ -1566,9 +1944,283 @@ test("Main Agent groups delegated work without wrapping ordinary turns in cards"
   }
   expect(rendered.container.querySelectorAll('[data-job-id^="job-child-"]')).toHaveLength(7);
 
-  const secondTurn = screen.getByLabelText("Add global search");
+  const secondTurn = screen.getByLabelText("Canvas execution · 1 child Agent");
   expect(within(secondTurn).getByText("1 child Agent")).toBeInTheDocument();
   expect(within(secondTurn).getByLabelText("Node generation · Search · queued")).toBeInTheDocument();
+});
+
+test("Main Agent keeps compact failed and cancelled parent outcomes with or without child work", async () => {
+  const target = node({ id: "child-node", name: "Checkout" });
+  const failedParent: DesignJob = {
+    ...job,
+    id: "job-parent-failed",
+    status: "failed",
+    error: "The canvas plan could not be applied",
+    activity: [],
+    createdAt: 10,
+    updatedAt: 12,
+    finishedAt: 12,
+  };
+  const cancelledParent: DesignJob = {
+    ...job,
+    id: "job-parent-cancelled",
+    status: "cancelled",
+    error: "Cancellation internals should not be shown as a failure",
+    activity: [],
+    createdAt: 20,
+    updatedAt: 22,
+    finishedAt: 22,
+  };
+  const child: DesignJob = {
+    ...job,
+    id: "job-cancelled-child",
+    kind: "node-generation",
+    status: "ready",
+    nodeId: target.id,
+    parentJobId: cancelledParent.id,
+    createdAt: 21,
+    updatedAt: 23,
+    finishedAt: 23,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    messages: [
+      { id: "failed-prompt", role: "user", content: "Apply the full canvas plan", jobId: failedParent.id, createdAt: 10 },
+      { id: "cancelled-prompt", role: "user", content: "Stop after checkout", jobId: cancelledParent.id, createdAt: 20 },
+    ],
+  });
+  const rendered = render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "main" }}
+      title="Main Agent"
+      subtitle="Coordinates the canvas"
+      nodes={[target]}
+      jobs={[failedParent, cancelledParent, child]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  await waitFor(() => expect(rendered.container.querySelector(`[data-parent-job-id="${failedParent.id}"]`)).toBeInTheDocument());
+  const failedGroup = rendered.container.querySelector<HTMLElement>(`[data-parent-job-id="${failedParent.id}"]`)!;
+  const failedOutcome = failedGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
+  expect(failedOutcome).toHaveTextContent("Failed");
+  expect(failedOutcome).toHaveTextContent("The canvas plan could not be applied");
+  const cancelledGroup = rendered.container.querySelector<HTMLElement>(`[data-parent-job-id="${cancelledParent.id}"]`)!;
+  const cancelledOutcome = cancelledGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
+  expect(cancelledOutcome).toHaveTextContent("Cancelled");
+  expect(within(cancelledGroup).queryByText(/Cancellation internals/)).not.toBeInTheDocument();
+  expect(within(cancelledGroup).getByLabelText("Node generation · Checkout · ready")).toBeInTheDocument();
+});
+
+test.each(["ready", "failed", "cancelled"] as const)(
+  "terminal %s Jobs render recorded Thinking as a static completed phase",
+  async (status) => {
+    const target = node({ id: "phase-node", name: "Phase node" });
+    const terminalJob: DesignJob = {
+      ...job,
+      id: `job-thinking-${status}`,
+      kind: "node-generation",
+      nodeId: target.id,
+      status,
+      error: status === "failed" ? "Generation failed" : null,
+      activity: [{ id: "reasoning-record", kind: "text", text: "Read the frozen canvas context.", createdAt: 2 }],
+      createdAt: 1,
+      updatedAt: 3,
+      finishedAt: 3,
+    };
+    const { api } = createCanvasApi(canvas([target]));
+    vi.mocked(api.getThread).mockResolvedValue({
+      ...thread,
+      scope: { type: "node", nodeId: target.id },
+    });
+    const rendered = render(
+      <CanvasAgentPanel
+        projectId={PROJECT_ID}
+        api={api}
+        scope={{ type: "node", nodeId: target.id }}
+        title="Phase node Agent"
+        subtitle="Builds the node"
+        nodes={[target]}
+        jobs={[terminalJob]}
+        onSubmit={async () => {}}
+        onCancelJob={async () => {}}
+        onAttachFiles={async () => {}}
+      />,
+    );
+
+    const record = await screen.findByLabelText(`Node generation · Phase node · ${status}`);
+    fireEvent.click(within(record).getByRole("button", { name: /Phase node generation/ }));
+    await waitFor(() => expect(record.querySelector('[data-activity-kind="thinking"]')).toBeInTheDocument());
+    const reasoning = record.querySelector<HTMLElement>('[data-activity-kind="thinking"]')!;
+    expect(reasoning).not.toHaveAttribute("data-active");
+    expect(reasoning.querySelector(".agent-activity-card__marker")).toHaveAttribute("data-state", "complete");
+    expect(reasoning.querySelector(".agent-activity-card__pulse")).toBeNull();
+    expect(within(reasoning).getByText("Completed")).toBeInTheDocument();
+    rendered.unmount();
+  },
+);
+
+test("running Jobs complete Thinking after later work and reactivate it only for newer reasoning", async () => {
+  const target = node({ id: "phase-node-live", name: "Live phase" });
+  const reasoning = { id: "reasoning-first", kind: "text" as const, text: "Inspect the canvas.", createdAt: 2 };
+  const runningJob: DesignJob = {
+    ...job,
+    id: "job-thinking-live",
+    kind: "node-generation",
+    nodeId: target.id,
+    status: "running",
+    activity: [reasoning],
+    createdAt: 1,
+    updatedAt: 2,
+    finishedAt: null,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  vi.mocked(api.getThread).mockResolvedValue({
+    ...thread,
+    scope: { type: "node", nodeId: target.id },
+  });
+  const panel = (jobs: readonly DesignJob[]) => (
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Live phase Agent"
+      subtitle="Builds the node"
+      nodes={[target]}
+      jobs={jobs}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />
+  );
+  const rendered = render(panel([runningJob]));
+  const record = await screen.findByLabelText("Node generation · Live phase · running");
+  const thinking = () => record.querySelector<HTMLElement>('[data-activity-kind="thinking"]')!;
+  const activeKinds = () => [...record.querySelectorAll<HTMLElement>('[data-activity-kind][data-active="true"]')]
+    .map((element) => element.dataset.activityKind);
+
+  await waitFor(() => expect(thinking()).toHaveAttribute("data-active", "true"));
+  expect(thinking().querySelector(".agent-activity-card__pulse")).toBeInTheDocument();
+  expect(within(thinking()).getByText("Live")).toBeInTheDocument();
+  expect(activeKinds()).toEqual(["thinking"]);
+
+  const laterActivities: Array<{ activity: DesignJob["activity"]; phase: string }> = [
+    { activity: [reasoning, { id: "tool-later", kind: "tool", text: "Writing index.html", createdAt: 3 }], phase: "actions" },
+    { activity: [reasoning, { id: "status-later", kind: "status", text: "Validating output", createdAt: 3 }], phase: "actions" },
+    { activity: [reasoning, { id: "search-later", kind: "text", text: "Searching the web for “editorial grids”", createdAt: 3 }], phase: "search" },
+    { activity: [reasoning, { id: "image-later", kind: "text", text: "Generating an image “Tokyo at dusk”", createdAt: 3 }], phase: "image-generation" },
+  ];
+  for (const { activity, phase } of laterActivities) {
+    rendered.rerender(panel([{ ...runningJob, activity, updatedAt: 3 }]));
+    await waitFor(() => expect(thinking()).not.toHaveAttribute("data-active"));
+    expect(thinking().querySelector(".agent-activity-card__pulse")).toBeNull();
+    expect(thinking().querySelector(".agent-activity-card__marker")).toHaveAttribute("data-state", "complete");
+    expect(within(thinking()).getByText("Completed")).toBeInTheDocument();
+    expect(activeKinds()).toEqual([phase]);
+  }
+
+  const cumulativeActivities: DesignJob["activity"] = [
+    reasoning,
+    { id: "tool-middle", kind: "tool", text: "Writing index.html", createdAt: 3 },
+    { id: "search-middle", kind: "text", text: "Searching the web for “editorial grids”", createdAt: 4 },
+    { id: "image-middle", kind: "text", text: "Generating an image “Tokyo at dusk”", createdAt: 5 },
+    { id: "reasoning-newest", kind: "text", text: "Review the generated hierarchy.", createdAt: 6 },
+  ];
+  rendered.rerender(panel([{
+    ...runningJob,
+    activity: cumulativeActivities,
+    updatedAt: 6,
+  }]));
+  await waitFor(() => expect(thinking()).toHaveAttribute("data-active", "true"));
+  expect(thinking().querySelector(".agent-activity-card__pulse")).toBeInTheDocument();
+  expect(within(thinking()).getByText("Live")).toBeInTheDocument();
+  expect(activeKinds()).toEqual(["thinking"]);
+  expect(record.querySelector('[data-activity-kind="actions"] li[data-state="active"]')).toBeNull();
+  expect(record.querySelector('[data-activity-kind="search"]')).not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-activity-kind="image-generation"]')).not.toHaveAttribute("data-active");
+
+  rendered.rerender(panel([{
+    ...runningJob,
+    status: "ready",
+    activity: cumulativeActivities,
+    updatedAt: 7,
+    finishedAt: 7,
+  }]));
+  await waitFor(() => expect(activeKinds()).toEqual([]));
+  expect(record.querySelector('[data-activity-kind="thinking"]')).not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-activity-kind="actions"] li[data-state="active"]')).toBeNull();
+  expect(record.querySelector('[data-activity-kind="search"]')).not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-activity-kind="image-generation"]')).not.toHaveAttribute("data-active");
+});
+
+test("Agent transcript follows live updates only while the reader remains near the tail", async () => {
+  const target = node();
+  const running: DesignJob = {
+    ...job,
+    id: "job-follow-tail",
+    kind: "node-generation",
+    status: "running",
+    nodeId: target.id,
+    finishedAt: null,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  const props = {
+    projectId: PROJECT_ID,
+    api,
+    scope: { type: "node", nodeId: target.id } as const,
+    title: "Landing page Agent",
+    subtitle: "Works from canvas context",
+    nodes: [target],
+    onSubmit: async () => {},
+    onCancelJob: async () => {},
+    onAttachFiles: async () => {},
+  };
+  const rendered = render(<CanvasAgentPanel {...props} jobs={[running]} />);
+  const log = await screen.findByRole("log");
+  Object.defineProperties(log, {
+    scrollHeight: { configurable: true, value: 1_000 },
+    clientHeight: { configurable: true, value: 300 },
+  });
+
+  log.scrollTop = 120;
+  fireEvent.scroll(log);
+  rendered.rerender(<CanvasAgentPanel {...props} jobs={[{ ...running, status: "validating", updatedAt: 2 }]} />);
+  await waitFor(() => expect(log.scrollTop).toBe(120));
+
+  log.scrollTop = 700;
+  fireEvent.scroll(log);
+  rendered.rerender(<CanvasAgentPanel {...props} jobs={[{ ...running, status: "ready", updatedAt: 3, finishedAt: 3 }]} />);
+  await waitFor(() => expect(log.scrollTop).toBe(1_000));
+});
+
+test("Job status changes have a dedicated polite atomic announcement", async () => {
+  const target = node();
+  const running: DesignJob = { ...job, kind: "node-generation", status: "running", nodeId: target.id, finishedAt: null };
+  const { api } = createCanvasApi(canvas([target]));
+  const rendered = render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Landing page Agent"
+      subtitle="Works from canvas context"
+      nodes={[target]}
+      jobs={[running]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onAttachFiles={async () => {}}
+    />,
+  );
+  const card = rendered.container.querySelector<HTMLElement>(`[data-job-id="${running.id}"]`)!;
+  const status = within(card).getByRole("status");
+  expect(status).toHaveAttribute("aria-live", "polite");
+  expect(status).toHaveAttribute("aria-atomic", "true");
+  expect(status).toHaveTextContent("Landing page generation: Working");
 });
 
 test("Main Agent toggles from the topbar, sees canvas scope, and submits orchestration turns", async () => {
@@ -1672,8 +2324,10 @@ test("Export opens Main Agent and keeps the implementation job visible through c
     1,
     { agentCommand: "claude", model: "opus" },
   ));
-  expect(await screen.findByText("Implementation export")).toBeInTheDocument();
-  expect(screen.getByText("Export ready · export-1")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Implementation export · ready")).toBeInTheDocument();
+  expect(screen.getAllByText("Implementation export")).toHaveLength(1);
+  expect(screen.getByText("Export ready")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: /Actions/ }));
   expect(screen.getByText("High-fidelity implementation ready")).toBeInTheDocument();
   expect(screen.getByTitle("/tmp/editorial/design/exports/export-1")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Reveal export" }));
@@ -1704,13 +2358,17 @@ test("Export stays disabled with provider-neutral guidance when no runtime Agent
 
   const exportButton = await screen.findByRole("button", { name: "Export code" });
   expect(exportButton).toBeDisabled();
-  expect(exportButton).toHaveAttribute("title", "No Design Agent is currently available for export");
+  expect(exportButton).not.toHaveAttribute("title");
+  await user.hover(exportButton.parentElement!);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("No Design Agent is currently available for export");
+  await user.unhover(exportButton.parentElement!);
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   expect(within(screen.getByLabelText("Main Agent panel")).getByRole("button", { name: "Agent unavailable" })).toBeInTheDocument();
   expect(api.startImplementationExport).not.toHaveBeenCalled();
 });
 
 test("Export stays disabled while any generated Node still has projected or listed live work", async () => {
+  const user = userEvent.setup();
   const nodeA = node({
     id: "page-a",
     name: "Checkout",
@@ -1740,8 +2398,9 @@ test("Export stays disabled while any generated Node still has projected or list
 
   const exportButton = await screen.findByRole("button", { name: "Export code" });
   expect(exportButton).toBeDisabled();
-  expect(exportButton).toHaveAttribute(
-    "title",
+  expect(exportButton).not.toHaveAttribute("title");
+  await user.hover(exportButton.parentElement!);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent(
     "Wait for Node generation to finish before exporting: Checkout, Account",
   );
   expect(api.startImplementationExport).not.toHaveBeenCalled();
@@ -1759,4 +2418,58 @@ test("file drops become material context nodes and undo/redo shortcuts call auth
   await waitFor(() => expect(api.undo).toHaveBeenCalledTimes(1));
   fireEvent.keyDown(window, { key: "z", metaKey: true, shiftKey: true });
   await waitFor(() => expect(api.redo).toHaveBeenCalledTimes(1));
+});
+
+test("live Node generation keeps complete Thinking detail and exposes an accessible Stop state", async () => {
+  const user = userEvent.setup();
+  const target = node();
+  const completeDetail = [
+    "Preserve the complete generation reasoning, including every constraint and verification note.",
+    "Expanded Thinking must not replace this information with a shortened summary.",
+  ].join(" ").repeat(3);
+  const liveJob: DesignJob = {
+    ...job,
+    id: "job-live-generation",
+    kind: "node-generation",
+    status: "running",
+    nodeId: target.id,
+    activity: Array.from({ length: 10 }, (_, index) => ({
+      id: `live-reason-${index + 1}`,
+      kind: "text" as const,
+      text: index === 9 ? completeDetail : `Complete reasoning step ${index + 1}`,
+      createdAt: index + 1,
+    })),
+    updatedAt: 10,
+    finishedAt: null,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  let finishCancel: (() => void) | undefined;
+  const onCancelJob = vi.fn(() => new Promise<void>((resolve) => {
+    finishCancel = resolve;
+  }));
+
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Landing page Agent"
+      subtitle=""
+      nodes={[target]}
+      jobs={[liveJob]}
+      onSubmit={async () => {}}
+      onCancelJob={onCancelJob}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  expect(await screen.findByText("Complete reasoning step 1")).toBeInTheDocument();
+  expect(screen.getByText(completeDetail)).toBeInTheDocument();
+  const stop = screen.getByRole("button", { name: "Stop Landing page generation" });
+  await user.click(stop);
+  expect(onCancelJob).toHaveBeenCalledWith(liveJob.id);
+  expect(screen.getByRole("button", { name: "Stopping Landing page generation" })).toBeDisabled();
+
+  finishCancel?.();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Stop Landing page generation" })).toBeEnabled());
 });

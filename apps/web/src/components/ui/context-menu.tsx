@@ -27,10 +27,10 @@ function ContextMenuContent({
       <ContextMenuPrimitive.Content
         ref={motionRef}
         data-slot="context-menu-content"
+        data-dezin-menu-presence=""
         collisionPadding={8}
         className={cn(
           "z-50 max-h-(--radix-context-menu-content-available-height) origin-(--radix-context-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border-[0.5px] border-border/80 bg-popover/95 p-1.5 text-popover-foreground shadow-pop outline-none backdrop-blur-xl",
-          "ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:duration-250 data-[state=closed]:duration-150 data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-[0.985] data-[state=open]:zoom-in-[0.975] data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
           className,
         )}
         {...props}
@@ -47,7 +47,7 @@ function ContextMenuItem({
     <ContextMenuPrimitive.Item
       data-slot="context-menu-item"
       className={cn(
-        "relative flex cursor-default select-none items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-hidden transition-[transform,background-color,color] duration-180 ease-out focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-default select-none items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-hidden transition-[transform,background-color,color] duration-150 ease-[var(--ease-smooth)] active:scale-[0.985] motion-reduce:active:scale-100 focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className,
       )}
       {...props}

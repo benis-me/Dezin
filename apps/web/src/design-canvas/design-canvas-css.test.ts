@@ -4,6 +4,8 @@ import { expect, test } from "vitest";
 
 const css = readFileSync(join(process.cwd(), "src/design-canvas/design-canvas.css"), "utf8");
 const conversationCss = readFileSync(join(process.cwd(), "src/components/agent-conversation.css"), "utf8");
+const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8");
+const floatingAgentSource = readFileSync(join(process.cwd(), "src/design-canvas/FloatingNodeAgent.tsx"), "utf8");
 
 test("Design Canvas CSS consumes full-color tokens without invalid hsl wrappers", () => {
   expect(css).not.toContain("hsl(var(--");
@@ -55,6 +57,15 @@ test("image Nodes suppress frame chrome because their geometry owns the intrinsi
   expect(css).toMatch(/\.design-canvas-node__asset--image\s*\{[^}]*object-fit:\s*contain;[^}]*background-color:\s*transparent;/s);
 });
 
+test("generation dots keep their organic loop on compositor-only properties", () => {
+  expect(css).toMatch(/\.design-canvas-node__generation-glow\s*\{[^}]*inset:\s*-28%;[^}]*will-change:\s*transform, opacity;[^}]*design-canvas-generation-morph 4\.8s linear infinite/s);
+  const keyframeStart = css.indexOf("@keyframes design-canvas-generation-morph");
+  const keyframeEnd = css.indexOf("@keyframes design-canvas-generation-breathe", keyframeStart);
+  const keyframes = css.slice(keyframeStart, keyframeEnd);
+  expect(keyframes).toContain("transform: translate3d");
+  expect(keyframes).not.toMatch(/mask-(?:position|size)/);
+});
+
 test("Node previews have no permanent title chrome or zoom-in cursor", () => {
   expect(css).not.toContain(".design-canvas-node__chrome");
   expect(css).not.toContain(".design-canvas-node__identity");
@@ -77,43 +88,126 @@ test("focused Nodes fly above an opaque same-color mask while background Nodes r
   expect(css).not.toMatch(/data-node-focus-role[^}]*\b(?:top|left|width|height):/s);
 });
 
-test("focused Agent fills available height below model-picker overlays", () => {
-  expect(css).toMatch(/\.design-canvas-agent--floating\s*\{[^}]*z-index:\s*49;[^}]*width:\s*var\(--design-node-agent-width, 352px\);/s);
+test("focused Agent morphs its real height without scaling its content", () => {
+  expect(css).toMatch(/\.design-canvas-agent--floating\s*\{[^}]*z-index:\s*49;[^}]*width:\s*var\(--design-node-agent-width, 352px\);[^}]*height:\s*min\(520px, calc\(100% - 24px\)\);[^}]*transition:\s*height 280ms var\(--design-canvas-ease-in-out\);/s);
   expect(css).toMatch(/\.design-canvas-agent--floating\[data-agent-size="focus"\]\s*\{[^}]*height:\s*calc\(100% - 24px\);/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-agent="open"\] \.design-canvas-focus-actions\s*\{[^}]*left:\s*calc\(50% - \(var\(--design-node-agent-width, 352px\) \+ 24px\) \/ 2\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-agent="open"\] \.design-canvas-focus-actions\s*\{[^}]*--design-focus-actions-offset-x:\s*calc\(-1 \* \(var\(--design-node-agent-width, 352px\) \+ 24px\) \/ 2\);/s);
+  expect(floatingAgentSource).toContain('layout={floating && !reduceMotion ? "position" : false}');
+  expect(floatingAgentSource).toContain("duration: reduceMotion ? 0 : 0.28, ease: AGENT_MORPH_EASE");
+  expect(floatingAgentSource).toContain("boundedEntryOffset(nodeCenterX - (resolved.left + panelWidth / 2), 8)");
+  expect(floatingAgentSource).not.toContain("data-agent-focus-reveal");
+  expect(floatingAgentSource).not.toContain("0.985");
+  expect(css).not.toContain("data-agent-focus-reveal");
 });
 
 test("Agent header is compact and its solid surface does not use backdrop glass", () => {
-  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*48px;[^}]*min-height:\s*48px;[^}]*padding:\s*0 10px 0 14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*50px;[^}]*min-height:\s*50px;[^}]*padding:\s*0 9px 0 14px;/s);
   expect(css).toMatch(/\.design-canvas-agent__surface\s*\{[^}]*background:\s*var\(--card\);/s);
   expect(css).not.toMatch(/\.design-canvas-agent__surface\s*\{[^}]*backdrop-filter/s);
   expect(css).not.toContain(".design-canvas-agent__mark");
 });
 
 test("Agent composer grows within explicit bounds without a separator above it", () => {
-  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 10px 10px;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 7px 7px;[^}]*background:\s*transparent;/s);
   expect(css).not.toMatch(/\.design-canvas-agent__composer\s*\{[^}]*border-top:/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*width:\s*100%;[^}]*border-radius:\s*14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;[^}]*width:\s*100%;[^}]*border-radius:\s*14px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*color-mix\(in oklch, var\(--foreground\) 5\.5%, var\(--card\)\);[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]\s*\{[^}]*animation-duration:\s*0\.001ms !important;[^}]*animation-iteration-count:\s*1 !important;[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]::before,[\s\S]*animation:\s*none !important;/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam:focus-within \.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*color-mix\(in oklch, var\(--design-canvas-accent\) 48%, var\(--border-strong\)\);/s);
 });
 
-test("expanded Agent detail never grows a left emphasis rail", () => {
-  expect(css).not.toMatch(/\.design-canvas-agent__activity[^}]*border-left:/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity[^}]*box-shadow:[^;}]*inset\s+[\d.]+px\s+0\s+0/s);
-  expect(conversationCss).not.toMatch(/\.agent-reasoning[^}]*border-left:/s);
+test("Agent execution records stay flat without decorative rails or nested card shells", () => {
+  expect(css).toMatch(/\.design-canvas-agent__activity-group\s*\{[^}]*overflow:\s*visible;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity\s*\{[^}]*overflow:\s*visible;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity(?:::[a-z-]+)?\s*\{[^}]*content:\s*["']{2}/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*background:\s*transparent;/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*border-radius:\s*999px/s);
+  expect(conversationCss).toMatch(/\.agent-activity-card\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
   expect(conversationCss).toMatch(/\.agent-web-search__rail\s*\{\s*display:\s*none;/s);
 });
 
-test("Agent Job cards reserve red surfaces for failures", () => {
-  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="ready"\][^\{]*\{[^}]*background:\s*color-mix\(in oklch, var\(--surface\) 36%, transparent\);/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*var\(--destructive\)[^}]*background:[^}]*box-shadow:\s*none;/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="failed"\][^}]*inset\s+[\d.]+px\s+0\s+0/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*color-mix\(in srgb, var\(--success\)/s);
+test("Agent disclosure rows keep every expanded glyph and body on the 29px editorial rail", () => {
+  expect(css).toMatch(/\.design-canvas-agent__activity-body\s*\{[^}]*padding:\s*0 0 10px;/s);
+  expect(conversationCss).toMatch(/\.agent-activity-card__header\s*\{[^}]*min-height:\s*38px;[^}]*padding:\s*7px 8px 7px 7px;/s);
+  expect(conversationCss).toMatch(/\.agent-reasoning__viewport\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
+  expect(conversationCss).toMatch(/\.agent-progress__items\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
+  expect(conversationCss).toMatch(/\.agent-progress__items li\s*\{[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\);[^}]*gap:\s*7px;/s);
+  expect(conversationCss).toMatch(/\.agent-web-search__results ul\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
+  expect(conversationCss).toMatch(/\.agent-web-search__results li > a,\s*\.agent-web-search__results li > span\s*\{[^}]*gap:\s*8px;/s);
+  expect(conversationCss).toMatch(/\.agent-web-search__status\s*\{[^}]*width:\s*13px;/s);
+  expect(conversationCss).toMatch(/\.agent-image-generation-state__body\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
+  expect(conversationCss).not.toMatch(/\.agent-activity-card__header:hover\s*\{[^}]*background:/s);
+  expect(conversationCss).toMatch(/\.agent-activity-card__header:hover \.agent-activity-card__marker,[\s\S]*\.agent-activity-card__header:hover \.agent-activity-card__chevron\s*\{[^}]*color:\s*var\(--foreground\);/s);
+  expect(conversationCss).toMatch(/\.agent-activity-card \+ \.agent-activity-card::before\s*\{[^}]*right:\s*8px;[^}]*left:\s*29px;/s);
+  expect(conversationCss).toMatch(/\.agent-activity-card\[data-active\] \.agent-activity-card__pulse\s*\{[^}]*animation:\s*agent-activity-pulse/s);
+  const basePulseRule = conversationCss.match(/(?:^|\n)(\.agent-activity-card__pulse\s*\{[^}]*\})/)?.[1];
+  expect(basePulseRule).toBeTruthy();
+  expect(basePulseRule).not.toContain("animation:");
+  const baseImageGlowRule = conversationCss.match(/(?:^|\n)(\.agent-image-generation-state__glow\s*\{[^}]*\})/)?.[1];
+  expect(baseImageGlowRule).toBeTruthy();
+  expect(baseImageGlowRule).not.toContain("animation:");
+  expect(conversationCss).toMatch(/\.agent-image-generation-state\[data-active\] \.agent-image-generation-state__glow\s*\{[^}]*animation:\s*agent-image-breathe/s);
+});
+
+test("Agent Job status stays in its glyph rather than tinting whole cards", () => {
+  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="ready"\][^\{]*\{[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-error\s*\{[^}]*display:\s*grid;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-error > svg\s*\{[^}]*color:\s*var\(--destructive\);/s);
+  expect(conversationCss).toMatch(/\.agent-progress__items li\[data-state="failed"\]\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 74%, var\(--muted-foreground\)\);/s);
+  expect(conversationCss).toMatch(/\.agent-progress__items li\[data-state="failed"\] \.agent-progress__state\s*\{[^}]*color:\s*var\(--destructive\);/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*background:[^;}]*var\(--destructive\)/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*color:\s*var\(--success\)/s);
   expect(css).not.toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*var\(--destructive\)/s);
   expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="(?:running|ready)"\][^{]*\{[^}]*background:[^;}]*var\(--destructive\)/s);
+});
+
+test("Agent transcript restores the original right-aligned Canvas user bubble", () => {
+  expect(floatingAgentSource).toContain('message.role === "user" ? "Prompt" : message.role === "assistant" ? "Response"');
+  expect(floatingAgentSource).toContain('role="log"');
+  expect(floatingAgentSource).toContain('aria-live="polite"');
+  expect(floatingAgentSource).toContain('aria-relevant="additions"');
+  expect(floatingAgentSource).toContain('job.status === "failed" && job.error');
+  expect(css).toMatch(/\.design-canvas-agent__message\[data-role="user"\]\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*flex-end;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message\[data-role="user"\] \.design-canvas-agent__message-meta\s*\{[^}]*display:\s*none;/s);
+  expect(conversationCss).toMatch(/\.agent-user-message\s*\{[^}]*border:\s*1px solid color-mix\(in oklch, var\(--border\) 84%, transparent\);[^}]*border-radius:\s*12px 12px 5px 12px;[^}]*padding:\s*7px 10px;[^}]*background:\s*var\(--surface-2\);[^}]*box-shadow:\s*var\(--shadow-card\);[^}]*font-size:\s*12\.5px;[^}]*line-height:\s*18px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message\[data-role="user"\] \.agent-user-message\s*\{[^}]*max-width:\s*86%;[^}]*border:\s*0;[^}]*border-radius:\s*14px 14px 5px 14px;[^}]*padding:\s*8px 11px;[^}]*background:\s*color-mix\(in oklch, var\(--foreground\) 7%, var\(--card\)\);[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message\[data-role="(?:system|tool)"\]\s*\{[^}]*border-top:/s);
+  expect(css).toMatch(/\.design-canvas-agent__message-meta\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 52%, var\(--muted-foreground\)\);/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer textarea::placeholder\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 68%, var\(--card\)\);/s);
+  expect(floatingAgentSource).not.toContain("text-muted-foreground/80");
+});
+
+test("Agent panel header uses the locked 50px shell and 2px control rhythm", () => {
+  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*50px;[^}]*min-height:\s*50px;[^}]*padding:\s*0 9px 0 14px;/s);
+  expect(floatingAgentSource).toContain('className="design-canvas-agent__header-controls"');
+  expect(css).toMatch(/\.design-canvas-agent__header-controls\s*\{[^}]*display:\s*flex;[^}]*gap:\s*2px;/s);
+});
+
+test("Agent transcript uses the locked turn hierarchy instead of one uniform stack", () => {
+  expect(css).toMatch(/\.design-canvas-agent__transcript\s*\{[^}]*padding:\s*14px 14px 12px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__history-more\s*\{[^}]*height:\s*28px;[^}]*margin-bottom:\s*8px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__message,[\s\S]*?\.design-canvas-agent__activity \+ \.design-canvas-agent__message,[\s\S]*?\{\s*margin-top:\s*16px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__activity,\s*\.design-canvas-agent__message \+ \.design-canvas-agent__activity-group\s*\{\s*margin-top:\s*10px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-group \+ \.design-canvas-agent__message,[\s\S]*\.design-canvas-agent__activity-group \+ \.design-canvas-agent__activity-group\s*\{\s*margin-top:\s*22px;/s);
+});
+
+test("Agent responses keep lightweight metadata and compact editorial prose", () => {
+  expect(floatingAgentSource).toContain('className="design-canvas-agent__message-meta"');
+  expect(css).toMatch(/\.design-canvas-agent__message-meta\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 52%, var\(--muted-foreground\)\);[^}]*font-size:\s*8px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message\[data-role="assistant"\] \.design-canvas-agent__message-meta\s*\{[^}]*display:\s*flex;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \.agent-text-response,\s*\.design-canvas-agent__message \.agent-response-prose\s*\{[^}]*font-size:\s*12\.5px;[^}]*line-height:\s*18\.5px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \.agent-response-prose > \* \+ \*\s*\{[^}]*margin-top:\s*7px;/s);
+});
+
+test("Agent composer preserves Beam geometry behind a 12px breath and 18px transcript fade", () => {
+  expect(css).toMatch(/\.design-canvas-agent__transcript\s*\{[^}]*padding:\s*14px 14px 12px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 7px 7px;[^}]*background:\s*transparent;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer::before\s*\{[^}]*bottom:\s*100%;[^}]*height:\s*18px;[^}]*background:\s*linear-gradient\(to bottom, transparent, color-mix\(in oklch, var\(--card\) 94%, transparent\)\);[^}]*pointer-events:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;[^}]*padding:\s*11px 10px 3px;/s);
 });
 
 test("light-mode bottom controls and context menus follow the Spatial surface language", () => {
@@ -123,9 +217,9 @@ test("light-mode bottom controls and context menus follow the Spatial surface la
   expect(css).toMatch(/#design-canvas-add\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;[^}]*padding:\s*0;/s);
   expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\]\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s);
   expect(css).toMatch(/\.design-canvas-zoom \[data-slot="button"\] > svg\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;[^}]*stroke-width:\s*2;/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-main-agent\] \.design-canvas-tools\s*\{[^}]*right:\s*calc\(clamp\(380px, 32vw, 492px\) \+ 20px\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-main-agent\] \.design-canvas-tools\s*\{[^}]*--design-canvas-toolbar-offset-x:\s*calc\(-1 \* \(clamp\(380px, 32vw, 492px\) \+ 8px\)\);/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*\.design-canvas-node\s*\{\s*opacity:\s*0\.45;/s);
-  expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*320ms,\s*360ms;/s);
+  expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*180ms,\s*200ms;/s);
   expect(css).toMatch(/\.design-node-context-menu\s*\{[^}]*width:\s*284px;[^}]*border-radius:\s*16px;/s);
   expect(css).not.toMatch(/\.design-canvas-node:hover(?:\s+\.design-canvas-node__frame)?\s*\{[^}]*\btransform:\s*[^;}]*scale/s);
 });
@@ -134,16 +228,30 @@ test("canvas chrome exits on focus opening and re-enters during closing", () => 
   expect(css).toMatch(/\.design-canvas-root\[data-node-focus="opening"\] \.design-canvas-topbar__leading\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(-10px,\s*0,\s*0\);/s);
   expect(css).toMatch(/\.design-canvas-root\[data-node-focus="opening"\] \.design-canvas-topbar__actions\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(10px,\s*0,\s*0\);/s);
   expect(css).toMatch(/\.design-canvas-root\[data-node-focus="closing"\] \.design-canvas-topbar__leading,[^{]*\.design-canvas-root\[data-node-focus="closing"\] \.design-canvas-topbar__actions\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0,\s*0,\s*0\);/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-tools\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(10px,\s*8px,\s*0\) scale\(0\.98\);/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(-10px,\s*8px,\s*0\) scale\(0\.98\);/s);
-  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-tools,[^{]*\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0,\s*0,\s*0\) scale\(1\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-tools\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(calc\(var\(--design-canvas-toolbar-offset-x\) \+ 22px\),\s*16px,\s*0\) scale\(0\.975\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(-22px,\s*16px,\s*0\) scale\(0\.975\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-tools\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(var\(--design-canvas-toolbar-offset-x\),\s*0,\s*0\) scale\(1\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-zoom\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0,\s*0,\s*0\) scale\(1\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-tools,\s*\.design-canvas-surface\[data-node-focus="closing"\] \.design-canvas-zoom\s*\{[^}]*transition:\s*opacity 280ms var\(--design-canvas-ease-in-out\),\s*transform 280ms var\(--design-canvas-ease-in-out\);/s);
   expect(css).toMatch(/\.design-canvas-surface\[data-node-focus\] \.react-flow__pane\s*\{\s*pointer-events:\s*none;/s);
+});
+
+test("reduced-motion toolbar chrome keeps a fade while removing spatial travel", () => {
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-tools,\s*\.design-canvas-zoom\s*\{\s*transition:\s*opacity 160ms var\(--design-canvas-ease-out\) !important;\s*\}/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-tools\s*\{\s*transform:\s*translate3d\(var\(--design-canvas-toolbar-offset-x\),\s*0,\s*0\) scale\(1\) !important;\s*\}/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-surface\[data-node-focus="opening"\] \.design-canvas-zoom\s*\{\s*transform:\s*translate3d\(0,\s*0,\s*0\) scale\(1\) !important;\s*\}/s);
 });
 
 test("focused preview controls are larger and animate with the focus chrome", () => {
   expect(css).toMatch(/\.design-canvas-focus-actions\s*\{[^}]*bottom:\s*16px;[^}]*border-radius:\s*17px;[^}]*padding:\s*5px;/s);
   expect(css).toMatch(/\.design-canvas-focus-actions \[data-slot="button"\]\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px;/s);
   expect(css).toMatch(/\.design-canvas-focus-dismiss\s*\{[^}]*z-index:\s*47;[^}]*inset:\s*0;/s);
+  expect(screenSource).toContain("duration: focusMotionAllowed ? 0.26 : 0");
+  expect(screenSource).toContain("duration: focusMotionAllowed ? 0.2 : 0");
+});
+
+test("selected Nodes temporarily suppress their redundant inline toolbar", () => {
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__toolbar\s*\{\s*display:\s*none;/s);
 });
 
 test("Canvas uses the requested neutral background in both color schemes", () => {
@@ -151,11 +259,62 @@ test("Canvas uses the requested neutral background in both color schemes", () =>
   expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*#e8eaeb;/s);
 });
 
-test("Node catalog animation follows the Radix open and closed lifecycle", () => {
-  expect(css).toContain('.design-node-catalog[data-state="open"]');
-  expect(css).toContain('.design-node-catalog[data-state="closed"]');
-  expect(css).toContain('.design-canvas-agent__mention-menu[data-state="open"]');
-  expect(css).toContain('.design-canvas-agent__mention-menu[data-state="closed"]');
-  expect(css).toContain("@keyframes design-canvas-menu-in");
-  expect(css).toContain("@keyframes design-canvas-menu-out");
+test("Canvas menu surfaces leave presence opacity and transforms to the shared compositor track", () => {
+  expect(css).toMatch(/\.design-node-catalog\s*\{[^}]*transform-origin:\s*var\(--radix-dropdown-menu-content-transform-origin,/s);
+  expect(css).toMatch(/\.design-node-context-menu\s*\{[^}]*transform-origin:\s*var\(--radix-context-menu-content-transform-origin,/s);
+  expect(css).toMatch(/\.design-canvas-agent__mention-menu\s*\{[^}]*transform-origin:\s*bottom center;/s);
+  expect(css).not.toMatch(/\.(?:design-node-catalog|design-node-context-menu|design-canvas-agent__mention-menu)\[data-state="(?:open|closed)"\]/s);
+  expect(css).not.toMatch(/\.(?:design-node-catalog|design-node-context-menu|design-canvas-agent__mention-menu)\s*\{[^}]*(?:transition:\s*(?:opacity|transform)|animation:)/s);
+});
+
+test("canvas chrome motion keeps the measured Agent height as its only layout transition", () => {
+  expect(css).toMatch(/\.design-canvas-root\s*\{[^}]*--design-canvas-ease-out:\s*cubic-bezier\(0\.23, 1, 0\.32, 1\);[^}]*--design-canvas-ease-in-out:\s*cubic-bezier\(0\.77, 0, 0\.175, 1\);/s);
+  expect(css).toMatch(/\.design-canvas-tools,\s*\.design-canvas-zoom\s*\{[^}]*transition:\s*opacity 240ms var\(--design-canvas-ease-out\),\s*transform 280ms var\(--design-canvas-ease-in-out\);/s);
+  expect(css).not.toMatch(/\.design-canvas-tools,\s*\.design-canvas-zoom\s*\{[^}]*transition:[^}]*(?:right|left|bottom)/s);
+  expect(css).toMatch(/\.design-canvas-focus-actions\s*\{[^}]*translate:\s*calc\(-50% \+ var\(--design-focus-actions-offset-x\)\) 0;[^}]*transition:\s*translate 280ms var\(--design-canvas-ease-in-out\);/s);
+  expect(css).not.toMatch(/\.design-canvas-focus-actions\s*\{[^}]*transition:[^}]*(?:left|bottom)/s);
+  expect(css).not.toMatch(/\.design-canvas-agent--floating\s*\{[^}]*transition:[^}]*(?:left|top)/s);
+  expect(css).toMatch(/\.design-canvas-agent--floating\s*\{[^}]*transition:\s*height 280ms var\(--design-canvas-ease-in-out\);/s);
+  expect(css).toMatch(/\.design-canvas-tools \[data-slot="button"\]:active:not\(:disabled\),[\s\S]*\.design-canvas-focus-actions \[data-slot="button"\]:active:not\(:disabled\)\s*\{[^}]*transform:\s*scale\(0\.97\);/s);
+  expect(css).toMatch(/@media \(prefers-reduced-transparency: reduce\)[\s\S]*\.design-node-catalog,[\s\S]*backdrop-filter:\s*none;/s);
+  expect(css).toMatch(/@media \(prefers-contrast: more\)[\s\S]*\.design-canvas-surface \.react-flow__selection/s);
+  expect(screenSource).toContain("[0.23, 1, 0.32, 1]");
+  expect(screenSource).not.toContain("CANVAS_MOTION_EASE_IN_OUT");
+  expect(screenSource).toContain("duration: reduceMotion ? 0 : 0.24, ease: CANVAS_MOTION_EASE");
+  expect(screenSource).not.toMatch(/\b(?:initial|animate|exit)=\{[^}]*\b(?:x|y|scale):/s);
+  expect(screenSource).toContain('transform: "translate3d(0px, 0px, 0px) scale(1)"');
+  expect(screenSource).not.toContain("translate3d(0, 0, 0)");
+  expect(screenSource).not.toMatch(/translate3d\(-?[\d.]+px, 0, 0\)/);
+  expect(screenSource).not.toMatch(/translate3d\(0, -?[\d.]+px, 0\)/);
+  expect(floatingAgentSource).not.toContain("translate3d(0, 0, 0)");
+  expect(floatingAgentSource).not.toMatch(/translate3d\(-?[\d.]+px, 0, 0\)/);
+  expect(floatingAgentSource).not.toMatch(/translate3d\(0, -?[\d.]+px, 0\)/);
+  expect(css).toMatch(/\.design-canvas-agent__mention-menu\s*\{[^}]*transform-origin:\s*bottom center;/s);
+  expect(css).not.toContain("@keyframes design-canvas-menu-in");
+  expect(css).not.toContain("@keyframes design-canvas-menu-out");
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-topbar__icon-action:hover,[\s\S]*\.design-canvas-agent__composer-shell:hover[\s\S]*\.design-node-catalog__item:hover/s);
+});
+
+test("Agent activity cards keep Thinking compact, complete, and visually quiet", () => {
+  expect(conversationCss).toMatch(/\.agent-thinking-state\s*\{[^}]*font-size:\s*11\.5px;[^}]*line-height:\s*16px;/s);
+  expect(conversationCss).not.toMatch(/\.agent-reasoning\[data-active\]\s*\{[^}]*background:/s);
+  expect(conversationCss).not.toMatch(/\.agent-reasoning__viewport\s*\{[^}]*(?:max-height|overflow-y|mask-image):/s);
+  expect(conversationCss).not.toMatch(/\.agent-reasoning__viewport p\s*\{[^}]*-webkit-line-clamp:/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
+  expect(css).not.toContain(".design-canvas-agent__activity::before");
+  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="[^"]+"\]::before/);
+  expect(css).toMatch(/\.design-canvas-agent__activity > header\s*\{[^}]*min-height:\s*40px;[^}]*padding:\s*0;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-toggle\s*\{[^}]*min-height:\s*40px;[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\) 14px;[^}]*gap:\s*8px;[^}]*padding:\s*6px 0;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-body\s*\{[^}]*padding:\s*0 0 10px;/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-agent__activity-toggle:hover\s*\{[^}]*background:\s*transparent;/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity\s*\{[^}]*animation:/s);
+  expect(css).toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 54%, var\(--muted-foreground\)\);/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*animation:/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*(?:background|background-clip):/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-stop\s*\{[^}]*margin-right:\s*4px;[^}]*border:[^;}]*var\(--destructive\)[^}]*border-radius:\s*999px(?:\s*!important)?;[^}]*transition:\s*transform 140ms/s);
+  expect(floatingAgentSource).toContain('<AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>');
+  expect(css).toMatch(/\.design-canvas-agent__activity-collapsible\s*\{[^}]*overflow:\s*hidden;/s);
+  expect(css).toMatch(/\.design-canvas-agent__activity-collapsible > \[data-agent-collapsible-content\]\s*\{[^}]*transform-origin:\s*50% 0;/s);
+  expect(css).not.toMatch(/\.design-canvas-agent__activity-collapsible[^}]*grid-template-rows/s);
 });
