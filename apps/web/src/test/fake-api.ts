@@ -23,7 +23,7 @@ function fakeProject(id: string, patch: Partial<Project> = {}): Project {
 
 function emptyCanvas(projectId: string): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId,
     revision: 0,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -38,6 +38,7 @@ function emptyCanvas(projectId: string): DesignCanvas {
 
 function emptyThread(scope: DesignThread["scope"]): DesignThread {
   return {
+    schemaVersion: 2,
     id: scope.type === "main" ? "thread-main" : `thread-node-${scope.nodeId}`,
     scope,
     messages: [],
@@ -48,6 +49,7 @@ function emptyThread(scope: DesignThread["scope"]): DesignThread {
 
 function fakeJob(id: string, patch: Partial<DesignJob> = {}): DesignJob {
   return {
+    schemaVersion: 2,
     id,
     kind: "node-generation",
     runnerId: "fixture",
@@ -56,9 +58,12 @@ function fakeJob(id: string, patch: Partial<DesignJob> = {}): DesignJob {
     nodeId: null,
     parentJobId: null,
     contextHash: null,
+    canvasRevision: null,
+    expectedHeadVersionId: null,
     versionId: null,
     exportId: null,
     error: null,
+    cancelRequested: false,
     activity: [],
     createdAt: NOW,
     updatedAt: NOW,
@@ -99,6 +104,27 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
       sharingan: input.sharingan,
       sourceUrl: input.sourceUrl,
     }),
+    bootstrapDesignProject: async (input) => {
+      const project = fakeProject("project-bootstrap", { name: input.name });
+      return {
+        project,
+        bootstrap: {
+          job: {
+            schemaVersion: 1,
+            id: "bootstrap-fake",
+            projectId: project.id,
+            requestHash: "0".repeat(64),
+            status: "ready",
+            completedPhase: "ready",
+            mainJobId: input.prompt.trim() ? "job-fake" : null,
+            error: null,
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+          reused: false,
+        },
+      };
+    },
     generateProjectTitle: async (id) => fakeProject(id),
     getProject: async (id) => fakeProject(id),
     patchProject: async (id, patch) => fakeProject(id, patch),
@@ -125,6 +151,7 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
     listDesignNodeVersions: async () => [],
     designNodeVersionPreviewUrl: (projectId, nodeId, versionId) =>
       `/api/projects/${projectId}/design-canvas/nodes/${nodeId}/versions/${versionId}/preview/`,
+    downloadDesignNodeVersionHtml: async () => new Blob(["<!doctype html>"], { type: "text/html" }),
     getDesignThread: async (_projectId, scope) => emptyThread(scope),
     submitDesignAgentTurn: async (projectId, scope, input) => ({
       thread: {
@@ -144,9 +171,17 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
       canvas: emptyCanvas(projectId),
     }),
     listDesignJobs: async () => [],
+    // eslint-disable-next-line require-yield
+    streamDesignCanvasInvalidations: async function* () {},
     cancelDesignJob: async (_projectId, jobId) => fakeJob(jobId, {
       status: "cancelled",
       finishedAt: NOW,
+    }),
+    retryDesignJob: async (projectId, jobId) => ({
+      retryOfJobId: jobId,
+      thread: emptyThread({ type: "main" }),
+      job: fakeJob(`retry-${jobId}`),
+      canvas: emptyCanvas(projectId),
     }),
     startDesignImplementationExport: async () => ({
       exportId: "export-fake",

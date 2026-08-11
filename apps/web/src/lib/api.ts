@@ -1,19 +1,27 @@
 import type {
   DesignAgentTurnResult,
   DesignCanvas,
+  DesignCanvasAssetImportItem,
   DesignCanvasIntent,
   DesignExportResult,
+  DesignInvalidationMessage,
   DesignJob,
-  DesignNodeGeometry,
-  DesignNodeKind,
+  DesignJobRetryResult,
   DesignNodeVersion,
+  DesignProjectBootstrapInput,
+  DesignProjectBootstrapResult,
   DesignThread,
+} from "../design-canvas/types.ts";
+
+export type {
+  DesignCanvasAssetImportItem,
+  DesignCanvasAssetImportSource,
 } from "../design-canvas/types.ts";
 
 /**
  * Typed client for the Dezin daemon. fetch is injectable so it can be unit-tested
- * with a mock (no live daemon). Types mirror @dezin/core but are declared locally —
- * the browser bundle must not import the node packages.
+ * with a mock (no live daemon). Canvas wire DTOs come from the browser-safe
+ * contracts package; Node-owned storage types never cross this boundary.
  */
 
 export type ExtensionScope = "capture:write" | "image:analyze";
@@ -48,28 +56,9 @@ export interface CreateProjectInput {
   sourceUrl?: string;
 }
 
-export type DesignCanvasAssetImportSource =
-  | { name: string; mimeType: string; base64: string; sourceVersion?: never }
-  | {
-      name: string;
-      mimeType: string;
-      sourceVersion: { projectId: string; nodeId: string; versionId: string };
-      base64?: never;
-    };
-
-export interface DesignCanvasAssetImportItem {
-  asset: DesignCanvasAssetImportSource;
-  binding:
-    | {
-        type: "create-node";
-        node: {
-          id?: string;
-          kind: DesignNodeKind;
-          name?: string;
-          geometry?: Partial<DesignNodeGeometry>;
-        };
-      }
-    | { type: "append-version"; nodeId: string };
+export interface BootstrapDesignProjectResponse {
+  project: Project;
+  bootstrap: DesignProjectBootstrapResult;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -408,11 +397,15 @@ function jsonInit(method: string, body?: unknown): RequestInit {
 }
 
 interface ParsedSseBlock {
+  id: string | null;
   event: string | null;
   data: unknown;
 }
 
 function parseSseEnvelope(block: string): ParsedSseBlock | null {
+  const idLine = block
+    .split("\n")
+    .find((line) => line.startsWith("id:"));
   const eventLine = block
     .split("\n")
     .find((line) => line.startsWith("event:"));
@@ -423,6 +416,7 @@ function parseSseEnvelope(block: string): ParsedSseBlock | null {
   if (dataLines.length === 0) return null;
   try {
     return {
+      id: idLine === undefined ? null : idLine.slice(3).trim() || null,
       event: eventLine === undefined ? null : eventLine.slice(6).trim() || null,
       data: JSON.parse(dataLines.join("\n")) as unknown,
     };
@@ -434,6 +428,92 @@ function parseSseEnvelope(block: string): ParsedSseBlock | null {
 /** Parse one SSE block ("data: {...}" possibly multi-line) into its JSON payload. */
 export function parseSseBlock<T = unknown>(block: string): T | null {
   return (parseSseEnvelope(block)?.data as T | undefined) ?? null;
+}
+
+async function* consumeSseEnvelopes(res: Response): AsyncGenerator<ParsedSseBlock> {
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
+  if (!res.body) {
+    for (const block of (await res.text()).split("\n\n")) {
+      const parsed = parseSseEnvelope(block);
+      if (parsed) yield parsed;
+    }
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index: number;
+      while ((index = buffer.indexOf("\n\n")) >= 0) {
+        const parsed = parseSseEnvelope(buffer.slice(0, index));
+        buffer = buffer.slice(index + 2);
+        if (parsed) yield parsed;
+      }
+    }
+    buffer += decoder.decode();
+    const tail = buffer.trim();
+    if (tail) {
+      const parsed = parseSseEnvelope(tail);
+      if (parsed) yield parsed;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+function invalidationMessage(envelope: ParsedSseBlock): DesignInvalidationMessage | null {
+  if (envelope.id === null || envelope.data === null || typeof envelope.data !== "object" || Array.isArray(envelope.data)) {
+    return null;
+  }
+  const record = envelope.data as Record<string, unknown>;
+  const message = record as Partial<DesignInvalidationMessage>;
+  if ((message.type !== "invalidate" && message.type !== "reset")
+    || envelope.event !== message.type
+    || message.cursor !== envelope.id
+    || typeof message.epoch !== "string"
+    || !/^[A-Za-z0-9-]{1,128}$/.test(message.epoch)
+    || !Number.isSafeInteger(message.sequence)
+    || (message.sequence ?? -1) < 0
+    || message.cursor !== `${message.epoch}:${message.sequence}`) {
+    return null;
+  }
+  if (message.type === "invalidate") {
+    if (Object.keys(record).some((field) => !["type", "cursor", "epoch", "sequence", "topics"].includes(field))
+      || message.sequence === 0) return null;
+    if (!Array.isArray(message.topics) || message.topics.length === 0
+      || message.topics.some((topic) => typeof topic !== "string"
+        || !/^(?:canvas|jobs|thread:main|thread:node:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/.test(topic))
+      || new Set(message.topics).size !== message.topics.length) return null;
+  } else {
+    if (Object.keys(record).some((field) => !["type", "cursor", "epoch", "sequence", "reason"].includes(field))
+      || !("reason" in message) || ![
+        "initial",
+        "invalid-cursor",
+        "epoch-mismatch",
+        "history-compacted",
+        "cursor-ahead",
+      ].includes(String(message.reason))) {
+      return null;
+    }
+  }
+  return message as DesignInvalidationMessage;
+}
+
+function reconnectDelay(signal: AbortSignal | undefined, delayMs: number): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(finish, delayMs);
+    function finish(): void {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 export interface SharinganStep {
@@ -462,41 +542,13 @@ export interface SharinganStatus {
 
 /** Generic SSE consumer for JSON-shaped events such as Sharingan steps. */
 export async function* consumeSseJson<T>(res: Response): AsyncGenerator<T> {
-  if (!res.ok) throw new ApiError(res.status, await safeText(res));
-  if (!res.body) {
-    // Environments without a streaming body: parse the whole text.
-    for (const block of (await res.text()).split("\n\n")) {
-      const parsed = parseSseBlock(block) as T | null;
-      if (parsed) yield parsed;
-    }
-    return;
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf("\n\n")) >= 0) {
-      const block = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      const parsed = parseSseBlock(block) as T | null;
-      if (parsed) yield parsed;
-    }
-  }
-  buffer += decoder.decode();
-  const tail = buffer.trim();
-  if (tail) {
-    const parsed = parseSseBlock(tail) as T | null;
-    if (parsed) yield parsed;
-  }
+  for await (const envelope of consumeSseEnvelopes(res)) yield envelope.data as T;
 }
 
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
+  bootstrapDesignProject(input: DesignProjectBootstrapInput): Promise<BootstrapDesignProjectResponse>;
   generateProjectTitle(id: string, brief: string): Promise<Project>;
   getProject(id: string): Promise<Project>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
@@ -545,6 +597,7 @@ export interface ApiClient {
   designCanvasAssetUrl(projectId: string, assetId: string): string;
   listDesignNodeVersions(projectId: string, nodeId: string, signal?: AbortSignal): Promise<DesignNodeVersion[]>;
   designNodeVersionPreviewUrl(projectId: string, nodeId: string, versionId: string): string;
+  downloadDesignNodeVersionHtml(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
   getDesignThread(
     projectId: string,
     scope: { type: "main" } | { type: "node"; nodeId: string },
@@ -562,7 +615,12 @@ export interface ApiClient {
     },
   ): Promise<DesignAgentTurnResult>;
   listDesignJobs(projectId: string, signal?: AbortSignal): Promise<DesignJob[]>;
+  streamDesignCanvasInvalidations(
+    projectId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<DesignInvalidationMessage>;
   cancelDesignJob(projectId: string, jobId: string): Promise<DesignJob>;
+  retryDesignJob(projectId: string, jobId: string): Promise<DesignJobRetryResult>;
   startDesignImplementationExport(
     projectId: string,
     input: { canvasRevision: number; agentCommand?: string; model?: string | null },
@@ -667,6 +725,15 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
+  async function blob(path: string, init?: RequestInit): Promise<Blob> {
+    const res = await f(baseUrl + path, initWithDaemonToken(init));
+    if (!res.ok) {
+      const error = await readApiError(res);
+      throw new ApiError(res.status, error.message, error.details);
+    }
+    return res.blob();
+  }
+
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
     const res = await f(baseUrl + "/api/agents/rescan-stream", initWithDaemonToken({ method: "POST" }));
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
@@ -714,6 +781,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     scanAgentsStream,
     listProjects: () => json<Project[]>("/api/projects"),
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
+    bootstrapDesignProject: (input) =>
+      json<BootstrapDesignProjectResponse>("/api/projects/bootstrap", jsonInit("POST", input)),
     generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
     getDesignCanvas: (projectId, signal) =>
@@ -758,6 +827,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       ),
     designNodeVersionPreviewUrl: (projectId, nodeId, versionId) =>
       `${baseUrl}/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(nodeId)}/versions/${enc(versionId)}/preview/`,
+    downloadDesignNodeVersionHtml: (projectId, nodeId, versionId) =>
+      blob(`/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(nodeId)}/versions/${enc(versionId)}/preview/download`),
     getDesignThread: (projectId, scope, signal) =>
       json<DesignThread>(
         scope.type === "main"
@@ -777,8 +848,41 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         `/api/projects/${enc(projectId)}/design-canvas/jobs`,
         signal === undefined ? undefined : { signal },
       ),
+    streamDesignCanvasInvalidations: async function* (projectId, signal) {
+      let lastEventId: string | null = null;
+      let delayMs = 250;
+      while (!signal?.aborted) {
+        try {
+          const response = await f(
+            baseUrl + `/api/projects/${enc(projectId)}/design-canvas/events`,
+            initWithDaemonToken({
+              signal,
+              ...(lastEventId === null ? {} : { headers: { "Last-Event-ID": lastEventId } }),
+            }),
+          );
+          for await (const envelope of consumeSseEnvelopes(response)) {
+            const message = invalidationMessage(envelope);
+            if (!message) continue;
+            lastEventId = message.cursor;
+            delayMs = 250;
+            yield message;
+          }
+        } catch (problem) {
+          if (signal?.aborted) return;
+          if (problem instanceof ApiError) throw problem;
+        }
+        if (signal?.aborted) return;
+        await reconnectDelay(signal, delayMs);
+        delayMs = Math.min(delayMs * 2, 5_000);
+      }
+    },
     cancelDesignJob: (projectId, jobId) =>
       json<DesignJob>(`/api/projects/${enc(projectId)}/design-canvas/jobs/${enc(jobId)}`, { method: "DELETE" }),
+    retryDesignJob: (projectId, jobId) =>
+      json<DesignJobRetryResult>(
+        `/api/projects/${enc(projectId)}/design-canvas/jobs/${enc(jobId)}/retry`,
+        jsonInit("POST", {}),
+      ),
     startDesignImplementationExport: (projectId, input) =>
       json<DesignExportResult>(`/api/projects/${enc(projectId)}/design-canvas/exports`, jsonInit("POST", input)),
     patchProject: (id, patch) => json<Project>(`/api/projects/${enc(id)}`, jsonInit("PATCH", patch)),

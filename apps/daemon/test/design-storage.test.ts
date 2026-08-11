@@ -1,18 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stableStringify } from "../src/canonical-json.ts";
 import {
   DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
   DesignRevisionConflictError,
   MAX_DESIGN_ASSET_BYTES,
   MAX_DESIGN_CONTEXT_BYTES,
   assertDesignFrozenContextBudget,
+  buildPortableDesignVersionHtml,
   cancelDesignJob,
   createDesignJob,
+  ensureDesignCanvasAssetBatch,
   getDesignCanvas,
   getDesignJob,
+  getDesignJobByIdempotencyKey,
   getDesignJobContext,
   getDesignThread,
   getDesignVersion,
@@ -39,8 +44,44 @@ import {
 } from "../src/design/design-storage.ts";
 import { materializeDesignContext } from "../src/design/design-node-agent.ts";
 import type { DesignVersionPublicationPhase } from "../src/design/design-types.ts";
+import type { DesignJobCreationPhase } from "../src/design/design-storage.ts";
 
 const FIXTURE_JOB_IDENTITY = { runnerId: "fixture", model: null } as const;
+
+async function completesBefore<T>(operation: Promise<T>, milliseconds = 2_000): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Operation did not complete within ${milliseconds}ms`)),
+          milliseconds,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+async function sourceVersionFixture(dataDir: string, projectId: string) {
+  await initializeDesignProject(dataDir, projectId);
+  await mutateDesignCanvas(dataDir, projectId, {
+    expectedRevision: 0,
+    intents: [{ type: "add-node", node: { id: "node-source", kind: "component" } }],
+  });
+  return publishDesignVersion(dataDir, projectId, {
+    nodeId: "node-source",
+    html: `<!doctype html><html><head></head><body><main>${projectId}</main></body></html>`,
+    contextHash: createHash("sha256").update(projectId).digest("hex"),
+    canvasRevision: 1,
+    expectedHeadVersionId: null,
+    jobId: null,
+    runnerId: "fixture",
+    model: null,
+  });
+}
 
 async function validatingPublicationFixture(label: string): Promise<{
   dataDir: string;
@@ -85,6 +126,27 @@ test("Design HTML validation allows inert URL and capability text in inline Java
     const copy = "Parent/top/opener notes: https://example.test/reference and /api/examples";
     document.body.textContent = copy;
   </script></body></html>`));
+});
+
+test("Design HTML validation allows passive data images but rejects active data MIME types", () => {
+  assert.doesNotThrow(() => validateDesignHtml(`<!doctype html><html><head><style>
+    body { background-image: url("data:image/png;base64,iVBORw0KGgo="); }
+  </style></head><body></body></html>`));
+
+  for (const url of [
+    "data:text/html,<script>alert(1)</script>",
+    "data:application/xhtml+xml,<html></html>",
+    "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+    "data:application/xml,<root/>",
+    "data:application/atom+xml,<feed/>",
+    "data:application/pdf;base64,JVBERi0xLjQ=",
+  ]) {
+    assert.throws(
+      () => validateDesignHtml(`<!doctype html><html><head></head><body><img src="${url}"></body></html>`),
+      /active|unsafe|data|media type|unpinned|external/i,
+      url,
+    );
+  }
 });
 
 test("Design HTML validation rejects active global navigation and remote capabilities", () => {
@@ -622,7 +684,7 @@ test("a Design project starts as an empty revisioned canvas and mutations use CA
     assert.equal(projectJson.nodes[0].id, "node-page");
     await assert.rejects(readFile(join(dataDir, "projects", projectId, "design", "nodes", "node-page", "node.json")));
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
   }
 });
 
@@ -728,6 +790,244 @@ test("restart recovery replaces interrupted Main Agent reservations in place and
 
     assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 300), []);
     assert.deepEqual(await getDesignThread(dataDir, projectId, { type: "main" }), after);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cancelling a reserved Node turn replaces its assistant marker before returning", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-thread-cancel-"));
+  const projectId = "project-node-thread-cancel";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+      reserveThreadTurn: {
+        requestContent: "Generate this page",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 100);
+    await updateDesignJob(dataDir, projectId, created.job.id, { status: "running" }, 101);
+
+    const cancelled = await cancelDesignJob(dataDir, projectId, created.job.id, 102);
+
+    assert.equal(cancelled.status, "cancelled");
+    const thread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+    assert.equal(thread.messages.length, 2);
+    assert.equal(thread.messages[0]?.content, "Generate this page");
+    assert.equal(thread.messages[1]?.content, "Generation cancelled.");
+    assert.notEqual(thread.messages[1]?.content, DESIGN_MAIN_AGENT_QUEUED_MESSAGE);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("fresh Job creation returns both thread reservation ids while idempotent reuse adds no messages", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-thread-reservation-ids-"));
+  const projectId = "project-thread-reservation-ids";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const input = {
+      kind: "node-generation" as const,
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+      idempotencyKey: "reserve-once",
+      promptHash: "a".repeat(64),
+      reserveThreadTurn: {
+        requestContent: "Generate exactly once",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    };
+
+    const fresh = await createDesignJob(dataDir, projectId, input, 100);
+    assert.equal(fresh.reused, false);
+    assert.ok(fresh.threadTurnReservation);
+    assert.equal(fresh.mainThreadReservation, null);
+    assert.deepEqual(
+      fresh.threadTurnReservation!.thread.messages.map((message) => message.id),
+      [
+        fresh.threadTurnReservation!.requestMessageId,
+        fresh.threadTurnReservation!.assistantMessageId,
+      ],
+    );
+
+    const reused = await createDesignJob(dataDir, projectId, input, 101);
+    assert.equal(reused.reused, true);
+    assert.equal(reused.job.id, fresh.job.id);
+    assert.equal(reused.threadTurnReservation, null);
+    assert.equal(reused.mainThreadReservation, null);
+    assert.equal((await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" })).messages.length, 2);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart reconciliation makes every Job creation phase exactly-once", async (t) => {
+  const phases: readonly DesignJobCreationPhase[] = [
+    "marker", "context", "job", "thread", "project", "committed", "delete",
+  ];
+  for (const phase of phases) {
+    await t.test(phase, async () => {
+      const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-job-creation-${phase}-`));
+      const projectId = `project-job-creation-${phase}`;
+      const input = {
+        kind: "node-generation" as const,
+        ...FIXTURE_JOB_IDENTITY,
+        nodeId: "node-page",
+        idempotencyKey: `create-once-${phase}`,
+        promptHash: "d".repeat(64),
+        reserveThreadTurn: {
+          requestContent: "Generate exactly once across restart",
+          assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+        },
+      };
+      try {
+        await initializeDesignProject(dataDir, projectId);
+        await mutateDesignCanvas(dataDir, projectId, {
+          expectedRevision: 0,
+          intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+        });
+        await assert.rejects(
+          Reflect.apply(createDesignJob, undefined, [dataDir, projectId, input, 100, {
+            simulateProcessCrash: true,
+            afterPhase: (completed: DesignJobCreationPhase) => {
+              if (completed === phase) throw new Error(`simulated Job creation exit after ${phase}`);
+            },
+          }]),
+          new RegExp(`exit after ${phase}`),
+        );
+
+        // Every public Project barrier reconciles creation WAL before exposing authority.
+        await getDesignCanvas(dataDir, projectId);
+        const retried = await createDesignJob(dataDir, projectId, input, 300);
+        const jobs = await listDesignJobs(dataDir, projectId);
+        const thread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+        const designRoot = join(dataDir, "projects", projectId, "design");
+        const jobEntries = await readdir(join(designRoot, "jobs"));
+        const transactionEntries = await readdir(join(designRoot, "transactions", "job-creations"));
+
+        assert.equal(retried.reused, phase === "committed" || phase === "delete");
+        assert.equal(jobs.length, 1);
+        assert.equal(jobs[0]?.id, retried.job.id);
+        assert.equal(thread.messages.length, 2);
+        assert.deepEqual(thread.messages.map((message) => message.jobId), [retried.job.id, retried.job.id]);
+        assert.equal(jobEntries.filter((entry) => entry.endsWith(".context.json")).length, 1);
+        assert.deepEqual(transactionEntries, []);
+
+        const interrupted = await recoverInterruptedDesignJobs(dataDir, projectId, 400);
+        assert.equal(interrupted.length, 1);
+        assert.equal(interrupted[0]?.id, retried.job.id);
+        const terminalReplay = await createDesignJob(dataDir, projectId, {
+          ...input,
+          terminalReceiptPolicy: "reuse",
+        }, 500);
+        assert.equal(terminalReplay.reused, true);
+        assert.equal(terminalReplay.job.id, retried.job.id);
+        assert.equal((await listDesignJobs(dataDir, projectId)).length, 1);
+        const recoveredThread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+        assert.equal(recoveredThread.messages.length, 2);
+        assert.notEqual(recoveredThread.messages[1]?.content, DESIGN_MAIN_AGENT_QUEUED_MESSAGE);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("Job creation recovery fails closed when a pending thread reaches a third state", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-job-creation-third-state-"));
+  const projectId = "project-job-creation-third-state";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    await assert.rejects(
+      Reflect.apply(createDesignJob, undefined, [dataDir, projectId, {
+        kind: "node-generation",
+        ...FIXTURE_JOB_IDENTITY,
+        nodeId: "node-page",
+        idempotencyKey: "third-state",
+        promptHash: "e".repeat(64),
+        reserveThreadTurn: {
+          requestContent: "Generate once",
+          assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+        },
+      }, 100, {
+        simulateProcessCrash: true,
+        afterPhase: (phase: DesignJobCreationPhase) => {
+          if (phase === "thread") throw new Error("simulated process exit");
+        },
+      }]),
+      /simulated process exit/,
+    );
+    const designRoot = join(dataDir, "projects", projectId, "design");
+    const threadPath = join(designRoot, "nodes", "node-page", "agent", "thread.json");
+    const thread = JSON.parse(await readFile(threadPath, "utf8"));
+    thread.messages[1].content = "A different but valid assistant state";
+    await writeFile(threadPath, `${JSON.stringify(thread, null, 2)}\n`, "utf8");
+
+    await assert.rejects(getDesignCanvas(dataDir, projectId), /thread is in a third state/i);
+    assert.equal((await readdir(join(designRoot, "transactions", "job-creations"))).length, 1);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("restart recovery replaces reserved Node and Export assistant markers in place", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-thread-recovery-all-jobs-"));
+  const projectId = "project-thread-recovery-all-jobs";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const nodeJob = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-page",
+      reserveThreadTurn: {
+        requestContent: "Generate this page",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 100);
+    const exportJob = await createDesignJob(dataDir, projectId, {
+      kind: "implementation-export",
+      ...FIXTURE_JOB_IDENTITY,
+      exportId: "export-recovery",
+      reserveThreadTurn: {
+        requestContent: "Implementation export export-recovery started from exact Canvas revision 2.",
+        assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE,
+      },
+    }, 101);
+
+    const recovered = await recoverInterruptedDesignJobs(dataDir, projectId, 200);
+
+    assert.deepEqual(
+      recovered.map((job) => job.id).sort(),
+      [nodeJob.job.id, exportJob.job.id].sort(),
+    );
+    const nodeThread = await getDesignThread(dataDir, projectId, { type: "node", nodeId: "node-page" });
+    const mainThread = await getDesignThread(dataDir, projectId, { type: "main" });
+    assert.equal(nodeThread.messages.length, 2);
+    assert.equal(mainThread.messages.length, 2);
+    assert.match(nodeThread.messages[1]?.content ?? "", /Generation was interrupted by daemon restart and cancelled/i);
+    assert.match(mainThread.messages[1]?.content ?? "", /export-recovery.*interrupted by daemon restart and cancelled/i);
+    assert.notEqual(nodeThread.messages[1]?.content, DESIGN_MAIN_AGENT_QUEUED_MESSAGE);
+    assert.notEqual(mainThread.messages[1]?.content, DESIGN_MAIN_AGENT_QUEUED_MESSAGE);
+    assert.deepEqual(await recoverInterruptedDesignJobs(dataDir, projectId, 300), []);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -982,6 +1282,177 @@ test("idempotency receipts bind the normalized request and atomically replace fa
   }
 });
 
+test("terminal receipt reuse is concurrent exact replay while ordinary retries still create a successor", async () => {
+  for (const [index, status] of (["failed", "cancelled"] as const).entries()) {
+    const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-terminal-receipt-${status}-`));
+    const projectId = `project-terminal-receipt-${status}`;
+    const input = {
+      kind: "main-agent" as const,
+      ...FIXTURE_JOB_IDENTITY,
+      idempotencyKey: `terminal-${status}`,
+      promptHash: String(index + 1).repeat(64),
+      terminalReceiptPolicy: "reuse" as const,
+    };
+    try {
+      await initializeDesignProject(dataDir, projectId);
+      const first = await createDesignJob(dataDir, projectId, input, 100);
+      await updateDesignJob(dataDir, projectId, first.job.id, {
+        status,
+        ...(status === "failed" ? { error: "provider failed" } : {}),
+      }, 101);
+      const replayed = await Promise.all([
+        createDesignJob(dataDir, projectId, input, 102),
+        createDesignJob(dataDir, projectId, input, 102),
+      ]);
+      assert.deepEqual(replayed.map((entry) => entry.reused), [true, true]);
+      assert.deepEqual(replayed.map((entry) => entry.job.id), [first.job.id, first.job.id]);
+      assert.equal((await listDesignJobs(dataDir, projectId)).length, 1);
+
+      const ordinary = await createDesignJob(dataDir, projectId, {
+        ...input,
+        terminalReceiptPolicy: undefined,
+      }, 103);
+      assert.equal(ordinary.reused, false);
+      assert.notEqual(ordinary.job.id, first.job.id);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-terminal-policy-invalid-"));
+  try {
+    await initializeDesignProject(dataDir, "project-terminal-policy-invalid");
+    for (const terminalReceiptPolicy of ["reuse", "retry-restart-interrupted"] as const) {
+      await assert.rejects(createDesignJob(dataDir, "project-terminal-policy-invalid", {
+        kind: "main-agent",
+        ...FIXTURE_JOB_IDENTITY,
+        terminalReceiptPolicy,
+      }), /requires an idempotencyKey/i);
+    }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap receipt recovery retries only a daemon-restart orphan", async (t) => {
+  const terminalCases = [
+    { label: "ready", finish: async (dataDir: string, projectId: string, jobId: string) => {
+      await updateDesignJob(dataDir, projectId, jobId, { status: "running" }, 101);
+      await updateDesignJob(dataDir, projectId, jobId, { status: "ready" }, 102);
+    } },
+    { label: "provider-failed", finish: async (dataDir: string, projectId: string, jobId: string) => {
+      await updateDesignJob(dataDir, projectId, jobId, {
+        status: "failed",
+        error: "authentication expired; login required",
+      }, 101);
+    } },
+    { label: "user-cancelled", finish: async (dataDir: string, projectId: string, jobId: string) => {
+      await cancelDesignJob(dataDir, projectId, jobId, 101);
+    } },
+  ] as const;
+
+  for (const [index, fixture] of terminalCases.entries()) {
+    await t.test(`${fixture.label} is exact replay`, async () => {
+      const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-bootstrap-policy-${fixture.label}-`));
+      const projectId = `project-bootstrap-policy-${fixture.label}`;
+      const input = {
+        kind: "main-agent" as const,
+        ...FIXTURE_JOB_IDENTITY,
+        idempotencyKey: `bootstrap-policy-${fixture.label}`,
+        promptHash: String(index + 3).repeat(64),
+        terminalReceiptPolicy: "retry-restart-interrupted" as const,
+      };
+      try {
+        await initializeDesignProject(dataDir, projectId);
+        const first = await createDesignJob(dataDir, projectId, input, 100);
+        await fixture.finish(dataDir, projectId, first.job.id);
+        const replay = await createDesignJob(dataDir, projectId, input, 103);
+        assert.equal(replay.reused, true);
+        assert.equal(replay.job.id, first.job.id);
+        assert.equal((await listDesignJobs(dataDir, projectId)).length, 1);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  await t.test("daemon-restart interruption creates one successor", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-policy-interrupted-"));
+    const projectId = "project-bootstrap-policy-interrupted";
+    const input = {
+      kind: "main-agent" as const,
+      ...FIXTURE_JOB_IDENTITY,
+      idempotencyKey: "bootstrap-policy-interrupted",
+      promptHash: "6".repeat(64),
+      terminalReceiptPolicy: "retry-restart-interrupted" as const,
+    };
+    try {
+      await initializeDesignProject(dataDir, projectId);
+      const first = await createDesignJob(dataDir, projectId, input, 100);
+      const interrupted = await recoverInterruptedDesignJobs(dataDir, projectId, 101);
+      assert.deepEqual(interrupted.map((job) => job.id), [first.job.id]);
+      const concurrent = await Promise.all([
+        createDesignJob(dataDir, projectId, input, 102),
+        createDesignJob(dataDir, projectId, input, 102),
+      ]);
+      assert.equal(new Set(concurrent.map((entry) => entry.job.id)).size, 1);
+      assert.notEqual(concurrent[0]!.job.id, first.job.id);
+      assert.deepEqual(concurrent.map((entry) => entry.reused).sort(), [false, true]);
+      assert.equal((await listDesignJobs(dataDir, projectId)).length, 2);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Job receipt lookup returns the terminal original without mutating or creating a successor", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-job-receipt-lookup-"));
+  const projectId = "project-job-receipt-lookup";
+  const idempotencyKey = "lookup-terminal-original";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      idempotencyKey,
+      promptHash: "9".repeat(64),
+    }, 100);
+    await updateDesignJob(dataDir, projectId, created.job.id, {
+      status: "failed",
+      error: "terminal lookup fixture",
+    }, 101);
+    const designRoot = join(dataDir, "projects", projectId, "design");
+    const projectPath = join(designRoot, "project.json");
+    const beforeProject = await readFile(projectPath, "utf8");
+    const beforeJobs = await readdir(join(designRoot, "jobs"));
+    const receipt = JSON.parse(beforeProject).turnReceipts[`main-agent:main:${idempotencyKey}`];
+
+    const found = await getDesignJobByIdempotencyKey(dataDir, projectId, {
+      kind: "main-agent",
+      nodeId: null,
+      idempotencyKey,
+      requestHash: receipt.requestHash,
+    });
+    assert.equal(found?.job.id, created.job.id);
+    assert.equal(found?.job.status, "failed");
+    assert.equal(await readFile(projectPath, "utf8"), beforeProject);
+    assert.deepEqual(await readdir(join(designRoot, "jobs")), beforeJobs);
+    await assert.rejects(getDesignJobByIdempotencyKey(dataDir, projectId, {
+      kind: "main-agent",
+      nodeId: null,
+      idempotencyKey,
+      requestHash: "0".repeat(64),
+    }), /different Design Agent request/i);
+    assert.equal(await getDesignJobByIdempotencyKey(dataDir, projectId, {
+      kind: "main-agent",
+      nodeId: null,
+      idempotencyKey: "missing",
+      requestHash: receipt.requestHash,
+    }), null);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("restart recovery keeps a committed idempotent Main plan terminal-sticky", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-commit-recovery-"));
   const projectId = "project-main-commit-recovery";
@@ -1024,7 +1495,10 @@ test("restart recovery keeps a committed idempotent Main plan terminal-sticky", 
     assert.equal(rawProject.turnReceipts[created.receiptKey!].mainPlanAppliedRevision, canvas.revision);
 
     await recoverInterruptedDesignJobs(dataDir, projectId, 104);
-    const retry = await createDesignJob(dataDir, projectId, request, 105);
+    const retry = await createDesignJob(dataDir, projectId, {
+      ...request,
+      terminalReceiptPolicy: "retry-restart-interrupted",
+    }, 105);
     assert.equal(retry.reused, true);
     assert.equal(retry.job.id, created.job.id);
     assert.equal(retry.job.status, "cancelled");
@@ -1577,6 +2051,433 @@ test("single-HTML Node versions publish immutably and late head-CAS results beco
   }
 });
 
+test("publication semantically pins entity-encoded Assets for portable roundtrip", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-semantic-asset-publication-"));
+  const projectId = "project-semantic-asset-publication";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const imageBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("semantic publication pixel", "utf8"),
+    ]);
+    const asset = await storeDesignAsset(dataDir, projectId, {
+      name: "semantic.png",
+      mimeType: "image/png",
+      base64: imageBytes.toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const entityAsset = `dezin-asset:&#47;&#47;${asset.id}`;
+    const cssEscapedAsset = `dezin-asset:\\2f \\2f ${asset.id}`;
+
+    const published = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head><style>.hero{background-image:url("${cssEscapedAsset}")}</style></head><body>
+        <img src="${entityAsset}" srcset="dezin-asset://${asset.id} 1x, ${entityAsset} 2x">
+        <a href="${entityAsset}" ping="dezin-asset://${asset.id} ${entityAsset}">asset</a>
+        <div class="hero" style="background-image:url('${cssEscapedAsset}')"></div>
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+          <image href="${entityAsset}" width="10" height="10" />
+          <image xlink:href="${entityAsset}" width="10" height="10" />
+          <rect fill="url('${cssEscapedAsset}')" width="10" height="10" />
+        </svg>
+      </body></html>`,
+      contextHash: "a".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+
+    assert.deepEqual(published.manifest.assetPins, [{ assetId: asset.id, checksum: asset.checksum }]);
+    const portable = await buildPortableDesignVersionHtml(
+      dataDir,
+      projectId,
+      "node-page",
+      published.manifest.id,
+    );
+    assert.match(portable.html.toString("utf8"), new RegExp(`data:image/png;base64,${imageBytes.toString("base64")}`));
+    assert.doesNotMatch(portable.html.toString("utf8"), /dezin-asset:|\/api\/projects\//i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("publication rebinds authorized semantic Head URLs and preserves exact JavaScript Asset sinks", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-semantic-head-publication-"));
+  const projectId = "project-semantic-head-publication";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const imageBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("script sink pixel", "utf8"),
+    ]);
+    const asset = await storeDesignAsset(dataDir, projectId, {
+      name: "script.png",
+      mimeType: "image/png",
+      base64: imageBytes.toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const first = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body><script>
+        const image = document.createElement("img");
+        const assetUrl = "dezin-asset://${asset.id}";
+        const background = "url(dezin-asset://${asset.id})";
+        image.src = assetUrl;
+        image.style.backgroundImage = background;
+        document.body.append(image);
+      </script></body></html>`,
+      contextHash: "a".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    assert.deepEqual(first.manifest.assetPins, [{ assetId: asset.id, checksum: asset.checksum }]);
+    const firstFile = await resolveDesignVersionFile(dataDir, projectId, "node-page", first.manifest.id, "index.html");
+    const firstHtml = await readFile(firstFile.path, "utf8");
+    assert.doesNotMatch(firstHtml, /dezin-asset:/i);
+    assert.match(firstHtml, new RegExp(`versionId=${first.manifest.id}`));
+    const firstPortable = await buildPortableDesignVersionHtml(
+      dataDir,
+      projectId,
+      "node-page",
+      first.manifest.id,
+    );
+    assert.match(firstPortable.html.toString("utf8"), new RegExp(`data:image/png;base64,${imageBytes.toString("base64")}`));
+    assert.doesNotMatch(firstPortable.html.toString("utf8"), /dezin-asset:|\/api\/projects\//i);
+
+    const headUrl = `/api/projects/${projectId}/design-canvas/assets/${asset.id}/${asset.fileName}`
+      + `?nodeId=node-page&versionId=${first.manifest.id}&checksum=${asset.checksum}`;
+    const encodedHeadUrl = headUrl.replaceAll("&", "&#38;").replaceAll("/", "&#47;");
+    const second = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head><style>.hero{background:url("${headUrl.replaceAll("/", "\\2f ")}")}</style></head><body>
+        <img src="${encodedHeadUrl}">
+        <script>const image = document.createElement("img"); image.src = \`${headUrl}\`;</script>
+      </body></html>`,
+      contextHash: "b".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: first.manifest.id,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    assert.deepEqual(second.manifest.assetPins, [{ assetId: asset.id, checksum: asset.checksum }]);
+    const secondFile = await resolveDesignVersionFile(dataDir, projectId, "node-page", second.manifest.id, "index.html");
+    const secondHtml = await readFile(secondFile.path, "utf8");
+    assert.match(secondHtml, new RegExp(`versionId=${second.manifest.id}`));
+    assert.doesNotMatch(secondHtml, new RegExp(`versionId=${first.manifest.id}`));
+    const secondPortable = await buildPortableDesignVersionHtml(
+      dataDir,
+      projectId,
+      "node-page",
+      second.manifest.id,
+    );
+    assert.match(secondPortable.html.toString("utf8"), /data:image\/png;base64,/);
+    assert.doesNotMatch(secondPortable.html.toString("utf8"), /dezin-asset:|\/api\/projects\//i);
+
+    const third = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body><script>
+        const image = document.createElement("img");
+        image.src = "dezin-asset://${asset.id}";
+      </script></body></html>`,
+      contextHash: "d".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: second.manifest.id,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    const thirdPortable = await buildPortableDesignVersionHtml(
+      dataDir,
+      projectId,
+      "node-page",
+      third.manifest.id,
+    );
+    assert.match(thirdPortable.html.toString("utf8"), /data:image\/png;base64,/);
+    assert.doesNotMatch(thirdPortable.html.toString("utf8"), /dezin-asset:|\/api\/projects\//i);
+
+    await assert.rejects(publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body><img src="${encodedHeadUrl.replace(asset.checksum, "0".repeat(64))}"></body></html>`,
+      contextHash: "c".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: third.manifest.id,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    }), /not authorized by its expected Head Version/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("publication fails closed for JavaScript Asset sinks without an exact source token", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-js-asset-authority-"));
+  const projectId = "project-js-asset-authority";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const asset = await storeDesignAsset(dataDir, projectId, {
+      name: "script.png",
+      mimeType: "image/png",
+      base64: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("semantic script pixel", "utf8"),
+      ]).toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const scripts = [
+      `const image = document.createElement("img"); image.src = "dezin" + "-asset://${asset.id}";`,
+      `const image = document.createElement("img"); image.src = "dezin\\x2dasset://${asset.id}";`,
+      `/* dezin-asset://${asset.id} */ const image = document.createElement("img"); image.src = "dezin\\x2dasset://${asset.id}";`,
+      `const decoy = "dezin-asset://${asset.id}"; const image = document.createElement("img"); image.src = "dezin" + "-asset://${asset.id}"; void decoy;`,
+      `const decoy = "dezin-asset://${asset.id}"; const image = document.createElement("img"); image.src = "dezin\\x2dasset://${asset.id}"; void decoy;`,
+      `const exact = document.createElement("img"); exact.src = "dezin-asset://${asset.id}"; const split = document.createElement("img"); split.src = "dezin" + "-asset://${asset.id}";`,
+      `const exact = document.createElement("img"); exact.src = "dezin-asset://${asset.id}"; const escaped = document.createElement("img"); escaped.src = "dezin\\x2dasset://${asset.id}";`,
+      `const image = document.createElement("img"); image.style.backgroundImage = "url(dezin" + "-asset://${asset.id})";`,
+      `const image = document.createElement("img"); const id = "${asset.id}"; image.src = \`dezin-asset://\${id}\`;`,
+    ];
+    for (const [index, script] of scripts.entries()) {
+      await assert.rejects(publishDesignVersion(dataDir, projectId, {
+        nodeId: "node-page",
+        html: `<!doctype html><html><head></head><body><script>${script}</script></body></html>`,
+        contextHash: String(index).padStart(64, "a"),
+        canvasRevision: 1,
+        expectedHeadVersionId: null,
+        jobId: null,
+        runnerId: "fixture",
+        model: null,
+      }), /JavaScript Asset URL.*exact source|cannot.*canonical|remote scripts or resources/i);
+    }
+    await assert.rejects(publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body><script>
+        const image = document.createElement("img");
+        image.src = "dezin-asset://asset-${"f".repeat(32)}";
+      </script></body></html>`,
+      contextHash: "f".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    }), /not found|unavailable|missing/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("portable Version export rejects active-content Asset MIME types", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-portable-active-mime-"));
+  const projectId = "project-portable-active-mime";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const asset = await storeDesignAsset(dataDir, projectId, {
+      name: "active.html",
+      mimeType: "text/html",
+      base64: Buffer.from("<!doctype html><title>active</title>", "utf8").toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const published = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body><img src="dezin-asset://${asset.id}"></body></html>`,
+      contextHash: "a".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+
+    await assert.rejects(
+      buildPortableDesignVersionHtml(dataDir, projectId, "node-page", published.manifest.id),
+      /active|unsafe|portable.*mime|media type/i,
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("portable Version export rejects its projected base64 budget before reading any Asset payload", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-portable-budget-"));
+  const projectId = "project-portable-budget";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const asset = await storeDesignAsset(dataDir, projectId, {
+      name: "photo.png",
+      mimeType: "image/png",
+      base64: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("small-payload", "utf8"),
+      ]).toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const references = Array.from(
+      { length: 10 },
+      (_, index) => `<img alt="${index}" src="dezin-asset://${asset.id}">`,
+    ).join("");
+    const published = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-page",
+      html: `<!doctype html><html><head></head><body>${references}</body></html>`,
+      contextHash: "a".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    const assetManifestPath = join(
+      dataDir,
+      "projects",
+      projectId,
+      "design",
+      "assets",
+      asset.id,
+      "manifest.json",
+    );
+    const storedAsset = JSON.parse(await readFile(assetManifestPath, "utf8")) as { bytes: number };
+    storedAsset.bytes = MAX_DESIGN_ASSET_BYTES;
+    await writeFile(assetManifestPath, `${JSON.stringify(storedAsset, null, 2)}\n`);
+    let payloadReads = 0;
+
+    await assert.rejects(
+      buildPortableDesignVersionHtml(
+        dataDir,
+        projectId,
+        "node-page",
+        published.manifest.id,
+        { beforeAssetPayloadRead: () => { payloadReads += 1; } },
+      ),
+      /single-file export limit/i,
+    );
+    assert.equal(payloadReads, 0);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("portable Version export rejects same-byte path substitution before reading Version and Asset payloads", async (t) => {
+  await t.test("Version HTML", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-portable-version-toctou-"));
+    const projectId = "project-portable-version-toctou";
+    try {
+      await initializeDesignProject(dataDir, projectId);
+      await mutateDesignCanvas(dataDir, projectId, {
+        expectedRevision: 0,
+        intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+      });
+      const published = await publishDesignVersion(dataDir, projectId, {
+        nodeId: "node-page",
+        html: "<!doctype html><html><head><title>Portable race</title></head><body><main>Portable race</main></body></html>",
+        contextHash: "d".repeat(64),
+        canvasRevision: 1,
+        expectedHeadVersionId: null,
+        jobId: null,
+        runnerId: "fixture",
+        model: null,
+      });
+      const version = await resolveDesignVersionFile(
+        dataDir,
+        projectId,
+        "node-page",
+        published.manifest.id,
+        "index.html",
+      );
+      const replacement = join(dataDir, "same-version.html");
+      await writeFile(replacement, await readFile(version.path));
+      let substituted = false;
+
+      await assert.rejects(buildPortableDesignVersionHtml(
+        dataDir,
+        projectId,
+        "node-page",
+        published.manifest.id,
+        {
+          beforeVersionPayloadRead: async () => {
+            substituted = true;
+            await rm(version.path, { force: true });
+            await symlink(replacement, version.path);
+          },
+        },
+      ), /changed|invalid|unsafe|unavailable/i);
+      assert.equal(substituted, true);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("pinned Asset", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-portable-asset-toctou-"));
+    const projectId = "project-portable-asset-toctou";
+    try {
+      await initializeDesignProject(dataDir, projectId);
+      const bytes = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("same-byte portable asset"),
+      ]);
+      const asset = await storeDesignAsset(dataDir, projectId, {
+        name: "portable.png",
+        mimeType: "image/png",
+        base64: bytes.toString("base64"),
+      });
+      await mutateDesignCanvas(dataDir, projectId, {
+        expectedRevision: 0,
+        intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+      });
+      const published = await publishDesignVersion(dataDir, projectId, {
+        nodeId: "node-page",
+        html: `<!doctype html><html><head><title>Portable asset race</title></head><body><img alt="" src="dezin-asset://${asset.id}"></body></html>`,
+        contextHash: "e".repeat(64),
+        canvasRevision: 1,
+        expectedHeadVersionId: null,
+        jobId: null,
+        runnerId: "fixture",
+        model: null,
+      });
+      const payload = await resolveDesignAssetFile(dataDir, projectId, asset.id, asset.fileName);
+      const replacement = join(dataDir, "same-asset.png");
+      await writeFile(replacement, bytes);
+      let substituted = false;
+
+      await assert.rejects(buildPortableDesignVersionHtml(
+        dataDir,
+        projectId,
+        "node-page",
+        published.manifest.id,
+        {
+          beforeAssetPayloadRead: async () => {
+            substituted = true;
+            await rm(payload.path, { force: true });
+            await symlink(replacement, payload.path);
+          },
+        },
+      ), /changed|invalid|unsafe|unavailable/i);
+      assert.equal(substituted, true);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 test("a cancelled generation Job cannot publish its staged Version", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-cancelled-publication-"));
   const projectId = "project-cancelled-publication";
@@ -1729,6 +2630,57 @@ test("publication WAL recovers every durable crash phase without leaving single-
     } finally {
       await rm(fixture.dataDir, { recursive: true, force: true });
     }
+  }
+});
+
+test("publication recovery accepts a checksum-valid pre-title WAL and preserves the Node name", async () => {
+  const fixture = await validatingPublicationFixture("legacy-title-wal");
+  const markerPath = join(
+    fixture.dataDir,
+    "projects",
+    fixture.projectId,
+    "design",
+    "transactions",
+    "publications",
+    `${fixture.job.id}.json`,
+  );
+  try {
+    await assert.rejects(
+      publishDesignVersion(fixture.dataDir, fixture.projectId, {
+        nodeId: "node-page",
+        html: "<!doctype html><html><head><title>Legacy generated title</title></head><body>legacy WAL</body></html>",
+        contextHash: fixture.job.contextHash!,
+        canvasRevision: fixture.job.canvasRevision!,
+        expectedHeadVersionId: fixture.job.expectedHeadVersionId,
+        jobId: fixture.job.id,
+        runnerId: fixture.job.runnerId,
+        model: fixture.job.model,
+      }, 4_000, {
+        simulateProcessCrash: true,
+        afterPhase(phase) {
+          if (phase === "pending") throw new Error("simulated legacy daemon exit");
+        },
+      }),
+      /simulated legacy daemon exit/,
+    );
+
+    const marker = JSON.parse(await readFile(markerPath, "utf8")) as Record<string, unknown>;
+    delete marker.nodeNameBefore;
+    delete marker.nodeNameAfter;
+    delete marker.checksum;
+    marker.checksum = createHash("sha256").update(stableStringify(marker), "utf8").digest("hex");
+    await writeFile(markerPath, `${JSON.stringify(marker, null, 2)}\n`);
+
+    await recoverInterruptedDesignJobs(fixture.dataDir, fixture.projectId, 5_000);
+    const canvas = await getDesignCanvas(fixture.dataDir, fixture.projectId);
+    const recovered = await getDesignJob(fixture.dataDir, fixture.projectId, fixture.job.id);
+    assert.equal(recovered.status, "ready");
+    assert.equal(canvas.nodes[0]?.name, "Page");
+    assert.equal(canvas.nodes[0]?.versionCount, 1);
+    assert.equal(canvas.nodes[0]?.currentVersionId, recovered.versionId);
+    assert.deepEqual(await readdir(join(markerPath, "..")), []);
+  } finally {
+    await rm(fixture.dataDir, { recursive: true, force: true });
   }
 });
 
@@ -2109,6 +3061,41 @@ test("Design assets are project-owned, content-addressed, and can ingest an exis
   }
 });
 
+test("uploaded Asset ingestion rejects same-byte path substitution before reading the reference", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-upload-toctou-"));
+  const projectId = "project-upload-toctou";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("same-byte uploaded asset"),
+    ]);
+    const refs = join(dataDir, "projects", projectId, ".refs");
+    const source = join(refs, "race.png");
+    const replacement = join(dataDir, "same-upload.png");
+    await mkdir(refs, { recursive: true });
+    await writeFile(source, bytes);
+    await writeFile(replacement, bytes);
+    let substituted = false;
+
+    await assert.rejects(storeDesignAsset(dataDir, projectId, {
+      name: "race.png",
+      mimeType: "image/png",
+      uploadedFileId: ".refs/race.png",
+    }, undefined, {
+      beforeUploadedPayloadOpen: async () => {
+        substituted = true;
+        await rm(source, { force: true });
+        await symlink(replacement, source);
+      },
+    }), /unsafe|unavailable|changed|regular file/i);
+    assert.equal(substituted, true);
+    assert.deepEqual(await listDesignAssets(dataDir, projectId), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("large canonical base64 Assets do not overflow the JavaScript call stack", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-large-base64-"));
   const projectId = "project-large-base64";
@@ -2207,6 +3194,67 @@ test("Asset batches atomically bind material Nodes, roll back failures, and reco
   }
 });
 
+test("idempotent Asset batches replay the exact committed Canvas and recover commit-receipt crashes", async (t) => {
+  for (const phase of ["marker", "canvas", "receipt"] as const) {
+    await t.test(phase, async () => {
+      const dataDir = await mkdtemp(join(tmpdir(), `dezin-design-asset-receipt-${phase}-`));
+      const projectId = `project-asset-receipt-${phase}`;
+      const bytes = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from(`idempotent asset ${phase}`),
+      ]);
+      const input = {
+        idempotencyKey: `bootstrap-assets-${phase}`,
+        requestHash: createHash("sha256").update(`request-${phase}`).digest("hex"),
+        items: [{
+          asset: { name: `${phase}.png`, mimeType: "image/png", base64: bytes.toString("base64") },
+          binding: { type: "create-node" as const, node: { id: `node-${phase}`, kind: "image" as const } },
+        }],
+      };
+      try {
+        await initializeDesignProject(dataDir, projectId);
+        await assert.rejects(
+          Reflect.apply(ensureDesignCanvasAssetBatch, undefined, [dataDir, projectId, input, 100, {
+            simulateProcessCrash: true,
+            afterPhase: (completed: string) => {
+              if (completed === phase) throw new Error(`simulated Asset receipt exit after ${phase}`);
+            },
+          }]),
+          new RegExp(`exit after ${phase}`),
+        );
+
+        const recovered = await ensureDesignCanvasAssetBatch(dataDir, projectId, input, 200);
+        assert.equal(recovered.reused, phase !== "marker");
+        assert.equal(recovered.canvas.revision, 1);
+        assert.deepEqual(recovered.canvas.nodeOrder, [`node-${phase}`]);
+        assert.equal((await listDesignVersions(dataDir, projectId, `node-${phase}`)).length, 1);
+
+        await mutateDesignCanvas(dataDir, projectId, {
+          expectedRevision: 1,
+          intents: [{ type: "set-viewport", viewport: { x: 20, y: 30, zoom: 1.2 } }],
+        }, 300);
+        const replayed = await ensureDesignCanvasAssetBatch(dataDir, projectId, input, 400);
+        assert.equal(replayed.reused, true);
+        assert.deepEqual(replayed.canvas, recovered.canvas);
+        assert.equal((await listDesignVersions(dataDir, projectId, `node-${phase}`)).length, 1);
+        await assert.rejects(ensureDesignCanvasAssetBatch(dataDir, projectId, {
+          ...input,
+          requestHash: "f".repeat(64),
+        }), /idempotencyKey.*different.*request/i);
+        await assert.rejects(ensureDesignCanvasAssetBatch(dataDir, projectId, {
+          ...input,
+          items: [{
+            ...input.items[0]!,
+            asset: { ...input.items[0]!.asset, name: `changed-${phase}.png` },
+          }],
+        }), /idempotencyKey.*different.*request/i);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("a material import publishes v1 and resolves its immutable Asset preview", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-material-v1-"));
   const projectId = "project-material-v1";
@@ -2259,7 +3307,7 @@ test("Asset batch byte limits include every bundled byte copied from a cross-pro
       expectedRevision: 0,
       intents: [{ type: "add-node", node: { id: "node-source", kind: "page" } }],
     });
-    const largePng = Buffer.alloc(MAX_DESIGN_ASSET_BYTES);
+    const largePng = Buffer.alloc(1024 * 1024);
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(largePng);
     const refs = join(dataDir, "projects", sourceProjectId, ".refs");
     await mkdir(refs, { recursive: true });
@@ -2301,6 +3349,8 @@ test("Asset batch byte limits include every bundled byte copied from a cross-pro
         },
         binding: { type: "create-node", node: { id: "node-import", kind: "document" } },
       }],
+    }, undefined, {
+      assetBatchByteLimit: Math.floor(1.5 * 1024 * 1024),
     }), /batch exceeds its bounded size/i);
 
     const target = await getDesignCanvas(dataDir, targetProjectId);
@@ -2311,6 +3361,303 @@ test("Asset batch byte limits include every bundled byte copied from a cross-pro
       readdir(join(dataDir, "projects", targetProjectId, "design", "assets", ".transactions")),
       /ENOENT/,
     );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("reciprocal cross-project sourceVersion imports acquire Project locks without deadlocking", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-reciprocal-locks-"));
+  const projectA = "project-source-lock-a";
+  const projectB = "project-source-lock-b";
+  try {
+    const [versionA, versionB] = await Promise.all([
+      sourceVersionFixture(dataDir, projectA),
+      sourceVersionFixture(dataDir, projectB),
+    ]);
+
+    const [assetFromB, assetFromA] = await completesBefore(Promise.all([
+      storeDesignAsset(dataDir, projectA, {
+        name: "Imported from B",
+        sourceVersion: {
+          projectId: projectB,
+          nodeId: "node-source",
+          versionId: versionB.manifest.id,
+        },
+      }),
+      storeDesignAsset(dataDir, projectB, {
+        name: "Imported from A",
+        sourceVersion: {
+          projectId: projectA,
+          nodeId: "node-source",
+          versionId: versionA.manifest.id,
+        },
+      }),
+    ]));
+
+    assert.equal(assetFromB.sourceVersion?.projectId, projectB);
+    assert.equal(assetFromA.sourceVersion?.projectId, projectA);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
+  }
+});
+
+test("a multi-source Version batch and an inverse import share one deterministic Project lock order", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-batch-locks-"));
+  const projectA = "project-batch-lock-a";
+  const projectB = "project-batch-lock-b";
+  const projectC = "project-batch-lock-c";
+  try {
+    const [versionA, versionB, versionC] = await Promise.all([
+      sourceVersionFixture(dataDir, projectA),
+      sourceVersionFixture(dataDir, projectB),
+      sourceVersionFixture(dataDir, projectC),
+    ]);
+
+    const [batch, inverse] = await completesBefore(Promise.all([
+      importDesignCanvasAssetBatch(dataDir, projectA, {
+        expectedRevision: 2,
+        items: [
+          {
+            asset: {
+              name: "Imported B",
+              sourceVersion: {
+                projectId: projectB,
+                nodeId: "node-source",
+                versionId: versionB.manifest.id,
+              },
+            },
+            binding: { type: "create-node", node: { id: "node-from-b", kind: "document" } },
+          },
+          {
+            asset: {
+              name: "Imported C",
+              sourceVersion: {
+                projectId: projectC,
+                nodeId: "node-source",
+                versionId: versionC.manifest.id,
+              },
+            },
+            binding: { type: "create-node", node: { id: "node-from-c", kind: "document" } },
+          },
+        ],
+      }),
+      storeDesignAsset(dataDir, projectB, {
+        name: "Inverse import from A",
+        sourceVersion: {
+          projectId: projectA,
+          nodeId: "node-source",
+          versionId: versionA.manifest.id,
+        },
+      }),
+    ]));
+
+    assert.deepEqual(batch.nodes.slice(-2).map((node) => node.id), ["node-from-b", "node-from-c"]);
+    assert.equal(inverse.sourceVersion?.projectId, projectA);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
+  }
+});
+
+test("a same-Project sourceVersion snapshot copies pinned Asset bytes without re-entering its Project lock", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-same-project-lock-"));
+  const projectId = "project-source-lock-same";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const image = await storeDesignAsset(dataDir, projectId, {
+      name: "same-project.png",
+      mimeType: "image/png",
+      base64: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("same-project-pixel"),
+      ]).toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-source", kind: "component" } }],
+    });
+    const version = await publishDesignVersion(dataDir, projectId, {
+      nodeId: "node-source",
+      html: `<!doctype html><html><head></head><body><img src="dezin-asset://${image.id}"></body></html>`,
+      contextHash: "7".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+
+    const copied = await completesBefore(storeDesignAsset(dataDir, projectId, {
+      name: "Same Project snapshot",
+      sourceVersion: { projectId, nodeId: "node-source", versionId: version.manifest.id },
+    }));
+    assert.equal(copied.sourceVersion?.projectId, projectId);
+    assert.deepEqual(copied.sourceVersion?.assetPins.map((pin) => pin.assetId), [image.id]);
+    assert.ok(copied.bundleFiles.some((file) => file.checksum === image.checksum));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("an idempotent sourceVersion batch replays its receipt after the source Project is removed", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-receipt-replay-"));
+  const sourceProjectId = "project-source-receipt";
+  const targetProjectId = "project-target-receipt";
+  try {
+    const version = await sourceVersionFixture(dataDir, sourceProjectId);
+    await initializeDesignProject(dataDir, targetProjectId);
+    const input = {
+      idempotencyKey: "source-version-receipt-replay",
+      requestHash: "8".repeat(64),
+      items: [{
+        asset: {
+          name: "Durable source snapshot",
+          sourceVersion: {
+            projectId: sourceProjectId,
+            nodeId: "node-source",
+            versionId: version.manifest.id,
+          },
+        },
+        binding: { type: "create-node" as const, node: { id: "node-import", kind: "document" as const } },
+      }],
+    };
+    const first = await ensureDesignCanvasAssetBatch(dataDir, targetProjectId, input);
+    assert.equal(first.reused, false);
+    await rm(join(dataDir, "projects", sourceProjectId, "design"), { recursive: true, force: true });
+
+    const replay = await ensureDesignCanvasAssetBatch(dataDir, targetProjectId, input);
+    assert.equal(replay.reused, true);
+    assert.deepEqual(replay.canvas, first.canvas);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("sourceVersion batch projection rejects a pinned payload before reading beyond its byte budget", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-pre-read-budget-"));
+  const sourceProjectId = "project-source-pre-read-budget";
+  const targetProjectId = "project-target-pre-read-budget";
+  try {
+    await initializeDesignProject(dataDir, sourceProjectId);
+    await initializeDesignProject(dataDir, targetProjectId);
+    const image = await storeDesignAsset(dataDir, sourceProjectId, {
+      name: "budget.png",
+      mimeType: "image/png",
+      base64: Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("budget-payload"),
+      ]).toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, sourceProjectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-source", kind: "component" } }],
+    });
+    const version = await publishDesignVersion(dataDir, sourceProjectId, {
+      nodeId: "node-source",
+      html: `<!doctype html><html><head></head><body><img src="dezin-asset://${image.id}"></body></html>`,
+      contextHash: "9".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    const payload = await resolveDesignAssetFile(
+      dataDir,
+      sourceProjectId,
+      image.id,
+      image.fileName,
+    );
+    await rm(payload.path, { force: true });
+
+    await assert.rejects(importDesignCanvasAssetBatch(dataDir, targetProjectId, {
+      expectedRevision: 0,
+      items: [{
+        asset: {
+          name: "Budgeted snapshot",
+          sourceVersion: {
+            projectId: sourceProjectId,
+            nodeId: "node-source",
+            versionId: version.manifest.id,
+          },
+        },
+        binding: { type: "create-node", node: { id: "node-import", kind: "document" } },
+      }],
+    }, undefined, {
+      assetBatchByteLimit: version.manifest.bytes + image.bytes - 1,
+    }), /batch exceeds its bounded size/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("sourceVersion snapshots reject same-byte path substitution before reading a pinned payload", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-source-version-toctou-"));
+  const sourceProjectId = "project-source-version-toctou";
+  const targetProjectId = "project-target-version-toctou";
+  try {
+    await initializeDesignProject(dataDir, sourceProjectId);
+    await initializeDesignProject(dataDir, targetProjectId);
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("same-byte source snapshot"),
+    ]);
+    const image = await storeDesignAsset(dataDir, sourceProjectId, {
+      name: "source.png",
+      mimeType: "image/png",
+      base64: bytes.toString("base64"),
+    });
+    await mutateDesignCanvas(dataDir, sourceProjectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-source", kind: "component" } }],
+    });
+    const version = await publishDesignVersion(dataDir, sourceProjectId, {
+      nodeId: "node-source",
+      html: `<!doctype html><html><head></head><body><img alt="" src="dezin-asset://${image.id}"></body></html>`,
+      contextHash: "f".repeat(64),
+      canvasRevision: 1,
+      expectedHeadVersionId: null,
+      jobId: null,
+      runnerId: "fixture",
+      model: null,
+    });
+    const payload = await resolveDesignAssetFile(
+      dataDir,
+      sourceProjectId,
+      image.id,
+      image.fileName,
+    );
+    const replacement = join(dataDir, "same-source.png");
+    await writeFile(replacement, bytes);
+    let substituted = false;
+
+    await assert.rejects(importDesignCanvasAssetBatch(dataDir, targetProjectId, {
+      expectedRevision: 0,
+      items: [{
+        asset: {
+          name: "Source snapshot",
+          sourceVersion: {
+            projectId: sourceProjectId,
+            nodeId: "node-source",
+            versionId: version.manifest.id,
+          },
+        },
+        binding: { type: "create-node", node: { id: "node-import", kind: "document" } },
+      }],
+    }, undefined, {
+      beforeSourceVersionPayloadOpen: async (input: { kind: string; path: string }) => {
+        if (input.kind !== "asset" || substituted) return;
+        substituted = true;
+        await rm(input.path, { force: true });
+        await symlink(replacement, input.path);
+      },
+    }), /unsafe|unavailable|changed|invalid/i);
+    assert.equal(substituted, true);
+    const target = await getDesignCanvas(dataDir, targetProjectId);
+    assert.equal(target.revision, 0);
+    assert.deepEqual(target.nodes, []);
+    assert.deepEqual(target.nodeOrder, []);
+    assert.deepEqual(await listDesignAssets(dataDir, targetProjectId), []);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -2429,7 +3776,7 @@ test("an exact cross-project Design Version is checksum-verified and byte-copied
     const canonicalSource = sourceHtml.replace(
       `dezin-asset://${sourceImage.id}`,
       `/api/projects/${sourceProjectId}/design-canvas/assets/${sourceImage.id}/${sourceImage.fileName}?nodeId=node-source&versionId=${version.manifest.id}&checksum=${sourceImage.checksum}`,
-    );
+    ).replaceAll("&", "&amp;");
     await writeFile(sourceFile.path, canonicalSource);
     await importDesignCanvasAssetBatch(dataDir, targetProjectId, {
       expectedRevision: 0,

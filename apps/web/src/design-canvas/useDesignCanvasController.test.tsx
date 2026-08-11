@@ -1,21 +1,16 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import {
-  discardPendingDesignCanvasIntent,
-  peekPendingDesignCanvasIntent,
-  setPendingDesignCanvasIntent,
-} from "../lib/pending-design-canvas.ts";
 import type { DesignCanvasApi } from "./api.ts";
-import type { DesignCanvas, DesignJob, DesignThread } from "./types.ts";
+import type { DesignCanvas, DesignInvalidationMessage, DesignJob, DesignThread } from "./types.ts";
 import { useDesignCanvasController } from "./useDesignCanvasController.ts";
 
 const PROJECT_ID = "design-project";
 
 function canvas(revision = 1, undoDepth = 0, redoDepth = 0): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: PROJECT_ID,
     revision,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -29,6 +24,7 @@ function canvas(revision = 1, undoDepth = 0, redoDepth = 0): DesignCanvas {
 }
 
 const readyJob: DesignJob = {
+  schemaVersion: 2,
   id: "job-1",
   kind: "main-agent",
   runnerId: "fixture",
@@ -37,9 +33,12 @@ const readyJob: DesignJob = {
   nodeId: null,
   parentJobId: null,
   contextHash: "context",
+  canvasRevision: 1,
+  expectedHeadVersionId: null,
   versionId: null,
   exportId: null,
   error: null,
+  cancelRequested: false,
   activity: [],
   createdAt: 1,
   updatedAt: 2,
@@ -47,6 +46,7 @@ const readyJob: DesignJob = {
 };
 
 const mainThread: DesignThread = {
+  schemaVersion: 2,
   id: "thread-main",
   scope: { type: "main" },
   messages: [],
@@ -65,15 +65,24 @@ function fakeApi(overrides: Partial<DesignCanvasApi> = {}): DesignCanvasApi {
     importProjectVersion: vi.fn(async () => canvas(2, 1)),
     listNodeVersions: vi.fn(async () => []),
     getExactVersionPreview: vi.fn(async (_projectId, nodeId, versionId) => ({ nodeId, versionId, url: `/preview/${versionId}` })),
+    downloadExactVersionHtml: vi.fn(async () => new Blob()),
     getThread: vi.fn(async () => mainThread),
     submitAgentTurn: vi.fn(async () => ({ thread: mainThread, job: readyJob, canvas: canvas(3, 2) })),
     listJobs: vi.fn(async () => []),
     cancelJob: vi.fn(async (_projectId: string, jobId: string): Promise<DesignJob> => ({ ...readyJob, id: jobId, status: "cancelled" })),
+    retryJob: vi.fn(async (_projectId: string, jobId: string) => ({
+      retryOfJobId: jobId,
+      thread: mainThread,
+      job: { ...readyJob, id: "job-retry", status: "queued" as const },
+      canvas: canvas(3, 2),
+    })),
     startImplementationExport: vi.fn(async () => ({
       exportId: "export-1",
       job: { ...readyJob, kind: "implementation-export" as const },
     })),
     ...overrides,
+    // eslint-disable-next-line require-yield
+    streamInvalidations: overrides.streamInvalidations ?? (async function* () {}),
   };
 }
 
@@ -86,19 +95,18 @@ function Harness({ api }: { api: DesignCanvasApi }) {
       <button type="button" onClick={() => void controller.applyIntents([{ type: "add-node", node: { kind: "page" } }])}>mutate</button>
       <button type="button" onClick={() => void controller.appendMaterialVersion("image-1", new File(["v2"], "v2.png", { type: "image/png" }))}>append material version</button>
       <button type="button" onClick={() => void controller.cancelJob("job-live")}>cancel</button>
+      <button type="button" onClick={() => void controller.retryJob("job-failed")}>retry failed job</button>
       <button type="button" onClick={() => void controller.refresh()}>refresh</button>
-      {controller.pendingIntentRetryAvailable ? <button type="button" onClick={controller.retryPendingIntent}>retry handoff</button> : null}
     </div>
   );
 }
 
 afterEach(() => {
-  discardPendingDesignCanvasIntent(PROJECT_ID);
   sessionStorage.clear();
 });
 
-test("StrictMode claims and completes the initial canvas handoff exactly once", async () => {
-  setPendingDesignCanvasIntent({
+test("loading a Canvas never claims a browser-owned pending bootstrap handoff", async () => {
+  sessionStorage.setItem(`dezin.design-canvas.intent.${PROJECT_ID}`, JSON.stringify({
     projectId: PROJECT_ID,
     prompt: "Create the launch page",
     context: [{
@@ -108,45 +116,16 @@ test("StrictMode claims and completes the initial canvas handoff exactly once", 
       sourceNodeId: "source-node",
       sourceVersionId: "source-version",
     }],
-  });
+  }));
   const api = fakeApi();
 
   render(<StrictMode><Harness api={api} /></StrictMode>);
 
-  await waitFor(() => expect(api.importProjectVersion).toHaveBeenCalledTimes(1));
-  await waitFor(() => expect(api.submitAgentTurn).toHaveBeenCalledTimes(1));
-  expect(api.submitAgentTurn).toHaveBeenCalledWith(PROJECT_ID, { type: "main" }, {
-    prompt: "Create the launch page",
-    context: { nodeIds: [] },
-    idempotencyKey: `initial-design-canvas-${PROJECT_ID}`,
-  });
-  expect(peekPendingDesignCanvasIntent(PROJECT_ID)).toBeNull();
-});
-
-test("a failed handoff remains pending and retries without re-importing completed context", async () => {
-  setPendingDesignCanvasIntent({
-    projectId: PROJECT_ID,
-    prompt: "",
-    context: [{
-      kind: "project-version",
-      title: "Source page",
-      sourceProjectId: "source-project",
-      sourceNodeId: "source-node",
-      sourceVersionId: "source-version",
-    }],
-  });
-  const importProjectVersion = vi.fn()
-    .mockRejectedValueOnce(new Error("daemon unavailable"))
-    .mockResolvedValue(canvas(2, 1));
-  const api = fakeApi({ importProjectVersion });
-  render(<Harness api={api} />);
-
-  expect(await screen.findByRole("button", { name: "retry handoff" })).toBeInTheDocument();
-  expect(peekPendingDesignCanvasIntent(PROJECT_ID)?.context).toHaveLength(1);
-  fireEvent.click(screen.getByRole("button", { name: "retry handoff" }));
-
-  await waitFor(() => expect(importProjectVersion).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(peekPendingDesignCanvasIntent(PROJECT_ID)).toBeNull());
+  await screen.findByText("1");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(api.importProjectVersion).not.toHaveBeenCalled();
+  expect(api.submitAgentTurn).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(`dezin.design-canvas.intent.${PROJECT_ID}`)).not.toBeNull();
 });
 
 test("a CAS conflict refreshes canonical revision and replays an absolute mutation once", async () => {
@@ -180,7 +159,7 @@ test("material revision imports flow through the mutation queue and update the c
   expect(appendMaterialVersion).toHaveBeenCalledWith(PROJECT_ID, "image-1", expect.objectContaining({ name: "v2.png" }));
 });
 
-test("cancelling a live job refreshes the canvas projection before polling can stop", async () => {
+test("cancelling a live job refreshes the canonical canvas projection immediately", async () => {
   const getCanvas = vi.fn()
     .mockResolvedValueOnce(canvas(1))
     .mockResolvedValueOnce(canvas(2));
@@ -192,6 +171,54 @@ test("cancelling a live job refreshes the canvas projection before polling can s
 
   await screen.findByText("2");
   expect(api.cancelJob).toHaveBeenCalledWith(PROJECT_ID, "job-live");
+  expect(getCanvas).toHaveBeenCalledTimes(2);
+});
+
+test("an invalidation event refreshes Canvas and Jobs from canonical GETs", async () => {
+  let emit!: (message: DesignInvalidationMessage) => void;
+  const streamInvalidations = vi.fn(async function* () {
+    yield await new Promise<DesignInvalidationMessage>((resolve) => { emit = resolve; });
+  });
+  const getCanvas = vi.fn()
+    .mockResolvedValueOnce(canvas(1))
+    .mockResolvedValueOnce(canvas(5));
+  const listJobs = vi.fn(async () => []);
+  const api = fakeApi({ getCanvas, listJobs, streamInvalidations });
+  render(<Harness api={api} />);
+
+  await screen.findByText("1");
+  await waitFor(() => expect(streamInvalidations).toHaveBeenCalledWith(PROJECT_ID, expect.any(AbortSignal)));
+  await act(async () => emit({
+    type: "invalidate",
+    cursor: "epoch:1",
+    epoch: "epoch",
+    sequence: 1,
+    topics: ["jobs"],
+  }));
+
+  await screen.findByText("5");
+  expect(getCanvas).toHaveBeenCalledTimes(2);
+  expect(listJobs).toHaveBeenCalledTimes(2);
+});
+
+test("retrying a failed Job installs its successor projection before refreshing authority", async () => {
+  const getCanvas = vi.fn()
+    .mockResolvedValueOnce(canvas(1))
+    .mockResolvedValueOnce(canvas(4));
+  const retryJob = vi.fn(async () => ({
+    retryOfJobId: "job-failed",
+    thread: mainThread,
+    job: { ...readyJob, id: "job-retry", status: "queued" as const },
+    canvas: canvas(3, 2),
+  }));
+  const api = fakeApi({ getCanvas, retryJob });
+  render(<Harness api={api} />);
+  await screen.findByText("1");
+
+  fireEvent.click(screen.getByRole("button", { name: "retry failed job" }));
+
+  await screen.findByText("4");
+  expect(retryJob).toHaveBeenCalledWith(PROJECT_ID, "job-failed");
   expect(getCanvas).toHaveBeenCalledTimes(2);
 });
 

@@ -1264,7 +1264,7 @@ function project(id: string, name: string) {
 
 function generatedCanvas(projectId: string, nodeName = "Checkout"): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId,
     revision: 1,
     viewport: { x: 0, y: 0, zoom: 1 },

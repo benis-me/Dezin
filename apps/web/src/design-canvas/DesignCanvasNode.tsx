@@ -1,15 +1,29 @@
-import { NodeResizeControl, useViewport, type ControlPosition, type Node, type NodeProps } from "@xyflow/react";
+import {
+  NodeResizeControl,
+  type ControlPosition,
+  type Node,
+  type NodeProps,
+  type OnResizeEnd,
+  type ShouldResize,
+} from "@xyflow/react";
 import {
   CircleAlert,
   LoaderCircle,
-  Maximize2,
   Play,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+} from "react";
 
 import { Button } from "../components/ui/Button.tsx";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import {
   embeddedPreviewDocumentSrc,
   previewDocumentSrc,
@@ -21,6 +35,7 @@ import type { DesignCanvasApi } from "./api.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import { useExactVersionMetadata } from "./exact-version-metadata.ts";
 import { nodeFocusEase, type NodeFocusMotion } from "./node-focus-motion.ts";
+import { designNodeGenerationCopy, designNodePresentation } from "./node-presentation.ts";
 import { TypedMaterialSurface } from "./TypedMaterialSurface.tsx";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
@@ -181,6 +196,12 @@ const STATE_LABELS: Record<DesignNode["state"], string> = {
 const LIVE_STATES = new Set<DesignNode["state"]>(["queued", "generating", "validating"]);
 const NODE_ENTERING_DURATION_MS = 1_500;
 
+export function designNodeAriaLabel(
+  node: Pick<DesignNode, "kind" | "name" | "state">,
+): string {
+  return `${node.name}, ${catalogItem(node.kind).label}, ${STATE_LABELS[node.state]}`;
+}
+
 const GENERATED_PREVIEW_SIZES: Partial<Record<DesignNodeKind, { width: number; height: number }>> = {
   page: { width: 800, height: 600 },
   component: { width: 560, height: 400 },
@@ -192,7 +213,14 @@ const GENERATED_PREVIEW_SIZES: Partial<Record<DesignNodeKind, { width: number; h
   knowledge: { width: 680, height: 500 },
 };
 
-const RESIZE_CORNERS: readonly ControlPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+const RESIZE_CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"] as const satisfies readonly ControlPosition[];
+type ResizeCornerPosition = typeof RESIZE_CORNERS[number];
+const RESIZE_CORNER_LABELS: Record<ResizeCornerPosition, string> = {
+  "top-left": "top left",
+  "top-right": "top right",
+  "bottom-left": "bottom left",
+  "bottom-right": "bottom right",
+};
 
 export function preferredGeneratedNodeGeometry(node: Pick<DesignNode, "kind" | "geometry">): DesignNode["geometry"] {
   const preferred = GENERATED_PREVIEW_SIZES[node.kind];
@@ -217,6 +245,157 @@ function useNearViewport(selected: boolean): { ref: React.RefObject<HTMLDivEleme
   return { ref, nearViewport };
 }
 
+function keyboardResizeGeometry(
+  geometry: DesignNode["geometry"],
+  position: ResizeCornerPosition,
+  key: string,
+  step: number,
+  lockAspectRatio: boolean,
+): DesignNode["geometry"] | null {
+  const horizontalDelta = key === "ArrowLeft" ? -step : key === "ArrowRight" ? step : 0;
+  const verticalDelta = key === "ArrowUp" ? -step : key === "ArrowDown" ? step : 0;
+  if (horizontalDelta === 0 && verticalDelta === 0) return null;
+
+  const left = position.endsWith("left");
+  const top = position.startsWith("top");
+  const minimumWidth = lockAspectRatio ? 120 : 280;
+  const minimumHeight = lockAspectRatio ? 80 : 200;
+
+  if (!lockAspectRatio) {
+    const width = horizontalDelta === 0
+      ? geometry.width
+      : Math.max(minimumWidth, geometry.width + (left ? -horizontalDelta : horizontalDelta));
+    const height = verticalDelta === 0
+      ? geometry.height
+      : Math.max(minimumHeight, geometry.height + (top ? -verticalDelta : verticalDelta));
+    return {
+      x: left ? geometry.x + geometry.width - width : geometry.x,
+      y: top ? geometry.y + geometry.height - height : geometry.y,
+      width,
+      height,
+    };
+  }
+
+  const aspectRatio = geometry.width / geometry.height;
+  if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return null;
+  let width: number;
+  let height: number;
+  if (horizontalDelta !== 0) {
+    width = Math.max(
+      minimumWidth,
+      minimumHeight * aspectRatio,
+      geometry.width + (left ? -horizontalDelta : horizontalDelta),
+    );
+    height = width / aspectRatio;
+  } else {
+    height = Math.max(
+      minimumHeight,
+      minimumWidth / aspectRatio,
+      geometry.height + (top ? -verticalDelta : verticalDelta),
+    );
+    width = height * aspectRatio;
+  }
+  return {
+    x: left ? geometry.x + geometry.width - width : geometry.x,
+    y: top ? geometry.y + geometry.height - height : geometry.y,
+    width,
+    height,
+  };
+}
+
+function NodeCornerResizeControl({
+  nodeId,
+  nodeName,
+  geometryRef,
+  position,
+  enabled,
+  emphasized,
+  lockAspectRatio,
+  onResize,
+  onResizeStart,
+  onResizeEnd,
+}: {
+  nodeId: string;
+  nodeName: string;
+  geometryRef: RefObject<DesignNode["geometry"]>;
+  position: ResizeCornerPosition;
+  enabled: boolean;
+  emphasized: boolean;
+  lockAspectRatio: boolean;
+  onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
+  onResizeStart: () => void;
+  onResizeEnd: () => void;
+}) {
+  const shouldResize = useCallback<ShouldResize>(() => enabled, [enabled]);
+  const handleResizeEnd = useCallback<OnResizeEnd>((_event, params) => {
+    const geometry = {
+      x: params.x,
+      y: params.y,
+      width: params.width,
+      height: params.height,
+    };
+    geometryRef.current = geometry;
+    onResizeEnd();
+    onResize(nodeId, geometry);
+  }, [geometryRef, nodeId, onResize, onResizeEnd]);
+  const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!enabled) return;
+    const geometry = keyboardResizeGeometry(
+      geometryRef.current,
+      position,
+      event.key,
+      event.shiftKey ? 24 : 8,
+      lockAspectRatio,
+    );
+    if (!geometry) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const current = geometryRef.current;
+    if (geometry.x === current.x
+      && geometry.y === current.y
+      && geometry.width === current.width
+      && geometry.height === current.height) return;
+    geometryRef.current = geometry;
+    onResize(nodeId, geometry);
+  }, [enabled, geometryRef, lockAspectRatio, nodeId, onResize, position]);
+
+  return (
+    <NodeResizeControl
+      position={position}
+      minWidth={lockAspectRatio ? 120 : 280}
+      minHeight={lockAspectRatio ? 80 : 200}
+      keepAspectRatio={lockAspectRatio}
+      shouldResize={shouldResize}
+      className={cn(
+        "design-canvas-node__resize-control",
+        enabled && "design-canvas-node__resize-control--enabled",
+        emphasized
+          ? "design-canvas-node__resize-control--interactive"
+          : "design-canvas-node__resize-control--affordance",
+      )}
+      onResizeStart={onResizeStart}
+      onResizeEnd={handleResizeEnd}
+    >
+      {emphasized && enabled ? (
+        <button
+          type="button"
+          className="design-canvas-node__resize-hit-target"
+          data-resize-corner={position}
+          tabIndex={0}
+          aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+          aria-label={`Resize ${nodeName} from ${RESIZE_CORNER_LABELS[position]}`}
+          aria-description="Use arrow keys to resize. Hold Shift for larger steps."
+          onKeyDown={handleKeyDown}
+        >
+          <span aria-hidden className="design-canvas-node__resize-corner" />
+        </button>
+      ) : (
+        <span aria-hidden className="design-canvas-node__resize-corner" />
+      )}
+    </NodeResizeControl>
+  );
+}
+
 function NodeCornerResizeControls({
   node,
   enabled,
@@ -234,34 +413,25 @@ function NodeCornerResizeControls({
   onResizeStart: () => void;
   onResizeEnd: () => void;
 }) {
+  const geometryRef = useRef(node.geometry);
+  useEffect(() => {
+    geometryRef.current = node.geometry;
+  }, [node.geometry]);
+
   return RESIZE_CORNERS.map((position) => (
-    <NodeResizeControl
+    <NodeCornerResizeControl
       key={position}
+      nodeId={node.id}
+      nodeName={node.name}
+      geometryRef={geometryRef}
       position={position}
-      minWidth={lockAspectRatio ? 120 : 280}
-      minHeight={lockAspectRatio ? 80 : 200}
-      keepAspectRatio={lockAspectRatio}
-      shouldResize={() => enabled}
-      className={cn(
-        "design-canvas-node__resize-control",
-        enabled && "design-canvas-node__resize-control--enabled",
-        emphasized
-          ? "design-canvas-node__resize-control--interactive"
-          : "design-canvas-node__resize-control--affordance",
-      )}
+      enabled={enabled}
+      emphasized={emphasized}
+      lockAspectRatio={lockAspectRatio}
+      onResize={onResize}
       onResizeStart={onResizeStart}
-      onResizeEnd={(_event, params) => {
-        onResizeEnd();
-        onResize(node.id, {
-          x: params.x,
-          y: params.y,
-          width: params.width,
-          height: params.height,
-        });
-      }}
-    >
-      <span aria-hidden className="design-canvas-node__resize-corner" />
-    </NodeResizeControl>
+      onResizeEnd={onResizeEnd}
+    />
   ));
 }
 
@@ -303,8 +473,6 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
   } = data;
   const [resizing, setResizing] = useState(false);
   const reduceMotion = usePrefersReducedMotion();
-  const { zoom } = useViewport();
-  const chromeScale = 1 / Math.max(0.12, zoom);
   const { ref, nearViewport } = useNearViewport(selected);
   const focusAnimationRef = useRef<FocusAnimationState | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -327,6 +495,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     enabled: shouldMountRichPreview,
   });
   const catalog = catalogItem(node.kind);
+  const presentation = designNodePresentation(node.kind);
   const hasRichContent = versionId !== null;
   const contentPlaneActive = preview !== null && contentLayout !== null;
   const live = LIVE_STATES.has(node.state);
@@ -353,6 +522,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     },
   });
   const previousVersionIdRef = useRef(versionId);
+  const handleResizeStart = useCallback(() => setResizing(true), []);
+  const handleResizeEnd = useCallback(() => setResizing(false), []);
   const focusStyle = focusMotion ? {
     "--design-node-focus-start-x": `${focusMotion.startX}px`,
     "--design-node-focus-start-y": `${focusMotion.startY}px`,
@@ -506,6 +677,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       ref={ref}
       data-design-node-id={node.id}
       data-node-kind={node.kind}
+      data-node-presentation={presentation.mode}
       data-node-state={node.state}
       data-node-focus-role={focusMotion?.role}
       data-node-focus-phase={focusMotion?.phase}
@@ -526,44 +698,19 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         ...focusStyle,
       }}
     >
+      <div className="design-canvas-node__hover-label" aria-hidden="true">
+        <span>{node.name}</span>
+      </div>
+
       <NodeCornerResizeControls
         node={node}
         enabled={focusMotion === null}
         emphasized={selected}
         lockAspectRatio={catalog.lockAspectRatio === true}
         onResize={onResize}
-        onResizeStart={() => setResizing(true)}
-        onResizeEnd={() => setResizing(false)}
+        onResizeStart={handleResizeStart}
+        onResizeEnd={handleResizeEnd}
       />
-
-      {selected && hasRichContent && !material && !focusInteractive ? (
-        <TooltipProvider delayDuration={180}>
-          <div
-            className="nodrag nopan design-canvas-node__toolbar"
-            role="toolbar"
-            aria-label={`${node.name} preview controls`}
-            style={{
-              top: `calc(100% + ${7 * chromeScale}px)`,
-              transform: `translateX(-50%) scale(${chromeScale})`,
-            }}
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="Fit Node preview"
-                  onClick={() => onResize(node.id, preferredGeneratedNodeGeometry(node))}
-                >
-                  <Maximize2 aria-hidden />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={5}>Fit Node preview</TooltipContent>
-            </Tooltip>
-          </div>
-        </TooltipProvider>
-      ) : null}
 
       <div className="design-canvas-node__frame">
         <div className="design-canvas-node__body">
@@ -619,6 +766,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             ) : live ? (
               <NodeWorkingPlaceholder
                 state={node.state}
+                kind={node.kind}
                 label={catalog.label}
                 generationSeed={generationSeed}
                 motionActive={generationMotionActive}
@@ -653,6 +801,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
           {live && hasRichContent ? (
             <NodeGenerationStatus
               state={node.state}
+              kind={node.kind}
               generationSeed={generationSeed}
               motionActive={generationMotionActive}
             />
@@ -672,36 +821,29 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
 
 export function NodeWorkingPlaceholder({
   state,
-  label,
+  kind = "page",
   generationSeed = "generation-preview",
   motionActive = true,
 }: {
   state: DesignNode["state"];
-  label: string;
+  kind?: DesignNodeKind;
+  label?: string;
   generationSeed?: string;
   motionActive?: boolean;
 }) {
-  const title = state === "queued"
-    ? "Waiting to begin"
-    : state === "validating"
-      ? "Preparing the preview"
-      : `Creating ${articleFor(label)} ${label.toLocaleLowerCase()}`;
-  const detail = state === "queued"
-    ? "This Node is next in the Agent queue."
-    : state === "validating"
-      ? "Checking the single-file result before it becomes a version."
-      : "The Agent is composing a new single-file design from the canvas context.";
+  const copy = designNodeGenerationCopy(kind, state, false);
   return (
     <div
       className="design-canvas-node__generation"
       data-generation-state={state}
+      data-generation-kind={kind}
       data-generation-motion={motionActive ? "active" : "paused"}
       role="status"
     >
       <GenerationDotField key={generationSeed} generationSeed={generationSeed} motionActive={motionActive} />
       <div className="design-canvas-node__generation-copy">
-        <p>{title}</p>
-        <span>{detail}</span>
+        <p>{copy.title}</p>
+        <span>{copy.detail}</span>
       </div>
     </div>
   );
@@ -709,22 +851,26 @@ export function NodeWorkingPlaceholder({
 
 export function NodeGenerationStatus({
   state,
+  kind = "page",
   generationSeed = "generation-preview",
   motionActive = true,
 }: {
   state: DesignNode["state"];
+  kind?: DesignNodeKind;
   generationSeed?: string;
   motionActive?: boolean;
 }) {
+  const copy = designNodeGenerationCopy(kind, state, true);
   return (
     <div
       className="design-canvas-node__working-badge"
       data-generation-state={state}
+      data-generation-kind={kind}
       data-generation-motion={motionActive ? "active" : "paused"}
       role="status"
     >
       <GenerationDotField key={generationSeed} compact generationSeed={generationSeed} motionActive={motionActive} />
-      <span>{state === "validating" ? "Preparing the next preview" : "Creating the next version"}</span>
+      <span>{copy.title}</span>
     </div>
   );
 }
@@ -839,10 +985,6 @@ function GenerationDotField({
       </span>
     </span>
   );
-}
-
-function articleFor(label: string): string {
-  return /^[aeiou]/i.test(label) ? "an" : "a";
 }
 
 function MaterialPreview({

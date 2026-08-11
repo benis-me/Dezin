@@ -5,7 +5,9 @@ import { expect, test } from "vitest";
 const css = readFileSync(join(process.cwd(), "src/design-canvas/design-canvas.css"), "utf8");
 const conversationCss = readFileSync(join(process.cwd(), "src/components/agent-conversation.css"), "utf8");
 const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8");
+const focusedChromeSource = readFileSync(join(process.cwd(), "src/design-canvas/FocusedNodeChrome.tsx"), "utf8");
 const floatingAgentSource = readFileSync(join(process.cwd(), "src/design-canvas/FloatingNodeAgent.tsx"), "utf8");
+const nodeSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasNode.tsx"), "utf8");
 
 test("Design Canvas CSS consumes full-color tokens without invalid hsl wrappers", () => {
   expect(css).not.toContain("hsl(var(--");
@@ -35,10 +37,18 @@ test("selected and keyboard-focused Nodes use restrained depth with discoverable
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
   expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;[^}]*transition:\s*opacity 160ms[^}]*transform 180ms/s);
+  expect(css.match(/\.design-canvas-node__resize-corner\s*\{[^}]*\}/s)?.[0]).not.toContain("will-change");
+  expect(css).toMatch(/\.design-canvas-node__resize-hit-target\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*width:\s*100%;[^}]*height:\s*100%;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*width:\s*13px;[^}]*height:\s*13px;[^}]*pointer-events:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control:active \.design-canvas-node__resize-corner,[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-corner\s*\{[^}]*will-change:\s*opacity, transform;/s);
   expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{\s*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover \.design-canvas-node__resize-control--enabled\s*\{\s*pointer-events:\s*auto;/s);
-  expect(css).toMatch(/\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.3;/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-node:hover \.design-canvas-node__resize-corner\s*\{[^}]*will-change:\s*opacity, transform;/s);
+  expect(css).toMatch(/\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.18;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control:hover \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.68;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 34%, transparent\);/s);
   expect(css).toMatch(/\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node__resize-control--interactive,[^{]*\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-control--enabled\s*\{[^}]*pointer-events:\s*auto/s);
   expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
+  expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible\s*\{[^}]*outline:[^}]*transition:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible \.design-canvas-node__resize-corner\s*\{[^}]*transition:\s*none;[^}]*opacity:\s*1;[^}]*transform:\s*scale\(1\);/s);
   expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*7px;[^}]*left:\s*7px;/s);
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
@@ -71,6 +81,9 @@ test("Node previews have no permanent title chrome or zoom-in cursor", () => {
   expect(css).not.toContain(".design-canvas-node__identity");
   expect(css).not.toContain(".design-canvas-node__name");
   expect(css).not.toContain("cursor: zoom-in");
+  expect(css).toMatch(/\.design-canvas-node__hover-label\s*\{[^}]*pointer-events:\s*none;[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(0, 7px, 0\);[^}]*transition:[^}]*opacity 160ms[^}]*transform 220ms cubic-bezier\(0\.23, 1, 0\.32, 1\);/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover > \.design-canvas-node__hover-label\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0, calc\(-100% - 7px\), 0\);/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-node__hover-label\s*\{[^}]*transition:\s*opacity 160ms var\(--design-canvas-ease-out\) !important;/s);
 });
 
 test("focused Nodes fly above an opaque same-color mask while background Nodes retreat", () => {
@@ -246,12 +259,15 @@ test("focused preview controls are larger and animate with the focus chrome", ()
   expect(css).toMatch(/\.design-canvas-focus-actions\s*\{[^}]*bottom:\s*16px;[^}]*border-radius:\s*17px;[^}]*padding:\s*5px;/s);
   expect(css).toMatch(/\.design-canvas-focus-actions \[data-slot="button"\]\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px;/s);
   expect(css).toMatch(/\.design-canvas-focus-dismiss\s*\{[^}]*z-index:\s*47;[^}]*inset:\s*0;/s);
-  expect(screenSource).toContain("duration: focusMotionAllowed ? 0.26 : 0");
-  expect(screenSource).toContain("duration: focusMotionAllowed ? 0.2 : 0");
+  expect(focusedChromeSource).toContain("duration: motionAllowed ? 0.26 : 0");
+  expect(focusedChromeSource).toContain("duration: motionAllowed ? 0.2 : 0");
 });
 
-test("selected Nodes temporarily suppress their redundant inline toolbar", () => {
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__toolbar\s*\{\s*display:\s*none;/s);
+test("selected Nodes do not ship an unreachable inline toolbar", () => {
+  expect(nodeSource).not.toContain("design-canvas-node__toolbar");
+  expect(nodeSource).not.toContain("Fit Node preview");
+  expect(css).not.toContain("design-canvas-node__toolbar");
+  expect(css).not.toContain("design-canvas-agent__versions");
 });
 
 test("Canvas uses the requested neutral background in both color schemes", () => {
@@ -313,6 +329,7 @@ test("Agent activity cards keep Thinking compact, complete, and visually quiet",
   expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*animation:/s);
   expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*(?:background|background-clip):/s);
   expect(css).toMatch(/\.design-canvas-agent__activity-stop\s*\{[^}]*margin-right:\s*4px;[^}]*border:[^;}]*var\(--destructive\)[^}]*border-radius:\s*999px(?:\s*!important)?;[^}]*transition:\s*transform 140ms/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__activity-retry\s*\{\s*transition:\s*none !important;\s*\}/s);
   expect(floatingAgentSource).toContain('<AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>');
   expect(css).toMatch(/\.design-canvas-agent__activity-collapsible\s*\{[^}]*overflow:\s*hidden;/s);
   expect(css).toMatch(/\.design-canvas-agent__activity-collapsible > \[data-agent-collapsible-content\]\s*\{[^}]*transform-origin:\s*50% 0;/s);

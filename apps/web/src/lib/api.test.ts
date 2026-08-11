@@ -13,6 +13,13 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
+function sseResponse(blocks: readonly string[]): Response {
+  return new Response(`${blocks.join("\n\n")}\n\n`, {
+    status: 200,
+    headers: { "content-type": "text/event-stream; charset=utf-8" },
+  });
+}
+
 const PROJECT = {
   id: "project-1",
   name: "Canvas project",
@@ -36,6 +43,42 @@ test("project creation uses the current empty-canvas defaults", async () => {
         name: "Canvas project",
       }),
     }),
+  );
+});
+
+test("Home bootstrap posts one durable Project request", async () => {
+  const bootstrap = {
+    project: PROJECT,
+    bootstrap: {
+      job: {
+        schemaVersion: 1 as const,
+        id: "bootstrap-1",
+        projectId: PROJECT.id,
+        requestHash: "a".repeat(64),
+        status: "ready" as const,
+        completedPhase: "ready" as const,
+        mainJobId: "job-main",
+        error: null,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      reused: false,
+    },
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(bootstrap, 201));
+  const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
+  const input = {
+    schemaVersion: 1 as const,
+    idempotencyKey: "home-web-0001",
+    name: "Canvas project",
+    prompt: "Create the page",
+    items: [],
+  };
+
+  await expect(api.bootstrapDesignProject(input)).resolves.toEqual(bootstrap);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://daemon/api/projects/bootstrap",
+    expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
   );
 });
 
@@ -137,6 +180,161 @@ test("parseSseBlock joins multiline JSON data and ignores malformed payloads", (
     type: "ready",
   });
   expect(parseSseBlock("data: {not-json")).toBeNull();
+});
+
+test("Design invalidation fetch streams authenticate and resume with Last-Event-ID", async () => {
+  const reset = {
+    type: "reset",
+    cursor: "epoch-a:4",
+    epoch: "epoch-a",
+    sequence: 4,
+    reason: "initial",
+  } as const;
+  const invalidation = {
+    type: "invalidate",
+    cursor: "epoch-a:5",
+    epoch: "epoch-a",
+    sequence: 5,
+    topics: ["canvas", "jobs"],
+  } as const;
+  const fetchImpl = vi.fn<FetchLike>()
+    .mockResolvedValueOnce(sseResponse([
+      `id: ${reset.cursor}\nevent: reset\ndata: ${JSON.stringify(reset)}`,
+    ]))
+    .mockResolvedValueOnce(sseResponse([
+      `id: ${invalidation.cursor}\nevent: invalidate\ndata: ${JSON.stringify(invalidation)}`,
+    ]));
+  const api = createApiClient({
+    baseUrl: "http://daemon",
+    daemonToken: "canvas-token",
+    fetchImpl,
+  });
+  const controller = new AbortController();
+  const stream = api.streamDesignCanvasInvalidations("project /1", controller.signal);
+
+  await expect(stream.next()).resolves.toEqual({ done: false, value: reset });
+  await expect(stream.next()).resolves.toEqual({ done: false, value: invalidation });
+  controller.abort();
+  await stream.return(undefined);
+
+  expect(fetchImpl).toHaveBeenCalledTimes(2);
+  expect(fetchImpl.mock.calls[0]).toEqual([
+    "http://daemon/api/projects/project%20%2F1/design-canvas/events",
+    expect.objectContaining({
+      signal: controller.signal,
+      headers: expect.objectContaining({ "x-dezin-daemon-token": "canvas-token" }),
+    }),
+  ]);
+  expect(fetchImpl.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+    headers: expect.objectContaining({
+      "x-dezin-daemon-token": "canvas-token",
+      "Last-Event-ID": reset.cursor,
+    }),
+  }));
+});
+
+test("Design invalidation streams retain their cursor across a transient fetch disconnect", async () => {
+  const reset = {
+    type: "reset",
+    cursor: "epoch-b:2",
+    epoch: "epoch-b",
+    sequence: 2,
+    reason: "initial",
+  } as const;
+  const invalidation = {
+    type: "invalidate",
+    cursor: "epoch-b:3",
+    epoch: "epoch-b",
+    sequence: 3,
+    topics: ["thread:main"],
+  } as const;
+  const fetchImpl = vi.fn<FetchLike>()
+    .mockResolvedValueOnce(sseResponse([
+      `id: ${reset.cursor}\nevent: reset\ndata: ${JSON.stringify(reset)}`,
+    ]))
+    .mockRejectedValueOnce(new TypeError("socket reset"))
+    .mockResolvedValueOnce(sseResponse([
+      `id: ${invalidation.cursor}\nevent: invalidate\ndata: ${JSON.stringify(invalidation)}`,
+    ]));
+  const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
+  const controller = new AbortController();
+  const stream = api.streamDesignCanvasInvalidations("project-1", controller.signal);
+
+  expect((await stream.next()).value).toEqual(reset);
+  expect((await stream.next()).value).toEqual(invalidation);
+  controller.abort();
+  await stream.return(undefined);
+
+  expect(fetchImpl).toHaveBeenCalledTimes(3);
+  for (const call of fetchImpl.mock.calls.slice(1)) {
+    expect(call[1]).toEqual(expect.objectContaining({
+      headers: expect.objectContaining({ "Last-Event-ID": reset.cursor }),
+    }));
+  }
+});
+
+test("Design invalidation streams discard non-canonical cursors, topics, duplicates, and fields", async () => {
+  const malformed = [
+    {
+      type: "invalidate",
+      cursor: "epoch-c:99",
+      epoch: "epoch-c",
+      sequence: 1,
+      topics: ["canvas"],
+    },
+    {
+      type: "invalidate",
+      cursor: "epoch c:2",
+      epoch: "epoch c",
+      sequence: 2,
+      topics: ["jobs"],
+    },
+    {
+      type: "invalidate",
+      cursor: "epoch-c:3",
+      epoch: "epoch-c",
+      sequence: 3,
+      topics: ["thread:node:../../escape"],
+    },
+    {
+      type: "invalidate",
+      cursor: "epoch-c:4",
+      epoch: "epoch-c",
+      sequence: 4,
+      topics: ["canvas"],
+      unexpected: true,
+    },
+    {
+      type: "invalidate",
+      cursor: "epoch-c:5",
+      epoch: "epoch-c",
+      sequence: 5,
+      topics: ["canvas", "canvas"],
+    },
+  ];
+  const valid = {
+    type: "invalidate",
+    cursor: "epoch-c:6",
+    epoch: "epoch-c",
+    sequence: 6,
+    topics: ["thread:node:node-safe_1", "jobs"],
+  } as const;
+  const blocks = [
+    ...malformed.map((message) => (
+      `id: ${message.cursor}\nevent: invalidate\ndata: ${JSON.stringify(message)}`
+    )),
+    `id: ${valid.cursor}\nevent: invalidate\ndata: ${JSON.stringify(valid)}`,
+  ];
+  const fetchImpl = vi.fn<FetchLike>().mockResolvedValueOnce(sseResponse(blocks));
+  const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
+  const controller = new AbortController();
+  const stream = api.streamDesignCanvasInvalidations("project-1", controller.signal);
+
+  const first = await stream.next();
+  controller.abort();
+  await stream.return(undefined);
+
+  expect(first).toEqual({ done: false, value: valid });
 });
 
 test("prompt optimization carries only the selected Agent fields supplied by Home", async () => {

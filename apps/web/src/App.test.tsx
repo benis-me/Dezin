@@ -1,8 +1,7 @@
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
-import App, { designCanvasAttachmentItems } from "./App.tsx";
+import App, { designCanvasAttachmentItems, homeBootstrapFingerprint } from "./App.tsx";
 import { ApiProvider } from "./lib/api-context.tsx";
-import { peekPendingDesignCanvasIntent } from "./lib/pending-design-canvas.ts";
 import { makeFakeApi } from "./test/fake-api.ts";
 import { validPngFile } from "./test/image-fixtures.ts";
 import type { DesignJob } from "./design-canvas/types.ts";
@@ -18,7 +17,7 @@ const api = makeFakeApi({
     { id: "modern-minimal", name: "Modern Minimal", category: "Modern & Minimal", summary: "neutral" },
   ],
   getDesignCanvas: async (projectId) => ({
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId,
     revision: 0,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -73,6 +72,7 @@ test("a Project screen wires a ready Export to the browser-safe path fallback", 
     value: { writeText },
   });
   const readyExport: DesignJob = {
+    schemaVersion: 2,
     id: "job-ready-export",
     kind: "implementation-export",
     runnerId: "fixture",
@@ -81,9 +81,12 @@ test("a Project screen wires a ready Export to the browser-safe path fallback", 
     nodeId: null,
     parentJobId: null,
     contextHash: "context",
+    canvasRevision: 1,
+    expectedHeadVersionId: null,
     versionId: null,
     exportId: "export-ready-1",
     error: null,
+    cancelRequested: false,
     activity: [],
     createdAt: 1,
     updatedAt: 2,
@@ -170,11 +173,28 @@ test("the theme toggle flips the .dark class", () => {
 });
 
 test("creating a project asks the daemon for a generated title in the background", async () => {
-  const createProject = vi.fn(async () => ({
-    id: "p1",
-    name: "A dashboard for pricing experiments",
-    createdAt: 1,
-    updatedAt: 1,
+  const bootstrapDesignProject = vi.fn(async () => ({
+    project: {
+      id: "p1",
+      name: "A dashboard for pricing experiments",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    bootstrap: {
+      job: {
+        schemaVersion: 1 as const,
+        id: "bootstrap-p1",
+        projectId: "p1",
+        requestHash: "request-hash",
+        status: "ready" as const,
+        completedPhase: "ready" as const,
+        mainJobId: "job-main",
+        error: null,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      reused: false,
+    },
   }));
   const generateProjectTitle = vi.fn(async () => ({
     id: "p1",
@@ -183,7 +203,7 @@ test("creating a project asks the daemon for a generated title in the background
     updatedAt: 2,
   }));
   render(
-    <ApiProvider client={makeFakeApi({ ...api, createProject, generateProjectTitle })}>
+    <ApiProvider client={makeFakeApi({ ...api, bootstrapDesignProject, generateProjectTitle })}>
       <App />
     </ApiProvider>,
   );
@@ -191,7 +211,7 @@ test("creating a project asks the daemon for a generated title in the background
   fireEvent.change(screen.getByLabelText("Describe your design"), { target: { value: "A dashboard for pricing experiments" } });
   fireEvent.click(screen.getByLabelText("Design"));
 
-  await waitFor(() => expect(createProject).toHaveBeenCalled());
+  await waitFor(() => expect(bootstrapDesignProject).toHaveBeenCalled());
   await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith("p1", "A dashboard for pricing experiments"));
 });
 
@@ -229,26 +249,58 @@ test("Home attachment mapping keeps exact source Version identity in the atomic 
   }]);
 });
 
-test("Home sends attached bytes through one Canvas batch without the retired ref-upload path", async () => {
-  const createProject = vi.fn(async () => ({ id: "atomic-home", name: "Untitled", createdAt: 1, updatedAt: 1 }));
-  const getDesignCanvas = vi.fn(async (projectId: string) => ({
+test("Home retry fingerprint stays bounded while exact attachment bytes remain authoritative", async () => {
+  const base64 = btoa("x".repeat(256 * 1024));
+  const request = {
     schemaVersion: 1 as const,
-    projectId,
-    revision: 0,
-    viewport: { x: 0, y: 0, zoom: 1 },
-    nodeOrder: [],
-    nodes: [],
-    undoDepth: 0,
-    redoDepth: 0,
-    createdAt: 1,
-    updatedAt: 1,
+    name: "Large attachment",
+    prompt: "Use the reference",
+    items: [{
+      asset: { name: "large.txt", mimeType: "text/plain", base64 },
+      binding: {
+        type: "create-node" as const,
+        node: { id: "node-large", kind: "document" as const, name: "Large" },
+      },
+    }],
+  };
+
+  const first = await homeBootstrapFingerprint(request);
+  const replay = await homeBootstrapFingerprint(request);
+  const changed = await homeBootstrapFingerprint({
+    ...request,
+    items: [{ ...request.items[0]!, asset: { ...request.items[0]!.asset, base64: btoa(`${"x".repeat(256 * 1024 - 1)}y`) } }],
+  });
+
+  expect(first).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(first.length).toBe(71);
+  expect(replay).toBe(first);
+  expect(changed).not.toBe(first);
+  expect(first).not.toContain(base64.slice(0, 64));
+});
+
+test("Home sends attached bytes through one durable bootstrap before navigating", async () => {
+  const bootstrapDesignProject = vi.fn(async () => ({
+    project: { id: "atomic-home", name: "Untitled", createdAt: 1, updatedAt: 1 },
+    bootstrap: {
+      job: {
+        schemaVersion: 1 as const,
+        id: "bootstrap-home",
+        projectId: "atomic-home",
+        requestHash: "a".repeat(64),
+        status: "ready" as const,
+        completedPhase: "ready" as const,
+        mainJobId: null,
+        error: null,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      reused: false,
+    },
   }));
-  const importDesignCanvasAssets = vi.fn(async (projectId: string) => ({
-    ...(await getDesignCanvas(projectId)),
-    revision: 1,
-  }));
+  const createProject = vi.fn(api.createProject);
+  const importDesignCanvasAssets = vi.fn(api.importDesignCanvasAssets);
   render(
-    <ApiProvider client={makeFakeApi({ ...api, createProject, getDesignCanvas, importDesignCanvasAssets })}>
+    <ApiProvider client={makeFakeApi({ ...api, createProject, importDesignCanvasAssets, bootstrapDesignProject })}>
       <App />
     </ApiProvider>,
   );
@@ -259,9 +311,12 @@ test("Home sends attached bytes through one Canvas batch without the retired ref
   await screen.findByLabelText("Remove direction.png");
   fireEvent.click(screen.getByLabelText("Design"));
 
-  await waitFor(() => expect(importDesignCanvasAssets).toHaveBeenCalledTimes(1));
-  expect(importDesignCanvasAssets).toHaveBeenCalledWith("atomic-home", {
-    expectedRevision: 0,
+  await waitFor(() => expect(bootstrapDesignProject).toHaveBeenCalledTimes(1));
+  expect(bootstrapDesignProject).toHaveBeenCalledWith(expect.objectContaining({
+    schemaVersion: 1,
+    idempotencyKey: expect.any(String),
+    name: "Recreate the reference screenshot faithfully.",
+    prompt: "Recreate the reference screenshot faithfully.",
     items: [{
       asset: {
         name: "direction.png",
@@ -278,18 +333,38 @@ test("Home sends attached bytes through one Canvas batch without the retired ref
         },
       },
     }],
-  });
+  }));
+  expect(createProject).not.toHaveBeenCalled();
+  expect(importDesignCanvasAssets).not.toHaveBeenCalled();
+  expect(window.location.pathname).toBe("/projects/atomic-home");
 });
 
-test("Home removes a just-created Project when its atomic attachment import fails", async () => {
-  const createProject = vi.fn(async () => ({ id: "failed-home", name: "Untitled", createdAt: 1, updatedAt: 1 }));
-  const importDesignCanvasAssets = vi.fn(async () => { throw new Error("batch rejected"); });
+test("Home retries an ambiguous bootstrap with the same idempotency key before navigating", async () => {
+  const bootstrapDesignProject = vi.fn()
+    .mockRejectedValueOnce(new Error("response lost"))
+    .mockResolvedValue({
+      project: { id: "recovered-home", name: "Recovered", createdAt: 1, updatedAt: 1 },
+      bootstrap: {
+        job: {
+          schemaVersion: 1,
+          id: "bootstrap-recovered",
+          projectId: "recovered-home",
+          requestHash: "b".repeat(64),
+          status: "ready",
+          completedPhase: "ready",
+          mainJobId: "job-main",
+          error: null,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        reused: true,
+      },
+    });
   const deleteProject = vi.fn(async () => undefined);
   render(
     <ApiProvider client={makeFakeApi({
       ...api,
-      createProject,
-      importDesignCanvasAssets,
+      bootstrapDesignProject,
       deleteProject,
     })}>
       <App />
@@ -302,8 +377,13 @@ test("Home removes a just-created Project when its atomic attachment import fail
   await screen.findByLabelText("Remove rollback.png");
   fireEvent.click(screen.getByLabelText("Design"));
 
-  await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("failed-home"));
-  expect(importDesignCanvasAssets).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(bootstrapDesignProject).toHaveBeenCalledTimes(1));
   expect(window.location.pathname).toBe("/");
-  expect(peekPendingDesignCanvasIntent("failed-home")).toBeNull();
+  fireEvent.click(screen.getByLabelText("Design"));
+  await waitFor(() => expect(bootstrapDesignProject).toHaveBeenCalledTimes(2));
+  const firstKey = bootstrapDesignProject.mock.calls[0]?.[0]?.idempotencyKey;
+  const retryKey = bootstrapDesignProject.mock.calls[1]?.[0]?.idempotencyKey;
+  expect(retryKey).toBe(firstKey);
+  expect(deleteProject).not.toHaveBeenCalled();
+  expect(window.location.pathname).toBe("/projects/recovered-home");
 });

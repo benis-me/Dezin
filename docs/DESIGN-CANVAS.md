@@ -13,7 +13,7 @@ legacy project migration path.
 - The Main Agent may add, remove, rename, move, select, and queue nodes. It may
   dispatch node-scoped Agents and report their statuses, but it cannot publish
   node content itself.
-- Design output is a self-contained `index.html`. CSS and JavaScript are inline.
+- Generative Design output is a self-contained `index.html`. CSS and JavaScript are inline.
   Shared project assets are immutable and served by the local daemon.
 - Component, Page, Design System, Research, Design Tokens, Design Document,
   Layout, and Knowledge nodes are generative. Image, Video, Document, and File
@@ -27,8 +27,37 @@ legacy project migration path.
 - Empty, queued, generating, validating, ready, failed, cancelled, and
   superseded are durable node/run states. A process crash must never turn a
   partial candidate into a ready version or clear the last ready preview.
+- A Page's first generation must contain exactly one non-empty semantic
+  `<title>` in `<head>`. Publication adopts that title only while the Node still
+  has its default `Page` name; an explicit user name is never overwritten.
 - Canvas mutations use optimistic revision checks. Undo and redo replay ordinary
   canvas snapshots; they do not create a second mutation protocol.
+
+## Node-kind contract
+
+Every kind has an explicit catalog entry, generation/analysis copy, default
+geometry, and presentation mode. The current runtime distinctions are:
+
+| Kind | Agent output contract | Canvas/focus presentation |
+| --- | --- | --- |
+| Page | Complete responsive page with one semantic first-publication title | Sandboxed web preview with device controls and portable HTML export |
+| Component | Reusable specimen with states, variants, and usage | Sandboxed component preview |
+| Design System | Visual rules, primitives, and representative components | Sandboxed system reference |
+| Research | Evidence, gaps, findings, decisions, and implications | Document-sized research presentation |
+| Design Tokens | CSS-variable and JSON-like token reference | Token-reference presentation |
+| Design Document | Design.md-style rationale, rules, and guidance | Document-sized specification presentation |
+| Layout | Responsive grids, regions, spacing, and composition | Layout-reference presentation |
+| Knowledge | Facts, constraints, terminology, relationships, and open questions | Document-sized knowledge presentation |
+| Image / Video | Immutable material revision plus scoped analysis | Native aspect-preserving media renderer |
+| Document / File | Immutable material revision plus scoped analysis | MIME/filename-driven Markdown, TanStack code, text editor, or binary fallback |
+
+The eight generative kinds still publish one validated `index.html` Version.
+Their prompt and presentation contracts differ, but Markdown, token JSON/CSS,
+component contracts, research sources, and knowledge facts are not yet separate
+filesystem authority. They must not be described as native semantic artifacts
+until bundle Versions can carry those typed payloads alongside preview HTML and
+pinned assets. The proposed Figma mapping and bundle migration are documented
+in [FIGMA-IMPORT.md](./FIGMA-IMPORT.md).
 
 ## On-disk layout
 
@@ -62,6 +91,8 @@ projects/<project-id>/
     jobs/
       <job-id>.json                 # durable state, activity, cancellation and parent linkage
       <job-id>.context.json         # checksum-bound frozen canvas receipt
+    events/
+      invalidation-journal.json     # bounded SSE cursor and replay authority
     exports/
       .pending/<export-id>/         # isolated implementation Agent checkout; deleted after snapshot
       .validation/<export-id>/      # daemon-owned snapshot used for type/build/visual gates
@@ -77,6 +108,13 @@ projects/<project-id>/
           typecheck/receipt.json     # TypeScript compiler/config/source receipt
           visual/receipt.json        # per-route source/output/diff evidence
 ```
+
+Home creation uses one idempotent daemon bootstrap Job under
+`design-bootstrap-jobs/<idempotency-key-hash>/`: its compact `job.json` reserves
+the exact Project id, content-addressed attachment import, and optional Main
+Agent turn. Equal request keys replay the same receipt, conflicting payloads
+fail closed, restart recovery resumes the recorded phase, and staged
+`payloads/<sha256>` bytes are removed after the receipt is ready.
 
 For an ordinary Design project, `design/project.json` is the existence and
 Canvas authority, while `design/metadata.json` owns the project name, archive
@@ -102,6 +140,14 @@ renamed Version nor a terminal Job until recovery completes the whole
 publication. New code does not read
 or migrate the previous workspace graph, snapshots, proposals, plans, artifact
 tracks, or resource revisions.
+
+The daemon keeps `design-storage.ts` as a stable facade over focused Canvas,
+Asset/Version, Job/Thread, frozen-context, URL-context, and validation modules.
+Implementation Export, project bootstrap, and invalidation streaming are
+separate services; daemon and Web DTOs come from the browser-safe
+`@dezin/design-canvas-contracts` package. The Web screen delegates durable state
+and Agent-panel state to controllers while header, focus chrome, tool docks, and
+panel views remain independently testable.
 
 ## Preview and assets
 
@@ -227,6 +273,19 @@ successor-eligible only before that commit; after commit the logical turn is
 terminal-sticky, so an exact replay can never repeat a Canvas command or child
 dispatch. Restart recovery also projects queued, failed, cancelled, and
 pre-terminal Main Agent assistant records from durable Job state before reuse.
+Transient provider failures may retry once inside the same confined Job;
+authentication, permission, identity, contract, and cancellation failures do
+not. A missing/empty/unchanged generated artifact gets one bounded continuation,
+and repairable HTML/runtime validation may get two bounded in-place repairs.
+After a Job is durably failed, the explicit Retry/Repair action creates one
+idempotent successor for Node, Main, or revision-matching Export work; it never
+rewrites the failed Job or retries a non-failed Job.
+
+Every canonical Canvas, Job, and Thread authority change also advances the
+project-local invalidation journal. Web clients subscribe over authenticated
+SSE with `Last-Event-ID`, replay retained cursors, reset to canonical GETs when
+the epoch/history cannot be continued, and do not use interval polling as an
+alternate authority.
 The server accepts one of these canvas intents:
 
 ```text
@@ -274,10 +333,10 @@ untrusted data and cannot change Agent instructions or scope.
   while leaving the centered, interactive Node untouched; the focus dock can
   restore the Agent. The separate Back
   control exits focus. A Node preview is the object itself and has no permanent
-  title bar. The selected-only preview toolbar counter-scales while selection
-  uses a white radius-matched offset ring, heavier depth, and faint hover-revealed
-  corner resize brackets instead of a permanent resize box. Fixed-ratio material
-  kinds preserve that ratio through corner resize.
+  title bar. Selection uses restrained depth without an outline or redundant
+  inline toolbar. Pointer hover reveals faint corner resize brackets plus the
+  Node name rising from behind the frame; both reverse smoothly on leave.
+  Fixed-ratio material kinds preserve that ratio through corner resize.
 - Every Node panel uses the same compact `Vn` Version selector in its header;
   timestamps remain in the menu rather than the trigger. Material Nodes additionally
   expose a single-file `Add revision` action; Agent composer attachments still
@@ -315,5 +374,7 @@ untrusted data and cannot change Agent instructions or scope.
   Nodes mount only their selected exact Version. Outside focus a gesture shield
   preserves selection and pan/drag semantics; double-click focus removes that
   shield and makes the iframe itself the hit target. New generated documents must
-  reflow from 320px without document-level horizontal overflow, and the selected
-  toolbar can restore a kind-appropriate preview size.
+  reflow from 320px without document-level horizontal overflow. The focused Page
+  dock can download its exact immutable Version as portable single-file HTML;
+  daemon-owned pinned Assets are checksum-verified and embedded as data URLs so
+  the file does not depend on a running Dezin instance.

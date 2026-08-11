@@ -442,6 +442,213 @@ test("NodeSpawner abort kills a process that ignores SIGTERM", async () => {
   await assert.rejects(run, (error) => error instanceof Error && error.name === "AbortError");
 });
 
+test("ClaudeCodeRunner completes a terminal result when the provider event loop stays alive", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-result-"));
+  const processRecordPath = join(dir, "processes.json");
+  let groupPid: number | null = null;
+  t.after(() => {
+    let recordedGroupPid = groupPid;
+    if (!recordedGroupPid) {
+      try {
+        recordedGroupPid = (JSON.parse(readFileSync(processRecordPath, "utf8")) as { groupPid?: number }).groupPid ?? null;
+      } catch {
+        return;
+      }
+    }
+    if (!recordedGroupPid) return;
+    try {
+      process.kill(-recordedGroupPid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  });
+  const html = "<!doctype html><html><body>terminal result</body></html>";
+  const descendant = [
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const childScript = [
+    "const {spawn}=require('node:child_process')",
+    "const fs=require('node:fs')",
+    `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'})`,
+    "child.unref()",
+    `fs.writeFileSync(${JSON.stringify(processRecordPath)},JSON.stringify({groupPid:process.pid,descendantPid:child.pid}))`,
+    `fs.writeFileSync('index.html',${JSON.stringify(html)})`,
+    `process.stdout.write(${JSON.stringify(`${STREAM}\n`)})`,
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ killDelayMs: 10, timeoutMs: 700 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  const result = await runner.runTurn({
+    systemPrompt: "S",
+    message: "go",
+    projectDir: dir,
+    timeoutMs: 700,
+  });
+  const record = JSON.parse(readFileSync(processRecordPath, "utf8")) as {
+    groupPid: number;
+    descendantPid: number;
+  };
+  groupPid = record.groupPid;
+
+  assert.equal(result.text, "Wrote the hero.");
+  assert.equal(result.artifactHtml, html);
+  assert.throws(
+    () => process.kill(record.descendantPid, 0),
+    (error) => (error as NodeJS.ErrnoException).code === "ESRCH",
+  );
+});
+
+test("ClaudeCodeRunner grants a terminal provider time to exit naturally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-natural-exit-"));
+  const termMarkerPath = join(dir, "received-term.txt");
+  const html = "<!doctype html><html><body>natural exit</body></html>";
+  const childScript = [
+    "const fs=require('node:fs')",
+    `fs.writeFileSync('index.html',${JSON.stringify(html)})`,
+    `process.stdout.write(${JSON.stringify(`${STREAM}\n`)})`,
+    `process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(termMarkerPath)},'term');process.exit(2)})`,
+    "setTimeout(()=>process.exit(0),40)",
+  ].join(";");
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ killDelayMs: 10, timeoutMs: 700 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  const result = await runner.runTurn({
+    systemPrompt: "S",
+    message: "go",
+    projectDir: dir,
+    timeoutMs: 700,
+  });
+
+  assert.equal(result.artifactHtml, html);
+  assert.throws(
+    () => readFileSync(termMarkerPath, "utf8"),
+    (error) => (error as NodeJS.ErrnoException).code === "ENOENT",
+  );
+});
+
+test("ClaudeCodeRunner preserves an error result without result text while closing a stuck provider", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-error-"));
+  const errorStream = [
+    STREAM.split("\n")[0]!,
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"authentication expired"}]}}',
+    '{"type":"result","subtype":"error_during_execution","is_error":true}',
+  ].join("\n");
+  const childScript = [
+    "const fs=require('node:fs')",
+    "fs.writeFileSync('index.html','<!doctype html><html><body>error</body></html>')",
+    `process.stdout.write(${JSON.stringify(`${errorStream}\n`)})`,
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ killDelayMs: 10, timeoutMs: 700 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir, timeoutMs: 700 }),
+    (error: unknown) => error instanceof AgentTurnError
+      && /error result.*authentication expired/i.test(error.message),
+  );
+});
+
+test("ClaudeCodeRunner ignores assistant decoys and a non-terminated result line", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-decoy-"));
+  const [initLine, , resultLine] = STREAM.split("\n");
+  const assistantDecoy = JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: resultLine }],
+    },
+  });
+  const childScript = [
+    "const fs=require('node:fs')",
+    "fs.writeFileSync('index.html','<!doctype html><html><body>decoy</body></html>')",
+    `process.stdout.write(${JSON.stringify(`${initLine}\n${assistantDecoy}\n${resultLine}`)})`,
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ killDelayMs: 10, timeoutMs: 120 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir, timeoutMs: 120 }),
+    /timed out after 120ms/i,
+  );
+});
+
+test("ClaudeCodeRunner keeps Abort priority after observing a terminal result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-abort-"));
+  const childScript = [
+    "const fs=require('node:fs')",
+    "fs.writeFileSync('index.html','<!doctype html><html><body>abort</body></html>')",
+    `process.stdout.write(${JSON.stringify(`${STREAM}\n`)})`,
+    "process.on('SIGTERM',()=>{})",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const controller = new AbortController();
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ killDelayMs: 10, timeoutMs: 700 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({
+      systemPrompt: "S",
+      message: "go",
+      projectDir: dir,
+      timeoutMs: 700,
+      signal: controller.signal,
+      onActivity: (activity) => {
+        if (activity.kind === "text" && !controller.signal.aborted) controller.abort();
+      },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+});
+
+test("ClaudeCodeRunner keeps output-limit priority after observing a terminal result", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-terminal-output-limit-"));
+  const childScript = [
+    "const fs=require('node:fs')",
+    "fs.writeFileSync('index.html','<!doctype html><html><body>limit</body></html>')",
+    `process.stdout.write(${JSON.stringify(`${STREAM}\n`)})`,
+    "process.on('SIGTERM',()=>{})",
+    "const chunk=Buffer.alloc(16384,120)",
+    "const pump=()=>{while(process.stdout.write(chunk)){};process.stdout.once('drain',pump)}",
+    "setTimeout(pump,20)",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const runner = new ClaudeCodeRunner({
+    command: process.execPath,
+    spawner: new NodeSpawner({ stdoutLimitBytes: 64 * 1024, killDelayMs: 10, timeoutMs: 700 }),
+    buildArgs: () => ["-e", childScript],
+  });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir, timeoutMs: 700 }),
+    (error: unknown) => error instanceof Error
+      && (error as Error & { code?: string }).code === "AGENT_OUTPUT_LIMIT",
+  );
+});
+
 test("NodeSpawner retains only a UTF-8-safe 1-marker stderr tail", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-stderr-"));
   const out = await new NodeSpawner({ stderrLimitBytes: 160 }).run({

@@ -17,6 +17,7 @@ interface MetadataEntry {
 }
 
 const EMPTY_SNAPSHOT: ExactVersionMetadataSnapshot = { status: "idle", metadata: null };
+const MAX_EXACT_VERSION_METADATA_ENTRIES = 128;
 const stores = new WeakMap<DesignCanvasApi, Map<string, MetadataEntry>>();
 
 function cacheKey(projectId: string, nodeId: string, versionId: string): string {
@@ -32,12 +33,32 @@ function storeFor(api: DesignCanvasApi): Map<string, MetadataEntry> {
   return store;
 }
 
+function touchEntry(store: Map<string, MetadataEntry>, key: string, entry: MetadataEntry): void {
+  if (store.get(key) !== entry) return;
+  store.delete(key);
+  store.set(key, entry);
+}
+
+function trimStore(store: Map<string, MetadataEntry>): void {
+  let overflow = store.size - MAX_EXACT_VERSION_METADATA_ENTRIES;
+  if (overflow <= 0) return;
+  for (const [key, entry] of store) {
+    if (overflow <= 0) break;
+    if (entry.pending !== null || entry.listeners.size > 0) continue;
+    store.delete(key);
+    overflow -= 1;
+  }
+}
+
 function entryFor(api: DesignCanvasApi, key: string): MetadataEntry {
   const store = storeFor(api);
   let entry = store.get(key);
   if (!entry) {
     entry = { snapshot: EMPTY_SNAPSHOT, listeners: new Set(), pending: null };
     store.set(key, entry);
+    trimStore(store);
+  } else {
+    touchEntry(store, key, entry);
   }
   return entry;
 }
@@ -77,6 +98,7 @@ function loadExactVersionMetadata(
     }
   }).finally(() => {
     requested.pending = null;
+    trimStore(storeFor(api));
   });
   requested.pending = pending;
   return pending;
@@ -94,7 +116,12 @@ export function readExactVersionMetadata({
   versionId: string | null;
 }): DesignNodeVersion | null {
   if (!versionId) return null;
-  return storeFor(api).get(cacheKey(projectId, nodeId, versionId))?.snapshot.metadata ?? null;
+  const store = storeFor(api);
+  const key = cacheKey(projectId, nodeId, versionId);
+  const entry = store.get(key);
+  if (!entry) return null;
+  touchEntry(store, key, entry);
+  return entry.snapshot.metadata;
 }
 
 export function useExactVersionMetadata({
@@ -115,7 +142,10 @@ export function useExactVersionMetadata({
     if (!key) return () => undefined;
     const entry = entryFor(api, key);
     entry.listeners.add(listener);
-    return () => entry.listeners.delete(listener);
+    return () => {
+      entry.listeners.delete(listener);
+      trimStore(storeFor(api));
+    };
   }, [api, key]);
   const getSnapshot = useCallback(
     () => key ? entryFor(api, key).snapshot : EMPTY_SNAPSHOT,

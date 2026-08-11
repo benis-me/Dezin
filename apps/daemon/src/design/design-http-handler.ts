@@ -7,13 +7,17 @@ import type { Settings } from "../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../app.ts";
 import { HttpError, readJsonBody, sendJson } from "../http-util.ts";
 import {
-  buildDesignImplementationExportSystemPrompt,
   buildDesignMainSystemPrompt,
   cancelDesignGlobalJob,
-  startDesignImplementationExport,
   startDesignMainTurn,
   type DesignMainDispatch,
 } from "./design-global-agents.ts";
+import {
+  buildDesignImplementationExportSystemPrompt,
+  createProductionDesignImplementationExportAdapter,
+  startDesignImplementationExport,
+  type StartDesignImplementationExportInput,
+} from "./design-implementation-export.ts";
 import {
   buildDesignNodeAnalysisSystemPrompt,
   buildDesignNodeSystemPrompt,
@@ -23,11 +27,14 @@ import {
   productionDesignAgentEnvironment,
   startDesignNodeTurn,
 } from "./design-node-agent.ts";
+import { runDesignNodeRuntimeGate } from "./design-node-runtime-gate.ts";
 import {
+  designAgentProviderId,
   DesignAgentConfinementError,
   DesignAgentProviderUnsupportedError,
 } from "./design-agent-confinement.ts";
 import {
+  buildPortableDesignVersionHtml,
   getDesignAssetManifest,
   getDesignCanvas,
   getDesignJob,
@@ -42,6 +49,7 @@ import {
   resolveDesignVersionPreview,
   resolvePinnedDesignAssetFile,
   storeDesignAsset,
+  type DesignJobTerminalReceiptPolicy,
   undoDesignCanvas,
   MAX_DESIGN_ASSET_BATCH_BYTES,
   MAX_DESIGN_ASSET_BATCH_ITEMS,
@@ -165,6 +173,46 @@ function productionDesignRunner(input: {
   }
 }
 
+function implementationExportStartInput(input: {
+  deps: AppDeps;
+  projectId: string;
+  settings: Settings;
+  agentCommand: string;
+  model: string | null;
+  sourcePreviewOrigin: string;
+}): Omit<StartDesignImplementationExportInput, "canvasRevision"> {
+  const brief = "Reimplement every selected Canvas Version as one coherent production application.";
+  if (input.deps.designRunner) {
+    return {
+      dataDir: input.deps.dataDir,
+      projectId: input.projectId,
+      runner: input.deps.designRunner,
+      sourcePreviewOrigin: input.sourcePreviewOrigin,
+      systemPrompt: buildDesignImplementationExportSystemPrompt({ settings: input.settings, brief }),
+      env: productionDesignAgentEnvironment(input.settings, input.agentCommand, input.deps.security?.token),
+      model: input.model,
+    };
+  }
+  try {
+    return createProductionDesignImplementationExportAdapter({
+      dataDir: input.deps.dataDir,
+      projectId: input.projectId,
+      settings: input.settings,
+      agentCommand: input.agentCommand,
+      model: input.model,
+      sourcePreviewOrigin: input.sourcePreviewOrigin,
+      brief,
+      token: input.deps.security?.token,
+    });
+  } catch (error) {
+    if (error instanceof DesignAgentProviderUnsupportedError
+      || error instanceof DesignAgentConfinementError) {
+      throw new HttpError(400, error.message);
+    }
+    throw error;
+  }
+}
+
 function boundedString(value: unknown, label: string, maximum: number, optional = false): string | undefined {
   if (optional && value === undefined) return undefined;
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > maximum) {
@@ -191,6 +239,27 @@ function effectiveDesignAgent(
     model: override.model !== undefined
       ? override.model
       : (agentCommand === settingsAgentCommand ? settingsModel || null : null),
+  };
+}
+
+function retryDesignAgent(
+  settings: Settings,
+  failedJob: DesignJob,
+  body: Record<string, unknown>,
+): { agentCommand: string; model: string | null } {
+  const explicitAgentCommand = boundedString(body.agentCommand, "agentCommand", 512, true);
+  const explicitModel = optionalDesignModel(body.model);
+  const current = effectiveDesignAgent(settings, { agentCommand: explicitAgentCommand });
+  const providerCompatible = designAgentProviderId(current.agentCommand) === failedJob.runnerId;
+  return {
+    agentCommand: current.agentCommand,
+    model: body.model !== undefined
+      ? explicitModel ?? null
+      : providerCompatible
+        ? failedJob.model
+        : explicitAgentCommand === undefined
+          ? current.model
+          : null,
   };
 }
 
@@ -261,6 +330,26 @@ function sendEmbeddedPreviewHtml(req: IncomingMessage, res: ServerResponse, html
     return;
   }
   res.writeHead(200, headers);
+  res.end(req.method === "HEAD" ? undefined : html);
+}
+
+function sendPortablePreviewHtml(
+  req: IncomingMessage,
+  res: ServerResponse,
+  html: Buffer,
+  checksum: string,
+  fileName: string,
+): void {
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": String(html.length),
+    "content-disposition": contentDisposition(fileName),
+    "cache-control": "private, no-store",
+    etag: `"sha256-${checksum}"`,
+    "x-content-type-options": "nosniff",
+    "x-dns-prefetch-control": "off",
+    "referrer-policy": "no-referrer",
+  });
   res.end(req.method === "HEAD" ? undefined : html);
 }
 
@@ -573,6 +662,11 @@ export async function handleServeEmbeddedDesignVersionPreview(req: IncomingMessa
   sendEmbeddedPreviewHtml(req, res, instrumentEmbeddedPreview(html));
 }
 
+export async function handleDownloadPortableDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  const portable = await buildPortableDesignVersionHtml(d.dataDir, p.id!, p.nodeId!, p.versionId!);
+  sendPortablePreviewHtml(req, res, portable.html, portable.checksum, `dezin-preview-${p.versionId!}.html`);
+}
+
 export async function handleGetMainDesignThread(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   sendJson(res, 200, await getDesignThread(d.dataDir, p.id!, { type: "main" }));
 }
@@ -630,6 +724,7 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     idempotencyKey: idempotencyKey ?? null,
     env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
     model: execution.model,
+    runtimeGate: d.designRunner === undefined && generative ? runDesignNodeRuntimeGate : undefined,
   });
   if (!started.reused) superviseDesignExecution(d, p.id!, started);
   sendJson(res, started.reused ? 200 : 202, { thread: started.thread, job: started.job, canvas: await getDesignCanvas(d.dataDir, p.id!) });
@@ -664,16 +759,20 @@ function designAgentTurnBody(
   };
 }
 
-export async function handleDesignMainTurn(
-  req: IncomingMessage,
-  res: ServerResponse,
-  p: Record<string, string>,
+export interface StartDesignMainAgentRequest {
+  message: string;
+  contextNodeIds: string[];
+  agentCommand?: string;
+  model?: string | null;
+  idempotencyKey?: string | null;
+  terminalReceiptPolicy?: DesignJobTerminalReceiptPolicy;
+}
+
+export async function startDesignMainAgentTurn(
   d: AppDeps,
-): Promise<void> {
-  const body = exactRecord(await readJsonBody(req), "Main Agent turn", [
-    "message", "context", "agentCommand", "model", "idempotencyKey",
-  ]);
-  const parsed = designAgentTurnBody(body, "Main Agent");
+  projectId: string,
+  parsed: StartDesignMainAgentRequest,
+) {
   const settings = d.store.getSettings();
   const execution = effectiveDesignAgent(settings, {
     agentCommand: parsed.agentCommand,
@@ -681,7 +780,7 @@ export async function handleDesignMainTurn(
   });
   const mainRunner = d.designRunner ?? productionDesignRunner({
     deps: d,
-    projectId: p.id!,
+    projectId,
     settings,
     agentCommand: execution.agentCommand,
     model: execution.model,
@@ -692,13 +791,13 @@ export async function handleDesignMainTurn(
     parentJobId: string,
     idempotencyKey?: string | null,
   ) => {
-    const canvas = await getDesignCanvas(d.dataDir, p.id!);
+    const canvas = await getDesignCanvas(d.dataDir, projectId);
     const node = canvas.nodes.find((candidate) => candidate.id === dispatch.nodeId);
     if (!node) throw new HttpError(409, `Main Agent dispatch target ${dispatch.nodeId} no longer exists`);
     const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
     const runner = d.designRunner ?? productionDesignRunner({
       deps: d,
-      projectId: p.id!,
+      projectId,
       settings,
       agentCommand: execution.agentCommand,
       model: execution.model,
@@ -709,7 +808,7 @@ export async function handleDesignMainTurn(
       : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
     const child = await startDesignNodeTurn({
       dataDir: d.dataDir,
-      projectId: p.id!,
+      projectId,
       nodeId: dispatch.nodeId,
       message: dispatch.message,
       runner,
@@ -719,23 +818,42 @@ export async function handleDesignMainTurn(
       parentJobId,
       env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
       model: execution.model,
+      runtimeGate: d.designRunner === undefined && generative ? runDesignNodeRuntimeGate : undefined,
     });
-    if (!child.reused) superviseDesignExecution(d, p.id!, child);
+    if (!child.reused) superviseDesignExecution(d, projectId, child);
     return child.job;
   };
   const started = await startDesignMainTurn({
     dataDir: d.dataDir,
-    projectId: p.id!,
+    projectId,
     message: parsed.message,
     runner: mainRunner,
     systemPrompt: buildDesignMainSystemPrompt(),
     contextNodeIds: parsed.contextNodeIds,
     idempotencyKey: parsed.idempotencyKey ?? null,
+    terminalReceiptPolicy: parsed.terminalReceiptPolicy,
     env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
     model: execution.model,
     dispatchNode,
   });
-  if (!started.reused) superviseDesignExecution(d, p.id!, started);
+  if (!started.reused) superviseDesignExecution(d, projectId, started);
+  return started;
+}
+
+export async function handleDesignMainTurn(
+  req: IncomingMessage,
+  res: ServerResponse,
+  p: Record<string, string>,
+  d: AppDeps,
+): Promise<void> {
+  const body = exactRecord(await readJsonBody(req), "Main Agent turn", [
+    "message", "context", "agentCommand", "model", "idempotencyKey",
+  ]);
+  const started = await startDesignMainAgentTurn(
+    d,
+    p.id!,
+    designAgentTurnBody(body, "Main Agent"),
+  );
   sendJson(res, started.reused ? 200 : 202, {
     thread: started.thread,
     job: started.job,
@@ -776,26 +894,16 @@ export async function handleStartDesignImplementationExport(
     agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
     model: optionalDesignModel(body.model),
   });
-  const runner = d.designRunner ?? productionDesignRunner({
-    deps: d,
-    projectId: p.id!,
-    settings,
-    agentCommand: execution.agentCommand,
-    model: execution.model,
-    artifactOutput: true,
-  });
   const started = await startDesignImplementationExport({
-    dataDir: d.dataDir,
-    projectId: p.id!,
-    canvasRevision: body.canvasRevision as number,
-    runner,
-    sourcePreviewOrigin: trustedDesignPreviewOrigin(req.socket),
-    systemPrompt: buildDesignImplementationExportSystemPrompt({
+    ...implementationExportStartInput({
+      deps: d,
+      projectId: p.id!,
       settings,
-      brief: "Reimplement every selected Canvas Version as one coherent production application.",
+      agentCommand: execution.agentCommand,
+      model: execution.model,
+      sourcePreviewOrigin: trustedDesignPreviewOrigin(req.socket),
     }),
-    env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
-    model: execution.model,
+    canvasRevision: body.canvasRevision as number,
   });
   superviseDesignExecution(d, p.id!, started);
   sendJson(res, 202, { exportId: started.exportId, job: started.job });
@@ -810,4 +918,156 @@ export async function handleCancelDesignJob(_req: IncomingMessage, res: ServerRe
   sendJson(res, 200, job.kind === "node-generation" || job.kind === "node-analysis"
     ? await cancelDesignNodeTurn(d.dataDir, p.id!, p.jobId!)
     : await cancelDesignGlobalJob(d.dataDir, p.id!, p.jobId!));
+}
+
+export async function handleRetryDesignJob(
+  req: IncomingMessage,
+  res: ServerResponse,
+  p: Record<string, string>,
+  d: AppDeps,
+): Promise<void> {
+  const body = exactRecord(await readJsonBody(req), "Design Job retry", ["agentCommand", "model"]);
+  const failedJob = await getDesignJob(d.dataDir, p.id!, p.jobId!);
+  if (failedJob.status !== "failed") throw new HttpError(409, "Only a failed Design Job can be retried");
+  const settings = d.store.getSettings();
+  const execution = retryDesignAgent(settings, failedJob, body);
+  const retryKey = `retry-${failedJob.id}`;
+
+  if (failedJob.kind === "node-generation" || failedJob.kind === "node-analysis") {
+    if (failedJob.nodeId === null) throw new HttpError(409, "Failed Node Job lost its target authority");
+    const canvas = await getDesignCanvas(d.dataDir, p.id!);
+    const node = canvas.nodes.find((candidate) => candidate.id === failedJob.nodeId);
+    if (!node) throw new HttpError(409, "Failed Node Job target no longer exists");
+    const priorThread = await getDesignThread(d.dataDir, p.id!, { type: "node", nodeId: node.id });
+    const originalMessage = priorThread.messages.find((message) =>
+      message.jobId === failedJob.id && message.role === "user")?.content;
+    if (!originalMessage) throw new HttpError(409, "Failed Node Job original request is unavailable");
+    const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
+    const retryRunner = d.designRunner ?? productionDesignRunner({
+      deps: d,
+      projectId: p.id!,
+      settings,
+      agentCommand: execution.agentCommand,
+      model: execution.model,
+      artifactOutput: generative,
+    });
+    const systemPrompt = generative
+      ? buildDesignNodeSystemPrompt({ settings, message: originalMessage, node })
+      : buildDesignNodeAnalysisSystemPrompt({ settings, message: originalMessage, node });
+    const started = await startDesignNodeTurn({
+      dataDir: d.dataDir,
+      projectId: p.id!,
+      nodeId: node.id,
+      message: originalMessage,
+      runner: retryRunner,
+      systemPrompt,
+      idempotencyKey: retryKey,
+      parentJobId: failedJob.parentJobId,
+      env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+      model: execution.model,
+      runtimeGate: d.designRunner === undefined && generative ? runDesignNodeRuntimeGate : undefined,
+    });
+    if (!started.reused) superviseDesignExecution(d, p.id!, started);
+    sendJson(res, started.reused ? 200 : 202, {
+      retryOfJobId: failedJob.id,
+      thread: started.thread,
+      job: started.job,
+      canvas: await getDesignCanvas(d.dataDir, p.id!),
+    });
+    return;
+  }
+
+  if (failedJob.kind === "main-agent") {
+    const priorThread = await getDesignThread(d.dataDir, p.id!, { type: "main" });
+    const originalMessage = priorThread.messages.find((message) =>
+      message.jobId === failedJob.id && message.role === "user")?.content;
+    if (!originalMessage) throw new HttpError(409, "Failed Main Agent Job original request is unavailable");
+    const mainRunner = d.designRunner ?? productionDesignRunner({
+      deps: d,
+      projectId: p.id!,
+      settings,
+      agentCommand: execution.agentCommand,
+      model: execution.model,
+      artifactOutput: false,
+    });
+    const dispatchNode = async (
+      dispatch: DesignMainDispatch,
+      parentJobId: string,
+      idempotencyKey?: string | null,
+    ) => {
+      const canvas = await getDesignCanvas(d.dataDir, p.id!);
+      const node = canvas.nodes.find((candidate) => candidate.id === dispatch.nodeId);
+      if (!node) throw new HttpError(409, `Main Agent dispatch target ${dispatch.nodeId} no longer exists`);
+      const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
+      const childRunner = d.designRunner ?? productionDesignRunner({
+        deps: d,
+        projectId: p.id!,
+        settings,
+        agentCommand: execution.agentCommand,
+        model: execution.model,
+        artifactOutput: generative,
+      });
+      const systemPrompt = generative
+        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node })
+        : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
+      const child = await startDesignNodeTurn({
+        dataDir: d.dataDir,
+        projectId: p.id!,
+        nodeId: node.id,
+        message: dispatch.message,
+        runner: childRunner,
+        systemPrompt,
+        contextNodeIds: dispatch.contextNodeIds,
+        idempotencyKey: idempotencyKey ?? null,
+        parentJobId,
+        env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+        model: execution.model,
+        runtimeGate: d.designRunner === undefined && generative ? runDesignNodeRuntimeGate : undefined,
+      });
+      if (!child.reused) superviseDesignExecution(d, p.id!, child);
+      return child.job;
+    };
+    const started = await startDesignMainTurn({
+      dataDir: d.dataDir,
+      projectId: p.id!,
+      message: originalMessage,
+      runner: mainRunner,
+      systemPrompt: buildDesignMainSystemPrompt(),
+      idempotencyKey: retryKey,
+      env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
+      model: execution.model,
+      dispatchNode,
+    });
+    if (!started.reused) superviseDesignExecution(d, p.id!, started);
+    sendJson(res, started.reused ? 200 : 202, {
+      retryOfJobId: failedJob.id,
+      thread: started.thread,
+      job: started.job,
+      canvas: await getDesignCanvas(d.dataDir, p.id!),
+    });
+    return;
+  }
+
+  const canvas = await getDesignCanvas(d.dataDir, p.id!);
+  if (failedJob.canvasRevision === null || canvas.revision !== failedJob.canvasRevision) {
+    throw new HttpError(409, `Failed Export is bound to Canvas revision ${failedJob.canvasRevision ?? "unknown"}; current revision is ${canvas.revision}`);
+  }
+  const started = await startDesignImplementationExport({
+    ...implementationExportStartInput({
+      deps: d,
+      projectId: p.id!,
+      settings,
+      agentCommand: execution.agentCommand,
+      model: execution.model,
+      sourcePreviewOrigin: trustedDesignPreviewOrigin(req.socket),
+    }),
+    canvasRevision: canvas.revision,
+    idempotencyKey: retryKey,
+  });
+  if (!started.reused) superviseDesignExecution(d, p.id!, started);
+  sendJson(res, started.reused ? 200 : 202, {
+    retryOfJobId: failedJob.id,
+    exportId: started.exportId,
+    job: started.job,
+  });
 }

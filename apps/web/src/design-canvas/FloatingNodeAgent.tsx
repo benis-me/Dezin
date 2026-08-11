@@ -6,7 +6,6 @@ import {
   AgentReasoning,
   AgentWebSearch,
   type AgentProgressItem,
-  type AgentSearchResult,
 } from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import {
@@ -38,6 +37,7 @@ import {
   LoaderCircle,
   Paperclip,
   PanelRightClose,
+  RotateCcw,
   Square,
   X,
 } from "lucide-react";
@@ -47,30 +47,48 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type RefObject,
   type Ref,
 } from "react";
 
-import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
+import {
+  activeAgentActivityPhase,
+  buildAgentTranscriptPage,
+  compactActivityText,
+  compactJobDuration,
+  isImageGenerationActivity,
+  isReasoningActivity,
+  isWebSearchActivity,
+  jobRetryLabel,
+  jobStatusLabel,
+  quotedActivityText,
+  searchResults,
+  versionOptionLabel,
+  type MainAgentJobGroup,
+  type OptimisticUserTurn,
+} from "./agent-panel-model.ts";
+import { type DesignCanvasApi } from "./api.ts";
 import { NodeMentionInput } from "./NodeMentionInput.tsx";
 import type {
   DesignJob,
-  DesignJobActivity,
   DesignNode,
   DesignNodeVersion,
   DesignThread,
   DesignThreadScope,
 } from "./types.ts";
+import {
+  useAgentTranscriptController,
+  useCanvasAgentPanelController,
+  useJobActionController,
+  type CanvasAgentSelection,
+} from "./useCanvasAgentPanelController.ts";
+
+export type { CanvasAgentSelection } from "./useCanvasAgentPanelController.ts";
 
 const AGENT_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
 const AGENT_MORPH_EASE: [number, number, number, number] = [0.77, 0, 0.175, 1];
-const TRANSCRIPT_MESSAGE_PAGE_SIZE = 12;
-const TRANSCRIPT_JOB_PAGE_SIZE = 6;
-const RESERVED_MAIN_AGENT_QUEUED_REPLY =
-  "Main Agent orchestration is queued. The final result will replace this status.";
 
 interface FloatingPosition {
   nodeId: string | null;
@@ -241,6 +259,7 @@ export interface CanvasAgentPanelProps {
   onRescanAgents?: () => Promise<void>;
   onSubmit: (prompt: string, nodeIds: readonly string[], selection: { agentCommand?: string; model?: string | null }) => Promise<void>;
   onCancelJob: (jobId: string) => Promise<void>;
+  onRetryJob?: (jobId: string) => Promise<void>;
   onAttachFiles: (files: readonly File[]) => Promise<void>;
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
@@ -252,38 +271,7 @@ export interface CanvasAgentPanelProps {
   compact?: boolean;
   entryX?: number;
   entryY?: number;
-  deferTranscriptMs?: number;
   rootRef?: Ref<HTMLElement>;
-}
-
-export interface CanvasAgentSelection {
-  agentCommand: string;
-  model: string;
-}
-
-interface MainAgentJobGroup {
-  parentJobId: string;
-  label: string;
-  jobs: DesignJob[];
-}
-
-interface OptimisticUserTurn {
-  scopeKey: string;
-  message: DesignThread["messages"][number];
-  existingMessageIds: ReadonlySet<string>;
-  existingJobIds: ReadonlySet<string>;
-}
-
-type AgentTimelineItem =
-  | { kind: "message"; id: string; createdAt: number; message: DesignThread["messages"][number] }
-  | { kind: "thinking"; id: string; createdAt: number }
-  | { kind: "main-job-group"; id: string; createdAt: number; group: MainAgentJobGroup }
-  | { kind: "node-job"; id: string; createdAt: number; job: DesignJob };
-
-function isReservedMainAgentReply(message: DesignThread["messages"][number]): boolean {
-  return message.role === "assistant"
-    && message.jobId !== null
-    && message.content.trim() === RESERVED_MAIN_AGENT_QUEUED_REPLY;
 }
 
 export function composerBeamActive(focused: boolean, reduceMotion: boolean | null): boolean {
@@ -311,127 +299,6 @@ function useApplicationBeamTheme(): "dark" | "light" {
   return theme;
 }
 
-function mainAgentGroupLabel(job: DesignJob): string {
-  return job.kind === "implementation-export" ? "Implementation export" : "Canvas execution";
-}
-
-function groupMainAgentJobs(jobs: readonly DesignJob[], thread: DesignThread | null): MainAgentJobGroup[] {
-  const parents = jobs.filter((job) => job.kind === "main-agent" || job.kind === "implementation-export");
-  const children = jobs.filter((job) => job.parentJobId !== null);
-  const childrenByParent = new Map<string, DesignJob[]>();
-  for (const child of children) {
-    const grouped = childrenByParent.get(child.parentJobId!);
-    if (grouped) grouped.push(child);
-    else childrenByParent.set(child.parentJobId!, [child]);
-  }
-  const groups = parents.flatMap((parent) => {
-    const groupedChildren = childrenByParent.get(parent.id) ?? [];
-    const hasAssistantReply = thread?.messages.some((message) => (
-      message.role === "assistant" && message.jobId === parent.id
-    )) ?? false;
-    const conversationOnly = parent.kind === "main-agent"
-      && parent.status === "ready"
-      && parent.conversationOnly === true
-      && groupedChildren.length === 0
-      && hasAssistantReply;
-    return conversationOnly ? [] : [{
-      parentJobId: parent.id,
-      label: mainAgentGroupLabel(parent),
-      jobs: [parent, ...groupedChildren],
-    }];
-  });
-  const visibleParents = new Set(parents.map((parent) => parent.id));
-  for (const [parentJobId, orphanedChildren] of childrenByParent) {
-    if (visibleParents.has(parentJobId)) continue;
-    groups.push({
-      parentJobId,
-      label: "Canvas execution",
-      jobs: orphanedChildren,
-    });
-  }
-  return groups;
-}
-
-function versionOptionLabel(version: DesignNodeVersion): string {
-  const materialName = version.contentKind === "asset"
-    ? version.fileName ?? version.mimeType ?? "Material"
-    : null;
-  const timestamp = new Date(version.createdAt).toLocaleString();
-  return `V${version.sequence} · ${materialName ? `${materialName} · ` : ""}${timestamp}`;
-}
-
-function compactActivityText(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return "Activity updated";
-  if ((normalized.startsWith("{") || normalized.startsWith("[")) && normalized.length > 240) {
-    return "Prepared the structured response";
-  }
-  if (normalized.length <= 260) return normalized;
-  const sentence = normalized.match(/^.{80,220}?[.!?](?:\s|$)/)?.[0]?.trim();
-  return `${sentence ?? normalized.slice(0, 220).trimEnd()}…`;
-}
-
-function isWebSearchActivity(activity: DesignJobActivity): boolean {
-  return /\b(?:web\s+search|searching\s+(?:the\s+)?web|searched\s+(?:the\s+)?web)\b/i.test(activity.text);
-}
-
-function isImageGenerationActivity(activity: DesignJobActivity): boolean {
-  return /\b(?:generating|generate|rendering)\s+(?:an?\s+)?image\b/i.test(activity.text);
-}
-
-function isReasoningActivity(activity: DesignJobActivity): boolean {
-  return activity.kind === "text"
-    && !isWebSearchActivity(activity)
-    && !isImageGenerationActivity(activity);
-}
-
-type AgentActivityPhase = "reasoning" | "progress" | "search" | "image";
-
-function activityPhase(activity: DesignJobActivity): AgentActivityPhase {
-  if (isWebSearchActivity(activity)) return "search";
-  if (isImageGenerationActivity(activity)) return "image";
-  if (isReasoningActivity(activity)) return "reasoning";
-  return "progress";
-}
-
-function quotedActivityText(text: string): string | null {
-  return /[“"]([^”"]{2,180})[”"]/.exec(text)?.[1]?.trim() ?? null;
-}
-
-function searchResults(activities: readonly DesignJobActivity[], active: boolean): AgentSearchResult[] {
-  return activities.flatMap((activity, index) => {
-    const href = activity.text.match(/https?:\/\/[^\s)>\]]+/)?.[0]?.replace(/[.,;:]$/, "");
-    if (!href) return [];
-    const title = compactActivityText(activity.text.replace(href, "").replace(/^[\s·—:-]+|[\s·—:-]+$/g, "")) || href;
-    return [{
-      id: activity.id,
-      title,
-      href,
-      state: active && index === activities.length - 1 ? "loading" as const : "done" as const,
-    }];
-  });
-}
-
-function jobStatusLabel(job: DesignJob): string {
-  switch (job.status) {
-    case "queued": return "Queued";
-    case "running": return "Working";
-    case "validating": return "Validating";
-    case "ready": return "Complete";
-    case "failed": return "Failed";
-    case "cancelled": return "Cancelled";
-    case "superseded": return "Superseded";
-  }
-}
-
-function compactJobDuration(durationMs: number): string {
-  const seconds = Math.max(1, Math.round(durationMs / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
-}
-
 export function CanvasAgentPanel({
   projectId,
   api,
@@ -452,6 +319,7 @@ export function CanvasAgentPanel({
   onRescanAgents = async () => {},
   onSubmit,
   onCancelJob,
+  onRetryJob,
   onAttachFiles,
   projectPath,
   onRevealExport,
@@ -468,155 +336,56 @@ export function CanvasAgentPanel({
   const reduceMotion = usePrefersReducedMotion();
   const composerBeamTheme = useApplicationBeamTheme();
   const [composerFocused, setComposerFocused] = useState(false);
-  const [thread, setThread] = useState<DesignThread | null>(null);
-  const [threadLoading, setThreadLoading] = useState(true);
-  const [threadError, setThreadError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [optimisticUserTurn, setOptimisticUserTurn] = useState<OptimisticUserTurn | null>(null);
-  const [appendingRevision, setAppendingRevision] = useState(false);
-  const [internalAgentSelection, setInternalAgentSelection] = useState<CanvasAgentSelection>(() => ({
-    agentCommand: initialAgentCommand,
-    model: initialModel,
-  }));
-  const agentSelection = controlledAgentSelection ?? internalAgentSelection;
-  const setAgentSelection = useCallback((next: CanvasAgentSelection) => {
-    setInternalAgentSelection(next);
-    onAgentSelectionChange?.(next);
-  }, [onAgentSelectionChange]);
-  const [contextNodeIds, setContextNodeIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
-  const optimisticTurnSequenceRef = useRef(0);
-  const threadLoadSequenceRef = useRef(0);
-  const loadedThreadScopeRef = useRef<string | null>(null);
-  const scopeKey = scope.type === "main" ? "main" : `node:${scope.nodeId}`;
-  const relatedJobs = useMemo(() => {
-    const related = scope.type === "main"
-      ? jobs.filter((job) => job.kind === "main-agent" || job.kind === "implementation-export" || job.parentJobId !== null)
-      : jobs.filter((job) => job.nodeId === scope.nodeId);
-    return related.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
-  }, [jobs, scopeKey]);
-  const nodeNames = useMemo(() => new Map(nodes.map((node) => [node.id, node.name])), [nodes]);
-  const scopedNode = scope.type === "node" ? nodes.find((node) => node.id === scope.nodeId) ?? null : null;
-  const mainJobGroups = useMemo(
-    () => scope.type === "main" ? groupMainAgentJobs(relatedJobs, thread) : [],
-    [relatedJobs, scope.type, thread],
-  );
-  const availableAgents = useMemo(
-    () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
-    [agents],
-  );
-  const activeAgent = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
-  const live = relatedJobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
-  const transcriptTailKey = relatedJobs.map((job) => (
-    `${job.id}:${job.status}:${job.activity.length}:${job.error ?? ""}`
-  )).join("|");
-  const requestedVersionId = selectedVersionId ?? versions.at(-1)?.id ?? "";
-  const activeVersion = versions.find((version) => version.id === requestedVersionId) ?? versions.at(-1) ?? null;
-  const activeVersionId = activeVersion?.id ?? "";
-  const visibleOptimisticUserTurn = useMemo(() => {
-    if (!optimisticUserTurn || optimisticUserTurn.scopeKey !== scopeKey) return null;
-    const canonicalMessageArrived = thread?.messages.some((message) => (
-      message.role === "user"
-      && message.content.trim() === optimisticUserTurn.message.content
-      && !optimisticUserTurn.existingMessageIds.has(message.id)
-    )) ?? false;
-    return canonicalMessageArrived ? null : optimisticUserTurn;
-  }, [optimisticUserTurn, scopeKey, thread]);
-
-  const loadThread = useCallback(async (signal?: AbortSignal) => {
-    const sequence = ++threadLoadSequenceRef.current;
-    const initialLoad = loadedThreadScopeRef.current !== scopeKey;
-    if (initialLoad) setThreadLoading(true);
-    try {
-      const next = await api.getThread(projectId, scope, signal);
-      if (!signal?.aborted && sequence === threadLoadSequenceRef.current) {
-        loadedThreadScopeRef.current = scopeKey;
-        setThread(next);
-        setThreadError(null);
-      }
-    } catch (problem) {
-      if (!signal?.aborted && sequence === threadLoadSequenceRef.current) {
-        loadedThreadScopeRef.current = scopeKey;
-        setThreadError(problem instanceof Error ? problem.message : String(problem));
-      }
-    } finally {
-      if (!signal?.aborted && sequence === threadLoadSequenceRef.current && initialLoad) setThreadLoading(false);
-    }
-  }, [api, projectId, scopeKey]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadThread(controller.signal);
-    return () => controller.abort();
-  }, [loadThread]);
-
-  useEffect(() => {
-    setOptimisticUserTurn(null);
-  }, [scopeKey]);
-
-  useEffect(() => {
-    const existingIds = new Set(nodes.map((node) => node.id));
-    setContextNodeIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [nodes]);
-
-  useEffect(() => {
-    const active = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
-    if (active) {
-      if (agentSelection.model && !active.models.includes(agentSelection.model)) {
-        setAgentSelection({ agentCommand: active.command, model: "" });
-      }
-      return;
-    }
-    const fallback = availableAgents[0] ?? null;
-    if (fallback) {
-      setAgentSelection({ agentCommand: fallback.command, model: "" });
-    } else if (agentSelection.agentCommand || agentSelection.model) {
-      setAgentSelection({ agentCommand: "", model: "" });
-    }
-  }, [agentSelection.agentCommand, agentSelection.model, availableAgents, setAgentSelection]);
-
-  useEffect(() => {
-    if (!live) return;
-    const timer = window.setInterval(() => void loadThread(), 1_200);
-    return () => window.clearInterval(timer);
-  }, [live, loadThread]);
-
-  const submit = async () => {
-    const prompt = draft.trim();
-    if (!prompt || submitting || !activeAgent) return;
-    const optimisticId = `optimistic-user-${++optimisticTurnSequenceRef.current}`;
-    setOptimisticUserTurn({
-      scopeKey,
-      message: {
-        id: optimisticId,
-        role: "user",
-        content: prompt,
-        jobId: null,
-        createdAt: Date.now(),
-      },
-      existingMessageIds: new Set(thread?.messages.map((message) => message.id) ?? []),
-      existingJobIds: new Set(relatedJobs.map((job) => job.id)),
-    });
-    setSubmitting(true);
-    setThreadError(null);
-    try {
-      await onSubmit(prompt, contextNodeIds, {
-        agentCommand: activeAgent.command,
-        ...(agentSelection.model
-          ? { model: agentSelection.model }
-          : { model: null }),
-      });
-      setDraft("");
-      await loadThread();
-    } catch (problem) {
-      setOptimisticUserTurn((current) => current?.message.id === optimisticId ? null : current);
-      setThreadError(problem instanceof Error ? problem.message : String(problem));
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const {
+    scopeKey,
+    thread,
+    threadLoading,
+    threadError,
+    dismissThreadError,
+    draft,
+    setDraft,
+    submitting,
+    visibleOptimisticUserTurn,
+    appendingRevision,
+    agentSelection,
+    setAgentSelection,
+    contextNodeIds,
+    setContextNodeIds,
+    relatedJobs,
+    nodeNames,
+    scopedNode,
+    mainJobGroups,
+    availableAgents,
+    activeAgent,
+    transcriptTailKey,
+    activeVersion,
+    activeVersionId,
+    submit,
+    appendMaterialRevision,
+    selectVersion,
+    attachFiles,
+    rescanAgents,
+  } = useCanvasAgentPanelController({
+    projectId,
+    api,
+    scope,
+    nodes,
+    jobs,
+    versions,
+    selectedVersionId,
+    agents,
+    initialAgentCommand,
+    initialModel,
+    agentSelection: controlledAgentSelection,
+    onAgentSelectionChange,
+    onSubmit,
+    onAppendMaterialVersion,
+    onSelectVersion,
+    onAttachFiles,
+    onRescanAgents,
+  });
 
   const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
   const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
@@ -672,10 +441,7 @@ export function CanvasAgentPanel({
                 <Select
                   value={activeVersionId}
                   onValueChange={(versionId) => {
-                    if (versionId === activeVersionId) return;
-                    void onSelectVersion(versionId).catch((problem) => {
-                      setThreadError(problem instanceof Error ? problem.message : String(problem));
-                    });
+                    void selectVersion(versionId);
                   }}
                 >
                   <SelectTrigger
@@ -714,11 +480,7 @@ export function CanvasAgentPanel({
                       const file = event.target.files?.[0];
                       event.target.value = "";
                       if (!file || appendingRevision) return;
-                      setAppendingRevision(true);
-                      setThreadError(null);
-                      void onAppendMaterialVersion(file).catch((problem) => {
-                        setThreadError(problem instanceof Error ? problem.message : String(problem));
-                      }).finally(() => setAppendingRevision(false));
+                      void appendMaterialRevision(file);
                     }}
                   />
                   <Tooltip>
@@ -772,6 +534,7 @@ export function CanvasAgentPanel({
         projectPath={projectPath}
         onRevealExport={onRevealExport}
         onCancelJob={onCancelJob}
+        onRetryJob={onRetryJob}
         reduceMotion={reduceMotion === true}
         tailKey={`${transcriptTailKey}|${visibleOptimisticUserTurn?.message.id ?? ""}`}
       />
@@ -786,11 +549,7 @@ export function CanvasAgentPanel({
           onChange={(event) => {
             const files = event.target.files ? [...event.target.files] : [];
             event.target.value = "";
-            if (files.length) {
-              void onAttachFiles(files).catch((problem) => {
-                setThreadError(problem instanceof Error ? problem.message : String(problem));
-              });
-            }
+            if (files.length) void attachFiles(files);
           }}
         />
         <BorderBeam
@@ -845,7 +604,7 @@ export function CanvasAgentPanel({
                         setAgentSelection({ ...agentSelection, model });
                       }
                     }}
-                    onRescan={onRescanAgents}
+                    onRescan={rescanAgents}
                     dropUp
                   />
                 ) : (
@@ -856,9 +615,7 @@ export function CanvasAgentPanel({
                     className="design-canvas-agent__agent-unavailable"
                     title="No Design Agent is currently available"
                     onClick={() => {
-                      void onRescanAgents().catch((problem) => {
-                        setThreadError(problem instanceof Error ? problem.message : String(problem));
-                      });
+                      void rescanAgents();
                     }}
                   >
                     <CircleAlert aria-hidden />Agent unavailable
@@ -887,7 +644,7 @@ export function CanvasAgentPanel({
           >
             <CircleAlert aria-hidden />
             <span>{threadError}</span>
-            <button type="button" aria-label="Dismiss Agent error" onClick={() => setThreadError(null)}><X aria-hidden /></button>
+            <button type="button" aria-label="Dismiss Agent error" onClick={dismissThreadError}><X aria-hidden /></button>
           </motion.div>
         ) : null}
       </div>
@@ -908,6 +665,7 @@ const AgentTranscript = memo(function AgentTranscript({
   projectPath,
   onRevealExport,
   onCancelJob,
+  onRetryJob,
   reduceMotion,
   tailKey,
 }: {
@@ -922,110 +680,37 @@ const AgentTranscript = memo(function AgentTranscript({
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancelJob: (jobId: string) => Promise<void>;
+  onRetryJob?: (jobId: string) => Promise<void>;
   reduceMotion: boolean;
   tailKey: string;
 }) {
-  const [historyPages, setHistoryPages] = useState(1);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
-  const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
-  const followTailRef = useRef(true);
-  const messageHistoryLimit = historyPages * TRANSCRIPT_MESSAGE_PAGE_SIZE;
-  const jobHistoryLimit = historyPages * (scopeType === "main" ? TRANSCRIPT_JOB_PAGE_SIZE : 2);
-  const threadMatchesScope = thread !== null && (
-    thread.scope.type === "main"
-      ? scopeKey === "main"
-      : scopeKey === `node:${thread.scope.nodeId}`
-  );
-  const threadMessages = optimisticUserTurn
-    ? [...(threadMatchesScope ? thread.messages : []), optimisticUserTurn.message]
-    : threadMatchesScope ? thread.messages : [];
-  const reservedMainReplies = scopeType === "main"
-    ? threadMessages.filter(isReservedMainAgentReply)
-    : [];
-  const presentableMessages = scopeType === "main"
-    ? threadMessages.filter((message) => !isReservedMainAgentReply(message))
-    : threadMessages;
-  const visibleMessages = presentableMessages.slice(-messageHistoryLimit);
-  const visibleMainJobGroups = mainJobGroups.slice(-jobHistoryLimit);
-  const visibleRelatedJobs = relatedJobs.slice(-jobHistoryLimit);
-  const visibleReservedMainReplies = reservedMainReplies.slice(-jobHistoryLimit);
-  const hiddenTranscriptCount = Math.max(0, presentableMessages.length - visibleMessages.length)
-    + (scopeType === "main"
-      ? Math.max(0, mainJobGroups.length - visibleMainJobGroups.length)
-      : Math.max(0, relatedJobs.length - visibleRelatedJobs.length));
-  const latestRelatedJobId = relatedJobs.at(-1)?.id ?? null;
-  const timeline = useMemo<AgentTimelineItem[]>(() => {
-    const userTurnCreatedAt = new Map<string, number>();
-    for (const message of threadMessages) {
-      if (message.role === "user" && message.jobId !== null) {
-        userTurnCreatedAt.set(message.jobId, message.createdAt);
-      }
-    }
-    const items: AgentTimelineItem[] = visibleMessages.map((message) => ({
-      kind: "message",
-      id: `message:${message.id}`,
-      createdAt: message.createdAt,
-      message,
-    }));
-    if (scopeType === "main") {
-      const representedJobIds = new Set(visibleMainJobGroups.map((group) => group.parentJobId));
-      items.push(...visibleMainJobGroups.map((group) => ({
-        kind: "main-job-group" as const,
-        id: `main-job-group:${group.parentJobId}`,
-        createdAt: (optimisticUserTurn && !optimisticUserTurn.existingJobIds.has(group.parentJobId)
-          ? optimisticUserTurn.message.createdAt
-          : userTurnCreatedAt.get(group.parentJobId))
-          ?? Math.min(...group.jobs.map((job) => job.createdAt)),
-        group,
-      })));
-      items.push(...visibleReservedMainReplies.flatMap((message) => (
-        message.jobId !== null && representedJobIds.has(message.jobId)
-          ? []
-          : [{
-            kind: "thinking" as const,
-            id: `thinking:${message.id}`,
-            createdAt: userTurnCreatedAt.get(message.jobId ?? "") ?? message.createdAt,
-          }]
-      )));
-    } else {
-      items.push(...visibleRelatedJobs.map((job) => ({
-        kind: "node-job" as const,
-        id: `node-job:${job.id}`,
-        createdAt: (optimisticUserTurn && !optimisticUserTurn.existingJobIds.has(job.id)
-          ? optimisticUserTurn.message.createdAt
-          : userTurnCreatedAt.get(job.id)) ?? job.createdAt,
-        job,
-      })));
-    }
-    const priority = (item: AgentTimelineItem): number => {
-      if (item.kind !== "message") return 1;
-      return item.message.role === "user" ? 0 : 2;
-    };
-    return items.sort((left, right) => (
-      left.createdAt - right.createdAt
-      || priority(left) - priority(right)
-      || left.id.localeCompare(right.id)
-    ));
-  }, [optimisticUserTurn, scopeType, threadMessages, visibleMainJobGroups, visibleMessages, visibleRelatedJobs, visibleReservedMainReplies]);
-
-  useEffect(() => {
-    setHistoryPages(1);
-    restoreScrollRef.current = null;
-    followTailRef.current = true;
-  }, [scopeKey]);
-
-  useEffect(() => {
-    const transcript = transcriptRef.current;
-    if (!transcript) return;
-    const restore = restoreScrollRef.current;
-    if (restore) {
-      transcript.scrollTop = restore.top + transcript.scrollHeight - restore.height;
-      restoreScrollRef.current = null;
-    } else if (followTailRef.current || optimisticUserTurn !== null) {
-      transcript.scrollTop = transcript.scrollHeight;
-      followTailRef.current = true;
-    }
-  }, [historyPages, optimisticUserTurn, tailKey, thread?.messages.length, thread?.updatedAt]);
+  const {
+    historyPages,
+    transcriptRef,
+    onScroll,
+    showEarlier,
+  } = useAgentTranscriptController({
+    scopeKey,
+    tailKey,
+    optimisticUserTurnId: optimisticUserTurn?.message.id ?? null,
+    threadMessageCount: thread?.messages.length,
+    threadUpdatedAt: thread?.updatedAt,
+  });
+  const {
+    presentableMessages,
+    reservedMainReplies,
+    hiddenTranscriptCount,
+    latestRelatedJobId,
+    timeline,
+  } = buildAgentTranscriptPage({
+    scopeKey,
+    scopeType,
+    thread,
+    optimisticUserTurn,
+    relatedJobs,
+    mainJobGroups,
+    historyPages,
+  });
 
   return (
     <div
@@ -1035,20 +720,13 @@ const AgentTranscript = memo(function AgentTranscript({
       aria-live="polite"
       aria-relevant="additions"
       aria-busy={threadLoading || undefined}
-      onScroll={(event) => {
-        const transcript = event.currentTarget;
-        followTailRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= 56;
-      }}
+      onScroll={onScroll}
     >
       {hiddenTranscriptCount > 0 ? (
         <button
           type="button"
           className="design-canvas-agent__history-more"
-          onClick={() => {
-            const transcript = transcriptRef.current;
-            if (transcript) restoreScrollRef.current = { height: transcript.scrollHeight, top: transcript.scrollTop };
-            setHistoryPages((current) => current + 1);
-          }}
+          onClick={showEarlier}
         >
           Show earlier activity <span>{hiddenTranscriptCount}</span>
         </button>
@@ -1092,6 +770,7 @@ const AgentTranscript = memo(function AgentTranscript({
               projectPath={projectPath}
               onRevealExport={onRevealExport}
               onCancelJob={onCancelJob}
+              onRetryJob={onRetryJob}
               reduceMotion={reduceMotion}
               latestRelatedJobId={latestRelatedJobId}
             />
@@ -1105,6 +784,7 @@ const AgentTranscript = memo(function AgentTranscript({
             projectPath={projectPath}
             onRevealExport={onRevealExport}
             onCancel={onCancelJob}
+            onRetry={onRetryJob}
           />
         );
       })}
@@ -1118,6 +798,7 @@ function MainAgentJobGroupView({
   projectPath,
   onRevealExport,
   onCancelJob,
+  onRetryJob,
   reduceMotion,
   latestRelatedJobId,
 }: {
@@ -1126,6 +807,7 @@ function MainAgentJobGroupView({
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancelJob: (jobId: string) => Promise<void>;
+  onRetryJob?: (jobId: string) => Promise<void>;
   reduceMotion: boolean;
   latestRelatedJobId: string | null;
 }) {
@@ -1135,6 +817,12 @@ function MainAgentJobGroupView({
   const mainTerminalOutcome = mainJob !== null && ["failed", "cancelled", "superseded"].includes(mainJob.status)
     ? mainJob
     : null;
+  const { retrying, retryError, retry } = useJobActionController({
+    jobId: mainTerminalOutcome?.id ?? group.parentJobId,
+    active: mainActive,
+    displayLabel: "Canvas plan",
+    onRetry: onRetryJob,
+  });
   if (workJobs.length === 0) {
     if (mainActive) return <AgentThinkingIndicator reduceMotion={reduceMotion} />;
     if (!mainTerminalOutcome) return null;
@@ -1170,6 +858,31 @@ function MainAgentJobGroupView({
             : null}
         </div>
       ) : null}
+      {mainTerminalOutcome?.status === "failed" && onRetryJob ? (
+        <div className="design-canvas-agent__activity-group-retry">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="design-canvas-agent__activity-retry"
+            aria-label={`${jobRetryLabel(mainTerminalOutcome)} Canvas plan`}
+            aria-busy={retrying || undefined}
+            disabled={retrying}
+            onClick={() => void retry()}
+          >
+            {retrying
+              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
+              : <RotateCcw aria-hidden />}
+            <span>{retrying ? "Retrying" : jobRetryLabel(mainTerminalOutcome)}</span>
+          </Button>
+        </div>
+      ) : null}
+      {retryError ? (
+        <div className="design-canvas-agent__activity-error" role="alert">
+          <CircleAlert aria-hidden />
+          <p>{retryError}</p>
+        </div>
+      ) : null}
       {workJobs.map((job) => (
         <AgentActivityCard
           key={job.id}
@@ -1178,6 +891,7 @@ function MainAgentJobGroupView({
           projectPath={projectPath}
           onRevealExport={onRevealExport}
           onCancel={onCancelJob}
+          onRetry={onRetryJob}
           initiallyExpanded={job.id === latestRelatedJobId && job.kind === "implementation-export" && job.status === "ready"}
         />
       ))}
@@ -1209,6 +923,7 @@ function AgentActivityCard({
   projectPath,
   onRevealExport,
   onCancel,
+  onRetry,
   initiallyExpanded = false,
 }: {
   job: DesignJob;
@@ -1216,12 +931,12 @@ function AgentActivityCard({
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancel: (jobId: string) => Promise<void>;
+  onRetry?: (jobId: string) => Promise<void>;
   initiallyExpanded?: boolean;
 }) {
   const reduceMotion = usePrefersReducedMotion();
   const [revealFeedback, setRevealFeedback] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
-  const [stopping, setStopping] = useState(false);
   const detailsId = useId();
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
   const [expanded, setExpanded] = useState(active || initiallyExpanded);
@@ -1243,6 +958,20 @@ function AgentActivityCard({
       : job.kind === "main-agent"
         ? "Canvas plan"
         : "Implementation export";
+  const {
+    stopping,
+    stopError,
+    stop,
+    retrying,
+    retryError,
+    retry,
+  } = useJobActionController({
+    jobId: job.id,
+    active,
+    displayLabel,
+    onCancel,
+    onRetry,
+  });
   const exportId = job.kind === "implementation-export" ? job.exportId : null;
   const exportPath = exportId
     ? designExportPath(projectPath, exportId)
@@ -1252,10 +981,7 @@ function AgentActivityCard({
   const reasoningItems = job.activity
     .filter(isReasoningActivity)
     .map((activity) => ({ id: activity.id, text: activity.text.trim() || "Activity updated" }));
-  const latestActivity = job.activity.at(-1);
-  const activePhase: AgentActivityPhase | null = active
-    ? latestActivity === undefined ? "reasoning" : activityPhase(latestActivity)
-    : null;
+  const activePhase = activeAgentActivityPhase(job);
   const reasoningActive = activePhase === "reasoning";
   const progressActive = activePhase === "progress";
   const searchActive = activePhase === "search";
@@ -1345,11 +1071,7 @@ function AgentActivityCard({
             aria-label={`${stopping ? "Stopping" : "Stop"} ${displayLabel}`}
             aria-busy={stopping || undefined}
             disabled={stopping}
-            onClick={() => {
-              if (stopping) return;
-              setStopping(true);
-              void onCancel(job.id).catch(() => undefined).finally(() => setStopping(false));
-            }}
+            onClick={() => void stop()}
           >
             {stopping
               ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
@@ -1357,7 +1079,36 @@ function AgentActivityCard({
             <span>{stopping ? "Stopping" : "Stop"}</span>
           </Button>
         ) : null}
+        {job.status === "failed" && onRetry ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="design-canvas-agent__activity-retry"
+            aria-label={`${jobRetryLabel(job)} ${displayLabel}`}
+            aria-busy={retrying || undefined}
+            disabled={retrying}
+            onClick={() => void retry()}
+          >
+            {retrying
+              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
+              : <RotateCcw aria-hidden />}
+            <span>{retrying ? "Retrying" : jobRetryLabel(job)}</span>
+          </Button>
+        ) : null}
       </header>
+      {stopError ? (
+        <div className="design-canvas-agent__activity-error" role="alert">
+          <CircleAlert aria-hidden />
+          <p>{stopError}</p>
+        </div>
+      ) : null}
+      {retryError ? (
+        <div className="design-canvas-agent__activity-error" role="alert">
+          <CircleAlert aria-hidden />
+          <p>{retryError}</p>
+        </div>
+      ) : null}
       <AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>
         <>
           <div className="design-canvas-agent__activity-body">

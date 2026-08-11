@@ -13,6 +13,7 @@
     "test:coverage": "node --experimental-strip-types --experimental-sqlite --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=79 --test-coverage-branches=67 --test-coverage-functions=35 --test --test-concurrency=4 'test/*.test.ts'"
   },
   "dependencies": {
+    "@dezin/design-canvas-contracts": "workspace:*",
     "@ai-sdk/azure": "^4.0.5",
     "@ai-sdk/fal": "^3.0.3",
     "@ai-sdk/google": "^4.0.6",

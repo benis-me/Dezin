@@ -65,7 +65,6 @@ import {
   type DesignProjectAttachments,
   type DesignProjectReferenceIdentity,
 } from "../lib/design-attachments.ts";
-import { discardPendingDesignCanvasIntent } from "../lib/pending-design-canvas.ts";
 import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { cn } from "../lib/utils.ts";
@@ -904,7 +903,6 @@ export function HomeScreen({
     if (!window.confirm("Delete this project permanently? This can't be undone.")) return;
     try {
       await api.deleteProject(id);
-      discardPendingDesignCanvasIntent(id);
       refresh();
     } catch {
       toast("Couldn't delete the project.", { variant: "error" });

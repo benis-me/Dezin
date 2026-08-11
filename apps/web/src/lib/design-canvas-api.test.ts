@@ -19,9 +19,22 @@ function requestMethod(init: RequestInit | undefined): string {
   return init?.method ?? "GET";
 }
 
+async function readBlobText(blob: Blob): Promise<string> {
+  const withArrayBuffer = blob as Blob & { arrayBuffer?: () => Promise<ArrayBuffer> };
+  if (typeof withArrayBuffer.arrayBuffer === "function") {
+    return new TextDecoder().decode(await withArrayBuffer.arrayBuffer());
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")), { once: true });
+    reader.addEventListener("error", () => reject(reader.error ?? new Error("Blob read failed")), { once: true });
+    reader.readAsText(blob);
+  });
+}
+
 function emptyCanvas(revision: number, projectId = "project /1"): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId,
     revision,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -36,6 +49,7 @@ function emptyCanvas(revision: number, projectId = "project /1"): DesignCanvas {
 
 function designJob(overrides: Partial<DesignJob> = {}): DesignJob {
   return {
+    schemaVersion: 2,
     id: "job-1",
     kind: "node-generation",
     runnerId: "fixture",
@@ -44,9 +58,12 @@ function designJob(overrides: Partial<DesignJob> = {}): DesignJob {
     nodeId: null,
     parentJobId: null,
     contextHash: null,
+    canvasRevision: null,
+    expectedHeadVersionId: null,
     versionId: null,
     exportId: null,
     error: null,
+    cancelRequested: false,
     activity: [],
     createdAt: 1,
     updatedAt: 1,
@@ -460,4 +477,40 @@ test("exact preview identities and implementation export revisions are never rep
     agentCommand: "claude",
     model: "sonnet",
   });
+});
+
+test("portable exact-version HTML is downloaded as daemon-authored bytes with authenticated failure semantics", async () => {
+  const portable = "<!doctype html><html><body><img src=\"data:image/png;base64,AQID\"></body></html>";
+  const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
+    expect(String(input)).toBe(
+      "http://d/api/projects/project%20%2F1/design-canvas/nodes/node%20%2F1/versions/version%20%2F9/preview/download",
+    );
+    expect(init?.headers).toMatchObject({ "x-dezin-daemon-token": "secret" });
+    return new Response(portable, { headers: { "content-type": "text/html; charset=utf-8" } });
+  });
+  const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "secret" }));
+
+  const downloaded = await api.downloadExactVersionHtml("project /1", "node /1", "version /9");
+
+  expect(downloaded.type).toBe("text/html;charset=utf-8");
+  expect(await readBlobText(downloaded)).toBe(portable);
+});
+
+test("failed Design Jobs retry through their immutable daemon identity without rebuilding the prompt in Web", async () => {
+  const retryResult = {
+    retryOfJobId: "job-failed",
+    job: designJob({ id: "job-retry", status: "queued" }),
+    thread: { id: "thread-1", scope: { type: "main" as const }, messages: [], createdAt: 1, updatedAt: 2 },
+    canvas: emptyCanvas(8, "project /1"),
+  };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(retryResult, 202));
+  const api = createDesignCanvasApi(createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "" }));
+
+  await expect(api.retryJob("project /1", "job /failed")).resolves.toEqual(retryResult);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  expect(fetchImpl.mock.calls[0]![0]).toBe(
+    "http://d/api/projects/project%20%2F1/design-canvas/jobs/job%20%2Ffailed/retry",
+  );
+  expect(requestMethod(fetchImpl.mock.calls[0]![1])).toBe("POST");
+  expect(jsonBody(fetchImpl.mock.calls[0]![1])).toEqual({});
 });

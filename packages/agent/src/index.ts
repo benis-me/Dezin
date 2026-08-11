@@ -21,9 +21,12 @@ export { FakeRunner, type FakeRunnerOptions } from "./fake-runner.ts";
 export {
   generateArtifact,
   runTurnWithRetry,
+  classifyAgentTurnFailure,
   type GenerateInput,
   type GenerateResult,
   type GenerateEvent,
+  type AgentTurnFailureCategory,
+  type AgentTurnFailureClassification,
 } from "./generate.ts";
 export {
   parseClaudeStream,
@@ -51,6 +54,7 @@ export {
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
+  type TerminalStdoutContract,
 } from "./claude-runner.ts";
 export { BoundedTextBuffer, OUTPUT_TRUNCATION_MARKER } from "./bounded-text-buffer.ts";
 export {

@@ -1,10 +1,21 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import type { DesignNode as WireDesignNode } from "@dezin/design-canvas-contracts";
 import { StrictMode } from "react";
 import { expect, test, vi } from "vitest";
 
 import type { DesignCanvasApi } from "./api.ts";
 import type { DesignNode } from "./types.ts";
-import { useExactVersionPreview } from "./useExactVersionPreview.ts";
+import { previewVersionIdForNode, useExactVersionPreview } from "./useExactVersionPreview.ts";
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+    (<Value>() => Value extends Right ? 1 : 2)
+    ? true
+    : false;
+type Expect<Value extends true> = Value;
+type WebNodeIsTheWireNode = Expect<Equal<DesignNode, WireDesignNode>>;
+
+void (0 as unknown as WebNodeIsTheWireNode);
 
 function generatedNode(versionId: string): DesignNode {
   return {
@@ -37,6 +48,17 @@ function PreviewHarness({ api, node }: { api: DesignCanvasApi; node: DesignNode 
     </span>
   );
 }
+
+test("exact preview identity uses the selected revision or the current wire revision", () => {
+  const current = generatedNode("current-version");
+  const legacyPayload = {
+    ...current,
+    lastReadyVersionId: "unprojected-version",
+  } as DesignNode;
+
+  expect(previewVersionIdForNode(legacyPayload)).toBe("current-version");
+  expect(previewVersionIdForNode({ ...current, selectedVersionId: "selected-version" })).toBe("selected-version");
+});
 
 test("StrictMode aborts only its own preview request and the remount still resolves", async () => {
   const getExactVersionPreview = vi.fn((_projectId: string, nodeId: string, versionId: string, signal?: AbortSignal) => (

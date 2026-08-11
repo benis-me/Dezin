@@ -11,6 +11,7 @@ const EXPECTED_SUITES = [
   "packages/core",
   "packages/craft",
   "packages/design",
+  "packages/design-canvas-contracts",
   "packages/effects",
   "packages/prompt",
   "packages/quality",

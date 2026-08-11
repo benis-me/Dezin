@@ -6,19 +6,161 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Store } from "../../../packages/core/src/index.ts";
-import type { AgentRunner } from "../../../packages/agent/src/index.ts";
+import { AgentTurnError, type AgentRunner } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import {
+  buildDesignMainSystemPrompt,
   DESIGN_EXPORT_TYPESCRIPT_VERSION,
   DESIGN_EXPORT_VITE_VERSION,
+  startDesignMainTurn,
 } from "../src/design/design-global-agents.ts";
 import { trustedDesignPreviewOrigin } from "../src/design/design-http-handler.ts";
+import { bootstrapDesignProject } from "../src/design/design-project-bootstrap.ts";
+import { ensureDesignProjectAtId } from "../src/design/design-project-store.ts";
 import { findDesignExportChrome } from "../src/design/design-export-visual-gate.ts";
+import { rewriteDesignHtmlUrlReferences } from "../src/design/design-portable-html.ts";
 import {
   getDesignCanvas,
+  getDesignJob,
   initializeDesignProject,
+  listDesignJobs,
   publishDesignVersion,
 } from "../src/design/design-storage.ts";
+
+test("failed Design Jobs expose one idempotent server-authoritative retry route", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-job-retry-"));
+  const store = new Store(":memory:");
+  store.updateSettings({
+    agentCommand: "claude",
+    model: "settings-claude-model",
+    apiKey: "settings-claude-secret",
+  });
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  let calls = 0;
+  const messageCalls = new Map<string, number>();
+  const designRunner: AgentRunner = {
+    id: "codebuddy",
+    async runTurn(input) {
+      calls += 1;
+      const messageCall = (messageCalls.get(input.message) ?? 0) + 1;
+      messageCalls.set(input.message, messageCall);
+      if (messageCall === 1) {
+        throw new AgentTurnError(
+          "authentication expired; login required",
+          {
+            requested: { providerId: "codebuddy", model: "settings-claude-model" },
+            observed: {
+              providerId: "codebuddy",
+              model: "hy3-ioa",
+              command: "codebuddy",
+              cliVersion: "2.132.0",
+              apiKeySource: "copilot.tencent.com",
+              protocol: "claude-stream-json-init-v1",
+            },
+          },
+        );
+      }
+      if (input.message === "Build it") {
+        assert.equal(input.env?.ANTHROPIC_API_KEY, "settings-claude-secret", "POST {} must use the current Settings command");
+      } else {
+        assert.equal(input.message, "Build with explicit provider");
+        assert.equal(input.env?.ANTHROPIC_API_KEY, undefined, "an explicit CodeBuddy retry must retain its credential fence");
+      }
+      const html = "<!doctype html><html><head><title>Retried page</title></head><body><main>Recovered</main></body></html>";
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "Recovered", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  const server = createApp({ dataDir, store, runtimeSupervisor, designRunner });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+  const json = (path: string, method = "GET", body?: unknown) => fetch(`${base}${path}`, {
+    method,
+    ...(body === undefined ? {} : {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  });
+  try {
+    const projectId = "project-job-retry";
+    await initializeDesignProject(dataDir, projectId);
+    const root = `/api/projects/${projectId}/design-canvas`;
+    const added = await json(root, "PUT", {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    assert.equal(added.status, 200, await added.clone().text());
+    const firstResponse = await json(`${root}/nodes/node-page/agent/turns`, "POST", { message: "Build it" });
+    assert.equal(firstResponse.status, 202, await firstResponse.clone().text());
+    const first = await firstResponse.json() as { job: { id: string } };
+    let failed = await getDesignJob(dataDir, projectId, first.job.id);
+    for (let attempt = 0; attempt < 100 && failed.status !== "failed"; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      failed = await getDesignJob(dataDir, projectId, first.job.id);
+    }
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.runnerId, "codebuddy");
+    assert.equal(failed.model, "hy3-ioa");
+    assert.equal(calls, 1, "authentication failures must not be retried blindly");
+
+    const retriedResponse = await json(`${root}/jobs/${failed.id}/retry`, "POST", {});
+    assert.equal(retriedResponse.status, 202, await retriedResponse.clone().text());
+    const retried = await retriedResponse.json() as { retryOfJobId: string; job: { id: string } };
+    assert.equal(retried.retryOfJobId, failed.id);
+    assert.notEqual(retried.job.id, failed.id);
+    const retriedJob = await getDesignJob(dataDir, projectId, retried.job.id);
+    assert.equal(retriedJob.model, "settings-claude-model", "a mismatched failed provider cannot donate its model");
+    const duplicateResponse = await json(`${root}/jobs/${failed.id}/retry`, "POST", {});
+    assert.equal(duplicateResponse.status, 200, await duplicateResponse.clone().text());
+    const duplicate = await duplicateResponse.json() as { job: { id: string } };
+    assert.equal(duplicate.job.id, retried.job.id);
+
+    let completed = await getDesignJob(dataDir, projectId, retried.job.id);
+    for (let attempt = 0; attempt < 100 && completed.status !== "ready"; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      completed = await getDesignJob(dataDir, projectId, retried.job.id);
+    }
+    assert.equal(completed.status, "ready", completed.error ?? "Retry did not complete");
+    assert.equal(calls, 2);
+    assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.name, "Retried page");
+    const readyRetry = await json(`${root}/jobs/${completed.id}/retry`, "POST", {});
+    assert.equal(readyRetry.status, 409);
+
+    const explicitStart = await json(`${root}/nodes/node-page/agent/turns`, "POST", {
+      message: "Build with explicit provider",
+    });
+    assert.equal(explicitStart.status, 202, await explicitStart.clone().text());
+    const explicitFirst = await explicitStart.json() as { job: { id: string } };
+    let explicitFailed = await getDesignJob(dataDir, projectId, explicitFirst.job.id);
+    for (let attempt = 0; attempt < 100 && explicitFailed.status !== "failed"; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      explicitFailed = await getDesignJob(dataDir, projectId, explicitFirst.job.id);
+    }
+    assert.equal(explicitFailed.status, "failed");
+    const oversizedOverride = await json(`${root}/jobs/${explicitFailed.id}/retry`, "POST", {
+      agentCommand: "x".repeat(513),
+    });
+    assert.equal(oversizedOverride.status, 400);
+    const explicitRetry = await json(`${root}/jobs/${explicitFailed.id}/retry`, "POST", {
+      agentCommand: "codebuddy",
+    });
+    assert.equal(explicitRetry.status, 202, await explicitRetry.clone().text());
+    const explicitRetryBody = await explicitRetry.json() as { job: { id: string; model: string | null } };
+    assert.equal(explicitRetryBody.job.model, "hy3-ioa", "a compatible explicit provider preserves the attested model");
+    let explicitCompleted = await getDesignJob(dataDir, projectId, explicitRetryBody.job.id);
+    for (let attempt = 0; attempt < 100 && explicitCompleted.status !== "ready"; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      explicitCompleted = await getDesignJob(dataDir, projectId, explicitRetryBody.job.id);
+    }
+    assert.equal(explicitCompleted.status, "ready", explicitCompleted.error ?? "Explicit retry did not complete");
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 
 interface AbortGate {
   entered: Promise<void>;
@@ -104,6 +246,381 @@ test("ordinary Project creation initializes an empty Design canvas without scaff
   }
 });
 
+test("Home bootstrap HTTP creates once, replays exactly, and rejects key rebinding", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-http-"));
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const server = createApp({
+    dataDir,
+    store,
+    runtimeSupervisor,
+    designProjectBootstrapPorts: {
+      ensureAssetBatch: async () => undefined,
+      ensureMainTurn: async () => ({ jobId: "job-bootstrap-http" }),
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const bootstrap = (body: unknown) => fetch(`http://127.0.0.1:${port}/api/projects/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const input = {
+    schemaVersion: 1,
+    idempotencyKey: "home-http-0001",
+    name: "HTTP bootstrap",
+    prompt: "",
+    items: [],
+  };
+  try {
+    const firstResponse = await bootstrap(input);
+    assert.equal(firstResponse.status, 201, await firstResponse.clone().text());
+    const first = await firstResponse.json() as {
+      project: { id: string };
+      bootstrap: { job: { id: string; projectId: string }; reused: boolean };
+    };
+    assert.equal(first.project.id, first.bootstrap.job.projectId);
+    assert.equal(first.bootstrap.reused, false);
+    assert.equal(store.getProject(first.project.id), null);
+
+    const replayResponse = await bootstrap(input);
+    assert.equal(replayResponse.status, 200, await replayResponse.clone().text());
+    const replay = await replayResponse.json() as typeof first;
+    assert.equal(replay.project.id, first.project.id);
+    assert.equal(replay.bootstrap.job.id, first.bootstrap.job.id);
+    assert.equal(replay.bootstrap.reused, true);
+
+    const conflict = await bootstrap({ ...input, prompt: "Different request" });
+    assert.equal(conflict.status, 409, await conflict.clone().text());
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Home bootstrap HTTP rejects malformed nested Asset import records before creating a Project", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-invalid-http-"));
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  let assetCalls = 0;
+  const server = createApp({
+    dataDir,
+    store,
+    runtimeSupervisor,
+    designProjectBootstrapPorts: {
+      ensureAssetBatch: async () => { assetCalls += 1; },
+      ensureMainTurn: async () => ({ jobId: "job-bootstrap-invalid-http" }),
+    },
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const asset = { name: "Source", mimeType: "text/html", base64: Buffer.from("x").toString("base64") };
+  const node = { id: "node-source", kind: "document", name: "Source" };
+  const malformedItems = [
+    [{ asset, binding: { type: "create-node", node }, unexpected: true }],
+    [{ asset: { ...asset, sourceVersion: { projectId: "p", nodeId: "n", versionId: "v" } }, binding: { type: "create-node", node } }],
+    [{ asset, binding: { type: "create-node", node: { ...node, kind: "unsupported-kind" } } }],
+    [{ asset, binding: { type: "create-node", node: { ...node, geometry: { width: null } } } }],
+    [{ asset: { name: "Source", mimeType: "text/html", sourceVersion: { projectId: "../escape", nodeId: "n", versionId: "v" } }, binding: { type: "create-node", node } }],
+  ];
+  try {
+    for (const [index, items] of malformedItems.entries()) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/projects/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schemaVersion: 1,
+          idempotencyKey: `home-http-invalid-${index}`,
+          name: "Invalid bootstrap",
+          prompt: "",
+          items,
+        }),
+      });
+      assert.equal(response.status, 400, await response.clone().text());
+    }
+    assert.equal(assetCalls, 0);
+    await assert.rejects(readFile(join(dataDir, "design-bootstrap-jobs")));
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("production Home bootstrap atomically imports attachments and reserves one Main turn", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-production-http-"));
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  let runnerCalls = 0;
+  const designRunner: AgentRunner = {
+    id: "bootstrap-production-runner",
+    async runTurn() {
+      runnerCalls += 1;
+      return { text: "Bootstrap is ready.", artifactHtml: "" };
+    },
+  };
+  const server = createApp({ dataDir, store, runtimeSupervisor, designRunner });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const input = {
+    schemaVersion: 1,
+    idempotencyKey: "home-production-0001",
+    name: "Production bootstrap",
+    prompt: "Use the supplied brief",
+    items: [{
+      asset: { name: "brief.txt", mimeType: "text/plain", base64: Buffer.from("brief").toString("base64") },
+      binding: {
+        type: "create-node",
+        node: { id: "node-brief", kind: "document", name: "Brief" },
+      },
+    }],
+  };
+  const bootstrap = () => fetch(`http://127.0.0.1:${port}/api/projects/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  try {
+    const firstResponse = await bootstrap();
+    assert.equal(firstResponse.status, 201, await firstResponse.clone().text());
+    const first = await firstResponse.json() as {
+      project: { id: string };
+      bootstrap: { job: { id: string; mainJobId: string | null }; reused: boolean };
+    };
+    assert.ok(first.bootstrap.job.mainJobId);
+    const canvas = await getDesignCanvas(dataDir, first.project.id);
+    assert.deepEqual(canvas.nodeOrder, ["node-brief"]);
+    const mainJob = await getDesignJob(dataDir, first.project.id, first.bootstrap.job.mainJobId!);
+    assert.equal(mainJob.kind, "main-agent");
+
+    const replayResponse = await bootstrap();
+    assert.equal(replayResponse.status, 200, await replayResponse.clone().text());
+    const replay = await replayResponse.json() as typeof first;
+    assert.equal(replay.bootstrap.job.id, first.bootstrap.job.id);
+    assert.equal(replay.bootstrap.job.mainJobId, first.bootstrap.job.mainJobId);
+    assert.equal(replay.bootstrap.reused, true);
+    let completedMainJob = await getDesignJob(dataDir, first.project.id, first.bootstrap.job.mainJobId!);
+    for (let attempt = 0; attempt < 100 && !["ready", "failed", "cancelled", "superseded"].includes(completedMainJob.status); attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      completedMainJob = await getDesignJob(dataDir, first.project.id, first.bootstrap.job.mainJobId!);
+    }
+    assert.equal(completedMainJob.status, "ready", completedMainJob.error ?? "bootstrap Main turn did not finish");
+    assert.equal(completedMainJob.conversationOnly, true);
+    assert.equal(runnerCalls, 1);
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("startup recovery never cancels a fresh Main turn resumed from a pre-Main bootstrap phase", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-recovery-main-"));
+  const input = {
+    schemaVersion: 1 as const,
+    idempotencyKey: "home-recovery-main-0001",
+    name: "Recovered Main bootstrap",
+    prompt: "Start after recovery",
+    items: [],
+  };
+  await assert.rejects(
+    bootstrapDesignProject({
+      dataDir,
+      input,
+      ports: {
+        ensureProject: (project) => ensureDesignProjectAtId(dataDir, project).then(() => undefined),
+        ensureAssetBatch: async () => { throw new Error("no assets"); },
+        ensureMainTurn: async () => { throw new Error("must crash before Main"); },
+      },
+      testHooks: {
+        simulateProcessCrash: true,
+        afterPhase: (phase) => {
+          if (phase === "project-created") throw new Error("daemon exited before Main reservation");
+        },
+      },
+    }),
+    /daemon exited before Main reservation/,
+  );
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  let releaseRunner!: () => void;
+  const runnerGate = new Promise<void>((resolve) => { releaseRunner = resolve; });
+  const designRunner: AgentRunner = {
+    id: "bootstrap-recovery-runner",
+    async runTurn() {
+      await runnerGate;
+      return { text: "Recovered.", artifactHtml: "" };
+    },
+  };
+  const server = createApp({ dataDir, store, runtimeSupervisor, designRunner });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/projects`);
+    assert.equal(response.status, 200, await response.clone().text());
+    const projects = await response.json() as Array<{ id: string }>;
+    assert.equal(projects.length, 1);
+    const jobs = await listDesignJobs(dataDir, projects[0]!.id);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]!.kind, "main-agent");
+    assert.notEqual(jobs[0]!.status, "cancelled");
+    assert.notEqual(jobs[0]!.error, "Interrupted by daemon restart");
+  } finally {
+    releaseRunner();
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("startup recovery replaces a bootstrap Main orphan created before its phase commit exactly once", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-recovery-orphan-"));
+  const input = {
+    schemaVersion: 1 as const,
+    idempotencyKey: "home-recovery-orphan-0001",
+    name: "Recovered orphan bootstrap",
+    prompt: "Resume the durable Main reservation",
+    items: [],
+  };
+  let projectId = "";
+  let orphanJobId = "";
+  let orphanCompletion: Promise<unknown> | null = null;
+  let markOrphanRunning!: () => void;
+  let releaseOrphan!: () => void;
+  const orphanRunning = new Promise<void>((resolve) => { markOrphanRunning = resolve; });
+  const orphanGate = new Promise<void>((resolve) => { releaseOrphan = resolve; });
+  const orphanRunner: AgentRunner = {
+    id: "bootstrap-restart-runner",
+    async runTurn() {
+      markOrphanRunning();
+      await orphanGate;
+      return { text: "The stale process must not complete this turn.", artifactHtml: "" };
+    },
+  };
+
+  try {
+    await assert.rejects(
+      bootstrapDesignProject({
+        dataDir,
+        input,
+        ports: {
+          ensureProject: async (project) => {
+            projectId = project.projectId;
+            await ensureDesignProjectAtId(dataDir, project);
+          },
+          ensureAssetBatch: async () => { throw new Error("no assets"); },
+          ensureMainTurn: async (main) => {
+            const started = await startDesignMainTurn({
+              dataDir,
+              projectId: main.projectId,
+              message: main.prompt,
+              runner: orphanRunner,
+              systemPrompt: buildDesignMainSystemPrompt(),
+              idempotencyKey: main.idempotencyKey,
+              model: null,
+              dispatchNode: async () => { throw new Error("orphan fixture must not dispatch"); },
+            });
+            orphanJobId = started.job.id;
+            orphanCompletion = started.completion;
+            throw new Error("daemon exited after durable Main creation but before bootstrap phase commit");
+          },
+        },
+        testHooks: { simulateProcessCrash: true },
+      }),
+      /daemon exited after durable Main creation but before bootstrap phase commit/,
+    );
+    await orphanRunning;
+    assert.ok(projectId);
+    assert.ok(orphanJobId);
+
+    const store = new Store(":memory:");
+    const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+    let recoveredRunnerCalls = 0;
+    const recoveredRunner: AgentRunner = {
+      id: "bootstrap-restart-runner",
+      async runTurn() {
+        recoveredRunnerCalls += 1;
+        return { text: "Recovered bootstrap Main turn.", artifactHtml: "" };
+      },
+    };
+    const server = createApp({ dataDir, store, runtimeSupervisor, designRunner: recoveredRunner });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const startup = await fetch(`http://127.0.0.1:${port}/api/projects`);
+      assert.equal(startup.status, 200, await startup.clone().text());
+      const replayResponse = await fetch(`http://127.0.0.1:${port}/api/projects/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      assert.equal(replayResponse.status, 200, await replayResponse.clone().text());
+      const replay = await replayResponse.json() as {
+        project: { id: string };
+        bootstrap: { job: { mainJobId: string | null }; reused: boolean };
+      };
+      assert.equal(replay.project.id, projectId);
+      assert.equal(replay.bootstrap.reused, true);
+      assert.ok(replay.bootstrap.job.mainJobId);
+      assert.notEqual(replay.bootstrap.job.mainJobId, orphanJobId);
+
+      const orphan = await getDesignJob(dataDir, projectId, orphanJobId);
+      assert.equal(orphan.status, "cancelled");
+      assert.equal(orphan.error, "Interrupted by daemon restart");
+      let successor = await getDesignJob(dataDir, projectId, replay.bootstrap.job.mainJobId!);
+      for (let attempt = 0; attempt < 100 && successor.status !== "ready"; attempt += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        successor = await getDesignJob(dataDir, projectId, successor.id);
+      }
+      assert.equal(successor.status, "ready", successor.error ?? "bootstrap successor did not complete");
+      assert.equal(recoveredRunnerCalls, 1);
+      assert.equal((await listDesignJobs(dataDir, projectId)).length, 2);
+    } finally {
+      await runtimeSupervisor.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      store.close();
+    }
+
+    const restartStore = new Store(":memory:");
+    const restartSupervisor = createRuntimeSupervisor({ dataDir, store: restartStore });
+    let duplicateRunnerCalls = 0;
+    const restartServer = createApp({
+      dataDir,
+      store: restartStore,
+      runtimeSupervisor: restartSupervisor,
+      designRunner: {
+        id: "bootstrap-duplicate-recovery-runner",
+        async runTurn() {
+          duplicateRunnerCalls += 1;
+          return { text: "Duplicate recovery must not run.", artifactHtml: "" };
+        },
+      },
+    });
+    await new Promise<void>((resolve) => restartServer.listen(0, "127.0.0.1", resolve));
+    const restartPort = (restartServer.address() as AddressInfo).port;
+    try {
+      const startup = await fetch(`http://127.0.0.1:${restartPort}/api/projects`);
+      assert.equal(startup.status, 200, await startup.clone().text());
+      assert.equal((await listDesignJobs(dataDir, projectId)).length, 2);
+      assert.equal(duplicateRunnerCalls, 0);
+    } finally {
+      await restartSupervisor.shutdown();
+      await new Promise<void>((resolve) => restartServer.close(() => resolve()));
+      restartStore.close();
+    }
+  } finally {
+    releaseOrphan();
+    await Promise.resolve(orphanCompletion).catch(() => {});
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Design HTTP routes wait for startup recovery and fail closed when it cannot complete", async (t) => {
   await t.test("a Canvas mutation cannot overtake startup recovery", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-recovery-gate-"));
@@ -140,8 +657,11 @@ test("Design HTTP routes wait for startup recovery and fail closed when it canno
         settled = true;
         return response;
       });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const outcome = await Promise.race([
+        responsePromise.then(() => "settled" as const),
+        new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]);
+      assert.equal(outcome, "waiting");
       assert.equal(settled, false);
       assert.equal((await getDesignCanvas(dataDir, projectId)).revision, 0);
 
@@ -149,6 +669,61 @@ test("Design HTTP routes wait for startup recovery and fail closed when it canno
       const response = await responsePromise;
       assert.equal(response.status, 200, await response.clone().text());
       assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.id, "node-after-recovery");
+    } finally {
+      releaseRecovery();
+      await runtimeSupervisor.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("Home bootstrap cannot overtake startup recovery", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-bootstrap-recovery-gate-"));
+    const store = new Store(":memory:");
+    const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+    let markRecoveryStarted!: () => void;
+    let releaseRecovery!: () => void;
+    const recoveryStarted = new Promise<void>((resolve) => { markRecoveryStarted = resolve; });
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const server = createApp({
+      dataDir,
+      store,
+      runtimeSupervisor,
+      designStartupRecovery: async () => {
+        markRecoveryStarted();
+        await recoveryGate;
+      },
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      await recoveryStarted;
+      let settled = false;
+      const responsePromise = fetch(`http://127.0.0.1:${port}/api/projects/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schemaVersion: 1,
+          idempotencyKey: "home-recovery-gate",
+          name: "Recovered bootstrap",
+          prompt: "",
+          items: [],
+        }),
+      }).then((response) => {
+        settled = true;
+        return response;
+      });
+      const outcome = await Promise.race([
+        responsePromise.then(() => "settled" as const),
+        new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), 50)),
+      ]);
+      assert.equal(outcome, "waiting");
+      assert.equal(settled, false);
+
+      releaseRecovery();
+      const response = await responsePromise;
+      assert.equal(response.status, 201, await response.clone().text());
     } finally {
       releaseRecovery();
       await runtimeSupervisor.shutdown();
@@ -288,7 +863,7 @@ test("Main Agent request identity is inherited by its child Job and published Ve
       if (input.projectDir.includes("/exports/.pending/main-job-")) {
         return { text: plan, artifactHtml: "" };
       }
-      const html = "<!doctype html><html><head><style>body{margin:0}</style></head><body>Main child generated</body></html>";
+      const html = "<!doctype html><html><head><title>Delegated home</title><style>body{margin:0}</style></head><body>Main child generated</body></html>";
       await writeFile(join(input.projectDir, "index.html"), html);
       return { text: "Published the delegated page.", artifactHtml: html, artifactPath: "index.html" };
     },
@@ -931,7 +1506,32 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(exactPreviewAgain.headers.get("etag"), `"sha256-${published.manifest.checksum}"`);
     assert.equal(await exactPreviewAgain.text(), previewHtml);
 
-    const pinnedPath = previewHtml.match(/\/api\/projects\/[^"']+checksum=[a-f0-9]{64}/)?.[0];
+    const portablePreviewUrl = `${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/download`;
+    const portablePreview = await fetch(portablePreviewUrl);
+    assert.equal(portablePreview.status, 200, await portablePreview.clone().text());
+    assert.equal(portablePreview.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.match(portablePreview.headers.get("content-disposition") ?? "", /^attachment;/);
+    assert.match(portablePreview.headers.get("cache-control") ?? "", /no-store/);
+    const portableHtml = await portablePreview.text();
+    assert.match(portableHtml, new RegExp(`data:image/png;base64,${imageBytes.toString("base64")}`));
+    assert.doesNotMatch(portableHtml, /dezin-asset:|\/api\/projects\/[^"']+\/design-canvas\/assets\//i);
+
+    const portableHead = await fetch(portablePreviewUrl, { method: "HEAD" });
+    assert.equal(portableHead.status, 200);
+    assert.equal(portableHead.headers.get("content-length"), String(Buffer.byteLength(portableHtml, "utf8")));
+    assert.equal((await portableHead.arrayBuffer()).byteLength, 0);
+
+    let pinnedPath: string | undefined;
+    rewriteDesignHtmlUrlReferences({
+      html: previewHtml,
+      rewriteUrl(url) {
+        if (url.startsWith(`/api/projects/${project.id}/design-canvas/assets/`)) {
+          const checksum = new URL(url, "http://dezin.local").searchParams.get("checksum");
+          if (checksum !== null && /^[a-f0-9]{64}$/.test(checksum)) pinnedPath = url;
+        }
+        return url;
+      },
+    });
     assert.ok(pinnedPath);
     const pinned = await fetch(`${base}${pinnedPath}`);
     assert.equal(pinned.status, 200, await pinned.clone().text());

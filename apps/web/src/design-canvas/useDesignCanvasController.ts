@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  claimPendingDesignCanvasIntent,
-  completePendingDesignCanvasIntent,
-  markPendingDesignCanvasContextComplete,
-  releasePendingDesignCanvasIntent,
-} from "../lib/pending-design-canvas.ts";
-import { isDesignAgentCommand, type DesignCanvasApi, type DesignImplementationExportSelection } from "./api.ts";
+import type { DesignCanvasApi, DesignImplementationExportSelection } from "./api.ts";
 import type {
   DesignAgentSelection,
   DesignCanvas,
@@ -24,7 +18,6 @@ export interface DesignCanvasController {
   jobs: DesignJob[];
   error: string | null;
   mutating: boolean;
-  pendingIntentRetryAvailable: boolean;
   refresh: () => Promise<void>;
   applyIntents: (intents: readonly DesignCanvasIntent[]) => Promise<DesignCanvas>;
   undo: () => Promise<DesignCanvas | null>;
@@ -39,7 +32,7 @@ export interface DesignCanvasController {
   ) => Promise<void>;
   startExport: (selection: DesignImplementationExportSelection) => Promise<DesignExportResult>;
   cancelJob: (jobId: string) => Promise<void>;
-  retryPendingIntent: () => void;
+  retryJob: (jobId: string) => Promise<void>;
   clearError: () => void;
 }
 
@@ -57,8 +50,6 @@ export function useDesignCanvasController({
   const [jobs, setJobs] = useState<DesignJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [mutating, setMutating] = useState(false);
-  const [pendingIntentRetryAvailable, setPendingIntentRetryAvailable] = useState(false);
-  const [pendingIntentAttempt, setPendingIntentAttempt] = useState(0);
   const canvasRef = useRef<DesignCanvas | null>(null);
   const projectRef = useRef(projectId);
   const mutationQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -298,66 +289,41 @@ export function useDesignCanvasController({
     }
   }, [api, beginMutation, finishMutation, projectId, refresh, reportError]);
 
-  useEffect(() => {
-    if (loadState !== "ready") return;
-    const claim = claimPendingDesignCanvasIntent(projectId);
-    if (!claim) return;
-    const { intent } = claim;
-    const completedContextIndexes = new Set(claim.completedContextIndexes);
-    setPendingIntentRetryAvailable(false);
-    void enqueue(async () => {
-      try {
-        let next = canvasRef.current;
-        for (const [index, context] of intent.context.entries()) {
-          if (projectRef.current !== projectId) {
-            releasePendingDesignCanvasIntent(claim);
-            return;
-          }
-          if (completedContextIndexes.has(index)) continue;
-          const position = { x: 100 + (index % 3) * 390, y: 100 + Math.floor(index / 3) * 320 };
-          next = await api.importProjectVersion(projectId, context, position);
-          setCanvas(next);
-          markPendingDesignCanvasContextComplete(claim, index);
-        }
-        if (projectRef.current !== projectId) {
-          releasePendingDesignCanvasIntent(claim);
-          return;
-        }
-        if (intent.prompt.trim()) {
-          const result = await api.submitAgentTurn(projectId, { type: "main" }, {
-            prompt: intent.prompt.trim(),
-            context: { nodeIds: next?.nodeOrder ?? [] },
-            idempotencyKey: `initial-design-canvas-${projectId}`,
-            ...(isDesignAgentCommand(intent.agentCommand) ? { agentCommand: intent.agentCommand } : {}),
-            ...(isDesignAgentCommand(intent.agentCommand) && intent.model ? { model: intent.model } : {}),
-          });
-          if (result.canvas) setCanvas(result.canvas);
-          setJobs((current) => [result.job, ...current.filter((job) => job.id !== result.job.id)]);
-        }
-        completePendingDesignCanvasIntent(claim);
-      } catch (problem) {
-        releasePendingDesignCanvasIntent(claim);
-        setPendingIntentRetryAvailable(true);
-        throw problem;
-      }
-    }).catch(() => undefined);
-  }, [api, enqueue, loadState, pendingIntentAttempt, projectId, setCanvas]);
-
-  const hasLiveJob = jobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "validating");
-  useEffect(() => {
-    if (!hasLiveJob || loadState !== "ready") return;
-    let active = true;
-    let timer: number | null = null;
-    const poll = async () => {
+  const retryJob = useCallback(async (jobId: string) => {
+    beginMutation();
+    try {
+      const result = await api.retryJob(projectId, jobId);
+      if (projectRef.current !== projectId) return;
+      if ("canvas" in result) setCanvas(result.canvas);
+      if ("exportId" in result) onExportReady?.({ exportId: result.exportId, job: result.job });
+      setJobs((current) => [result.job, ...current.filter((job) => job.id !== result.job.id)]);
       await refresh();
-      if (active) timer = window.setTimeout(() => void poll(), 1_200);
-    };
-    timer = window.setTimeout(() => void poll(), 1_200);
-    return () => {
-      active = false;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [hasLiveJob, loadState, refresh]);
+    } catch (problem) {
+      reportError(problem);
+      throw problem;
+    } finally {
+      finishMutation();
+    }
+  }, [api, beginMutation, finishMutation, onExportReady, projectId, refresh, reportError, setCanvas]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const message of api.streamInvalidations(projectId, controller.signal)) {
+          if (controller.signal.aborted || projectRef.current !== projectId) return;
+          if (message.type === "reset"
+            || message.topics.includes("canvas")
+            || message.topics.includes("jobs")) {
+            await refresh();
+          }
+        }
+      } catch (problem) {
+        if (!controller.signal.aborted && projectRef.current === projectId) reportError(problem);
+      }
+    })();
+    return () => controller.abort();
+  }, [api, projectId, refresh, reportError]);
 
   return {
     loadState,
@@ -365,7 +331,6 @@ export function useDesignCanvasController({
     jobs,
     error,
     mutating,
-    pendingIntentRetryAvailable,
     refresh,
     applyIntents,
     undo,
@@ -375,10 +340,7 @@ export function useDesignCanvasController({
     submitAgentTurn,
     startExport,
     cancelJob,
-    retryPendingIntent: () => {
-      setPendingIntentRetryAvailable(false);
-      setPendingIntentAttempt((current) => current + 1);
-    },
+    retryJob,
     clearError: () => setError(null),
   };
 }

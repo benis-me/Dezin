@@ -17,24 +17,11 @@ import {
 } from "@xyflow/react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  ArrowLeft,
-  Bot,
-  Code2,
-  Download,
   FileUp,
-  Hand,
-  LayoutGrid,
   LoaderCircle,
   LocateFixed,
-  Monitor,
-  Minus,
-  MousePointer2,
-  Plus,
   RotateCcw,
-  Settings2,
-  Smartphone,
   Sparkles,
-  Tablet,
   Trash2,
   X,
 } from "lucide-react";
@@ -47,7 +34,6 @@ import {
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
 } from "react";
 
 import {
@@ -57,29 +43,25 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
 } from "../components/ui/index.ts";
-import { StudioToolbarHeader } from "../components/ui/StudioHeader.tsx";
 import type { AgentInfo } from "../lib/api.ts";
 import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
-import { previewDocumentSrc } from "../lib/preview-channel.ts";
 import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { arrangeDesignNodes } from "./auto-layout.ts";
 import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
+import { CanvasToolDocks } from "./CanvasToolDocks.tsx";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
+import { DesignCanvasHeader } from "./DesignCanvasHeader.tsx";
+import { ImplementationExportConfirmation } from "./ImplementationExportConfirmation.tsx";
 import {
   DesignCanvasNode,
+  designNodeAriaLabel,
   type DesignFlowNode,
   type DesignNodeContentLayout,
 } from "./DesignCanvasNode.tsx";
 import { readExactVersionMetadata, useExactVersionMetadata } from "./exact-version-metadata.ts";
+import { FocusedNodeChrome, type FocusedPreviewDevice } from "./FocusedNodeChrome.tsx";
 import {
   focusedNodeLayoutMode,
   focusedNodeTransform,
@@ -170,8 +152,6 @@ export function synchronizeFocusTransitionDuration(
   return { ...current, durationMs: Math.max(0, Math.round(durationMs)) };
 }
 
-type FocusedPreviewDevice = "desktop" | "tablet" | "mobile";
-
 interface SelectionGhost {
   id: number;
   left: number;
@@ -255,6 +235,7 @@ export function DesignCanvasScreen({
   const { canvas } = controller;
   const surfaceRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
   const pendingRevisionNodeIdRef = useRef<string | null>(null);
   const pendingContextTargetRef = useRef<string | null>(null);
@@ -271,6 +252,8 @@ export function DesignCanvasScreen({
   const focusViewportLockRef = useRef<Viewport | null>(null);
   const mountedViewportProjectRef = useRef<string | null>(null);
   const layoutFrameRef = useRef<number | null>(null);
+  const transientNodeChangesFrameRef = useRef<number | null>(null);
+  const pendingTransientNodeChangesRef = useRef<NodeChange<DesignFlowNode>[]>([]);
   const pendingImportPositionRef = useRef({ x: 120, y: 120 });
   const selectionGuardRef = useRef<string | null>(null);
   const contextSelectionGuardRef = useRef<string | null>(null);
@@ -295,8 +278,10 @@ export function DesignCanvasScreen({
   const [focusMotionEnabled, setFocusMotionEnabled] = useState(true);
   const [focusedPreviewDevice, setFocusedPreviewDevice] = useState<FocusedPreviewDevice>("desktop");
   const [focusPreviewExporting, setFocusPreviewExporting] = useState(false);
+  const [focusPreviewExportError, setFocusPreviewExportError] = useState<string | null>(null);
   const [selectionGhost, setSelectionGhost] = useState<SelectionGhost | null>(null);
   const [mainAgentOpen, setMainAgentOpen] = useState(false);
+  const [exportConfirmationOpen, setExportConfirmationOpen] = useState(false);
   const [mainAgentSelection, setMainAgentSelection] = useState<CanvasAgentSelection>(() => ({
     agentCommand: isDesignAgentCommand(initialAgentCommand) ? initialAgentCommand : "",
     model: isDesignAgentCommand(initialAgentCommand) ? initialModel ?? "" : "",
@@ -429,6 +414,7 @@ export function DesignCanvasScreen({
     previewDeviceByNodeRef.current.set(nodeId, previewDevice);
     setFocusedPreviewDevice(previewDevice);
     setFocusPreviewExporting(false);
+    setFocusPreviewExportError(null);
     setMainAgentOpen(false);
     setFocusedNodeId(nodeId);
     if (!panelAlreadyVisible) setFocusedPanelNodeId(null);
@@ -832,6 +818,9 @@ export function DesignCanvasScreen({
 
   useEffect(() => () => {
     if (layoutFrameRef.current !== null) window.cancelAnimationFrame(layoutFrameRef.current);
+    if (transientNodeChangesFrameRef.current !== null) {
+      window.cancelAnimationFrame(transientNodeChangesFrameRef.current);
+    }
     if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
     if (contextSelectionGuardFrameRef.current !== null) window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
     if (focusPanelTimerRef.current !== null) window.clearTimeout(focusPanelTimerRef.current);
@@ -842,6 +831,8 @@ export function DesignCanvasScreen({
     draggingNodeIdsRef.current.clear();
     resizingNodeIdsRef.current.clear();
     pendingNodeGeometriesRef.current.clear();
+    pendingTransientNodeChangesRef.current = [];
+    transientNodeChangesFrameRef.current = null;
     focusTransitionSequenceRef.current += 1;
     focusCloseCompletionRef.current = null;
     selectionGuardRef.current = null;
@@ -1037,8 +1028,42 @@ export function DesignCanvasScreen({
     persistNodeGeometries(updates);
   }, [canvas?.nodes, persistNodeGeometries]);
 
+  const takePendingTransientNodeChanges = useCallback(() => {
+    if (transientNodeChangesFrameRef.current !== null) {
+      window.cancelAnimationFrame(transientNodeChangesFrameRef.current);
+      transientNodeChangesFrameRef.current = null;
+    }
+    const pending = pendingTransientNodeChangesRef.current;
+    pendingTransientNodeChangesRef.current = [];
+    return pending;
+  }, []);
+
+  const scheduleTransientNodeChanges = useCallback((changes: NodeChange<DesignFlowNode>[]) => {
+    pendingTransientNodeChangesRef.current.push(...changes);
+    if (transientNodeChangesFrameRef.current !== null) return;
+    transientNodeChangesFrameRef.current = window.requestAnimationFrame(() => {
+      transientNodeChangesFrameRef.current = null;
+      const pending = takePendingTransientNodeChanges();
+      if (pending.length > 0) {
+        replaceFlowNodes((current) => applyNodeChanges(pending, current));
+      }
+    });
+  }, [replaceFlowNodes, takePendingTransientNodeChanges]);
+
   const onNodesChange = useCallback((changes: NodeChange<DesignFlowNode>[]) => {
-    const next = replaceFlowNodes((current) => applyNodeChanges(changes, current));
+    const resizeEnded = changes.some((change) => change.type === "dimensions" && change.resizing === false);
+    const transientResize = !resizeEnded && changes.some((change) => (
+      change.type === "dimensions"
+        && (change.resizing === true || resizingNodeIdsRef.current.has(change.id))
+    ));
+    let next = flowNodesRef.current;
+    if (transientResize) {
+      scheduleTransientNodeChanges(changes);
+    } else {
+      const pending = takePendingTransientNodeChanges();
+      const orderedChanges = pending.length > 0 ? [...pending, ...changes] : changes;
+      next = replaceFlowNodes((current) => applyNodeChanges(orderedChanges, current));
+    }
     let completedPositionChange = false;
     for (const change of changes) {
       if (change.type === "position") {
@@ -1059,7 +1084,7 @@ export function DesignCanvasScreen({
       persistNodePositions(completedNodeIds, next);
     }
     if (changes.some((change) => change.type === "position" || change.type === "dimensions")) bumpLayout();
-  }, [bumpLayout, persistNodePositions, replaceFlowNodes]);
+  }, [bumpLayout, persistNodePositions, replaceFlowNodes, scheduleTransientNodeChanges, takePendingTransientNodeChanges]);
 
   const persistViewport = useCallback((viewport: Viewport) => {
     const current = authoritativeViewportRef.current;
@@ -1349,22 +1374,26 @@ export function DesignCanvasScreen({
   }, [clearSelection, closeNodeFocus, controller.applyIntents, controller.redo, controller.undo, focusActive, historyLocked, openNodeAgent, selectedNodeIds]);
 
   const exportFocusedPreview = useCallback(async () => {
-    const versionId = focusedCanvasNode?.selectedVersionId
-      ?? focusedCanvasNode?.currentVersionId
-      ?? focusedCanvasNode?.lastReadyVersionId
-      ?? null;
+    const versionId = focusedCanvasNode ? previewVersionIdForNode(focusedCanvasNode) : null;
     if (!focusedCanvasNode || !versionId || focusPreviewExporting) return;
     setFocusPreviewExporting(true);
+    setFocusPreviewExportError(null);
+    let objectUrl: string | null = null;
     try {
-      const preview = await api.getExactVersionPreview(projectId, focusedCanvasNode.id, versionId);
+      const portable = await api.downloadExactVersionHtml(projectId, focusedCanvasNode.id, versionId);
+      objectUrl = URL.createObjectURL(portable);
       const link = document.createElement("a");
-      link.href = previewDocumentSrc(preview.url);
+      link.href = objectUrl;
       link.download = `${downloadFileStem(focusedCanvasNode.name)}-${versionId}.html`;
       link.rel = "noreferrer";
       document.body.append(link);
       link.click();
       link.remove();
+    } catch (error) {
+      const detail = error instanceof Error && error.message.trim() ? error.message.trim() : "Unknown export error";
+      setFocusPreviewExportError(`Couldn't export this preview. ${detail}`);
     } finally {
+      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
       setFocusPreviewExporting(false);
     }
   }, [api, focusPreviewExporting, focusedCanvasNode, projectId]);
@@ -1497,59 +1526,37 @@ export function DesignCanvasScreen({
         }}
       />
 
-      <StudioToolbarHeader className="design-canvas-topbar app-drag">
-        <TooltipProvider delayDuration={120}>
-          <div className="app-no-drag design-canvas-topbar__leading">
-            {onBackHome ? (
-              <>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label="Back to projects" onClick={onBackHome}><ArrowLeft aria-hidden /></Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" sideOffset={4}>Back to projects</TooltipContent>
-                </Tooltip>
-                <span className="design-canvas-topbar__divider" aria-hidden />
-              </>
-            ) : null}
-            <div className="design-canvas-topbar__identity">
-              <EditableProjectName name={projectName} onRename={onRenameProject} />
-              <span className="design-canvas-topbar__view"><LayoutGrid aria-hidden />Canvas</span>
-            </div>
-          </div>
-          <div className="app-no-drag design-canvas-topbar__actions" role="toolbar" aria-label="Project actions">
-            <HeaderIconAction
-              label="Main Agent"
-              active={mainAgentOpen}
-              disabled={!canvasAvailable}
-              onClick={() => {
-                const nextOpen = !mainAgentOpen;
-                if (nextOpen && focusActive) closeNodeFocus(false);
-                setMainAgentOpen(nextOpen);
-                if (nextOpen) setFocusedPanelNodeId(null);
-              }}
-            >
-              <Bot aria-hidden />
-            </HeaderIconAction>
-            <HeaderIconAction
-              label="Export code"
-              tooltip={exportTitle}
-              disabled={exporting || controller.mutating || !canExport}
-              onClick={() => {
-                if (focusActive) closeNodeFocus(false);
-                setMainAgentOpen(true);
-                if (executionAgent && isDesignAgentCommand(executionAgent.command)) {
-                  void controller.startExport({ agentCommand: executionAgent.command, model: exportModel }).catch(() => undefined);
-                }
-              }}
-            >
-              {exporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Code2 aria-hidden />}
-            </HeaderIconAction>
-            <HeaderIconAction label="Settings" disabled={!onOpenSettings} onClick={() => onOpenSettings?.()}>
-              <Settings2 aria-hidden />
-            </HeaderIconAction>
-          </div>
-        </TooltipProvider>
-      </StudioToolbarHeader>
+      <DesignCanvasHeader
+        projectName={projectName}
+        onRenameProject={onRenameProject}
+        onBackHome={onBackHome}
+        canvasAvailable={canvasAvailable}
+        mainAgentOpen={mainAgentOpen}
+        onToggleMainAgent={() => {
+          const nextOpen = !mainAgentOpen;
+          if (nextOpen && focusActive) closeNodeFocus(false);
+          setMainAgentOpen(nextOpen);
+          if (nextOpen) setFocusedPanelNodeId(null);
+        }}
+        exportTitle={exportTitle}
+        exporting={exporting}
+        exportDisabled={exporting || controller.mutating || !canExport}
+        exportButtonRef={exportButtonRef}
+        onExport={() => setExportConfirmationOpen(true)}
+        onOpenSettings={onOpenSettings}
+      />
+
+      <ImplementationExportConfirmation
+        open={exportConfirmationOpen}
+        onOpenChange={setExportConfirmationOpen}
+        returnFocusRef={exportButtonRef}
+        onConfirm={async () => {
+          if (!executionAgent || !isDesignAgentCommand(executionAgent.command)) return;
+          if (focusActive) closeNodeFocus(false);
+          setMainAgentOpen(true);
+          await controller.startExport({ agentCommand: executionAgent.command, model: exportModel });
+        }}
+      />
 
       <ContextMenu
         modal={false}
@@ -1599,23 +1606,19 @@ export function DesignCanvasScreen({
           >
         {flowCanvas}
 
-        <AnimatePresence initial={false}>
-          {focusTransition ? (
-            <motion.div
-              key={`focus-dismiss-${focusTransition.nodeId}`}
-              className="design-canvas-focus-dismiss"
-              aria-hidden
-              initial={focusMotionAllowed ? { opacity: 0 } : false}
-              animate={{ opacity: focusTransition.phase === "closing" ? 0 : 1 }}
-              exit={{ opacity: 0 }}
-              transition={{
-                duration: focusMotionAllowed ? activeFocusDurationMs / 1_000 : 0,
-                ease: CANVAS_MOTION_EASE,
-              }}
-              onClick={() => closeNodeFocus()}
-            />
-          ) : null}
-        </AnimatePresence>
+        <FocusedNodeChrome
+          transition={focusTransition}
+          motionAllowed={focusMotionAllowed}
+          durationMs={activeFocusDurationMs}
+          previewToolsVisible={focusedPreviewToolsVisible}
+          previewDevice={focusedPreviewDevice}
+          previewExporting={focusPreviewExporting}
+          agentVisible={focusedPanelNodeId === focusTransition?.nodeId}
+          onClose={() => closeNodeFocus()}
+          onChooseDevice={chooseFocusedPreviewDevice}
+          onExport={() => void exportFocusedPreview().catch(() => undefined)}
+          onSetAgentVisible={setFocusedNodeAgentVisible}
+        />
 
         {selectionGhost ? (
           <span
@@ -1631,134 +1634,6 @@ export function DesignCanvasScreen({
           />
         ) : null}
 
-        <AnimatePresence initial={false}>
-          {focusTransition ? (
-            <motion.div
-              key={`focus-back-${focusTransition.nodeId}`}
-              className="design-canvas-focus-back"
-              initial={focusMotionAllowed ? { opacity: 0, transform: "translate3d(-6px, 0px, 0px) scale(0.96)" } : false}
-              animate={focusTransition.phase === "closing"
-                ? {
-                    opacity: 0,
-                    transform: "translate3d(-5px, 0px, 0px) scale(0.97)",
-                    transition: { duration: focusMotionAllowed ? 0.13 : 0, ease: CANVAS_MOTION_EASE },
-                  }
-                : {
-                    opacity: 1,
-                    transform: "translate3d(0px, 0px, 0px) scale(1)",
-                    transition: {
-                      duration: focusMotionAllowed ? 0.18 : 0,
-                      delay: focusMotionAllowed ? 0.08 : 0,
-                      ease: CANVAS_MOTION_EASE,
-                    },
-                  }}
-              exit={{
-                opacity: 0,
-                transform: "translate3d(-5px, 0px, 0px) scale(0.97)",
-                transition: { duration: focusMotionAllowed ? 0.13 : 0, ease: CANVAS_MOTION_EASE },
-              }}
-            >
-              <TooltipProvider delayDuration={120}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button type="button" variant="ghost" size="icon-sm" aria-label="Close Node focus" onClick={() => closeNodeFocus()}>
-                      <ArrowLeft aria-hidden />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right" sideOffset={6}>Back to canvas</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-
-        <AnimatePresence initial={false}>
-          {focusTransition ? (
-            <motion.div
-              key={`focus-actions-${focusTransition.nodeId}`}
-              className="design-canvas-focus-actions"
-              role="toolbar"
-              aria-label="Focused preview tools"
-              initial={focusMotionAllowed ? { opacity: 0, transform: "translate3d(0px, 7px, 0px) scale(0.98)" } : false}
-              animate={focusTransition.phase === "closing"
-                ? {
-                    opacity: 0,
-                    transform: "translate3d(0px, 6px, 0px) scale(0.98)",
-                    transition: { duration: focusMotionAllowed ? 0.2 : 0, ease: CANVAS_MOTION_EASE },
-                  }
-                : {
-                    opacity: 1,
-                    transform: "translate3d(0px, 0px, 0px) scale(1)",
-                    transition: {
-                      duration: focusMotionAllowed ? 0.26 : 0,
-                      delay: focusMotionAllowed ? 0.1 : 0,
-                      ease: CANVAS_MOTION_EASE,
-                    },
-                  }}
-              exit={{
-                opacity: 0,
-                transform: "translate3d(0px, 6px, 0px) scale(0.98)",
-                transition: { duration: focusMotionAllowed ? 0.2 : 0, ease: CANVAS_MOTION_EASE },
-              }}
-            >
-              <TooltipProvider delayDuration={120}>
-                {focusedPreviewToolsVisible ? (
-                  <span className="design-canvas-focus-actions__devices" role="group" aria-label="Preview device">
-                    <CanvasToolButton
-                      label="Desktop preview"
-                      active={focusedPreviewDevice === "desktop"}
-                      onClick={() => chooseFocusedPreviewDevice("desktop")}
-                    >
-                      <Monitor aria-hidden />
-                    </CanvasToolButton>
-                    <CanvasToolButton
-                      label="Tablet preview"
-                      active={focusedPreviewDevice === "tablet"}
-                      onClick={() => chooseFocusedPreviewDevice("tablet")}
-                    >
-                      <Tablet aria-hidden />
-                    </CanvasToolButton>
-                    <CanvasToolButton
-                      label="Mobile preview"
-                      active={focusedPreviewDevice === "mobile"}
-                      onClick={() => chooseFocusedPreviewDevice("mobile")}
-                    >
-                      <Smartphone aria-hidden />
-                    </CanvasToolButton>
-                  </span>
-                ) : null}
-                {focusedPreviewToolsVisible ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
-                {focusedPreviewToolsVisible ? (
-                  <CanvasToolButton
-                    label={focusPreviewExporting ? "Exporting preview" : "Export preview HTML"}
-                    disabled={focusPreviewExporting}
-                    onClick={() => void exportFocusedPreview().catch(() => undefined)}
-                  >
-                    {focusPreviewExporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Download aria-hidden />}
-                  </CanvasToolButton>
-                ) : null}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={focusedPanelNodeId === focusTransition.nodeId ? "Hide Node Agent" : "Show Node Agent"}
-                      aria-pressed={focusedPanelNodeId === focusTransition.nodeId}
-                      onClick={() => setFocusedNodeAgentVisible(focusedPanelNodeId !== focusTransition.nodeId)}
-                    >
-                      <Bot aria-hidden />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" sideOffset={7}>
-                    {focusedPanelNodeId === focusTransition.nodeId ? "Hide Agent" : "Show Agent"}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-
         {canvas && canvas.nodes.length === 0 && controller.loadState === "ready" ? (
           <QuickStart
             onAddPage={() => void addNode("page")}
@@ -1769,68 +1644,24 @@ export function DesignCanvasScreen({
         ) : null}
 
         {canvasAvailable ? (
-          <TooltipProvider delayDuration={120}>
-            <div className="design-canvas-tools" role="toolbar" aria-label="Canvas tools" onContextMenu={(event) => event.stopPropagation()}>
-              <span className="design-canvas-tools__modes">
-                <CanvasToolButton label="Select tool" active={tool === "select"} onClick={() => setTool("select")}>
-                  <MousePointer2 aria-hidden />
-                </CanvasToolButton>
-                <CanvasToolButton label="Hand tool" active={tool === "hand"} onClick={() => setTool("hand")}>
-                  <Hand aria-hidden />
-                </CanvasToolButton>
-              </span>
-              <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen} modal={false}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="design-canvas-add-trigger">
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          id="design-canvas-add"
-                          variant="default"
-                          size="sm"
-                          aria-label="Add Design node"
-                        >
-                          <Plus aria-hidden />
-                        </Button>
-                      </DropdownMenuTrigger>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" sideOffset={5}>Add Node</TooltipContent>
-                </Tooltip>
-                <DropdownMenuContent
-                  side="top"
-                  align="end"
-                  sideOffset={9}
-                  aria-label="Add Design node"
-                  className="design-node-catalog"
-                >
-                  <NodeCatalogMenu menuType="dropdown" onChoose={(kind) => void addNode(kind)} />
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-
-            <div className="design-canvas-zoom" role="toolbar" aria-label="Canvas view controls" onContextMenu={(event) => event.stopPropagation()}>
-              <CanvasToolButton label="Arrange nodes" disabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating} onClick={arrange}>
-                <LayoutGrid aria-hidden />
-              </CanvasToolButton>
-              <CanvasToolButton label="Fit canvas" onClick={() => void flowRef.current?.fitView({
-                padding: 0.16,
-                duration: reduceMotion ? 0 : 240,
-                ease: nodeFocusEase,
-                interpolate: "smooth",
-              })}>
-                <LocateFixed aria-hidden />
-              </CanvasToolButton>
-              <span className="design-canvas-tools__divider" aria-hidden />
-              <CanvasToolButton label="Zoom out" onClick={() => void flowRef.current?.zoomOut({ duration: reduceMotion ? 0 : 140 })}>
-                <Minus aria-hidden />
-              </CanvasToolButton>
-              <output aria-label="Canvas zoom">{Math.round(zoom * 100)}%</output>
-              <CanvasToolButton label="Zoom in" onClick={() => void flowRef.current?.zoomIn({ duration: reduceMotion ? 0 : 140 })}>
-                <Plus aria-hidden />
-              </CanvasToolButton>
-            </div>
-          </TooltipProvider>
+          <CanvasToolDocks
+            tool={tool}
+            addMenuOpen={addMenuOpen}
+            onAddMenuOpenChange={setAddMenuOpen}
+            onChooseNode={(kind) => void addNode(kind)}
+            onToolChange={setTool}
+            arrangeDisabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating}
+            onArrange={arrange}
+            onFit={() => void flowRef.current?.fitView({
+              padding: 0.16,
+              duration: reduceMotion ? 0 : 240,
+              ease: nodeFocusEase,
+              interpolate: "smooth",
+            })}
+            onZoomOut={() => void flowRef.current?.zoomOut({ duration: reduceMotion ? 0 : 140 })}
+            onZoomIn={() => void flowRef.current?.zoomIn({ duration: reduceMotion ? 0 : 140 })}
+            zoom={zoom}
+          />
         ) : null}
 
         {contextMenuOpen ? null : (
@@ -1843,7 +1674,6 @@ export function DesignCanvasScreen({
             compact={!focusedNodeId}
             entryX={floatingPosition.entryX}
             entryY={floatingPosition.entryY}
-            deferTranscriptMs={focusMotionAllowed ? NODE_FOCUS_FLIGHT_DURATION_MS - NODE_FOCUS_DETAIL_DELAY_MS : 0}
             projectId={projectId}
             api={api}
             scope={{ type: "node", nodeId: selectedNode.id }}
@@ -1866,6 +1696,7 @@ export function DesignCanvasScreen({
             onAgentSelectionChange={updateMainAgentSelection}
             onRescanAgents={onRescanAgents}
             onCancelJob={controller.cancelJob}
+            onRetryJob={controller.retryJob}
             onSubmit={(prompt, nodeIds, selection) => controller.submitAgentTurn({ type: "node", nodeId: selectedNode.id }, prompt, nodeIds, selection)}
             onAttachFiles={(files) => importFiles(files, { x: selectedNode.geometry.x + selectedNode.geometry.width + 48, y: selectedNode.geometry.y })}
             onSelectVersion={async (versionId) => {
@@ -1904,7 +1735,6 @@ export function DesignCanvasScreen({
                 projectId={projectId}
                 api={api}
                 scope={{ type: "main" }}
-                deferTranscriptMs={reduceMotion ? 0 : 340}
                 title="Main Agent"
                 subtitle=""
                 nodes={canvas?.nodes ?? []}
@@ -1916,6 +1746,7 @@ export function DesignCanvasScreen({
                 onAgentSelectionChange={updateMainAgentSelection}
                 onRescanAgents={onRescanAgents}
                 onCancelJob={controller.cancelJob}
+                onRetryJob={controller.retryJob}
                 onSubmit={(prompt, nodeIds, selection) => controller.submitAgentTurn({ type: "main" }, prompt, nodeIds, selection)}
                 onAttachFiles={(files) => importFiles(files, canvasCenter())}
                 projectPath={projectPath}
@@ -1937,8 +1768,13 @@ export function DesignCanvasScreen({
         {controller.error && canvas ? (
           <div className="design-canvas-error" role="alert">
             <span>{controller.error}</span>
-            {controller.pendingIntentRetryAvailable ? <Button size="xs" variant="outline" onClick={controller.retryPendingIntent}><RotateCcw aria-hidden />Retry handoff</Button> : null}
             <Button size="icon-xs" variant="ghost" aria-label="Dismiss canvas error" onClick={controller.clearError}><X aria-hidden /></Button>
+          </div>
+        ) : null}
+        {focusPreviewExportError && canvas && !controller.error ? (
+          <div className="design-canvas-error" role="alert">
+            <span>{focusPreviewExportError}</span>
+            <Button size="icon-xs" variant="ghost" aria-label="Dismiss preview export error" onClick={() => setFocusPreviewExportError(null)}><X aria-hidden /></Button>
           </div>
         ) : null}
         {versionsLoading && selectedNode ? <span className="sr-only" role="status">Loading {selectedNode.name} versions</span> : null}
@@ -2029,167 +1865,6 @@ function DesignNodeContextMenu({
   );
 }
 
-function EditableProjectName({
-  name,
-  onRename,
-}: {
-  name: string;
-  onRename?: (name: string) => Promise<void>;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(name);
-  const [displayName, setDisplayName] = useState(name);
-  const [saving, setSaving] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const cancelledRef = useRef(false);
-
-  useEffect(() => {
-    setDisplayName(name);
-    setValue(name);
-  }, [name]);
-
-  useEffect(() => {
-    if (!editing) return;
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, [editing]);
-
-  const commit = useCallback(async () => {
-    if (cancelledRef.current) {
-      cancelledRef.current = false;
-      return;
-    }
-    const nextName = value.trim();
-    if (!nextName || nextName === displayName || !onRename) {
-      setValue(displayName);
-      setEditing(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      await onRename(nextName);
-      setDisplayName(nextName);
-      setValue(nextName);
-    } catch {
-      setValue(displayName);
-    } finally {
-      setSaving(false);
-      setEditing(false);
-    }
-  }, [displayName, onRename, value]);
-
-  return (
-    <h1 className="design-canvas-topbar__project-name" title={displayName} data-editing={editing || undefined}>
-      {editing ? (
-        <input
-          ref={inputRef}
-          aria-label="Project name"
-          value={value}
-          maxLength={160}
-          disabled={saving}
-          onChange={(event) => setValue(event.target.value)}
-          onBlur={() => void commit()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              event.currentTarget.blur();
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              cancelledRef.current = true;
-              setValue(displayName);
-              setEditing(false);
-            }
-          }}
-        />
-      ) : onRename ? (
-        <button
-          type="button"
-          aria-label={`Rename project: ${displayName}`}
-          title="Rename project"
-          onClick={() => {
-            cancelledRef.current = false;
-            setValue(displayName);
-            setEditing(true);
-          }}
-        >
-          {displayName}
-        </button>
-      ) : displayName}
-    </h1>
-  );
-}
-
-function HeaderIconAction({
-  label,
-  tooltip = label,
-  active,
-  disabled = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  tooltip?: string;
-  active?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="design-canvas-topbar__action-trigger" tabIndex={disabled ? 0 : undefined}>
-          <Button
-            type="button"
-            variant={active ? "secondary" : "ghost"}
-            size="icon-sm"
-            className="design-canvas-topbar__icon-action"
-            aria-label={label}
-            aria-pressed={active === undefined ? undefined : active}
-            disabled={disabled}
-            onClick={onClick}
-          >
-            {children}
-          </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" sideOffset={5}>{tooltip}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function CanvasToolButton({
-  label,
-  active,
-  disabled = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant={active ? "secondary" : "ghost"}
-          size="icon-sm"
-          aria-label={label}
-          aria-pressed={active === undefined ? undefined : active}
-          disabled={disabled}
-          onClick={onClick}
-        >
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="top" sideOffset={5}>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 function canvasToFlowNodes(
   nodes: readonly DesignNode[],
   projectId: string,
@@ -2210,6 +1885,7 @@ function canvasToFlowNodes(
     return {
     id: node.id,
     type: "design",
+    ariaLabel: designNodeAriaLabel(node),
     className: focusMotion?.role === "source"
       ? "design-canvas-flow-node--focused"
       : focusMotion
@@ -2270,7 +1946,6 @@ function sameDesignNode(left: DesignNode, right: DesignNode): boolean {
     && left.state === right.state
     && left.currentVersionId === right.currentVersionId
     && left.selectedVersionId === right.selectedVersionId
-    && (left.lastReadyVersionId ?? null) === (right.lastReadyVersionId ?? null)
     && left.versionCount === right.versionCount
     && left.assetId === right.assetId
     && left.activeJobId === right.activeJobId

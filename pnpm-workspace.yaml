@@ -5,6 +5,8 @@ allowBuilds:
   electron: true
 overrides:
   postcss: 8.5.26
+patchedDependencies:
+  '@xyflow/react@12.11.2': patches/@xyflow__react@12.11.2.patch
 minimumReleaseAgeExclude:
   - simple-icons@16.24.1
   - '@ai-sdk/azure@4.0.5'

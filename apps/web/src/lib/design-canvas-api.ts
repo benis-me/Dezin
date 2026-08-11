@@ -1,9 +1,9 @@
 import type { ApiClient, DesignCanvasAssetImportItem } from "./api.ts";
-import type { PendingDesignCanvasContext } from "./pending-design-canvas.ts";
 import type {
   DesignCanvasApi,
   DesignCanvasImportPosition,
   DesignCanvasMutationRequest,
+  DesignProjectVersionReference,
 } from "../design-canvas/api.ts";
 import type {
   DesignCanvas,
@@ -135,8 +135,8 @@ function stableImportIdentity(value: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-function pendingProjectVersionNodeId(
-  context: Extract<PendingDesignCanvasContext, { kind: "project-version" }>,
+function projectVersionNodeId(
+  context: DesignProjectVersionReference,
   position: DesignCanvasImportPosition,
 ): string {
   return `node-context-version-${stableImportIdentity([
@@ -240,7 +240,7 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
         binding: {
           type: "create-node",
           node: {
-            id: pendingProjectVersionNodeId(context, position),
+            id: projectVersionNodeId(context, position),
             kind: "document",
             name: context.title,
             geometry: { x: position.x, y: position.y, width: 320, height: 190 },
@@ -255,7 +255,10 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
       versionId,
       url: api.designNodeVersionPreviewUrl(projectId, nodeId, versionId),
     }),
+    downloadExactVersionHtml: (projectId, nodeId, versionId) =>
+      api.downloadDesignNodeVersionHtml(projectId, nodeId, versionId),
     getThread: (projectId, scope, signal) => api.getDesignThread(projectId, scope, signal),
+    streamInvalidations: (projectId, signal) => api.streamDesignCanvasInvalidations(projectId, signal),
     submitAgentTurn: (projectId, scope, request) => api.submitDesignAgentTurn(projectId, scope, {
       message: request.prompt,
       context: request.context,
@@ -265,6 +268,7 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
     }),
     listJobs: (projectId, signal) => api.listDesignJobs(projectId, signal),
     cancelJob: (projectId, jobId) => api.cancelDesignJob(projectId, jobId),
+    retryJob: (projectId, jobId) => api.retryDesignJob(projectId, jobId),
     startImplementationExport: (projectId, canvasRevision, selection) =>
       api.startDesignImplementationExport(projectId, { canvasRevision, ...selection }),
   };

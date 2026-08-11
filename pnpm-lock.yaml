@@ -7,6 +7,9 @@ settings:
 overrides:
   postcss: 8.5.26
 
+patchedDependencies:
+  '@xyflow/react@12.11.2': 06821cf242588822063cb4b55ac1a13d085365c889c778ee337ca7b2e25f6e9d
+
 importers:
 
   .:
@@ -38,6 +41,9 @@ importers:
       '@babel/parser':
         specifier: ^7.29.7
         version: 7.29.7
+      '@dezin/design-canvas-contracts':
+        specifier: workspace:*
+        version: link:../../packages/design-canvas-contracts
       '@napi-rs/canvas':
         specifier: 1.0.2
         version: 1.0.2
@@ -82,6 +88,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@dezin/design-canvas-contracts':
+        specifier: workspace:*
+        version: link:../../packages/design-canvas-contracts
       '@dezin/leafer-react':
         specifier: workspace:*
         version: link:../../packages/leafer-react
@@ -120,7 +129,7 @@ importers:
         version: 0.0.10
       '@xyflow/react':
         specifier: ^12.11.2
-        version: 12.11.2(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        version: 12.11.2(patch_hash=06821cf242588822063cb4b55ac1a13d085365c889c778ee337ca7b2e25f6e9d)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       border-beam:
         specifier: 1.3.0
         version: 1.3.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -230,6 +239,8 @@ importers:
   packages/craft: {}
 
   packages/design: {}
+
+  packages/design-canvas-contracts: {}
 
   packages/effects: {}
 
@@ -5540,7 +5551,7 @@ snapshots:
 
   '@workflow/serde@4.1.0': {}
 
-  '@xyflow/react@12.11.2(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
+  '@xyflow/react@12.11.2(patch_hash=06821cf242588822063cb4b55ac1a13d085365c889c778ee337ca7b2e25f6e9d)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@xyflow/system': 0.0.79
       classcat: 5.0.5

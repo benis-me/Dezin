@@ -39,6 +39,13 @@ const DESIGN_PROVIDER_ENVIRONMENT_KEYS: Record<StrictDesignProvider, readonly st
 
 type StrictDesignProvider = (typeof STRICT_DESIGN_AGENT_COMMANDS)[number];
 
+/** Canonical non-secret provider identity derived from an executable selection. */
+export function designAgentProviderId(command: string): string {
+  const provider = getProvider(command);
+  return provider?.id
+    ?? (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
+}
+
 function minimalDesignAgentEnvironment(
   provider: string,
   requested: NodeJS.ProcessEnv | undefined,
@@ -352,8 +359,7 @@ export function createConfinedDesignAgentRunner(input: CreateConfinedDesignRunne
   const command = input.override?.agentCommand || input.settings.agentCommand || "claude";
   const model = input.override?.model || input.settings.model || undefined;
   const provider = getProvider(command);
-  const providerId = provider?.id
-    ?? (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
+  const providerId = designAgentProviderId(command);
   if (!SAFE_SEGMENT.test(providerId)) throw new DesignAgentProviderUnsupportedError(command);
   const strictProvider = (STRICT_DESIGN_AGENT_COMMANDS as readonly string[]).includes(providerId)
     ? providerId as StrictDesignProvider

@@ -13,8 +13,7 @@ interface ExactVersionPreviewState {
 }
 
 export function previewVersionIdForNode(node: DesignNode): string | null {
-  if (node.selectedVersionId) return node.selectedVersionId;
-  return node.lastReadyVersionId ?? node.currentVersionId;
+  return node.selectedVersionId ?? node.currentVersionId;
 }
 
 export function useExactVersionPreview({

@@ -228,6 +228,15 @@ test("CodeBuddy Design runners use their verified no-Bash policy and exact job c
   assert.equal(confinedSettings.permissions.disableBypassPermissionsMode, "disable");
   assert.equal(call.args.includes("bypassPermissions"), false);
   assert.equal(call.args.some((argument) => /^(Bash|Web|Task|Agent)$/i.test(argument)), false);
+  assert.ok(call.terminalStdout);
+  assert.equal(call.terminalStdout.graceMs > 0 && call.terminalStdout.graceMs <= 1_000, true);
+  assert.equal(call.terminalStdout.isTerminalLine(
+    '{"type":"result","subtype":"success","result":"done","is_error":false}',
+  ), true);
+  assert.equal(call.terminalStdout.isTerminalLine(
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"{\\"type\\":\\"result\\"}"}]}}',
+  ), false);
+  assert.equal(call.terminalStdout.isTerminalLine('{"type":"result"}'), false);
 });
 
 test("Codex Design runners are accepted and remain scoped to the exact Project staging directory", async (t) => {

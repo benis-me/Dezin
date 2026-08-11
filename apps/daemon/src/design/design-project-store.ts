@@ -218,6 +218,50 @@ export async function createDesignProject(
 }
 
 /**
+ * Initialize the exact filesystem Project identity reserved by a durable
+ * coordinator. Replaying the same identity is a no-op; adopting an existing
+ * identity with different metadata fails closed.
+ */
+export async function ensureDesignProjectAtId(
+  dataDir: string,
+  input: { projectId: string; name: string; createdAt: number },
+): Promise<DesignProjectMetadata> {
+  const projectId = safeProjectId(input?.projectId);
+  const name = projectName(input?.name);
+  const createdAt = timestamp(input?.createdAt, "createdAt");
+  return withMetadataLock(dataDir, projectId, async () => {
+    const root = projectRoot(dataDir, projectId);
+    await mkdir(join(dataDir, "projects"), { recursive: true });
+    await mkdir(root, { recursive: true });
+    await mkdir(designRoot(dataDir, projectId), { recursive: true });
+
+    const current = await readMetadata(dataDir, projectId);
+    if (current !== null && (
+      current.name !== name
+      || current.createdAt !== createdAt
+      || current.archivedAt !== null
+    )) {
+      throw new DesignStorageError("conflict", "Design Project identity is already bound to different metadata");
+    }
+    const metadata: DesignProjectMetadata = current ?? {
+      schemaVersion: DESIGN_PROJECT_METADATA_SCHEMA_VERSION,
+      projectId,
+      name,
+      createdAt,
+      updatedAt: createdAt,
+      archivedAt: null,
+    };
+    if (current === null) await writeAtomicJson(metadataPath(dataDir, projectId), metadata);
+    await initializeDesignProject(dataDir, projectId, createdAt);
+    const initialized = await getDesignProject(dataDir, projectId);
+    if (initialized === null) {
+      throw new DesignStorageError("corrupt", "Design Project initialization did not publish its Canvas authority");
+    }
+    return initialized;
+  });
+}
+
+/**
  * Return a normal Design Project only when both exact manifests exist. Canvas
  * activity is part of the public Project recency authority, while name/archive
  * edits remain owned by metadata.json.

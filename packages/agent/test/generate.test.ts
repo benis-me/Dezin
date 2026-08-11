@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FakeRunner, generateArtifact, runTurnWithRetry, type GenerateEvent } from "../src/index.ts";
+import {
+  AgentExecutionIdentityError,
+  FakeRunner,
+  classifyAgentTurnFailure,
+  generateArtifact,
+  runTurnWithRetry,
+  type GenerateEvent,
+} from "../src/index.ts";
 
 const CLEAN = `<style>:root{--accent:#2563eb}</style>
 <section data-dezin-id="x"><h1>Hi there</h1><p>Real copy describing the thing.</p></section>`;
@@ -128,4 +135,46 @@ test("runTurnWithRetry throws after exhausting attempts", async () => {
     runTurnWithRetry(dead as never, { systemPrompt: "S", message: "m", projectDir: "/tmp/x" }, { maxAttempts: 2, sleep: async () => {} }),
     /agent crashed/,
   );
+});
+
+test("runTurnWithRetry retries only bounded transient provider failures", async () => {
+  const transient = [
+    new Error("provider returned 429 Too Many Requests"),
+    new Error("socket hang up ECONNRESET"),
+    new Error("codebuddy timed out after 1000ms"),
+    new Error("agent process crashed with signal SIGSEGV"),
+  ];
+  for (const error of transient) {
+    assert.equal(classifyAgentTurnFailure(error).retryable, true, error.message);
+  }
+
+  const terminal = [
+    new Error("authentication expired; please login again"),
+    new Error("permission denied by provider policy"),
+    new DOMException("cancelled", "AbortError"),
+    new AgentExecutionIdentityError(
+      "provider reported a different runtime model",
+      { providerId: "codebuddy", model: "requested" },
+      null,
+    ),
+  ];
+  for (const error of terminal) {
+    let calls = 0;
+    const runner = {
+      async runTurn() {
+        calls += 1;
+        throw error;
+      },
+    };
+    await assert.rejects(
+      runTurnWithRetry(
+        runner as never,
+        { systemPrompt: "S", message: "m", projectDir: "/tmp/x" },
+        { maxAttempts: 3, sleep: async () => {} },
+      ),
+      error,
+    );
+    assert.equal(calls, 1, error.message);
+    assert.equal(classifyAgentTurnFailure(error).retryable, false, error.message);
+  }
 });

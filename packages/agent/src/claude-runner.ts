@@ -44,6 +44,13 @@ export function historyPreamble(history?: { role: string; content: string }[]): 
   return `## Conversation so far\n\nThis continues an existing conversation. Earlier turns, oldest first:\n\n${picked.join("\n\n")}\n\n--- Current request ---\n\n`;
 }
 
+export interface TerminalStdoutContract {
+  /** Pure predicate for one complete, newline-terminated stdout line. */
+  isTerminalLine: (line: string) => boolean;
+  /** Time allowed for a natural process exit before owned-group cleanup begins. */
+  graceMs: number;
+}
+
 export interface SpawnInput {
   command: string;
   args: string[];
@@ -53,6 +60,13 @@ export interface SpawnInput {
   timeoutMs?: number;
   /** Called with each stdout chunk as it arrives (for live streaming). */
   onStdout?: (chunk: string) => void;
+  /**
+   * Optional structured protocol boundary. Only complete, newline-terminated
+   * stdout lines are offered to this predicate. Once it accepts a terminal
+   * line, the child gets a short natural-exit grace before its owned process
+   * group is terminated and the collected stdout is returned normally.
+   */
+  terminalStdout?: TerminalStdoutContract;
   /** Abort to terminate the child (a user "Stop"). */
   signal?: AbortSignal;
   /** Extra environment variables for the spawned process. */
@@ -88,6 +102,8 @@ export interface NodeSpawnerOptions {
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_KILL_DELAY_MS = 2000;
+const CLAUDE_RESULT_EXIT_GRACE_MS = 250;
+const STRUCTURED_STDOUT_LINE_LIMIT_BYTES = 1024 * 1024;
 export const AGENT_STDOUT_LIMIT_BYTES = 32 * 1024 * 1024;
 export const AGENT_STDERR_LIMIT_BYTES = 1024 * 1024;
 
@@ -98,6 +114,26 @@ export class AgentOutputLimitError extends Error {
     super(`Agent stdout exceeded the ${limitBytes}-byte limit`);
     this.name = "AgentOutputLimitError";
   }
+}
+
+function isClaudeTerminalResultLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.type !== "result" || typeof record.subtype !== "string") return false;
+  if (record.subtype === "success") {
+    return record.is_error === false && typeof record.result === "string";
+  }
+  return record.subtype.startsWith("error")
+    && record.is_error === true
+    && (record.result === undefined || record.result === null || typeof record.result === "string");
 }
 
 /** Real spawner backed by node:child_process. */
@@ -130,6 +166,11 @@ export class NodeSpawner implements ProcessSpawner {
       let settled = false;
       let outputLimitError: AgentOutputLimitError | null = null;
       let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let terminalTimer: ReturnType<typeof setTimeout> | null = null;
+      let terminalLineBuffer = "";
+      let droppingOversizedTerminalLine = false;
+      let terminalObserved = false;
+      let terminalTerminationRequested = false;
       let terminationPromise: Promise<void> | null = null;
       const killChild = (signal: NodeJS.Signals): void => {
         try {
@@ -171,6 +212,37 @@ export class NodeSpawner implements ProcessSpawner {
       const cleanup = (): void => {
         input.signal?.removeEventListener("abort", onAbort);
         if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (terminalTimer) clearTimeout(terminalTimer);
+      };
+      const inspectTerminalLines = (decoded: string): void => {
+        const terminal = input.terminalStdout;
+        if (!terminal || terminalObserved) return;
+        if (droppingOversizedTerminalLine) {
+          const newline = decoded.indexOf("\n");
+          if (newline < 0) return;
+          droppingOversizedTerminalLine = false;
+          decoded = decoded.slice(newline + 1);
+        }
+        terminalLineBuffer += decoded;
+        let newline: number;
+        while ((newline = terminalLineBuffer.indexOf("\n")) >= 0) {
+          const line = terminalLineBuffer.slice(0, newline);
+          terminalLineBuffer = terminalLineBuffer.slice(newline + 1);
+          if (!terminal.isTerminalLine(line)) continue;
+          terminalObserved = true;
+          terminalTimer = setTimeout(() => {
+            terminalTimer = null;
+            if (settled || outputLimitError || timedOut || input.signal?.aborted) return;
+            terminalTerminationRequested = true;
+            void terminate();
+          }, Math.max(0, terminal.graceMs));
+          terminalTimer.unref?.();
+          return;
+        }
+        if (Buffer.byteLength(terminalLineBuffer, "utf8") > STRUCTURED_STDOUT_LINE_LIMIT_BYTES) {
+          terminalLineBuffer = "";
+          droppingOversizedTerminalLine = true;
+        }
       };
       input.signal?.addEventListener("abort", onAbort, { once: true });
       const timeoutMs = input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -192,7 +264,10 @@ export class NodeSpawner implements ProcessSpawner {
         }
         stdoutChunks.push(chunk);
         const decoded = stdoutDecoder.write(chunk);
-        if (decoded) input.onStdout?.(decoded);
+        if (decoded) {
+          inspectTerminalLines(decoded);
+          input.onStdout?.(decoded);
+        }
       });
       child.stderr.on("data", (raw: Buffer | Uint8Array) => stderr.append(raw));
       child.on("error", (e) => {
@@ -232,7 +307,11 @@ export class NodeSpawner implements ProcessSpawner {
           // A signal-terminated provider has no numeric exit code. Treat that
           // as failure; mapping null to zero would turn a sandbox crash into a
           // false successful Agent turn.
-          resolve({ stdout, stderr: stderr.toString(), exitCode: code ?? 1 });
+          resolve({
+            stdout,
+            stderr: stderr.toString(),
+            exitCode: code ?? (terminalTerminationRequested ? 0 : 1),
+          });
         })();
       });
       child.stdin.on("error", () => {}); // ignore EPIPE if the child exits early
@@ -371,6 +450,10 @@ export class ClaudeCodeRunner implements AgentRunner {
       stdin,
       timeoutMs: input.timeoutMs,
       onStdout,
+      terminalStdout: {
+        isTerminalLine: isClaudeTerminalResultLine,
+        graceMs: CLAUDE_RESULT_EXIT_GRACE_MS,
+      },
       signal: input.signal,
       env: input.env,
     });

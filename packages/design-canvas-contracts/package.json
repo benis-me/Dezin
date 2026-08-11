@@ -1,0 +1,16 @@
+{
+  "name": "@dezin/design-canvas-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-safe wire contracts for the filesystem-authoritative Design Canvas.",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='**/*.test.*' --test 'test/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
+  }
+}

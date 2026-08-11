@@ -6,11 +6,8 @@ import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
 import type { ApiClient, DesignCanvasAssetImportItem, Project, Settings } from "./lib/api.ts";
+import type { DesignProjectBootstrapInput } from "./design-canvas/types.ts";
 import { type DesignProjectAttachments } from "./lib/design-attachments.ts";
-import {
-  discardPendingDesignCanvasIntent,
-  setPendingDesignCanvasIntent,
-} from "./lib/pending-design-canvas.ts";
 import { createDesignCanvasApi } from "./lib/design-canvas-api.ts";
 import { revealDesignExport } from "./lib/design-export.ts";
 import { native } from "./lib/native.ts";
@@ -196,9 +193,53 @@ export function designCanvasAttachmentItems(
   return items;
 }
 
+type HomeBootstrapRequest = Omit<DesignProjectBootstrapInput, "idempotencyKey">;
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error("Secure hashing is unavailable");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Base64Bytes(base64: string): Promise<string> {
+  const binary = globalThis.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return sha256(bytes);
+}
+
+export async function homeBootstrapFingerprint(request: HomeBootstrapRequest): Promise<string> {
+  const items: unknown[] = [];
+  for (const item of request.items) {
+    items.push({
+      asset: "base64" in item.asset && item.asset.base64 !== undefined
+        ? {
+            name: item.asset.name,
+            mimeType: item.asset.mimeType,
+            sha256: await sha256Base64Bytes(item.asset.base64),
+          }
+        : {
+            name: item.asset.name,
+            mimeType: item.asset.mimeType,
+            sourceVersion: item.asset.sourceVersion,
+          },
+      binding: item.binding,
+    });
+  }
+  const descriptor = new TextEncoder().encode(JSON.stringify({
+    schemaVersion: request.schemaVersion,
+    name: request.name,
+    prompt: request.prompt,
+    items,
+    ...(request.agent === undefined ? {} : { agent: request.agent }),
+  }));
+  return `sha256:${await sha256(descriptor)}`;
+}
+
 function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (section?: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
+  const homeBootstrapKeyRef = useRef<{ fingerprint: string; key: string } | null>(null);
   switch (route.name) {
     case "project":
     case "project-canvas":
@@ -226,31 +267,44 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
       return (
         <HomeScreen
           onNewProject={async (brief, sharingan, agentSelection, attachments) => {
-            let createdProjectId: string | null = null;
             try {
-              const project = await api.createProject({
-                name: briefToName(brief),
-                ...(sharingan ? { sharingan: true, sourceUrl: sharingan.sourceUrl } : {}),
-              });
-              createdProjectId = project.id;
-              const attachmentCount = (attachments?.images.length ?? 0) + (attachments?.refs.length ?? 0);
-              const importItems = designCanvasAttachmentItems(attachments);
-              if (importItems.length > 0) {
-                const canvas = await api.getDesignCanvas(project.id);
-                await api.importDesignCanvasAssets(project.id, {
-                  expectedRevision: canvas.revision,
-                  items: importItems,
+              if (sharingan) {
+                const project = await api.createProject({
+                  name: briefToName(brief),
+                  sharingan: true,
+                  sourceUrl: sharingan.sourceUrl,
                 });
+                navigate(`/projects/${project.id}`);
+                return;
               }
-              if ((brief.trim() || attachmentCount > 0) && !setPendingDesignCanvasIntent({
-                projectId: project.id,
+              const importItems = designCanvasAttachmentItems(attachments);
+              const request = {
+                schemaVersion: 1 as const,
+                name: briefToName(brief),
                 prompt: brief,
-                ...(agentSelection?.agentCommand ? { agentCommand: agentSelection.agentCommand } : {}),
-                ...(agentSelection?.model ? { model: agentSelection.model } : {}),
-                context: [],
-              })) {
-                throw new Error("Initial Design Canvas intent could not be saved");
+                items: importItems,
+                ...(agentSelection?.agentCommand ? {
+                  agent: {
+                    agentCommand: agentSelection.agentCommand,
+                    ...(agentSelection.model ? { model: agentSelection.model } : {}),
+                  },
+                } : {}),
+              };
+              const fingerprint = await homeBootstrapFingerprint(request);
+              if (homeBootstrapKeyRef.current?.fingerprint !== fingerprint) {
+                homeBootstrapKeyRef.current = {
+                  fingerprint,
+                  key: typeof globalThis.crypto?.randomUUID === "function"
+                    ? `home-${globalThis.crypto.randomUUID()}`
+                    : `home-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                };
               }
+              const bootstrapKey = homeBootstrapKeyRef.current.key;
+              const { project } = await api.bootstrapDesignProject({
+                ...request,
+                idempotencyKey: bootstrapKey,
+              });
+              if (homeBootstrapKeyRef.current?.key === bootstrapKey) homeBootstrapKeyRef.current = null;
               if (brief.trim()) {
                 void api
                   .generateProjectTitle(project.id, brief)
@@ -259,15 +313,6 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
               }
               navigate(`/projects/${project.id}`);
             } catch {
-              if (createdProjectId !== null) {
-                try {
-                  await api.deleteProject(createdProjectId);
-                  discardPendingDesignCanvasIntent(createdProjectId);
-                } catch {
-                  // Keep the project-scoped handoff if cleanup fails so the
-                  // incomplete project remains diagnosable and recoverable.
-                }
-              }
               toast("Couldn't create the project.", { variant: "error" });
             }
           }}

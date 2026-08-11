@@ -2,7 +2,6 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
-import { discardPendingDesignCanvasIntent } from "../lib/pending-design-canvas.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import {
   EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE,
@@ -127,7 +126,7 @@ function node(overrides: Partial<DesignNode> = {}): DesignNode {
 
 function canvas(nodes: DesignNode[] = [], revision = 1, undoDepth = 0, redoDepth = 0): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: PROJECT_ID,
     revision,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -141,6 +140,7 @@ function canvas(nodes: DesignNode[] = [], revision = 1, undoDepth = 0, redoDepth
 }
 
 const thread: DesignThread = {
+  schemaVersion: 2,
   id: "thread-main",
   scope: { type: "main" },
   messages: [],
@@ -149,6 +149,7 @@ const thread: DesignThread = {
 };
 
 const job: DesignJob = {
+  schemaVersion: 2,
   id: "job-1",
   kind: "main-agent",
   runnerId: "fixture",
@@ -157,9 +158,12 @@ const job: DesignJob = {
   nodeId: null,
   parentJobId: null,
   contextHash: "context",
+  canvasRevision: 1,
+  expectedHeadVersionId: null,
   versionId: null,
   exportId: null,
   error: null,
+  cancelRequested: false,
   activity: [{ id: "activity-1", kind: "status", text: "Coordinating Node Agents", createdAt: 1 }],
   createdAt: 1,
   updatedAt: 1,
@@ -200,6 +204,8 @@ function createCanvasApi(initial: DesignCanvas) {
   });
   const api: DesignCanvasApi = {
     getCanvas: vi.fn(async () => current),
+    // eslint-disable-next-line require-yield
+    streamInvalidations: vi.fn(async function* () {}),
     applyIntents,
     undo: vi.fn(async (_projectId, revision) => (current = canvas(current.nodes, revision + 1, Math.max(0, current.undoDepth - 1), 1))),
     redo: vi.fn(async (_projectId, revision) => (current = canvas(current.nodes, revision + 1, 1, 0))),
@@ -250,6 +256,7 @@ function createCanvasApi(initial: DesignCanvas) {
       }];
     }),
     getExactVersionPreview: vi.fn(async (_projectId, nodeId, versionId) => ({ nodeId, versionId, url: `https://preview.local/${nodeId}/${versionId}` })),
+    downloadExactVersionHtml: vi.fn(async () => new Blob(["<!doctype html><html></html>"], { type: "text/html" })),
     getThread: vi.fn(async (_projectId, scope) => ({ ...thread, scope })),
     submitAgentTurn: vi.fn(async (_projectId: string, scope: DesignThreadScope, request: DesignAgentTurnRequest): Promise<DesignAgentTurnResult> => ({
       thread: { ...thread, scope, messages: [{ id: "message-1", role: "user", content: request.prompt, jobId: job.id, createdAt: 2 }] },
@@ -258,6 +265,12 @@ function createCanvasApi(initial: DesignCanvas) {
     })),
     listJobs: vi.fn(async () => []),
     cancelJob: vi.fn(async (): Promise<DesignJob> => ({ ...job, status: "cancelled" })),
+    retryJob: vi.fn(async (_projectId: string, failedJobId: string) => ({
+      retryOfJobId: failedJobId,
+      thread,
+      job: { ...job, id: `retry-${failedJobId}`, status: "queued" as const },
+      canvas: current,
+    })),
     startImplementationExport: vi.fn(async (): Promise<DesignExportResult> => ({
       exportId: "export-1",
       job: { ...job, kind: "implementation-export", exportId: "export-1" },
@@ -267,7 +280,6 @@ function createCanvasApi(initial: DesignCanvas) {
 }
 
 afterEach(() => {
-  discardPendingDesignCanvasIntent(PROJECT_ID);
   vi.unstubAllGlobals();
 });
 
@@ -506,6 +518,31 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   expect(within(imageMenu).queryByRole("menuitem", { name: /Create page/ })).not.toBeInTheDocument();
 });
 
+test("keyboard corner resizing follows the same persisted geometry path as pointer resizing", async () => {
+  const target = node({ id: "page-keyboard-persist", name: "Keyboard resize" });
+  const { api, applyIntents } = createCanvasApi(canvas([target]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  const flowNode = await screen.findByTestId("rf__node-page-keyboard-persist");
+  expect(flowNode).toHaveAttribute("aria-label", "Keyboard resize, Page, Not generated");
+  fireEvent.click(flowNode);
+
+  const bottomRight = await screen.findByRole("button", {
+    name: "Resize Keyboard resize from bottom right",
+  });
+  fireEvent.keyDown(bottomRight, { key: "ArrowRight" });
+
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledWith(PROJECT_ID, expect.objectContaining({
+    intents: [{
+      type: "update-node",
+      nodeId: target.id,
+      patch: {
+        geometry: { x: 80, y: 80, width: 488, height: 360 },
+      },
+    }],
+  })));
+});
+
 test("a selected Node keeps the same Agent panel DOM while its position morphs into focus", async () => {
   const target = node({ id: "page-panel-morph", name: "Panel morph" });
   const { api } = createCanvasApi(canvas([target]));
@@ -639,6 +676,76 @@ test("double-clicking a ready generated Node enters focus with an operable stric
   fireEvent.click(screen.getByRole("button", { name: "Main Agent" }));
   await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
   expect(screen.getByLabelText("Main Agent panel")).toBeInTheDocument();
+});
+
+test("focused Page export downloads the daemon-authored portable exact Version", async () => {
+  const ready = node({
+    id: "page-portable-export",
+    name: "Portable landing",
+    state: "ready",
+    currentVersionId: "version-portable",
+    selectedVersionId: "version-portable",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([ready]));
+  const portable = new Blob(["<!doctype html><html><body>portable</body></html>"], { type: "text/html" });
+  vi.mocked(api.downloadExactVersionHtml).mockResolvedValue(portable);
+  const createObjectURL = vi.fn(() => "blob:portable-version");
+  const revokeObjectURL = vi.fn();
+  const NativeUrl = URL;
+  class TestUrl extends NativeUrl {}
+  Object.assign(TestUrl, { createObjectURL, revokeObjectURL });
+  vi.stubGlobal("URL", TestUrl);
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  fireEvent.doubleClick(await screen.findByRole("button", {
+    name: "Select Portable landing; double click to focus and interact",
+  }));
+  fireEvent.click(await screen.findByRole("button", { name: "Export preview HTML" }));
+
+  await waitFor(() => expect(api.downloadExactVersionHtml).toHaveBeenCalledWith(
+    PROJECT_ID,
+    ready.id,
+    ready.currentVersionId,
+  ));
+  expect(createObjectURL).toHaveBeenCalledWith(portable);
+  expect(click).toHaveBeenCalledTimes(1);
+  expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-version");
+});
+
+test("focused Page export failure stays visible, dismissible, and retryable", async () => {
+  const ready = node({
+    id: "page-portable-retry",
+    name: "Retry landing",
+    state: "ready",
+    currentVersionId: "version-retry",
+    selectedVersionId: "version-retry",
+    versionCount: 1,
+  });
+  const { api } = createCanvasApi(canvas([ready]));
+  vi.mocked(api.downloadExactVersionHtml)
+    .mockRejectedValueOnce(new Error("Asset integrity check failed"))
+    .mockResolvedValueOnce(new Blob(["<!doctype html><html></html>"], { type: "text/html" }));
+  const NativeUrl = URL;
+  class TestUrl extends NativeUrl {}
+  Object.assign(TestUrl, { createObjectURL: () => "blob:retry", revokeObjectURL: vi.fn() });
+  vi.stubGlobal("URL", TestUrl);
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
+
+  fireEvent.doubleClick(await screen.findByRole("button", {
+    name: "Select Retry landing; double click to focus and interact",
+  }));
+  fireEvent.click(await screen.findByRole("button", { name: "Export preview HTML" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Couldn't export this preview. Asset integrity check failed");
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss preview export error" }));
+  expect(screen.queryByText(/Asset integrity check failed/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Export preview HTML" }));
+  await waitFor(() => expect(api.downloadExactVersionHtml).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText(/Asset integrity check failed/)).not.toBeInTheDocument();
 });
 
 test("exact iframe identity and src stay stable across focus open and close", async () => {
@@ -1376,7 +1483,6 @@ test("Agent panel renders local transcript history without an artificial skeleto
       nodes={[]}
       jobs={[]}
       agents={[CLAUDE_AGENT]}
-      deferTranscriptMs={5_000}
       onSubmit={async () => {}}
       onCancelJob={async () => {}}
       onAttachFiles={async () => {}}
@@ -1891,6 +1997,53 @@ test("Node Agent activity stays chronological so a successful retry is the visib
     .map((element) => element.dataset.jobId)).toEqual([failed.id, ready.id]);
 });
 
+test("a failed Node Job exposes Repair & retry with visible retryable failure feedback", async () => {
+  const user = userEvent.setup();
+  const target = node();
+  const failed: DesignJob = {
+    ...job,
+    id: "job-failed-repair",
+    kind: "node-generation",
+    status: "failed",
+    nodeId: target.id,
+    error: "Generated HTML did not pass validation",
+    activity: [],
+    createdAt: 10,
+    updatedAt: 11,
+    finishedAt: 11,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  const onRetryJob = vi.fn()
+    .mockRejectedValueOnce(new Error("The failed Job could not be reopened"))
+    .mockResolvedValueOnce(undefined);
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Landing page Agent"
+      subtitle=""
+      nodes={[target]}
+      jobs={[failed]}
+      onSubmit={async () => {}}
+      onCancelJob={async () => {}}
+      onRetryJob={onRetryJob}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  const retry = await screen.findByRole("button", { name: "Repair & retry Landing page generation" });
+  await user.click(retry);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Couldn't retry Landing page generation. The failed Job could not be reopened",
+  );
+  expect(retry).toBeEnabled();
+
+  await user.click(retry);
+  await waitFor(() => expect(onRetryJob).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText(/could not be reopened/)).not.toBeInTheDocument();
+});
+
 test("Main Agent groups delegated work under semantic execution labels without repeating prompts", async () => {
   const childNodes = ["Checkout", "Header", "Pricing", "FAQ", "Footer", "Account", "Search"].map((name, index) => (
     node({ id: `node-${index + 1}`, name })
@@ -1983,6 +2136,7 @@ test("Main Agent keeps compact failed and cancelled parent outcomes with or with
     finishedAt: 23,
   };
   const { api } = createCanvasApi(canvas([target]));
+  const onRetryJob = vi.fn(async () => {});
   vi.mocked(api.getThread).mockResolvedValue({
     ...thread,
     messages: [
@@ -2001,6 +2155,7 @@ test("Main Agent keeps compact failed and cancelled parent outcomes with or with
       jobs={[failedParent, cancelledParent, child]}
       onSubmit={async () => {}}
       onCancelJob={async () => {}}
+      onRetryJob={onRetryJob}
       onAttachFiles={async () => {}}
     />,
   );
@@ -2010,6 +2165,8 @@ test("Main Agent keeps compact failed and cancelled parent outcomes with or with
   const failedOutcome = failedGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
   expect(failedOutcome).toHaveTextContent("Failed");
   expect(failedOutcome).toHaveTextContent("The canvas plan could not be applied");
+  await userEvent.click(within(failedGroup).getByRole("button", { name: "Repair & retry Canvas plan" }));
+  expect(onRetryJob).toHaveBeenCalledWith(failedParent.id);
   const cancelledGroup = rendered.container.querySelector<HTMLElement>(`[data-parent-job-id="${cancelledParent.id}"]`)!;
   const cancelledOutcome = cancelledGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
   expect(cancelledOutcome).toHaveTextContent("Cancelled");
@@ -2246,6 +2403,98 @@ test("Main Agent toggles from the topbar, sees canvas scope, and submits orchest
   ));
 });
 
+test("Export waits for explicit confirmation before starting an implementation job", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
+  render(
+    <DesignCanvasScreen
+      projectId={PROJECT_ID}
+      projectName="Editorial"
+      api={api}
+      agents={[CLAUDE_AGENT]}
+      initialAgentCommand="claude"
+      initialModel="sonnet"
+    />,
+  );
+
+  const exportButton = await screen.findByRole("button", { name: "Export code" });
+  await user.click(exportButton);
+
+  expect(api.startImplementationExport).not.toHaveBeenCalled();
+  const confirmation = screen.getByRole("dialog", { name: "Start implementation export?" });
+  expect(confirmation).toHaveTextContent("fresh implementation from the selected Versions");
+  expect(confirmation).toHaveTextContent("consume quota from your configured provider");
+  expect(within(confirmation).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  expect(within(confirmation).getByRole("button", { name: "Start export" })).toBeEnabled();
+});
+
+test("Export confirmation Cancel and Escape restore focus without starting", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
+  render(
+    <DesignCanvasScreen
+      projectId={PROJECT_ID}
+      projectName="Editorial"
+      api={api}
+      agents={[CLAUDE_AGENT]}
+      initialAgentCommand="claude"
+    />,
+  );
+
+  const exportButton = await screen.findByRole("button", { name: "Export code" });
+  await user.click(exportButton);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
+  expect(exportButton).toHaveFocus();
+
+  await user.click(exportButton);
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
+  expect(exportButton).toHaveFocus();
+  expect(api.startImplementationExport).not.toHaveBeenCalled();
+});
+
+test("confirmed Export starts exactly once and disables duplicate confirmation while pending", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
+  let resolveExport!: (result: DesignExportResult) => void;
+  vi.mocked(api.startImplementationExport).mockImplementation(() => new Promise((resolve) => {
+    resolveExport = resolve;
+  }));
+  render(
+    <DesignCanvasScreen
+      projectId={PROJECT_ID}
+      projectName="Editorial"
+      api={api}
+      agents={[CLAUDE_AGENT]}
+      initialAgentCommand="claude"
+      initialModel="sonnet"
+    />,
+  );
+
+  const exportButton = await screen.findByRole("button", { name: "Export code" });
+  await user.click(exportButton);
+  const start = screen.getByRole("button", { name: "Start export" });
+  fireEvent.click(start);
+  fireEvent.click(start);
+
+  expect(api.startImplementationExport).toHaveBeenCalledOnce();
+  expect(api.startImplementationExport).toHaveBeenCalledWith(
+    PROJECT_ID,
+    1,
+    { agentCommand: "claude", model: "sonnet" },
+  );
+  expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+
+  resolveExport({
+    exportId: "export-1",
+    job: { ...job, kind: "implementation-export", exportId: "export-1" },
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument());
+  expect(screen.getByLabelText("Main Agent panel")).toBeInTheDocument();
+  expect(exportButton).toHaveFocus();
+});
+
 test("late Settings defaults replace an untouched Agent fallback before Export", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
@@ -2271,6 +2520,8 @@ test("late Settings defaults replace an untouched Agent fallback before Export",
   );
 
   await user.click(screen.getByRole("button", { name: "Export code" }));
+  expect(api.startImplementationExport).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Start export" }));
   await waitFor(() => expect(api.startImplementationExport).toHaveBeenCalledWith(
     PROJECT_ID,
     1,
@@ -2317,13 +2568,18 @@ test("Export opens Main Agent and keeps the implementation job visible through c
   await user.click(await screen.findByRole("button", { name: "opus" }));
   await waitFor(() => expect(persistAgentDefaults).toHaveBeenCalledWith({ agentCommand: "claude", model: "opus" }));
   await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Close Main Agent" }));
+  await waitFor(() => expect(screen.queryByLabelText("Main Agent panel")).not.toBeInTheDocument());
   await user.click(screen.getByRole("button", { name: "Export code" }));
-  expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
+  expect(api.startImplementationExport).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("Main Agent panel")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Start export" }));
   await waitFor(() => expect(api.startImplementationExport).toHaveBeenCalledWith(
     PROJECT_ID,
     1,
     { agentCommand: "claude", model: "opus" },
   ));
+  expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
   expect(await screen.findByLabelText("Implementation export · ready")).toBeInTheDocument();
   expect(screen.getAllByText("Implementation export")).toHaveLength(1);
   expect(screen.getByText("Export ready")).toBeInTheDocument();
@@ -2333,6 +2589,30 @@ test("Export opens Main Agent and keeps the implementation job visible through c
   await user.click(screen.getByRole("button", { name: "Reveal export" }));
   await waitFor(() => expect(revealExport).toHaveBeenCalledWith("export-1"));
   expect(await screen.findByText("Opened in Finder.")).toBeInTheDocument();
+});
+
+test("confirmed Export failure closes confirmation and keeps the existing visible error", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
+  vi.mocked(api.startImplementationExport).mockRejectedValue(new Error("Configured provider quota is exhausted."));
+  render(
+    <DesignCanvasScreen
+      projectId={PROJECT_ID}
+      projectName="Editorial"
+      api={api}
+      agents={[CLAUDE_AGENT]}
+      initialAgentCommand="claude"
+    />,
+  );
+
+  await user.click(await screen.findByRole("button", { name: "Export code" }));
+  expect(api.startImplementationExport).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Start export" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Configured provider quota is exhausted.");
+  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
+  expect(api.startImplementationExport).toHaveBeenCalledOnce();
 });
 
 test("Export stays disabled with provider-neutral guidance when no runtime Agent is available", async () => {
@@ -2472,4 +2752,46 @@ test("live Node generation keeps complete Thinking detail and exposes an accessi
 
   finishCancel?.();
   await waitFor(() => expect(screen.getByRole("button", { name: "Stop Landing page generation" })).toBeEnabled());
+});
+
+test("a rejected Stop stays visible and the same Job can be stopped again", async () => {
+  const user = userEvent.setup();
+  const target = node();
+  const liveJob: DesignJob = {
+    ...job,
+    id: "job-stop-retry",
+    kind: "node-generation",
+    status: "running",
+    nodeId: target.id,
+    activity: [{ id: "reason-1", kind: "text", text: "Still generating", createdAt: 1 }],
+    finishedAt: null,
+  };
+  const { api } = createCanvasApi(canvas([target]));
+  const onCancelJob = vi.fn()
+    .mockRejectedValueOnce(new Error("Agent process did not acknowledge cancellation"))
+    .mockResolvedValueOnce(undefined);
+  render(
+    <CanvasAgentPanel
+      projectId={PROJECT_ID}
+      api={api}
+      scope={{ type: "node", nodeId: target.id }}
+      title="Landing page Agent"
+      subtitle=""
+      nodes={[target]}
+      jobs={[liveJob]}
+      onSubmit={async () => {}}
+      onCancelJob={onCancelJob}
+      onAttachFiles={async () => {}}
+    />,
+  );
+
+  await user.click(await screen.findByRole("button", { name: "Stop Landing page generation" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Couldn't stop Landing page generation. Agent process did not acknowledge cancellation",
+  );
+  const retry = screen.getByRole("button", { name: "Stop Landing page generation" });
+  expect(retry).toBeEnabled();
+  await user.click(retry);
+  await waitFor(() => expect(onCancelJob).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText(/did not acknowledge cancellation/)).not.toBeInTheDocument();
 });

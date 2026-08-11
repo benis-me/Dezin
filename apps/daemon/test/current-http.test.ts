@@ -315,7 +315,7 @@ test("filesystem-only Design Projects run Main Agent, Node Agent, and Implementa
         ]);
         return { text: "Fresh implementation complete", artifactHtml: index, artifactPath: "index.html" };
       }
-      const html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>body{margin:0}</style></head><body><main>Filesystem Node</main></body></html>";
+      const html = "<!doctype html><html><head><title>Filesystem Node</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>body{margin:0}</style></head><body><main>Filesystem Node</main></body></html>";
       await writeFile(join(input.projectDir, "index.html"), html);
       return { text: "Node generated", artifactHtml: html, artifactPath: "index.html" };
     },

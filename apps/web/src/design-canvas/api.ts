@@ -1,4 +1,3 @@
-import type { PendingDesignCanvasContext } from "../lib/pending-design-canvas.ts";
 import type {
   DesignAgentContext,
   DesignAgentSelection,
@@ -6,7 +5,9 @@ import type {
   DesignCanvas,
   DesignCanvasIntent,
   DesignExportResult,
+  DesignInvalidationMessage,
   DesignJob,
+  DesignJobRetryResult,
   DesignNodeVersion,
   DesignThread,
   DesignThreadScope,
@@ -21,6 +22,14 @@ export interface DesignCanvasMutationRequest {
 export interface DesignCanvasImportPosition {
   x: number;
   y: number;
+}
+
+export interface DesignProjectVersionReference {
+  kind: "project-version";
+  title: string;
+  sourceProjectId: string;
+  sourceNodeId: string;
+  sourceVersionId: string;
 }
 
 export interface DesignAgentTurnRequest extends DesignAgentSelection {
@@ -60,7 +69,7 @@ export interface DesignCanvasApi {
   appendMaterialVersion(projectId: string, nodeId: string, file: File): Promise<DesignCanvas>;
   importProjectVersion(
     projectId: string,
-    context: Extract<PendingDesignCanvasContext, { kind: "project-version" }>,
+    context: DesignProjectVersionReference,
     position: DesignCanvasImportPosition,
   ): Promise<DesignCanvas>;
 
@@ -71,8 +80,13 @@ export interface DesignCanvasApi {
     versionId: string,
     signal?: AbortSignal,
   ): Promise<ExactVersionPreview>;
+  downloadExactVersionHtml(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
 
   getThread(projectId: string, scope: DesignThreadScope, signal?: AbortSignal): Promise<DesignThread>;
+  streamInvalidations(
+    projectId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<DesignInvalidationMessage>;
   submitAgentTurn(
     projectId: string,
     scope: DesignThreadScope,
@@ -80,6 +94,7 @@ export interface DesignCanvasApi {
   ): Promise<DesignAgentTurnResult>;
   listJobs(projectId: string, signal?: AbortSignal): Promise<DesignJob[]>;
   cancelJob(projectId: string, jobId: string): Promise<DesignJob>;
+  retryJob(projectId: string, jobId: string): Promise<DesignJobRetryResult>;
   startImplementationExport(
     projectId: string,
     canvasRevision: number,

@@ -70,6 +70,7 @@ import {
 import {
   createDesignProject,
   designProjectPayload,
+  ensureDesignProjectAtId,
   getDesignProject,
   listDesignProjects,
   listInitializedDesignProjectIds,
@@ -78,9 +79,11 @@ import {
 } from "./design/design-project-store.ts";
 import {
   handleCancelDesignJob,
+  handleRetryDesignJob,
   handleCreateDesignAsset,
   handleDesignMainTurn,
   handleDesignNodeTurn,
+  handleDownloadPortableDesignVersionPreview,
   handleGetDesignCanvas,
   handleGetMainDesignThread,
   handleGetNodeDesignThread,
@@ -97,6 +100,13 @@ import {
   handleStartDesignImplementationExport,
   handleUndoDesignCanvas,
 } from "./design/design-http-handler.ts";
+import { handleDesignInvalidationEvents } from "./design/design-invalidation-http.ts";
+import {
+  handleBootstrapDesignProject,
+  type DesignProjectBootstrapExecutionPorts,
+} from "./design/design-project-bootstrap-http.ts";
+import { recoverDesignProjectBootstraps } from "./design/design-project-bootstrap.ts";
+import { createProductionDesignProjectBootstrapPorts } from "./design/design-project-bootstrap-adapter.ts";
 
 export interface AppDeps {
   store: Store;
@@ -133,6 +143,8 @@ export interface AppDeps {
   sharinganBootstrap?: SharinganBootstrapPort;
   /** Deterministic startup-recovery seam; production enumerates every initialized Design Canvas. */
   designStartupRecovery?: () => Promise<void>;
+  /** Durable Home bootstrap execution supplied by the Design Asset and Agent ledger adapters. */
+  designProjectBootstrapPorts?: DesignProjectBootstrapExecutionPorts;
 }
 
 type Handler = (
@@ -269,7 +281,26 @@ async function withRequestAbortSignal(
 const REQUEST_LIFETIME_ONLY_SIGNAL = new AbortController().signal;
 
 const routes: Route[] = [
+  { method: "POST", pattern: "/api/projects/bootstrap", handler: handleBootstrapDesignProject },
   { method: "GET", pattern: "/api/projects/:id/design-canvas", handler: handleGetDesignCanvas },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/design-canvas/events",
+    projectAdmission: "skip",
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleDesignInvalidationEvents(req, res, {
+          dataDir: deps.dataDir,
+          projectId: p.id!,
+          signal,
+        }),
+      ),
+    ),
+  },
   { method: "PUT", pattern: "/api/projects/:id/design-canvas", handler: handlePutDesignCanvas },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/undo", handler: handleUndoDesignCanvas },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/redo", handler: handleRedoDesignCanvas },
@@ -285,12 +316,15 @@ const routes: Route[] = [
   { method: "HEAD", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/versions/:versionId/preview", handler: handleServeDesignVersionPreview, publicRead: true },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/versions/:versionId/preview/embed", handler: handleServeEmbeddedDesignVersionPreview, publicRead: true },
   { method: "HEAD", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/versions/:versionId/preview/embed", handler: handleServeEmbeddedDesignVersionPreview, publicRead: true },
+  { method: "GET", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/versions/:versionId/preview/download", handler: handleDownloadPortableDesignVersionPreview },
+  { method: "HEAD", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/versions/:versionId/preview/download", handler: handleDownloadPortableDesignVersionPreview },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/agent/thread", handler: handleGetMainDesignThread },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/agent/turns", handler: handleDesignMainTurn },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/agent/thread", handler: handleGetNodeDesignThread },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/nodes/:nodeId/agent/turns", handler: handleDesignNodeTurn },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/exports", handler: handleStartDesignImplementationExport },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/jobs", handler: handleListDesignJobs },
+  { method: "POST", pattern: "/api/projects/:id/design-canvas/jobs/:jobId/retry", handler: handleRetryDesignJob },
   { method: "DELETE", pattern: "/api/projects/:id/design-canvas/jobs/:jobId", handler: handleCancelDesignJob },
   {
     method: "GET",
@@ -954,6 +988,7 @@ export function createApp(deps: AppDeps): http.Server {
     ...deps,
     runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor(deps),
   };
+  appDeps.designProjectBootstrapPorts ??= createProductionDesignProjectBootstrapPorts(appDeps);
   const webDir = appDeps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
@@ -963,6 +998,13 @@ export function createApp(deps: AppDeps): http.Server {
       if (appDeps.designStartupRecovery) return appDeps.designStartupRecovery();
       const projectIds = await listInitializedDesignProjectIds(appDeps.dataDir);
       await Promise.all(projectIds.map((projectId) => recoverInterruptedDesignJobs(appDeps.dataDir, projectId)));
+      await recoverDesignProjectBootstraps({
+        dataDir: appDeps.dataDir,
+        ports: {
+          ensureProject: (project) => ensureDesignProjectAtId(appDeps.dataDir, project).then(() => undefined),
+          ...appDeps.designProjectBootstrapPorts!,
+        },
+      });
     })
     .then(
       () => ({ ok: true as const }),
@@ -995,6 +1037,7 @@ export function createApp(deps: AppDeps): http.Server {
         else requireDaemonRequest(req, { ...appDeps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
         const needsDesignRecovery = route.pattern.includes("/design-canvas")
           || route.pattern === "/api/projects"
+          || route.pattern === "/api/projects/bootstrap"
           || route.pattern === "/api/projects/:id"
           || route.pattern === "/api/projects/:id/title";
         if (needsDesignRecovery) {

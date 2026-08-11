@@ -1,69 +1,59 @@
-export const DESIGN_SCHEMA_VERSION = 2 as const;
+import { DESIGN_SCHEMA_VERSION } from "@dezin/design-canvas-contracts";
+import type {
+  DesignCanvas,
+  DesignCanvasIntent,
+  DesignGenerativeNodeKind,
+  DesignInvalidationEvent,
+  DesignInvalidationMessage,
+  DesignInvalidationReset,
+  DesignInvalidationTopic,
+  DesignJob,
+  DesignJobActivity,
+  DesignJobKind,
+  DesignJobStatus,
+  DesignMaterialNodeKind,
+  DesignNode,
+  DesignNodeGeometry,
+  DesignNodeKind,
+  DesignNodeState,
+  DesignThread,
+  DesignThreadMessage,
+  DesignThreadRole,
+  DesignThreadScope,
+  DesignViewport,
+  NewDesignNode,
+} from "@dezin/design-canvas-contracts";
 
-export const DESIGN_GENERATIVE_NODE_KINDS = [
-  "component",
-  "page",
-  "design-system",
-  "research",
-  "design-tokens",
-  "design-document",
-  "layout",
-  "knowledge",
-] as const;
-
-export const DESIGN_MATERIAL_NODE_KINDS = [
-  "image",
-  "video",
-  "document",
-  "file",
-] as const;
-
-export const DESIGN_NODE_KINDS = [
-  ...DESIGN_GENERATIVE_NODE_KINDS,
-  ...DESIGN_MATERIAL_NODE_KINDS,
-] as const;
-
-export type DesignGenerativeNodeKind = (typeof DESIGN_GENERATIVE_NODE_KINDS)[number];
-export type DesignMaterialNodeKind = (typeof DESIGN_MATERIAL_NODE_KINDS)[number];
-export type DesignNodeKind = (typeof DESIGN_NODE_KINDS)[number];
-export type DesignNodeState =
-  | "empty"
-  | "queued"
-  | "generating"
-  | "validating"
-  | "ready"
-  | "failed"
-  | "cancelled"
-  | "superseded";
-
-export interface DesignViewport {
-  x: number;
-  y: number;
-  zoom: number;
-}
-
-export interface DesignNodeGeometry {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface DesignNode {
-  id: string;
-  kind: DesignNodeKind;
-  name: string;
-  geometry: DesignNodeGeometry;
-  state: DesignNodeState;
-  currentVersionId: string | null;
-  selectedVersionId: string | null;
-  versionCount: number;
-  assetId: string | null;
-  activeJobId: string | null;
-  error: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
+export {
+  DESIGN_GENERATIVE_NODE_KINDS,
+  DESIGN_MATERIAL_NODE_KINDS,
+  DESIGN_NODE_KINDS,
+} from "@dezin/design-canvas-contracts";
+export { DESIGN_SCHEMA_VERSION };
+export type {
+  DesignCanvas,
+  DesignCanvasIntent,
+  DesignGenerativeNodeKind,
+  DesignInvalidationEvent,
+  DesignInvalidationMessage,
+  DesignInvalidationReset,
+  DesignInvalidationTopic,
+  DesignJob,
+  DesignJobActivity,
+  DesignJobKind,
+  DesignJobStatus,
+  DesignMaterialNodeKind,
+  DesignNode,
+  DesignNodeGeometry,
+  DesignNodeKind,
+  DesignNodeState,
+  DesignThread,
+  DesignThreadMessage,
+  DesignThreadRole,
+  DesignThreadScope,
+  DesignViewport,
+  NewDesignNode,
+};
 
 export interface DesignCanvasSnapshot {
   viewport: DesignViewport;
@@ -100,45 +90,6 @@ export interface DesignProjectFile {
   createdAt: number;
   updatedAt: number;
 }
-
-export interface DesignCanvas {
-  schemaVersion: typeof DESIGN_SCHEMA_VERSION;
-  projectId: string;
-  revision: number;
-  viewport: DesignViewport;
-  nodeOrder: string[];
-  nodes: DesignNode[];
-  undoDepth: number;
-  redoDepth: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface NewDesignNode {
-  id?: string;
-  kind: DesignNodeKind;
-  name?: string;
-  geometry?: Partial<DesignNodeGeometry>;
-  assetId?: string | null;
-}
-
-export type DesignCanvasIntent =
-  | { type: "add-node"; node: NewDesignNode }
-  | {
-      type: "update-node";
-      nodeId: string;
-      patch: {
-        name?: string;
-        geometry?: Partial<DesignNodeGeometry>;
-        selectedVersionId?: string | null;
-      };
-    }
-  | { type: "remove-node"; nodeId: string }
-  | { type: "set-viewport"; viewport: DesignViewport }
-  | {
-      type: "replace-layout";
-      nodes: Array<{ nodeId: string; geometry: DesignNodeGeometry }>;
-    };
 
 export interface DesignAssetManifest {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
@@ -215,71 +166,15 @@ export interface DesignVersionPublicationTransaction {
   terminalStatus: "ready" | "superseded";
   projectRevisionBefore: number;
   previousVersionCount: number;
+  /** Added without changing the project schema; absent only on a pre-title publication WAL. */
+  nodeNameBefore?: string;
+  /** Added without changing the project schema; absent only on a pre-title publication WAL. */
+  nodeNameAfter?: string;
   currentVersionIdBefore: string | null;
   selectedVersionIdBefore: string | null;
   followsHead: boolean;
   createdAt: number;
   checksum: string;
-}
-
-export type DesignThreadRole = "user" | "assistant" | "system" | "tool";
-
-export interface DesignThreadMessage {
-  id: string;
-  role: DesignThreadRole;
-  content: string;
-  jobId: string | null;
-  createdAt: number;
-}
-
-export interface DesignThread {
-  schemaVersion: typeof DESIGN_SCHEMA_VERSION;
-  id: string;
-  scope: { type: "main" } | { type: "node"; nodeId: string };
-  messages: DesignThreadMessage[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-export type DesignJobKind = "node-generation" | "node-analysis" | "main-agent" | "implementation-export";
-export type DesignJobStatus =
-  | "queued"
-  | "running"
-  | "validating"
-  | "ready"
-  | "failed"
-  | "cancelled"
-  | "superseded";
-
-export interface DesignJobActivity {
-  id: string;
-  kind: "text" | "tool" | "status";
-  text: string;
-  createdAt: number;
-}
-
-export interface DesignJob {
-  schemaVersion: typeof DESIGN_SCHEMA_VERSION;
-  id: string;
-  kind: DesignJobKind;
-  runnerId: string;
-  model: string | null;
-  status: DesignJobStatus;
-  nodeId: string | null;
-  parentJobId: string | null;
-  contextHash: string | null;
-  canvasRevision: number | null;
-  expectedHeadVersionId: string | null;
-  versionId: string | null;
-  exportId: string | null;
-  error: string | null;
-  cancelRequested: boolean;
-  /** True only for a Main Agent turn that produced no Canvas plan or child work. */
-  conversationOnly?: boolean;
-  activity: DesignJobActivity[];
-  createdAt: number;
-  updatedAt: number;
-  finishedAt: number | null;
 }
 
 export interface DesignFrozenContext {

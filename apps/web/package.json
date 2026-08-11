@@ -12,6 +12,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@dezin/design-canvas-contracts": "workspace:*",
     "@dezin/leafer-react": "workspace:*",
     "@dnd-kit/react": "^0.5.0",
     "@fontsource-variable/geist": "^5.3.0",

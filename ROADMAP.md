@@ -13,7 +13,9 @@ Dezin is an early open-source Design Canvas. This file describes the current pro
 - Provider-neutral durable Job activity, cancellation, idempotency, restart recovery, and semantic status presentation.
 - Atomic migration backup and receipt before destructive retirement of old SQLite Design tables.
 - Imported images/documents and exact cross-project Version references.
-- Local single-HTML Node preview with strict URL, DOM-capability, asset, and responsive-output validation.
+- Local single-HTML Node preview with strict URL, DOM-capability, asset, and responsive-output validation; focused Pages can be downloaded as checksum-verified, self-contained portable HTML.
+- First Page publication requires one semantic `<title>` and adopts it as the default Node name; bounded transient-provider, incomplete-artifact, and validation-repair paths keep recovery fail-closed.
+- Failed Node, Main, and Implementation Export Jobs expose an idempotent immutable-successor Retry/Repair path instead of hiding action failures.
 - **Implementation Export** to an immutable local Vite + TypeScript directory with a frozen manifest, strict source/built-output scanning, CSP, TypeScript, isolated Vite build, and Chrome desktop/mobile visual evidence.
 - One bounded continuation for incomplete/timeout Export work and one bounded validation-repair turn.
 - Moodboards, Design Systems, Effects, Settings, Electron development shell, and Chrome reference-capture extension.
@@ -21,19 +23,20 @@ Dezin is an early open-source Design Canvas. This file describes the current pro
 
 ## Required before the next release
 
-- [ ] Complete a quota-backed production-path CodeBuddy `hy3-ioa` Canvas + Implementation Export receipt, including every deterministic Node route and immutable output hash.
+- [x] Complete a quota-backed production-path CodeBuddy `hy3-ioa` Canvas + Implementation Export receipt, including every deterministic Node route and immutable output hash.
 - [ ] Add provider-version black-box confinement receipts for additional real CLIs; generic providers are available, but do not yet have Claude/CodeBuddy's verified tool and execution-identity guarantees.
 - [ ] Exercise first-fit geometry, persisted resize, light/dark appearance, reduced motion, tooltips, and live activity motion in packaged Electron on macOS.
 - [ ] Package, sign, notarize, and distribute the Electron application.
 
 ## Architecture follow-ups
 
-- [ ] Split Canvas storage into Canvas state, Asset/Version publication, Job/Thread ledger, frozen context, and static validation modules.
-- [ ] Extract Implementation Export from the global-Agent module behind one production adapter shared by HTTP and QA.
-- [ ] Stream persisted Job activity over SSE instead of polling while preserving durable replay.
-- [ ] Move the initial Home→Canvas intent handoff from session storage to an idempotent daemon bootstrap Job.
-- [ ] Publish shared pure Design Canvas contracts for daemon and Web rather than maintaining mirrored unions.
-- [ ] Split the largest Canvas screen and Agent panel along controller/view boundaries and add focused browser interaction coverage.
+- [x] Split Canvas storage into a stable facade over primitives, Canvas state, Asset/Version publication, Job/Thread ledger, frozen context, URL handling, and static validation modules.
+- [x] Extract Implementation Export from the global-Agent module behind one production adapter shared by HTTP and QA.
+- [x] Replace Canvas/Job/Thread polling with a persisted, replayable SSE invalidation journal.
+- [x] Replace the initial Home→Canvas session handoff with an idempotent, restart-recoverable daemon bootstrap Job.
+- [x] Publish shared pure Design Canvas contracts for daemon and Web rather than maintaining mirrored unions.
+- [x] Split Canvas and Agent state into controllers and extract header, focus chrome, tool docks, and Agent-panel views with focused interaction coverage.
+- [ ] Implement Figma URL import. The filesystem-authoritative API, token, component, and `Design.md` mapping is researched in [docs/FIGMA-IMPORT.md](docs/FIGMA-IMPORT.md), but no Figma parser, authentication, or import endpoint is shipped.
 
 ## Formally retired from the primary Canvas contract
 

@@ -367,6 +367,12 @@ test("streaming deep rescan is the canonical scan reused by GET and forced resca
     dataDir: mkdtempSync(join(tmpdir(), "dezin-agents-stream-coordinator-")),
     agentProber: prober,
   });
+  const concurrentRequestsEntered = deferred<void>();
+  let catalogRequestCount = 0;
+  server.on("request", () => {
+    catalogRequestCount += 1;
+    if (catalogRequestCount === 3) concurrentRequestsEntered.resolve();
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
@@ -376,7 +382,7 @@ test("streaming deep rescan is the canonical scan reused by GET and forced resca
     const listRequest = fetch(`${base}/api/agents`);
     const forcedRequest = fetch(`${base}/api/agents/rescan`, { method: "POST" });
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    await concurrentRequestsEntered.promise;
     assert.equal(probes, 1, "all concurrent catalog requests reuse the streaming deep scan");
     releaseFirstProbe.resolve();
     const [streamResponse, listResponse, forcedResponse] = await Promise.all([

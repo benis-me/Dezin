@@ -135,7 +135,7 @@ function designNode(id: string, x: number): DesignNode {
 
 function designCanvas(nodes: DesignNode[], revision = 1, viewport: Viewport = { x: 0, y: 0, zoom: 1 }): DesignCanvas {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: PROJECT_ID,
     revision,
     viewport,
@@ -149,6 +149,7 @@ function designCanvas(nodes: DesignNode[], revision = 1, viewport: Viewport = { 
 }
 
 const thread: DesignThread = {
+  schemaVersion: 2,
   id: "thread-main",
   scope: { type: "main" },
   messages: [],
@@ -157,6 +158,7 @@ const thread: DesignThread = {
 };
 
 const mainJob: DesignJob = {
+  schemaVersion: 2,
   id: "main-job",
   kind: "main-agent",
   runnerId: "fixture",
@@ -165,9 +167,12 @@ const mainJob: DesignJob = {
   nodeId: null,
   parentJobId: null,
   contextHash: "context",
+  canvasRevision: 1,
+  expectedHeadVersionId: null,
   versionId: null,
   exportId: null,
   error: null,
+  cancelRequested: false,
   activity: [],
   createdAt: 1,
   updatedAt: 1,
@@ -205,10 +210,19 @@ function createApi(initial: DesignCanvas, mainAgentViewport?: Viewport) {
     importProjectVersion: vi.fn(async () => current),
     listNodeVersions: vi.fn(async () => []),
     getExactVersionPreview: vi.fn(async (_projectId, nodeId, versionId) => ({ nodeId, versionId, url: "about:blank" })),
+    downloadExactVersionHtml: vi.fn(async () => new Blob(["<!doctype html>"])),
     getThread: vi.fn(async (_projectId, scope) => ({ ...thread, scope })),
+    // eslint-disable-next-line require-yield
+    streamInvalidations: vi.fn(async function* () {}),
     submitAgentTurn,
     listJobs: vi.fn(async () => []),
     cancelJob: vi.fn(async () => mainJob),
+    retryJob: vi.fn(async (_projectId, jobId) => ({
+      retryOfJobId: jobId,
+      thread,
+      job: { ...mainJob, id: `retry-${jobId}`, status: "queued" as const },
+      canvas: current,
+    })),
     startImplementationExport: vi.fn(async () => ({ exportId: "export", job: mainJob })),
   };
   return { api, applyIntents };
@@ -230,6 +244,23 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllTimers();
   vi.unstubAllGlobals();
+});
+
+test("focusable Canvas Nodes expose their persisted identity, kind, and state", async () => {
+  const research = {
+    ...designNode("research-a", 80),
+    kind: "research" as const,
+    name: "Checkout field study",
+    state: "validating" as const,
+  };
+  const { api } = createApi(designCanvas([research]));
+
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+  expect(flowHarness.props?.nodes[0]).toMatchObject({
+    ariaLabel: "Checkout field study, Research, Preparing preview",
+  });
 });
 
 test("single-click selects while double-click flies only the Node and its neighbors above a stable viewport", async () => {
@@ -650,6 +681,161 @@ test("Node resize dimensions remain live through layout measurement and persist 
     nodeId: node.id,
     patch: { geometry: { x: 80, y: 80, width: 640, height: 480 } },
   }]);
+});
+
+test("pointer resize feedback coalesces within one animation frame and flushes the exact release geometry", async () => {
+  const node = designNode("page-a", 80);
+  const { api, applyIntents } = createApi(designCanvas([node]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+  await act(async () => {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  });
+
+  let nextFrameId = 1;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    const id = nextFrameId;
+    nextFrameId += 1;
+    frames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+    frames.delete(id);
+  });
+  const flushFrame = () => {
+    const callbacks = [...frames.values()];
+    frames.clear();
+    for (const callback of callbacks) callback(performance.now());
+  };
+
+  try {
+    act(() => {
+      flowHarness.props?.onNodesChange?.([
+        { type: "position", id: node.id, position: { x: 72, y: 72 } },
+        {
+          type: "dimensions",
+          id: node.id,
+          dimensions: { width: 592, height: 416 },
+          resizing: true,
+          setAttributes: true,
+        },
+      ]);
+    });
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: 80, y: 80 },
+      width: 480,
+      height: 360,
+    });
+
+    act(() => {
+      flowHarness.props?.onNodesChange?.([
+        { type: "position", id: node.id, position: { x: 64, y: 64 } },
+        {
+          type: "dimensions",
+          id: node.id,
+          dimensions: { width: 608, height: 432 },
+          resizing: true,
+          setAttributes: true,
+        },
+      ]);
+    });
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: 80, y: 80 },
+      width: 480,
+      height: 360,
+    });
+    expect(applyIntents).not.toHaveBeenCalled();
+
+    act(flushFrame);
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: 64, y: 64 },
+      width: 608,
+      height: 432,
+    });
+    expect(flowHarness.props?.nodes[0]?.data.node.geometry).toEqual({
+      x: 64,
+      y: 64,
+      width: 608,
+      height: 432,
+    });
+
+    const nextFrameGeometry = { x: 60, y: 60, width: 624, height: 444 };
+    act(() => {
+      flowHarness.props?.onNodesChange?.([
+        {
+          type: "position",
+          id: node.id,
+          position: { x: nextFrameGeometry.x, y: nextFrameGeometry.y },
+        },
+        {
+          type: "dimensions",
+          id: node.id,
+          dimensions: { width: nextFrameGeometry.width, height: nextFrameGeometry.height },
+          resizing: true,
+          setAttributes: true,
+        },
+      ]);
+    });
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: 64, y: 64 },
+      width: 608,
+      height: 432,
+    });
+    act(flushFrame);
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: nextFrameGeometry.x, y: nextFrameGeometry.y },
+      width: nextFrameGeometry.width,
+      height: nextFrameGeometry.height,
+    });
+    expect(flowHarness.props?.nodes[0]?.data.node.geometry).toEqual(nextFrameGeometry);
+
+    const released = { x: 56, y: 56, width: 640, height: 456 };
+    act(() => {
+      flowHarness.props?.onNodesChange?.([
+        { type: "position", id: node.id, position: { x: released.x, y: released.y } },
+        {
+          type: "dimensions",
+          id: node.id,
+          dimensions: { width: released.width, height: released.height },
+          resizing: true,
+          setAttributes: true,
+        },
+      ]);
+    });
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: nextFrameGeometry.x, y: nextFrameGeometry.y },
+      width: nextFrameGeometry.width,
+      height: nextFrameGeometry.height,
+    });
+
+    act(() => {
+      flowHarness.props?.nodes[0]?.data.onResize(node.id, released);
+      flowHarness.props?.onNodesChange?.([{
+        type: "dimensions",
+        id: node.id,
+        dimensions: { width: released.width, height: released.height },
+        resizing: false,
+      }]);
+    });
+    expect(flowHarness.props?.nodes[0]).toMatchObject({
+      position: { x: released.x, y: released.y },
+      width: released.width,
+      height: released.height,
+    });
+    act(flushFrame);
+    expect(flowHarness.props?.nodes[0]?.data.node.geometry).toEqual(released);
+
+    await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(1));
+    expect(applyIntents.mock.calls[0]?.[1].intents).toEqual([{
+      type: "update-node",
+      nodeId: node.id,
+      patch: { geometry: released },
+    }]);
+  } finally {
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
+  }
 });
 
 test("a stale position save acknowledgement cannot rewind a newer local drag", async () => {
