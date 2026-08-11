@@ -1,11 +1,10 @@
-import { Check, ChevronDown, Code2, Copy, ExternalLink, Globe2, ImageIcon, ListTodo } from "lucide-react";
 import {
   Children,
   isValidElement,
   useEffect,
-  useId,
   useMemo,
   useState,
+  type CSSProperties,
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
@@ -13,8 +12,11 @@ import type { Components } from "streamdown";
 
 import { explicitExternalImageHref, localPassiveImageSource } from "../lib/local-media-url.ts";
 import { cn } from "../lib/utils.ts";
-import { AgentActivityHeaderContent } from "./AgentActivityBlocks.tsx";
-import { AgentCollapsible } from "./AgentCollapsible.tsx";
+import {
+  DezinAgentContext,
+  DezinAgentLoadingState,
+  DezinAgentTaskRow,
+} from "../design-canvas/DezinAgentPrimitives.tsx";
 
 interface CitationReference {
   number: string;
@@ -61,43 +63,20 @@ export function citationReferences(markdown: string): CitationReference[] {
 
 export function AgentCitationSources({ markdown }: { markdown: string }) {
   const references = useMemo(() => citationReferences(markdown), [markdown]);
-  const [open, setOpen] = useState(true);
-  const detailsId = useId();
   if (references.length === 0) return null;
   return (
-    <footer className="agent-citations" aria-label="Sources" data-agent-component="sources" data-collapsed={!open || undefined}>
-      <button
-        type="button"
-        className="agent-citations__header"
-        aria-label={`Sources (${references.length})`}
-        aria-controls={detailsId}
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Globe2 aria-hidden />
-        <span>Sources</span>
-        <small>{references.length}</small>
-        <ChevronDown aria-hidden />
-      </button>
-      <AgentCollapsible id={detailsId} className="agent-citations__collapsible" open={open}>
-        <div className="agent-citations__references">
-          {references.map((reference) => (
-            <a
-              key={`${reference.number}:${reference.href}`}
-              className="agent-citations__reference"
-              href={reference.href}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <span className="agent-citation-mark" aria-hidden>{reference.number}</span>
-              <span className="agent-citations__label">{reference.label}</span>
-              <span className="agent-citations__separator" aria-hidden>·</span>
-              <span className="agent-citations__host">{reference.host}</span>
-              <ExternalLink className="agent-citations__arrow" aria-hidden />
-            </a>
-          ))}
-        </div>
-      </AgentCollapsible>
+    <footer className="agent-citations" aria-label="Sources" data-agent-component="sources">
+      <DezinAgentContext
+        title="Sources"
+        count={references.length}
+        items={references.map((reference) => ({
+          id: `${reference.number}:${reference.href}`,
+          title: reference.label,
+          meta: reference.number,
+          summary: reference.host,
+          source: { label: reference.host, href: reference.href, kind: reference.number },
+        }))}
+      />
     </footer>
   );
 }
@@ -133,7 +112,16 @@ function CopyCodeButton({ code }: { code: string }) {
         void writeClipboard(code).then(() => setCopied(true)).catch(() => setCopied(false));
       }}
     >
-      {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
+      {copied ? (
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5" />
+        </svg>
+      ) : (
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="12" height="12" rx="2.5" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
       <span>{copied ? "Copied" : "Copy"}</span>
     </button>
   );
@@ -144,17 +132,24 @@ export function AgentCodeBlock({ code, language = "text" }: { code: string; lang
   return (
     <figure className="agent-code-block" data-agent-component="code-block">
       <figcaption className="agent-code-block__header">
-        <span className="agent-code-block__language"><Code2 aria-hidden />{language || "text"}</span>
+        <span className="agent-code-block__language">
+          <strong>Code</strong>
+          <small>{language || "text"}</small>
+        </span>
         <CopyCodeButton code={code} />
       </figcaption>
-      <div className="agent-code-block__body">
+      <pre className="agent-code-block__body">
         {lines.map((line, index) => (
-          <div className="agent-code-block__row" key={`${index}:${line}`}>
+          <span
+            className="agent-code-block__row"
+            key={`${index}:${line}`}
+            style={{ "--agent-line-index": index } as CSSProperties}
+          >
             <span className="agent-code-block__line" aria-hidden>{index + 1}</span>
             <code>{line || "\u00a0"}</code>
-          </div>
+          </span>
         ))}
-      </div>
+      </pre>
     </figure>
   );
 }
@@ -209,20 +204,25 @@ export function AgentFileDiff({ code }: { code: string }) {
   return (
     <figure className="agent-file-diff" data-agent-component="file-diff">
       <figcaption className="agent-file-diff__header">
-        <span className="agent-file-diff__file"><Code2 aria-hidden />{parsed.file}</span>
+        <span className="agent-file-diff__file">{parsed.file}</span>
         <span className="agent-file-diff__stats" aria-label={`${added} additions and ${removed} deletions`}>
           <span>+{added}</span><span>-{removed}</span>
         </span>
       </figcaption>
       <div className="agent-file-diff__body">
-        {parsed.rows.map((row) => (
-          <div key={row.key} className="agent-file-diff__row" data-kind={row.kind}>
-            <span className="agent-file-diff__line" aria-hidden>{row.oldLine ?? ""}</span>
-            <span className="agent-file-diff__line" aria-hidden>{row.newLine ?? ""}</span>
-            <span className="agent-file-diff__sign" aria-hidden>{row.kind === "add" ? "+" : row.kind === "delete" ? "−" : ""}</span>
-            <code>{row.text || "\u00a0"}</code>
-          </div>
-        ))}
+        <table aria-label={`Changes in ${parsed.file}`}>
+          <tbody>
+            {parsed.rows.map((row) => (
+              <tr key={row.key} className="agent-file-diff__row" data-kind={row.kind}>
+                <td className="agent-file-diff__line" aria-hidden>{row.oldLine ?? ""}</td>
+                <td className="agent-file-diff__line" aria-hidden>{row.newLine ?? ""}</td>
+                <td className="agent-file-diff__content">
+                  <code><span className="agent-file-diff__sign" aria-hidden>{row.kind === "add" ? "+" : row.kind === "delete" ? "−" : " "}</span>{row.text || "\u00a0"}</code>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </figure>
   );
@@ -252,26 +252,22 @@ function taskChecks(node: ReactNode): boolean[] {
 }
 
 function AgentTaskList({ children, className }: ComponentPropsWithoutRef<"ul">) {
-  const [open, setOpen] = useState(true);
-  const detailsId = useId();
   const checks = taskChecks(children);
   const complete = checks.filter(Boolean).length;
   const total = checks.length;
   const allComplete = total > 0 && complete === total;
   return (
-    <section className="agent-activity-card agent-task-list" data-agent-component="task-list" data-activity-kind="tasks" data-collapsed={!open || undefined} data-complete={allComplete || undefined}>
-      <button type="button" className="agent-activity-card__header agent-task-list__header" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <AgentActivityHeaderContent
-          icon={allComplete ? <Check /> : <ListTodo />}
-          label="To-dos"
-          meta={`${complete}/${total}`}
-          state={allComplete ? "complete" : "idle"}
-        />
-      </button>
-      <AgentCollapsible id={detailsId} className="agent-task-list__collapsible" open={open}>
+    <div className="agent-task-list" data-agent-component="task-list" data-activity-kind="tasks" data-complete={allComplete || undefined}>
+      <DezinAgentTaskRow
+        title="To-dos"
+        meta={`${complete}/${total}`}
+        status={allComplete ? "ready" : "running"}
+        statusLabel={allComplete ? "Completed" : "In progress"}
+        defaultOpen
+      >
         <ul className={cn("agent-task-list__items", className)}>{children}</ul>
-      </AgentCollapsible>
-    </section>
+      </DezinAgentTaskRow>
+    </div>
   );
 }
 
@@ -289,12 +285,17 @@ function AgentGeneratedImage({ src, alt = "", title }: ComponentPropsWithoutRef<
   useEffect(() => {
     setState(localSrc ? "loading" : src ? "blocked" : "failed");
   }, [localSrc, src]);
+  const statusLabel = state === "loading"
+    ? "Generating image"
+    : state === "ready"
+      ? "Generated image"
+      : state === "blocked"
+        ? "External image blocked"
+        : "Image unavailable";
   return (
     <figure className="agent-generated-image" data-agent-component="image-generation" data-state={state}>
-      <div className="agent-generated-image__canvas">
-        <span className="agent-generated-image__dots" aria-hidden />
-        <span className="agent-generated-image__glow" aria-hidden />
-        {localSrc ? (
+      {localSrc && state !== "failed" ? (
+        <div className="agent-generated-image__media">
           <img
             src={localSrc}
             alt={alt}
@@ -303,23 +304,25 @@ function AgentGeneratedImage({ src, alt = "", title }: ComponentPropsWithoutRef<
             onLoad={() => setState("ready")}
             onError={() => setState("failed")}
           />
-        ) : null}
-        <span className="agent-generated-image__badge">Image</span>
-        {state === "failed" || state === "blocked" ? <ImageIcon className="agent-generated-image__fallback" aria-hidden /> : null}
-      </div>
-      <figcaption>
-        <strong>{state === "loading"
-          ? "Generating image"
-          : state === "ready"
-            ? "Generated image"
-            : state === "blocked"
-              ? "External image blocked"
-              : "Image unavailable"}</strong>
-        {alt ? <span>“{alt}”</span> : null}
-        {state === "blocked" && externalHref ? (
-          <a className="agent-response-link" href={externalHref} target="_blank" rel="noreferrer">Open image explicitly</a>
-        ) : null}
-      </figcaption>
+          {state === "loading" ? (
+            <div className="agent-generated-image__loading">
+              <DezinAgentLoadingState label={alt ? `Generating image · ${alt}` : "Generating image"} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {state === "failed" || state === "blocked" ? (
+        <div className="agent-generated-image__message">
+          <strong>{statusLabel}</strong>
+          {alt ? <span>{alt}</span> : null}
+          {state === "blocked" && externalHref ? (
+            <a className="agent-response-link" href={externalHref} target="_blank" rel="noreferrer">Open image explicitly</a>
+          ) : null}
+        </div>
+      ) : null}
+      {state === "ready" ? (
+        <figcaption><span className="agent-visually-hidden">Generated image. </span>{alt}</figcaption>
+      ) : null}
     </figure>
   );
 }
@@ -354,8 +357,12 @@ function AgentCitationLink({ children, href, title }: ComponentPropsWithoutRef<"
 function AgentTable({ children }: ComponentPropsWithoutRef<"table">) {
   return (
     <div className="agent-data-table" data-agent-component="data-table">
-      <div className="agent-data-table__scroll">
-        <table>{children}</table>
+      <div
+        className="agent-data-table__scroll"
+        tabIndex={0}
+        aria-label="Agent output table. Scroll horizontally to view all columns."
+      >
+        <table className="agent-data-table__table">{children}</table>
       </div>
     </div>
   );
@@ -383,10 +390,10 @@ export const agentMarkdownComponents = {
     : inlineCode({ children }),
   pre: AgentPre,
   table: AgentTable,
-  thead: ({ children }: ComponentPropsWithoutRef<"thead">) => <thead>{children}</thead>,
-  tbody: ({ children }: ComponentPropsWithoutRef<"tbody">) => <tbody>{children}</tbody>,
-  tr: ({ children }: ComponentPropsWithoutRef<"tr">) => <tr>{children}</tr>,
-  th: ({ children, colSpan, rowSpan, scope }: ComponentPropsWithoutRef<"th">) => <th colSpan={colSpan} rowSpan={rowSpan} scope={scope}>{children}</th>,
-  td: ({ children, colSpan, rowSpan }: ComponentPropsWithoutRef<"td">) => <td colSpan={colSpan} rowSpan={rowSpan}>{children}</td>,
+  thead: ({ children }: ComponentPropsWithoutRef<"thead">) => <thead className="agent-data-table__head">{children}</thead>,
+  tbody: ({ children }: ComponentPropsWithoutRef<"tbody">) => <tbody className="agent-data-table__body">{children}</tbody>,
+  tr: ({ children }: ComponentPropsWithoutRef<"tr">) => <tr className="agent-data-table__row">{children}</tr>,
+  th: ({ children, colSpan, rowSpan, scope }: ComponentPropsWithoutRef<"th">) => <th className="agent-data-table__cell agent-data-table__cell--heading" colSpan={colSpan} rowSpan={rowSpan} scope={scope}>{children}</th>,
+  td: ({ children, colSpan, rowSpan }: ComponentPropsWithoutRef<"td">) => <td className="agent-data-table__cell" colSpan={colSpan} rowSpan={rowSpan}>{children}</td>,
   img: AgentGeneratedImage,
 } as unknown as Components;

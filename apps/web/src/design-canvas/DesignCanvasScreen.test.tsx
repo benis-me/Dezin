@@ -1567,7 +1567,7 @@ test("Agent transcripts render a bounded recent window and page older history on
   }));
   vi.mocked(api.getThread).mockResolvedValue({ ...thread, messages });
 
-  render(
+  const rendered = render(
     <CanvasAgentPanel
       projectId={PROJECT_ID}
       api={api}
@@ -1585,12 +1585,12 @@ test("Agent transcripts render a bounded recent window and page older history on
 
   expect(await screen.findByText("Message 20")).toBeInTheDocument();
   expect(screen.queryByText("Message 8")).not.toBeInTheDocument();
-  expect(screen.getAllByLabelText("Implementation export · ready")).toHaveLength(6);
+  expect(rendered.container.querySelectorAll('[data-dezin-agent-primitive="task"][data-status="ready"]')).toHaveLength(6);
   expect(screen.getByRole("button", { name: "Show earlier activity 16" })).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Show earlier activity 16" }));
   expect(await screen.findByText("Message 1")).toBeInTheDocument();
-  expect(screen.getAllByLabelText("Implementation export · ready")).toHaveLength(12);
+  expect(rendered.container.querySelectorAll('[data-dezin-agent-primitive="task"][data-status="ready"]')).toHaveLength(12);
   expect(screen.getByRole("button", { name: "Show earlier activity 2" })).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Show earlier activity 2" }));
@@ -1635,7 +1635,7 @@ test("Agent transcript interleaves cards by creation time and always appends a n
 
   await screen.findByText("Newest request");
   const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
-    ".design-canvas-agent__message, .design-canvas-agent__activity",
+    ".design-canvas-agent__message, .design-canvas-agent__job",
   )];
   expect(timeline.map((item) => item.dataset.role ?? item.dataset.jobId)).toEqual([
     "user",
@@ -1688,14 +1688,16 @@ test("a submitted Agent turn stays above a Job that appears before the thread re
     .toHaveTextContent("Generate a new direction");
 
   rendered.rerender(panel([thinkingJob]));
-  await screen.findByRole("status", { name: "Thinking" });
+  await waitFor(() => expect(rendered.container.querySelector(`[data-job-id="${thinkingJob.id}"]`)).toBeInTheDocument());
   const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
-    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+    ".design-canvas-agent__message, .design-canvas-agent__job",
   )];
   expect(timeline).toHaveLength(2);
   expect(timeline[0]).toHaveAttribute("data-role", "user");
   expect(timeline[0]).toHaveTextContent("Generate a new direction");
-  expect(timeline[1]).toHaveAttribute("aria-label", "Thinking");
+  expect(timeline[1]).toHaveAttribute("data-job-id", thinkingJob.id);
+  expect(timeline[1].querySelector('[data-dezin-agent-primitive="loading"]')).toHaveAttribute("aria-label", "Planning the canvas");
+  expect(timeline[1].querySelector('[data-dezin-agent-primitive="thinking"]')).toHaveAttribute("data-active", "true");
 
   resolveSubmit();
   await waitFor(() => expect(api.getThread).toHaveBeenCalledTimes(2));
@@ -1883,7 +1885,7 @@ test("Node and Main Agent composers both fail closed without a compatible runtim
   expect(api.submitAgentTurn).not.toHaveBeenCalled();
 });
 
-test("A new Agent Job renders one Thinking placeholder, not two", async () => {
+test("A new Agent Job renders one Dezin Loading State and one Thinking trace, not duplicate placeholders", async () => {
   const { api } = createCanvasApi(canvas());
   const thinkingJob = { ...job, id: "job-thinking", status: "running" as const, activity: [], finishedAt: null };
   vi.mocked(api.getThread).mockResolvedValue({
@@ -1906,18 +1908,21 @@ test("A new Agent Job renders one Thinking placeholder, not two", async () => {
     />,
   );
 
-  const thinking = await screen.findByRole("status", { name: "Thinking" });
-  expect(within(thinking).getByText("Thinking…")).toBeInTheDocument();
-  expect(screen.queryByLabelText("Main Agent · running")).not.toBeInTheDocument();
+  await waitFor(() => expect(rendered.container.querySelector(`[data-job-id="${thinkingJob.id}"]`)).toBeInTheDocument());
+  const task = rendered.container.querySelector<HTMLElement>(`[data-job-id="${thinkingJob.id}"]`)!;
+  expect(task.querySelectorAll('[data-dezin-agent-primitive="loading"]')).toHaveLength(1);
+  expect(within(task).getByRole("status", { name: "Planning the canvas" })).toBeInTheDocument();
+  expect(task.querySelectorAll('[data-dezin-agent-primitive="thinking"]')).toHaveLength(1);
+  expect(within(task).getByRole("button", { name: "Thinking" })).toHaveAttribute("aria-expanded", "true");
   const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
-    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+    ".design-canvas-agent__message, .design-canvas-agent__job",
   )];
   expect(timeline).toHaveLength(2);
   expect(timeline[0]).toHaveAttribute("data-role", "user");
-  expect(timeline[1]).toHaveAttribute("aria-label", "Thinking");
+  expect(timeline[1]).toHaveAttribute("data-job-id", thinkingJob.id);
 });
 
-test("a reserved Main Agent reply is represented only by Thinking directly after its user turn", async () => {
+test("a reserved Main Agent reply is represented only by the live Dezin task directly after its user turn", async () => {
   const { api } = createCanvasApi(canvas());
   const thinkingJob = {
     ...job,
@@ -1953,15 +1958,18 @@ test("a reserved Main Agent reply is represented only by Thinking directly after
     />,
   );
 
-  const thinking = await screen.findByRole("status", { name: "Thinking" });
+  await waitFor(() => expect(rendered.container.querySelector(`[data-job-id="${thinkingJob.id}"]`)).toBeInTheDocument());
+  const liveTask = rendered.container.querySelector<HTMLElement>(`[data-job-id="${thinkingJob.id}"]`)!;
   expect(screen.queryByText(reservedReply)).not.toBeInTheDocument();
   const timeline = [...rendered.container.querySelectorAll<HTMLElement>(
-    ".design-canvas-agent__message, .design-canvas-agent__thinking",
+    ".design-canvas-agent__message, .design-canvas-agent__job",
   )];
   expect(timeline).toHaveLength(2);
   expect(timeline[0]).toHaveAttribute("data-role", "user");
   expect(timeline[0]).toHaveTextContent("Refine the visual hierarchy");
-  expect(timeline[1]).toBe(thinking);
+  expect(timeline[1]).toBe(liveTask);
+  expect(liveTask.querySelectorAll('[data-dezin-agent-primitive="loading"]')).toHaveLength(1);
+  expect(liveTask.querySelectorAll('[data-dezin-agent-primitive="thinking"]')).toHaveLength(1);
 });
 
 test("A completed conversational Main Agent turn renders as a message without an activity card", async () => {
@@ -1999,7 +2007,8 @@ test("A completed conversational Main Agent turn renders as a message without an
   );
 
   expect(await screen.findByText("你好！有什么我可以帮你的？")).toBeInTheDocument();
-  expect(screen.queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
+  expect(document.querySelector(`[data-job-id="${conversationJob.id}"]`)).not.toBeInTheDocument();
+  expect(document.querySelector('[data-dezin-agent-primitive="task"]')).not.toBeInTheDocument();
   expect(screen.queryByText("Canvas plan")).not.toBeInTheDocument();
 });
 
@@ -2047,10 +2056,13 @@ test("Main Agent expands the latest visible Job when a newer conversation-only t
     />,
   );
 
-  const exportCard = await screen.findByLabelText("Implementation export · cancelled");
-  expect(within(exportCard).getByRole("button", { name: /Implementation export/ }))
-    .toHaveAttribute("aria-expanded", "true");
-  expect(screen.queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
+  await waitFor(() => expect(document.querySelector(`[data-job-id="${exportJob.id}"]`)).toBeInTheDocument());
+  const exportCard = document.querySelector<HTMLElement>(`[data-job-id="${exportJob.id}"]`)!;
+  const exportTask = exportCard.querySelector<HTMLElement>('[data-dezin-agent-primitive="task"]')!;
+  expect(exportTask).toHaveAttribute("data-status", "cancelled");
+  await waitFor(() => expect(within(exportTask).getByRole("button", { name: "Implementation export · cancelled" }))
+    .toHaveAttribute("aria-expanded", "true"));
+  expect(document.querySelector(`[data-job-id="${conversationJob.id}"]`)).not.toBeInTheDocument();
 });
 
 test("Node Agent activity stays chronological so a successful retry is the visible tail", async () => {
@@ -2093,14 +2105,20 @@ test("Node Agent activity stays chronological so a successful retry is the visib
 
   const failedCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${failed.id}"]`)!;
   const readyCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${ready.id}"]`)!;
-  expect(failedCard).toHaveAttribute("data-agent-component", "task-row");
-  expect(within(failedCard).getByRole("button", { name: /Landing page generation/ }))
+  const failedTask = failedCard.querySelector<HTMLElement>('[data-dezin-agent-primitive="task"]')!;
+  const readyTask = readyCard.querySelector<HTMLElement>('[data-dezin-agent-primitive="task"]')!;
+  expect(failedTask).toHaveAttribute("data-status", "failed");
+  expect(within(failedTask).getByRole("button", { name: "Landing page generation · failed" }))
     .toHaveAttribute("aria-expanded", "false");
-  expect(within(readyCard).getByRole("button", { name: /Landing page generation/ }))
+  expect(within(readyTask).getByRole("button", { name: "Landing page generation · ready" }))
     .toHaveAttribute("aria-expanded", "true");
-  expect(readyCard).not.toHaveAttribute("data-collapsed");
-  expect(within(failedCard).queryByText("Older attempt failed")).not.toBeInTheDocument();
-  fireEvent.click(failedCard.querySelector<HTMLButtonElement>(".design-canvas-agent__activity-toggle")!);
+  expect(readyTask).toHaveAttribute("data-open", "true");
+  const failedRegion = failedTask.querySelector<HTMLElement>(".dezin-agent-task-row__region")!;
+  expect(failedRegion).toHaveAttribute("aria-hidden", "true");
+  expect(failedRegion).toHaveAttribute("inert");
+  fireEvent.click(within(failedTask).getByRole("button", { name: "Landing page generation · failed" }));
+  expect(failedRegion).toHaveAttribute("aria-hidden", "false");
+  expect(failedRegion).not.toHaveAttribute("inert");
   expect(await within(failedCard).findByText("Older attempt failed")).toBeInTheDocument();
   expect([...rendered.container.querySelectorAll<HTMLElement>("[data-job-id]")]
     .map((element) => element.dataset.jobId)).toEqual([failed.id, ready.id]);
@@ -2141,7 +2159,9 @@ test("a failed Node Job exposes Repair & retry with visible retryable failure fe
     />,
   );
 
-  const retry = await screen.findByRole("button", { name: "Repair & retry Landing page generation" });
+  const approval = await screen.findByRole("group", { name: "Repair this run?" });
+  expect(approval).toHaveAttribute("data-dezin-agent-primitive", "approval");
+  const retry = within(approval).getByRole("button", { name: "Repair & retry" });
   await user.click(retry);
   expect(await screen.findByText(
     "Couldn't retry Landing page generation. The failed Job could not be reopened",
@@ -2198,17 +2218,20 @@ test("Main Agent groups delegated work under semantic execution labels without r
   expect(within(firstTurn).getByText("6 child Agents")).toBeInTheDocument();
   expect(within(firstTurn).getByText("Canvas execution")).toBeInTheDocument();
   expect(within(firstTurn).queryByText("Build six launch surfaces")).not.toBeInTheDocument();
-  expect(within(firstTurn).queryByLabelText("Main Agent · ready")).not.toBeInTheDocument();
+  const parentTask = firstTurn.querySelector<HTMLElement>(`[data-job-id="${parentA.id}"] [data-dezin-agent-primitive="task"]`)!;
+  expect(parentTask).toHaveAttribute("data-status", "ready");
   for (const target of childNodes.slice(0, 6)) {
-    const activity = within(firstTurn).getByLabelText(`Node generation · ${target.name} · queued`);
+    const activity = firstTurn.querySelector<HTMLElement>(`[data-job-id="job-child-${childNodes.indexOf(target) + 1}"]`)!;
     expect(activity).toHaveAttribute("data-node-id", target.id);
     expect(activity).toHaveAttribute("data-parent-job-id", parentA.id);
+    expect(activity.querySelector('[data-dezin-agent-primitive="task"]')).toHaveAttribute("data-status", "queued");
   }
   expect(rendered.container.querySelectorAll('[data-job-id^="job-child-"]')).toHaveLength(7);
 
   const secondTurn = screen.getByLabelText("Canvas execution · 1 child Agent");
   expect(within(secondTurn).getByText("1 child Agent")).toBeInTheDocument();
-  expect(within(secondTurn).getByLabelText("Node generation · Search · queued")).toBeInTheDocument();
+  expect(secondTurn.querySelector(`[data-job-id="job-child-7"] [data-dezin-agent-primitive="task"][data-status="queued"]`))
+    .toBeInTheDocument();
 });
 
 test("Main Agent keeps compact failed and cancelled parent outcomes with or without child work", async () => {
@@ -2271,17 +2294,21 @@ test("Main Agent keeps compact failed and cancelled parent outcomes with or with
 
   await waitFor(() => expect(rendered.container.querySelector(`[data-parent-job-id="${failedParent.id}"]`)).toBeInTheDocument());
   const failedGroup = rendered.container.querySelector<HTMLElement>(`[data-parent-job-id="${failedParent.id}"]`)!;
-  const failedOutcome = failedGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
-  expect(failedOutcome).toHaveTextContent("Failed");
-  expect(failedOutcome).toHaveTextContent("The canvas plan could not be applied");
-  await userEvent.click(within(failedGroup).getByRole("button", { name: "Repair & retry Canvas plan" }));
+  const failedTask = failedGroup.querySelector<HTMLElement>(`[data-job-id="${failedParent.id}"] [data-dezin-agent-primitive="task"]`)!;
+  expect(failedTask).toHaveAttribute("data-status", "failed");
+  await userEvent.click(within(failedTask).getByRole("button", { name: "Canvas plan · failed" }));
+  const failedApproval = within(failedTask).getByRole("group", { name: "Repair this run?" });
+  expect(failedApproval).toHaveTextContent("The canvas plan could not be applied");
+  await userEvent.click(within(failedApproval).getByRole("button", { name: "Repair & retry" }));
   expect(onRetryJob).toHaveBeenCalledWith(failedParent.id);
   const cancelledGroup = rendered.container.querySelector<HTMLElement>(`[data-parent-job-id="${cancelledParent.id}"]`)!;
-  const cancelledOutcome = cancelledGroup.querySelector<HTMLElement>(".design-canvas-agent__activity-group-outcome")!;
-  expect(cancelledOutcome).toHaveTextContent("Cancelled");
+  const cancelledTask = cancelledGroup.querySelector<HTMLElement>(`[data-job-id="${cancelledParent.id}"] [data-dezin-agent-primitive="task"]`)!;
+  expect(cancelledTask).toHaveAttribute("data-status", "cancelled");
+  expect(cancelledTask).toHaveTextContent("Cancelled");
+  expect(cancelledTask.querySelector('[data-dezin-agent-primitive="approval"]')).not.toBeInTheDocument();
   expect(within(cancelledGroup).queryByText(/Cancellation internals/)).not.toBeInTheDocument();
-  const latestChild = within(cancelledGroup).getByLabelText("Node generation · Checkout · ready");
-  expect(within(latestChild).getByRole("button", { name: /Checkout generation/ }))
+  const latestChild = cancelledGroup.querySelector<HTMLElement>(`[data-job-id="${child.id}"] [data-dezin-agent-primitive="task"]`)!;
+  expect(within(latestChild).getByRole("button", { name: "Checkout generation · ready" }))
     .toHaveAttribute("aria-expanded", "true");
 });
 
@@ -2321,15 +2348,18 @@ test.each(["ready", "failed", "cancelled"] as const)(
       />,
     );
 
-    const record = await screen.findByLabelText(`Node generation · Phase node · ${status}`);
-    expect(within(record).getByRole("button", { name: /Phase node generation/ }))
+    await waitFor(() => expect(rendered.container.querySelector(`[data-job-id="${terminalJob.id}"]`)).toBeInTheDocument());
+    const record = rendered.container.querySelector<HTMLElement>(`[data-job-id="${terminalJob.id}"]`)!;
+    const task = record.querySelector<HTMLElement>('[data-dezin-agent-primitive="task"]')!;
+    expect(task).toHaveAttribute("data-status", status);
+    expect(within(task).getByRole("button", { name: `Phase node generation · ${status}` }))
       .toHaveAttribute("aria-expanded", "true");
-    await waitFor(() => expect(record.querySelector('[data-activity-kind="thinking"]')).toBeInTheDocument());
-    const reasoning = record.querySelector<HTMLElement>('[data-activity-kind="thinking"]')!;
+    const reasoning = task.querySelector<HTMLElement>('[data-dezin-agent-primitive="thinking"]')!;
     expect(reasoning).not.toHaveAttribute("data-active");
-    expect(reasoning.querySelector(".agent-activity-card__marker")).toHaveAttribute("data-state", "complete");
-    expect(reasoning.querySelector(".agent-activity-card__pulse")).toBeNull();
-    expect(within(reasoning).getByText("Completed")).toBeInTheDocument();
+    expect(within(reasoning).getByRole("button", { name: "Thought process" })).toHaveAttribute("aria-expanded", "true");
+    expect(reasoning.querySelectorAll('li[data-state="done"]')).toHaveLength(1);
+    expect(reasoning.querySelector('li[data-state="active"]')).toBeNull();
+    expect(task.querySelector('[data-dezin-agent-primitive="loading"]')).not.toBeInTheDocument();
     rendered.unmount();
   },
 );
@@ -2368,29 +2398,40 @@ test("running Jobs complete Thinking after later work and reactivate it only for
     />
   );
   const rendered = render(panel([runningJob]));
-  const record = await screen.findByLabelText("Node generation · Live phase · running");
-  const thinking = () => record.querySelector<HTMLElement>('[data-activity-kind="thinking"]')!;
-  const activeKinds = () => [...record.querySelectorAll<HTMLElement>('[data-activity-kind][data-active="true"]')]
-    .map((element) => element.dataset.activityKind);
+  await waitFor(() => expect(rendered.container.querySelector(`[data-job-id="${runningJob.id}"]`)).toBeInTheDocument());
+  const record = rendered.container.querySelector<HTMLElement>(`[data-job-id="${runningJob.id}"]`)!;
+  const thinking = () => record.querySelector<HTMLElement>('[data-agent-output-block="trace"] [data-dezin-agent-primitive="thinking"]')!;
+  const assertThinkingComplete = () => {
+    expect(thinking()).not.toHaveAttribute("data-active");
+    expect(thinking().querySelector('li[data-state="active"]')).toBeNull();
+    expect(thinking().querySelectorAll('li[data-state="done"]')).toHaveLength(1);
+  };
 
   await waitFor(() => expect(thinking()).toHaveAttribute("data-active", "true"));
-  expect(thinking().querySelector(".agent-activity-card__pulse")).toBeInTheDocument();
-  expect(within(thinking()).getByText("Live")).toBeInTheDocument();
-  expect(activeKinds()).toEqual(["thinking"]);
+  expect(thinking().querySelector('li[data-state="active"]')).toHaveTextContent("Inspect the canvas.");
+  expect(record.querySelector('[data-agent-output-block="loading"] [data-dezin-agent-primitive="loading"]'))
+    .toHaveAttribute("aria-label", "Generating Live phase");
 
-  const laterActivities: Array<{ activity: DesignJob["activity"]; phase: string }> = [
-    { activity: [reasoning, { id: "tool-later", kind: "tool", text: "Writing index.html", createdAt: 3 }], phase: "actions" },
-    { activity: [reasoning, { id: "status-later", kind: "status", text: "Validating output", createdAt: 3 }], phase: "actions" },
+  const laterActivities: Array<{ activity: DesignJob["activity"]; phase: "tools" | "search" | "image" }> = [
+    { activity: [reasoning, { id: "tool-later", kind: "tool", text: "Writing index.html", createdAt: 3 }], phase: "tools" },
+    { activity: [reasoning, { id: "status-later", kind: "status", text: "Validating output", createdAt: 3 }], phase: "tools" },
     { activity: [reasoning, { id: "search-later", kind: "text", text: "Searching the web for “editorial grids”", createdAt: 3 }], phase: "search" },
-    { activity: [reasoning, { id: "image-later", kind: "text", text: "Generating an image “Tokyo at dusk”", createdAt: 3 }], phase: "image-generation" },
+    { activity: [reasoning, { id: "image-later", kind: "text", text: "Generating an image “Tokyo at dusk”", createdAt: 3 }], phase: "image" },
   ];
   for (const { activity, phase } of laterActivities) {
     rendered.rerender(panel([{ ...runningJob, activity, updatedAt: 3 }]));
     await waitFor(() => expect(thinking()).not.toHaveAttribute("data-active"));
-    expect(thinking().querySelector(".agent-activity-card__pulse")).toBeNull();
-    expect(thinking().querySelector(".agent-activity-card__marker")).toHaveAttribute("data-state", "complete");
-    expect(within(thinking()).getByText("Completed")).toBeInTheDocument();
-    expect(activeKinds()).toEqual([phase]);
+    assertThinkingComplete();
+    if (phase === "tools") {
+      const tools = record.querySelector<HTMLElement>('[data-agent-output-block="tool-group"] [data-dezin-agent-primitive="tools"]')!;
+      expect(tools.querySelectorAll('li[data-state="active"]')).toHaveLength(1);
+    } else if (phase === "search") {
+      expect(record.querySelector('[data-agent-output-block="search"] [data-dezin-agent-primitive="thinking"]'))
+        .toHaveAttribute("data-active", "true");
+    } else {
+      expect(record.querySelector('[data-agent-output-block="image"] [data-dezin-agent-primitive="loading"]'))
+        .toHaveAttribute("aria-label", "Generating image · Tokyo at dusk");
+    }
   }
 
   const cumulativeActivities: DesignJob["activity"] = [
@@ -2406,12 +2447,12 @@ test("running Jobs complete Thinking after later work and reactivate it only for
     updatedAt: 6,
   }]));
   await waitFor(() => expect(thinking()).toHaveAttribute("data-active", "true"));
-  expect(thinking().querySelector(".agent-activity-card__pulse")).toBeInTheDocument();
-  expect(within(thinking()).getByText("Live")).toBeInTheDocument();
-  expect(activeKinds()).toEqual(["thinking"]);
-  expect(record.querySelector('[data-activity-kind="actions"] li[data-state="active"]')).toBeNull();
-  expect(record.querySelector('[data-activity-kind="search"]')).not.toHaveAttribute("data-active");
-  expect(record.querySelector('[data-activity-kind="image-generation"]')).not.toHaveAttribute("data-active");
+  expect(thinking().querySelector('li[data-state="active"]')).toHaveTextContent("Review the generated hierarchy.");
+  expect(record.querySelector('[data-agent-output-block="tool-group"] li[data-state="active"]')).toBeNull();
+  expect(record.querySelector('[data-agent-output-block="search"] [data-dezin-agent-primitive="thinking"]'))
+    .not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-agent-output-block="image"] [data-dezin-agent-primitive="thinking"]'))
+    .not.toHaveAttribute("data-active");
 
   rendered.rerender(panel([{
     ...runningJob,
@@ -2420,11 +2461,14 @@ test("running Jobs complete Thinking after later work and reactivate it only for
     updatedAt: 7,
     finishedAt: 7,
   }]));
-  await waitFor(() => expect(activeKinds()).toEqual([]));
-  expect(record.querySelector('[data-activity-kind="thinking"]')).not.toHaveAttribute("data-active");
-  expect(record.querySelector('[data-activity-kind="actions"] li[data-state="active"]')).toBeNull();
-  expect(record.querySelector('[data-activity-kind="search"]')).not.toHaveAttribute("data-active");
-  expect(record.querySelector('[data-activity-kind="image-generation"]')).not.toHaveAttribute("data-active");
+  await waitFor(() => expect(record.querySelector('[data-dezin-agent-primitive="task"]')).toHaveAttribute("data-status", "ready"));
+  expect(record.querySelector('[data-agent-output-block="loading"]')).not.toBeInTheDocument();
+  expect(thinking()).not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-agent-output-block="tool-group"] li[data-state="active"]')).toBeNull();
+  expect(record.querySelector('[data-agent-output-block="search"] [data-dezin-agent-primitive="thinking"]'))
+    .not.toHaveAttribute("data-active");
+  expect(record.querySelector('[data-agent-output-block="image"] [data-dezin-agent-primitive="thinking"]'))
+    .not.toHaveAttribute("data-active");
 });
 
 test("Agent transcript follows live updates only while the reader remains near the tail", async () => {
@@ -2486,10 +2530,10 @@ test("Job status changes have a dedicated polite atomic announcement", async () 
     />,
   );
   const card = rendered.container.querySelector<HTMLElement>(`[data-job-id="${running.id}"]`)!;
-  const status = within(card).getByRole("status");
+  const status = card.querySelector<HTMLElement>('.agent-visually-hidden[role="status"]')!;
   expect(status).toHaveAttribute("aria-live", "polite");
   expect(status).toHaveAttribute("aria-atomic", "true");
-  expect(status).toHaveTextContent("Landing page generation: Working");
+  expect(status).toHaveTextContent("Landing page generation: running");
 });
 
 test("Main Agent toggles from the topbar, sees canvas scope, and submits orchestration turns", async () => {
@@ -2692,13 +2736,18 @@ test("Export opens Main Agent and keeps the implementation job visible through c
     { agentCommand: "claude", model: "opus" },
   ));
   expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
-  expect(await screen.findByLabelText("Implementation export · ready")).toBeInTheDocument();
-  expect(screen.getAllByText("Implementation export")).toHaveLength(1);
-  expect(screen.getByText("Export ready")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: /Actions/ }));
-  expect(screen.getByText("High-fidelity implementation ready")).toBeInTheDocument();
-  expect(screen.getByTitle("/tmp/editorial/design/exports/export-1")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Reveal export" }));
+  await waitFor(() => expect(document.querySelector(`[data-job-id="${exportJob.id}"]`)).toBeInTheDocument());
+  const exportRecord = document.querySelector<HTMLElement>(`[data-job-id="${exportJob.id}"]`)!;
+  const exportTask = exportRecord.querySelector<HTMLElement>('[data-dezin-agent-primitive="task"]')!;
+  expect(exportTask).toHaveAttribute("data-status", "ready");
+  expect(within(exportTask).getByRole("button", { name: "Implementation export · ready" }))
+    .toHaveAttribute("aria-expanded", "true");
+  const recommendation = within(exportTask).getByRole("group", { name: "Export ready" });
+  expect(recommendation).toHaveAttribute("data-dezin-agent-primitive", "recommendation");
+  await user.click(within(exportTask).getByRole("button", { name: "1 action" }));
+  expect(within(exportTask).getByText("High-fidelity implementation ready")).toBeInTheDocument();
+  expect(within(recommendation).getByTitle("/tmp/editorial/design/exports/export-1")).toBeInTheDocument();
+  await user.click(within(recommendation).getByRole("button", { name: "Reveal export" }));
   await waitFor(() => expect(revealExport).toHaveBeenCalledWith("export-1"));
   expect(await screen.findByText("Opened in Finder.")).toBeInTheDocument();
 });

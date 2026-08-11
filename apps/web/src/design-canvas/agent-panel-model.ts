@@ -86,45 +86,80 @@ interface AgentOutputMetadataBlockBase {
   phase: null;
 }
 
-export interface AgentOutcomeOutputBlock extends AgentOutputMetadataBlockBase {
-  type: "outcome";
-  status: Extract<DesignJob["status"], "ready" | "cancelled" | "superseded">;
+export interface AgentLoadingOutputBlock {
+  type: "loading";
+  id: string;
+  createdAt: number;
+  active: true;
+  phase: null;
+  status: Extract<DesignJob["status"], "queued" | "running" | "validating">;
   label: string;
-  durationMs: number;
+  startedAt: number;
+}
+
+export interface AgentContextItemModel {
+  id: string;
+  label: string;
+  value: string;
+  detail?: string;
+}
+
+export interface AgentContextOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "context";
+  items: AgentContextItemModel[];
+}
+
+export interface AgentApprovalOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "approval";
+  title: string;
+  detail: string;
+  actionLabel: string;
+}
+
+export interface AgentRecommendationOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "recommendation";
+  title: string;
+  description: string;
+  actionLabel: string | null;
   versionId: string | null;
+  exportId: string | null;
 }
 
-export interface AgentErrorOutputBlock extends AgentOutputMetadataBlockBase {
-  type: "error";
-  status: "failed";
-  message: string | null;
-  durationMs: number;
+export interface AgentInsightItemModel {
+  id: string;
+  label: string;
+  value: string;
+  tone?: "neutral" | "positive" | "critical";
 }
 
-export interface AgentExportOutputBlock extends AgentOutputMetadataBlockBase {
-  type: "export";
-  exportId: string;
-  status: DesignJob["status"];
+export interface AgentInsightsOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "insights";
+  title: string;
+  items: AgentInsightItemModel[];
 }
 
 export interface AgentOutputBlockRegistry {
+  loading: AgentLoadingOutputBlock;
   trace: AgentTraceOutputBlock;
   "tool-group": AgentToolGroupOutputBlock;
   search: AgentSearchOutputBlock;
   image: AgentImageOutputBlock;
-  outcome: AgentOutcomeOutputBlock;
-  error: AgentErrorOutputBlock;
-  export: AgentExportOutputBlock;
+  context: AgentContextOutputBlock;
+  approval: AgentApprovalOutputBlock;
+  recommendation: AgentRecommendationOutputBlock;
+  insights: AgentInsightsOutputBlock;
 }
 
 export const AGENT_OUTPUT_BLOCK_TYPES = [
+  "loading",
   "trace",
   "tool-group",
   "search",
   "image",
-  "outcome",
-  "error",
-  "export",
+  "context",
+  "approval",
+  "recommendation",
+  "insights",
 ] as const satisfies readonly (keyof AgentOutputBlockRegistry)[];
 
 export type AgentOutputBlockType = (typeof AGENT_OUTPUT_BLOCK_TYPES)[number];
@@ -134,6 +169,10 @@ export interface AgentOutputModel {
   jobId: string;
   activePhase: AgentActivityPhase | null;
   blocks: AgentOutputBlock[];
+}
+
+export interface BuildAgentOutputModelOptions {
+  nodeName?: string;
 }
 
 export interface AgentTranscriptPage {
@@ -307,7 +346,7 @@ export function buildAgentTranscriptPage({
     if (item.kind === "node-job") {
       latestVisibleJobId = item.job.id;
     } else if (item.kind === "main-job-group") {
-      latestVisibleJobId = item.group.jobs.filter((job) => job.kind !== "main-agent").at(-1)?.id ?? null;
+      latestVisibleJobId = item.group.jobs.at(-1)?.id ?? null;
     }
   }
   return {
@@ -409,7 +448,134 @@ function searchQuery(activities: readonly DesignJobActivity[]): string {
     ?? (compactActivityText(first.text).replace(/^.*?\bsearch(?:ing|ed)?\b\s*/i, "") || "the web");
 }
 
-export function buildAgentOutputModel(job: DesignJob): AgentOutputModel {
+function outputContextItems(
+  job: DesignJob,
+  options: BuildAgentOutputModelOptions,
+): AgentContextItemModel[] {
+  const items: AgentContextItemModel[] = [];
+  if (job.nodeId !== null) {
+    items.push({
+      id: `${job.id}:context:target`,
+      label: "Target",
+      value: options.nodeName ?? job.nodeId,
+      ...(options.nodeName ? { detail: job.nodeId } : {}),
+    });
+  }
+  if (job.canvasRevision !== null || job.contextHash !== null) {
+    items.push({
+      id: `${job.id}:context:canvas`,
+      label: "Canvas snapshot",
+      value: job.canvasRevision === null ? "Frozen context" : `Revision ${job.canvasRevision}`,
+      ...(job.contextHash === null ? {} : { detail: `Context ${job.contextHash.slice(0, 8)}` }),
+    });
+  }
+  if (job.expectedHeadVersionId !== null) {
+    items.push({
+      id: `${job.id}:context:head`,
+      label: "Expected head",
+      value: job.expectedHeadVersionId,
+    });
+  }
+  items.push({
+    id: `${job.id}:context:runtime`,
+    label: "Runtime",
+    value: job.runnerId,
+    ...(job.model === null ? {} : { detail: job.model }),
+  });
+  if (job.parentJobId !== null) {
+    items.push({
+      id: `${job.id}:context:lineage`,
+      label: "Orchestrated by",
+      value: job.parentJobId,
+    });
+  }
+  return items;
+}
+
+function loadingLabel(job: DesignJob, nodeName?: string): string {
+  if (job.status === "validating") return "Validating the result";
+  switch (job.kind) {
+    case "node-generation": return `Generating ${nodeName ?? "the node"}`;
+    case "node-analysis": return `Analyzing ${nodeName ?? "the node"}`;
+    case "main-agent": return "Planning the canvas";
+    case "implementation-export": return "Building the implementation export";
+  }
+}
+
+function outputRecommendation(job: DesignJob, nodeName?: string): AgentRecommendationOutputBlock {
+  const base: AgentOutputMetadataBlockBase = {
+    id: `${job.id}:recommendation`,
+    createdAt: job.finishedAt ?? job.updatedAt,
+    active: false,
+    phase: null,
+  };
+  if (job.kind === "implementation-export" && job.exportId !== null) {
+    return {
+      ...base,
+      type: "recommendation",
+      title: "Export ready",
+      description: "Reveal the verified implementation output in Finder.",
+      actionLabel: "Reveal export",
+      versionId: null,
+      exportId: job.exportId,
+    };
+  }
+  if (job.versionId !== null) {
+    return {
+      ...base,
+      type: "recommendation",
+      title: "Version published",
+      description: `${nodeName ?? "The generated result"} is ready to review on the canvas.`,
+      actionLabel: null,
+      versionId: job.versionId,
+      exportId: null,
+    };
+  }
+  return {
+    ...base,
+    type: "recommendation",
+    title: job.kind === "main-agent" ? "Canvas plan complete" : "Task complete",
+    description: job.kind === "main-agent"
+      ? "Review the updated canvas and continue from the result."
+      : "Review the completed result in the conversation.",
+    actionLabel: null,
+    versionId: null,
+    exportId: null,
+  };
+}
+
+function outputInsights(job: DesignJob, durationMs: number): AgentInsightsOutputBlock {
+  const resultTone = job.status === "ready"
+    ? "positive" as const
+    : job.status === "failed"
+      ? "critical" as const
+      : "neutral" as const;
+  const count = job.activity.length;
+  const items: AgentInsightItemModel[] = [
+    { id: `${job.id}:insight:elapsed`, label: "Elapsed", value: compactJobDuration(durationMs) },
+    { id: `${job.id}:insight:activity`, label: "Activity", value: `${count} ${count === 1 ? "event" : "events"}` },
+    { id: `${job.id}:insight:result`, label: "Result", value: jobStatusLabel(job), tone: resultTone },
+  ];
+  if (job.versionId !== null) {
+    items.push({ id: `${job.id}:insight:version`, label: "Version", value: job.versionId, tone: "positive" });
+  } else if (job.exportId !== null) {
+    items.push({ id: `${job.id}:insight:export`, label: "Export", value: job.exportId, tone: resultTone });
+  }
+  return {
+    type: "insights",
+    id: `${job.id}:insights`,
+    createdAt: job.finishedAt ?? job.updatedAt,
+    active: false,
+    phase: null,
+    title: "Run insights",
+    items,
+  };
+}
+
+export function buildAgentOutputModel(
+  job: DesignJob,
+  options: BuildAgentOutputModelOptions = {},
+): AgentOutputModel {
   const orderedActivities = job.activity
     .map((activity, index) => ({ activity, index }))
     .sort((left, right) => (
@@ -429,6 +595,29 @@ export function buildAgentOutputModel(job: DesignJob): AgentOutputModel {
     else activitiesByPhase.set(phase, [activity]);
   }
   const blocks: AgentOutputBlock[] = [];
+  const contextItems = outputContextItems(job, options);
+  if (contextItems.length > 0) {
+    blocks.push({
+      type: "context",
+      id: `${job.id}:context`,
+      createdAt: job.createdAt,
+      active: false,
+      phase: null,
+      items: contextItems,
+    });
+  }
+  if (job.status === "queued" || job.status === "running" || job.status === "validating") {
+    blocks.push({
+      type: "loading",
+      id: `${job.id}:loading`,
+      createdAt: job.createdAt,
+      active: true,
+      phase: null,
+      status: job.status,
+      label: loadingLabel(job, options.nodeName),
+      startedAt: job.createdAt,
+    });
+  }
   if (orderedActivities.length === 0 && activePhase === "reasoning") {
     blocks.push({
       type: "trace",
@@ -488,38 +677,20 @@ export function buildAgentOutputModel(job: DesignJob): AgentOutputModel {
   const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
   if (job.status === "failed") {
     blocks.push({
-      type: "error",
-      id: `${job.id}:error`,
+      type: "approval",
+      id: `${job.id}:approval`,
       createdAt: job.finishedAt ?? job.updatedAt,
       active: false,
       phase: null,
-      status: job.status,
-      message: job.error,
-      durationMs,
+      title: "Repair this run?",
+      detail: job.error?.trim() || "The task did not complete.",
+      actionLabel: jobRetryLabel(job),
     });
-  } else if (job.status === "ready" || job.status === "cancelled" || job.status === "superseded") {
-    blocks.push({
-      type: "outcome",
-      id: `${job.id}:outcome`,
-      createdAt: job.finishedAt ?? job.updatedAt,
-      active: false,
-      phase: null,
-      status: job.status,
-      label: jobStatusLabel(job),
-      durationMs,
-      versionId: job.versionId,
-    });
+  } else if (job.status === "ready") {
+    blocks.push(outputRecommendation(job, options.nodeName));
   }
-  if (job.kind === "implementation-export" && job.exportId !== null) {
-    blocks.push({
-      type: "export",
-      id: `${job.id}:export`,
-      createdAt: job.updatedAt,
-      active: false,
-      phase: null,
-      exportId: job.exportId,
-      status: job.status,
-    });
+  if (!active) {
+    blocks.push(outputInsights(job, durationMs));
   }
   return { jobId: job.id, activePhase, blocks };
 }

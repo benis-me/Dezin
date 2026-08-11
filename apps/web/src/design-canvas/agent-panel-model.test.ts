@@ -187,15 +187,17 @@ test("Agent output blocks aggregate by activity type and retain first-activity o
 
   expect(model.activePhase).toBe("progress");
   expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
+    ["context", false],
+    ["loading", true],
     ["trace", false],
     ["search", false],
     ["tool-group", true],
   ]);
-  expect(model.blocks[0]).toMatchObject({
+  expect(model.blocks.find((block) => block.type === "trace")).toMatchObject({
     type: "trace",
     items: [{ id: "reason-1" }, { id: "reason-2" }],
   });
-  expect(model.blocks[2]).toMatchObject({
+  expect(model.blocks.find((block) => block.type === "tool-group")).toMatchObject({
     type: "tool-group",
     items: [{ id: "tool-1" }, { id: "tool-2" }],
   });
@@ -213,23 +215,24 @@ test("terminal Agent output exposes outcome and export metadata with zero active
 
   expect(model.activePhase).toBeNull();
   expect(model.blocks.some((block) => block.active)).toBe(false);
-  expect(model.blocks.map((block) => block.type)).toEqual(["trace", "outcome", "export"]);
-  expect(model.blocks[1]).toEqual({
-    type: "outcome",
-    id: "job-1:outcome",
+  expect(model.blocks.map((block) => block.type)).toEqual(["context", "trace", "recommendation", "insights"]);
+  expect(model.blocks[2]).toEqual({
+    type: "recommendation",
+    id: "job-1:recommendation",
     createdAt: 180,
     active: false,
     phase: null,
-    status: "ready",
-    label: "Complete",
-    durationMs: 80,
+    title: "Export ready",
+    description: "Reveal the verified implementation output in Finder.",
+    actionLabel: "Reveal export",
     versionId: null,
-  });
-  expect(model.blocks[2]).toMatchObject({
-    type: "export",
     exportId: "export-1",
-    status: "ready",
-    active: false,
+  });
+  expect(model.blocks[3]).toMatchObject({
+    type: "insights",
+    items: expect.arrayContaining([
+      expect.objectContaining({ label: "Export", value: "export-1" }),
+    ]),
   });
 });
 
@@ -245,16 +248,16 @@ test("failed Agent output exposes explicit error metadata instead of an active p
   }));
 
   expect(model.activePhase).toBeNull();
-  expect(model.blocks.map((block) => block.type)).toEqual(["tool-group", "error"]);
-  expect(model.blocks.at(-1)).toEqual({
-    type: "error",
-    id: "job-1:error",
+  expect(model.blocks.map((block) => block.type)).toEqual(["context", "tool-group", "approval", "insights"]);
+  expect(model.blocks[2]).toEqual({
+    type: "approval",
+    id: "job-1:approval",
     createdAt: 170,
     active: false,
     phase: null,
-    status: "failed",
-    message: "Generated HTML contains an unpinned or external URL",
-    durationMs: 70,
+    title: "Repair this run?",
+    detail: "Generated HTML contains an unpinned or external URL",
+    actionLabel: "Repair & retry",
   });
 });
 
@@ -262,14 +265,15 @@ test("an activity-free live Job has one active trace placeholder", () => {
   const model = buildAgentOutputModel(job({ activity: [] }));
 
   expect(model.activePhase).toBe("reasoning");
-  expect(model.blocks).toEqual([{
+  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
+  expect(model.blocks[2]).toEqual({
     type: "trace",
     id: "job-1:reasoning",
     createdAt: 100,
     active: true,
     phase: "reasoning",
     items: [],
-  }]);
+  });
 });
 
 test("the output registry stays closed and never guesses rich blocks from markdown", () => {
@@ -283,19 +287,23 @@ test("the output registry stays closed and never guesses rich blocks from markdo
   }));
 
   expect(AGENT_OUTPUT_BLOCK_TYPES).toEqual([
+    "loading",
     "trace",
     "tool-group",
     "search",
     "image",
-    "outcome",
-    "error",
-    "export",
+    "context",
+    "approval",
+    "recommendation",
+    "insights",
   ]);
-  expect(model.blocks.map((block) => block.type)).toEqual(["trace"]);
-  expect(model.blocks[0]).toMatchObject({
+  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
+  expect(model.blocks[2]).toMatchObject({
     type: "trace",
     items: [{ id: "markdown" }],
   });
+  expect(model.blocks.some((block) => block.type === "approval" || block.type === "recommendation" || block.type === "insights"))
+    .toBe(false);
 });
 
 test("the normalized model assigns activePhase to the chronologically latest activity", () => {
@@ -308,6 +316,8 @@ test("the normalized model assigns activePhase to the chronologically latest act
 
   expect(model.activePhase).toBe("progress");
   expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
+    ["context", false],
+    ["loading", true],
     ["trace", false],
     ["tool-group", true],
   ]);
@@ -337,16 +347,99 @@ test("search and image blocks retain renderer-ready metadata while aggregating r
     ],
   }));
 
-  expect(model.blocks.map((block) => block.type)).toEqual(["image", "search"]);
-  expect(model.blocks[0]).toMatchObject({
+  expect(model.blocks.map((block) => block.type)).toEqual(["context", "loading", "image", "search"]);
+  expect(model.blocks[2]).toMatchObject({
     type: "image",
     prompt: "Tokyo after rain",
     active: true,
     items: [{ id: "image-1" }, { id: "image-2" }],
   });
-  expect(model.blocks[1]).toMatchObject({
+  expect(model.blocks[3]).toMatchObject({
     type: "search",
     active: false,
     results: [{ id: "search-1", href: "https://example.com/type", state: "done" }],
   });
+});
+
+test("the production model supplies nine Dezin output patterns from grounded Job facts", () => {
+  const live = buildAgentOutputModel(job({
+    kind: "node-generation",
+    nodeId: "node-hero",
+    runnerId: "codebuddy",
+    model: "hy3-ioa",
+    canvasRevision: 42,
+    contextHash: "0123456789abcdef0123456789abcdef",
+    expectedHeadVersionId: "version-head",
+    activity: [],
+  }), { nodeName: "Hero" });
+
+  expect(live.blocks.map((block) => block.type)).toEqual(["context", "loading", "trace"]);
+  expect(live.blocks[0]).toMatchObject({
+    type: "context",
+    items: [
+      { label: "Target", value: "Hero", detail: "node-hero" },
+      { label: "Canvas snapshot", value: "Revision 42", detail: "Context 01234567" },
+      { label: "Expected head", value: "version-head" },
+      { label: "Runtime", value: "codebuddy", detail: "hy3-ioa" },
+    ],
+  });
+  expect(live.blocks[1]).toMatchObject({
+    type: "loading",
+    status: "running",
+    label: "Generating Hero",
+  });
+
+  const failed = buildAgentOutputModel(job({
+    kind: "node-generation",
+    nodeId: "node-hero",
+    status: "failed",
+    error: "Generated HTML did not pass validation",
+    activity: [{ id: "validate", kind: "status", text: "Validate generated HTML", createdAt: 130 }],
+    updatedAt: 170,
+    finishedAt: 170,
+  }), { nodeName: "Hero" });
+  expect(failed.blocks.map((block) => block.type)).toEqual(["context", "tool-group", "approval", "insights"]);
+  expect(failed.blocks[2]).toMatchObject({
+    type: "approval",
+    title: "Repair this run?",
+    detail: "Generated HTML did not pass validation",
+    actionLabel: "Repair & retry",
+  });
+  expect(failed.blocks[3]).toMatchObject({
+    type: "insights",
+    items: expect.arrayContaining([
+      expect.objectContaining({ label: "Elapsed", value: "1s" }),
+      expect.objectContaining({ label: "Activity", value: "1 event" }),
+      expect.objectContaining({ label: "Result", value: "Failed" }),
+    ]),
+  });
+
+  const readyExport = buildAgentOutputModel(job({
+    kind: "implementation-export",
+    status: "ready",
+    exportId: "export-1",
+    activity: [{ id: "package", kind: "text", text: "Packaging the app", createdAt: 120 }],
+    updatedAt: 180,
+    finishedAt: 180,
+  }));
+  expect(readyExport.blocks.map((block) => block.type)).toEqual(["context", "trace", "recommendation", "insights"]);
+  expect(readyExport.blocks[2]).toMatchObject({
+    type: "recommendation",
+    title: "Export ready",
+    description: "Reveal the verified implementation output in Finder.",
+    exportId: "export-1",
+    actionLabel: "Reveal export",
+  });
+
+  expect(AGENT_OUTPUT_BLOCK_TYPES).toEqual([
+    "loading",
+    "trace",
+    "tool-group",
+    "search",
+    "image",
+    "context",
+    "approval",
+    "recommendation",
+    "insights",
+  ]);
 });

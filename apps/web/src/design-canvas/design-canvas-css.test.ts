@@ -4,6 +4,7 @@ import { expect, test } from "vitest";
 
 const css = readFileSync(join(process.cwd(), "src/design-canvas/design-canvas.css"), "utf8");
 const conversationCss = readFileSync(join(process.cwd(), "src/components/agent-conversation.css"), "utf8");
+const primitivesCss = readFileSync(join(process.cwd(), "src/design-canvas/dezin-agent-primitives.css"), "utf8");
 const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8");
 const focusedChromeSource = readFileSync(join(process.cwd(), "src/design-canvas/FocusedNodeChrome.tsx"), "utf8");
 const floatingAgentSource = readFileSync(join(process.cwd(), "src/design-canvas/FloatingNodeAgent.tsx"), "utf8");
@@ -134,12 +135,9 @@ test("Agent composer grows within explicit bounds without a separator above it",
 
 test("Agent execution uses bordered Task Rows without decorative left rails", () => {
   expect(css).toMatch(/\.design-canvas-agent__activity-group\s*\{[^}]*overflow:\s*visible;[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity\s*\{[^}]*overflow:\s*hidden;[^}]*border:\s*1px solid color-mix\(in oklch, var\(--border\) 72%, transparent\);[^}]*border-radius:\s*12px;[^}]*background:\s*color-mix\(in oklch, var\(--surface-2\) 44%, var\(--card\)\);/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity(?:::[a-z-]+)?\s*\{[^}]*content:\s*["']{2}/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*background:\s*transparent;/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*border-radius:\s*999px/s);
-  expect(conversationCss).toMatch(/\.agent-activity-card\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
-  expect(conversationCss).not.toContain("agent-web-search__rail");
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\s*\{[^}]*border-radius:\s*22px;[^}]*background:\s*var\(--dz-surface\);[^}]*box-shadow:/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-open\]\s*\{[^}]*border-radius:\s*14px;/s);
+  expect(primitivesCss).not.toContain("__rail");
 });
 
 test("Agent disclosure rows keep every expanded glyph and body on the 29px editorial rail", () => {
@@ -151,42 +149,17 @@ test("Agent disclosure rows keep every expanded glyph and body on the 29px edito
   const toolChipTextX = toolChipIconX + 14 + 7;
   expect({ outputColumnWidth, traceIconX, traceTextX, searchTextX, toolChipIconX, toolChipTextX })
     .toEqual({ outputColumnWidth: 324, traceIconX: 29, traceTextX: 50, searchTextX: 50, toolChipIconX: 29, toolChipTextX: 50 });
-  expect(css).toMatch(/\.design-canvas-agent__activity-body\s*\{[^}]*padding:\s*0 0 8px;/s);
-  expect(conversationCss).toMatch(/\.agent-activity-card__header\s*\{[^}]*min-height:\s*38px;[^}]*gap:\s*7px;[^}]*padding:\s*7px 8px 7px 29px;/s);
-  expect(conversationCss).toMatch(/\.agent-thinking-state--trace\s*\{[^}]*grid-template-columns:\s*14px auto;[^}]*gap:\s*7px;[^}]*margin:\s*7px 8px 9px 29px;/s);
-  expect(conversationCss).toMatch(/\.agent-reasoning__viewport\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
-  expect(conversationCss).toMatch(/\.agent-progress__items\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
-  expect(conversationCss).toMatch(/\.agent-progress__items li\s*\{[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\);[^}]*gap:\s*7px;/s);
-  expect(conversationCss).toMatch(/\.agent-progress__items li\s*\{[^}]*margin-left:\s*-8px;[^}]*border:\s*1px solid color-mix\(in oklch, var\(--border\) 64%, transparent\);[^}]*border-radius:\s*8px;[^}]*padding:\s*5px 7px;[^}]*background:\s*color-mix\(in oklch, var\(--surface-2\) 58%, transparent\);/s);
-  expect(conversationCss).toMatch(/\.agent-web-search__results ul\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
-  expect(conversationCss).toMatch(/\.agent-web-search__results li > a,\s*\.agent-web-search__results li > span\s*\{[^}]*gap:\s*8px;/s);
-  expect(conversationCss).toMatch(/\.agent-web-search__status\s*\{[^}]*width:\s*13px;/s);
-  expect(conversationCss).toMatch(/\.agent-image-generation-state__body\s*\{[^}]*padding:\s*1px 8px 9px 29px;/s);
-  expect(conversationCss).not.toMatch(/\.agent-activity-card__header:hover\s*\{[^}]*background:/s);
-  expect(conversationCss).toMatch(/\.agent-activity-card__header:hover \.agent-activity-card__marker,[\s\S]*\.agent-activity-card__header:hover \.agent-activity-card__chevron\s*\{[^}]*color:\s*var\(--foreground\);/s);
-  expect(conversationCss).toMatch(/\.agent-activity-card \+ \.agent-activity-card::before\s*\{[^}]*right:\s*8px;[^}]*left:\s*29px;/s);
-  expect(conversationCss).toMatch(/\.agent-activity-card\[data-active\] \.agent-activity-card__pulse\s*\{[^}]*animation:\s*agent-activity-pulse/s);
-  const basePulseRule = conversationCss.match(/(?:^|\n)(\.agent-activity-card__pulse\s*\{[^}]*\})/)?.[1];
-  expect(basePulseRule).toBeTruthy();
-  expect(basePulseRule).not.toContain("animation:");
-  const baseImageGlowRule = conversationCss.match(/(?:^|\n)(\.agent-image-generation-state__glow\s*\{[^}]*\})/)?.[1];
-  expect(baseImageGlowRule).toBeTruthy();
-  expect(baseImageGlowRule).not.toContain("animation:");
-  expect(conversationCss).toMatch(/\.agent-image-generation-state\[data-active\] \.agent-image-generation-state__glow\s*\{[^}]*animation:\s*agent-image-breathe/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking__steps\s*\{[^}]*padding:\s*4px 0 4px 29px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking__steps li\s*\{[^}]*grid-template-columns:\s*14px minmax\(0,1fr\) auto;[^}]*gap:\s*8px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row__content\s*\{[^}]*padding:\s*9px 12px 11px 50px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-tool-chips__item-summary\s*\{[^}]*height:\s*28px;[^}]*gap:\s*8px;/s);
+  expect(primitivesCss).not.toContain("agent-web-search__rail");
 });
 
 test("Agent Job status stays in its glyph rather than tinting whole cards", () => {
-  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="ready"\][^\{]*\{[^}]*background:\s*color-mix\(in oklch, var\(--surface-2\) 44%, var\(--card\)\);/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*background:\s*color-mix\(in oklch, var\(--surface-2\) 44%, var\(--card\)\);/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-outcome\s*\{[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\);[^}]*gap:\s*7px;[^}]*margin:\s*2px 8px 8px 29px;[^}]*background:\s*transparent;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-error\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\);[^}]*gap:\s*7px;[^}]*margin:\s*2px 8px 8px 29px;[^}]*background:\s*transparent;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-error > svg\s*\{[^}]*color:\s*var\(--destructive\);/s);
-  expect(conversationCss).toMatch(/\.agent-progress__items li\[data-state="failed"\]\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 74%, var\(--muted-foreground\)\);/s);
-  expect(conversationCss).toMatch(/\.agent-progress__items li\[data-state="failed"\] \.agent-progress__state\s*\{[^}]*color:\s*var\(--destructive\);/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="failed"\]\s*\{[^}]*background:[^;}]*var\(--destructive\)/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*color:\s*var\(--success\)/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity-status\[data-status="ready"\]\s*\{[^}]*var\(--destructive\)/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="(?:running|ready)"\][^{]*\{[^}]*background:[^;}]*var\(--destructive\)/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-status="ready"\] \.dezin-agent-task-row__status-label\s*\{[^}]*color:\s*var\(--dz-green\);/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row\[data-status="failed"\] \.dezin-agent-task-row__status-label\s*\{[^}]*color:\s*var\(--dz-red\);/s);
+  expect(primitivesCss).not.toMatch(/\.dezin-agent-task-row\[data-status="failed"\]\s*\{[^}]*background:[^;}]*var\(--dz-red\)/s);
 });
 
 test("Agent transcript restores the original right-aligned Canvas user bubble", () => {
@@ -194,8 +167,8 @@ test("Agent transcript restores the original right-aligned Canvas user bubble", 
   expect(floatingAgentSource).toContain('role="log"');
   expect(floatingAgentSource).toContain('aria-live="polite"');
   expect(floatingAgentSource).toContain('aria-relevant="additions"');
-  expect(floatingAgentSource).toContain("buildAgentOutputModel(job)");
-  expect(outputRendererSource).toContain('case "error"');
+  expect(floatingAgentSource).toContain("<AgentOutputRenderer");
+  expect(outputRendererSource).toContain('case "approval"');
   expect(css).toMatch(/\.design-canvas-agent__message\[data-role="user"\]\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*flex-end;/s);
   expect(css).toMatch(/\.design-canvas-agent__message\[data-role="user"\] \.design-canvas-agent__message-meta\s*\{[^}]*display:\s*none;/s);
   expect(conversationCss).toMatch(/\.agent-user-message\s*\{[^}]*border:\s*1px solid color-mix\(in oklch, var\(--border\) 84%, transparent\);[^}]*border-radius:\s*12px 12px 5px 12px;[^}]*padding:\s*7px 10px;[^}]*background:\s*var\(--surface-2\);[^}]*box-shadow:\s*var\(--shadow-card\);[^}]*font-size:\s*12\.5px;[^}]*line-height:\s*18px;/s);
@@ -215,8 +188,8 @@ test("Agent panel header uses the locked 50px shell and 2px control rhythm", () 
 test("Agent transcript uses the locked turn hierarchy instead of one uniform stack", () => {
   expect(css).toMatch(/\.design-canvas-agent__transcript\s*\{[^}]*padding:\s*14px 14px 12px;/s);
   expect(css).toMatch(/\.design-canvas-agent__history-more\s*\{[^}]*height:\s*28px;[^}]*margin-bottom:\s*8px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__message,[\s\S]*?\.design-canvas-agent__activity \+ \.design-canvas-agent__message,[\s\S]*?\{\s*margin-top:\s*16px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__activity,\s*\.design-canvas-agent__message \+ \.design-canvas-agent__activity-group\s*\{\s*margin-top:\s*10px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__message,[\s\S]*?\.design-canvas-agent__job \+ \.design-canvas-agent__message,[\s\S]*?\{\s*margin-top:\s*16px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__message \+ \.design-canvas-agent__job,\s*\.design-canvas-agent__message \+ \.design-canvas-agent__activity-group\s*\{\s*margin-top:\s*10px;/s);
   expect(css).toMatch(/\.design-canvas-agent__activity-group \+ \.design-canvas-agent__message,[\s\S]*\.design-canvas-agent__activity-group \+ \.design-canvas-agent__activity-group\s*\{\s*margin-top:\s*22px;/s);
 });
 
@@ -334,26 +307,9 @@ test("canvas chrome motion keeps the measured Agent height as its only layout tr
 });
 
 test("Agent activity cards keep Thinking compact, complete, and visually quiet", () => {
-  expect(conversationCss).toMatch(/\.agent-thinking-state\s*\{[^}]*font-size:\s*11\.5px;[^}]*line-height:\s*16px;/s);
-  expect(conversationCss).not.toMatch(/\.agent-reasoning\[data-active\]\s*\{[^}]*background:/s);
-  expect(conversationCss).not.toMatch(/\.agent-reasoning__viewport\s*\{[^}]*(?:max-height|overflow-y|mask-image):/s);
-  expect(conversationCss).not.toMatch(/\.agent-reasoning__viewport p\s*\{[^}]*-webkit-line-clamp:/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity\s*\{[^}]*border:\s*1px solid color-mix\(in oklch, var\(--border\) 72%, transparent\);[^}]*border-radius:\s*12px;[^}]*background:\s*color-mix\(in oklch, var\(--surface-2\) 44%, var\(--card\)\);/s);
-  expect(css).not.toContain(".design-canvas-agent__activity::before");
-  expect(css).not.toMatch(/\.design-canvas-agent__activity\[data-status="[^"]+"\]::before/);
-  expect(css).toMatch(/\.design-canvas-agent__activity > header\s*\{[^}]*min-height:\s*44px;[^}]*padding:\s*0 7px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-toggle\s*\{[^}]*min-height:\s*44px;[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\) 14px;[^}]*gap:\s*8px;[^}]*padding:\s*7px 0;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-status\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-body\s*\{[^}]*padding:\s*0 0 8px;/s);
-  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-agent__activity-toggle:hover\s*\{[^}]*color:\s*var\(--foreground\);/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity\s*\{[^}]*animation:/s);
-  expect(css).toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*color:\s*color-mix\(in oklch, var\(--foreground\) 54%, var\(--muted-foreground\)\);/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*animation:/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__thinking-label\s*\{[^}]*(?:background|background-clip):/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-stop\s*\{[^}]*margin-right:\s*4px;[^}]*border:[^;}]*var\(--destructive\)[^}]*border-radius:\s*999px(?:\s*!important)?;[^}]*transition:\s*transform 140ms/s);
-  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__activity-retry\s*\{\s*transition:\s*none !important;\s*\}/s);
-  expect(floatingAgentSource).toContain('<AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>');
-  expect(css).toMatch(/\.design-canvas-agent__activity-collapsible\s*\{[^}]*overflow:\s*hidden;/s);
-  expect(css).toMatch(/\.design-canvas-agent__activity-collapsible > \[data-agent-collapsible-content\]\s*\{[^}]*transform-origin:\s*50% 0;/s);
-  expect(css).not.toMatch(/\.design-canvas-agent__activity-collapsible[^}]*grid-template-rows/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking\s*\{[^}]*font-size:\s*12\.5px;[^}]*line-height:\s*18\.75px;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking__trigger\s*\{[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-thinking\[data-active\] \.dezin-agent-thinking__trigger > span\s*\{[^}]*animation:\s*dezin-agent-shimmer 1\.4s linear infinite;/s);
+  expect(primitivesCss).toMatch(/\.dezin-agent-task-row > header\s*\{[^}]*min-height:\s*44px;/s);
+  expect(primitivesCss).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation-duration:\s*\.001ms !important;/s);
 });

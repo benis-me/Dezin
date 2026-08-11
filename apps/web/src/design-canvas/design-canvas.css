@@ -968,16 +968,16 @@
 .design-canvas-agent__activity-group { content-visibility: visible; }
 .design-canvas-agent__empty { display: flex; min-height: 136px; align-items: flex-start; justify-content: flex-end; flex-direction: column; gap: 5px; border: 0; border-radius: 12px; padding: 16px; background: repeating-linear-gradient(135deg, color-mix(in oklch, var(--foreground) 1.8%, transparent) 0 1px, transparent 1px 11px), color-mix(in oklch, var(--surface) 30%, transparent); color: var(--muted-foreground); text-align: left; font-size: 11px; line-height: 1.5; }
 .design-canvas-agent__message + .design-canvas-agent__message,
-.design-canvas-agent__activity + .design-canvas-agent__activity,
-.design-canvas-agent__activity + .design-canvas-agent__message,
-.design-canvas-agent__activity + .design-canvas-agent__activity-group,
+.design-canvas-agent__job + .design-canvas-agent__job,
+.design-canvas-agent__job + .design-canvas-agent__message,
+.design-canvas-agent__job + .design-canvas-agent__activity-group,
 .design-canvas-agent__thinking + .design-canvas-agent__message,
-.design-canvas-agent__thinking + .design-canvas-agent__activity,
+.design-canvas-agent__thinking + .design-canvas-agent__job,
 .design-canvas-agent__message + .design-canvas-agent__thinking { margin-top: 16px; }
-.design-canvas-agent__message + .design-canvas-agent__activity,
+.design-canvas-agent__message + .design-canvas-agent__job,
 .design-canvas-agent__message + .design-canvas-agent__activity-group { margin-top: 10px; }
 .design-canvas-agent__activity-group + .design-canvas-agent__message,
-.design-canvas-agent__activity-group + .design-canvas-agent__activity,
+.design-canvas-agent__activity-group + .design-canvas-agent__job,
 .design-canvas-agent__activity-group + .design-canvas-agent__thinking,
 .design-canvas-agent__activity-group + .design-canvas-agent__activity-group { margin-top: 22px; }
 .design-canvas-agent__message[data-role="user"] { display: flex; justify-content: flex-end; }
@@ -995,107 +995,33 @@
 .design-canvas-agent__message[data-role="system"] .agent-text-response,
 .design-canvas-agent__message[data-role="tool"] .agent-text-response { color: var(--muted-foreground); font-size: 11.5px; }
 
-.design-canvas-agent__thinking { display: inline-flex; width: fit-content; min-height: 22px; align-items: center; gap: 7px; margin: 1px 0; color: var(--muted-foreground); }
-.design-canvas-agent__thinking-orb { display: flex; width: 17px; height: 14px; flex: none; align-items: center; justify-content: center; gap: 2px; color: var(--foreground); contain: strict; }
-.design-canvas-agent__thinking-orb > span { width: 3px; height: 3px; border-radius: 999px; background: currentColor; opacity: 0.14; animation: design-canvas-orb-wave 1.7s var(--ease-in-out) infinite both; }
-.design-canvas-agent__thinking-orb > span:nth-child(2) { animation-delay: 140ms; }
-.design-canvas-agent__thinking-orb > span:nth-child(3) { animation-delay: 280ms; }
-.design-canvas-agent__thinking-label { width: fit-content; color: color-mix(in oklch, var(--foreground) 54%, var(--muted-foreground)); font-size: 11.5px; font-weight: 520; line-height: 17px; }
+.design-canvas-agent__thinking { display: block; width: 100%; min-width: 0; margin: 1px 0; }
 
 .design-canvas-agent__activity-group { overflow: visible; border: 0; border-radius: 0; padding: 0; background: transparent; }
 .design-canvas-agent__activity-group-header { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 0 0 0 16px; color: color-mix(in oklch, var(--foreground) 58%, var(--muted-foreground)); font-size: 10px; line-height: 15px; }
 .design-canvas-agent__activity-group-header p { min-width: 0; overflow: hidden; color: color-mix(in oklch, var(--foreground) 70%, var(--muted-foreground)); font-size: 10.5px; font-weight: 520; letter-spacing: -0.003em; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__activity-group-header span { flex: none; font-family: var(--font-mono-stack); font-size: 8.5px; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; text-transform: uppercase; }
-.design-canvas-agent__activity-group-outcome { display: grid; min-width: 0; grid-template-columns: 13px auto minmax(0, 1fr); align-items: center; gap: 7px; margin: 0 0 7px 16px; color: color-mix(in oklch, var(--foreground) 58%, var(--muted-foreground)); font-size: 10px; line-height: 15px; }
-.design-canvas-agent__activity-group-outcome > svg { width: 12px; height: 12px; color: var(--muted-foreground); stroke-width: 1.75; }
-.design-canvas-agent__activity-group-outcome > strong { color: var(--foreground); font-size: 10.5px; font-weight: 570; }
-.design-canvas-agent__activity-group-outcome > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-group-outcome[data-status="failed"] > svg { color: var(--destructive); }
-.design-canvas-agent__activity-group-retry { display: flex; margin: -1px 8px 8px 29px; }
-.design-canvas-agent__activity {
-  position: relative;
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
-  border-radius: 12px;
-  background: color-mix(in oklch, var(--surface-2) 44%, var(--card));
-  box-shadow: none;
-}
-.design-canvas-agent__activity + .design-canvas-agent__activity { margin-top: 6px; }
-.design-canvas-agent__activity-group .design-canvas-agent__activity { border: 1px solid color-mix(in oklch, var(--border) 72%, transparent); border-radius: 12px; background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); }
-.design-canvas-agent__activity-group .design-canvas-agent__activity + .design-canvas-agent__activity { margin-top: 6px; }
-.design-canvas-agent__activity[data-status="queued"],
-.design-canvas-agent__activity[data-status="running"],
-.design-canvas-agent__activity[data-status="validating"],
-.design-canvas-agent__activity[data-status="ready"],
-.design-canvas-agent__activity[data-status="cancelled"],
-.design-canvas-agent__activity[data-status="superseded"] {
-  background: color-mix(in oklch, var(--surface-2) 44%, var(--card));
-}
-.design-canvas-agent__activity[data-status="failed"] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); box-shadow: none; }
-.design-canvas-agent__activity[data-status="failed"][data-collapsed] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); box-shadow: none; }
-.design-canvas-agent__activity-group .design-canvas-agent__activity[data-status] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); }
-.design-canvas-agent__activity > header { display: flex; min-height: 44px; align-items: center; gap: 4px; padding: 0 7px; }
-.design-canvas-agent__activity-toggle { display: grid; min-width: 0; min-height: 44px; flex: 1; grid-template-columns: 14px minmax(0, 1fr) 14px; align-items: center; gap: 8px; border-radius: 7px; padding: 7px 0; color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground)); text-align: left; }
-.design-canvas-agent__activity-toggle:focus-visible { outline: 2px solid color-mix(in oklch, var(--ring) 58%, transparent); outline-offset: 1px; }
-.design-canvas-agent__activity-status { display: grid; width: 14px; height: 14px; place-items: center; background: transparent; color: var(--muted-foreground); }
-.design-canvas-agent__activity-status svg { width: 12px; height: 12px; stroke-width: 1.75; }
-.design-canvas-agent__activity-status[data-status="ready"] { color: var(--success); }
-.design-canvas-agent__activity-status[data-status="failed"] { color: var(--destructive); }
-.design-canvas-agent__activity-status[data-status="queued"] { color: var(--warning); }
-.design-canvas-agent__activity-status[data-status="running"],
-.design-canvas-agent__activity-status[data-status="validating"] { color: var(--design-canvas-accent); }
-.design-canvas-agent__activity-status[data-status="cancelled"] { color: var(--warning); }
-.design-canvas-agent__activity-status[data-status="queued"] svg,
-.design-canvas-agent__activity-status[data-status="running"] svg,
-.design-canvas-agent__activity-status[data-status="validating"] svg { animation: design-canvas-spin 900ms linear infinite; }
-.design-canvas-agent__activity-copy { display: block; min-width: 0; }
-.design-canvas-agent__activity-copy strong,
-.design-canvas-agent__activity-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-copy strong { color: var(--foreground); font-size: 11.5px; font-weight: 570; letter-spacing: -0.006em; }
-.design-canvas-agent__activity-copy small { margin-top: 1px; color: color-mix(in oklch, var(--foreground) 58%, var(--muted-foreground)); font-size: 9.5px; font-variant-numeric: tabular-nums; font-weight: 460; }
-.design-canvas-agent__activity-chevron { display: grid; width: 13px; height: 13px; place-items: center; color: var(--muted-foreground); }
-.design-canvas-agent__activity-chevron > svg { width: 13px; height: 13px; }
-.design-canvas-agent__activity-stop {
+.design-canvas-agent__job { min-width: 0; }
+.design-canvas-agent__job + .design-canvas-agent__job { margin-top: 6px; }
+.design-canvas-agent__output { display: grid; min-width: 0; gap: 7px; }
+.design-canvas-agent__task-stop {
   height: 26px !important;
-  flex: none;
   gap: 5px !important;
-  margin-right: 4px;
   border: 0.5px solid color-mix(in oklch, var(--destructive) 18%, var(--border));
-  border-radius: 999px !important;
-  padding: 0 8px !important;
+  border-radius: 8px !important;
+  padding: 0 7px !important;
   background: transparent;
   color: color-mix(in oklch, var(--destructive) 72%, var(--muted-foreground));
   font-size: 9.5px !important;
   font-weight: 560;
   transition: transform 140ms var(--design-canvas-ease-out), border-color 160ms var(--ease-smooth), background-color 160ms var(--ease-smooth), color 160ms var(--ease-smooth), opacity 160ms var(--ease-smooth);
 }
-.design-canvas-agent__activity-stop:focus-visible { outline: 2px solid color-mix(in oklch, var(--destructive) 24%, transparent); outline-offset: 1px; }
-.design-canvas-agent__activity-stop:disabled { opacity: 0.5; }
-.design-canvas-agent__activity-stop > svg { width: 9px !important; height: 9px !important; stroke-width: 1.8; }
-.design-canvas-agent__activity-retry { height: 26px !important; flex: none; gap: 5px !important; margin-right: 4px; border-color: color-mix(in oklch, var(--foreground) 13%, var(--border)); border-radius: 999px !important; padding: 0 8px !important; background: color-mix(in oklch, var(--foreground) 2.5%, transparent); color: color-mix(in oklch, var(--foreground) 76%, var(--muted-foreground)); font-size: 9.5px !important; font-weight: 560; box-shadow: none; transition: transform 140ms var(--design-canvas-ease-out), border-color 160ms var(--ease-smooth), background-color 160ms var(--ease-smooth), color 160ms var(--ease-smooth), opacity 160ms var(--ease-smooth); }
-.design-canvas-agent__activity-retry:focus-visible { outline: 2px solid color-mix(in oklch, var(--ring) 34%, transparent); outline-offset: 1px; }
-.design-canvas-agent__activity-retry:disabled { opacity: 0.5; }
-.design-canvas-agent__activity-retry > svg { width: 10px !important; height: 10px !important; stroke-width: 1.8; }
-.design-canvas-agent__activity-collapsible { overflow: hidden; }
-.design-canvas-agent__activity-collapsible > [data-agent-collapsible-content] { transform-origin: 50% 0; }
-.design-canvas-agent__activity-body { display: grid; min-width: 0; gap: 0; padding: 0 0 8px; }
-.design-canvas-agent__activity-outcome { display: grid; min-width: 0; grid-template-columns: 14px minmax(0, 1fr); align-items: center; gap: 7px; margin: 2px 8px 8px 29px; border-top: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent); padding: 7px 0 0; background: transparent; color: color-mix(in oklch, var(--foreground) 64%, var(--muted-foreground)); font-size: 10.5px; line-height: 15px; }
-.design-canvas-agent__activity-outcome > span { display: grid; width: 14px; height: 14px; place-items: center; color: var(--muted-foreground); }
-.design-canvas-agent__activity-outcome > span > svg { width: 12px; height: 12px; stroke-width: 1.75; }
-.design-canvas-agent__activity-outcome[data-status="ready"] > span { color: var(--success); }
-.design-canvas-agent__activity-outcome > p { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-result { display: grid; min-width: 0; grid-template-columns: 14px minmax(0, 1fr); align-items: start; gap: 7px; margin: 2px 8px 8px 29px; border-top: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent); padding: 8px 0 0; background: transparent; color: var(--muted-foreground); font-size: 10px; }
-.design-canvas-agent__activity-result > svg { width: 13px; height: 13px; margin-top: 1px; color: var(--muted-foreground); stroke-width: 1.75; }
-.design-canvas-agent__activity-result-body { min-width: 0; }
-.design-canvas-agent__activity-result-body > p { color: var(--foreground); font-size: 11.5px; font-weight: 550; }
-.design-canvas-agent__activity-result-body > code,
-.design-canvas-agent__activity-result-body > small { display: block; overflow: hidden; margin-top: 5px; font-size: 9.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-export-actions { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 8px; }
-.design-canvas-agent__activity-export-actions output { overflow: hidden; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-error { display: grid; grid-template-columns: 14px minmax(0, 1fr); align-items: start; gap: 7px; margin: 2px 8px 8px 29px; padding: 2px 0; background: transparent; color: color-mix(in oklch, var(--foreground) 74%, var(--muted-foreground)); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
-.design-canvas-agent__activity-error > svg { width: 12px; height: 12px; margin-top: 1px; color: var(--destructive); stroke-width: 1.75; }
-.design-canvas-agent__activity-error > p { min-width: 0; margin: 0; }
+.design-canvas-agent__task-stop:focus-visible { outline: 2px solid color-mix(in oklch, var(--destructive) 24%, transparent); outline-offset: 1px; }
+.design-canvas-agent__task-stop:disabled { opacity: 0.5; }
+.design-canvas-agent__task-stop > svg { width: 9px !important; height: 9px !important; stroke-width: 1.8; }
+.design-canvas-agent__job-error { display: grid; min-width: 0; grid-template-columns: 13px minmax(0, 1fr); align-items: start; gap: 7px; margin-bottom: 7px; color: color-mix(in oklch, var(--foreground) 74%, var(--muted-foreground)); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.design-canvas-agent__job-error > svg { width: 12px; height: 12px; margin-top: 1px; color: var(--destructive); stroke-width: 1.75; }
+.design-canvas-agent__job-error > p { min-width: 0; margin: 0; }
 
 .design-canvas-agent__composer { position: relative; flex: none; padding: 0 7px 7px; background: transparent; }
 .design-canvas-agent__composer::before { position: absolute; right: 0; bottom: 100%; left: 0; height: 18px; background: linear-gradient(to bottom, transparent, color-mix(in oklch, var(--card) 94%, transparent)); content: ""; pointer-events: none; }
@@ -1322,13 +1248,11 @@
   .dark .design-canvas-focus-actions [data-slot="button"]:hover { background: oklch(1 0 0 / 12%); color: white; }
   .design-canvas-node:hover .design-canvas-node__frame { border-color: var(--border-strong); }
   .design-canvas-agent__history-more:hover { background: var(--surface-2); color: var(--foreground); }
-  .design-canvas-agent__activity-toggle:hover { background: transparent; color: var(--foreground); }
-  .design-canvas-agent__activity-stop:hover:not(:disabled) {
+  .design-canvas-agent__task-stop:hover:not(:disabled) {
     border-color: color-mix(in oklch, var(--destructive) 30%, var(--border));
     background: color-mix(in oklch, var(--destructive) 5%, transparent);
     color: var(--destructive);
   }
-  .design-canvas-agent__activity-retry:hover:not(:disabled) { border-color: color-mix(in oklch, var(--foreground) 24%, var(--border)); background: color-mix(in oklch, var(--foreground) 6%, transparent); color: var(--foreground); }
   .design-canvas-agent__composer-shell:hover { border-color: var(--border-strong); background: color-mix(in oklch, var(--surface-2) 68%, var(--card)); }
   .design-canvas-agent__mention-chip > button:hover { background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--foreground); }
   .design-canvas-agent__mention-result:hover { background: var(--surface-2); }
@@ -1445,7 +1369,7 @@
   .design-canvas-agent__transcript,
   .design-canvas-agent__composer,
   .design-canvas-agent__message,
-  .design-canvas-agent__activity,
+  .design-canvas-agent__job,
   .design-canvas-agent__activity-group,
   .design-canvas-agent__empty,
   .design-canvas-main-agent,
@@ -1456,11 +1380,7 @@
   .design-canvas-node__placeholder-atmosphere,
   .design-canvas-node__generation-glow,
   .design-canvas-node__placeholder-icon > svg,
-  .design-canvas-node__working-badge svg,
-  .design-canvas-agent__activity-status svg,
-  .design-canvas-agent__thinking-orb > span,
-  .design-canvas-agent__thinking-label,
-  .design-canvas-agent__activity li > span { animation: none !important; }
+  .design-canvas-node__working-badge svg { animation: none !important; }
   .design-canvas-node__resize-corner,
   .design-canvas-topbar__leading,
   .design-canvas-topbar__actions,
@@ -1471,9 +1391,7 @@
   .design-canvas-surface::after,
   .design-canvas-surface .react-flow__background,
   .design-canvas-agent--floating,
-  .design-canvas-agent__activity-collapsible,
-  .design-canvas-agent__activity-chevron { transition: none !important; }
-  .design-canvas-agent__activity-retry { transition: none !important; }
+  .design-canvas-agent__task-stop { transition: none !important; }
   .design-canvas-tools,
   .design-canvas-zoom {
     transition: opacity 160ms var(--design-canvas-ease-out) !important;

@@ -8,8 +8,8 @@ import {
   upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
-import { AgentThinkingState } from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
+import { DezinAgentLoadingState } from "../design-canvas/DezinAgentPrimitives.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
@@ -271,7 +271,7 @@ export function MoodboardAgentPanel({
                 transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
               >
                 <div className="px-1 py-1 text-[13px] leading-[18px]">
-                  <AgentThinkingState />
+                  <DezinAgentLoadingState label="Thinking" variant="drive" />
                 </div>
               </motion.div>
             ) : null}

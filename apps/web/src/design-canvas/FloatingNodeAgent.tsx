@@ -1,5 +1,4 @@
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
-import { AgentCollapsible } from "../components/AgentCollapsible.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import {
   Button,
@@ -22,15 +21,11 @@ import { BorderBeam } from "border-beam";
 import { motion } from "motion/react";
 import {
   ArrowUp,
-  Check,
-  ChevronDown,
-  Circle,
   CircleAlert,
   FileUp,
   LoaderCircle,
   Paperclip,
   PanelRightClose,
-  RotateCcw,
   Square,
   X,
 } from "lucide-react";
@@ -38,7 +33,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -49,15 +43,12 @@ import {
 import {
   buildAgentTranscriptPage,
   buildAgentOutputModel,
-  compactActivityText,
-  compactJobDuration,
-  jobRetryLabel,
-  jobStatusLabel,
   versionOptionLabel,
   type MainAgentJobGroup,
   type OptimisticUserTurn,
 } from "./agent-panel-model.ts";
 import { AgentOutputRenderer } from "./AgentOutputRenderer.tsx";
+import { DezinAgentLoadingState, DezinAgentTaskRow } from "./DezinAgentPrimitives.tsx";
 import { type DesignCanvasApi } from "./api.ts";
 import { NodeMentionInput } from "./NodeMentionInput.tsx";
 import type {
@@ -524,7 +515,6 @@ export function CanvasAgentPanel({
         onRevealExport={onRevealExport}
         onCancelJob={onCancelJob}
         onRetryJob={onRetryJob}
-        reduceMotion={reduceMotion === true}
         tailKey={`${transcriptTailKey}|${visibleOptimisticUserTurn?.message.id ?? ""}`}
       />
 
@@ -655,7 +645,6 @@ const AgentTranscript = memo(function AgentTranscript({
   onRevealExport,
   onCancelJob,
   onRetryJob,
-  reduceMotion,
   tailKey,
 }: {
   scopeKey: string;
@@ -670,7 +659,6 @@ const AgentTranscript = memo(function AgentTranscript({
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancelJob: (jobId: string) => Promise<void>;
   onRetryJob?: (jobId: string) => Promise<void>;
-  reduceMotion: boolean;
   tailKey: string;
 }) {
   const {
@@ -732,7 +720,7 @@ const AgentTranscript = memo(function AgentTranscript({
       ) : null}
       {timeline.map((item) => {
         if (item.kind === "thinking") {
-          return <AgentThinkingIndicator key={item.id} reduceMotion={reduceMotion} />;
+          return <AgentThinkingIndicator key={item.id} />;
         }
         if (item.kind === "message") {
           const { message } = item;
@@ -760,7 +748,6 @@ const AgentTranscript = memo(function AgentTranscript({
               onRevealExport={onRevealExport}
               onCancelJob={onCancelJob}
               onRetryJob={onRetryJob}
-              reduceMotion={reduceMotion}
               latestVisibleJobId={latestVisibleJobId}
             />
           );
@@ -789,7 +776,6 @@ function MainAgentJobGroupView({
   onRevealExport,
   onCancelJob,
   onRetryJob,
-  reduceMotion,
   latestVisibleJobId,
 }: {
   group: MainAgentJobGroup;
@@ -798,28 +784,12 @@ function MainAgentJobGroupView({
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onCancelJob: (jobId: string) => Promise<void>;
   onRetryJob?: (jobId: string) => Promise<void>;
-  reduceMotion: boolean;
   latestVisibleJobId: string | null;
 }) {
-  const mainJob = group.jobs.find((job) => job.kind === "main-agent") ?? null;
   const workJobs = group.jobs.filter((job) => job.kind !== "main-agent");
-  const mainActive = mainJob !== null && ["queued", "running", "validating"].includes(mainJob.status);
-  const mainTerminalOutcome = mainJob !== null && ["failed", "cancelled", "superseded"].includes(mainJob.status)
-    ? mainJob
-    : null;
-  const { retrying, retryError, retry } = useJobActionController({
-    jobId: mainTerminalOutcome?.id ?? group.parentJobId,
-    active: mainActive,
-    displayLabel: "Canvas plan",
-    onRetry: onRetryJob,
-  });
-  if (workJobs.length === 0) {
-    if (mainActive) return <AgentThinkingIndicator reduceMotion={reduceMotion} />;
-    if (!mainTerminalOutcome) return null;
-  }
   const childCount = workJobs.filter((job) => job.nodeId !== null).length;
   const childLabel = childCount > 0 ? `${childCount} ${childCount === 1 ? "child Agent" : "child Agents"}` : null;
-  const showGroupHeader = childLabel !== null || mainTerminalOutcome !== null || workJobs.length > 1;
+  const showGroupHeader = childLabel !== null || group.jobs.length > 1;
   return (
     <section
       className="design-canvas-agent__activity-group"
@@ -832,48 +802,7 @@ function MainAgentJobGroupView({
           {childLabel ? <span>{childLabel}</span> : null}
         </header>
       ) : null}
-      {mainActive ? <AgentThinkingIndicator reduceMotion={reduceMotion} /> : null}
-      {mainTerminalOutcome ? (
-        <div
-          className="design-canvas-agent__activity-group-outcome"
-          data-status={mainTerminalOutcome.status}
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          {mainTerminalOutcome.status === "failed" ? <CircleAlert aria-hidden /> : <Circle aria-hidden />}
-          <strong>{jobStatusLabel(mainTerminalOutcome)}</strong>
-          {mainTerminalOutcome.status === "failed" && mainTerminalOutcome.error
-            ? <span>{compactActivityText(mainTerminalOutcome.error)}</span>
-            : null}
-        </div>
-      ) : null}
-      {mainTerminalOutcome?.status === "failed" && onRetryJob ? (
-        <div className="design-canvas-agent__activity-group-retry">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="design-canvas-agent__activity-retry"
-            aria-label={`${jobRetryLabel(mainTerminalOutcome)} Canvas plan`}
-            aria-busy={retrying || undefined}
-            disabled={retrying}
-            onClick={() => void retry()}
-          >
-            {retrying
-              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
-              : <RotateCcw aria-hidden />}
-            <span>{retrying ? "Retrying" : jobRetryLabel(mainTerminalOutcome)}</span>
-          </Button>
-        </div>
-      ) : null}
-      {retryError ? (
-        <div className="design-canvas-agent__activity-error" role="alert">
-          <CircleAlert aria-hidden />
-          <p>{retryError}</p>
-        </div>
-      ) : null}
-      {workJobs.map((job) => (
+      {group.jobs.map((job) => (
         <AgentActivityCard
           key={job.id}
           job={job}
@@ -889,21 +818,11 @@ function MainAgentJobGroupView({
   );
 }
 
-function AgentThinkingIndicator({ reduceMotion }: { reduceMotion: boolean }) {
+function AgentThinkingIndicator() {
   return (
-    <motion.div
-      className="design-canvas-agent__thinking"
-      role="status"
-      aria-label="Thinking"
-      initial={reduceMotion ? false : { opacity: 0, transform: "translate3d(-4px, 4px, 0px) scale(0.98)" }}
-      animate={{ opacity: 1, transform: "translate3d(0px, 0px, 0px) scale(1)" }}
-      transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
-    >
-      <span className="design-canvas-agent__thinking-orb" aria-hidden>
-        {Array.from({ length: 3 }, (_, index) => <span key={index} />)}
-      </span>
-      <span className="design-canvas-agent__thinking-label">Thinking…</span>
-    </motion.div>
+    <div className="design-canvas-agent__thinking">
+      <DezinAgentLoadingState label="Thinking" variant="dots" />
+    </div>
   );
 }
 
@@ -925,7 +844,6 @@ function AgentActivityCard({
   initiallyExpanded?: boolean;
 }) {
   const reduceMotion = usePrefersReducedMotion();
-  const detailsId = useId();
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
   const [expanded, setExpanded] = useState(active || initiallyExpanded);
   useEffect(() => {
@@ -938,7 +856,6 @@ function AgentActivityCard({
       : job.kind === "main-agent"
         ? "Main Agent"
         : "Implementation export";
-  const label = job.nodeId === null ? kindLabel : `${kindLabel} · ${nodeName ?? job.nodeId}`;
   const displayLabel = job.kind === "node-generation"
     ? `${nodeName ?? "Node"} generation`
     : job.kind === "node-analysis"
@@ -960,61 +877,30 @@ function AgentActivityCard({
     onCancel,
     onRetry,
   });
-  const outputModel = buildAgentOutputModel(job);
-  const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
+  const outputModel = buildAgentOutputModel(job, { nodeName });
+  const taskMeta = [kindLabel, job.model].filter(Boolean).join(" · ");
   return (
-    <article
-      className="design-canvas-agent__activity"
-      data-status={job.status}
-      data-collapsed={!expanded || undefined}
+    <div
+      className="design-canvas-agent__job"
       data-job-id={job.id}
       data-node-id={job.nodeId ?? undefined}
       data-parent-job-id={job.parentJobId ?? undefined}
-      data-agent-component="task-row"
-      aria-label={`${label} · ${job.status}`}
     >
       <span className="agent-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
-        {displayLabel}: {jobStatusLabel(job)}
+        {displayLabel}: {job.status}
       </span>
-      <header>
-        <button
-          type="button"
-          className="design-canvas-agent__activity-toggle"
-          aria-controls={detailsId}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          <span className="design-canvas-agent__activity-status" data-status={job.status} aria-hidden>
-            {active
-              ? <LoaderCircle />
-              : job.status === "ready"
-                ? <Check />
-                : job.status === "failed"
-                  ? <CircleAlert />
-                  : <Circle />}
-          </span>
-          <span className="design-canvas-agent__activity-copy">
-            <strong>{displayLabel}</strong>
-            <small>
-              {jobStatusLabel(job)}
-              {!active && durationMs > 0 ? ` · ${compactJobDuration(durationMs)}` : ""}
-            </small>
-          </span>
-          <motion.span
-            className="design-canvas-agent__activity-chevron"
-            aria-hidden
-            animate={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
-            transition={{ duration: reduceMotion ? 0 : 0.16, ease: AGENT_MOTION_EASE }}
-          >
-            <ChevronDown />
-          </motion.span>
-        </button>
-        {active ? (
+      <DezinAgentTaskRow
+        title={displayLabel}
+        meta={taskMeta}
+        status={job.status}
+        open={expanded}
+        onOpenChange={setExpanded}
+        trailing={active ? (
           <Button
             type="button"
             size="xs"
             variant="ghost"
-            className="design-canvas-agent__activity-stop"
+            className="design-canvas-agent__task-stop"
             aria-label={`${stopping ? "Stopping" : "Stop"} ${displayLabel}`}
             aria-busy={stopping || undefined}
             disabled={stopping}
@@ -1026,43 +912,22 @@ function AgentActivityCard({
             <span>{stopping ? "Stopping" : "Stop"}</span>
           </Button>
         ) : null}
-        {job.status === "failed" && onRetry ? (
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="design-canvas-agent__activity-retry"
-            aria-label={`${jobRetryLabel(job)} ${displayLabel}`}
-            aria-busy={retrying || undefined}
-            disabled={retrying}
-            onClick={() => void retry()}
-          >
-            {retrying
-              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
-              : <RotateCcw aria-hidden />}
-            <span>{retrying ? "Retrying" : jobRetryLabel(job)}</span>
-          </Button>
+      >
+        {stopError ? (
+          <div className="design-canvas-agent__job-error" role="alert">
+            <CircleAlert aria-hidden />
+            <p>{stopError}</p>
+          </div>
         ) : null}
-      </header>
-      {stopError ? (
-        <div className="design-canvas-agent__activity-error" role="alert">
-          <CircleAlert aria-hidden />
-          <p>{stopError}</p>
-        </div>
-      ) : null}
-      {retryError ? (
-        <div className="design-canvas-agent__activity-error" role="alert">
-          <CircleAlert aria-hidden />
-          <p>{retryError}</p>
-        </div>
-      ) : null}
-      <AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>
         <AgentOutputRenderer
           model={outputModel}
           projectPath={projectPath}
           onRevealExport={onRevealExport}
+          onRetry={onRetry ? async () => retry() : undefined}
+          retrying={retrying}
+          retryError={retryError}
         />
-      </AgentCollapsible>
-    </article>
+      </DezinAgentTaskRow>
+    </div>
   );
 }
