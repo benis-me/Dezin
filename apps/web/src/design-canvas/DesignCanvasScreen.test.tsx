@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
 import type { AgentInfo } from "../lib/api.ts";
+import { ApiProvider } from "../lib/api-context.tsx";
+import { makeFakeApi } from "../test/fake-api.ts";
 import {
   EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE,
   EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE,
@@ -331,6 +333,52 @@ test("empty projects expose Quick Start and toolbar/right-click share one node c
   await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(3));
 });
 
+test("a blank-canvas context menu exits before opening Figma import", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas());
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />
+    </ApiProvider>,
+  );
+
+  const surface = await screen.findByLabelText("Infinite Design canvas");
+  expect(surface).toHaveAttribute("tabindex", "0");
+  fireEvent.contextMenu(surface, { clientX: 320.6, clientY: 259.6 });
+  const menu = screen.getByRole("menu", { name: "Add Design node" });
+  await user.click(within(menu).getByRole("menuitem", { name: "Import from Figma" }));
+
+  await waitFor(() => expect(screen.queryByRole("menu", { name: "Add Design node" })).not.toBeInTheDocument());
+  expect(await screen.findByRole("dialog", { name: "Import from Figma" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Figma file URL" })).toHaveFocus();
+});
+
+test("Cancel and Escape return Figma import focus to the Canvas", async () => {
+  const user = userEvent.setup();
+  const { api } = createCanvasApi(canvas());
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />
+    </ApiProvider>,
+  );
+  const surface = await screen.findByLabelText("Infinite Design canvas");
+  const openImport = async () => {
+    fireEvent.contextMenu(surface, { clientX: 320, clientY: 260 });
+    await user.click(screen.getByRole("menuitem", { name: "Import from Figma" }));
+    return screen.findByRole("dialog", { name: "Import from Figma" });
+  };
+
+  await openImport();
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).not.toBeInTheDocument());
+  expect(surface).toHaveFocus();
+
+  await openImport();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import from Figma" })).not.toBeInTheDocument());
+  expect(surface).toHaveFocus();
+});
+
 test("Canvas menus use dismissible animated primitives and toolbars keep the requested order", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas());
@@ -446,6 +494,10 @@ test("Agent panels preserve the native context menu without opening the canvas N
   await user.click(screen.getByRole("button", { name: "Main Agent" }));
   const mainPanel = screen.getByLabelText("Main Agent panel");
   const composer = within(mainPanel).getByRole("textbox", { name: "Main Agent message" });
+  expect(composer.closest(".design-canvas-agent__composer-shell")).toHaveAttribute(
+    "data-agent-component",
+    "prompt-bar",
+  );
   const beam = composer.closest<HTMLElement>(".design-canvas-agent__composer-beam");
   expect(beam?.style.getPropertyValue("--beam-strength")).toBe("0.56");
   expect(beam).toHaveAttribute(
@@ -508,6 +560,7 @@ test("selected Nodes have no redundant Agent or delete buttons and expose kind-s
   expect(screen.queryByLabelText("Checkout Agent panel", { selector: "section" })).not.toBeInTheDocument();
   const pageMenu = await screen.findByRole("menu", { name: "Page Node actions" });
   expect(within(pageMenu).getByRole("menuitem", { name: "Create page with Agent" })).toBeInTheDocument();
+  expect(within(pageMenu).queryByRole("menuitem", { name: "Import from Figma" })).not.toBeInTheDocument();
   expect(within(pageMenu).queryByRole("menuitem", { name: /revision/ })).not.toBeInTheDocument();
   fireEvent.keyDown(document, { key: "Escape" });
 
@@ -1990,6 +2043,7 @@ test("Node Agent activity stays chronological so a successful retry is the visib
   );
 
   const failedCard = rendered.container.querySelector<HTMLElement>(`[data-job-id="${failed.id}"]`)!;
+  expect(failedCard).toHaveAttribute("data-agent-component", "task-row");
   expect(within(failedCard).queryByText("Older attempt failed")).not.toBeInTheDocument();
   fireEvent.click(failedCard.querySelector<HTMLButtonElement>(".design-canvas-agent__activity-toggle")!);
   expect(await within(failedCard).findByText("Older attempt failed")).toBeInTheDocument();

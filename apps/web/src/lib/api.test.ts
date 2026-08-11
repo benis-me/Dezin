@@ -83,7 +83,7 @@ test("Home bootstrap posts one durable Project request", async () => {
 });
 
 test("Figma import posts only the frozen import DTO and supports cancellation", async () => {
-  const result = { project: PROJECT, import: { manifest: { importId: "figma-1" }, reused: false } };
+  const result = { canvas: { projectId: "project-frozen", nodes: [] }, import: { manifest: { importId: "figma-1" }, reused: false } };
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(result, 201));
   const api = createApiClient({ baseUrl: "http://daemon", fetchImpl });
   const controller = new AbortController();
@@ -92,12 +92,13 @@ test("Figma import posts only the frozen import DTO and supports cancellation", 
     idempotencyKey: "figma-web-0001",
     url: "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34",
     nodeIds: ["12:34"],
+    anchor: { x: 142, y: -37 },
     rightsAcknowledged: true as const,
   };
 
-  await expect(api.importFigmaProject(input, controller.signal)).resolves.toEqual(result);
+  await expect(api.importFigmaProject("project-frozen", input, controller.signal)).resolves.toEqual(result);
   expect(fetchImpl).toHaveBeenCalledWith(
-    "http://daemon/api/projects/imports/figma",
+    "http://daemon/api/projects/project-frozen/design-canvas/imports/figma",
     expect.objectContaining({
       method: "POST",
       body: JSON.stringify(input),

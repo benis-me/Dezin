@@ -1,4 +1,4 @@
-import { Check, Code2, Copy, ExternalLink, ImageIcon, ListTodo } from "lucide-react";
+import { Check, ChevronDown, Code2, Copy, ExternalLink, Globe2, ImageIcon, ListTodo } from "lucide-react";
 import {
   Children,
   isValidElement,
@@ -61,24 +61,43 @@ export function citationReferences(markdown: string): CitationReference[] {
 
 export function AgentCitationSources({ markdown }: { markdown: string }) {
   const references = useMemo(() => citationReferences(markdown), [markdown]);
+  const [open, setOpen] = useState(true);
+  const detailsId = useId();
   if (references.length === 0) return null;
   return (
-    <footer className="agent-citations" aria-label="Sources" data-agent-component="inline-citations">
-      {references.map((reference) => (
-        <a
-          key={`${reference.number}:${reference.href}`}
-          className="agent-citations__reference"
-          href={reference.href}
-          target="_blank"
-          rel="noreferrer"
-        >
-          <span className="agent-citation-mark" aria-hidden>{reference.number}</span>
-          <span className="agent-citations__label">{reference.label}</span>
-          <span className="agent-citations__separator" aria-hidden>·</span>
-          <span className="agent-citations__host">{reference.host}</span>
-          <ExternalLink className="agent-citations__arrow" aria-hidden />
-        </a>
-      ))}
+    <footer className="agent-citations" aria-label="Sources" data-agent-component="sources" data-collapsed={!open || undefined}>
+      <button
+        type="button"
+        className="agent-citations__header"
+        aria-label={`Sources (${references.length})`}
+        aria-controls={detailsId}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Globe2 aria-hidden />
+        <span>Sources</span>
+        <small>{references.length}</small>
+        <ChevronDown aria-hidden />
+      </button>
+      <AgentCollapsible id={detailsId} className="agent-citations__collapsible" open={open}>
+        <div className="agent-citations__references">
+          {references.map((reference) => (
+            <a
+              key={`${reference.number}:${reference.href}`}
+              className="agent-citations__reference"
+              href={reference.href}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span className="agent-citation-mark" aria-hidden>{reference.number}</span>
+              <span className="agent-citations__label">{reference.label}</span>
+              <span className="agent-citations__separator" aria-hidden>·</span>
+              <span className="agent-citations__host">{reference.host}</span>
+              <ExternalLink className="agent-citations__arrow" aria-hidden />
+            </a>
+          ))}
+        </div>
+      </AgentCollapsible>
     </footer>
   );
 }

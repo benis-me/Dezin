@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
+import { createDesignProject } from "../src/design/design-project-store.ts";
 import { getDesignCanvas } from "../src/design/design-storage.ts";
 import { importFigmaDesignProject } from "../src/design/figma-import.ts";
 import type { FigmaRestClient } from "../src/design/figma-rest-client.ts";
@@ -50,7 +51,7 @@ async function assertNoSecretOutsideStore(dataDir: string, token: string): Promi
   }
 }
 
-test("Figma HTTP stores a non-echoed PAT and imports one exact Project with replay semantics", async (t) => {
+test("Figma HTTP stores a non-echoed PAT and imports exact artifacts at a Canvas anchor with replay semantics", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
@@ -96,42 +97,75 @@ test("Figma HTTP stores a non-echoed PAT and imports one exact Project with repl
   assert.equal(storedText.includes(token), false);
   assert.deepEqual(JSON.parse(storedText), { configured: true, source: "local" });
 
+  const project = await createDesignProject(dataDir, { name: "Existing canvas" });
   const input = {
     schemaVersion: 1,
     idempotencyKey: "figma-http-import-1",
     url: "https://www.figma.com/design/AbC123xyZ/Product-System",
     depth: 4,
+    anchor: { x: 180, y: -240 },
     rightsAcknowledged: true,
   };
-  const firstResponse = await json("/api/projects/imports/figma", "POST", input);
+  const importPath = `/api/projects/${project.projectId}/design-canvas/imports/figma`;
+  const firstResponse = await json(importPath, "POST", input);
   assert.equal(firstResponse.status, 201, await firstResponse.clone().text());
   const first = await firstResponse.json() as {
-    project: { id: string; name: string };
-    import: { reused: boolean; manifest: { projectId: string; importId: string } };
+    canvas: {
+      projectId: string;
+      revision: number;
+      viewport: unknown;
+      nodes: Array<{ name: string; geometry: unknown }>;
+    };
+    import: {
+      reused: boolean;
+      manifest: { projectId: string; importId: string; canvasRevision: number };
+    };
   };
+  assert.deepEqual(Object.keys(first).sort(), ["canvas", "import"]);
   assert.equal(first.import.reused, false);
-  assert.equal(first.project.id, first.import.manifest.projectId);
-  assert.equal(first.project.name, "Product System");
-  assert.deepEqual(leasedProjectIds, [first.project.id]);
-  assert.deepEqual((await getDesignCanvas(dataDir, first.project.id)).nodes.map((node) => node.name), [
+  assert.equal(first.canvas.projectId, project.projectId);
+  assert.equal(first.import.manifest.projectId, project.projectId);
+  assert.deepEqual((await getDesignCanvas(dataDir, project.projectId)).nodes.map((node) => node.name), [
     "Design.md", "tokens.json", "components.json",
   ]);
+  assert.deepEqual((await getDesignCanvas(dataDir, project.projectId)).nodes.map((node) => node.geometry), [
+    { x: 180, y: -240, width: 420, height: 560 },
+    { x: 640, y: -240, width: 420, height: 560 },
+    { x: 1_100, y: -240, width: 420, height: 560 },
+  ]);
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
+  assert.deepEqual(leasedProjectIds, [project.projectId]);
 
   await assertNoSecretOutsideStore(dataDir, token);
 
-  const replayResponse = await json("/api/projects/imports/figma", "POST", input);
+  const changedCanvasResponse = await json(`/api/projects/${project.projectId}/design-canvas`, "PUT", {
+    expectedRevision: first.canvas.revision,
+    intents: [{ type: "set-viewport", viewport: { x: 33, y: -44, zoom: 1.25 } }],
+  });
+  assert.equal(changedCanvasResponse.status, 200, await changedCanvasResponse.clone().text());
+  const changedCanvas = await changedCanvasResponse.json() as { revision: number; viewport: unknown };
+
+  const replayResponse = await json(importPath, "POST", input);
   assert.equal(replayResponse.status, 200, await replayResponse.clone().text());
   const replay = await replayResponse.json() as typeof first;
   assert.equal(replay.import.reused, true);
-  assert.equal(replay.project.id, first.project.id);
+  assert.equal(replay.canvas.projectId, project.projectId);
+  assert.equal(replay.canvas.revision, changedCanvas.revision);
+  assert.deepEqual(replay.canvas.viewport, changedCanvas.viewport);
   assert.equal(replay.import.manifest.importId, first.import.manifest.importId);
-  assert.deepEqual(leasedProjectIds, [first.project.id, first.project.id]);
+  assert.equal(replay.import.manifest.canvasRevision, first.canvas.revision);
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
 
-  const conflict = await json("/api/projects/imports/figma", "POST", { ...input, depth: 5 });
+  const conflict = await json(importPath, "POST", { ...input, depth: 5 });
   assert.equal(conflict.status, 409, await conflict.clone().text());
+  const anchorConflict = await json(importPath, "POST", {
+    ...input,
+    anchor: { x: input.anchor.x + 1, y: input.anchor.y },
+  });
+  assert.equal(anchorConflict.status, 409, await anchorConflict.clone().text());
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
+  assert.equal(leasedProjectIds.length, 5, "each Canvas operation owns exactly one Project lease");
+  assert.deepEqual([...new Set(leasedProjectIds)], [project.projectId]);
 
   const secretBytes = await readFile(join(dataDir, "secrets", "figma-pat.json"), "utf8");
   assert.equal(secretBytes.includes(token), true);
@@ -140,15 +174,68 @@ test("Figma HTTP stores a non-echoed PAT and imports one exact Project with repl
   assert.deepEqual(await forgotten.json(), { configured: false, source: null });
 });
 
+test("Figma Canvas import rejects a missing target before credential, network, or receipt side effects", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-missing-target-"));
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  let credentialCalls = 0;
+  let remoteCalls = 0;
+  const server = createApp({
+    dataDir,
+    store,
+    runtimeSupervisor,
+    figmaClient: {
+      async getMetadata() { remoteCalls += 1; throw new Error("must not fetch"); },
+      async getFileVersion() { remoteCalls += 1; throw new Error("must not fetch"); },
+      async getLocalVariables() { remoteCalls += 1; throw new Error("must not fetch"); },
+    },
+    figmaCredentialProvider: async () => {
+      credentialCalls += 1;
+      throw new Error("must not resolve credential");
+    },
+  });
+  t.after(async () => {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const missingProjectId = "00000000-0000-4000-8000-000000000000";
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/projects/${missingProjectId}/design-canvas/imports/figma`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        idempotencyKey: "figma-http-missing-target-1",
+        url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+        anchor: { x: 0, y: 0 },
+        rightsAcknowledged: true,
+      }),
+    },
+  );
+  assert.equal(response.status, 404, await response.clone().text());
+  assert.equal(credentialCalls, 0);
+  assert.equal(remoteCalls, 0);
+  await assert.rejects(stat(join(dataDir, "projects", missingProjectId)), { code: "ENOENT" });
+  await assert.rejects(stat(join(dataDir, "figma-import-jobs")), { code: "ENOENT" });
+});
+
 test("daemon startup rolls a staged Figma receipt forward before exposing Projects without PAT or network access", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-startup-recovery-"));
+  const project = await createDesignProject(dataDir, { name: "Startup Figma target" });
   const stagedCalls: string[] = [];
   await assert.rejects(importFigmaDesignProject({
     dataDir,
+    projectId: project.projectId,
     input: {
       schemaVersion: 1,
       idempotencyKey: "figma-http-startup-recovery-1",
       url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: -320, y: 640 },
       rightsAcknowledged: true,
     },
     client: figmaClient(stagedCalls),
@@ -202,6 +289,7 @@ test("Figma HTTP rejects token-bearing imports before remote or filesystem side 
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-invalid-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const project = await createDesignProject(dataDir, { name: "Invalid Figma target" });
   const token = "figd_private_token_0123456789";
   let credentialCalls = 0;
   let remoteCalls = 0;
@@ -233,13 +321,27 @@ test("Figma HTTP rejects token-bearing imports before remote or filesystem side 
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  const response = await fetch(`http://127.0.0.1:${port}/api/projects/imports/figma`, {
+  const importUrl = `http://127.0.0.1:${port}/api/projects/${project.projectId}/design-canvas/imports/figma`;
+  const removedHomeRoute = await fetch(`http://127.0.0.1:${port}/api/projects/imports/figma`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      idempotencyKey: "removed-home-route",
+      url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: 0, y: 0 },
+      rightsAcknowledged: true,
+    }),
+  });
+  assert.equal(removedHomeRoute.status, 404, await removedHomeRoute.clone().text());
+  const response = await fetch(importUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       schemaVersion: 1,
       idempotencyKey: "figma-http-invalid-1",
       url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: 0, y: 0 },
       rightsAcknowledged: true,
       token,
     }),
@@ -248,7 +350,23 @@ test("Figma HTTP rejects token-bearing imports before remote or filesystem side 
   assert.equal(credentialCalls, 0);
   assert.equal(remoteCalls, 0);
 
-  const canaryResponse = await fetch(`http://127.0.0.1:${port}/api/projects/imports/figma`, {
+  const projectBodyResponse = await fetch(importUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      idempotencyKey: "figma-http-project-body-1",
+      projectId: "other-project",
+      url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: 0, y: 0 },
+      rightsAcknowledged: true,
+    }),
+  });
+  assert.equal(projectBodyResponse.status, 400, await projectBodyResponse.clone().text());
+  assert.equal(credentialCalls, 0);
+  assert.equal(remoteCalls, 0);
+
+  const canaryResponse = await fetch(importUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -256,13 +374,14 @@ test("Figma HTTP rejects token-bearing imports before remote or filesystem side 
       idempotencyKey: "figma-http-request-canary-1",
       url: "https://www.figma.com/design/AbC123xyZ/Product-System",
       name: token,
+      anchor: { x: 0, y: 0 },
       rightsAcknowledged: true,
     }),
   });
   assert.equal(canaryResponse.status, 400, await canaryResponse.clone().text());
   const responseText = await canaryResponse.text();
   assert.equal(responseText.includes(token), false);
-  assert.equal(credentialCalls, 1);
+  assert.equal(credentialCalls, 0);
   assert.equal(remoteCalls, 0);
   await assertNoSecretOutsideStore(dataDir, token);
 });
@@ -271,6 +390,7 @@ test("Figma HTTP never echoes or persists a PAT hidden in hostile upstream label
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-secret-error-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const project = await createDesignProject(dataDir, { name: "Hostile response target" });
   const token = "figd_private_token_0123456789";
   const encoded = Buffer.from(token).toString("base64");
   const client: FigmaRestClient = {
@@ -311,16 +431,20 @@ test("Figma HTTP never echoes or persists a PAT hidden in hostile upstream label
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  const response = await fetch(`http://127.0.0.1:${port}/api/projects/imports/figma`, {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/projects/${project.projectId}/design-canvas/imports/figma`,
+    {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       schemaVersion: 1,
       idempotencyKey: "figma-http-secret-error-1",
       url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: 0, y: 0 },
       rightsAcknowledged: true,
     }),
-  });
+    },
+  );
   assert.equal(response.status, 502);
   const responseText = await response.text();
   assert.equal(responseText, JSON.stringify({ error: "Figma response could not be normalized safely" }));
@@ -334,6 +458,7 @@ test("Figma HTTP waits for startup recovery, enforces daemon auth, and propagate
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-lifecycle-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const project = await createDesignProject(dataDir, { name: "Lifecycle Figma target" });
   let releaseRecovery!: () => void;
   const recovery = new Promise<void>((resolve) => { releaseRecovery = resolve; });
   let metadataCalls = 0;
@@ -381,11 +506,12 @@ test("Figma HTTP waits for startup recovery, enforces daemon auth, and propagate
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  const url = `http://127.0.0.1:${port}/api/projects/imports/figma`;
+  const url = `http://127.0.0.1:${port}/api/projects/${project.projectId}/design-canvas/imports/figma`;
   const body = JSON.stringify({
     schemaVersion: 1,
     idempotencyKey: "figma-http-lifecycle-1",
     url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+    anchor: { x: 0, y: 0 },
     rightsAcknowledged: true,
   });
 
@@ -425,6 +551,7 @@ test("Figma HTTP keeps the Project lease through response projection before conc
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-http-delete-race-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const project = await createDesignProject(dataDir, { name: "Delete-race Figma target" });
   let releaseProjection!: () => void;
   const projectionGate = new Promise<void>((resolve) => { releaseProjection = resolve; });
   let markProjectionEntered!: (projectId: string) => void;
@@ -456,13 +583,14 @@ test("Figma HTTP keeps the Project lease through response projection before conc
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
-  const importing = fetch(`${base}/api/projects/imports/figma`, {
+  const importing = fetch(`${base}/api/projects/${project.projectId}/design-canvas/imports/figma`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       schemaVersion: 1,
       idempotencyKey: "figma-http-delete-race-1",
       url: "https://www.figma.com/design/AbC123xyZ/Product-System",
+      anchor: { x: 0, y: 0 },
       rightsAcknowledged: true,
     }),
   });

@@ -92,11 +92,15 @@ function Harness({ api }: { api: DesignCanvasApi }) {
     <div>
       <span data-testid="revision">{controller.canvas?.revision ?? "loading"}</span>
       <span data-testid="error">{controller.error ?? ""}</span>
+      <span data-testid="load-state">{controller.loadState}</span>
       <button type="button" onClick={() => void controller.applyIntents([{ type: "add-node", node: { kind: "page" } }])}>mutate</button>
       <button type="button" onClick={() => void controller.appendMaterialVersion("image-1", new File(["v2"], "v2.png", { type: "image/png" }))}>append material version</button>
       <button type="button" onClick={() => void controller.cancelJob("job-live")}>cancel</button>
       <button type="button" onClick={() => void controller.retryJob("job-failed")}>retry failed job</button>
       <button type="button" onClick={() => void controller.refresh()}>refresh</button>
+      <button type="button" onClick={() => controller.adoptCanvas(canvas(4))}>adopt response canvas</button>
+      <button type="button" onClick={() => controller.adoptCanvas(canvas(2))}>adopt stale canvas</button>
+      <button type="button" onClick={() => controller.adoptCanvas({ ...canvas(9), projectId: "other-project" })}>adopt foreign canvas</button>
     </div>
   );
 }
@@ -255,6 +259,21 @@ test("a successful retry clears an initial-load failure", async () => {
 
   await screen.findByText("2");
   expect(screen.getByTestId("error")).toHaveTextContent("");
+});
+
+test("a response Canvas is adopted only for this Project without rolling its revision backward", async () => {
+  const api = fakeApi({ getCanvas: vi.fn(async () => { throw new Error("daemon unavailable"); }) });
+  render(<Harness api={api} />);
+  await screen.findByText("daemon unavailable");
+
+  fireEvent.click(screen.getByRole("button", { name: "adopt response canvas" }));
+  expect(screen.getByTestId("revision")).toHaveTextContent("4");
+  expect(screen.getByTestId("load-state")).toHaveTextContent("ready");
+  expect(screen.getByTestId("error")).toHaveTextContent("");
+
+  fireEvent.click(screen.getByRole("button", { name: "adopt stale canvas" }));
+  fireEvent.click(screen.getByRole("button", { name: "adopt foreign canvas" }));
+  expect(screen.getByTestId("revision")).toHaveTextContent("4");
 });
 
 test("an older initial-load failure cannot replace a newer successful refresh", async () => {

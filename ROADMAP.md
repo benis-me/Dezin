@@ -36,7 +36,7 @@ Dezin is an early open-source Design Canvas. This file describes the current pro
 - [x] Replace the initial Home→Canvas session handoff with an idempotent, restart-recoverable daemon bootstrap Job.
 - [x] Publish shared pure Design Canvas contracts for daemon and Web rather than maintaining mirrored unions.
 - [x] Split Canvas and Agent state into controllers and extract header, focus chrome, tool docks, and Agent-panel views with focused interaction coverage.
-- [x] Ship the first filesystem-authoritative Figma URL import: strict Design/File/Board/Slides and branch parsing, local PAT/env credential handling, exact-version REST fencing, durable cross-process replay/recovery, and atomic `Design.md`/`tokens.json`/`components.json` material Nodes. Pixel-perfect clone, binary capture, OAuth, refresh/diff, and native semantic bundles remain follow-ups documented in [docs/FIGMA-IMPORT.md](docs/FIGMA-IMPORT.md).
+- [x] Ship the first filesystem-authoritative, blank-canvas context-menu Figma URL import into the current Project: strict Design/File/Board/Slides and branch parsing, local PAT/env credential handling, exact-version REST fencing, durable Project-local cross-process replay/recovery, and atomic anchored `Design.md`/`tokens.json`/`components.json` material Nodes. Pixel-perfect clone, binary capture, OAuth, refresh/diff, and native semantic bundles remain follow-ups documented in [docs/FIGMA-IMPORT.md](docs/FIGMA-IMPORT.md).
 
 ## Formally retired from the primary Canvas contract
 

@@ -215,19 +215,6 @@ test("creating a project asks the daemon for a generated title in the background
   await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith("p1", "A dashboard for pricing experiments"));
 });
 
-test("a completed Home Figma import navigates to the new local Canvas project", async () => {
-  renderApp();
-  fireEvent.click(screen.getByRole("button", { name: "Import from Figma" }));
-  fireEvent.change(await screen.findByRole("textbox", { name: "Figma file URL" }), {
-    target: { value: "https://www.figma.com/design/AbCdEf123456/Checkout?node-id=12-34" },
-  });
-  fireEvent.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
-  fireEvent.click(screen.getByRole("button", { name: "Import project" }));
-
-  await waitFor(() => expect(window.location.pathname).toBe("/projects/project-figma"));
-  expect(await screen.findByRole("main", { name: "Design canvas" })).toBeInTheDocument();
-});
-
 test("Home attachment mapping keeps exact source Version identity in the atomic import", () => {
   expect(designCanvasAttachmentItems({
     images: [],

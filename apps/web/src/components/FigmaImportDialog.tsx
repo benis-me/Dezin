@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { Figma, KeyRound, LoaderCircle } from "lucide-react";
-import { FIGMA_IMPORT_SCHEMA_VERSION, type FigmaCredentialStatus } from "../design-canvas/types.ts";
-import { ApiError, type FigmaImportProjectResponse } from "../lib/api.ts";
+import {
+  FIGMA_IMPORT_SCHEMA_VERSION,
+  type FigmaCanvasImportResponse,
+  type FigmaCredentialStatus,
+  type FigmaImportAnchor,
+} from "../design-canvas/types.ts";
+import { ApiError } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { hasFigmaVersionSelection, previewFigmaImportUrl } from "../lib/figma-import-url.ts";
 import { Button, Dialog, Input } from "./ui/index.ts";
@@ -81,13 +86,17 @@ function wasAborted(problem: unknown): boolean {
 
 export function FigmaImportDialog({
   open,
+  projectId,
+  anchor,
   onClose,
   onImported,
   returnFocusRef,
 }: {
   open: boolean;
+  projectId: string;
+  anchor: FigmaImportAnchor;
   onClose: () => void;
-  onImported: (result: FigmaImportProjectResponse) => void;
+  onImported: (result: FigmaCanvasImportResponse) => void | Promise<void>;
   returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const api = useApi();
@@ -201,6 +210,8 @@ export function FigmaImportDialog({
       const normalizedUrl = url.trim();
       const fingerprint = JSON.stringify({
         schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
+        projectId,
+        anchor,
         normalizedUrl: preview.normalizedUrl,
         nodeIds: preview.nodeIds,
       });
@@ -209,11 +220,12 @@ export function FigmaImportDialog({
         if (controller.signal.aborted) return;
       }
       const importKey = importKeyRef.current.key;
-      const result = await api.importFigmaProject({
+      const result = await api.importFigmaProject(projectId, {
         schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
         idempotencyKey: importKey,
         url: normalizedUrl,
         ...(preview.nodeIds.length ? { nodeIds: preview.nodeIds } : {}),
+        anchor,
         rightsAcknowledged: true,
       }, controller.signal);
       if (controller.signal.aborted) return;
@@ -222,7 +234,7 @@ export function FigmaImportDialog({
       setUrl("");
       setUrlTouched(false);
       setRightsAcknowledged(false);
-      onImported(result);
+      await onImported(result);
     } catch (problem) {
       if (controller.signal.aborted || wasAborted(problem)) return;
       if (problem instanceof ApiError && problem.status === 503) setCredential({ configured: false, source: null });
@@ -258,7 +270,7 @@ export function FigmaImportDialog({
             <div className="min-w-0">
               <h2 className="text-base font-semibold tracking-tight">Import from Figma</h2>
               <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                Extract a Figma file into local Design.md, tokens.json, and components.json artifacts.
+                Extract a Figma file into local Design.md, tokens.json, and components.json artifacts on this canvas.
                 This first version is an analysis import, not a pixel-perfect clone; restricted Variables are marked incomplete.
               </p>
             </div>
@@ -416,7 +428,7 @@ export function FigmaImportDialog({
             disabled={submitting || !preview || !rightsAcknowledged || credential === null || credentialError !== null || (!credential.configured && !hasToken)}
           >
             {submitting ? <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden /> : null}
-            {submitting ? "Importing…" : "Import project"}
+            {submitting ? "Importing…" : "Import into canvas"}
           </Button>
         </div>
       </form>

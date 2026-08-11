@@ -1014,14 +1014,15 @@
 .design-canvas-agent__activity-group-retry { display: flex; margin: -1px 8px 8px 29px; }
 .design-canvas-agent__activity {
   position: relative;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--surface-2) 44%, var(--card));
   box-shadow: none;
 }
 .design-canvas-agent__activity + .design-canvas-agent__activity { margin-top: 6px; }
-.design-canvas-agent__activity-group .design-canvas-agent__activity { border: 0; border-radius: 0; background: transparent; }
+.design-canvas-agent__activity-group .design-canvas-agent__activity { border: 1px solid color-mix(in oklch, var(--border) 72%, transparent); border-radius: 12px; background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); }
 .design-canvas-agent__activity-group .design-canvas-agent__activity + .design-canvas-agent__activity { margin-top: 6px; }
 .design-canvas-agent__activity[data-status="queued"],
 .design-canvas-agent__activity[data-status="running"],
@@ -1029,13 +1030,13 @@
 .design-canvas-agent__activity[data-status="ready"],
 .design-canvas-agent__activity[data-status="cancelled"],
 .design-canvas-agent__activity[data-status="superseded"] {
-  background: transparent;
+  background: color-mix(in oklch, var(--surface-2) 44%, var(--card));
 }
-.design-canvas-agent__activity[data-status="failed"] { background: transparent; box-shadow: none; }
-.design-canvas-agent__activity[data-status="failed"][data-collapsed] { background: transparent; box-shadow: none; }
-.design-canvas-agent__activity-group .design-canvas-agent__activity[data-status] { background: transparent; }
-.design-canvas-agent__activity > header { display: flex; min-height: 40px; align-items: center; gap: 4px; padding: 0; }
-.design-canvas-agent__activity-toggle { display: grid; min-width: 0; min-height: 40px; flex: 1; grid-template-columns: 14px minmax(0, 1fr) 14px; align-items: center; gap: 8px; border-radius: 7px; padding: 6px 0; text-align: left; }
+.design-canvas-agent__activity[data-status="failed"] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); box-shadow: none; }
+.design-canvas-agent__activity[data-status="failed"][data-collapsed] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); box-shadow: none; }
+.design-canvas-agent__activity-group .design-canvas-agent__activity[data-status] { background: color-mix(in oklch, var(--surface-2) 44%, var(--card)); }
+.design-canvas-agent__activity > header { display: flex; min-height: 44px; align-items: center; gap: 4px; padding: 0 7px; }
+.design-canvas-agent__activity-toggle { display: grid; min-width: 0; min-height: 44px; flex: 1; grid-template-columns: 14px minmax(0, 1fr) 14px; align-items: center; gap: 8px; border-radius: 7px; padding: 7px 0; color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground)); text-align: left; }
 .design-canvas-agent__activity-toggle:focus-visible { outline: 2px solid color-mix(in oklch, var(--ring) 58%, transparent); outline-offset: 1px; }
 .design-canvas-agent__activity-status { display: grid; width: 14px; height: 14px; place-items: center; background: transparent; color: var(--muted-foreground); }
 .design-canvas-agent__activity-status svg { width: 12px; height: 12px; stroke-width: 1.75; }
@@ -1078,14 +1079,21 @@
 .design-canvas-agent__activity-retry > svg { width: 10px !important; height: 10px !important; stroke-width: 1.8; }
 .design-canvas-agent__activity-collapsible { overflow: hidden; }
 .design-canvas-agent__activity-collapsible > [data-agent-collapsible-content] { transform-origin: 50% 0; }
-.design-canvas-agent__activity-body { display: grid; gap: 0; padding: 0 0 10px; }
-.design-canvas-agent__activity-result { margin: 2px 8px 8px 29px; border: 0.5px solid color-mix(in oklch, var(--border) 72%, transparent); border-radius: 8px; padding: 9px 10px; background: color-mix(in oklch, var(--surface) 44%, transparent); color: var(--muted-foreground); font-size: 10px; }
-.design-canvas-agent__activity-result > p { color: var(--foreground); font-size: 11.5px; font-weight: 550; }
-.design-canvas-agent__activity-result > code,
-.design-canvas-agent__activity-result > small { display: block; overflow: hidden; margin-top: 5px; font-size: 9.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.design-canvas-agent__activity-body { display: grid; min-width: 0; gap: 0; padding: 0 0 8px; }
+.design-canvas-agent__activity-outcome { display: grid; min-width: 0; grid-template-columns: 14px minmax(0, 1fr); align-items: center; gap: 7px; margin: 2px 8px 8px 29px; border-top: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent); padding: 7px 0 0; background: transparent; color: color-mix(in oklch, var(--foreground) 64%, var(--muted-foreground)); font-size: 10.5px; line-height: 15px; }
+.design-canvas-agent__activity-outcome > span { display: grid; width: 14px; height: 14px; place-items: center; color: var(--muted-foreground); }
+.design-canvas-agent__activity-outcome > span > svg { width: 12px; height: 12px; stroke-width: 1.75; }
+.design-canvas-agent__activity-outcome[data-status="ready"] > span { color: var(--success); }
+.design-canvas-agent__activity-outcome > p { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.design-canvas-agent__activity-result { display: grid; min-width: 0; grid-template-columns: 14px minmax(0, 1fr); align-items: start; gap: 7px; margin: 2px 8px 8px 29px; border-top: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent); padding: 8px 0 0; background: transparent; color: var(--muted-foreground); font-size: 10px; }
+.design-canvas-agent__activity-result > svg { width: 13px; height: 13px; margin-top: 1px; color: var(--muted-foreground); stroke-width: 1.75; }
+.design-canvas-agent__activity-result-body { min-width: 0; }
+.design-canvas-agent__activity-result-body > p { color: var(--foreground); font-size: 11.5px; font-weight: 550; }
+.design-canvas-agent__activity-result-body > code,
+.design-canvas-agent__activity-result-body > small { display: block; overflow: hidden; margin-top: 5px; font-size: 9.5px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__activity-export-actions { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 8px; }
 .design-canvas-agent__activity-export-actions output { overflow: hidden; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__activity-error { display: grid; grid-template-columns: 13px minmax(0, 1fr); align-items: start; gap: 7px; margin: 2px 8px 8px 29px; padding: 2px 0; background: transparent; color: color-mix(in oklch, var(--foreground) 74%, var(--muted-foreground)); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.design-canvas-agent__activity-error { display: grid; grid-template-columns: 14px minmax(0, 1fr); align-items: start; gap: 7px; margin: 2px 8px 8px 29px; padding: 2px 0; background: transparent; color: color-mix(in oklch, var(--foreground) 74%, var(--muted-foreground)); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .design-canvas-agent__activity-error > svg { width: 12px; height: 12px; margin-top: 1px; color: var(--destructive); stroke-width: 1.75; }
 .design-canvas-agent__activity-error > p { min-width: 0; margin: 0; }
 
@@ -1314,7 +1322,7 @@
   .dark .design-canvas-focus-actions [data-slot="button"]:hover { background: oklch(1 0 0 / 12%); color: white; }
   .design-canvas-node:hover .design-canvas-node__frame { border-color: var(--border-strong); }
   .design-canvas-agent__history-more:hover { background: var(--surface-2); color: var(--foreground); }
-  .design-canvas-agent__activity-toggle:hover { background: transparent; }
+  .design-canvas-agent__activity-toggle:hover { background: transparent; color: var(--foreground); }
   .design-canvas-agent__activity-stop:hover:not(:disabled) {
     border-color: color-mix(in oklch, var(--destructive) 30%, var(--border));
     background: color-mix(in oklch, var(--destructive) 5%, transparent);

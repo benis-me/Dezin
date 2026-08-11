@@ -1,12 +1,5 @@
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AgentCollapsible } from "../components/AgentCollapsible.tsx";
-import {
-  AgentImageGenerationState,
-  AgentProgressList,
-  AgentReasoning,
-  AgentWebSearch,
-  type AgentProgressItem,
-} from "../components/AgentActivityBlocks.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import {
   Button,
@@ -22,7 +15,7 @@ import {
 } from "../components/ui/index.ts";
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
-import { designExportPath, type DesignExportRevealResult } from "../lib/design-export.ts";
+import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { cn } from "../lib/utils.ts";
 import { BorderBeam } from "border-beam";
@@ -54,21 +47,17 @@ import {
 } from "react";
 
 import {
-  activeAgentActivityPhase,
   buildAgentTranscriptPage,
+  buildAgentOutputModel,
   compactActivityText,
   compactJobDuration,
-  isImageGenerationActivity,
-  isReasoningActivity,
-  isWebSearchActivity,
   jobRetryLabel,
   jobStatusLabel,
-  quotedActivityText,
-  searchResults,
   versionOptionLabel,
   type MainAgentJobGroup,
   type OptimisticUserTurn,
 } from "./agent-panel-model.ts";
+import { AgentOutputRenderer } from "./AgentOutputRenderer.tsx";
 import { type DesignCanvasApi } from "./api.ts";
 import { NodeMentionInput } from "./NodeMentionInput.tsx";
 import type {
@@ -570,7 +559,7 @@ export function CanvasAgentPanel({
             if (!event.currentTarget.contains(event.relatedTarget)) setComposerFocused(false);
           }}
         >
-          <div className="design-canvas-agent__composer-shell">
+          <div className="design-canvas-agent__composer-shell" data-agent-component="prompt-bar">
             <NodeMentionInput
               nodes={nodes}
               excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
@@ -935,8 +924,6 @@ function AgentActivityCard({
   initiallyExpanded?: boolean;
 }) {
   const reduceMotion = usePrefersReducedMotion();
-  const [revealFeedback, setRevealFeedback] = useState<string | null>(null);
-  const [revealing, setRevealing] = useState(false);
   const detailsId = useId();
   const active = job.status === "queued" || job.status === "running" || job.status === "validating";
   const [expanded, setExpanded] = useState(active || initiallyExpanded);
@@ -972,48 +959,7 @@ function AgentActivityCard({
     onCancel,
     onRetry,
   });
-  const exportId = job.kind === "implementation-export" ? job.exportId : null;
-  const exportPath = exportId
-    ? designExportPath(projectPath, exportId)
-    : null;
-  const searchActivities = job.activity.filter(isWebSearchActivity);
-  const imageActivity = [...job.activity].reverse().find(isImageGenerationActivity) ?? null;
-  const reasoningItems = job.activity
-    .filter(isReasoningActivity)
-    .map((activity) => ({ id: activity.id, text: activity.text.trim() || "Activity updated" }));
-  const activePhase = activeAgentActivityPhase(job);
-  const reasoningActive = activePhase === "reasoning";
-  const progressActive = activePhase === "progress";
-  const searchActive = activePhase === "search";
-  const imageActive = activePhase === "image";
-  const progressActivities = job.activity.filter((activity) => (
-    activity.kind !== "text" && !isWebSearchActivity(activity) && !isImageGenerationActivity(activity)
-  ));
-  const omittedProgressCount = Math.max(0, progressActivities.length - 7);
-  const visibleProgressActivities = progressActivities.slice(-7);
-  const progressItems: AgentProgressItem[] = [
-    ...(omittedProgressCount > 0 ? [{
-      id: `${job.id}-earlier-actions`,
-      text: `${omittedProgressCount} earlier actions completed`,
-      state: "done" as const,
-    }] : []),
-    ...visibleProgressActivities.map((activity, index) => ({
-      id: activity.id,
-      text: compactActivityText(activity.text),
-      state: job.status === "failed" && index === visibleProgressActivities.length - 1
-        ? "failed" as const
-        : progressActive && index === visibleProgressActivities.length - 1
-          ? "active" as const
-          : "done" as const,
-    })),
-  ];
-  const searchQuery = searchActivities.length > 0
-    ? quotedActivityText(searchActivities[0]!.text)
-      ?? (compactActivityText(searchActivities[0]!.text).replace(/^.*?\bsearch(?:ing|ed)?\b\s*/i, "") || "the web")
-    : null;
-  const imagePrompt = imageActivity
-    ? quotedActivityText(imageActivity.text) ?? compactActivityText(imageActivity.text)
-    : null;
+  const outputModel = buildAgentOutputModel(job);
   const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
   return (
     <article
@@ -1023,7 +969,7 @@ function AgentActivityCard({
       data-job-id={job.id}
       data-node-id={job.nodeId ?? undefined}
       data-parent-job-id={job.parentJobId ?? undefined}
-      data-agent-component="execution-log"
+      data-agent-component="task-row"
       aria-label={`${label} · ${job.status}`}
     >
       <span className="agent-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
@@ -1110,64 +1056,11 @@ function AgentActivityCard({
         </div>
       ) : null}
       <AgentCollapsible id={detailsId} className="design-canvas-agent__activity-collapsible" open={expanded}>
-        <>
-          <div className="design-canvas-agent__activity-body">
-            <AgentReasoning items={reasoningItems} active={reasoningActive} durationMs={durationMs} />
-            {searchQuery ? (
-              <AgentWebSearch query={searchQuery} results={searchResults(searchActivities, searchActive)} active={searchActive} />
-            ) : null}
-            {imagePrompt ? <AgentImageGenerationState prompt={imagePrompt} active={imageActive} /> : null}
-            <AgentProgressList
-              items={progressItems}
-              defaultOpen={active || job.status === "failed"}
-              completionTone={job.status === "ready" ? "auto" : "neutral"}
-            />
-          </div>
-          {job.kind === "implementation-export" && job.exportId ? (
-            <div className="design-canvas-agent__activity-result">
-              <p>{job.status === "ready" ? "Export ready" : "Export"}</p>
-              {job.status === "ready" ? (
-                <>
-                  {exportPath ? (
-                    <code title={exportPath}>{exportPath}</code>
-                  ) : <small>Output path unavailable until Project metadata loads.</small>}
-                  <div className="design-canvas-agent__activity-export-actions">
-                    <Button
-                      type="button"
-                      size="xs"
-                      variant="outline"
-                      disabled={revealing || !exportPath || !onRevealExport}
-                      onClick={() => {
-                        if (!onRevealExport || !exportId) return;
-                        setRevealing(true);
-                        setRevealFeedback(null);
-                        void onRevealExport(exportId).then((result) => {
-                          setRevealFeedback(result === "revealed"
-                            ? "Opened in Finder."
-                            : result === "copied"
-                              ? "Finder unavailable · path copied."
-                              : "Reveal unavailable · copy the path shown above.");
-                        }).catch(() => {
-                          setRevealFeedback("Couldn't reveal this export.");
-                        }).finally(() => setRevealing(false));
-                      }}
-                    >
-                      {revealing ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : null}
-                      Reveal export
-                    </Button>
-                    {revealFeedback ? <output role="status">{revealFeedback}</output> : null}
-                  </div>
-                </>
-              ) : null}
-            </div>
-          ) : null}
-          {job.status === "failed" && job.error ? (
-            <div className="design-canvas-agent__activity-error" aria-hidden={!expanded}>
-              <CircleAlert aria-hidden />
-              <p>{job.error}</p>
-            </div>
-          ) : null}
-        </>
+        <AgentOutputRenderer
+          model={outputModel}
+          projectPath={projectPath}
+          onRevealExport={onRevealExport}
+        />
       </AgentCollapsible>
     </article>
   );

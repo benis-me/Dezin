@@ -13,8 +13,8 @@ import type {
   DesignThread,
   FigmaCredentialPutInput,
   FigmaCredentialStatus,
+  FigmaCanvasImportResponse,
   FigmaImportInput,
-  FigmaImportResult,
 } from "../design-canvas/types.ts";
 
 export type {
@@ -63,11 +63,6 @@ export interface CreateProjectInput {
 export interface BootstrapDesignProjectResponse {
   project: Project;
   bootstrap: DesignProjectBootstrapResult;
-}
-
-export interface FigmaImportProjectResponse {
-  project: Project;
-  import: FigmaImportResult;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -558,7 +553,11 @@ export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
   bootstrapDesignProject(input: DesignProjectBootstrapInput): Promise<BootstrapDesignProjectResponse>;
-  importFigmaProject(input: FigmaImportInput, signal?: AbortSignal): Promise<FigmaImportProjectResponse>;
+  importFigmaProject(
+    projectId: string,
+    input: FigmaImportInput,
+    signal?: AbortSignal,
+  ): Promise<FigmaCanvasImportResponse>;
   getFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
   setFigmaCredential(input: FigmaCredentialPutInput, signal?: AbortSignal): Promise<FigmaCredentialStatus>;
   forgetFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
@@ -796,8 +795,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     bootstrapDesignProject: (input) =>
       json<BootstrapDesignProjectResponse>("/api/projects/bootstrap", jsonInit("POST", input)),
-    importFigmaProject: (input, signal) =>
-      json<FigmaImportProjectResponse>("/api/projects/imports/figma", { ...jsonInit("POST", input), signal }),
+    importFigmaProject: (projectId, input, signal) =>
+      json<FigmaCanvasImportResponse>(`/api/projects/${enc(projectId)}/design-canvas/imports/figma`, {
+        ...jsonInit("POST", input),
+        signal,
+      }),
     getFigmaCredential: (signal) => json<FigmaCredentialStatus>("/api/figma/credential", { signal }),
     setFigmaCredential: (input, signal) =>
       json<FigmaCredentialStatus>("/api/figma/credential", { ...jsonInit("PUT", input), signal }),

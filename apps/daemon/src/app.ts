@@ -306,7 +306,8 @@ const routes: Route[] = [
   { method: "DELETE", pattern: "/api/figma/credential", handler: handleDeleteFigmaCredential },
   {
     method: "POST",
-    pattern: "/api/projects/imports/figma",
+    pattern: "/api/projects/:id/design-canvas/imports/figma",
+    projectAdmission: "skip",
     handler: (req, res, params, deps) => withRequestAbortSignal(
       req,
       res,
@@ -1047,6 +1048,7 @@ export function createApp(deps: AppDeps): http.Server {
       });
       await recoverFigmaImports({
         dataDir: appDeps.dataDir,
+        projectIds,
         client: appDeps.figmaClient ?? createFigmaRestClient(),
         credentialProvider: appDeps.figmaCredentialProvider
           ?? (() => resolveFigmaCredential({ dataDir: appDeps.dataDir })),
@@ -1085,7 +1087,6 @@ export function createApp(deps: AppDeps): http.Server {
         const needsDesignRecovery = route.pattern.includes("/design-canvas")
           || route.pattern === "/api/projects"
           || route.pattern === "/api/projects/bootstrap"
-          || route.pattern === "/api/projects/imports/figma"
           || route.pattern === "/api/projects/:id"
           || route.pattern === "/api/projects/:id/title";
         if (needsDesignRecovery) {

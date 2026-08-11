@@ -43,6 +43,8 @@ export type {
   DesignViewport,
   FigmaCredentialPutInput,
   FigmaCredentialStatus,
+  FigmaCanvasImportResponse,
+  FigmaImportAnchor,
   FigmaImportInput,
   FigmaImportResult,
   NewDesignNode,

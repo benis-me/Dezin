@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
 import { getDesignCanvas } from "../src/design/design-storage.ts";
-import { getDesignProject } from "../src/design/design-project-store.ts";
+import { createDesignProject, getDesignProject } from "../src/design/design-project-store.ts";
 import {
   FigmaImportError,
-  importFigmaDesignProject,
-  recoverFigmaImports,
+  importFigmaDesignProject as importFigmaDesignProjectImpl,
+  recoverFigmaImports as recoverFigmaImportsImpl,
+  type ImportFigmaDesignProjectOptions,
+  type RecoverFigmaImportsOptions,
 } from "../src/design/figma-import.ts";
 import type { FigmaRestClient } from "../src/design/figma-rest-client.ts";
 import { FigmaUrlError } from "../src/design/figma-url.ts";
@@ -26,8 +28,46 @@ const input = {
   idempotencyKey: "figma-import-happy-1",
   url: "https://www.figma.com/design/AbC123xyZ/Product-System",
   depth: 4,
+  anchor: { x: 80, y: 120 },
   rightsAcknowledged: true as const,
 };
+
+const projectIdsByDataDir = new Map<string, string>();
+
+async function existingProjectId(dataDir: string): Promise<string> {
+  const existing = projectIdsByDataDir.get(dataDir);
+  if (existing) return existing;
+  const project = await createDesignProject(dataDir, { name: "Figma import target" });
+  projectIdsByDataDir.set(dataDir, project.projectId);
+  return project.projectId;
+}
+
+async function importFigmaDesignProject(
+  options: Omit<ImportFigmaDesignProjectOptions, "projectId"> & { projectId?: string },
+) {
+  const projectId = options.projectId ?? await existingProjectId(options.dataDir);
+  return importFigmaDesignProjectImpl({ ...options, projectId });
+}
+
+async function recoverFigmaImports(
+  options: Omit<RecoverFigmaImportsOptions, "projectIds"> & { projectIds?: readonly string[] },
+) {
+  const projectIds = options.projectIds ?? [await existingProjectId(options.dataDir)];
+  return recoverFigmaImportsImpl({ ...options, projectIds });
+}
+
+function figmaJobsRoot(dataDir: string, projectId: string): string {
+  return join(dataDir, "projects", projectId, "design", "transactions", "figma-imports");
+}
+
+async function visibleReceiptEntries(dataDir: string, projectId: string): Promise<string[]> {
+  try {
+    return (await readdir(figmaJobsRoot(dataDir, projectId))).filter((entry) => !entry.startsWith("."));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 function clientFixture(calls: string[]): FigmaRestClient {
   const file = {
@@ -239,7 +279,7 @@ test("malformed or mismatched Figma responses are fixed safe upstream failures, 
   }
 });
 
-test("signed Figma scalar URLs use a safe Project and manifest title", async (t) => {
+test("signed Figma scalar URLs use safe manifest metadata without renaming the target Project", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-scalar-url-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const remote = "Project prefix https://s3.amazonaws.com/private/render?X-Amz-Signature=secret trailing text";
@@ -266,15 +306,16 @@ test("signed Figma scalar URLs use a safe Project and manifest title", async (t)
     }),
   });
   assert.equal(imported.manifest.source.fileName, "Untitled Figma import");
-  assert.equal((await getDesignProject(dataDir, imported.manifest.projectId))?.name, "Untitled Figma import");
+  assert.equal((await getDesignProject(dataDir, imported.manifest.projectId))?.name, "Figma import target");
   const durable = await allRegularFileText(dataDir);
   assert.equal(durable.includes("s3.amazonaws.com"), false);
   assert.equal(durable.includes("X-Amz-Signature"), false);
 });
 
-test("explicit Project names containing embedded signed URLs fail before durable or remote side effects", async (t) => {
+test("removed Project-name input fails before receipt, credential, or remote side effects", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-explicit-scalar-url-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
   let calls = 0;
   await assert.rejects(importFigmaDesignProject({
     dataDir,
@@ -282,7 +323,7 @@ test("explicit Project names containing embedded signed URLs fail before durable
       ...input,
       idempotencyKey: "figma-explicit-scalar-url-1",
       name: "Prefix https://s3.amazonaws.com/private/render?X-Amz-Signature=secret suffix",
-    },
+    } as unknown as ImportFigmaDesignProjectOptions["input"],
     client: {
       async getMetadata() { calls += 1; throw new Error("must not fetch"); },
       async getFileVersion() { calls += 1; throw new Error("must not fetch"); },
@@ -291,7 +332,7 @@ test("explicit Project names containing embedded signed URLs fail before durable
     credentialProvider: async () => { calls += 1; throw new Error("must not resolve credential"); },
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "invalid-input");
   assert.equal(calls, 0);
-  await assert.rejects(stat(join(dataDir, "figma-import-jobs")), { code: "ENOENT" });
+  assert.deepEqual(await visibleReceiptEntries(dataDir, projectId), []);
 });
 
 test("configured PAT canaries reject persisted request fields before accepting a new receipt", async (t) => {
@@ -300,10 +341,12 @@ test("configured PAT canaries reject persisted request fields before accepting a
     {
       label: "name",
       value: { ...input, idempotencyKey: "figma-request-canary-name-1", name: token },
+      expectedCredentialCalls: 0,
     },
     {
       label: "idempotency-key",
       value: { ...input, idempotencyKey: token },
+      expectedCredentialCalls: 1,
     },
     {
       label: "url-slug",
@@ -312,6 +355,7 @@ test("configured PAT canaries reject persisted request fields before accepting a
         idempotencyKey: "figma-request-canary-slug-1",
         url: `https://www.figma.com/design/AbC123xyZ/${token}`,
       },
+      expectedCredentialCalls: 1,
     },
   ];
   for (const fixture of fixtures) {
@@ -339,13 +383,10 @@ test("configured PAT canaries reject persisted request fields before accepting a
     }), (error: unknown) => error instanceof FigmaImportError
       && error.code === "invalid-input"
       && !error.message.includes(token));
-    assert.equal(credentialCalls, 1);
+    assert.equal(credentialCalls, fixture.expectedCredentialCalls);
     assert.equal(remoteCalls, 0);
     assert.equal((await allRegularFileText(dataDir)).includes(token), false);
-    assert.deepEqual(
-      (await readdir(join(dataDir, "figma-import-jobs"))).filter((entry) => !entry.startsWith(".")),
-      [],
-    );
+    assert.deepEqual(await visibleReceiptEntries(dataDir, await existingProjectId(dataDir)), []);
   }
 });
 
@@ -367,9 +408,9 @@ test("new Figma authority directories fsync their direct parent before publicati
       afterAuthorityDirectoryDurable: (path, parent) => { durableDirectories.push({ path, parent }); },
     },
   });
-  const jobs = join(dataDir, "figma-import-jobs");
   const design = join(dataDir, "projects", result.manifest.projectId, "design");
-  assert.ok(durableDirectories.some((entry) => entry.path === jobs && entry.parent === dataDir));
+  const jobs = join(design, "transactions", "figma-imports");
+  assert.ok(durableDirectories.some((entry) => entry.path === jobs && entry.parent === join(design, "transactions")));
   assert.ok(durableDirectories.some((entry) => entry.path.endsWith(".lease-queue") && entry.parent === jobs));
   assert.ok(durableDirectories.some((entry) => entry.path === join(design, "imports") && entry.parent === design));
 });
@@ -497,7 +538,59 @@ test("same Figma import key cannot be rebound before credentials or remote APIs 
     },
     credentialProvider: async () => { forbiddenCalls += 1; throw new Error("must not resolve credential"); },
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "conflict");
+  await assert.rejects(importFigmaDesignProject({
+    ...base,
+    input: { ...base.input, anchor: { x: base.input.anchor.x + 1, y: base.input.anchor.y } },
+    client: {
+      async getMetadata() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+      async getFileVersion() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+      async getLocalVariables() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+    },
+    credentialProvider: async () => { forbiddenCalls += 1; throw new Error("must not resolve credential"); },
+  }), (error: unknown) => error instanceof FigmaImportError && error.code === "conflict");
   assert.equal(forbiddenCalls, 0);
+});
+
+test("a Project-local receipt cannot be transplanted to a different Canvas authority", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-project-binding-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const firstProjectId = await existingProjectId(dataDir);
+  const imported = await importFigmaDesignProject({
+    dataDir,
+    projectId: firstProjectId,
+    input: { ...input, idempotencyKey: "figma-project-binding-1" },
+    client: clientFixture([]),
+    credentialProvider: async () => ({
+      token: "figd_private_token_0123456789",
+      mode: "personal-access-token",
+      source: "local",
+      subject: "pat-0123456789abcdef",
+    }),
+  });
+  const secondProject = await createDesignProject(dataDir, { name: "Second Figma target" });
+  const [receipt] = await visibleReceiptEntries(dataDir, firstProjectId);
+  assert.ok(receipt);
+  await mkdir(figmaJobsRoot(dataDir, secondProject.projectId), { recursive: true });
+  await cp(
+    join(figmaJobsRoot(dataDir, firstProjectId), receipt),
+    join(figmaJobsRoot(dataDir, secondProject.projectId), receipt),
+    { recursive: true },
+  );
+  let forbiddenCalls = 0;
+  await assert.rejects(importFigmaDesignProjectImpl({
+    dataDir,
+    projectId: secondProject.projectId,
+    input: { ...input, idempotencyKey: "figma-project-binding-1" },
+    client: {
+      async getMetadata() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+      async getFileVersion() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+      async getLocalVariables() { forbiddenCalls += 1; throw new Error("must not fetch"); },
+    },
+    credentialProvider: async () => { forbiddenCalls += 1; throw new Error("must not resolve credential"); },
+  }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
+  assert.equal(forbiddenCalls, 0);
+  assert.equal(imported.manifest.projectId, firstProjectId);
+  assert.equal((await getDesignCanvas(dataDir, secondProject.projectId)).nodes.length, 0);
 });
 
 test("a crash after the atomic Asset batch resumes from staged authority without Figma or PAT access", async (t) => {
@@ -656,7 +749,8 @@ test("startup recovery leaves an accepted receipt without a snapshot pending and
   assert.equal(recovered.pending.length, 1);
   assert.equal(recovered.pending[0]?.idempotencyKey, pendingInput.idempotencyKey);
   assert.equal(forbiddenCalls, 0);
-  await assert.rejects(stat(join(dataDir, "projects")), { code: "ENOENT" });
+  const projectId = await existingProjectId(dataDir);
+  assert.equal((await getDesignCanvas(dataDir, projectId)).nodes.length, 0);
 });
 
 test("RuntimeSupervisor Project deletion waits for the Figma import lease through ready publication", async (t) => {
@@ -675,8 +769,10 @@ test("RuntimeSupervisor Project deletion waits for the Figma import lease throug
   const projectPhase = new Promise<void>((resolve) => { projectPhaseEntered = resolve; });
   let leaseHeld = false;
   let finalizedUnderLease = false;
+  const projectId = await existingProjectId(dataDir);
   const importing = importFigmaDesignProject({
     dataDir,
+    projectId,
     input: { ...input, idempotencyKey: "figma-project-lease-1" },
     client: clientFixture([]),
     credentialProvider: async () => ({
@@ -704,7 +800,7 @@ test("RuntimeSupervisor Project deletion waits for the Figma import lease throug
     testHooks: {
       afterPhase: async (phase) => {
         assert.equal(leaseHeld, true, `${phase} must run under the Project lease`);
-        if (phase === "project-created") {
+        if (phase === "snapshot-staged") {
           projectPhaseEntered();
           await projectPhaseGate;
         }
@@ -776,8 +872,9 @@ test("corrupt staged artifact paths fail closed before any filesystem traversal"
       },
     },
   }), /stop with staged snapshot/);
-  const receipts = (await readdir(join(dataDir, "figma-import-jobs"))).filter((entry) => !entry.startsWith("."));
-  const jobPath = join(dataDir, "figma-import-jobs", receipts[0]!, "job.json");
+  const projectId = await existingProjectId(dataDir);
+  const receipts = await visibleReceiptEntries(dataDir, projectId);
+  const jobPath = join(figmaJobsRoot(dataDir, projectId), receipts[0]!, "job.json");
   const job = JSON.parse(await readFile(jobPath, "utf8"));
   job.snapshot.payloads[0].path = "../escape";
   await writeFile(jobPath, `${JSON.stringify(job, null, 2)}\n`);
@@ -789,11 +886,12 @@ test("corrupt staged artifact paths fail closed before any filesystem traversal"
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
 });
 
-test("two daemon processes converge on one create-once Figma Job, Project, and Import identity", async (t) => {
+test("two daemon processes converge on one Project-local Figma Job and Import identity", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-cross-process-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
   const worker = join(import.meta.dirname, "support", "figma-import-worker.ts");
-  const command = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir];
+  const command = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir, projectId];
   const [left, right] = await Promise.all([
     execFile(process.execPath, command, { cwd: join(import.meta.dirname, "../../..") }),
     execFile(process.execPath, command, { cwd: join(import.meta.dirname, "../../..") }),
@@ -802,7 +900,7 @@ test("two daemon processes converge on one create-once Figma Job, Project, and I
   const second = JSON.parse(right.stdout) as typeof first;
   assert.deepEqual(second, first);
   const projects = await readdir(join(dataDir, "projects"));
-  assert.deepEqual(projects, [first.projectId]);
+  assert.deepEqual(projects, [projectId]);
   assert.equal((await getDesignCanvas(dataDir, first.projectId)).revision, 1);
   const calls = (await readFile(join(dataDir, "figma-worker-calls.log"), "utf8")).trim().split("\n").sort();
   assert.deepEqual(calls, ["credential", "file", "metadata", "metadata", "variables"]);
@@ -811,8 +909,9 @@ test("two daemon processes converge on one create-once Figma Job, Project, and I
 test("a real process exit after snapshot publication leaves a stale ticket that offline replay safely adopts", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-real-crash-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
   const worker = join(import.meta.dirname, "support", "figma-import-worker.ts");
-  const base = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir];
+  const base = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir, projectId];
   await assert.rejects(
     execFile(process.execPath, [...base, "crash-after-snapshot"], { cwd: join(import.meta.dirname, "../../..") }),
     (error: unknown) => error instanceof Error && "code" in error && error.code === 92,
@@ -826,33 +925,37 @@ test("a real process exit after snapshot publication leaves a stale ticket that 
   assert.equal((await getDesignCanvas(dataDir, result.projectId)).revision, 1);
   const calls = (await readFile(join(dataDir, "figma-worker-calls.log"), "utf8")).trim().split("\n").sort();
   assert.deepEqual(calls, ["credential", "file", "metadata", "metadata", "variables"]);
-  const queue = (await readdir(join(dataDir, "figma-import-jobs"))).find((entry) => entry.endsWith(".lease-queue"));
+  const jobs = figmaJobsRoot(dataDir, projectId);
+  const queue = (await readdir(jobs)).find((entry) => entry.endsWith(".lease-queue"));
   assert.ok(queue);
-  assert.deepEqual((await readdir(join(dataDir, "figma-import-jobs", queue))).filter((entry) => entry.startsWith("ticket-")), []);
+  assert.deepEqual((await readdir(join(jobs, queue))).filter((entry) => entry.startsWith("ticket-")), []);
 });
 
 test("a real process exit before ticket publication leaves no corrupt official owner", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-owner-publication-crash-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
   const worker = join(import.meta.dirname, "support", "figma-import-worker.ts");
-  const base = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir];
+  const base = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir, projectId];
   await assert.rejects(
     execFile(process.execPath, [...base, "crash-before-ticket-publication"], { cwd: join(import.meta.dirname, "../../..") }),
     (error: unknown) => error instanceof Error && "code" in error && error.code === 91,
   );
   const imported = await execFile(process.execPath, [...base, "normal"], { cwd: join(import.meta.dirname, "../../..") });
   assert.ok(JSON.parse(imported.stdout).projectId);
-  const queue = (await readdir(join(dataDir, "figma-import-jobs"))).find((entry) => entry.endsWith(".lease-queue"));
+  const jobs = figmaJobsRoot(dataDir, projectId);
+  const queue = (await readdir(jobs)).find((entry) => entry.endsWith(".lease-queue"));
   assert.ok(queue);
-  assert.deepEqual((await readdir(join(dataDir, "figma-import-jobs", queue))).filter((entry) => entry.startsWith(".pending-")), []);
+  assert.deepEqual((await readdir(join(jobs, queue))).filter((entry) => entry.startsWith(".pending-")), []);
 });
 
 test("malformed non-authoritative pending lease files age out without exhausting the queue", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-pending-gc-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const key = "figma-pending-gc-1";
-  const receipt = createHash("sha256").update(`dezin-figma-import-v1\0${key}`).digest("hex");
-  const queue = join(dataDir, "figma-import-jobs", `.${receipt}.lease-queue`);
+  const projectId = await existingProjectId(dataDir);
+  const receipt = createHash("sha256").update(`dezin-figma-canvas-import-v1\0${key}`).digest("hex");
+  const queue = join(figmaJobsRoot(dataDir, projectId), `.${receipt}.lease-queue`);
   await mkdir(queue, { recursive: true, mode: 0o700 });
   const orphan = join(queue, ".pending-00000000-0000-4000-8000-000000000000");
   await writeFile(orphan, "partial", { mode: 0o600 });
@@ -1040,7 +1143,8 @@ test("lease fencing rejects a replaced ticket and the old owner never deletes th
     testHooks: {
       afterPhase: async (phase) => {
         if (phase !== "snapshot-staged") return;
-        const jobsRoot = join(dataDir, "figma-import-jobs");
+        const projectId = await existingProjectId(dataDir);
+        const jobsRoot = figmaJobsRoot(dataDir, projectId);
         const queue = (await readdir(jobsRoot)).find((entry) => entry.endsWith(".lease-queue"));
         assert.ok(queue);
         const queueRoot = join(jobsRoot, queue);
@@ -1055,12 +1159,13 @@ test("lease fencing rejects a replaced ticket and the old owner never deletes th
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
   assert.ok(replacementPath);
   assert.equal((await stat(replacementPath)).isFile(), true);
-  await assert.rejects(stat(join(dataDir, "projects")), { code: "ENOENT" });
+  assert.equal((await getDesignCanvas(dataDir, await existingProjectId(dataDir))).nodes.length, 0);
 });
 
 test("oversized explicit Node ids fail before credential or remote side effects", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-node-budget-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
   let calls = 0;
   await assert.rejects(importFigmaDesignProject({
     dataDir,
@@ -1077,5 +1182,5 @@ test("oversized explicit Node ids fail before credential or remote side effects"
     credentialProvider: async () => { calls += 1; throw new Error("must not resolve credential"); },
   }), (error: unknown) => error instanceof FigmaUrlError);
   assert.equal(calls, 0);
-  await assert.rejects(stat(join(dataDir, "figma-import-jobs")), { code: "ENOENT" });
+  assert.deepEqual(await visibleReceiptEntries(dataDir, projectId), []);
 });

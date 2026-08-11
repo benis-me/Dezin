@@ -14,12 +14,11 @@ import {
   type FigmaImportResult,
 } from "@dezin/design-canvas-contracts";
 
-import { ensureDesignProjectAtId } from "./design-project-store.ts";
-import { ensureDesignCanvasAssetBatch } from "./design-storage.ts";
+import { ensureDesignCanvasAssetBatch, getDesignCanvas } from "./design-storage.ts";
+import { designRoot } from "./design-storage-primitives.ts";
 import type { ResolvedFigmaCredential } from "./figma-credential-store.ts";
 import {
   normalizeFigmaImport,
-  containsEphemeralRemoteResourceUrl,
   type FigmaNormalizedPayload,
   type NormalizedFigmaImport,
 } from "./figma-import-normalizer.ts";
@@ -27,9 +26,11 @@ import type { FigmaRestClient } from "./figma-rest-client.ts";
 import { parseFigmaUrl, type ParsedFigmaUrl } from "./figma-url.ts";
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const DEFAULT_DEPTH = 4;
 const MAX_DEPTH = 8;
+const MAX_ANCHOR_COORDINATE = 1_000_000;
 const execFile = promisify(execFileCallback);
 const LEASE_TICKET = /^ticket-([0-9]{16})$/;
 const LEASE_PENDING = /^\.pending-[a-f0-9-]{36}$/i;
@@ -41,14 +42,15 @@ const LIVE_OWNER_IDENTITY_CACHE_MS = 1_000;
 const LIVE_OWNER_POLL_MS = 100;
 const MAX_RECOVERY_RECEIPTS = 8_192;
 
-type FigmaImportPhase = "accepted" | "snapshot-staged" | "project-created" | "artifacts-imported" | "ready";
+type FigmaImportPhase = "accepted" | "snapshot-staged" | "artifacts-imported" | "ready";
 
 interface StoredFigmaImportRequest {
   schemaVersion: typeof FIGMA_IMPORT_SCHEMA_VERSION;
   idempotencyKey: string;
-  requestedName: string | null;
+  projectId: string;
   source: ParsedFigmaUrl;
   depth: number;
+  anchor: { x: number; y: number };
   rightsAcknowledged: true;
 }
 
@@ -98,13 +100,14 @@ interface StoredFigmaImportJob {
 
 export interface ImportFigmaDesignProjectOptions {
   dataDir: string;
+  projectId: string;
   input: FigmaImportInput;
   client: FigmaRestClient;
   credentialProvider: () => Promise<ResolvedFigmaCredential | null>;
   /**
-   * Own the Project lifecycle from the first operation after its durable Job
-   * identity is known until the Import reaches ready. Production binds this to
-   * RuntimeSupervisor; direct callers default to an identity scope.
+   * Own the existing target Project lifecycle from Canvas validation through
+   * final response projection. Production binds this to RuntimeSupervisor;
+   * direct callers default to an identity scope.
   */
   withProjectLease?: <T>(projectId: string, operation: () => Promise<T>) => Promise<T>;
   /** Complete any final Project projection before the lifecycle lease is released. */
@@ -126,6 +129,7 @@ export interface ImportFigmaDesignProjectOptions {
 
 export interface RecoverFigmaImportsOptions {
   dataDir: string;
+  projectIds: readonly string[];
   client: FigmaRestClient;
   credentialProvider: () => Promise<ResolvedFigmaCredential | null>;
   withProjectLease?: ImportFigmaDesignProjectOptions["withProjectLease"];
@@ -177,9 +181,19 @@ function boundedString(value: unknown, label: string, maxBytes: number): string 
   return value.trim();
 }
 
-function prepareRequest(input: FigmaImportInput): StoredFigmaImportRequest {
+function anchorCoordinate(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || Math.abs(value as number) > MAX_ANCHOR_COORDINATE) {
+    throw new FigmaImportError("invalid-input", `${label} is invalid`);
+  }
+  return value as number;
+}
+
+function prepareRequest(projectIdValue: string, input: FigmaImportInput): StoredFigmaImportRequest {
+  if (typeof projectIdValue !== "string" || !PROJECT_ID.test(projectIdValue)) {
+    throw new FigmaImportError("invalid-input", "Figma import Project id is invalid");
+  }
   const record = exactRecord(input, "Figma import", [
-    "schemaVersion", "idempotencyKey", "url", "name", "nodeIds", "depth", "rightsAcknowledged",
+    "schemaVersion", "idempotencyKey", "url", "nodeIds", "depth", "anchor", "rightsAcknowledged",
   ]);
   if (record.schemaVersion !== FIGMA_IMPORT_SCHEMA_VERSION || record.rightsAcknowledged !== true
     || typeof record.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(record.idempotencyKey)) {
@@ -190,18 +204,17 @@ function prepareRequest(input: FigmaImportInput): StoredFigmaImportRequest {
   if (!Number.isSafeInteger(depth) || (depth as number) < 1 || (depth as number) > MAX_DEPTH) {
     throw new FigmaImportError("invalid-input", `Figma import depth must be between 1 and ${MAX_DEPTH}`);
   }
-  const requestedName = record.name === undefined
-    ? null
-    : boundedString(record.name, "Figma import Project name", 1_024);
-  if (requestedName !== null && containsEphemeralRemoteResourceUrl(requestedName)) {
-    throw new FigmaImportError("invalid-input", "Figma import Project name may not contain a temporary remote resource URL");
-  }
+  const rawAnchor = exactRecord(record.anchor, "Figma import anchor", ["x", "y"]);
   return {
     schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
     idempotencyKey: record.idempotencyKey,
-    requestedName,
+    projectId: projectIdValue,
     source,
     depth: depth as number,
+    anchor: {
+      x: anchorCoordinate(rawAnchor.x, "Figma import anchor.x"),
+      y: anchorCoordinate(rawAnchor.y, "Figma import anchor.y"),
+    },
     rightsAcknowledged: true,
   };
 }
@@ -211,15 +224,19 @@ function hash(value: unknown): string {
 }
 
 function receiptId(key: string): string {
-  return createHash("sha256").update(`dezin-figma-import-v1\0${key}`).digest("hex");
+  return createHash("sha256").update(`dezin-figma-canvas-import-v1\0${key}`).digest("hex");
 }
 
-function jobRoot(dataDir: string, key: string): string {
-  return join(dataDir, "figma-import-jobs", receiptId(key));
+function jobsRoot(dataDir: string, projectId: string): string {
+  return join(designRoot(dataDir, projectId), "transactions", "figma-imports");
 }
 
-function jobPath(dataDir: string, key: string): string {
-  return join(jobRoot(dataDir, key), "job.json");
+function jobRoot(dataDir: string, projectId: string, key: string): string {
+  return join(jobsRoot(dataDir, projectId), receiptId(key));
+}
+
+function jobPath(dataDir: string, projectId: string, key: string): string {
+  return join(jobRoot(dataDir, projectId, key), "job.json");
 }
 
 async function atomicJson(path: string, value: unknown): Promise<void> {
@@ -349,7 +366,7 @@ async function publishAcceptedJob(root: string, job: StoredFigmaImportJob): Prom
   }
 }
 
-async function readJob(path: string): Promise<StoredFigmaImportJob | null> {
+async function readJob(path: string, expectedProjectId: string): Promise<StoredFigmaImportJob | null> {
   let value: unknown;
   try {
     const root = dirname(path);
@@ -362,7 +379,7 @@ async function readJob(path: string): Promise<StoredFigmaImportJob | null> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
     throw new FigmaImportError("corrupt", "Figma import Job is corrupt", { cause: error });
   }
-  return validateStoredJob(value, path);
+  return validateStoredJob(value, path, expectedProjectId);
 }
 
 function storedRecord(value: unknown, label: string, fields: readonly string[]): Record<string, unknown> {
@@ -391,15 +408,17 @@ function storedStringArray(value: unknown, label: string): string[] {
 
 function validateStoredRequest(value: unknown): StoredFigmaImportRequest {
   const request = storedRecord(value, "Stored Figma import request", [
-    "schemaVersion", "idempotencyKey", "requestedName", "source", "depth", "rightsAcknowledged",
+    "schemaVersion", "idempotencyKey", "projectId", "source", "depth", "anchor", "rightsAcknowledged",
   ]);
   const idempotencyKey = storedText(request.idempotencyKey, "Stored Figma import idempotencyKey", 160);
+  const projectId = storedText(request.projectId, "Stored Figma import Project id", 128);
+  const anchor = storedRecord(request.anchor, "Stored Figma import anchor", ["x", "y"]);
   if (request.schemaVersion !== FIGMA_IMPORT_SCHEMA_VERSION || !IDEMPOTENCY_KEY.test(idempotencyKey)
+    || !PROJECT_ID.test(projectId)
     || request.rightsAcknowledged !== true || !Number.isSafeInteger(request.depth)
     || (request.depth as number) < 1 || (request.depth as number) > MAX_DEPTH
-    || (request.requestedName !== null && (typeof request.requestedName !== "string"
-      || !request.requestedName.trim() || request.requestedName !== request.requestedName.trim()
-      || Buffer.byteLength(request.requestedName, "utf8") > 1_024))) {
+    || !Number.isSafeInteger(anchor.x) || Math.abs(anchor.x as number) > MAX_ANCHOR_COORDINATE
+    || !Number.isSafeInteger(anchor.y) || Math.abs(anchor.y as number) > MAX_ANCHOR_COORDINATE) {
     throw new FigmaImportError("corrupt", "Stored Figma import request is corrupt");
   }
   const sourceRecord = storedRecord(request.source, "Stored Figma import source", [
@@ -421,9 +440,10 @@ function validateStoredRequest(value: unknown): StoredFigmaImportRequest {
   return {
     schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
     idempotencyKey,
-    requestedName: request.requestedName as string | null,
+    projectId,
     source,
     depth: request.depth as number,
+    anchor: { x: anchor.x as number, y: anchor.y as number },
     rightsAcknowledged: true,
   };
 }
@@ -491,7 +511,7 @@ function validateStoredSnapshot(value: unknown, importId: string): StoredSnapsho
   };
 }
 
-function validateStoredJob(value: unknown, path: string): StoredFigmaImportJob {
+function validateStoredJob(value: unknown, path: string, expectedProjectId: string): StoredFigmaImportJob {
   const record = storedRecord(value, "Stored Figma import Job", [
     "schemaVersion", "id", "importId", "projectId", "requestHash", "request", "status", "completedPhase",
     "snapshot", "canvasRevision", "error", "createdAt", "updatedAt",
@@ -503,11 +523,12 @@ function validateStoredJob(value: unknown, path: string): StoredFigmaImportJob {
   const phase = record.completedPhase as FigmaImportPhase;
   const status = record.status as StoredFigmaImportJob["status"];
   if (record.schemaVersion !== FIGMA_IMPORT_SCHEMA_VERSION || !/^figma-job-[A-Fa-f0-9-]{36}$/.test(id)
-    || !/^figma-[A-Fa-f0-9-]{36}$/.test(importId) || !/^[A-Fa-f0-9-]{36}$/.test(projectId)
+    || !/^figma-[A-Fa-f0-9-]{36}$/.test(importId) || !PROJECT_ID.test(projectId)
+    || projectId !== expectedProjectId || request.projectId !== projectId
     || typeof record.requestHash !== "string" || !SHA256.test(record.requestHash)
     || record.requestHash !== hash(request) || basename(dirname(path)) !== receiptId(request.idempotencyKey)
     || !["running", "ready", "failed"].includes(status)
-    || !["accepted", "snapshot-staged", "project-created", "artifacts-imported", "ready"].includes(phase)
+    || !["accepted", "snapshot-staged", "artifacts-imported", "ready"].includes(phase)
     || (status === "ready") !== (phase === "ready")
     || !Number.isSafeInteger(record.createdAt) || (record.createdAt as number) < 0
     || !Number.isSafeInteger(record.updatedAt) || (record.updatedAt as number) < (record.createdAt as number)
@@ -517,7 +538,7 @@ function validateStoredJob(value: unknown, path: string): StoredFigmaImportJob {
   const snapshot = record.snapshot === null ? null : validateStoredSnapshot(record.snapshot, importId);
   const canvasRevision = record.canvasRevision;
   if ((phase === "accepted") !== (snapshot === null)
-    || (["accepted", "snapshot-staged", "project-created"].includes(phase) && canvasRevision !== null)
+    || (["accepted", "snapshot-staged"].includes(phase) && canvasRevision !== null)
     || (["artifacts-imported", "ready"].includes(phase)
       && (!Number.isSafeInteger(canvasRevision) || (canvasRevision as number) < 1))) {
     throw new FigmaImportError("corrupt", "Stored Figma import phase authority is corrupt");
@@ -1118,10 +1139,11 @@ async function readSnapshotPayload(root: string, artifact: StoredSnapshot["paylo
 async function artifactImportItems(root: string, job: StoredFigmaImportJob): Promise<DesignCanvasAssetImportItem[]> {
   const snapshot = job.snapshot!;
   const derived = snapshot.payloads.filter((artifact) => artifact.nodeId !== null);
+  const { x, y } = job.request.anchor;
   const geometry = [
-    { x: 0, y: 0, width: 420, height: 560 },
-    { x: 460, y: 0, width: 420, height: 560 },
-    { x: 920, y: 0, width: 420, height: 560 },
+    { x, y, width: 420, height: 560 },
+    { x: x + 460, y, width: 420, height: 560 },
+    { x: x + 920, y, width: 420, height: 560 },
   ];
   return Promise.all(derived.map(async (artifact, index) => ({
     asset: {
@@ -1170,12 +1192,13 @@ function finalManifest(job: StoredFigmaImportJob): FigmaImportManifest {
 }
 
 async function publishImport(
+  dataDir: string,
   root: string,
   job: StoredFigmaImportJob,
   afterRename?: () => void | Promise<void>,
   afterDirectoryDurable?: (path: string, parent: string) => void | Promise<void>,
 ): Promise<FigmaImportManifest> {
-  const importsRoot = join(root, "..", "..", "projects", job.projectId, "design", "imports");
+  const importsRoot = join(designRoot(dataDir, job.projectId), "imports");
   const target = join(importsRoot, job.importId);
   const pending = join(importsRoot, `.${job.importId}.${randomUUID()}.tmp`);
   const manifest = finalManifest(job);
@@ -1265,160 +1288,161 @@ async function withFigmaProjectLease<T>(
 export async function importFigmaDesignProject(
   options: ImportFigmaDesignProjectOptions,
 ): Promise<FigmaImportResult> {
-  const request = prepareRequest(options.input);
+  const request = prepareRequest(options.projectId, options.input);
   const requestHash = hash(request);
-  const path = jobPath(options.dataDir, request.idempotencyKey);
-  return withFilesystemImportLease(
-    path,
-    options.signal,
-    options.testHooks?.afterLeaseOwnerDurable,
-    options.testHooks?.afterLeaseObservedPredecessor,
-    options.testHooks?.afterLeaseProcessIdentityCheck,
-    options.testHooks?.afterAuthorityDirectoryDurable,
-    async (assertLease) => {
-    await assertLease();
-    let existing = await readJob(path);
-    if (existing && existing.requestHash !== requestHash) {
-      throw new FigmaImportError("conflict", "idempotencyKey is already bound to a different Figma import request");
-    }
-    if (existing?.status === "ready") {
-      const readyJob = existing;
-      return withFigmaProjectLease(options, readyJob.projectId, async () => {
+  const path = jobPath(options.dataDir, request.projectId, request.idempotencyKey);
+  return withFigmaProjectLease(options, request.projectId, async () => {
+    // The target is existing Canvas authority. Validate it before credential
+    // resolution or creation of any receipt/lease directories.
+    await getDesignCanvas(options.dataDir, request.projectId);
+    return withFilesystemImportLease(
+      path,
+      options.signal,
+      options.testHooks?.afterLeaseOwnerDurable,
+      options.testHooks?.afterLeaseObservedPredecessor,
+      options.testHooks?.afterLeaseProcessIdentityCheck,
+      options.testHooks?.afterAuthorityDirectoryDurable,
+      async (assertLease) => {
         await assertLease();
-        const manifest = await readReadyManifest(options.dataDir, readyJob);
-        await assertLease();
-        const result = { manifest, reused: true };
-        await options.finalizeUnderProjectLease?.(result);
-        return result;
-      });
-    }
-    const timestamp = options.now?.() ?? Date.now();
-    const candidate: StoredFigmaImportJob = {
-      schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
-      id: `figma-job-${randomUUID()}`,
-      importId: `figma-${randomUUID()}`,
-      projectId: randomUUID(),
-      requestHash,
-      request,
-      status: "running",
-      completedPhase: "accepted",
-      snapshot: null,
-      canvasRevision: null,
-      error: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    let job: StoredFigmaImportJob;
-    let resolvedCredential: ResolvedFigmaCredential | undefined;
-    if (existing === null) {
-      resolvedCredential = await requiredCredential(options.credentialProvider);
-      rejectRequestCredentialMaterial(request, resolvedCredential);
-      await assertLease();
-      const published = await publishAcceptedJob(dirname(path), candidate);
-      if (published) {
-        job = candidate;
-        await options.testHooks?.afterAcceptedJobPublished?.();
-      } else {
-        existing = await readJob(path);
-        if (existing === null) throw new FigmaImportError("corrupt", "Concurrent Figma import publication lost its Job");
-        if (existing.requestHash !== requestHash) {
-          throw new FigmaImportError("conflict", "idempotencyKey is already bound to a different Figma import request");
-        }
-        job = existing;
-      }
-    } else {
-      job = existing;
-    }
-    return withFigmaProjectLease(options, job.projectId, async () => {
-      job.status = "running";
-      job.error = null;
-      job.updatedAt = timestamp;
-      if (existing !== null) {
-        await assertLease();
-        await atomicJson(path, job);
-      }
-      let result: FigmaImportResult;
-      try {
-      if (job.completedPhase === "accepted") {
-        const staged = await readStagedSnapshot(dirname(path), job);
-        if (staged !== null) {
-          job.snapshot = staged;
-        } else {
-          const fetched = await fetchVersionFencedSnapshot(options, request, resolvedCredential);
-          await assertLease();
-          job.snapshot = await stageSnapshot(
-            dirname(path), job, fetched.normalized, fetched.credential, options.testHooks?.afterSnapshotRename,
+        let existing = await readJob(path, request.projectId);
+        if (existing && existing.requestHash !== requestHash) {
+          throw new FigmaImportError(
+            "conflict",
+            "idempotencyKey is already bound to a different Figma import request",
           );
         }
-        job.completedPhase = "snapshot-staged";
-        job.updatedAt = options.now?.() ?? Date.now();
-        await assertLease();
-        await atomicJson(path, job);
-        await options.testHooks?.afterPhase?.("snapshot-staged");
-      }
-      if (job.completedPhase === "snapshot-staged") {
-        await assertLease();
-        await ensureDesignProjectAtId(options.dataDir, {
-          projectId: job.projectId,
-          name: job.request.requestedName ?? job.snapshot!.fileName,
-          createdAt: job.createdAt,
-        });
-        job.completedPhase = "project-created";
-        job.updatedAt = options.now?.() ?? Date.now();
-        await assertLease();
-        await atomicJson(path, job);
-        await options.testHooks?.afterPhase?.("project-created");
-      }
-      if (job.completedPhase === "project-created") {
-        await assertLease();
-        const imported = await ensureDesignCanvasAssetBatch(options.dataDir, job.projectId, {
-          idempotencyKey: `${job.id}:artifacts`,
-          requestHash: job.requestHash,
-          items: await artifactImportItems(dirname(path), job),
-        });
-        job.canvasRevision = imported.canvas.revision;
-        job.completedPhase = "artifacts-imported";
-        job.updatedAt = options.now?.() ?? Date.now();
-        await assertLease();
-        await atomicJson(path, job);
-        await options.testHooks?.afterPhase?.("artifacts-imported");
-      }
-      let manifest: FigmaImportManifest;
-      if (job.completedPhase === "artifacts-imported") {
-        await assertLease();
-        manifest = await publishImport(
-          dirname(path),
-          job,
-          options.testHooks?.afterImportRename,
-          options.testHooks?.afterAuthorityDirectoryDurable,
-        );
-        job.completedPhase = "ready";
-        job.status = "ready";
-        job.updatedAt = options.now?.() ?? Date.now();
-        await assertLease();
-        await atomicJson(path, job);
-        await rm(join(dirname(path), "snapshot"), { recursive: true, force: true });
-        await options.testHooks?.afterPhase?.("ready");
-      } else {
-        manifest = await readReadyManifest(options.dataDir, job);
-      }
-        result = { manifest, reused: existing !== null };
-      } catch (error) {
-        if (options.testHooks?.simulateProcessCrash) throw error;
-        if (error instanceof Error && error.name === "AbortError") throw error;
-        await assertLease();
-        job.status = "failed";
-        job.error = error instanceof Error ? error.message : "Figma import failed";
-        job.updatedAt = options.now?.() ?? Date.now();
-        await atomicJson(path, job);
-        if (error instanceof FigmaImportError) throw error;
-        throw new FigmaImportError("failed", job.error, { cause: error });
-      }
-      await options.finalizeUnderProjectLease?.(result);
-      return result;
-    });
-    },
-  );
+        if (existing?.status === "ready") {
+          const readyJob = existing;
+          await assertLease();
+          const manifest = await readReadyManifest(options.dataDir, readyJob);
+          await assertLease();
+          const result = { manifest, reused: true };
+          await options.finalizeUnderProjectLease?.(result);
+          return result;
+        }
+
+        const timestamp = options.now?.() ?? Date.now();
+        const candidate: StoredFigmaImportJob = {
+          schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
+          id: `figma-job-${randomUUID()}`,
+          importId: `figma-${randomUUID()}`,
+          projectId: request.projectId,
+          requestHash,
+          request,
+          status: "running",
+          completedPhase: "accepted",
+          snapshot: null,
+          canvasRevision: null,
+          error: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        let job: StoredFigmaImportJob;
+        let resolvedCredential: ResolvedFigmaCredential | undefined;
+        if (existing === null) {
+          resolvedCredential = await requiredCredential(options.credentialProvider);
+          rejectRequestCredentialMaterial(request, resolvedCredential);
+          await assertLease();
+          const published = await publishAcceptedJob(dirname(path), candidate);
+          if (published) {
+            job = candidate;
+            await options.testHooks?.afterAcceptedJobPublished?.();
+          } else {
+            existing = await readJob(path, request.projectId);
+            if (existing === null) {
+              throw new FigmaImportError("corrupt", "Concurrent Figma import publication lost its Job");
+            }
+            if (existing.requestHash !== requestHash) {
+              throw new FigmaImportError(
+                "conflict",
+                "idempotencyKey is already bound to a different Figma import request",
+              );
+            }
+            job = existing;
+          }
+        } else {
+          job = existing;
+        }
+
+        job.status = "running";
+        job.error = null;
+        job.updatedAt = timestamp;
+        if (existing !== null) {
+          await assertLease();
+          await atomicJson(path, job);
+        }
+
+        let result: FigmaImportResult;
+        try {
+          if (job.completedPhase === "accepted") {
+            const staged = await readStagedSnapshot(dirname(path), job);
+            if (staged !== null) {
+              job.snapshot = staged;
+            } else {
+              const fetched = await fetchVersionFencedSnapshot(options, request, resolvedCredential);
+              await assertLease();
+              job.snapshot = await stageSnapshot(
+                dirname(path), job, fetched.normalized, fetched.credential, options.testHooks?.afterSnapshotRename,
+              );
+            }
+            job.completedPhase = "snapshot-staged";
+            job.updatedAt = options.now?.() ?? Date.now();
+            await assertLease();
+            await atomicJson(path, job);
+            await options.testHooks?.afterPhase?.("snapshot-staged");
+          }
+          if (job.completedPhase === "snapshot-staged") {
+            await assertLease();
+            const imported = await ensureDesignCanvasAssetBatch(options.dataDir, job.projectId, {
+              idempotencyKey: `${job.id}:artifacts`,
+              requestHash: job.requestHash,
+              items: await artifactImportItems(dirname(path), job),
+            });
+            job.canvasRevision = imported.canvas.revision;
+            job.completedPhase = "artifacts-imported";
+            job.updatedAt = options.now?.() ?? Date.now();
+            await assertLease();
+            await atomicJson(path, job);
+            await options.testHooks?.afterPhase?.("artifacts-imported");
+          }
+
+          let manifest: FigmaImportManifest;
+          if (job.completedPhase === "artifacts-imported") {
+            await assertLease();
+            manifest = await publishImport(
+              options.dataDir,
+              dirname(path),
+              job,
+              options.testHooks?.afterImportRename,
+              options.testHooks?.afterAuthorityDirectoryDurable,
+            );
+            job.completedPhase = "ready";
+            job.status = "ready";
+            job.updatedAt = options.now?.() ?? Date.now();
+            await assertLease();
+            await atomicJson(path, job);
+            await rm(join(dirname(path), "snapshot"), { recursive: true, force: true });
+            await options.testHooks?.afterPhase?.("ready");
+          } else {
+            manifest = await readReadyManifest(options.dataDir, job);
+          }
+          result = { manifest, reused: existing !== null };
+        } catch (error) {
+          if (options.testHooks?.simulateProcessCrash) throw error;
+          if (error instanceof Error && error.name === "AbortError") throw error;
+          await assertLease();
+          job.status = "failed";
+          job.error = error instanceof Error ? error.message : "Figma import failed";
+          job.updatedAt = options.now?.() ?? Date.now();
+          await atomicJson(path, job);
+          if (error instanceof FigmaImportError) throw error;
+          throw new FigmaImportError("failed", job.error, { cause: error });
+        }
+        await options.finalizeUnderProjectLease?.(result);
+        return result;
+      },
+    );
+  });
 }
 
 function recoveryInput(job: StoredFigmaImportJob): FigmaImportInput {
@@ -1426,14 +1450,14 @@ function recoveryInput(job: StoredFigmaImportJob): FigmaImportInput {
     schemaVersion: FIGMA_IMPORT_SCHEMA_VERSION,
     idempotencyKey: job.request.idempotencyKey,
     url: job.request.source.normalizedUrl,
-    ...(job.request.requestedName === null ? {} : { name: job.request.requestedName }),
     depth: job.request.depth,
+    anchor: { ...job.request.anchor },
     rightsAcknowledged: true,
   };
 }
 
-async function recoveryJobs(dataDir: string): Promise<StoredFigmaImportJob[]> {
-  const root = join(dataDir, "figma-import-jobs");
+async function recoveryJobs(dataDir: string, projectId: string): Promise<StoredFigmaImportJob[]> {
+  const root = jobsRoot(dataDir, projectId);
   let before;
   try {
     before = await lstat(root);
@@ -1463,7 +1487,7 @@ async function recoveryJobs(dataDir: string): Promise<StoredFigmaImportJob[]> {
     if (!SHA256.test(entry)) {
       throw new FigmaImportError("corrupt", "Figma import recovery found an invalid receipt identity");
     }
-    const job = await readJob(join(root, entry, "job.json"));
+    const job = await readJob(join(root, entry, "job.json"), projectId);
     if (job === null) throw new FigmaImportError("corrupt", "Figma import recovery receipt is missing its Job");
     jobs.push(job);
   }
@@ -1480,11 +1504,14 @@ export async function recoverFigmaImports(
 ): Promise<RecoverFigmaImportsResult> {
   const recovered: FigmaImportResult[] = [];
   const pending: PendingFigmaImportRecovery[] = [];
-  for (const job of await recoveryJobs(options.dataDir)) {
+  for (const projectId of options.projectIds) for (const job of await recoveryJobs(options.dataDir, projectId)) {
     options.signal?.throwIfAborted();
     if (job.status !== "running") continue;
     if (job.completedPhase === "accepted") {
-      const staged = await readStagedSnapshot(dirname(jobPath(options.dataDir, job.request.idempotencyKey)), job);
+      const staged = await readStagedSnapshot(
+        dirname(jobPath(options.dataDir, job.projectId, job.request.idempotencyKey)),
+        job,
+      );
       if (staged === null) {
         pending.push({
           jobId: job.id,
@@ -1498,6 +1525,7 @@ export async function recoverFigmaImports(
     }
     recovered.push(await importFigmaDesignProject({
       dataDir: options.dataDir,
+      projectId: job.projectId,
       input: recoveryInput(job),
       client: options.client,
       credentialProvider: options.credentialProvider,

@@ -18,6 +18,7 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import {
   FileUp,
+  Figma,
   LoaderCircle,
   LocateFixed,
   RotateCcw,
@@ -44,6 +45,8 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "../components/ui/index.ts";
+import { FigmaImportDialog } from "../components/FigmaImportDialog.tsx";
+import { useToast } from "../components/Toast.tsx";
 import type { AgentInfo } from "../lib/api.ts";
 import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
@@ -80,7 +83,16 @@ import {
 } from "./FloatingNodeAgent.tsx";
 import { NodeCatalogMenu } from "./NodeCatalogMenu.tsx";
 import { QuickStart } from "./QuickStart.tsx";
-import type { DesignExportResult, DesignJobStatus, DesignNode, DesignNodeKind, DesignNodeVersion } from "./types.ts";
+import type {
+  DesignExportResult,
+  DesignCanvas,
+  DesignJobStatus,
+  DesignNode,
+  DesignNodeKind,
+  DesignNodeVersion,
+  FigmaCanvasImportResponse,
+  FigmaImportAnchor,
+} from "./types.ts";
 import { useDesignCanvasController } from "./useDesignCanvasController.ts";
 import { previewVersionIdForNode } from "./useExactVersionPreview.ts";
 
@@ -230,6 +242,7 @@ export function DesignCanvasScreen({
   onRevealExport,
   onExportReady,
 }: DesignCanvasScreenProps) {
+  const { toast } = useToast();
   const reduceMotion = usePrefersReducedMotion();
   const controller = useDesignCanvasController({ projectId, api, onExportReady });
   const { canvas } = controller;
@@ -240,6 +253,10 @@ export function DesignCanvasScreen({
   const pendingRevisionNodeIdRef = useRef<string | null>(null);
   const pendingContextTargetRef = useRef<string | null>(null);
   const contextMenuActiveRef = useRef(false);
+  const pendingFigmaImportAnchorRef = useRef<FigmaImportAnchor | null>(null);
+  const figmaImportOpenFrameRef = useRef<number | null>(null);
+  const pendingFigmaImportedNodeIdsRef = useRef<string[] | null>(null);
+  const figmaImportFitFrameRef = useRef<number | null>(null);
   const nodePanelRef = useRef<HTMLElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<DesignFlowNode> | null>(null);
   const flowNodesRef = useRef<DesignFlowNode[]>([]);
@@ -295,6 +312,7 @@ export function DesignCanvasScreen({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [figmaImportAnchor, setFigmaImportAnchor] = useState<FigmaImportAnchor | null>(null);
   const [tool, setTool] = useState<"select" | "hand">("select");
   const [zoom, setZoom] = useState(1);
   const [layoutNonce, setLayoutNonce] = useState(0);
@@ -796,6 +814,36 @@ export function DesignCanvasScreen({
   }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
   useLayoutEffect(() => {
+    const pendingNodeIds = pendingFigmaImportedNodeIdsRef.current;
+    if (!canvas || !pendingNodeIds?.length) return;
+    const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
+    const importedNodeIds = pendingNodeIds.filter((nodeId) => canvasNodeIds.has(nodeId));
+    if (importedNodeIds.length === 0) return;
+    const importedNodeIdSet = new Set(importedNodeIds);
+    const importedFlowNodes = flowNodesRef.current.filter((node) => importedNodeIdSet.has(node.id));
+    if (importedFlowNodes.length !== importedNodeIds.length) return;
+    pendingFigmaImportedNodeIdsRef.current = null;
+    setMainAgentOpen(false);
+    setFocusedPanelNodeId(null);
+    setSelectedNodeIds(importedNodeIds);
+    replaceFlowNodes((current) => current.map((node) => ({
+      ...node,
+      selected: importedNodeIdSet.has(node.id),
+    })));
+    if (figmaImportFitFrameRef.current !== null) window.cancelAnimationFrame(figmaImportFitFrameRef.current);
+    figmaImportFitFrameRef.current = window.requestAnimationFrame(() => {
+      figmaImportFitFrameRef.current = null;
+      void flowRef.current?.fitView({
+        nodes: flowNodesRef.current.filter((node) => importedNodeIdSet.has(node.id)),
+        padding: 0.18,
+        duration: reduceMotion ? 0 : 260,
+        ease: nodeFocusEase,
+        interpolate: "smooth",
+      });
+    });
+  }, [canvas, reduceMotion, replaceFlowNodes]);
+
+  useLayoutEffect(() => {
     if (!reduceMotion || !focusTransition || !focusMotionEnabled) return;
     // Keep this focus session instant even if the preference is switched back
     // before it closes; otherwise the remaining flight would restart.
@@ -828,6 +876,8 @@ export function DesignCanvasScreen({
     if (focusReleaseTimerRef.current !== null) window.clearTimeout(focusReleaseTimerRef.current);
     if (selectionGhostTimerRef.current !== null) window.clearTimeout(selectionGhostTimerRef.current);
     if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
+    if (figmaImportOpenFrameRef.current !== null) window.cancelAnimationFrame(figmaImportOpenFrameRef.current);
+    if (figmaImportFitFrameRef.current !== null) window.cancelAnimationFrame(figmaImportFitFrameRef.current);
     draggingNodeIdsRef.current.clear();
     resizingNodeIdsRef.current.clear();
     pendingNodeGeometriesRef.current.clear();
@@ -1563,7 +1613,19 @@ export function DesignCanvasScreen({
         onOpenChange={(open) => {
           contextMenuActiveRef.current = open;
           setContextMenuOpen(open);
-          if (open) hideNodeAgentForContextMenu();
+          if (open) {
+            hideNodeAgentForContextMenu();
+          } else if (pendingFigmaImportAnchorRef.current) {
+            const anchor = pendingFigmaImportAnchorRef.current;
+            pendingFigmaImportAnchorRef.current = null;
+            if (figmaImportOpenFrameRef.current !== null) {
+              window.cancelAnimationFrame(figmaImportOpenFrameRef.current);
+            }
+            figmaImportOpenFrameRef.current = window.requestAnimationFrame(() => {
+              figmaImportOpenFrameRef.current = null;
+              setFigmaImportAnchor(anchor);
+            });
+          }
         }}
       >
         <ContextMenuTrigger asChild disabled={!canvasAvailable}>
@@ -1583,6 +1645,7 @@ export function DesignCanvasScreen({
               "--design-node-agent-width": `${FLOATING_NODE_AGENT_WIDTH_PX}px`,
             } as CSSProperties}
             aria-label="Infinite Design canvas"
+            tabIndex={0}
             onPointerMoveCapture={focusActive ? undefined : captureSelectionRect}
             onDragOver={(event) => {
               if (event.dataTransfer.types.includes("Files")) event.preventDefault();
@@ -1803,6 +1866,21 @@ export function DesignCanvasScreen({
           </ContextMenuContent>
         ) : (
           <ContextMenuContent aria-label="Add Design node" className="design-node-catalog design-node-catalog--context">
+            <ContextMenuItem
+              onSelect={() => {
+                const position = contextMenu
+                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
+                  : canvasCenter();
+                pendingFigmaImportAnchorRef.current = {
+                  x: Math.round(position.x),
+                  y: Math.round(position.y),
+                };
+              }}
+            >
+              <Figma aria-hidden />
+              Import from Figma
+            </ContextMenuItem>
+            <ContextMenuSeparator />
             <NodeCatalogMenu
               menuType="context"
               onChoose={(kind) => void addNode(
@@ -1815,8 +1893,46 @@ export function DesignCanvasScreen({
           </ContextMenuContent>
         ) : null}
       </ContextMenu>
+      <FigmaImportDialog
+        open={figmaImportAnchor !== null}
+        projectId={projectId}
+        anchor={figmaImportAnchor ?? { x: 0, y: 0 }}
+        returnFocusRef={surfaceRef}
+        onClose={() => setFigmaImportAnchor(null)}
+        onImported={(result) => {
+          pendingFigmaImportedNodeIdsRef.current = figmaImportedNodeIds(result, canvas);
+          controller.adoptCanvas(result.canvas);
+          const limitations = [...new Set([
+            ...result.import.manifest.incomplete,
+            ...result.import.manifest.warnings,
+          ])];
+          if (limitations.length > 0) {
+            const visible = limitations.slice(0, 2).join("; ");
+            toast(`Figma imported with limited metadata: ${visible}${
+              limitations.length > 2 ? `; +${limitations.length - 2} more` : ""
+            }`);
+          }
+          setFigmaImportAnchor(null);
+          void controller.refresh();
+        }}
+      />
     </main>
   );
+}
+
+function figmaImportedNodeIds(
+  result: FigmaCanvasImportResponse,
+  previousCanvas: DesignCanvas | null,
+): string[] {
+  const responseNodeIds = new Set(result.canvas.nodes.map((node) => node.id));
+  const artifactNodeIds = [...new Set(result.import.manifest.artifacts.flatMap((artifact) => (
+    artifact.nodeId && responseNodeIds.has(artifact.nodeId) ? [artifact.nodeId] : []
+  )))];
+  if (artifactNodeIds.length > 0) return artifactNodeIds;
+  const previousNodeIds = new Set(previousCanvas?.nodes.map((node) => node.id) ?? []);
+  return result.canvas.nodes
+    .map((node) => node.id)
+    .filter((nodeId) => !previousNodeIds.has(nodeId));
 }
 
 function DesignNodeContextMenu({

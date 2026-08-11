@@ -14,7 +14,6 @@ import {
   ArrowRight,
   Boxes,
   Check,
-  Figma,
   FileText,
   Image as ImageIcon,
   LayoutGrid,
@@ -44,7 +43,6 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { AttachMenu } from "../components/AttachMenu.tsx";
-import { FigmaImportDialog } from "../components/FigmaImportDialog.tsx";
 import {
   AgentComposerContextCards,
   type AgentComposerContextItem,
@@ -250,7 +248,6 @@ export function HomeScreen({
   const [sort, setSort] = useState<"recent" | "name" | "oldest">("recent");
   const [view, setView] = useState<"active" | "archived">("active");
   const [layout, setLayout] = useState<"grid" | "list">("grid");
-  const [figmaImportOpen, setFigmaImportOpen] = useState(false);
   const [homeAttachments, setHomeAttachments] = useState<HomeAttachments>({ images: [], refs: [] });
   const [canvasReferencePicker, setCanvasReferencePicker] = useState<{
     project: Project;
@@ -267,7 +264,6 @@ export function HomeScreen({
   const refs = homeAttachments.refs;
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
-  const figmaImportButtonRef = useRef<HTMLButtonElement>(null);
 
   const commitHomeAttachments = useCallback((next: HomeAttachments): void => {
     homeAttachmentsRef.current = next;
@@ -1019,31 +1015,17 @@ export function HomeScreen({
             </div>
             <div className="flex flex-wrap items-center gap-2 pb-0.5 sm:shrink-0">
               {!sharingan && (
-                <>
-                  <Button
-                    ref={figmaImportButtonRef}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={creating}
-                    onClick={() => setFigmaImportOpen(true)}
-                    className="gap-1.5 rounded-full bg-background/70 px-3 shadow-none backdrop-blur"
-                  >
-                    <Figma size={13} strokeWidth={1.9} />
-                    Import from Figma
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={creating}
-                    onClick={() => void startBlankCanvas()}
-                    className="gap-1.5 rounded-full bg-background/70 px-3 shadow-none backdrop-blur"
-                  >
-                    <Plus size={13} strokeWidth={1.9} />
-                    Blank canvas
-                  </Button>
-                </>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={creating}
+                  onClick={() => void startBlankCanvas()}
+                  className="gap-1.5 rounded-full bg-background/70 px-3 shadow-none backdrop-blur"
+                >
+                  <Plus size={13} strokeWidth={1.9} />
+                  Blank canvas
+                </Button>
               )}
             </div>
           </div>
@@ -1411,24 +1393,6 @@ export function HomeScreen({
           </ul>
         </div>
       </Dialog>
-
-      <FigmaImportDialog
-        open={figmaImportOpen}
-        onClose={() => setFigmaImportOpen(false)}
-        returnFocusRef={figmaImportButtonRef}
-        onImported={(result) => {
-          setFigmaImportOpen(false);
-          const limitations = [...new Set([
-            ...result.import.manifest.incomplete,
-            ...result.import.manifest.warnings,
-          ])];
-          if (limitations.length > 0) {
-            const visible = limitations.slice(0, 2).join("; ");
-            toast(`Figma imported with limited metadata: ${visible}${limitations.length > 2 ? `; +${limitations.length - 2} more` : ""}`);
-          }
-          onOpenProject?.(result.project.id);
-        }}
-      />
 
       <Dialog open={editingId !== null} onClose={() => setEditingId(null)} label="Rename project" className="max-w-md">
         <form

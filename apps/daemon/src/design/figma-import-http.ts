@@ -21,7 +21,7 @@ import {
   type ImportFigmaDesignProjectOptions,
 } from "./figma-import.ts";
 import { createFigmaRestClient, FigmaRestError, type FigmaRestClient } from "./figma-rest-client.ts";
-import { designProjectPayload, getDesignProject } from "./design-project-store.ts";
+import { getDesignCanvas } from "./design-storage.ts";
 
 const MAX_FIGMA_IMPORT_HTTP_BYTES = 64 * 1024;
 const MAX_FIGMA_CREDENTIAL_HTTP_BYTES = 8 * 1024;
@@ -34,7 +34,7 @@ export interface FigmaImportHttpDeps {
   figmaClient?: FigmaRestClient;
   figmaCredentialProvider?: FigmaCredentialProvider;
   withFigmaProjectLease?: FigmaProjectLease;
-  /** Test-only deterministic pause immediately before the leased Project response projection. */
+  /** Test-only deterministic pause immediately before the leased Canvas response projection. */
   beforeFigmaProjectResponse?: (projectId: string) => void | Promise<void>;
 }
 
@@ -123,7 +123,7 @@ export async function handleDeleteFigmaCredential(
 export async function handleImportFigmaProject(
   req: IncomingMessage,
   res: ServerResponse,
-  _params: Record<string, string>,
+  params: Record<string, string>,
   deps: FigmaImportHttpDeps,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -131,6 +131,7 @@ export async function handleImportFigmaProject(
   try {
     await importFigmaDesignProject({
       dataDir: deps.dataDir,
+      projectId: params.id!,
       input: decoded as FigmaImportInput,
       client: deps.figmaClient ?? createFigmaRestClient(),
       credentialProvider: deps.figmaCredentialProvider
@@ -139,10 +140,9 @@ export async function handleImportFigmaProject(
       ...(signal === undefined ? {} : { signal }),
       finalizeUnderProjectLease: async (result) => {
         await deps.beforeFigmaProjectResponse?.(result.manifest.projectId);
-        const project = await getDesignProject(deps.dataDir, result.manifest.projectId);
-        if (project === null) throw new HttpError(500, "Figma import did not publish its Project");
+        const canvas = await getDesignCanvas(deps.dataDir, result.manifest.projectId);
         sendJson(res, result.reused ? 200 : 201, {
-          project: designProjectPayload(deps.dataDir, project),
+          canvas,
           import: result,
         });
         await finished(res, { cleanup: true });

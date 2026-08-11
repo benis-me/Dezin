@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 const dataDir = process.argv[2];
 if (!dataDir) throw new Error("dataDir is required");
-const mode = process.argv[3] ?? "normal";
+const projectId = process.argv[3];
+if (!projectId) throw new Error("projectId is required");
+const mode = process.argv[4] ?? "normal";
 
 const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
 const mark = (value: string) => appendFile(join(dataDir, "figma-worker-calls.log"), `${value}\n`);
@@ -39,10 +41,12 @@ const client: FigmaRestClient = {
 
 const result = await importFigmaDesignProject({
   dataDir,
+  projectId,
   input: {
     schemaVersion: 1,
     idempotencyKey: "figma-cross-process-1",
     url: "https://www.figma.com/design/AbC123xyZ/Concurrent-Figma",
+    anchor: { x: 0, y: 0 },
     rightsAcknowledged: true,
   },
   client,

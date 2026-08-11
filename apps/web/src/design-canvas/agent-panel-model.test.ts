@@ -1,7 +1,9 @@
 import { expect, test } from "vitest";
 
 import {
+  AGENT_OUTPUT_BLOCK_TYPES,
   activeAgentActivityPhase,
+  buildAgentOutputModel,
   buildAgentTranscriptPage,
   groupMainAgentJobs,
 } from "./agent-panel-model.ts";
@@ -170,4 +172,181 @@ test("only the latest live activity owns the active phase and terminal Jobs own 
     activity: [{ id: "reason", kind: "text", text: "Refining the hierarchy", createdAt: 104 }],
   })).toBe("reasoning");
   expect(activeAgentActivityPhase({ ...live, status: "ready", finishedAt: 110 })).toBeNull();
+});
+
+test("Agent output blocks aggregate by activity type and retain first-activity order", () => {
+  const model = buildAgentOutputModel(job({
+    activity: [
+      { id: "tool-1", kind: "tool", text: "Opened the source", createdAt: 130 },
+      { id: "reason-1", kind: "text", text: "Inspecting the hierarchy", createdAt: 110 },
+      { id: "search-1", kind: "text", text: "Searching the web for typography", createdAt: 120 },
+      { id: "reason-2", kind: "text", text: "Refining the layout", createdAt: 140 },
+      { id: "tool-2", kind: "status", text: "Validated the result", createdAt: 150 },
+    ],
+  }));
+
+  expect(model.activePhase).toBe("progress");
+  expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
+    ["trace", false],
+    ["search", false],
+    ["tool-group", true],
+  ]);
+  expect(model.blocks[0]).toMatchObject({
+    type: "trace",
+    items: [{ id: "reason-1" }, { id: "reason-2" }],
+  });
+  expect(model.blocks[2]).toMatchObject({
+    type: "tool-group",
+    items: [{ id: "tool-1" }, { id: "tool-2" }],
+  });
+});
+
+test("terminal Agent output exposes outcome and export metadata with zero active blocks", () => {
+  const model = buildAgentOutputModel(job({
+    kind: "implementation-export",
+    status: "ready",
+    exportId: "export-1",
+    activity: [{ id: "reason", kind: "text", text: "Packaging the app", createdAt: 120 }],
+    updatedAt: 180,
+    finishedAt: 180,
+  }));
+
+  expect(model.activePhase).toBeNull();
+  expect(model.blocks.some((block) => block.active)).toBe(false);
+  expect(model.blocks.map((block) => block.type)).toEqual(["trace", "outcome", "export"]);
+  expect(model.blocks[1]).toEqual({
+    type: "outcome",
+    id: "job-1:outcome",
+    createdAt: 180,
+    active: false,
+    phase: null,
+    status: "ready",
+    label: "Complete",
+    durationMs: 80,
+    versionId: null,
+  });
+  expect(model.blocks[2]).toMatchObject({
+    type: "export",
+    exportId: "export-1",
+    status: "ready",
+    active: false,
+  });
+});
+
+test("failed Agent output exposes explicit error metadata instead of an active phase", () => {
+  const model = buildAgentOutputModel(job({
+    kind: "node-generation",
+    nodeId: "node-1",
+    status: "failed",
+    error: "Generated HTML contains an unpinned or external URL",
+    activity: [{ id: "validate", kind: "status", text: "Validating the result", createdAt: 130 }],
+    updatedAt: 170,
+    finishedAt: 170,
+  }));
+
+  expect(model.activePhase).toBeNull();
+  expect(model.blocks.map((block) => block.type)).toEqual(["tool-group", "error"]);
+  expect(model.blocks.at(-1)).toEqual({
+    type: "error",
+    id: "job-1:error",
+    createdAt: 170,
+    active: false,
+    phase: null,
+    status: "failed",
+    message: "Generated HTML contains an unpinned or external URL",
+    durationMs: 70,
+  });
+});
+
+test("an activity-free live Job has one active trace placeholder", () => {
+  const model = buildAgentOutputModel(job({ activity: [] }));
+
+  expect(model.activePhase).toBe("reasoning");
+  expect(model.blocks).toEqual([{
+    type: "trace",
+    id: "job-1:reasoning",
+    createdAt: 100,
+    active: true,
+    phase: "reasoning",
+    items: [],
+  }]);
+});
+
+test("the output registry stays closed and never guesses rich blocks from markdown", () => {
+  const model = buildAgentOutputModel(job({
+    activity: [{
+      id: "markdown",
+      kind: "text",
+      text: "Approval required\n\n| Metric | Value |\n| --- | --- |\n| Insight | Strong hierarchy |",
+      createdAt: 110,
+    }],
+  }));
+
+  expect(AGENT_OUTPUT_BLOCK_TYPES).toEqual([
+    "trace",
+    "tool-group",
+    "search",
+    "image",
+    "outcome",
+    "error",
+    "export",
+  ]);
+  expect(model.blocks.map((block) => block.type)).toEqual(["trace"]);
+  expect(model.blocks[0]).toMatchObject({
+    type: "trace",
+    items: [{ id: "markdown" }],
+  });
+});
+
+test("the normalized model assigns activePhase to the chronologically latest activity", () => {
+  const model = buildAgentOutputModel(job({
+    activity: [
+      { id: "new-tool", kind: "tool", text: "Published the artifact", createdAt: 200 },
+      { id: "old-reasoning", kind: "text", text: "Earlier reasoning", createdAt: 110 },
+    ],
+  }));
+
+  expect(model.activePhase).toBe("progress");
+  expect(model.blocks.map((block) => [block.type, block.active])).toEqual([
+    ["trace", false],
+    ["tool-group", true],
+  ]);
+});
+
+test("search and image blocks retain renderer-ready metadata while aggregating repeated activity", () => {
+  const model = buildAgentOutputModel(job({
+    activity: [
+      {
+        id: "image-1",
+        kind: "text",
+        text: "Generating an image “Tokyo at dusk”",
+        createdAt: 110,
+      },
+      {
+        id: "search-1",
+        kind: "text",
+        text: "Searched the web for references https://example.com/type",
+        createdAt: 120,
+      },
+      {
+        id: "image-2",
+        kind: "text",
+        text: "Rendering an image “Tokyo after rain”",
+        createdAt: 130,
+      },
+    ],
+  }));
+
+  expect(model.blocks.map((block) => block.type)).toEqual(["image", "search"]);
+  expect(model.blocks[0]).toMatchObject({
+    type: "image",
+    prompt: "Tokyo after rain",
+    active: true,
+    items: [{ id: "image-1" }, { id: "image-2" }],
+  });
+  expect(model.blocks[1]).toMatchObject({
+    type: "search",
+    active: false,
+    results: [{ id: "search-1", href: "https://example.com/type", state: "done" }],
+  });
 });

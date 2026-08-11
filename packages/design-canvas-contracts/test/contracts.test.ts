@@ -23,6 +23,7 @@ import type {
   DesignProjectBootstrapJob,
   DesignProjectBootstrapResult,
   DesignThread,
+  FigmaCanvasImportResponse,
   FigmaImportInput,
   FigmaImportManifest,
   FigmaImportResult,
@@ -174,6 +175,7 @@ const figmaInput = {
   url: "https://www.figma.com/design/AbC123xyZ/Product-System?node-id=1-2",
   nodeIds: ["1:2"],
   depth: 4,
+  anchor: { x: 180, y: -240 },
   rightsAcknowledged: true,
 } satisfies FigmaImportInput;
 const figmaManifest = {
@@ -208,6 +210,7 @@ const figmaManifest = {
   createdAt: 1,
 } satisfies FigmaImportManifest;
 const figmaImport = { manifest: figmaManifest, reused: false } satisfies FigmaImportResult;
+const figmaCanvasImport = { canvas, import: figmaImport } satisfies FigmaCanvasImportResponse;
 
 void (0 as unknown as GenerativeKindsAreExact);
 void (0 as unknown as MaterialKindsAreExact);
@@ -238,6 +241,7 @@ test("representative wire DTOs retain their public shape", () => {
   assert.equal(DESIGN_SCHEMA_VERSION, 2);
   assert.equal(canvas.nodes[0]?.currentVersionId, version.id);
   assert.equal(turn.job.versionId, version.id);
+  assert.equal(figmaCanvasImport.canvas.projectId, figmaCanvasImport.import.manifest.projectId);
   assert.equal(turn.job.canvasRevision, canvas.revision);
   assert.equal(turn.job.cancelRequested, false);
   assert.equal(retry.retryOfJobId, "job-0");

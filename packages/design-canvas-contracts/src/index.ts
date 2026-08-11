@@ -279,13 +279,18 @@ export interface DesignProjectBootstrapResult {
 
 export const FIGMA_IMPORT_SCHEMA_VERSION = 1 as const;
 
+export interface FigmaImportAnchor {
+  x: number;
+  y: number;
+}
+
 export interface FigmaImportInput {
   schemaVersion: typeof FIGMA_IMPORT_SCHEMA_VERSION;
   idempotencyKey: string;
   url: string;
-  name?: string;
   nodeIds?: string[];
   depth?: number;
+  anchor: FigmaImportAnchor;
   rightsAcknowledged: true;
 }
 
@@ -334,6 +339,11 @@ export interface FigmaImportManifest {
 export interface FigmaImportResult {
   manifest: FigmaImportManifest;
   reused: boolean;
+}
+
+export interface FigmaCanvasImportResponse {
+  canvas: DesignCanvas;
+  import: FigmaImportResult;
 }
 
 export interface FigmaCredentialStatus {

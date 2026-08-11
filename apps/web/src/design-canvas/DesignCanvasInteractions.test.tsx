@@ -4,6 +4,9 @@ import type { Viewport } from "@xyflow/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AgentInfo } from "../lib/api.ts";
+import { ApiProvider } from "../lib/api-context.tsx";
+import { ToastProvider } from "../components/Toast.tsx";
+import { makeFakeApi } from "../test/fake-api.ts";
 import type { DesignCanvasApi } from "./api.ts";
 import { DesignCanvasScreen } from "./DesignCanvasScreen.tsx";
 import type {
@@ -13,6 +16,7 @@ import type {
   DesignJob,
   DesignNode,
   DesignThread,
+  FigmaCanvasImportResponse,
 } from "./types.ts";
 
 const flowHarness = vi.hoisted(() => ({
@@ -261,6 +265,94 @@ test("focusable Canvas Nodes expose their persisted identity, kind, and state", 
   expect(flowHarness.props?.nodes[0]).toMatchObject({
     ariaLabel: "Checkout field study, Research, Preparing preview",
   });
+});
+
+test("a successful Figma import adopts its response Canvas before a best-effort refresh", async () => {
+  const initial = designCanvas([]);
+  const importedNodes: DesignNode[] = [
+    { ...designNode("figma-design", 321), kind: "design-document", name: "Design.md" },
+    { ...designNode("figma-tokens", 761), kind: "design-tokens", name: "Tokens" },
+    { ...designNode("figma-components", 1201), kind: "component", name: "Components" },
+  ];
+  const canonical = designCanvas(importedNodes, 2);
+  const { api } = createApi(initial);
+  vi.mocked(api.getCanvas)
+    .mockResolvedValueOnce(initial)
+    .mockRejectedValueOnce(new Error("transient refresh failure"));
+  const response: FigmaCanvasImportResponse = {
+    canvas: canonical,
+    import: {
+      reused: false,
+      manifest: {
+        schemaVersion: 1,
+        importId: "figma-import-1",
+        projectId: PROJECT_ID,
+        source: {
+          normalizedUrl: "https://www.figma.com/design/AbCdEf123456/Checkout",
+          fileType: "design",
+          fileKey: "AbCdEf123456",
+          branchKey: null,
+          fileName: "Checkout",
+          requestedVersionId: null,
+          resolvedVersion: "1",
+          selectedNodeIds: [],
+          depth: 4,
+        },
+        access: { editorType: null, role: null, linkAccess: null },
+        credential: { mode: "personal-access-token", subject: "fake" },
+        tokenAuthority: "style-values-inferred",
+        artifacts: importedNodes.map((item, index) => ({
+          kind: index === 0 ? "design-document" : index === 1 ? "tokens" : "components",
+          path: `artifact-${index}.json`,
+          mimeType: "application/json",
+          sha256: String(index).repeat(64),
+          bytes: 100,
+          nodeId: item.id,
+        })),
+        incomplete: ["Variables unavailable"],
+        warnings: ["Tokens inferred"],
+        canvasRevision: canonical.revision,
+        createdAt: 2,
+      },
+    },
+  };
+  const importFigmaProject = vi.fn(async () => response);
+  const routeBefore = window.location.pathname;
+  const user = userEvent.setup();
+  render(
+    <ApiProvider client={makeFakeApi({ importFigmaProject })}>
+      <ToastProvider>
+        <DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} />
+      </ToastProvider>
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(0));
+
+  fireEvent.contextMenu(screen.getByLabelText("Infinite Design canvas"), { clientX: 320.6, clientY: 259.6 });
+  await user.click(screen.getByRole("menuitem", { name: "Import from Figma" }));
+  await user.type(
+    await screen.findByRole("textbox", { name: "Figma file URL" }),
+    "https://www.figma.com/design/AbCdEf123456/Checkout",
+  );
+  await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
+  await user.click(screen.getByRole("button", { name: "Import into canvas" }));
+
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(3));
+  expect(flowHarness.props?.nodes.every((item: { selected?: boolean }) => item.selected)).toBe(true);
+  await waitFor(() => expect(flowHarness.fitView).toHaveBeenCalledTimes(1));
+  expect(flowHarness.fitView).toHaveBeenCalledWith(expect.objectContaining({
+    nodes: expect.arrayContaining(importedNodes.map((item) => expect.objectContaining({ id: item.id }))),
+  }));
+  expect(importFigmaProject).toHaveBeenCalledWith(
+    PROJECT_ID,
+    expect.objectContaining({ anchor: { x: 321, y: 260 } }),
+    expect.any(AbortSignal),
+  );
+  expect(api.getCanvas).toHaveBeenCalledTimes(2);
+  expect(window.location.pathname).toBe(routeBefore);
+  expect(await screen.findByText(
+    "Figma imported with limited metadata: Variables unavailable; Tokens inferred",
+  )).toBeVisible();
 });
 
 test("single-click selects while double-click flies only the Node and its neighbors above a stable viewport", async () => {

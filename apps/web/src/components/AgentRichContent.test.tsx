@@ -86,6 +86,27 @@ test("Agent activity blocks share one editorial log-row anatomy", () => {
     .toEqual(["thinking", "actions", "search"]);
 });
 
+test("tool activity keeps one outer disclosure and exposes each operation as an inner Tool Chip", () => {
+  const { container } = render(
+    <AgentProgressList
+      items={[
+        { id: "tool-read", text: "Read design/project.json", state: "done" },
+        { id: "tool-write", text: "Write components.json", state: "active" },
+      ]}
+    />,
+  );
+
+  const group = container.querySelector('[data-agent-component="tool-group"]');
+  expect(group).toBeInTheDocument();
+  expect(group).toHaveAttribute("data-activity-kind", "actions");
+  const chips = within(group as HTMLElement).getAllByRole("listitem");
+  expect(chips).toHaveLength(2);
+  expect(chips[0]).toHaveAttribute("data-agent-component", "tool-chip");
+  expect(chips[0]).toHaveAttribute("data-state", "done");
+  expect(chips[1]).toHaveAttribute("data-agent-component", "tool-chip");
+  expect(chips[1]).toHaveAttribute("data-state", "active");
+});
+
 test("the image-generation card uses the same accessible disclosure contract", () => {
   const { container } = render(<AgentImageGenerationState prompt="A quiet editorial cover" />);
   const toggle = screen.getByRole("button", { name: "Image generation: Generating" });
@@ -96,6 +117,21 @@ test("the image-generation card uses the same accessible disclosure contract", (
   expect(toggle).toHaveAttribute("aria-expanded", "false");
   expect(collapsible).toHaveAttribute("aria-hidden", "true");
   expect(collapsible).toHaveAttribute("inert");
+});
+
+test("Thinking, Search, and Image activity share one Trace primitive with explicit kinds", () => {
+  const { container } = render(
+    <>
+      <AgentReasoning active durationMs={1_000} items={[{ id: "trace-1", text: "Inspecting" }]} />
+      <AgentWebSearch active={false} query="layout systems" results={[]} />
+      <AgentImageGenerationState active prompt="Editorial cover" />
+    </>,
+  );
+
+  expect([...container.querySelectorAll('[data-agent-component="trace"]')]
+    .map((element) => element.getAttribute("data-trace-kind")))
+    .toEqual(["thinking", "search", "image"]);
+  expect(container.querySelector(".agent-web-search__rail")).not.toBeInTheDocument();
 });
 
 test("Agent output renders passive local images without authorizing remote image requests", () => {

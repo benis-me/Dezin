@@ -1,14 +1,15 @@
 # Figma URL import
 
 **Status:** the first filesystem-authoritative import slice is implemented.
-Dezin can create a new Design Project from an authorized Figma file URL and
-publish three material Canvas artifacts: `Design.md`, `tokens.json`, and
-`components.json`. This is a deterministic analysis import, not a pixel-perfect
-Figma clone.
+From an existing Design Canvas, Dezin can import an authorized Figma file URL
+and atomically append three material artifacts to the current Project:
+`Design.md`, `tokens.json`, and `components.json`. This is a deterministic
+analysis import, not a pixel-perfect Figma clone.
 
 ## Supported input
 
-The Home screen accepts these credential-free HTTPS URL forms:
+The blank-canvas context menu exposes **Import from Figma**. The dialog accepts
+these credential-free HTTPS URL forms:
 
 - `https://www.figma.com/design/<file-key>/<name>`
 - `https://www.figma.com/file/<file-key>/<name>`
@@ -26,11 +27,13 @@ Variables endpoint cannot be pinned to that historical Version, so accepting
 one would falsely claim an exact token snapshot.
 
 The daemon is the parsing authority. The Web parser only provides a conservative
-preview. While an import is unconfirmed, the renderer persists only an opaque
-random idempotency key and the SHA-256 of its canonical submission fingerprint;
-it stores neither the Figma URL nor the PAT. An ambiguous retry or renderer
-restart reuses that pending key. Confirmed success clears it, so a later explicit
-import of the same URL can capture a newer Figma Version.
+preview. The right-click position is converted to a Canvas coordinate and rounded
+before the menu closes. While an import is unconfirmed, the renderer persists
+only an opaque random idempotency key and the SHA-256 of its canonical submission
+fingerprint, including the Project and anchor; it stores neither the Figma URL nor
+the PAT. An ambiguous retry or renderer restart reuses that pending key. Confirmed
+success clears it, so a later explicit import of the same URL can capture a newer
+Figma Version.
 
 Official identity and query semantics are documented by Figma's
 [File endpoints](https://developers.figma.com/docs/rest-api/file-endpoints/) and
@@ -103,6 +106,11 @@ The three derived files are also published atomically into one Canvas revision:
 | `tokens.json` | File | Exact Variables when authorized, otherwise explicitly inferred style evidence |
 | `components.json` | File | Deterministic local component, component-set, and style records |
 
+The first card uses the frozen right-click anchor as its top-left position. The
+other two use the same row at `x + 460` and `x + 920`; all three start at
+`420 × 560`. A successful import remains on the current Project route, selects
+the three new Nodes, and frames them once without opening an Agent panel.
+
 `tokenAuthority` is one of `figma-variables-exact`,
 `style-values-inferred`, or `not-applicable`. A Variables `403`/`404` is recorded
 as incomplete evidence and never masquerades as exact token authority. Figma's
@@ -118,19 +126,22 @@ the only remote URL retained as provenance.
 
 ## Durability and replay
 
-The import is a daemon-owned, cross-process transaction:
+The import is a daemon-owned, Project-local cross-process transaction:
 
 - One idempotency key binds one normalized request; rebinding returns `409`
   before credential or network access.
 - Cross-process tickets serialize the same receipt, are cancellable while
   waiting, and use owner identity plus fencing so an old process cannot delete
   or publish over a replacement.
-- Accepted receipts, snapshot publication, Project creation, the Asset batch,
-  final import publication, and phase advancement are fsync-ordered.
+- The target Project must already exist. Missing Projects fail before receipt,
+  credential, or Figma access, and an import never creates or resurrects one.
+- Accepted receipts, snapshot publication, the Asset batch, final import
+  publication, and phase advancement are fsync-ordered.
 - Restart recovery adopts an already-renamed snapshot and rolls
   `snapshot-staged` or later phases forward without Figma or PAT access.
-- Ready replay verifies every immutable artifact byte and returns the original
-  Project/import with no remote request.
+- Ready replay verifies every immutable artifact byte and returns the current
+  canonical Canvas plus the original import receipt with no remote request or
+  Canvas mutation.
 - The Project is protected by the runtime operation lease while it is being
   materialized, so concurrent deletion cannot tear down an active import.
 
@@ -140,11 +151,13 @@ HTTP endpoints:
 GET    /api/figma/credential
 PUT    /api/figma/credential
 DELETE /api/figma/credential
-POST   /api/projects/imports/figma
+POST   /api/projects/:id/design-canvas/imports/figma
 ```
 
-The import endpoint returns `201` for the first completion, `200` for exact
-replay, and `409` for idempotency conflict or corrupt authority.
+The import endpoint returns `201` when a newly created receipt completes in the
+same request. An existing, request-identical receipt returns `200` after either
+offline continuation or exact replay. Idempotency conflict or corrupt authority
+returns `409`.
 
 ## Deliberate limitations
 

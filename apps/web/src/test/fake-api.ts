@@ -125,15 +125,14 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
         },
       };
     },
-    importFigmaProject: async (input) => {
-      const project = fakeProject("project-figma", { name: "Figma import" });
+    importFigmaProject: async (projectId, input) => {
       return {
-        project,
+        canvas: emptyCanvas(projectId),
         import: {
           manifest: {
             schemaVersion: 1,
             importId: input.idempotencyKey,
-            projectId: project.id,
+            projectId,
             source: {
               normalizedUrl: input.url,
               fileType: "design",
@@ -151,7 +150,7 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
             artifacts: [],
             incomplete: [],
             warnings: [],
-            canvasRevision: 1,
+            canvasRevision: 0,
             createdAt: NOW,
           },
           reused: false,

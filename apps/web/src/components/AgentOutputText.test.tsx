@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, test } from "vitest";
 import { AgentOutputText } from "./AgentOutputText.tsx";
 
@@ -36,4 +36,28 @@ test("AgentOutputText keeps long paths and inline code inside the chat column", 
   expect(output).toHaveClass("min-w-0", "max-w-full", "overflow-x-hidden", "[overflow-wrap:anywhere]");
   expect(command.tagName).toBe("CODE");
   expect(command).toHaveClass("whitespace-normal", "[overflow-wrap:anywhere]");
+});
+
+test("assistant output exposes one Message Response surface with explicit streaming state and Sources", () => {
+  const { container, rerender } = render(
+    <AgentOutputText text={'Grounded answer [1](https://example.com/spec "Product spec")'} animate />,
+  );
+
+  const response = container.querySelector('[data-agent-component="message-response"]');
+  expect(response).toHaveAttribute("data-output-state", "streaming");
+  const sources = within(response as HTMLElement).getByRole("contentinfo", { name: "Sources" });
+  expect(sources).toHaveAttribute("data-agent-component", "sources");
+  expect(sources).toHaveTextContent("Product spec");
+  const sourcesToggle = within(sources).getByRole("button", { name: "Sources (1)" });
+  expect(sourcesToggle).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(sourcesToggle);
+  expect(sourcesToggle).toHaveAttribute("aria-expanded", "false");
+  expect(sources.querySelector(".agent-citations__collapsible")).toHaveAttribute("aria-hidden", "true");
+  expect(sources.querySelector(".agent-citations__collapsible")).toHaveAttribute("inert");
+
+  rerender(<AgentOutputText text="Grounded answer" />);
+  expect(container.querySelector('[data-agent-component="message-response"]')).toHaveAttribute(
+    "data-output-state",
+    "complete",
+  );
 });

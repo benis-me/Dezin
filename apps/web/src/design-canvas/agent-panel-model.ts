@@ -39,6 +39,103 @@ export interface AgentSearchResultModel {
   state: "loading" | "done";
 }
 
+export interface AgentOutputActivityItem {
+  id: string;
+  text: string;
+  createdAt: number;
+}
+
+interface AgentOutputActivityBlockBase {
+  id: string;
+  createdAt: number;
+  active: boolean;
+  phase: AgentActivityPhase;
+}
+
+export interface AgentTraceOutputBlock extends AgentOutputActivityBlockBase {
+  type: "trace";
+  phase: "reasoning";
+  items: AgentOutputActivityItem[];
+}
+
+export interface AgentToolGroupOutputBlock extends AgentOutputActivityBlockBase {
+  type: "tool-group";
+  phase: "progress";
+  items: AgentOutputActivityItem[];
+}
+
+export interface AgentSearchOutputBlock extends AgentOutputActivityBlockBase {
+  type: "search";
+  phase: "search";
+  query: string;
+  items: AgentOutputActivityItem[];
+  results: AgentSearchResultModel[];
+}
+
+export interface AgentImageOutputBlock extends AgentOutputActivityBlockBase {
+  type: "image";
+  phase: "image";
+  prompt: string;
+  items: AgentOutputActivityItem[];
+}
+
+interface AgentOutputMetadataBlockBase {
+  id: string;
+  createdAt: number;
+  active: false;
+  phase: null;
+}
+
+export interface AgentOutcomeOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "outcome";
+  status: Extract<DesignJob["status"], "ready" | "cancelled" | "superseded">;
+  label: string;
+  durationMs: number;
+  versionId: string | null;
+}
+
+export interface AgentErrorOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "error";
+  status: "failed";
+  message: string | null;
+  durationMs: number;
+}
+
+export interface AgentExportOutputBlock extends AgentOutputMetadataBlockBase {
+  type: "export";
+  exportId: string;
+  status: DesignJob["status"];
+}
+
+export interface AgentOutputBlockRegistry {
+  trace: AgentTraceOutputBlock;
+  "tool-group": AgentToolGroupOutputBlock;
+  search: AgentSearchOutputBlock;
+  image: AgentImageOutputBlock;
+  outcome: AgentOutcomeOutputBlock;
+  error: AgentErrorOutputBlock;
+  export: AgentExportOutputBlock;
+}
+
+export const AGENT_OUTPUT_BLOCK_TYPES = [
+  "trace",
+  "tool-group",
+  "search",
+  "image",
+  "outcome",
+  "error",
+  "export",
+] as const satisfies readonly (keyof AgentOutputBlockRegistry)[];
+
+export type AgentOutputBlockType = (typeof AGENT_OUTPUT_BLOCK_TYPES)[number];
+export type AgentOutputBlock = AgentOutputBlockRegistry[AgentOutputBlockType];
+
+export interface AgentOutputModel {
+  jobId: string;
+  activePhase: AgentActivityPhase | null;
+  blocks: AgentOutputBlock[];
+}
+
 export interface AgentTranscriptPage {
   presentableMessages: DesignThread["messages"];
   reservedMainReplies: DesignThread["messages"];
@@ -282,6 +379,141 @@ export function searchResults(
       state: active && index === activities.length - 1 ? "loading" as const : "done" as const,
     }];
   });
+}
+
+function outputActivityItem(
+  activity: DesignJobActivity,
+  compact: boolean,
+): AgentOutputActivityItem {
+  return {
+    id: activity.id,
+    text: compact
+      ? compactActivityText(activity.text)
+      : activity.text.trim() || "Activity updated",
+    createdAt: activity.createdAt,
+  };
+}
+
+function searchQuery(activities: readonly DesignJobActivity[]): string {
+  const first = activities[0];
+  if (!first) return "the web";
+  return quotedActivityText(first.text)
+    ?? (compactActivityText(first.text).replace(/^.*?\bsearch(?:ing|ed)?\b\s*/i, "") || "the web");
+}
+
+export function buildAgentOutputModel(job: DesignJob): AgentOutputModel {
+  const orderedActivities = job.activity
+    .map((activity, index) => ({ activity, index }))
+    .sort((left, right) => (
+      left.activity.createdAt - right.activity.createdAt || left.index - right.index
+    ))
+    .map(({ activity }) => activity);
+  const active = job.status === "queued" || job.status === "running" || job.status === "validating";
+  const latestActivity = orderedActivities.at(-1);
+  const activePhase = !active
+    ? null
+    : latestActivity === undefined ? "reasoning" : activityPhase(latestActivity);
+  const activitiesByPhase = new Map<AgentActivityPhase, DesignJobActivity[]>();
+  for (const activity of orderedActivities) {
+    const phase = activityPhase(activity);
+    const grouped = activitiesByPhase.get(phase);
+    if (grouped) grouped.push(activity);
+    else activitiesByPhase.set(phase, [activity]);
+  }
+  const blocks: AgentOutputBlock[] = [];
+  if (orderedActivities.length === 0 && activePhase === "reasoning") {
+    blocks.push({
+      type: "trace",
+      id: `${job.id}:reasoning`,
+      createdAt: job.createdAt,
+      active: true,
+      phase: "reasoning",
+      items: [],
+    });
+  }
+  for (const [phase, activities] of activitiesByPhase) {
+    const base = {
+      id: `${job.id}:${phase}`,
+      createdAt: activities[0]!.createdAt,
+      active: activePhase === phase,
+    };
+    switch (phase) {
+      case "reasoning":
+        blocks.push({
+          ...base,
+          type: "trace",
+          phase,
+          items: activities.map((activity) => outputActivityItem(activity, false)),
+        });
+        break;
+      case "progress":
+        blocks.push({
+          ...base,
+          type: "tool-group",
+          phase,
+          items: activities.map((activity) => outputActivityItem(activity, true)),
+        });
+        break;
+      case "search":
+        blocks.push({
+          ...base,
+          type: "search",
+          phase,
+          query: searchQuery(activities),
+          items: activities.map((activity) => outputActivityItem(activity, true)),
+          results: searchResults(activities, activePhase === phase),
+        });
+        break;
+      case "image": {
+        const latest = activities.at(-1)!;
+        blocks.push({
+          ...base,
+          type: "image",
+          phase,
+          prompt: quotedActivityText(latest.text) ?? compactActivityText(latest.text),
+          items: activities.map((activity) => outputActivityItem(activity, true)),
+        });
+        break;
+      }
+    }
+  }
+  const durationMs = Math.max(0, (job.finishedAt ?? job.updatedAt) - job.createdAt);
+  if (job.status === "failed") {
+    blocks.push({
+      type: "error",
+      id: `${job.id}:error`,
+      createdAt: job.finishedAt ?? job.updatedAt,
+      active: false,
+      phase: null,
+      status: job.status,
+      message: job.error,
+      durationMs,
+    });
+  } else if (job.status === "ready" || job.status === "cancelled" || job.status === "superseded") {
+    blocks.push({
+      type: "outcome",
+      id: `${job.id}:outcome`,
+      createdAt: job.finishedAt ?? job.updatedAt,
+      active: false,
+      phase: null,
+      status: job.status,
+      label: jobStatusLabel(job),
+      durationMs,
+      versionId: job.versionId,
+    });
+  }
+  if (job.kind === "implementation-export" && job.exportId !== null) {
+    blocks.push({
+      type: "export",
+      id: `${job.id}:export`,
+      createdAt: job.updatedAt,
+      active: false,
+      phase: null,
+      exportId: job.exportId,
+      status: job.status,
+    });
+  }
+  return { jobId: job.id, activePhase, blocks };
 }
 
 export function jobStatusLabel(job: DesignJob): string {

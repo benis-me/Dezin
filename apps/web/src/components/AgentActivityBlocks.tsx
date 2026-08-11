@@ -35,7 +35,15 @@ export function AgentActivityHeaderContent({
   );
 }
 
-export function AgentThinkingState({ label = "Thinking" }: { label?: string }) {
+export function AgentThinkingState({ label = "Thinking", trace = false }: { label?: string; trace?: boolean }) {
+  if (trace) {
+    return (
+      <span className="agent-thinking-state agent-thinking-state--trace" data-agent-component="trace" data-agent-output-block="trace" data-trace-kind="thinking">
+        <span className="agent-activity-card__pulse" aria-hidden />
+        <span>{label}</span>
+      </span>
+    );
+  }
   return <span className="agent-thinking-state" data-agent-component="thinking-state">{label}</span>;
 }
 
@@ -53,7 +61,7 @@ export function AgentReasoning({
   useEffect(() => {
     if (active) setOpen(true);
   }, [active]);
-  if (items.length === 0) return active ? <AgentThinkingState /> : null;
+  if (items.length === 0) return active ? <AgentThinkingState trace /> : null;
   const boundedVisibleItemCount = Math.min(
     items.length,
     Math.max(INITIAL_REASONING_WINDOW, visibleItemCount),
@@ -62,7 +70,7 @@ export function AgentReasoning({
   const revealItemCount = Math.min(hiddenItemCount, boundedVisibleItemCount);
   const visibleItems = items.slice(-boundedVisibleItemCount);
   return (
-    <section className="agent-activity-card agent-reasoning" data-agent-component="thinking-reasoning" data-activity-kind="thinking" data-active={active || undefined} data-collapsed={!open || undefined}>
+    <section className="agent-activity-card agent-reasoning" data-agent-component="trace" data-agent-output-block="trace" data-trace-kind="thinking" data-activity-kind="thinking" data-active={active || undefined} data-collapsed={!open || undefined}>
       <button type="button" className="agent-activity-card__header agent-reasoning__header" aria-label="Thinking" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
         <AgentActivityHeaderContent
           icon={active ? <span className="agent-activity-card__pulse" /> : <Check />}
@@ -125,7 +133,7 @@ export function AgentProgressList({
   const allComplete = complete === items.length;
   const showCompleteTone = allComplete && completionTone === "auto";
   return (
-    <section className="agent-activity-card agent-progress" data-agent-component="to-do-list" data-activity-kind="actions" data-active={active || undefined} data-collapsed={!open || undefined} data-complete={showCompleteTone || undefined}>
+    <section className="agent-activity-card agent-progress" data-agent-component="tool-group" data-agent-output-block="tool-group" data-activity-kind="actions" data-active={active || undefined} data-collapsed={!open || undefined} data-complete={showCompleteTone || undefined}>
       <button type="button" className="agent-activity-card__header agent-progress__header" aria-controls={detailsId} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
         <AgentActivityHeaderContent
           icon={allComplete ? <Check /> : <ListChecks />}
@@ -141,7 +149,7 @@ export function AgentProgressList({
       >
         <ol className="agent-progress__items">
           {items.map((item) => (
-            <li key={item.id} data-state={item.state}>
+            <li key={item.id} data-agent-component="tool-chip" data-state={item.state}>
               <span className="agent-progress__state" aria-hidden>
                 {item.state === "done"
                   ? <Check />
@@ -184,7 +192,7 @@ export function AgentWebSearch({
     state: active ? "loading" as const : "done" as const,
   }], [active, results]);
   return (
-    <section className="agent-activity-card agent-web-search" data-agent-component="web-search" data-activity-kind="search" data-active={active || undefined} data-collapsed={!open || undefined}>
+    <section className="agent-activity-card agent-web-search" data-agent-component="trace" data-agent-output-block="search" data-trace-kind="search" data-activity-kind="search" data-active={active || undefined} data-collapsed={!open || undefined}>
       <button
         type="button"
         className="agent-activity-card__header agent-web-search__header"
@@ -207,7 +215,6 @@ export function AgentWebSearch({
         open={open}
       >
         <div className="agent-web-search__results">
-          <span className="agent-web-search__rail" aria-hidden />
           <ul>
             {normalizedResults.map((result) => {
               const state = result.state ?? (active ? "loading" : "done");
@@ -256,7 +263,7 @@ export function AgentImageGenerationState({
   const detailsId = useId();
   const statusLabel = resolution ?? (active ? "Generating" : "Completed");
   return (
-    <figure className="agent-activity-card agent-image-generation-state" data-agent-component="image-generation" data-activity-kind="image-generation" data-active={active || undefined} data-collapsed={!open || undefined}>
+    <figure className="agent-activity-card agent-image-generation-state" data-agent-component="trace" data-agent-output-block="image" data-trace-kind="image" data-activity-kind="image-generation" data-active={active || undefined} data-collapsed={!open || undefined}>
       <button
         type="button"
         className="agent-activity-card__header agent-image-generation-state__header"

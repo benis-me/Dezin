@@ -22,7 +22,8 @@ export function AgentOutputText({
         "agent-text-response dz-selectable min-w-0 max-w-full overflow-x-hidden [overflow-wrap:anywhere]",
         className,
       )}
-      data-agent-component={animate ? "streaming-text" : "text-response"}
+      data-agent-component="message-response"
+      data-output-state={animate ? "streaming" : "complete"}
       data-streaming={animate || undefined}
     >
       {needsTextMirror ? (

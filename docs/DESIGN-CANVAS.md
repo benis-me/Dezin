@@ -58,9 +58,12 @@ filesystem authority. They must not be described as native semantic artifacts
 until bundle Versions can carry those typed payloads alongside preview HTML and
 pinned assets. The first Figma URL import now publishes `Design.md`,
 `tokens.json`, and `components.json` as checksum-bound material Document/File
-Nodes. It deliberately does not claim native semantic bundles or a pixel-perfect
-clone. The exact input, credential, Version fence, durability, and remaining
-binary/OAuth/refresh work are documented in [FIGMA-IMPORT.md](./FIGMA-IMPORT.md).
+Nodes through the blank-canvas **Import from Figma** context-menu action. The
+three artifacts are appended to the current Project at the frozen right-click
+anchor; the import never creates a separate Project. It deliberately does not
+claim native semantic bundles or a pixel-perfect clone. The exact input,
+credential, Version fence, durability, and remaining binary/OAuth/refresh work
+are documented in [FIGMA-IMPORT.md](./FIGMA-IMPORT.md).
 
 ## On-disk layout
 

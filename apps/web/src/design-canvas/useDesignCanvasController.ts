@@ -18,6 +18,7 @@ export interface DesignCanvasController {
   jobs: DesignJob[];
   error: string | null;
   mutating: boolean;
+  adoptCanvas: (canvas: DesignCanvas) => void;
   refresh: () => Promise<void>;
   applyIntents: (intents: readonly DesignCanvasIntent[]) => Promise<DesignCanvas>;
   undo: () => Promise<DesignCanvas | null>;
@@ -66,12 +67,19 @@ export function useDesignCanvasController({
     appliedRefreshSequenceRef.current = refreshSequenceRef.current;
   }
 
-  const setCanvas = useCallback((next: DesignCanvas) => {
-    if (next.projectId !== projectRef.current) return;
-    if (canvasRef.current && next.revision < canvasRef.current.revision) return;
+  const setCanvas = useCallback((next: DesignCanvas): boolean => {
+    if (next.projectId !== projectRef.current) return false;
+    if (canvasRef.current && next.revision < canvasRef.current.revision) return false;
     canvasRef.current = next;
     setCanvasState(next);
+    return true;
   }, []);
+
+  const adoptCanvas = useCallback((next: DesignCanvas) => {
+    if (!setCanvas(next)) return;
+    setLoadState("ready");
+    setError(null);
+  }, [setCanvas]);
 
   const reportError = useCallback((problem: unknown) => {
     const message = problem instanceof Error ? problem.message : String(problem);
@@ -331,6 +339,7 @@ export function useDesignCanvasController({
     jobs,
     error,
     mutating,
+    adoptCanvas,
     refresh,
     applyIntents,
     undo,
