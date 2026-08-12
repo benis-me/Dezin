@@ -461,6 +461,33 @@ test("a rapid pane deselect then Node click ignores the pane's delayed empty sel
   expect(screen.getByLabelText("Page A Agent panel")).toBeInTheDocument();
 });
 
+test("a rapid drag-threshold interaction transfers selection even when the following click is suppressed", async () => {
+  const nodeA = designNode("page-a", 80);
+  const nodeB = designNode("page-b", 620);
+  const { api } = createApi(designCanvas([nodeA, nodeB]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(2));
+
+  act(() => {
+    flowHarness.props?.onNodeClick?.(new MouseEvent("click"), flowHarness.props.nodes[0]);
+  });
+  await waitFor(() => expect(screen.getByLabelText("Page A Agent panel")).toBeInTheDocument());
+
+  const nextNode = { ...flowHarness.props!.nodes[1]!, selected: true };
+  act(() => {
+    flowHarness.props?.onNodesChange?.([
+      { type: "select", id: nodeA.id, selected: false },
+      { type: "select", id: nodeB.id, selected: true },
+    ]);
+    flowHarness.props?.onNodeDragStart?.(new MouseEvent("mousemove"), nextNode, [nextNode]);
+    flowHarness.props?.onSelectionChange?.({ nodes: [nextNode] });
+  });
+
+  await waitFor(() => expect(flowHarness.props?.nodes.map((node: { selected?: boolean }) => node.selected)).toEqual([false, true]));
+  expect(screen.getByLabelText("Page B Agent panel")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByLabelText("Page A Agent panel")).not.toBeInTheDocument());
+});
+
 test("repeated canvas clicks cannot restart or stutter the return flight", async () => {
   const { api } = createApi(designCanvas([designNode("page-a", 80)]));
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);

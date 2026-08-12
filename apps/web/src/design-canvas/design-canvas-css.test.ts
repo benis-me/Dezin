@@ -31,7 +31,8 @@ test("Design Canvas keeps native titlebar and floating feedback geometry stable"
 });
 
 test("selected and keyboard-focused Nodes use restrained depth with discoverable corner brackets", () => {
-  expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*14px;/s);
+  expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*10px;/s);
+  expect(css).toMatch(/\.design-canvas-node__frame\s*\{[^}]*border-radius:\s*7px;/s);
   expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 10px 20px/s);
   expect(css).not.toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*white/s);
@@ -55,11 +56,13 @@ test("selected and keyboard-focused Nodes use restrained depth with discoverable
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
 
-test("marquee selection is solid and leaves a short animated solid ghost", () => {
-  expect(css).toMatch(/\.design-canvas-surface \.react-flow__selection\s*\{[^}]*border:\s*1\.5px solid/s);
-  expect(css).toMatch(/\.design-canvas-surface \.react-flow__nodesselection-rect\s*\{[^}]*border:\s*2px solid[^}]*background:[^}]*box-shadow:/s);
+test("marquee selection matches Moodboard's thin blue selection treatment", () => {
+  expect(css).toMatch(/--design-canvas-selection-color:\s*#0d99ff;/s);
+  expect(css).toMatch(/--design-canvas-selection-fill:\s*rgb\(13 153 255 \/ 20%\);/s);
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__selection\s*\{[^}]*border:\s*1px solid var\(--design-canvas-selection-color\);[^}]*background:\s*var\(--design-canvas-selection-fill\);/s);
+  expect(css).toMatch(/\.design-canvas-surface \.react-flow__nodesselection-rect\s*\{[^}]*border:\s*1px solid var\(--design-canvas-selection-color\);[^}]*border-radius:\s*0;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).not.toMatch(/\.react-flow__(?:nodes)?selection[^}]*dashed/s);
-  expect(css).toMatch(/\.design-canvas-selection-ghost\s*\{[^}]*border:\s*1px solid[^}]*animation:\s*design-canvas-selection-out 180ms/s);
+  expect(css).toMatch(/\.design-canvas-selection-ghost\s*\{[^}]*border:\s*1px solid var\(--design-canvas-selection-color\);[^}]*border-radius:\s*0;[^}]*animation:\s*design-canvas-selection-out 180ms/s);
   expect(css).toContain("@keyframes design-canvas-selection-out");
 });
 
@@ -83,9 +86,12 @@ test("Node previews have no permanent title chrome or zoom-in cursor", () => {
   expect(css).not.toContain(".design-canvas-node__identity");
   expect(css).not.toContain(".design-canvas-node__name");
   expect(css).not.toContain("cursor: zoom-in");
-  expect(css).toMatch(/\.design-canvas-node__hover-label\s*\{[^}]*pointer-events:\s*none;[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(0, 7px, 0\);[^}]*transition:[^}]*opacity 160ms[^}]*transform 220ms cubic-bezier\(0\.23, 1, 0\.32, 1\);/s);
-  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover > \.design-canvas-node__hover-label\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0, calc\(-100% - 7px\), 0\);/s);
-  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-node__hover-label\s*\{[^}]*transition:\s*opacity 160ms var\(--design-canvas-ease-out\) !important;/s);
+  expect(css).toMatch(/\.design-canvas-node__hover-label\s*\{[^}]*left:\s*var\(--design-canvas-hover-label-inset, 12px\);[^}]*pointer-events:\s*none;[^}]*transform:\s*scale\(var\(--design-canvas-viewport-inverse-scale, 1\)\);[^}]*transform-origin:\s*left top;/s);
+  expect(css).toMatch(/\.design-canvas-node__hover-label > span\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(0, 7px, 0\);[^}]*transition:[^}]*opacity 160ms[^}]*transform 220ms cubic-bezier\(0\.23, 1, 0\.32, 1\);/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover > \.design-canvas-node__hover-label > span\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0, calc\(-100% - 7px\), 0\);/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-node__hover-label > span\s*\{[^}]*transition:\s*opacity 160ms var\(--design-canvas-ease-out\) !important;/s);
+  expect(screenSource).toContain('"--design-canvas-viewport-inverse-scale": 1 / Math.max(zoom, 0.12)');
+  expect(screenSource).toContain('"--design-canvas-hover-label-inset": `${12 / Math.max(zoom, 0.12)}px`');
 });
 
 test("focused Nodes fly above an opaque same-color mask while background Nodes retreat", () => {

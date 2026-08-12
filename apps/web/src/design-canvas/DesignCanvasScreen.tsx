@@ -11,6 +11,7 @@ import {
   type Edge,
   type OnMove,
   type OnMoveEnd,
+  type OnNodeDrag,
   type NodeMouseHandler,
   type ReactFlowInstance,
   type Viewport,
@@ -1032,10 +1033,12 @@ export function DesignCanvasScreen({
     if (!focusActive) setFocusedPanelNodeId(suppressPanel ? null : next.length === 1 ? next[0]! : null);
   }, [focusActive]);
 
-  const onNodeClick = useCallback<NodeMouseHandler<DesignFlowNode>>((_event, node) => {
+  const selectNodeFromPointerInteraction = useCallback((nodeId: string, interactionNodeIds: readonly string[]) => {
     if (focusActive) return;
+    const uniqueInteractionNodeIds = [...new Set(interactionNodeIds)];
+    const nextNodeIds = uniqueInteractionNodeIds.includes(nodeId) ? uniqueInteractionNodeIds : [nodeId];
     selectionClearGuardRef.current = false;
-    selectionGuardRef.current = node.id;
+    selectionGuardRef.current = nodeId;
     if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
     selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
       selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
@@ -1049,10 +1052,22 @@ export function DesignCanvasScreen({
       contextSelectionGuardFrameRef.current = null;
     }
     setMainAgentOpen(false);
-    setSelectedNodeIds([node.id]);
-    setFocusedPanelNodeId(node.id);
-    replaceFlowNodes((current) => current.map((candidate) => ({ ...candidate, selected: candidate.id === node.id })));
+    setSelectedNodeIds(nextNodeIds);
+    setFocusedPanelNodeId(nextNodeIds.length === 1 ? nodeId : null);
+    const selectedNodeIdSet = new Set(nextNodeIds);
+    replaceFlowNodes((current) => current.map((candidate) => ({
+      ...candidate,
+      selected: selectedNodeIdSet.has(candidate.id),
+    })));
   }, [focusActive, replaceFlowNodes]);
+
+  const onNodeClick = useCallback<NodeMouseHandler<DesignFlowNode>>((_event, node) => {
+    selectNodeFromPointerInteraction(node.id, [node.id]);
+  }, [selectNodeFromPointerInteraction]);
+
+  const onNodeDragStart = useCallback<OnNodeDrag<DesignFlowNode>>((_event, node, nodes) => {
+    selectNodeFromPointerInteraction(node.id, nodes.map((candidate) => candidate.id));
+  }, [selectNodeFromPointerInteraction]);
 
   const onNodeDoubleClick = useCallback<NodeMouseHandler<DesignFlowNode>>((event, node) => {
     event.preventDefault();
@@ -1470,6 +1485,7 @@ export function DesignCanvasScreen({
       multiSelectionKeyCode={MULTI_SELECTION_KEYS}
       onInit={onFlowInit}
       onNodesChange={onNodesChange}
+      onNodeDragStart={onNodeDragStart}
       onNodeDrag={bumpLayout}
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
@@ -1494,6 +1510,7 @@ export function DesignCanvasScreen({
     onMove,
     onMoveEnd,
     onNodeClick,
+    onNodeDragStart,
     onNodeContextMenu,
     onNodeDoubleClick,
     onNodesChange,
@@ -1643,6 +1660,8 @@ export function DesignCanvasScreen({
             style={{
               "--design-focus-duration": `${activeFocusDurationMs}ms`,
               "--design-node-agent-width": `${FLOATING_NODE_AGENT_WIDTH_PX}px`,
+              "--design-canvas-viewport-inverse-scale": 1 / Math.max(zoom, 0.12),
+              "--design-canvas-hover-label-inset": `${12 / Math.max(zoom, 0.12)}px`,
             } as CSSProperties}
             aria-label="Infinite Design canvas"
             tabIndex={0}

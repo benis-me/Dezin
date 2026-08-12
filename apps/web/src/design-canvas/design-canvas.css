@@ -1,6 +1,8 @@
 .design-canvas-root {
   --design-canvas-accent: oklch(0.58 0.18 258);
   --design-canvas-accent-soft: color-mix(in oklch, var(--design-canvas-accent) 10%, transparent);
+  --design-canvas-selection-color: #0d99ff;
+  --design-canvas-selection-fill: rgb(13 153 255 / 20%);
   --design-canvas-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --design-canvas-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --design-focus-duration: 420ms;
@@ -43,20 +45,20 @@
 .design-canvas-surface[data-tool="hand"] .react-flow__pane { cursor: grab; }
 .design-canvas-surface[data-tool="hand"] .react-flow__pane:active { cursor: grabbing; }
 .design-canvas-surface .react-flow__selection {
-  border: 1.5px solid color-mix(in oklch, var(--design-canvas-accent) 78%, var(--foreground));
-  background: color-mix(in oklch, var(--design-canvas-accent) 10%, transparent);
+  border: 1px solid var(--design-canvas-selection-color);
+  background: var(--design-canvas-selection-fill);
 }
 .design-canvas-surface .react-flow__nodesselection-rect {
-  border: 2px solid color-mix(in oklch, var(--design-canvas-accent) 72%, var(--foreground));
-  border-radius: 3px;
-  background: color-mix(in oklch, var(--design-canvas-accent) 6%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in oklch, var(--background) 64%, transparent), 0 5px 16px oklch(0.12 0.01 255 / 0.08);
+  border: 1px solid var(--design-canvas-selection-color);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 .design-canvas-selection-ghost {
   position: absolute;
   z-index: 21;
-  border: 1px solid color-mix(in oklch, var(--design-canvas-accent) 58%, white);
-  border-radius: 1px;
+  border: 1px solid var(--design-canvas-selection-color);
+  border-radius: 0;
   pointer-events: none;
   animation: design-canvas-selection-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -521,20 +523,18 @@
   position: absolute;
   z-index: 0;
   top: 0;
-  left: 12px;
+  left: var(--design-canvas-hover-label-inset, 12px);
   display: flex;
-  max-width: calc(100% - 24px);
+  max-width: 280px;
   height: 22px;
   align-items: center;
   pointer-events: none;
-  opacity: 0;
-  transform: translate3d(0, 7px, 0);
-  transition:
-    opacity 160ms var(--design-canvas-ease-out),
-    transform 220ms cubic-bezier(0.23, 1, 0.32, 1);
+  transform: scale(var(--design-canvas-viewport-inverse-scale, 1));
+  transform-origin: left top;
 }
 .design-canvas-node__hover-label > span {
   overflow: hidden;
+  max-width: 100%;
   border: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent);
   border-radius: 7px;
   padding: 4px 7px;
@@ -545,11 +545,16 @@
   font-weight: 560;
   letter-spacing: -0.006em;
   line-height: 1;
+  opacity: 0;
   text-overflow: ellipsis;
+  transform: translate3d(0, 7px, 0);
+  transition:
+    opacity 160ms var(--design-canvas-ease-out),
+    transform 220ms cubic-bezier(0.23, 1, 0.32, 1);
   white-space: nowrap;
 }
 @media (hover: hover) and (pointer: fine) {
-  .design-canvas-surface:not([data-node-focus]) .design-canvas-node:hover > .design-canvas-node__hover-label {
+  .design-canvas-surface:not([data-node-focus]) .design-canvas-node:hover > .design-canvas-node__hover-label > span {
     opacity: 1;
     transform: translate3d(0, calc(-100% - 7px), 0);
   }
@@ -605,7 +610,7 @@
   z-index: 6;
   inset: -3px;
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: 10px;
   content: "";
   pointer-events: none;
   transition: border-color 130ms cubic-bezier(0.23, 1, 0.32, 1);
@@ -624,7 +629,7 @@
   height: 100%;
   overflow: hidden;
   border: 0.5px solid color-mix(in oklch, var(--border) 82%, transparent);
-  border-radius: 10px;
+  border-radius: 7px;
   background: var(--card);
   box-shadow: 0 2px 5px oklch(0.1 0 0 / 0.045), 0 12px 28px oklch(0.1 0 0 / 0.075);
   transition: border-color 180ms var(--ease-smooth);
@@ -1396,7 +1401,7 @@
   .design-canvas-zoom {
     transition: opacity 160ms var(--design-canvas-ease-out) !important;
   }
-  .design-canvas-node__hover-label {
+  .design-canvas-node__hover-label > span {
     transition: opacity 160ms var(--design-canvas-ease-out) !important;
   }
   .design-canvas-surface[data-node-focus="opening"] .design-canvas-tools {
