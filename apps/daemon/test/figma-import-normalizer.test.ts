@@ -100,6 +100,61 @@ test("Figma normalization emits deterministic raw authority plus Design.md, toke
   assert.equal(components.componentSets[0].key, "set-key");
 });
 
+test("a REST-bounded Variables response with several full collections normalizes without pretty-print inflation", () => {
+  const variableCount = 16_500;
+  const variableIdsByCollection = Array.from({ length: 4 }, () => [] as string[]);
+  for (let index = 0; index < variableCount; index += 1) {
+    variableIdsByCollection[index % 4]!.push(`variable-${index}`);
+  }
+  const variableCollections = Object.fromEntries(Array.from({ length: 4 }, (_, index) => {
+    const id = `collection-${index}`;
+    return [id, {
+      id,
+      name: `Collection ${index}`,
+      key: `collection-key-${index}`,
+      modes: [{ modeId: "light", name: "Light" }, { modeId: "dark", name: "Dark" }],
+      defaultModeId: "light",
+      remote: false,
+      hiddenFromPublishing: false,
+      variableIds: variableIdsByCollection[index],
+    }];
+  }));
+  const largeVariables = {
+    status: 200,
+    error: false,
+    meta: {
+      variableCollections,
+      variables: Object.fromEntries(Array.from({ length: variableCount }, (_, index) => {
+        const id = `variable-${index}`;
+        return [id, {
+          id,
+          name: `Token/${index}`,
+          key: `key-${index}`,
+          variableCollectionId: `collection-${index % 4}`,
+          resolvedType: "STRING",
+          valuesByMode: { light: `value-${index}`, dark: `value-${index}` },
+          remote: false,
+          description: "",
+          hiddenFromPublishing: false,
+          scopes: ["ALL_SCOPES"],
+          codeSyntax: { WEB: `--token-${index}` },
+        }];
+      })),
+    },
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(largeVariables), "utf8") < 8 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(largeVariables, null, 2), "utf8") > 8 * 1024 * 1024);
+
+  const normalized = normalizeFigmaImport({
+    source,
+    file,
+    variables: { kind: "available", body: largeVariables },
+  });
+
+  assert.equal(JSON.parse(normalized.rawVariables!.bytes.toString("utf8")).meta.variables["variable-16499"].name, "Token/16499");
+  assert.equal(JSON.parse(normalized.tokensJson.bytes.toString("utf8")).variables.length, variableCount);
+});
+
 test("Variables 403/404 remains explicit incomplete evidence and never invents token authority", () => {
   for (const status of [403, 404] as const) {
     const normalized = normalizeFigmaImport({

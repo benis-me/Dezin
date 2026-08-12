@@ -7,7 +7,7 @@ const MAX_RAW_VARIABLE_BYTES = 8 * 1024 * 1024;
 const MAX_DERIVED_BYTES = 8 * 1024 * 1024;
 const MAX_STRUCTURE_DEPTH = 64;
 const MAX_CONTAINER_WIDTH = 50_000;
-const MAX_STRUCTURE_ENTRIES = 250_000;
+const MAX_STRUCTURE_ENTRIES = 1_000_000;
 const MAX_STRUCTURE_STRING_BYTES = 16 * 1024 * 1024;
 const EPHEMERAL_REMOTE_KEY = /(?:thumbnail|image|render|download|preview).*(?:url|uri)|(?:url|uri).*(?:thumbnail|image|render|download|preview)/i;
 
@@ -186,7 +186,7 @@ function sanitizedRemoteResources(value: unknown): { value: unknown; omitted: nu
 
 function payload(value: unknown, label: string, maxBytes: number): FigmaNormalizedPayload {
   const sanitized = sanitizedRemoteResources(value).value;
-  const bytes = Buffer.from(`${JSON.stringify(canonicalValue(sanitized, label), null, 2)}\n`, "utf8");
+  const bytes = Buffer.from(`${JSON.stringify(canonicalValue(sanitized, label))}\n`, "utf8");
   if (bytes.length > maxBytes) fail(`${label} exceeds the import byte budget`);
   return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
