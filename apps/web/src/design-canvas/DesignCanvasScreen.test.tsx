@@ -346,7 +346,10 @@ test("a blank-canvas context menu exits before opening Figma import", async () =
   expect(surface).toHaveAttribute("tabindex", "0");
   fireEvent.contextMenu(surface, { clientX: 320.6, clientY: 259.6 });
   const menu = screen.getByRole("menu", { name: "Add Design node" });
-  await user.click(within(menu).getByRole("menuitem", { name: "Import from Figma" }));
+  const figmaItem = within(menu).getByRole("menuitem", { name: "Import from Figma" });
+  expect(within(menu).getAllByRole("menuitem").at(-1)).toBe(figmaItem);
+  expect(figmaItem.querySelector("svg")).toHaveClass("size-3.5");
+  await user.click(figmaItem);
 
   await waitFor(() => expect(screen.queryByRole("menu", { name: "Add Design node" })).not.toBeInTheDocument());
   expect(await screen.findByRole("dialog", { name: "Import from Figma" })).toBeInTheDocument();

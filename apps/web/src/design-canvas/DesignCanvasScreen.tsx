@@ -1866,7 +1866,18 @@ export function DesignCanvasScreen({
           </ContextMenuContent>
         ) : (
           <ContextMenuContent aria-label="Add Design node" className="design-node-catalog design-node-catalog--context">
+            <NodeCatalogMenu
+              menuType="context"
+              onChoose={(kind) => void addNode(
+                kind,
+                contextMenu
+                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
+                  : canvasCenter(),
+              )}
+            />
+            <ContextMenuSeparator />
             <ContextMenuItem
+              className="design-node-catalog__item"
               onSelect={() => {
                 const position = contextMenu
                   ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
@@ -1877,19 +1888,11 @@ export function DesignCanvasScreen({
                 };
               }}
             >
-              <Figma aria-hidden />
+              <span className="design-node-catalog__icon">
+                <Figma aria-hidden className="size-3.5" />
+              </span>
               Import from Figma
             </ContextMenuItem>
-            <ContextMenuSeparator />
-            <NodeCatalogMenu
-              menuType="context"
-              onChoose={(kind) => void addNode(
-                kind,
-                contextMenu
-                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
-                  : canvasCenter(),
-              )}
-            />
           </ContextMenuContent>
         ) : null}
       </ContextMenu>
