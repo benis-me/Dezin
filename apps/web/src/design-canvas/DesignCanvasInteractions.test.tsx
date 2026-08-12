@@ -1028,6 +1028,26 @@ test("the mounted viewport stays locally owned while persistence and Agent snaps
   expect(applyIntents).not.toHaveBeenCalled();
 });
 
+test("hover labels receive the latest inverse zoom synchronously on every viewport frame", async () => {
+  const { api } = createApi(designCanvas([designNode("page-a", 80)]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />);
+  await waitFor(() => expect(flowHarness.props).not.toBeNull());
+
+  const surface = screen.getByRole("region", { name: "Infinite Design canvas" });
+  expect(flowHarness.props?.onViewportChange).toBeTypeOf("function");
+
+  flowHarness.props?.onViewportChange?.({ x: 0, y: 0, zoom: 0.5 });
+  expect(Number(surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale"))).toBeCloseTo(2);
+  expect(Number.parseFloat(surface.style.getPropertyValue("--design-canvas-hover-label-inset"))).toBeCloseTo(24);
+
+  flowHarness.props?.onViewportChange?.({ x: 0, y: 0, zoom: 2.4 });
+  expect(Number(surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale"))).toBeCloseTo(1 / 2.4);
+  expect(Number.parseFloat(surface.style.getPropertyValue("--design-canvas-hover-label-inset"))).toBeCloseTo(5);
+
+  act(() => flowHarness.props?.onMove?.(null, { x: 0, y: 0, zoom: 2.4 }));
+  expect(Number(surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale"))).toBeCloseTo(1 / 2.4);
+});
+
 test("a stale viewport save acknowledgement cannot rewind a newer local pan", async () => {
   const initial = designCanvas([designNode("page-a", 80)]);
   const { api, applyIntents } = createApi(initial);

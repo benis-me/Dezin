@@ -90,8 +90,10 @@ test("Node previews have no permanent title chrome or zoom-in cursor", () => {
   expect(css).toMatch(/\.design-canvas-node__hover-label > span\s*\{[^}]*opacity:\s*0;[^}]*transform:\s*translate3d\(0, 7px, 0\);[^}]*transition:[^}]*opacity 160ms[^}]*transform 220ms cubic-bezier\(0\.23, 1, 0\.32, 1\);/s);
   expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover > \.design-canvas-node__hover-label > span\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0, calc\(-100% - 7px\), 0\);/s);
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-node__hover-label > span\s*\{[^}]*transition:\s*opacity 160ms var\(--design-canvas-ease-out\) !important;/s);
-  expect(screenSource).toContain('"--design-canvas-viewport-inverse-scale": 1 / Math.max(zoom, 0.12)');
-  expect(screenSource).toContain('"--design-canvas-hover-label-inset": `${12 / Math.max(zoom, 0.12)}px`');
+  expect(screenSource).toContain('surface.style.setProperty("--design-canvas-viewport-inverse-scale"');
+  expect(screenSource).toContain('"--design-canvas-hover-label-inset"');
+  expect(screenSource).toContain("onViewportChange={onViewportChange}");
+  expect(screenSource).not.toContain('"--design-canvas-viewport-inverse-scale": 1 / Math.max(zoom, 0.12)');
 });
 
 test("focused Nodes fly above an opaque same-color mask while background Nodes retreat", () => {

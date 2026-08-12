@@ -103,6 +103,21 @@ const SELECT_PAN_BUTTONS = [1];
 const MULTI_SELECTION_KEYS = ["Meta", "Control", "Shift"];
 const PRO_OPTIONS = { hideAttribution: true } as const;
 const CANVAS_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
+const DESIGN_CANVAS_MIN_ZOOM = 0.12;
+const HOVER_LABEL_SCREEN_INSET_PX = 12;
+
+function syncHoverLabelViewportScale(surface: HTMLElement | null, zoom: number): void {
+  if (!surface) return;
+  const safeZoom = Math.max(Number.isFinite(zoom) ? zoom : 1, DESIGN_CANVAS_MIN_ZOOM);
+  const inverseScale = String(1 / safeZoom);
+  const screenInset = `${HOVER_LABEL_SCREEN_INSET_PX / safeZoom}px`;
+  if (surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale") !== inverseScale) {
+    surface.style.setProperty("--design-canvas-viewport-inverse-scale", inverseScale);
+  }
+  if (surface.style.getPropertyValue("--design-canvas-hover-label-inset") !== screenInset) {
+    surface.style.setProperty("--design-canvas-hover-label-inset", screenInset);
+  }
+}
 
 const SPATIAL_FOCUS_MOTION_SELECTOR = [
   ".design-canvas-node[data-node-focus-role]",
@@ -658,20 +673,28 @@ export function DesignCanvasScreen({
     mountedViewportProjectRef.current = projectId;
     const mounted = instance.getViewport();
     if (sameViewport(mounted, target)) {
+      syncHoverLabelViewportScale(surfaceRef.current, mounted.zoom);
       setZoom(mounted.zoom);
       return;
     }
     void instance.setViewport({ ...target }, { duration: 0 }).then(() => {
       if (flowRef.current !== instance) return;
-      setZoom(instance.getZoom());
+      const currentZoom = instance.getZoom();
+      syncHoverLabelViewportScale(surfaceRef.current, currentZoom);
+      setZoom(currentZoom);
       bumpLayout();
     }).catch(() => {
-      if (flowRef.current === instance) setZoom(instance.getZoom());
+      if (flowRef.current === instance) {
+        const currentZoom = instance.getZoom();
+        syncHoverLabelViewportScale(surfaceRef.current, currentZoom);
+        setZoom(currentZoom);
+      }
     });
   }, [bumpLayout, projectId]);
 
   useLayoutEffect(() => {
     if (!canvas) return;
+    syncHoverLabelViewportScale(surfaceRef.current, flowRef.current?.getZoom() ?? canvas.viewport.zoom);
     authoritativeViewportRef.current = canvas.viewport;
     const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
     const selected = new Set(selectedNodeIds.filter((id) => canvasNodeIds.has(id)));
@@ -859,6 +882,7 @@ export function DesignCanvasScreen({
 
   const onFlowInit = useCallback((instance: ReactFlowInstance<DesignFlowNode>) => {
     flowRef.current = instance;
+    syncHoverLabelViewportScale(surfaceRef.current, instance.getZoom());
     const target = authoritativeViewportRef.current;
     if (target) applyInitialViewport(instance, target);
     else setZoom(instance.getZoom());
@@ -1178,6 +1202,7 @@ export function DesignCanvasScreen({
   const restoreLockedFocusViewport = useCallback((viewport: Viewport): boolean => {
     const locked = focusViewportLockRef.current;
     if (!locked) return false;
+    syncHoverLabelViewportScale(surfaceRef.current, locked.zoom);
     setZoom(locked.zoom);
     if (!sameViewport(viewport, locked)) {
       void flowRef.current?.setViewport({ ...locked }, { duration: 0 }).catch(() => undefined);
@@ -1190,6 +1215,12 @@ export function DesignCanvasScreen({
     setZoom(viewport.zoom);
     bumpLayout();
   }, [bumpLayout, restoreLockedFocusViewport]);
+
+  const onViewportChange = useCallback((viewport: Viewport) => {
+    // XYFlow updates its viewport transform outside React's render path. Write
+    // the matching counter-scale in that same hot path, before the next paint.
+    syncHoverLabelViewportScale(surfaceRef.current, viewport.zoom);
+  }, []);
 
   const onMoveEnd = useCallback<OnMoveEnd>((_event, viewport) => {
     if (restoreLockedFocusViewport(viewport)) return;
@@ -1469,7 +1500,7 @@ export function DesignCanvasScreen({
       edges={EMPTY_EDGES}
       nodeTypes={NODE_TYPES}
       defaultViewport={canvas.viewport}
-      minZoom={0.12}
+      minZoom={DESIGN_CANVAS_MIN_ZOOM}
       maxZoom={2.4}
       nodesConnectable={false}
       nodesDraggable={!focusActive}
@@ -1493,6 +1524,7 @@ export function DesignCanvasScreen({
       onSelectionStart={onSelectionStart}
       onSelectionEnd={onSelectionEnd}
       onSelectionChange={onSelectionChange}
+      onViewportChange={onViewportChange}
       onMove={onMove}
       onMoveEnd={onMoveEnd}
       onPaneClick={onPaneClick}
@@ -1519,6 +1551,7 @@ export function DesignCanvasScreen({
     onSelectionEnd,
     onSelectionChange,
     onSelectionStart,
+    onViewportChange,
     tool,
   ]);
 
@@ -1660,8 +1693,6 @@ export function DesignCanvasScreen({
             style={{
               "--design-focus-duration": `${activeFocusDurationMs}ms`,
               "--design-node-agent-width": `${FLOATING_NODE_AGENT_WIDTH_PX}px`,
-              "--design-canvas-viewport-inverse-scale": 1 / Math.max(zoom, 0.12),
-              "--design-canvas-hover-label-inset": `${12 / Math.max(zoom, 0.12)}px`,
             } as CSSProperties}
             aria-label="Infinite Design canvas"
             tabIndex={0}
