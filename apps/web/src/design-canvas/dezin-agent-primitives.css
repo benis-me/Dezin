@@ -97,7 +97,7 @@
 .dezin-agent-tool-chips__trigger:hover { background: var(--dz-hover-2); }
 .dezin-agent-tool-chips__trigger > svg { width: 12px; height: 12px; transition: transform 200ms; }
 .dezin-agent-tool-chips__trigger[aria-expanded="false"] > svg { transform: rotate(-90deg); }
-.dezin-agent-tool-chips__clip { margin: 0 -4px 0 12px; overflow: hidden; padding: 0 6px 0 8px; }
+.dezin-agent-tool-chips__clip { margin: 0 -4px; overflow: hidden; padding: 0 6px 1px; }
 .dezin-agent-tool-chips__items { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
 .dezin-agent-tool-rows[data-flat] .dezin-agent-tool-chips__items { margin-top: 0; }
 .dezin-agent-tool-rows[data-flat] .dezin-agent-tool-chips__item-summary { width: calc(100% + 6px); margin-left: -6px; padding-inline: 6px; }
@@ -113,18 +113,16 @@
 .dezin-agent-tool-chips__label { min-width: 0; flex: none; overflow: hidden; font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .dezin-agent-tool-chips__item-summary code, .dezin-agent-tool-chips__detail { min-width: 0; height: 22px; flex: 1; overflow: hidden; border-radius: 6px; padding: 2px 6px; color: var(--dz-ink-2); font-size: 11.5px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .dezin-agent-tool-chips__item-summary code { background: var(--dz-hover-2); font-family: var(--font-mono-stack); }
-.dezin-agent-tool-chips__detail { background: transparent; font-family: var(--font-sans); }
-.dezin-agent-tool-chips__item-content { min-width: 0; margin: 2px 0 4px 8px; overflow: auto hidden; border-left: 1px solid var(--dz-line); padding: 2px 8px 2px 14px; color: var(--dz-ink-2); font-family: var(--font-mono-stack); font-size: 11.5px; line-height: 18px; }
+.dezin-agent-tool-chips__detail { background: var(--dz-hover-2); font-family: var(--font-sans); }
+.dezin-agent-tool-chips__item-content { min-width: 0; margin: 2px 0 4px 8px; overflow: hidden; border-left: 1px solid var(--dz-line); padding: 2px 8px 2px 14px; color: var(--dz-ink-2); font-family: var(--font-mono-stack); font-size: 11.5px; line-height: 18px; }
 .dezin-agent-tool-chips__item-content pre { max-width: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dezin-agent-tool-chips__item-content[data-content-mono="false"], .dezin-agent-tool-chips__item-content[data-content-mono="false"] pre, .dezin-agent-tool-chips__item-content[data-content-mono="false"] code { font-family: var(--font-sans); }
-.dezin-agent-tool-detail { display: grid; min-width: 0; gap: 8px; color: var(--dz-ink-2); }
-.dezin-agent-tool-detail > section { min-width: 0; }
-.dezin-agent-tool-detail small { display: block; margin-bottom: 3px; color: var(--dz-ink-3); font-family: var(--font-sans); font-size: 10.5px; font-weight: 550; }
-.dezin-agent-tool-detail pre { overflow: auto; color: var(--dz-ink-2); }
-.dezin-agent-tool-detail[data-tool-result-error] pre { color: var(--dz-red); }
-.dezin-agent-tool-detail .agent-file-diff, .dezin-agent-tool-detail .agent-code-block { margin: 0; border: 0; border-radius: 0; }
-.dezin-agent-tool-detail .agent-file-diff__header, .dezin-agent-tool-detail .agent-code-block__header { min-height: 28px; padding: 3px 6px; }
-.dezin-agent-tool-detail .agent-file-diff__body table { min-width: 260px; }
+.dezin-agent-tool-detail { display: flex; min-width: 0; flex-direction: column; gap: 2px; color: var(--dz-ink-2); }
+.dezin-agent-tool-detail__line { display: block; min-width: 0; overflow: hidden; color: var(--dz-ink-2); font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.dezin-agent-tool-detail__line[data-tone="add"] { color: var(--dz-green); }
+.dezin-agent-tool-detail__line[data-tone="remove"], .dezin-agent-tool-detail__line[data-tone="error"] { color: var(--dz-red); }
+.dezin-agent-tool-detail__line[data-tone="input"], .dezin-agent-tool-detail__line[data-tone="result"] { color: var(--dz-ink-3); }
+.dezin-agent-tool-detail--thinking { font-family: var(--font-sans); }
 .dezin-agent-thinking__detail-markdown { color: var(--dz-ink-2); font-family: var(--font-sans); }
 .dezin-agent-tool-chips__changes { display: flex; min-width: 0; flex-wrap: wrap; gap: 6px; margin-top: 10px; border-top: 1px solid var(--dz-line); padding-top: 10px; }
 .dezin-agent-tool-chips__changes > span { display: inline-flex; max-width: 100%; min-width: 0; height: 28px; align-items: center; gap: 6px; border-radius: 6px; padding: 0 8px; background: var(--dz-surface); box-shadow: inset 0 0 0 1px var(--dz-line); animation: dezin-agent-pop-in 250ms cubic-bezier(.23,1,.32,1) calc(var(--item-index) * 80ms) both; }

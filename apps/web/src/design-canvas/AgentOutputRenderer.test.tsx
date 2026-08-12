@@ -17,7 +17,10 @@ test("the typed output registry renders Thinking and real tool details in one ac
         createdAt: 1,
         active: false,
         phase: "reasoning",
-        items: [{ id: "reason", text: "Inspecting the canvas", createdAt: 1 }],
+        items: [
+          { id: "reason-1", text: "Inspecting the canvas", createdAt: 1 },
+          { id: "reason-2", text: "Comparing the activity hierarchy", createdAt: 2 },
+        ],
       },
       {
         type: "search",
@@ -68,12 +71,12 @@ test("the typed output registry renders Thinking and real tool details in one ac
   ))).toEqual(["tool-group", "search", "image"]);
   expect(container.querySelectorAll('[data-dezin-agent-primitive="thinking"]')).toHaveLength(2);
   const toolGroup = container.querySelector<HTMLElement>('[data-dezin-agent-primitive="tools"]')!;
-  expect(within(toolGroup).getByRole("button", { name: "2 tool calls, 1 message" })).toBeInTheDocument();
+  expect(within(toolGroup).getByRole("button", { name: "2 tool calls, 2 messages" })).toBeInTheDocument();
   expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.state)).toEqual(["done", "done", "active"]);
   expect(within(toolGroup).getAllByRole("listitem").map((chip) => chip.dataset.kind)).toEqual(["thinking", "read", "write"]);
   expect(within(toolGroup).getByRole("button", { name: "Thinking" })).toHaveAttribute("aria-expanded", "false");
   await user.click(within(toolGroup).getByRole("button", { name: "Write" }));
-  expect(within(toolGroup).getByRole("figure")).toHaveAttribute("data-agent-component", "code-block");
+  expect(within(toolGroup).queryByRole("figure")).not.toBeInTheDocument();
   expect(within(toolGroup).getByText("export const hero = true;")).toBeInTheDocument();
 });
 

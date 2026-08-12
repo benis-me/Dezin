@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { Markdown } from "../components/Markdown.tsx";
-import { AgentCodeBlock, AgentFileDiff } from "../components/AgentRichContent.tsx";
 import {
   DezinAgentApproval,
   DezinAgentLoadingState,
@@ -288,43 +286,47 @@ function RecommendationBlock({
 }
 
 function activityItems(entries: readonly AgentOutputActivityItem[], activeItemId: string | null): AgentToolChipItem[] {
-  const omittedCount = Math.max(0, entries.length - 7);
-  const visibleItems = entries.slice(-7);
-  return [
-    ...(omittedCount > 0 ? [{
-      id: "earlier-activities",
-      label: `${omittedCount} earlier activities`,
-      detail: "Completed",
-      detailMono: false,
-      state: "done" as const,
-      kind: "tool" as const,
-    }] : []),
-    ...visibleItems.map((item) => {
-      const rawText = item.rawText?.trim() || item.text;
-      if (item.kind !== "tool") {
-        return {
-          id: item.id,
-          label: "Thinking",
-          detail: compactActivityText(rawText),
-          detailMono: false,
-          contentMono: false,
-          kind: "thinking" as const,
-          state: item.id === activeItemId ? "active" as const : "done" as const,
-          children: <Markdown className="dezin-agent-thinking__detail-markdown">{rawText}</Markdown>,
-        };
-      }
-      return {
-        id: item.id,
-        label: toolLabel(item.toolName),
-        detail: toolDetail(item),
-        detailMono: item.toolName === "write" || item.toolName === "read" || item.toolName === "command",
-        contentMono: item.toolName !== "read" && item.toolName !== "search",
-        kind: item.toolName ?? "tool" as const,
-        state: item.id === activeItemId ? "active" as const : "done" as const,
-        children: toolActivityDetails(item),
-      };
-    }),
-  ];
+  const messages = entries.filter((item) => item.kind !== "tool");
+  const firstMessageId = messages[0]?.id;
+  const latestMessage = messages.at(-1);
+  const earlierMessages = messages.slice(Math.max(0, messages.length - 3), -1);
+  const thinkingActive = messages.some((item) => item.id === activeItemId);
+  const items: AgentToolChipItem[] = [];
+
+  for (const item of entries) {
+    if (item.kind !== "tool") {
+      if (item.id !== firstMessageId || !latestMessage) continue;
+      items.push({
+        id: `thinking:${item.id}`,
+        label: "Thinking",
+        detail: compactActivityText(latestMessage.rawText?.trim() || latestMessage.text),
+        detailMono: false,
+        contentMono: false,
+        kind: "thinking",
+        state: thinkingActive ? "active" : "done",
+        children: earlierMessages.length === 0 ? undefined : (
+          <div className="dezin-agent-tool-detail dezin-agent-tool-detail--thinking">
+            {earlierMessages.map((message) => {
+              const text = compactActivityText(message.rawText?.trim() || message.text);
+              return <span key={message.id} className="dezin-agent-tool-detail__line" title={text}>{text}</span>;
+            })}
+          </div>
+        ),
+      });
+      continue;
+    }
+    items.push({
+      id: item.id,
+      label: toolLabel(item.toolName),
+      detail: toolDetail(item),
+      detailMono: item.toolName === "write" || item.toolName === "read" || item.toolName === "command",
+      contentMono: item.toolName !== "read" && item.toolName !== "search",
+      kind: item.toolName ?? "tool",
+      state: item.id === activeItemId ? "active" : "done",
+      children: toolActivityDetails(item),
+    });
+  }
+  return items;
 }
 
 function toolLabel(toolName: AgentOutputActivityItem["toolName"]): string {
@@ -366,29 +368,65 @@ function toolActivityDetails(item: AgentOutputActivityItem): ReactNode | undefin
   const writtenContent = item.toolName === "write" && typeof input?.content === "string"
     ? input.content
     : null;
+  const lines = item.diff
+    ? diffPreviewLines(item.diff)
+    : writtenContent !== null
+      ? textPreviewLines(writtenContent, "content")
+      : input
+        ? inputPreviewLines(input)
+        : [];
+  const resultLines = item.toolResult
+    ? textPreviewLines(prettyToolPayload(item.toolResult), item.toolResultError ? "error" : "result")
+    : [];
+  const previewLines = lines.length > 0 && resultLines.length > 0 && !item.diff && writtenContent === null
+    ? [lines[0], resultLines[0]].filter((line): line is ToolPreviewLine => line !== undefined)
+    : [...lines, ...resultLines].slice(0, 2);
+  if (previewLines.length === 0) return undefined;
   return (
     <div className="dezin-agent-tool-detail" data-tool-kind={item.toolName ?? "tool"} data-tool-result-error={item.toolResultError || undefined}>
-      {item.diff ? <AgentFileDiff code={item.diff} /> : writtenContent !== null ? (
-        <AgentCodeBlock code={writtenContent} language={toolLanguage(input?.file_path)} />
-      ) : item.toolInput ? (
-        <section>
-          <small>Input</small>
-          <pre><code>{prettyToolPayload(item.toolInput)}</code></pre>
-        </section>
-      ) : null}
-      {item.toolResult ? (
-        <section>
-          <small>{item.toolResultError ? "Error" : "Result"}</small>
-          <pre><code>{prettyToolPayload(item.toolResult)}</code></pre>
-        </section>
-      ) : null}
+      {previewLines.map((line, index) => (
+        <span
+          key={`${line.tone}:${index}:${line.text}`}
+          className="dezin-agent-tool-detail__line"
+          data-tone={line.tone}
+          title={line.text}
+        >
+          {line.text}
+        </span>
+      ))}
     </div>
   );
 }
 
-function toolLanguage(path: unknown): string {
-  if (typeof path !== "string") return "text";
-  return /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase() ?? "text";
+interface ToolPreviewLine {
+  text: string;
+  tone: "add" | "remove" | "content" | "input" | "result" | "error";
+}
+
+function diffPreviewLines(diff: string): ToolPreviewLine[] {
+  return diff.split(/\r?\n/)
+    .filter((line) => (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")))
+    .slice(0, 2)
+    .map((line) => ({ text: line, tone: line.startsWith("+") ? "add" : "remove" }));
+}
+
+function textPreviewLines(value: string, tone: ToolPreviewLine["tone"]): ToolPreviewLine[] {
+  return value.split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .slice(0, 2)
+    .map((text) => ({ text, tone }));
+}
+
+function inputPreviewLines(input: Record<string, unknown>): ToolPreviewLine[] {
+  const inlineKeys = new Set(["file_path", "path", "command", "query", "pattern", "content", "old_string", "new_string", "edits", "diff", "patch"]);
+  return Object.entries(input)
+    .filter(([key]) => !inlineKeys.has(key))
+    .slice(0, 2)
+    .map(([key, value]) => ({
+      text: `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+      tone: "input" as const,
+    }));
 }
 
 function prettyToolPayload(value: string): string {

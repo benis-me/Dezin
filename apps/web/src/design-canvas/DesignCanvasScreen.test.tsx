@@ -2852,7 +2852,7 @@ test("file drops become material context nodes and undo/redo shortcuts call auth
   await waitFor(() => expect(api.redo).toHaveBeenCalledTimes(1));
 });
 
-test("live Node generation keeps complete Thinking detail and exposes an accessible Stop state", async () => {
+test("live Node generation condenses Thinking into one disclosure and exposes an accessible Stop state", async () => {
   const user = userEvent.setup();
   const target = node();
   const completeDetail = [
@@ -2897,11 +2897,15 @@ test("live Node generation keeps complete Thinking detail and exposes an accessi
 
   const activityGroup = await screen.findByRole("button", { name: "0 tool calls, 10 messages" });
   const activityRegion = activityGroup.closest('[data-dezin-agent-primitive="tools"]') as HTMLElement;
-  expect(within(activityRegion).getByText("3 earlier activities")).toBeInTheDocument();
+  expect(within(activityRegion).queryByText(/earlier activities/i)).not.toBeInTheDocument();
   const thinkingRows = within(activityRegion).getAllByRole("button", { name: "Thinking" });
-  expect(thinkingRows.at(-1)).toHaveAttribute("aria-expanded", "false");
-  await user.click(thinkingRows.at(-1)!);
-  expect(screen.getByText(completeDetail)).toBeInTheDocument();
+  expect(thinkingRows).toHaveLength(1);
+  expect(thinkingRows[0]).toHaveAttribute("aria-expanded", "false");
+  expect(within(activityRegion).getByText(/Preserve the complete generation reasoning/)).toBeInTheDocument();
+  await user.click(thinkingRows[0]);
+  expect(within(activityRegion).getByText("Complete reasoning step 8")).toBeInTheDocument();
+  expect(within(activityRegion).getByText("Complete reasoning step 9")).toBeInTheDocument();
+  expect(within(activityRegion).queryByText("Complete reasoning step 7")).not.toBeInTheDocument();
   const stop = screen.getByRole("button", { name: "Stop Landing page generation" });
   await user.click(stop);
   expect(onCancelJob).toHaveBeenCalledWith(liveJob.id);
