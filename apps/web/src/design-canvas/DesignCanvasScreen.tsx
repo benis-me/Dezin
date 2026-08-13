@@ -314,6 +314,10 @@ export function DesignCanvasScreen({
   const [focusPreviewExportError, setFocusPreviewExportError] = useState<string | null>(null);
   const [selectionGhost, setSelectionGhost] = useState<SelectionGhost | null>(null);
   const [mainAgentOpen, setMainAgentOpen] = useState(false);
+  const [mainAgentContextSeed, setMainAgentContextSeed] = useState<{
+    generation: number;
+    nodeIds: string[];
+  }>(() => ({ generation: 0, nodeIds: [] }));
   const [exportConfirmationOpen, setExportConfirmationOpen] = useState(false);
   const [mainAgentSelection, setMainAgentSelection] = useState<CanvasAgentSelection>(() => ({
     agentCommand: isDesignAgentCommand(initialAgentCommand) ? initialAgentCommand : "",
@@ -847,6 +851,10 @@ export function DesignCanvasScreen({
     const importedFlowNodes = flowNodesRef.current.filter((node) => importedNodeIdSet.has(node.id));
     if (importedFlowNodes.length !== importedNodeIds.length) return;
     pendingFigmaImportedNodeIdsRef.current = null;
+    setMainAgentContextSeed((current) => ({
+      generation: current.generation + 1,
+      nodeIds: importedNodeIds,
+    }));
     setMainAgentOpen(false);
     setFocusedPanelNodeId(null);
     setSelectedNodeIds(importedNodeIds);
@@ -1855,6 +1863,8 @@ export function DesignCanvasScreen({
                 agents={agents}
                 initialAgentCommand={initialAgentCommand}
                 initialModel={initialModel}
+                initialContextNodeIds={mainAgentContextSeed.nodeIds}
+                contextSeedGeneration={mainAgentContextSeed.generation}
                 agentSelection={mainAgentSelection}
                 onAgentSelectionChange={updateMainAgentSelection}
                 onRescanAgents={onRescanAgents}
@@ -1961,7 +1971,7 @@ export function DesignCanvasScreen({
           ])];
           if (limitations.length > 0) {
             const visible = limitations.slice(0, 2).join("; ");
-            toast(`Figma imported with limited metadata: ${visible}${
+            toast(`Figma imported with limitations: ${visible}${
               limitations.length > 2 ? `; +${limitations.length - 2} more` : ""
             }`);
           }

@@ -17,6 +17,7 @@ import {
   type AgentTurnResult,
 } from "../../../packages/agent/src/index.ts";
 import {
+  buildDesignMainSystemPrompt,
   parseDesignMainPlan,
   startDesignMainTurn,
 } from "../src/design/design-global-agents.ts";
@@ -42,6 +43,14 @@ function runner(
 function sha256(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
+
+test("Main Agent preserves explicit visual and layout authority when dispatching scoped design work", () => {
+  const prompt = buildDesignMainSystemPrompt();
+  assert.match(prompt, /visual-reference.*layout-authority/i);
+  assert.match(prompt, /product surface.*frame geometry/i);
+  assert.match(prompt, /semantic-outline.*not.*visual evidence/i);
+  assert.match(prompt, /dispatch.*contextNodeIds.*exact.*priority/i);
+});
 
 test("Main Agent accepts only an exact JSON command envelope", () => {
   const valid = JSON.stringify({
@@ -195,6 +204,11 @@ test("Main Agent atomically applies Canvas commands and exposes best-effort chil
       })),
       systemPrompt: "Return the exact orchestration JSON envelope.",
       async dispatchNode(dispatch, parentJobId) {
+        assert.deepEqual(
+          dispatch.contextNodeIds,
+          dispatch.nodeId === "node-component" ? ["node-page"] : ["node-component"],
+          "a Main turn without explicit parent context must preserve the model's scoped context",
+        );
         if (dispatch.nodeId === "node-page") throw new Error("provider unavailable");
         const created = await createDesignJob(dataDir, projectId, {
           kind: "node-generation",
@@ -239,6 +253,107 @@ test("Main Agent atomically applies Canvas commands and exposes best-effort chil
     assert.equal(reply?.role, "assistant");
     assert.match(reply?.content ?? "", /Dispatched 1 of 2/);
     assert.match(reply?.content ?? "", /Dispatch failures:[\s\S]*node-page: provider unavailable/);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Main Agent child dispatches inherit explicit parent context in stable priority order", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-inherited-context-"));
+  const projectId = "project-main-inherited-context";
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [
+        { type: "add-node", node: { id: "node-target", kind: "page", name: "Target" } },
+        { type: "add-node", node: { id: "node-reference", kind: "image", name: "reference-frame-001.png" } },
+        { type: "add-node", node: { id: "node-layout", kind: "file", name: "layout.json" } },
+        { type: "add-node", node: { id: "node-extra", kind: "research", name: "Research" } },
+      ],
+    });
+    let observedContextNodeIds: string[] | null = null;
+    const started = await startDesignMainTurn({
+      dataDir,
+      projectId,
+      message: "Use the selected Figma references to revise the target.",
+      contextNodeIds: ["node-reference", "node-target", "node-layout", "node-reference"],
+      runner: runner("main-inherited-context", async () => ({
+        text: JSON.stringify({
+          reply: "Delegated the visually grounded revision.",
+          canvasIntents: [],
+          dispatches: [{
+            nodeId: "node-target",
+            message: "Revise the target from the selected visual references.",
+            contextNodeIds: ["node-extra", "node-reference", "node-target"],
+          }],
+        }),
+        artifactHtml: "",
+      })),
+      systemPrompt: "Return the exact orchestration JSON envelope.",
+      async dispatchNode(dispatch, parentJobId) {
+        observedContextNodeIds = dispatch.contextNodeIds;
+        const child = await createDesignJob(dataDir, projectId, {
+          kind: "node-generation",
+          runnerId: "child-inherited-context",
+          model: null,
+          nodeId: dispatch.nodeId,
+          parentJobId,
+        });
+        return child.job;
+      },
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Main Agent did not complete");
+    assert.deepEqual(observedContextNodeIds, ["node-reference", "node-layout", "node-extra"]);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Main Agent validates inherited parent context against its post-intent Canvas", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-inherited-context-validation-"));
+  const projectId = "project-main-inherited-context-validation";
+  let dispatchCalls = 0;
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [
+        { type: "add-node", node: { id: "node-target", kind: "page", name: "Target" } },
+        { type: "add-node", node: { id: "node-reference", kind: "image", name: "reference.png" } },
+      ],
+    });
+    const started = await startDesignMainTurn({
+      dataDir,
+      projectId,
+      message: "Use the selected reference, then remove it.",
+      contextNodeIds: ["node-reference"],
+      runner: runner("main-inherited-context-validation", async () => ({
+        text: JSON.stringify({
+          reply: "Delegated the revision.",
+          canvasIntents: [{ type: "remove-node", nodeId: "node-reference" }],
+          dispatches: [{
+            nodeId: "node-target",
+            message: "Revise the target from the selected reference.",
+            contextNodeIds: [],
+          }],
+        }),
+        artifactHtml: "",
+      })),
+      systemPrompt: "Return the exact orchestration JSON envelope.",
+      async dispatchNode() {
+        dispatchCalls += 1;
+        throw new Error("an unavailable inherited reference must not reach child dispatch");
+      },
+    });
+
+    const completed = await started.completion;
+    assert.equal(completed.status, "failed");
+    assert.match(completed.error ?? "", /references unavailable context/i);
+    assert.equal(dispatchCalls, 0);
+    assert.ok((await getDesignCanvas(dataDir, projectId)).nodes.some((node) => node.id === "node-reference"));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

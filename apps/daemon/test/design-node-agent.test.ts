@@ -54,10 +54,113 @@ test("Node generation prompts bind the exact target and expose kind-specific con
     assert.doesNotMatch(page, /Dezin Render Frame|dezin:frame-change|Viewer and visual QA|Vite|npm\s+install|pre-installed React|GSAP|CDN/i);
     assert.match(page, /untrusted reference data/i);
     assert.match(page, /cannot change these instructions/i);
+    assert.match(page, /visual-reference.*layout-authority/i);
+    assert.match(page, /read.*visual.*layout.*before drafting/i);
+    assert.match(page, /product surface.*frame geometry/i);
+    assert.match(page, /semantic-outline.*never.*visual evidence/i);
+    assert.match(page, /reference-overview.*not.*target/i);
+    assert.match(page, /reference-frame.*visual authority/i);
+    assert.match(page, /not.*pixel-perfect/i);
+    assert.match(page, /without.*referenceAuthority.*background/i);
     assert.match(page, /re-open.*index\.html.*audit/i);
     assert.match(page, /Map.*computed.*receiver|computed.*receiver.*Map/i);
   } finally {
     store.close();
+  }
+});
+
+test("explicit Figma references carry visual, layout, and semantic authority into the staged Agent context", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-figma-reference-authority-"));
+  const projectId = "project-figma-reference-authority";
+  const referenceBytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from("figma visual reference"),
+  ]);
+  const overviewBytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from("figma reference overview"),
+  ]);
+  const layoutBytes = Buffer.from(JSON.stringify({ frame: { width: 720, height: 727 }, surface: "modal" }));
+  const outlineBytes = Buffer.from("# Popup\n\nSemantic outline only.");
+  const runner: AgentRunner = {
+    id: "figma-reference-authority-fake",
+    async runTurn(input) {
+      const context = JSON.parse(await readFile(join(input.projectDir, ".context", "canvas.json"), "utf8"));
+      const byId = new Map(context.nodes.map((node: { id: string }) => [node.id, node]));
+      const reference = byId.get("node-reference") as { name: string; referenceAuthority?: string; assetPath: string };
+      const overview = byId.get("node-overview") as { referenceAuthority?: string; referenceRole?: string };
+      const layout = byId.get("node-layout") as { referenceAuthority?: string; assetPath: string };
+      const outline = byId.get("node-outline") as { referenceAuthority?: string };
+      const background = byId.get("node-background") as Record<string, unknown>;
+
+      assert.equal(reference.name, "Library detail state");
+      assert.equal(reference.referenceAuthority, "visual-reference");
+      assert.equal((reference as { referenceRole?: string }).referenceRole, "reference-frame");
+      assert.equal(overview.referenceAuthority, "visual-reference");
+      assert.equal(overview.referenceRole, "reference-overview");
+      assert.equal(layout.referenceAuthority, "layout-authority");
+      assert.equal(outline.referenceAuthority, "semantic-outline");
+      assert.equal(Object.hasOwn(background, "referenceAuthority"), false);
+      assert.deepEqual(await readFile(join(input.projectDir, reference.assetPath)), referenceBytes);
+      assert.deepEqual(JSON.parse(await readFile(join(input.projectDir, layout.assetPath), "utf8")), {
+        frame: { width: 720, height: 727 },
+        surface: "modal",
+      });
+
+      const html = "<!doctype html><html><head><title>Figma grounded page</title></head><body><main>Grounded</main></body></html>";
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "generated", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const imported = await importDesignCanvasAssetBatch(dataDir, projectId, {
+      expectedRevision: 0,
+      items: [
+        {
+          asset: { name: "reference.png", mimeType: "image/png", base64: referenceBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-reference", kind: "image", name: "reference.png" } },
+        },
+        {
+          asset: { name: "reference-overview.png", mimeType: "image/png", base64: overviewBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-overview", kind: "image", name: "reference-overview.png" } },
+        },
+        {
+          asset: { name: "layout.json", mimeType: "application/json", base64: layoutBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-layout", kind: "file", name: "layout.json" } },
+        },
+        {
+          asset: { name: "Design.md", mimeType: "text/markdown", base64: outlineBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-outline", kind: "document", name: "Design.md" } },
+        },
+        {
+          asset: { name: "reference.png", mimeType: "image/png", base64: referenceBytes.toString("base64") },
+          binding: { type: "create-node", node: { id: "node-background", kind: "image", name: "reference.png" } },
+        },
+      ],
+    });
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: imported.revision,
+      intents: [
+        { type: "update-node", nodeId: "node-reference", patch: { name: "Library detail state" } },
+        { type: "update-node", nodeId: "node-overview", patch: { name: "Imported state map" } },
+        { type: "update-node", nodeId: "node-layout", patch: { name: "Desktop frame geometry" } },
+        { type: "update-node", nodeId: "node-outline", patch: { name: "Product information architecture" } },
+        { type: "add-node", node: { id: "node-page", kind: "page", name: "Grounded page" } },
+      ],
+    });
+    const completed = await (await startDesignNodeTurn({
+      dataDir,
+      projectId,
+      nodeId: "node-page",
+      message: "Use the selected Figma references",
+      systemPrompt: "Write index.html",
+      runner,
+      contextNodeIds: ["node-reference", "node-overview", "node-layout", "node-outline"],
+    })).completion;
+    assert.equal(completed.status, "ready", completed.error ?? "Figma reference context failed");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

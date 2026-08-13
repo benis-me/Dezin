@@ -171,6 +171,104 @@ test("Variables 403/404 remains explicit incomplete evidence and never invents t
   }
 });
 
+test("long Figma Node names are safely previewed instead of rejecting the whole import", () => {
+  const longName = `ZenStudio ${"影视内容".repeat(320)}`;
+  const normalized = normalizeFigmaImport({
+    source,
+    file: {
+      ...file,
+      document: {
+        ...file.document,
+        children: [{ id: "1:2", name: longName, type: "FRAME" }],
+      },
+    },
+    variables: { kind: "unavailable", status: 403, reason: "Figma Variables returned 403" },
+  });
+
+  const markdown = normalized.designMarkdown.bytes.toString("utf8");
+  assert.match(markdown, /ZenStudio/);
+  assert.match(markdown, /… `FRAME`/);
+  assert.equal(markdown.includes("\uFFFD"), false);
+  assert.ok(normalized.incomplete.includes("outline-name-budget"));
+  assert.ok(normalized.warnings.some((warning) => /Node name.*truncated/.test(warning)));
+});
+
+test("overlapping selected roots emit each visual candidate once", () => {
+  const normalized = normalizeFigmaImport({
+    source: { ...source, nodeIds: ["1:2", "2:2"] },
+    file: {
+      ...file,
+      document: {
+        ...file.document,
+        children: [{
+          id: "1:2", name: "Section", type: "SECTION",
+          absoluteBoundingBox: { x: 0, y: 0, width: 4_000, height: 3_000 },
+          children: [
+            {
+              id: "2:2", name: "Shared frame", type: "FRAME",
+              absoluteBoundingBox: { x: 100, y: 100, width: 720, height: 620 }, children: [],
+            },
+            {
+              id: "2:3", name: "Sibling frame", type: "FRAME",
+              absoluteBoundingBox: { x: 900, y: 100, width: 720, height: 620 }, children: [],
+            },
+          ],
+        }],
+      },
+    },
+    variables: { kind: "unavailable", status: 403, reason: "unavailable" },
+  });
+
+  assert.deepEqual(normalized.visualCandidates.map((candidate) => candidate.nodeId), ["2:2", "2:3"]);
+  assert.deepEqual(normalized.visualCandidates.map((candidate) => candidate.referencePath), [
+    "derived/references/reference-frame-001.png",
+    "derived/references/reference-frame-002.png",
+  ]);
+});
+
+test("a requested selected Node missing from the version-fenced tree fails closed", () => {
+  assert.throws(
+    () => normalizeFigmaImport({
+      source: { ...source, nodeIds: ["9:9"] },
+      file,
+      variables: { kind: "unavailable", status: 403, reason: "unavailable" },
+    }),
+    /selected Node tree is incomplete/,
+  );
+});
+
+test("multiple selected roots receive visual candidates in stable round-robin order", () => {
+  const root = (rootId: string, x: number) => ({
+    id: rootId,
+    name: `Root ${rootId}`,
+    type: "SECTION",
+    absoluteBoundingBox: { x, y: 0, width: 10_000, height: 8_000 },
+    children: Array.from({ length: 12 }, (_, index) => ({
+      id: `${rootId.split(":")[0]}:${index + 10}`,
+      name: `Frame ${rootId}-${index}`,
+      type: "FRAME",
+      absoluteBoundingBox: { x: x + index * 740, y: 100, width: 720, height: 620 },
+      children: [],
+    })),
+  });
+  const normalized = normalizeFigmaImport({
+    source: { ...source, nodeIds: ["1:1", "2:1"] },
+    file: {
+      ...file,
+      document: { ...file.document, children: [root("1:1", 0), root("2:1", 20_000)] },
+    },
+    variables: { kind: "unavailable", status: 403, reason: "unavailable" },
+  });
+
+  assert.equal(normalized.visualCandidates.length, 12);
+  assert.deepEqual(normalized.visualCandidates.slice(0, 4).map((candidate) => candidate.selectedNodeId), [
+    "1:1", "2:1", "1:1", "2:1",
+  ]);
+  assert.equal(normalized.visualLayout.diagnostics &&
+    (normalized.visualLayout.diagnostics as { truncated?: unknown }).truncated, true);
+  assert.ok(normalized.incomplete.includes("visual-layout-node-budget"));
+});
+
 test("Board and Slides adapters label Design.md without inventing component or token semantics", () => {
   for (const fixture of [
     { fileType: "board" as const, editorType: "figjam", marker: "research/knowledge" },

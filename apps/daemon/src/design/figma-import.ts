@@ -14,16 +14,20 @@ import {
   type FigmaImportResult,
 } from "@dezin/design-canvas-contracts";
 
+import { inspectBoundedPngImage } from "../bounded-png.ts";
 import { ensureDesignCanvasAssetBatch, getDesignCanvas } from "./design-storage.ts";
 import { designRoot } from "./design-storage-primitives.ts";
 import type { ResolvedFigmaCredential } from "./figma-credential-store.ts";
 import {
+  containsEphemeralRemoteResourceBytes,
+  finalizeFigmaVisualReferences,
   normalizeFigmaImport,
   type FigmaNormalizedPayload,
   type NormalizedFigmaImport,
 } from "./figma-import-normalizer.ts";
 import type { FigmaRestClient } from "./figma-rest-client.ts";
-import { parseFigmaUrl, type ParsedFigmaUrl } from "./figma-url.ts";
+import { sanitizeFigmaPng } from "./figma-png.ts";
+import { isSafeFigmaApiNodeId, parseFigmaUrl, type ParsedFigmaUrl } from "./figma-url.ts";
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -41,6 +45,9 @@ const MALFORMED_PENDING_GRACE_MS = 2_000;
 const LIVE_OWNER_IDENTITY_CACHE_MS = 1_000;
 const LIVE_OWNER_POLL_MS = 100;
 const MAX_RECOVERY_RECEIPTS = 8_192;
+const MAX_REFERENCE_RENDER_BYTES = 16 * 1024 * 1024;
+const MAX_TOTAL_REFERENCE_RENDER_BYTES = 32 * 1024 * 1024;
+const MAX_TOTAL_REFERENCE_RENDER_PIXELS = 64_000_000;
 
 type FigmaImportPhase = "accepted" | "snapshot-staged" | "artifacts-imported" | "ready";
 
@@ -249,6 +256,10 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   } finally {
     await rm(pending, { force: true }).catch(() => {});
   }
+}
+
+async function cleanupReadySnapshot(root: string): Promise<void> {
+  await rm(join(root, "snapshot"), { recursive: true, force: true }).catch(() => {});
 }
 
 async function durableWrite(path: string, bytes: Buffer, mode: number): Promise<void> {
@@ -460,7 +471,7 @@ function validateStoredSnapshot(value: unknown, importId: string): StoredSnapsho
   if (credential.mode !== "personal-access-token" || typeof credential.subject !== "string"
     || !/^pat-[a-f0-9]{16}$/.test(credential.subject)
     || !["figma-variables-exact", "style-values-inferred", "not-applicable"].includes(String(record.tokenAuthority))
-    || !Array.isArray(record.payloads) || ![4, 5].includes(record.payloads.length)) {
+    || !Array.isArray(record.payloads) || record.payloads.length < 5 || record.payloads.length > 18) {
     throw new FigmaImportError("corrupt", "Stored Figma snapshot is corrupt");
   }
   const ids = nodeIds(importId);
@@ -470,7 +481,14 @@ function validateStoredSnapshot(value: unknown, importId: string): StoredSnapsho
     ["derived/Design.md", { kind: "design-document", mimeType: "text/markdown", nodeId: ids.design }],
     ["derived/tokens.json", { kind: "tokens", mimeType: "application/json", nodeId: ids.tokens }],
     ["derived/components.json", { kind: "components", mimeType: "application/json", nodeId: ids.components }],
+    ["derived/layout.json", { kind: "layout", mimeType: "application/json", nodeId: ids.layout }],
   ]);
+  for (let index = 0; index < 12; index += 1) {
+    expected.set(
+      `derived/references/reference-frame-${String(index + 1).padStart(3, "0")}.png`,
+      { kind: "reference-render", mimeType: "image/png", nodeId: ids.reference(index) },
+    );
+  }
   const seen = new Set<string>();
   const payloads = record.payloads.map((value): StoredSnapshot["payloads"][number] => {
     const payload = storedRecord(value, "Stored Figma snapshot artifact", [
@@ -494,8 +512,26 @@ function validateStoredSnapshot(value: unknown, importId: string): StoredSnapsho
       nodeId: authority.nodeId,
     };
   });
-  for (const required of ["raw/file.json", "derived/Design.md", "derived/tokens.json", "derived/components.json"]) {
+  for (const required of [
+    "raw/file.json", "derived/Design.md", "derived/tokens.json", "derived/components.json", "derived/layout.json",
+  ]) {
     if (!seen.has(required)) throw new FigmaImportError("corrupt", "Stored Figma snapshot is incomplete");
+  }
+  const references = payloads.filter((artifact) => artifact.kind === "reference-render");
+  let previousReferenceIndex = 0;
+  let totalReferenceBytes = 0;
+  for (const reference of references) {
+    const match = /^derived\/references\/reference-frame-(\d{3})\.png$/.exec(reference.path);
+    const referenceIndex = match ? Number(match[1]) : 0;
+    if (!Number.isSafeInteger(referenceIndex) || referenceIndex < 1 || referenceIndex > 12
+      || referenceIndex <= previousReferenceIndex) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render sequence is corrupt");
+    }
+    previousReferenceIndex = referenceIndex;
+    totalReferenceBytes += reference.bytes;
+    if (totalReferenceBytes > MAX_TOTAL_REFERENCE_RENDER_BYTES) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render byte budget is corrupt");
+    }
   }
   return {
     fileName: storedText(record.fileName, "Stored Figma snapshot fileName", 1_024),
@@ -957,6 +993,101 @@ async function fetchVersionFencedSnapshot(
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
       : { kind: "unavailable" as const, status: 404 as const, reason: "Variables are not applicable to this Figma editor type." };
+    let normalized: NormalizedFigmaImport;
+    try {
+      normalized = normalizeFigmaImport({ source: request.source, file, variables, depthLimited: true });
+    } catch {
+      // Normalizer labels can be derived from hostile upstream object keys. Never let those
+      // labels (or a cause carrying them) cross the credential boundary into Job or HTTP state.
+      throw new FigmaImportError("upstream", "Figma response could not be normalized safely");
+    }
+    if (normalized.visualCandidates.length > 0 && options.client.getNodeRenders) {
+      const renderResult = await options.client.getNodeRenders({
+        fileKey,
+        version: meta0.version,
+        nodeIds: normalized.visualCandidates.map((candidate) => candidate.nodeId),
+        credential,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+      const expected = new Set(normalized.visualCandidates.map((candidate) => candidate.nodeId));
+      const seen = new Set<string>();
+      const renderByNodeId = new Map<string, (typeof renderResult.renders)[number]>();
+      let totalBytes = 0;
+      let totalPixels = 0;
+      for (const render of renderResult.renders) {
+        if (!expected.has(render.nodeId) || seen.has(render.nodeId)
+          || !Buffer.isBuffer(render.png) || render.png.length < 45
+          || render.png.length > MAX_REFERENCE_RENDER_BYTES
+          || !Number.isSafeInteger(render.width) || !Number.isSafeInteger(render.height)
+          || render.width < 1 || render.height < 1 || render.width > 8_192 || render.height > 8_192
+          || render.width * render.height > 32_000_000) {
+          throw new FigmaImportError("upstream", "Figma rendered reference response is invalid");
+        }
+        let sanitized: ReturnType<typeof sanitizeFigmaPng>;
+        try {
+          sanitized = sanitizeFigmaPng(render.png);
+        } catch {
+          throw new FigmaImportError("upstream", "Figma rendered reference response is invalid");
+        }
+        try {
+          await inspectBoundedPngImage(sanitized.bytes, options.signal);
+        } catch (error) {
+          if (options.signal?.aborted) throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
+          throw new FigmaImportError("upstream", "Figma rendered reference pixels are invalid", { cause: error });
+        }
+        if (sanitized.width !== render.width || sanitized.height !== render.height
+          || containsEphemeralRemoteResourceBytes(sanitized.bytes)) {
+          throw new FigmaImportError("upstream", "Figma rendered reference response is invalid");
+        }
+        totalBytes += sanitized.bytes.length;
+        totalPixels += sanitized.pixels;
+        if (totalBytes > MAX_TOTAL_REFERENCE_RENDER_BYTES) {
+          throw new FigmaImportError("upstream", "Figma rendered references exceed the total byte budget");
+        }
+        if (totalPixels > MAX_TOTAL_REFERENCE_RENDER_PIXELS) {
+          throw new FigmaImportError("upstream", "Figma rendered references exceed the total pixel budget");
+        }
+        seen.add(render.nodeId);
+        renderByNodeId.set(render.nodeId, { ...render, png: sanitized.bytes });
+      }
+      for (const id of renderResult.unavailableNodeIds) {
+        if (!expected.has(id) || seen.has(id)) {
+          throw new FigmaImportError("upstream", "Figma rendered reference response is invalid");
+        }
+        seen.add(id);
+      }
+      if (seen.size !== expected.size) {
+        throw new FigmaImportError("upstream", "Figma rendered reference response is incomplete");
+      }
+      const unavailable = new Set(renderResult.unavailableNodeIds);
+      for (const candidate of normalized.visualCandidates) {
+        const render = renderByNodeId.get(candidate.nodeId);
+        if (!render) continue;
+        normalized.referenceRenders.push({
+          nodeId: render.nodeId,
+          candidateIndex: candidate.referenceIndex,
+          referencePath: candidate.referencePath,
+          width: render.width,
+          height: render.height,
+          payload: { bytes: render.png, sha256: createHash("sha256").update(render.png).digest("hex") },
+        });
+      }
+      finalizeFigmaVisualReferences(normalized, new Set(renderByNodeId.keys()), unavailable);
+      if (renderResult.unavailableNodeIds.length > 0) {
+        normalized.incomplete.push("visual-reference-unavailable");
+        normalized.warnings.push(
+          `${renderResult.unavailableNodeIds.length} Figma visual reference render(s) were unavailable.`,
+        );
+      }
+    } else if (normalized.visualCandidates.length > 0) {
+      finalizeFigmaVisualReferences(
+        normalized,
+        new Set(),
+        new Set(normalized.visualCandidates.map((candidate) => candidate.nodeId)),
+      );
+      normalized.incomplete.push("visual-reference-unavailable");
+      normalized.warnings.push("Figma visual reference rendering is unavailable.");
+    }
     const meta1 = metadataFence(await options.client.getMetadata({
       fileKey,
       credential,
@@ -967,17 +1098,10 @@ async function fetchVersionFencedSnapshot(
       if (round === 0) continue;
       throw new FigmaImportError("version-drift", "Figma file changed while its exact Version was being imported");
     }
-    let normalized: NormalizedFigmaImport;
-    try {
-      normalized = normalizeFigmaImport({ source: request.source, file, variables, depthLimited: true });
-    } catch {
-      // Normalizer labels can be derived from hostile upstream object keys. Never let those
-      // labels (or a cause carrying them) cross the credential boundary into Job or HTTP state.
-      throw new FigmaImportError("upstream", "Figma response could not be normalized safely");
-    }
     const canaries = credentialCanaries(credential.token);
     for (const artifact of [normalized.rawFile, normalized.rawVariables, normalized.designMarkdown,
-      normalized.tokensJson, normalized.componentsJson]) {
+      normalized.tokensJson, normalized.componentsJson, normalized.layoutJson,
+      ...normalized.referenceRenders.map((render) => render.payload)]) {
       if (artifact && canaries.some((canary) => artifact.bytes.includes(Buffer.from(canary)))) {
         throw new FigmaImportError("upstream", "Figma response contained credential material and was rejected");
       }
@@ -993,6 +1117,8 @@ function nodeIds(importId: string) {
     design: `figma-design-${suffix}`,
     tokens: `figma-tokens-${suffix}`,
     components: `figma-components-${suffix}`,
+    layout: `figma-layout-${suffix}`,
+    reference: (index: number) => `figma-reference-${String(index + 1).padStart(3, "0")}-${suffix}`,
   };
 }
 
@@ -1015,7 +1141,17 @@ function snapshotPayloads(
     artifact("design-document", "derived/Design.md", "text/markdown", ids.design, normalized.designMarkdown),
     artifact("tokens", "derived/tokens.json", "application/json", ids.tokens, normalized.tokensJson),
     artifact("components", "derived/components.json", "application/json", ids.components, normalized.componentsJson),
+    artifact("layout", "derived/layout.json", "application/json", ids.layout, normalized.layoutJson),
   ];
+  for (const render of normalized.referenceRenders) {
+    values.push(artifact(
+      "reference-render",
+      render.referencePath,
+      "image/png",
+      ids.reference(render.candidateIndex),
+      render.payload,
+    ));
+  }
   if (normalized.rawVariables) {
     values.splice(1, 0, artifact(
       "raw-variables", "raw/variables.json", "application/json", null, normalized.rawVariables,
@@ -1098,6 +1234,88 @@ async function stageSnapshot(
   return snapshot;
 }
 
+async function validateStoredVisualAuthority(
+  root: string,
+  artifacts: readonly StoredSnapshot["payloads"][number][],
+  importId: string,
+): Promise<void> {
+  const layoutArtifact = artifacts.find((artifact) => artifact.kind === "layout");
+  if (!layoutArtifact) throw new FigmaImportError("corrupt", "Stored Figma visual layout authority is missing");
+  let candidates: unknown[];
+  try {
+    const layoutBytes = await exactFile(join(root, ...layoutArtifact.path.split("/")), layoutArtifact);
+    const layout = storedRecord(JSON.parse(layoutBytes.toString("utf8")), "Stored Figma visual layout", [
+      "schemaVersion", "selectedNodeIds", "selectedNodes", "candidates", "diagnostics",
+    ]);
+    if (layout.schemaVersion !== 1 || !Array.isArray(layout.candidates) || layout.candidates.length > 12) {
+      throw new FigmaImportError("corrupt", "Stored Figma visual layout candidates are corrupt");
+    }
+    candidates = layout.candidates;
+  } catch (error) {
+    if (error instanceof FigmaImportError) throw error;
+    throw new FigmaImportError("corrupt", "Stored Figma visual layout authority is corrupt", { cause: error });
+  }
+
+  const references = new Map(
+    artifacts.filter((artifact) => artifact.kind === "reference-render")
+      .map((artifact) => [artifact.path, artifact] as const),
+  );
+  const expectedReferencePaths = new Set<string>();
+  const sourceNodeIds = new Set<string>();
+  const ids = nodeIds(importId);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = storedRecord(candidates[index], "Stored Figma visual candidate", [
+      "nodeId", "selectedNodeId", "name", "type", "depth", "geometry",
+      "referenceIndex", "referencePath", "referenceAvailability",
+    ]);
+    const expectedPath = `derived/references/reference-frame-${String(index + 1).padStart(3, "0")}.png`;
+    const available = candidate.referenceAvailability === "available";
+    if (!isSafeFigmaApiNodeId(candidate.nodeId)
+      || sourceNodeIds.has(candidate.nodeId) || candidate.referenceIndex !== index
+      || candidate.referencePath !== expectedPath
+      || (!available && candidate.referenceAvailability !== "unavailable")) {
+      throw new FigmaImportError("corrupt", "Stored Figma visual candidate authority is corrupt");
+    }
+    sourceNodeIds.add(candidate.nodeId);
+    const reference = references.get(expectedPath);
+    if (available !== Boolean(reference) || (reference && reference.nodeId !== ids.reference(index))) {
+      throw new FigmaImportError("corrupt", "Stored Figma visual availability diverges from reference authority");
+    }
+    if (reference) expectedReferencePaths.add(expectedPath);
+  }
+  if (expectedReferencePaths.size !== references.size) {
+    throw new FigmaImportError("corrupt", "Stored Figma reference authority diverges from its visual layout");
+  }
+
+  let totalReferenceBytes = 0;
+  let totalReferencePixels = 0;
+  for (const artifact of artifacts) {
+    if (artifact === layoutArtifact) continue;
+    const bytes = await exactFile(join(root, ...artifact.path.split("/")), artifact);
+    if (artifact.kind !== "reference-render") continue;
+    let sanitized: ReturnType<typeof sanitizeFigmaPng>;
+    try {
+      sanitized = sanitizeFigmaPng(bytes);
+    } catch (error) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render is not a valid PNG authority", { cause: error });
+    }
+    try {
+      await inspectBoundedPngImage(sanitized.bytes);
+    } catch (error) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render pixels are invalid", { cause: error });
+    }
+    if (!sanitized.bytes.equals(bytes) || containsEphemeralRemoteResourceBytes(bytes)) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render contains non-visual authority");
+    }
+    totalReferenceBytes += bytes.length;
+    totalReferencePixels += sanitized.pixels;
+    if (totalReferenceBytes > MAX_TOTAL_REFERENCE_RENDER_BYTES
+      || totalReferencePixels > MAX_TOTAL_REFERENCE_RENDER_PIXELS) {
+      throw new FigmaImportError("corrupt", "Stored Figma reference render aggregate budget is corrupt");
+    }
+  }
+}
+
 async function readStagedSnapshot(root: string, job: StoredFigmaImportJob): Promise<StoredSnapshot | null> {
   const target = join(root, "snapshot");
   try {
@@ -1125,9 +1343,7 @@ async function readStagedSnapshot(root: string, job: StoredFigmaImportJob): Prom
     if (error instanceof FigmaImportError) throw error;
     throw new FigmaImportError("corrupt", "Staged Figma snapshot metadata is corrupt", { cause: error });
   }
-  for (const artifact of snapshot.payloads) {
-    await exactFile(join(target, ...artifact.path.split("/")), artifact);
-  }
+  await validateStoredVisualAuthority(target, snapshot.payloads, job.importId);
   return snapshot;
 }
 
@@ -1138,29 +1354,48 @@ async function readSnapshotPayload(root: string, artifact: StoredSnapshot["paylo
 
 async function artifactImportItems(root: string, job: StoredFigmaImportJob): Promise<DesignCanvasAssetImportItem[]> {
   const snapshot = job.snapshot!;
+  await validateStoredVisualAuthority(join(root, "snapshot"), snapshot.payloads, job.importId);
   const derived = snapshot.payloads.filter((artifact) => artifact.nodeId !== null);
   const { x, y } = job.request.anchor;
-  const geometry = [
-    { x, y, width: 420, height: 560 },
-    { x: x + 460, y, width: 420, height: 560 },
-    { x: x + 920, y, width: 420, height: 560 },
-  ];
-  return Promise.all(derived.map(async (artifact, index) => ({
-    asset: {
-      name: basename(artifact.path),
-      mimeType: artifact.mimeType,
-      base64: (await readSnapshotPayload(root, artifact)).toString("base64"),
-    },
-    binding: {
-      type: "create-node" as const,
-      node: {
-        id: artifact.nodeId!,
-        kind: artifact.kind === "design-document" ? "document" as const : "file" as const,
+  const referenceStartY = y + 600;
+  const items: DesignCanvasAssetImportItem[] = [];
+  let referenceIndex = 0;
+  for (let index = 0; index < derived.length; index += 1) {
+    const artifact = derived[index]!;
+    const bytes = await readSnapshotPayload(root, artifact);
+    let geometry = { x: x + (index % 4) * 460, y: y + Math.floor(index / 4) * 600, width: 420, height: 560 };
+    if (artifact.kind === "reference-render") {
+      const width = bytes.readUInt32BE(16);
+      const height = bytes.readUInt32BE(20);
+      const scale = Math.min(420 / width, 560 / height, 1);
+      geometry = {
+        x: x + (referenceIndex % 4) * 460,
+        y: referenceStartY + Math.floor(referenceIndex / 4) * 600,
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale)),
+      };
+      referenceIndex += 1;
+    }
+    items.push({
+      asset: {
         name: basename(artifact.path),
-        geometry: geometry[index],
+        mimeType: artifact.mimeType,
+        base64: bytes.toString("base64"),
       },
-    },
-  })));
+      binding: {
+        type: "create-node" as const,
+        node: {
+          id: artifact.nodeId!,
+          kind: artifact.kind === "design-document" ? "document" as const
+            : artifact.kind === "reference-render" ? "image" as const
+              : "file" as const,
+          name: basename(artifact.path),
+          geometry,
+        },
+      },
+    });
+  }
+  return items;
 }
 
 function finalManifest(job: StoredFigmaImportJob): FigmaImportManifest {
@@ -1269,9 +1504,7 @@ async function readPublishedManifest(target: string, job: StoredFigmaImportJob):
   if (!isDeepStrictEqual(manifest, expected)) {
     throw new FigmaImportError("corrupt", "Ready Figma import manifest diverges from its Job authority");
   }
-  for (const artifact of expected.artifacts) {
-    await exactFile(join(target, ...artifact.path.split("/")), artifact);
-  }
+  await validateStoredVisualAuthority(target, expected.artifacts, job.importId);
   return manifest;
 }
 
@@ -1316,6 +1549,7 @@ export async function importFigmaDesignProject(
           await assertLease();
           const manifest = await readReadyManifest(options.dataDir, readyJob);
           await assertLease();
+          await cleanupReadySnapshot(dirname(path));
           const result = { manifest, reused: true };
           await options.finalizeUnderProjectLease?.(result);
           return result;
@@ -1421,8 +1655,8 @@ export async function importFigmaDesignProject(
             job.updatedAt = options.now?.() ?? Date.now();
             await assertLease();
             await atomicJson(path, job);
-            await rm(join(dirname(path), "snapshot"), { recursive: true, force: true });
-            await options.testHooks?.afterPhase?.("ready");
+            await cleanupReadySnapshot(dirname(path));
+            await Promise.resolve(options.testHooks?.afterPhase?.("ready")).catch(() => {});
           } else {
             manifest = await readReadyManifest(options.dataDir, job);
           }

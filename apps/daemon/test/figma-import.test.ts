@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { deflateSync } from "node:zlib";
 
 import { getDesignCanvas } from "../src/design/design-storage.ts";
 import { createDesignProject, getDesignProject } from "../src/design/design-project-store.ts";
@@ -95,6 +96,41 @@ function clientFixture(calls: string[]): FigmaRestClient {
   };
 }
 
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data = Buffer.alloc(0)): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(data.length, 0);
+  typeBytes.copy(header, 4);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 0);
+  return Buffer.concat([header, data, checksum]);
+}
+
+function pngFixture(width: number, height: number, ancillary: Buffer[] = []): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 1;
+  ihdr[9] = 0;
+  const scanlines = Buffer.alloc((Math.ceil(width / 8) + 1) * height);
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", ihdr),
+    ...ancillary,
+    pngChunk("IDAT", deflateSync(scanlines)),
+    pngChunk("IEND"),
+  ]);
+}
+
 async function allRegularFileText(root: string): Promise<string> {
   const entries = await readdir(root, { recursive: true });
   const chunks: string[] = [];
@@ -105,7 +141,7 @@ async function allRegularFileText(root: string): Promise<string> {
   return chunks.join("\n");
 }
 
-test("Figma import version-fences one snapshot, publishes three material artifacts, and exact replay is offline", async (t) => {
+test("Figma import version-fences one snapshot, publishes material authorities, and exact replay is offline", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-import-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const calls: string[] = [];
@@ -135,13 +171,14 @@ test("Figma import version-fences one snapshot, publishes three material artifac
   assert.equal(first.manifest.tokenAuthority, "style-values-inferred");
   assert.ok(first.manifest.incomplete.includes("variables-http-403"));
   assert.deepEqual(first.manifest.artifacts.map((artifact) => artifact.kind), [
-    "raw-file", "design-document", "tokens", "components",
+    "raw-file", "design-document", "tokens", "components", "layout",
   ]);
   const canvas = await getDesignCanvas(dataDir, first.manifest.projectId);
   assert.deepEqual(canvas.nodes.map((node) => [node.kind, node.name]), [
     ["document", "Design.md"],
     ["file", "tokens.json"],
     ["file", "components.json"],
+    ["file", "layout.json"],
   ]);
   assert.equal(canvas.revision, first.manifest.canvasRevision);
 
@@ -157,6 +194,338 @@ test("Figma import version-fences one snapshot, publishes three material artifac
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
   assert.equal((await getDesignCanvas(dataDir, first.manifest.projectId)).revision, canvas.revision);
   assert.equal(credentialCalls, 1);
+});
+
+test("an oversized selected Section publishes deterministic near-frame visual references and layout authority", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-visual-import-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const calls: string[] = [];
+  const file = {
+    version: "42",
+    name: "ZenStudio",
+    role: "viewer",
+    editorType: "figma",
+    linkAccess: "view",
+    document: {
+      id: "0:0", name: "ZenStudio", type: "DOCUMENT", children: [{
+        id: "1:1", name: "Page", type: "CANVAS", children: [{
+          id: "457:5026", name: "影视工作流", type: "SECTION",
+          absoluteBoundingBox: { x: 100, y: 200, width: 14_215, height: 9_071 },
+          children: [
+            {
+              id: "457:5028", name: "评论", type: "FRAME",
+              absoluteBoundingBox: { x: 1_000, y: 900, width: 720, height: 727 },
+              layoutMode: "VERTICAL", itemSpacing: 12, cornerRadius: 12,
+              fills: [{ type: "SOLID", color: { r: 0.08, g: 0.08, b: 0.09 } }],
+              children: [],
+            },
+            {
+              id: "457:5027", name: "使用演示", type: "FRAME",
+              absoluteBoundingBox: { x: 200, y: 300, width: 720, height: 564 },
+              layoutMode: "VERTICAL", itemSpacing: 8,
+              children: [],
+            },
+            {
+              id: "457:5999", name: "hidden", type: "FRAME", visible: false,
+              absoluteBoundingBox: { x: 0, y: 0, width: 720, height: 620 }, children: [],
+            },
+            {
+              id: "457:6000", name: "giant background", type: "FRAME",
+              absoluteBoundingBox: { x: 0, y: 0, width: 5_000, height: 5_000 }, children: [],
+            },
+          ],
+        }],
+      }],
+    },
+    components: {}, componentSets: {}, styles: {},
+  };
+  let credentialCalls = 0;
+  const result = await importFigmaDesignProject({
+    dataDir,
+    input: {
+      ...input,
+      idempotencyKey: "figma-import-visual-section-1",
+      url: "https://www.figma.com/design/AbC123xyZ/ZenStudio?node-id=457-5026",
+    },
+    client: {
+      async getMetadata() {
+        calls.push("metadata");
+        return { file: { key: "AbC123xyZ", version: "42" } };
+      },
+      async getFileVersion(request) {
+        calls.push(`file:${request.version}`);
+        return file;
+      },
+      async getLocalVariables() {
+        calls.push("variables");
+        return { kind: "unavailable", status: 403, reason: "unavailable" };
+      },
+      async getNodeRenders(request) {
+        calls.push(`renders:${request.nodeIds.join(",")}:${request.version}`);
+        return {
+          renders: request.nodeIds.map((nodeId) => ({
+            nodeId,
+            png: pngFixture(720, nodeId === "457:5027" ? 564 : 727),
+            width: 720,
+            height: nodeId === "457:5027" ? 564 : 727,
+          })),
+          unavailableNodeIds: [],
+        };
+      },
+    },
+    credentialProvider: async () => {
+      credentialCalls += 1;
+      return {
+        token: "figd_visual_private_token_0123456789",
+        mode: "personal-access-token",
+        source: "local",
+        subject: "pat-0123456789abcdef",
+      };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    "metadata", "file:42", "variables", "renders:457:5027,457:5028:42", "metadata",
+  ]);
+  assert.deepEqual(result.manifest.artifacts.map(({ kind, path }) => [kind, path]), [
+    ["raw-file", "raw/file.json"],
+    ["design-document", "derived/Design.md"],
+    ["tokens", "derived/tokens.json"],
+    ["components", "derived/components.json"],
+    ["layout", "derived/layout.json"],
+    ["reference-render", "derived/references/reference-frame-001.png"],
+    ["reference-render", "derived/references/reference-frame-002.png"],
+  ]);
+  const importRoot = join(
+    dataDir, "projects", result.manifest.projectId, "design", "imports", result.manifest.importId,
+  );
+  const layout = JSON.parse(await readFile(join(importRoot, "derived/layout.json"), "utf8"));
+  assert.deepEqual(layout.selectedNodes.map((node: { id: string; geometry: unknown }) => [node.id, node.geometry]), [[
+    "457:5026", { x: 100, y: 200, width: 14_215, height: 9_071 },
+  ]]);
+  assert.deepEqual(layout.candidates.map((candidate: { nodeId: string; name: string }) => [candidate.nodeId, candidate.name]), [
+    ["457:5027", "使用演示"], ["457:5028", "评论"],
+  ]);
+  const canvas = await getDesignCanvas(dataDir, result.manifest.projectId);
+  assert.deepEqual(canvas.nodes.map((node) => [node.kind, node.name]), [
+    ["document", "Design.md"],
+    ["file", "tokens.json"],
+    ["file", "components.json"],
+    ["file", "layout.json"],
+    ["image", "reference-frame-001.png"],
+    ["image", "reference-frame-002.png"],
+  ]);
+
+  const firstAuthority = result.manifest.artifacts.map(({ nodeId, bytes, sha256 }) => ({ nodeId, bytes, sha256 }));
+  const replay = await importFigmaDesignProject({
+    dataDir,
+    input: {
+      ...input,
+      idempotencyKey: "figma-import-visual-section-1",
+      url: "https://www.figma.com/design/AbC123xyZ/ZenStudio?node-id=457-5026",
+    },
+    client: {
+      async getMetadata() { throw new Error("ready replay must be offline"); },
+      async getFileVersion() { throw new Error("ready replay must be offline"); },
+      async getLocalVariables() { throw new Error("ready replay must be offline"); },
+      async getNodeRenders() { throw new Error("ready replay must be offline"); },
+    },
+    credentialProvider: async () => {
+      credentialCalls += 1;
+      throw new Error("ready replay must not resolve credentials");
+    },
+  });
+  assert.equal(replay.reused, true);
+  assert.deepEqual(
+    replay.manifest.artifacts.map(({ nodeId, bytes, sha256 }) => ({ nodeId, bytes, sha256 })),
+    firstAuthority,
+  );
+  assert.equal(credentialCalls, 1);
+  assert.equal((await getDesignCanvas(dataDir, result.manifest.projectId)).revision, canvas.revision);
+});
+
+test("an unavailable earlier visual candidate does not renumber later reference authority", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-visual-gap-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const file = {
+    version: "42", name: "Visual gap", editorType: "figma",
+    document: {
+      id: "0:0", name: "Visual gap", type: "DOCUMENT", children: [{
+        id: "1:1", name: "Selected", type: "SECTION",
+        absoluteBoundingBox: { x: 0, y: 0, width: 4_000, height: 3_000 },
+        children: [
+          { id: "1:2", name: "First", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 720, height: 564 }, children: [] },
+          { id: "I1:1;1:3", name: "Second", type: "FRAME", absoluteBoundingBox: { x: 800, y: 0, width: 720, height: 727 }, children: [] },
+        ],
+      }],
+    },
+    components: {}, componentSets: {}, styles: {},
+  };
+  const result = await importFigmaDesignProject({
+    dataDir,
+    input: {
+      ...input,
+      idempotencyKey: "figma-import-visual-gap-1",
+      url: "https://www.figma.com/design/AbC123xyZ/Visual?node-id=1-1",
+    },
+    client: {
+      async getMetadata() { return { file: { version: "42" } }; },
+      async getFileVersion() { return file; },
+      async getLocalVariables() { return { kind: "unavailable", status: 403, reason: "unavailable" }; },
+      async getNodeRenders() {
+        return {
+          renders: [{ nodeId: "I1:1;1:3", png: pngFixture(720, 727), width: 720, height: 727 }],
+          unavailableNodeIds: ["1:2"],
+        };
+      },
+    },
+    credentialProvider: async () => ({
+      token: "figd_visual_private_token_0123456789",
+      mode: "personal-access-token",
+      source: "local",
+      subject: "pat-0123456789abcdef",
+    }),
+  });
+  assert.deepEqual(
+    result.manifest.artifacts.filter((artifact) => artifact.kind === "reference-render")
+      .map(({ path, nodeId }) => ({ path, nodeId })),
+    [{
+      path: "derived/references/reference-frame-002.png",
+      nodeId: result.manifest.artifacts.find((artifact) => artifact.kind === "reference-render")!.nodeId,
+    }],
+  );
+  const importRoot = join(
+    dataDir, "projects", result.manifest.projectId, "design", "imports", result.manifest.importId,
+  );
+  const layout = JSON.parse(await readFile(join(importRoot, "derived/layout.json"), "utf8"));
+  assert.deepEqual(layout.candidates.map((candidate: {
+    nodeId: string; referencePath: string; referenceAvailability: string;
+  }) => ({
+    nodeId: candidate.nodeId,
+    referencePath: candidate.referencePath,
+    referenceAvailability: candidate.referenceAvailability,
+  })), [
+    {
+      nodeId: "1:2",
+      referencePath: "derived/references/reference-frame-001.png",
+      referenceAvailability: "unavailable",
+    },
+    {
+      nodeId: "I1:1;1:3",
+      referencePath: "derived/references/reference-frame-002.png",
+      referenceAvailability: "available",
+    },
+  ]);
+  assert.deepEqual((await getDesignCanvas(dataDir, result.manifest.projectId)).nodes.map((node) => node.name), [
+    "Design.md", "tokens.json", "components.json", "layout.json", "reference-frame-002.png",
+  ]);
+});
+
+test("custom render clients cannot exceed the aggregate decoded-pixel budget", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-render-pixels-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const frames = Array.from({ length: 3 }, (_, index) => ({
+    id: `1:${index + 2}`,
+    name: `Large ${index + 1}`,
+    type: "FRAME",
+    absoluteBoundingBox: { x: index * 8_100, y: 0, width: 8_000, height: 4_000 },
+    children: [],
+  }));
+  await assert.rejects(importFigmaDesignProject({
+    dataDir,
+    input: {
+      ...input,
+      idempotencyKey: "figma-import-render-pixels-1",
+      url: "https://www.figma.com/design/AbC123xyZ/Visual?node-id=1-1",
+    },
+    client: {
+      async getMetadata() { return { file: { version: "42" } }; },
+      async getFileVersion() {
+        return {
+          version: "42", name: "Pixel budget", editorType: "figma",
+          document: {
+            id: "0:0", name: "Pixel budget", type: "DOCUMENT", children: [{
+              id: "1:1", name: "Selected", type: "SECTION",
+              absoluteBoundingBox: { x: 0, y: 0, width: 30_000, height: 5_000 }, children: frames,
+            }],
+          },
+          components: {}, componentSets: {}, styles: {},
+        };
+      },
+      async getLocalVariables() { return { kind: "unavailable", status: 403, reason: "unavailable" }; },
+      async getNodeRenders(request) {
+        return {
+          renders: request.nodeIds.map((nodeId) => ({
+            nodeId, png: pngFixture(8_000, 4_000), width: 8_000, height: 4_000,
+          })),
+          unavailableNodeIds: [],
+        };
+      },
+    },
+    credentialProvider: async () => ({
+      token: "figd_visual_private_token_0123456789",
+      mode: "personal-access-token",
+      source: "local",
+      subject: "pat-0123456789abcdef",
+    }),
+  }), (error: unknown) => error instanceof FigmaImportError
+    && error.code === "upstream"
+    && error.message === "Figma rendered references exceed the total pixel budget");
+});
+
+test("render PNG text metadata is stripped before ephemeral signed URLs can reach durable authority", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-render-url-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const signedUrl = "https://s3-alpha-sig.figma.com/private.png?X-Amz-Signature=secret&X-Amz-Expires=30";
+  const png = pngFixture(720, 620, [
+    pngChunk("tEXt", Buffer.from(`Comment\0${signedUrl}`)),
+    pngChunk("zTXt", Buffer.concat([Buffer.from("Comment\0\0"), deflateSync(Buffer.from(signedUrl))])),
+  ]);
+  const imported = await importFigmaDesignProject({
+    dataDir,
+    input: {
+      ...input,
+      idempotencyKey: "figma-import-render-url-1",
+      url: "https://www.figma.com/design/AbC123xyZ/Visual?node-id=1-1",
+    },
+    client: {
+      async getMetadata() { return { file: { version: "42" } }; },
+      async getFileVersion() {
+        return {
+          version: "42", name: "Visual", editorType: "figma",
+          document: {
+            id: "0:0", name: "Visual", type: "DOCUMENT", children: [{
+              id: "1:1", name: "Selected", type: "FRAME",
+              absoluteBoundingBox: { x: 0, y: 0, width: 720, height: 620 }, children: [],
+            }],
+          },
+          components: {}, componentSets: {}, styles: {},
+        };
+      },
+      async getLocalVariables() { return { kind: "unavailable", status: 403, reason: "unavailable" }; },
+      async getNodeRenders() {
+        return { renders: [{ nodeId: "1:1", png, width: 720, height: 620 }], unavailableNodeIds: [] };
+      },
+    },
+    credentialProvider: async () => ({
+      token: "figd_visual_private_token_0123456789",
+      mode: "personal-access-token",
+      source: "local",
+      subject: "pat-0123456789abcdef",
+    }),
+  });
+  const durablePng = await readFile(join(
+    dataDir, "projects", imported.manifest.projectId, "design", "imports", imported.manifest.importId,
+    "derived", "references", "reference-frame-001.png",
+  ));
+  assert.equal(durablePng.readUInt32BE(16), 720);
+  assert.equal(durablePng.readUInt32BE(20), 620);
+  assert.equal(durablePng.includes(Buffer.from("tEXt")), false);
+  assert.equal(durablePng.includes(Buffer.from("zTXt")), false);
+  assert.equal(durablePng.includes(Buffer.from(signedUrl)), false);
+  assert.deepEqual(durablePng, pngFixture(720, 620));
+  assert.equal((await allRegularFileText(dataDir)).includes("s3-alpha-sig.figma.com"), false);
+  assert.equal((await allRegularFileText(dataDir)).includes("X-Amz-Signature"), false);
 });
 
 test("normalization failures cannot persist or return PAT material embedded in hostile upstream keys", async (t) => {
@@ -668,6 +1037,55 @@ test("snapshot and final import directory rename crash windows roll forward from
   }
 });
 
+test("post-ready cleanup failures cannot roll terminal import authority back to a corrupt Job", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-ready-cleanup-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const calls: string[] = [];
+  let credentialCalls = 0;
+  const projectId = await existingProjectId(dataDir);
+  const first = await importFigmaDesignProject({
+    dataDir,
+    projectId,
+    input: { ...input, idempotencyKey: "figma-ready-cleanup-1" },
+    client: clientFixture(calls),
+    credentialProvider: async () => {
+      credentialCalls += 1;
+      return {
+        token: "figd_private_token_0123456789",
+        mode: "personal-access-token",
+        source: "local",
+        subject: "pat-0123456789abcdef",
+      };
+    },
+    testHooks: {
+      afterPhase: async (phase) => {
+        if (phase === "ready") throw new Error("post-ready hook failed");
+      },
+    },
+  });
+  assert.equal(first.manifest.projectId, projectId);
+
+  const replay = await importFigmaDesignProject({
+    dataDir,
+    projectId,
+    input: { ...input, idempotencyKey: "figma-ready-cleanup-1" },
+    client: {
+      async getMetadata() { throw new Error("ready replay must be offline"); },
+      async getFileVersion() { throw new Error("ready replay must be offline"); },
+      async getLocalVariables() { throw new Error("ready replay must be offline"); },
+      async getNodeRenders() { throw new Error("ready replay must be offline"); },
+    },
+    credentialProvider: async () => {
+      credentialCalls += 1;
+      throw new Error("ready replay must not resolve credentials");
+    },
+  });
+  assert.equal(replay.reused, true);
+  assert.deepEqual(replay.manifest, first.manifest);
+  assert.equal(credentialCalls, 1);
+  assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
+});
+
 test("startup recovery rolls a staged running receipt forward offline under its Project lease", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-startup-recovery-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -711,7 +1129,7 @@ test("startup recovery rolls a staged running receipt forward offline under its 
   assert.equal(recovered.recovered.length, 1);
   assert.deepEqual(recovered.pending, []);
   assert.equal(recovered.recovered[0]?.reused, true);
-  assert.equal((await getDesignCanvas(dataDir, recovered.recovered[0]!.manifest.projectId)).nodes.length, 3);
+  assert.equal((await getDesignCanvas(dataDir, recovered.recovered[0]!.manifest.projectId)).nodes.length, 4);
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
   assert.equal(heldProjectId, null);
 });
@@ -882,6 +1300,79 @@ test("corrupt staged artifact paths fail closed before any filesystem traversal"
     dataDir,
     input: corruptInput,
     client: clientFixture([]),
+    credentialProvider: async () => { throw new Error("corrupt replay must not resolve PAT"); },
+  }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
+});
+
+test("staged visual layout availability must exactly match durable reference artifacts", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-visual-authority-corrupt-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const visualInput = {
+    ...input,
+    idempotencyKey: "figma-visual-authority-corrupt-1",
+    url: "https://www.figma.com/design/AbC123xyZ/Visual?node-id=1-1",
+  };
+  const file = {
+    version: "42", name: "Visual authority", editorType: "figma",
+    document: {
+      id: "0:0", name: "Visual authority", type: "DOCUMENT", children: [{
+        id: "1:1", name: "Selected", type: "FRAME",
+        absoluteBoundingBox: { x: 0, y: 0, width: 720, height: 620 }, children: [],
+      }],
+    },
+    components: {}, componentSets: {}, styles: {},
+  };
+  await assert.rejects(importFigmaDesignProject({
+    dataDir,
+    input: visualInput,
+    client: {
+      async getMetadata() { return { file: { version: "42" } }; },
+      async getFileVersion() { return file; },
+      async getLocalVariables() { return { kind: "unavailable", status: 403, reason: "unavailable" }; },
+      async getNodeRenders() {
+        return {
+          renders: [{ nodeId: "1:1", png: pngFixture(720, 620), width: 720, height: 620 }],
+          unavailableNodeIds: [],
+        };
+      },
+    },
+    credentialProvider: async () => ({
+      token: "figd_visual_private_token_0123456789",
+      mode: "personal-access-token",
+      source: "local",
+      subject: "pat-0123456789abcdef",
+    }),
+    testHooks: {
+      simulateProcessCrash: true,
+      afterPhase: (phase) => {
+        if (phase === "snapshot-staged") throw new Error("stop with visual snapshot");
+      },
+    },
+  }), /stop with visual snapshot/);
+
+  const projectId = await existingProjectId(dataDir);
+  const receipt = (await visibleReceiptEntries(dataDir, projectId))[0]!;
+  const receiptRoot = join(figmaJobsRoot(dataDir, projectId), receipt);
+  const jobPath = join(receiptRoot, "job.json");
+  const envelopePath = join(receiptRoot, "snapshot", "snapshot.json");
+  const job = JSON.parse(await readFile(jobPath, "utf8"));
+  const envelope = JSON.parse(await readFile(envelopePath, "utf8"));
+  job.snapshot.payloads = job.snapshot.payloads.filter((artifact: { kind: string }) => artifact.kind !== "reference-render");
+  envelope.snapshot.payloads = envelope.snapshot.payloads
+    .filter((artifact: { kind: string }) => artifact.kind !== "reference-render");
+  await writeFile(jobPath, `${JSON.stringify(job, null, 2)}\n`);
+  await writeFile(envelopePath, `${JSON.stringify(envelope, null, 2)}\n`);
+
+  await assert.rejects(importFigmaDesignProject({
+    dataDir,
+    projectId,
+    input: visualInput,
+    client: {
+      async getMetadata() { throw new Error("corrupt replay must remain offline"); },
+      async getFileVersion() { throw new Error("corrupt replay must remain offline"); },
+      async getLocalVariables() { throw new Error("corrupt replay must remain offline"); },
+      async getNodeRenders() { throw new Error("corrupt replay must remain offline"); },
+    },
     credentialProvider: async () => { throw new Error("corrupt replay must not resolve PAT"); },
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
 });

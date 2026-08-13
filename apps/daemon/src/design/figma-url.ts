@@ -1,6 +1,7 @@
 const FIGMA_FILE_TYPES = new Set(["design", "file", "board", "slides"] as const);
 const FIGMA_FILE_KEY = /^[A-Za-z0-9_-]{6,128}$/;
 const FIGMA_NODE_ID = /^[0-9]+(?::[0-9]+)+$/;
+const FIGMA_API_NODE_ID = /^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)+(?:;[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)+)*$/;
 export const FIGMA_NODE_ID_MAX_BYTES = 128;
 export const FIGMA_NODE_IDS_MAX_BYTES = 4_096;
 
@@ -21,6 +22,11 @@ export class FigmaUrlError extends Error {
     super(message);
     this.name = "FigmaUrlError";
   }
+}
+
+export function isSafeFigmaApiNodeId(value: unknown): value is string {
+  return typeof value === "string" && FIGMA_API_NODE_ID.test(value)
+    && Buffer.byteLength(value, "utf8") <= FIGMA_NODE_ID_MAX_BYTES;
 }
 
 function fail(message: string): never {

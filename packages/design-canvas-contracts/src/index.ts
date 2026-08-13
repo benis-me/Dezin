@@ -310,7 +310,14 @@ export interface FigmaImportInput {
 }
 
 export interface FigmaImportArtifactManifest {
-  kind: "raw-file" | "raw-variables" | "design-document" | "tokens" | "components";
+  kind:
+    | "raw-file"
+    | "raw-variables"
+    | "design-document"
+    | "tokens"
+    | "components"
+    | "layout"
+    | "reference-render";
   path: string;
   mimeType: string;
   sha256: string;

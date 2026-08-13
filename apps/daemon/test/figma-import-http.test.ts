@@ -126,12 +126,13 @@ test("Figma HTTP stores a non-echoed PAT and imports exact artifacts at a Canvas
   assert.equal(first.canvas.projectId, project.projectId);
   assert.equal(first.import.manifest.projectId, project.projectId);
   assert.deepEqual((await getDesignCanvas(dataDir, project.projectId)).nodes.map((node) => node.name), [
-    "Design.md", "tokens.json", "components.json",
+    "Design.md", "tokens.json", "components.json", "layout.json",
   ]);
   assert.deepEqual((await getDesignCanvas(dataDir, project.projectId)).nodes.map((node) => node.geometry), [
     { x: 180, y: -240, width: 420, height: 560 },
     { x: 640, y: -240, width: 420, height: 560 },
     { x: 1_100, y: -240, width: 420, height: 560 },
+    { x: 1_560, y: -240, width: 420, height: 560 },
   ]);
   assert.deepEqual(calls, ["metadata", "file:42", "variables", "metadata"]);
   assert.deepEqual(leasedProjectIds, [project.projectId]);
@@ -280,7 +281,7 @@ test("daemon startup rolls a staged Figma receipt forward before exposing Projec
   assert.equal(response.status, 200, await response.clone().text());
   const projects = await response.json() as Array<{ id: string }>;
   assert.equal(projects.length, 1);
-  assert.equal((await getDesignCanvas(dataDir, projects[0]!.id)).nodes.length, 3);
+  assert.equal((await getDesignCanvas(dataDir, projects[0]!.id)).nodes.length, 4);
   assert.equal(forbiddenCalls, 0);
   assert.deepEqual(stagedCalls, ["metadata", "file:42", "variables", "metadata"]);
 });

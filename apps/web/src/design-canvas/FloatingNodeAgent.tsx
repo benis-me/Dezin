@@ -234,6 +234,8 @@ export interface CanvasAgentPanelProps {
   agents?: readonly AgentInfo[];
   initialAgentCommand?: string;
   initialModel?: string;
+  initialContextNodeIds?: readonly string[];
+  contextSeedGeneration?: number;
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onRescanAgents?: () => Promise<void>;
@@ -294,6 +296,8 @@ export function CanvasAgentPanel({
   agents = [],
   initialAgentCommand = "",
   initialModel = "",
+  initialContextNodeIds,
+  contextSeedGeneration,
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onRescanAgents = async () => {},
@@ -358,6 +362,8 @@ export function CanvasAgentPanel({
     agents,
     initialAgentCommand,
     initialModel,
+    initialContextNodeIds,
+    contextSeedGeneration,
     agentSelection: controlledAgentSelection,
     onAgentSelectionChange,
     onSubmit,

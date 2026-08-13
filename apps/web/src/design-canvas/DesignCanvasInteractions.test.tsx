@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Viewport } from "@xyflow/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -267,14 +267,18 @@ test("focusable Canvas Nodes expose their persisted identity, kind, and state", 
   });
 });
 
-test("a successful Figma import adopts its response Canvas before a best-effort refresh", async () => {
-  const initial = designCanvas([]);
+test("a successful Figma import selects and fits every manifest-linked artifact without disturbing existing Nodes", async () => {
+  const existingNode = { ...designNode("existing-page", 80), name: "Existing page" };
+  const initial = designCanvas([existingNode]);
   const importedNodes: DesignNode[] = [
     { ...designNode("figma-design", 321), kind: "design-document", name: "Design.md" },
     { ...designNode("figma-tokens", 761), kind: "design-tokens", name: "Tokens" },
     { ...designNode("figma-components", 1201), kind: "component", name: "Components" },
+    { ...designNode("figma-layout", 1641), kind: "file", name: "layout.json" },
+    { ...designNode("figma-reference-a", 2081), kind: "image", name: "Checkout modal.png" },
+    { ...designNode("figma-reference-b", 2521), kind: "image", name: "Gallery modal.png" },
   ];
-  const canonical = designCanvas(importedNodes, 2);
+  const canonical = designCanvas([existingNode, ...importedNodes], 2);
   const { api } = createApi(initial);
   vi.mocked(api.getCanvas)
     .mockResolvedValueOnce(initial)
@@ -302,9 +306,16 @@ test("a successful Figma import adopts its response Canvas before a best-effort 
         credential: { mode: "personal-access-token", subject: "fake" },
         tokenAuthority: "style-values-inferred",
         artifacts: importedNodes.map((item, index) => ({
-          kind: index === 0 ? "design-document" : index === 1 ? "tokens" : "components",
-          path: `artifact-${index}.json`,
-          mimeType: "application/json",
+          kind: ([
+            "design-document",
+            "tokens",
+            "components",
+            "layout",
+            "reference-render",
+            "reference-render",
+          ] as const)[index],
+          path: index < 4 ? `artifact-${index}.json` : `references/reference-${index - 3}.png`,
+          mimeType: index < 4 ? "application/json" : "image/png",
           sha256: String(index).repeat(64),
           bytes: 100,
           nodeId: item.id,
@@ -322,11 +333,14 @@ test("a successful Figma import adopts its response Canvas before a best-effort 
   render(
     <ApiProvider client={makeFakeApi({ importFigmaProject })}>
       <ToastProvider>
-        <DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} />
+        <DesignCanvasScreen projectId={PROJECT_ID} projectName="Interactions" api={api} agents={[CLAUDE_AGENT]} />
       </ToastProvider>
     </ApiProvider>,
   );
-  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(0));
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(1));
+
+  await user.click(screen.getByRole("button", { name: "Main Agent" }));
+  expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
 
   fireEvent.contextMenu(screen.getByLabelText("Infinite Design canvas"), { clientX: 320.6, clientY: 259.6 });
   await user.click(screen.getByRole("menuitem", { name: "Import from Figma" }));
@@ -337,12 +351,18 @@ test("a successful Figma import adopts its response Canvas before a best-effort 
   await user.click(screen.getByRole("checkbox", { name: "I have permission to import and use this Figma file" }));
   await user.click(screen.getByRole("button", { name: "Import into canvas" }));
 
-  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(3));
-  expect(flowHarness.props?.nodes.every((item: { selected?: boolean }) => item.selected)).toBe(true);
+  await waitFor(() => expect(flowHarness.props?.nodes).toHaveLength(7));
+  expect(flowHarness.props?.nodes.find((item: { id: string }) => item.id === existingNode.id)?.selected).toBe(false);
+  expect(flowHarness.props?.nodes
+    .filter((item: { id: string }) => item.id !== existingNode.id)
+    .every((item: { selected?: boolean }) => item.selected)).toBe(true);
+  expect(flowHarness.props?.nodes.find((item: { id: string }) => item.id === "figma-layout")?.data.node.kind).toBe("file");
+  expect(flowHarness.props?.nodes.find((item: { id: string }) => item.id === "figma-reference-a")?.data.node.kind).toBe("image");
   await waitFor(() => expect(flowHarness.fitView).toHaveBeenCalledTimes(1));
-  expect(flowHarness.fitView).toHaveBeenCalledWith(expect.objectContaining({
-    nodes: expect.arrayContaining(importedNodes.map((item) => expect.objectContaining({ id: item.id }))),
-  }));
+  const fittedNodeIds = flowHarness.fitView.mock.calls[0]?.[0]?.nodes
+    .map((item: { id: string }) => item.id)
+    .sort();
+  expect(fittedNodeIds).toEqual(importedNodes.map((item) => item.id).sort());
   expect(importFigmaProject).toHaveBeenCalledWith(
     PROJECT_ID,
     expect.objectContaining({ anchor: { x: 321, y: 260 } }),
@@ -351,8 +371,33 @@ test("a successful Figma import adopts its response Canvas before a best-effort 
   expect(api.getCanvas).toHaveBeenCalledTimes(2);
   expect(window.location.pathname).toBe(routeBefore);
   expect(await screen.findByText(
-    "Figma imported with limited metadata: Variables unavailable; Tokens inferred",
+    "Figma imported with limitations: Variables unavailable; Tokens inferred",
   )).toBeVisible();
+
+  await waitFor(() => expect(screen.queryByLabelText("Main Agent panel")).not.toBeInTheDocument());
+  await user.click(screen.getByRole("button", { name: "Main Agent" }));
+  const mainPanel = await screen.findByLabelText("Main Agent panel");
+  for (const importedNode of importedNodes) {
+    expect(within(mainPanel).getByRole("button", {
+      name: `Remove ${importedNode.name} reference`,
+    })).toBeInTheDocument();
+  }
+  expect(within(mainPanel).queryByRole("button", {
+    name: `Remove ${existingNode.name} reference`,
+  })).not.toBeInTheDocument();
+
+  await user.type(
+    within(mainPanel).getByRole("textbox", { name: "Main Agent message" }),
+    "Use the imported Figma references",
+  );
+  await user.click(within(mainPanel).getByRole("button", { name: "Send to Main Agent" }));
+  await waitFor(() => expect(api.submitAgentTurn).toHaveBeenCalledWith(
+    PROJECT_ID,
+    { type: "main" },
+    expect.objectContaining({
+      context: { nodeIds: importedNodes.map((node) => node.id) },
+    }),
+  ));
 });
 
 test("single-click selects while double-click flies only the Node and its neighbors above a stable viewport", async () => {

@@ -25,6 +25,25 @@ async function fillImportForm(): Promise<void> {
   await user.click(screen.getByRole("button", { name: "Import into canvas" }));
 }
 
+test("the Canvas dialog describes visual references and partial-import limitations without promising three fixed artifacts", async () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <FigmaImportDialog
+        open
+        projectId="project-a"
+        anchor={{ x: 321, y: 260 }}
+        onClose={() => undefined}
+        onImported={() => undefined}
+      />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText(/visual references/i)).toBeInTheDocument();
+  expect(screen.getByText(/Unavailable previews or metadata are reported as limitations\./)).toBeInTheDocument();
+  expect(screen.queryByText(/Design\.md, tokens\.json, and components\.json artifacts/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/not a pixel-perfect clone/i)).not.toBeInTheDocument();
+});
+
 test("a failed project-scoped import preserves the Figma URL and frozen rounded anchor", async () => {
   const anchor = { x: 321, y: 260 };
   const importFigmaProject = vi.fn(async (_projectId: string, _input: FigmaImportInput, _signal?: AbortSignal) => {

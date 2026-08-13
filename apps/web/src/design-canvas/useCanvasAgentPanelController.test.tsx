@@ -3,7 +3,7 @@ import { expect, test, vi } from "vitest";
 
 import type { AgentInfo } from "../lib/api.ts";
 import type { DesignCanvasApi } from "./api.ts";
-import type { DesignInvalidationMessage, DesignThread, DesignThreadScope } from "./types.ts";
+import type { DesignInvalidationMessage, DesignNode, DesignThread, DesignThreadScope } from "./types.ts";
 import {
   useAgentTranscriptController,
   useCanvasAgentPanelController,
@@ -27,6 +27,24 @@ function thread(scope: DesignThreadScope, messages: DesignThread["messages"] = [
     messages,
     createdAt: 1,
     updatedAt: messages.at(-1)?.createdAt ?? 1,
+  };
+}
+
+function contextNode(id: string): DesignNode {
+  return {
+    id,
+    kind: "page",
+    name: id,
+    geometry: { x: 0, y: 0, width: 320, height: 240 },
+    state: "empty",
+    currentVersionId: null,
+    selectedVersionId: null,
+    versionCount: 0,
+    assetId: null,
+    activeJobId: null,
+    error: null,
+    createdAt: 1,
+    updatedAt: 1,
   };
 }
 
@@ -90,6 +108,42 @@ test("panel controller publishes an optimistic Prompt immediately and reconciles
   expect(result.current.visibleOptimisticUserTurn).toBeNull();
   expect(result.current.draft).toBe("");
   expect(result.current.submitting).toBe(false);
+});
+
+test("panel controller consumes each context seed once after filtering, deduplicating, and capping it", async () => {
+  const nodes = Array.from({ length: 26 }, (_, index) => contextNode(`node-${index + 1}`));
+  const api = {
+    getThread: vi.fn(async () => thread({ type: "main" })),
+    // eslint-disable-next-line require-yield
+    streamInvalidations: vi.fn(async function* () {}),
+  } as unknown as DesignCanvasApi;
+  const initialSeed = ["missing", nodes[0]!.id, nodes[0]!.id, ...nodes.map((node) => node.id)];
+  const { result, rerender } = renderHook(
+    ({ generation, seed, availableNodes }: {
+      generation: number;
+      seed: readonly string[];
+      availableNodes: readonly DesignNode[];
+    }) => useCanvasAgentPanelController({
+      ...panelOptions({ api }),
+      nodes: availableNodes,
+      initialContextNodeIds: seed,
+      contextSeedGeneration: generation,
+    }),
+    { initialProps: { generation: 1, seed: initialSeed, availableNodes: nodes } },
+  );
+
+  expect(result.current.contextNodeIds).toEqual(nodes.slice(0, 24).map((node) => node.id));
+
+  act(() => result.current.setContextNodeIds([nodes[1]!.id]));
+  rerender({ generation: 1, seed: [nodes[25]!.id], availableNodes: [...nodes] });
+  expect(result.current.contextNodeIds).toEqual([nodes[1]!.id]);
+
+  rerender({
+    generation: 2,
+    seed: ["missing", nodes[25]!.id, nodes[25]!.id],
+    availableNodes: [...nodes],
+  });
+  await waitFor(() => expect(result.current.contextNodeIds).toEqual([nodes[25]!.id]));
 });
 
 test("a late thread response from the previous scope cannot replace the current scope", async () => {

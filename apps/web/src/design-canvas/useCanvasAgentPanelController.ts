@@ -30,6 +30,25 @@ export interface CanvasAgentSelection {
   model: string;
 }
 
+const MAX_INITIAL_CONTEXT_NODES = 24;
+
+function normalizedInitialContextNodeIds(
+  initialContextNodeIds: readonly string[] | undefined,
+  nodes: readonly DesignNode[],
+): string[] {
+  if (!initialContextNodeIds?.length || nodes.length === 0) return [];
+  const existingIds = new Set(nodes.map((node) => node.id));
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const nodeId of initialContextNodeIds) {
+    if (!existingIds.has(nodeId) || seen.has(nodeId)) continue;
+    seen.add(nodeId);
+    normalized.push(nodeId);
+    if (normalized.length === MAX_INITIAL_CONTEXT_NODES) break;
+  }
+  return normalized;
+}
+
 export interface UseCanvasAgentPanelControllerOptions {
   projectId: string;
   api: DesignCanvasApi;
@@ -41,6 +60,8 @@ export interface UseCanvasAgentPanelControllerOptions {
   agents: readonly AgentInfo[];
   initialAgentCommand: string;
   initialModel: string;
+  initialContextNodeIds?: readonly string[];
+  contextSeedGeneration?: number;
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onSubmit: (
@@ -69,6 +90,8 @@ export function useCanvasAgentPanelController({
   agents,
   initialAgentCommand,
   initialModel,
+  initialContextNodeIds,
+  contextSeedGeneration,
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onSubmit,
@@ -93,7 +116,10 @@ export function useCanvasAgentPanelController({
     setInternalAgentSelection(next);
     onAgentSelectionChange?.(next);
   }, [onAgentSelectionChange]);
-  const [contextNodeIds, setContextNodeIds] = useState<string[]>([]);
+  const [contextNodeIds, setContextNodeIds] = useState<string[]>(() => (
+    normalizedInitialContextNodeIds(initialContextNodeIds, nodes)
+  ));
+  const consumedContextSeedGenerationRef = useRef(contextSeedGeneration);
   const optimisticTurnSequenceRef = useRef(0);
   const threadLoadSequenceRef = useRef(0);
   const loadedThreadScopeRef = useRef<string | null>(null);
@@ -179,6 +205,13 @@ export function useCanvasAgentPanelController({
       return next.length === current.length ? current : next;
     });
   }, [nodes]);
+
+  useEffect(() => {
+    if (contextSeedGeneration === undefined
+      || consumedContextSeedGenerationRef.current === contextSeedGeneration) return;
+    consumedContextSeedGenerationRef.current = contextSeedGeneration;
+    setContextNodeIds(normalizedInitialContextNodeIds(initialContextNodeIds, nodes));
+  }, [contextSeedGeneration, initialContextNodeIds, nodes]);
 
   useEffect(() => {
     const selected = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;

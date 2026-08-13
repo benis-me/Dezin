@@ -270,8 +270,8 @@ export function FigmaImportDialog({
             <div className="min-w-0">
               <h2 className="text-base font-semibold tracking-tight">Import from Figma</h2>
               <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                Extract a Figma file into local Design.md, tokens.json, and components.json artifacts on this canvas.
-                This first version is an analysis import, not a pixel-perfect clone; restricted Variables are marked incomplete.
+                Import Figma structure, visual references, tokens, and components as local canvas artifacts.
+                Unavailable previews or metadata are reported as limitations.
               </p>
             </div>
           </div>

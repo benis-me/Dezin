@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import type { ParsedFigmaUrl } from "./figma-url.ts";
+import {
+  projectFigmaVisualLayout,
+  type FigmaVisualCandidate,
+} from "./figma-visual-projection.ts";
 
 const MAX_RAW_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_VARIABLE_BYTES = 8 * 1024 * 1024;
@@ -35,6 +39,36 @@ export interface NormalizedFigmaImport {
   designMarkdown: FigmaNormalizedPayload;
   tokensJson: FigmaNormalizedPayload;
   componentsJson: FigmaNormalizedPayload;
+  layoutJson: FigmaNormalizedPayload;
+  visualLayout: Record<string, unknown>;
+  visualCandidates: FigmaVisualCandidate[];
+  referenceRenders: Array<{
+    nodeId: string;
+    candidateIndex: number;
+    referencePath: string;
+    width: number;
+    height: number;
+    payload: FigmaNormalizedPayload;
+  }>;
+}
+
+export function finalizeFigmaVisualReferences(
+  normalized: NormalizedFigmaImport,
+  availableNodeIds: ReadonlySet<string>,
+  unavailableNodeIds: ReadonlySet<string>,
+): void {
+  const candidates = normalized.visualCandidates.map((candidate): FigmaVisualCandidate => ({
+    ...candidate,
+    referenceAvailability: availableNodeIds.has(candidate.nodeId) ? "available"
+      : unavailableNodeIds.has(candidate.nodeId) ? "unavailable"
+        : "pending",
+  }));
+  if (candidates.some((candidate) => candidate.referenceAvailability === "pending")) {
+    fail("Figma visual reference availability is incomplete");
+  }
+  normalized.visualCandidates = candidates;
+  normalized.visualLayout = { ...normalized.visualLayout, candidates };
+  normalized.layoutJson = payload(normalized.visualLayout, "Derived layout.json", MAX_DERIVED_BYTES);
 }
 
 export class FigmaNormalizationError extends Error {
@@ -93,6 +127,11 @@ export function containsEphemeralRemoteResourceUrl(value: string): boolean {
   return false;
 }
 
+export function containsEphemeralRemoteResourceBytes(value: Uint8Array): boolean {
+  const ascii = Buffer.from(value).toString("latin1").replace(/[^\x20-\x7e]+/g, " ");
+  return containsEphemeralRemoteResourceUrl(ascii);
+}
+
 function redactRemoteResourceUrls(value: string, allRemoteUrls: boolean): { value: string; omitted: number } {
   let omitted = 0;
   const redacted = value.replace(EMBEDDED_HTTP_URL, (candidate) => {
@@ -112,6 +151,23 @@ function requiredSemanticString(value: unknown, label: string, maxBytes: number,
 function optionalSemanticString(value: unknown, label: string, maxBytes: number): string | null {
   const result = optionalString(value, label, maxBytes);
   return result !== null && containsEphemeralRemoteResourceUrl(result) ? null : result;
+}
+
+function optionalSemanticPreview(
+  value: unknown,
+  label: string,
+  maxBytes: number,
+): { value: string | null; truncated: boolean } {
+  if (value === undefined || value === null || value === "") return { value: null, truncated: false };
+  if (typeof value !== "string" || !value.trim()) fail(`${label} is invalid`);
+  const result = value.trim();
+  if (containsEphemeralRemoteResourceUrl(result)) return { value: null, truncated: false };
+  const bytes = Buffer.from(result, "utf8");
+  if (bytes.length <= maxBytes) return { value: result, truncated: false };
+  const suffix = "…";
+  let end = maxBytes - Buffer.byteLength(suffix, "utf8");
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return { value: `${bytes.subarray(0, end).toString("utf8")}${suffix}`, truncated: true };
 }
 
 function canonicalValue(value: unknown, label: string): unknown {
@@ -214,14 +270,21 @@ function markdown(value: unknown): string {
     .trim();
 }
 
-function documentOutline(document: Record<string, unknown>): { lines: string[]; truncated: boolean } {
+function documentOutline(document: Record<string, unknown>): {
+  lines: string[];
+  truncated: boolean;
+  truncatedNames: number;
+} {
   const lines: string[] = [];
   let visited = 0;
+  let truncatedNames = 0;
   const visit = (node: unknown, depth: number) => {
     if (visited >= 500 || depth > 6) return;
     const current = record(node, "Figma document Node");
     visited += 1;
-    const name = optionalSemanticString(current.name, "Figma document Node name", 1_024) ?? "Untitled";
+    const namePreview = optionalSemanticPreview(current.name, "Figma document Node name", 1_024);
+    if (namePreview.truncated) truncatedNames += 1;
+    const name = namePreview.value ?? "Untitled";
     const type = optionalSemanticString(current.type, "Figma document Node type", 128) ?? "UNKNOWN";
     if (depth > 0) lines.push(`${"  ".repeat(depth - 1)}- ${markdown(name)} \`${markdown(type)}\``);
     if (current.children === undefined) return;
@@ -231,7 +294,7 @@ function documentOutline(document: Record<string, unknown>): { lines: string[]; 
   visit(document, 0);
   const truncated = visited >= 500;
   if (truncated) lines.push("- Outline truncated at the deterministic 500 Node budget.");
-  return { lines, truncated };
+  return { lines, truncated, truncatedNames };
 }
 
 function componentNames(components: Array<Record<string, unknown>>): string[] {
@@ -269,6 +332,7 @@ export function normalizeFigmaImport(input: {
     ? `omitted-remote-version-${createHash("sha256").update(rawVersion).digest("hex").slice(0, 16)}`
     : rawVersion;
   const document = record(file.document, "Figma File document");
+  const visual = projectFigmaVisualLayout(document, input.source.nodeIds);
   const editorType = optionalSemanticString(file.editorType, "Figma File editorType", 128);
   const role = optionalSemanticString(file.role, "Figma File role", 128);
   const linkAccess = optionalSemanticString(file.linkAccess, "Figma File linkAccess", 128);
@@ -279,6 +343,10 @@ export function normalizeFigmaImport(input: {
   const styles = keyedFacts(file.styles, "Figma File styles");
   const incomplete: string[] = [];
   const warnings: string[] = [];
+  if (visual.truncated) {
+    incomplete.push("visual-layout-node-budget");
+    warnings.push("layout.json was truncated at the deterministic visual Node budget.");
+  }
   if (input.depthLimited === true) {
     incomplete.push("depth-limited");
     warnings.push("The Figma document tree was fetched with an explicit depth limit.");
@@ -349,6 +417,10 @@ export function normalizeFigmaImport(input: {
     incomplete.push("outline-node-budget");
     warnings.push("Design.md outline was truncated at 500 Nodes.");
   }
+  if (outline.truncatedNames > 0) {
+    incomplete.push("outline-name-budget");
+    warnings.push(`${outline.truncatedNames} Figma document Node name(s) were truncated in the Design.md preview.`);
+  }
   const names = componentNames(components);
   const surfaceDescription = surface === "board" ? "research/knowledge"
     : surface === "slides" ? "storyboard"
@@ -406,5 +478,9 @@ export function normalizeFigmaImport(input: {
       componentSets,
       styles,
     }, "Derived components.json", MAX_DERIVED_BYTES),
+    layoutJson: payload(visual.layout, "Derived layout.json", MAX_DERIVED_BYTES),
+    visualLayout: visual.layout,
+    visualCandidates: visual.candidates,
+    referenceRenders: [],
   };
 }
