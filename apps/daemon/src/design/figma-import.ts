@@ -15,7 +15,11 @@ import {
 } from "@dezin/design-canvas-contracts";
 
 import { inspectBoundedPngImage } from "../bounded-png.ts";
-import { ensureDesignCanvasAssetBatch, getDesignCanvas } from "./design-storage.ts";
+import {
+  assertDesignCanvasTarget,
+  ensureDesignCanvasAssetBatch,
+  getDesignCanvas,
+} from "./design-storage.ts";
 import { designRoot } from "./design-storage-primitives.ts";
 import type { ResolvedFigmaCredential } from "./figma-credential-store.ts";
 import {
@@ -764,8 +768,8 @@ async function cleanDeadPendingLeaseOwners(queueRoot: string): Promise<void> {
   if (changed) await syncDirectory(queueRoot);
 }
 
-async function withFilesystemImportLease<T>(
-  jobFile: string,
+async function withFilesystemFigmaProjectLease<T>(
+  authorityRoot: string,
   signal: AbortSignal | undefined,
   afterOwnerDurable: (() => void | Promise<void>) | undefined,
   afterObservedPredecessor: (() => void | Promise<void>) | undefined,
@@ -773,9 +777,7 @@ async function withFilesystemImportLease<T>(
   afterDirectoryDurable: ((path: string, parent: string) => void | Promise<void>) | undefined,
   operation: (assertLease: () => Promise<void>) => Promise<T>,
 ): Promise<T> {
-  const receiptRoot = dirname(jobFile);
-  const parent = dirname(receiptRoot);
-  const queueRoot = join(parent, `.${basename(receiptRoot)}.lease-queue`);
+  const queueRoot = join(authorityRoot, ".project.lease-queue");
   const nonce = randomUUID();
   const owner: ImportLeaseOwner = {
     pid: process.pid,
@@ -783,7 +785,7 @@ async function withFilesystemImportLease<T>(
     createdAt: Date.now(),
     processStartIdentity: await processStartIdentity(process.pid),
   };
-  await ensureDurableDirectory(parent, "Figma import Jobs authority root", afterDirectoryDurable);
+  await ensureDurableDirectory(authorityRoot, "Figma import Jobs authority root", afterDirectoryDurable);
   await ensureDurableDirectory(queueRoot, "Figma import lease queue", afterDirectoryDurable);
   await cleanDeadPendingLeaseOwners(queueRoot);
   const pending = join(queueRoot, `.pending-${nonce}`);
@@ -1527,15 +1529,20 @@ export async function importFigmaDesignProject(
   return withFigmaProjectLease(options, request.projectId, async () => {
     // The target is existing Canvas authority. Validate it before credential
     // resolution or creation of any receipt/lease directories.
-    await getDesignCanvas(options.dataDir, request.projectId);
-    return withFilesystemImportLease(
-      path,
+    await assertDesignCanvasTarget(options.dataDir, request.projectId);
+    return withFilesystemFigmaProjectLease(
+      jobsRoot(options.dataDir, request.projectId),
       options.signal,
       options.testHooks?.afterLeaseOwnerDurable,
       options.testHooks?.afterLeaseObservedPredecessor,
       options.testHooks?.afterLeaseProcessIdentityCheck,
       options.testHooks?.afterAuthorityDirectoryDurable,
       async (assertLease) => {
+        await assertLease();
+        // Canvas reads may recover an interrupted Asset transaction. Keep that
+        // recovery under the same Project-wide cross-process fence as every
+        // Figma Asset writer so it cannot delete another live staging tree.
+        await getDesignCanvas(options.dataDir, request.projectId);
         await assertLease();
         let existing = await readJob(path, request.projectId);
         if (existing && existing.requestHash !== requestHash) {

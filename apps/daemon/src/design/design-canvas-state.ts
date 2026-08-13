@@ -321,6 +321,17 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
     });
   }
 
+  /**
+   * Validate an existing Design Canvas without running transaction recovery or
+   * creating authority directories. Callers use this before acquiring a
+   * durable operation lease so missing Projects remain side-effect free.
+   */
+  async function assertDesignCanvasTarget(dataDir: string, projectId: string): Promise<void> {
+    const root = designRoot(dataDir, projectId);
+    await requireInitialized(root);
+    await readCanvasUnlocked(root);
+  }
+
   function retireNodeIdentities(project: DesignProjectFile, candidates: Iterable<string>): void {
     const additions: string[] = [];
     for (const id of candidates) {
@@ -620,6 +631,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
 
   return {
     addNode,
+    assertDesignCanvasTarget,
     assertStoredProject,
     canvas,
     cloneNode,

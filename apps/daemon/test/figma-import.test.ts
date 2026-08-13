@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile as execFileCallback } from "node:child_process";
-import { createHash } from "node:crypto";
+import { execFile as execFileCallback, fork, type ChildProcess } from "node:child_process";
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +22,75 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 
 const execFile = promisify(execFileCallback);
+
+interface FigmaImportWorkerResult {
+  projectId: string;
+  importId: string;
+  nodeIds: string[];
+}
+
+interface RunningFigmaImportWorker {
+  child: ChildProcess;
+  signal: Promise<unknown>;
+  result: Promise<FigmaImportWorkerResult>;
+}
+
+function startFigmaImportWorker(
+  dataDir: string,
+  projectId: string,
+  mode: string,
+  idempotencyKey = "figma-cross-process-1",
+): RunningFigmaImportWorker {
+  const worker = join(import.meta.dirname, "support", "figma-import-worker.ts");
+  const child = fork(worker, [dataDir, projectId, mode, idempotencyKey], {
+    cwd: join(import.meta.dirname, "../../.."),
+    execArgv: ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings"],
+    silent: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+  const signal = new Promise<unknown>((resolve, reject) => {
+    let received = false;
+    child.once("message", (message) => {
+      received = true;
+      resolve(message);
+    });
+    child.once("error", reject);
+    child.once("exit", (code, exitSignal) => {
+      if (!received) reject(new Error(`Figma import worker exited before signalling: ${code ?? exitSignal ?? "unknown"}`));
+    });
+  });
+  const result = new Promise<FigmaImportWorkerResult>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, exitSignal) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `Figma import worker exited with ${code ?? exitSignal ?? "unknown"}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as FigmaImportWorkerResult);
+      } catch (error) {
+        reject(new Error(`Figma import worker returned invalid JSON: ${stdout}`, { cause: error }));
+      }
+    });
+  });
+  void result.catch(() => {});
+  return { child, signal, result };
+}
+
+function settleWindow(milliseconds: number): Promise<null> {
+  return new Promise((resolve) => setTimeout(() => resolve(null), milliseconds));
+}
+
+function terminateFigmaImportWorker(worker: RunningFigmaImportWorker): void {
+  if (worker.child.exitCode !== null || worker.child.signalCode !== null) return;
+  worker.child.kill("SIGCONT");
+  worker.child.kill("SIGTERM");
+}
 
 const input = {
   schemaVersion: 1 as const,
@@ -1377,24 +1445,65 @@ test("staged visual layout availability must exactly match durable reference art
   }), (error: unknown) => error instanceof FigmaImportError && error.code === "corrupt");
 });
 
-test("two daemon processes converge on one Project-local Figma Job and Import identity", async (t) => {
+test("two daemon processes converge on one Project-local Figma Job even when one validates during live Asset staging", { timeout: 15_000 }, async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-cross-process-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const projectId = await existingProjectId(dataDir);
-  const worker = join(import.meta.dirname, "support", "figma-import-worker.ts");
-  const command = ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", worker, dataDir, projectId];
-  const [left, right] = await Promise.all([
-    execFile(process.execPath, command, { cwd: join(import.meta.dirname, "../../..") }),
-    execFile(process.execPath, command, { cwd: join(import.meta.dirname, "../../..") }),
-  ]);
-  const first = JSON.parse(left.stdout) as { projectId: string; importId: string };
-  const second = JSON.parse(right.stdout) as typeof first;
+  const firstWorker = startFigmaImportWorker(dataDir, projectId, "pause-during-asset-staging");
+  t.after(() => terminateFigmaImportWorker(firstWorker));
+  const firstSignal = await firstWorker.signal as { type?: string };
+  assert.equal(firstSignal.type, "asset-staging");
+
+  const secondWorker = startFigmaImportWorker(dataDir, projectId, "notify-after-predecessor");
+  t.after(() => terminateFigmaImportWorker(secondWorker));
+  await Promise.race([secondWorker.signal, settleWindow(250)]);
+  firstWorker.child.kill("SIGCONT");
+
+  const [first, second] = await Promise.all([firstWorker.result, secondWorker.result]);
   assert.deepEqual(second, first);
   const projects = await readdir(join(dataDir, "projects"));
   assert.deepEqual(projects, [projectId]);
   assert.equal((await getDesignCanvas(dataDir, first.projectId)).revision, 1);
   const calls = (await readFile(join(dataDir, "figma-worker-calls.log"), "utf8")).trim().split("\n").sort();
   assert.deepEqual(calls, ["credential", "file", "metadata", "metadata", "variables"]);
+});
+
+test("two different Figma import requests concurrently commit every artifact to the same Project", { timeout: 15_000 }, async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-cross-process-different-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const projectId = await existingProjectId(dataDir);
+  const firstWorker = startFigmaImportWorker(
+    dataDir,
+    projectId,
+    "pause-during-asset-staging",
+    "figma-cross-process-left-1",
+  );
+  t.after(() => terminateFigmaImportWorker(firstWorker));
+  const firstSignal = await firstWorker.signal as { type?: string };
+  assert.equal(firstSignal.type, "asset-staging");
+
+  const secondWorker = startFigmaImportWorker(
+    dataDir,
+    projectId,
+    "notify-after-predecessor",
+    "figma-cross-process-right-1",
+  );
+  t.after(() => terminateFigmaImportWorker(secondWorker));
+  await Promise.race([secondWorker.signal, settleWindow(250)]);
+  firstWorker.child.kill("SIGCONT");
+
+  const [first, second] = await Promise.all([firstWorker.result, secondWorker.result]);
+  assert.equal(first.projectId, projectId);
+  assert.equal(second.projectId, projectId);
+  assert.notEqual(second.importId, first.importId);
+  assert.equal(new Set([...first.nodeIds, ...second.nodeIds]).size, first.nodeIds.length + second.nodeIds.length);
+
+  const canvas = await getDesignCanvas(dataDir, projectId);
+  assert.equal(canvas.revision, 2);
+  assert.deepEqual(
+    new Set(canvas.nodes.map((node) => node.id)),
+    new Set([...first.nodeIds, ...second.nodeIds]),
+  );
 });
 
 test("a real process exit after snapshot publication leaves a stale ticket that offline replay safely adopts", async (t) => {
@@ -1445,8 +1554,7 @@ test("malformed non-authoritative pending lease files age out without exhausting
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const key = "figma-pending-gc-1";
   const projectId = await existingProjectId(dataDir);
-  const receipt = createHash("sha256").update(`dezin-figma-canvas-import-v1\0${key}`).digest("hex");
-  const queue = join(figmaJobsRoot(dataDir, projectId), `.${receipt}.lease-queue`);
+  const queue = join(figmaJobsRoot(dataDir, projectId), ".project.lease-queue");
   await mkdir(queue, { recursive: true, mode: 0o700 });
   const orphan = join(queue, ".pending-00000000-0000-4000-8000-000000000000");
   await writeFile(orphan, "partial", { mode: 0o600 });

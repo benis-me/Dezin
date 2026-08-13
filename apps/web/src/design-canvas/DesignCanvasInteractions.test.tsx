@@ -1081,11 +1081,13 @@ test("hover labels receive the latest inverse zoom synchronously on every viewpo
   const surface = screen.getByRole("region", { name: "Infinite Design canvas" });
   expect(flowHarness.props?.onViewportChange).toBeTypeOf("function");
 
-  flowHarness.props?.onViewportChange?.({ x: 0, y: 0, zoom: 0.5 });
+  flowHarness.viewport = { x: 0, y: 0, zoom: 0.5 };
+  flowHarness.props?.onViewportChange?.(flowHarness.viewport);
   expect(Number(surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale"))).toBeCloseTo(2);
   expect(Number.parseFloat(surface.style.getPropertyValue("--design-canvas-hover-label-inset"))).toBeCloseTo(24);
 
-  flowHarness.props?.onViewportChange?.({ x: 0, y: 0, zoom: 2.4 });
+  flowHarness.viewport = { x: 0, y: 0, zoom: 2.4 };
+  flowHarness.props?.onViewportChange?.(flowHarness.viewport);
   expect(Number(surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale"))).toBeCloseTo(1 / 2.4);
   expect(Number.parseFloat(surface.style.getPropertyValue("--design-canvas-hover-label-inset"))).toBeCloseTo(5);
 

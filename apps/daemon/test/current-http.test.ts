@@ -26,7 +26,9 @@ async function waitForReadyJob(
   transport: typeof fetch = fetch,
 ): Promise<void> {
   let consecutiveTransportFailures = 0;
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+  let lastStatus = "missing";
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     let response: Response;
     try {
       response = await transport(`${base}/api/projects/${projectId}/design-canvas/jobs`);
@@ -46,13 +48,14 @@ async function waitForReadyJob(
       error: string | null;
     }>;
     const job = jobs.find((candidate) => candidate.id === jobId);
+    lastStatus = job?.status ?? "missing";
     if (job?.status === "ready") return;
     if (job && ["failed", "cancelled", "superseded"].includes(job.status)) {
       assert.fail(`Job ${jobId} became ${job.status}: ${job.error ?? "unknown error"}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail(`Job ${jobId} did not become ready`);
+  assert.fail(`Job ${jobId} did not become ready within 30 seconds (last status: ${lastStatus})`);
 }
 
 test("Job HTTP polling tolerates one transient loopback transport reset", async () => {

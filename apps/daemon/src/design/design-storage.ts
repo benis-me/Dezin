@@ -84,6 +84,7 @@ const {
 } = canvasState;
 
 export const initializeDesignProject = canvasState.initializeDesignProject;
+export const assertDesignCanvasTarget = canvasState.assertDesignCanvasTarget;
 export const getDesignCanvas = canvasState.getDesignCanvas;
 export const mutateDesignCanvas = canvasState.mutateDesignCanvas;
 export const undoDesignCanvas = canvasState.undoDesignCanvas;
