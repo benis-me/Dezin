@@ -417,6 +417,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         <div ref={canvas.hostRef} data-testid="moodboard-leafer-canvas" className="h-full w-full overflow-hidden">
           <Leafer
             fill="#f7f7f5"
+            exclusiveGlobalResourceOwnership
             editor={MOODBOARD_LEAFER_EDITOR_CONFIG}
             wheel={{ preventDefault: true }}
             move={{ dragEmpty: canvas.tool === "hand" && capabilities.panZoom }}

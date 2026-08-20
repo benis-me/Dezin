@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 
 const css = readFileSync(join(process.cwd(), "src/design-canvas/design-canvas.css"), "utf8");
 const conversationCss = readFileSync(join(process.cwd(), "src/components/agent-conversation.css"), "utf8");
-const primitivesCss = readFileSync(join(process.cwd(), "src/design-canvas/dezin-agent-primitives.css"), "utf8");
+const require = createRequire(import.meta.url);
+const primitivesCss = readFileSync(require.resolve("@capability-foundry/agent-ui/styles.css"), "utf8");
 const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8");
 const focusedChromeSource = readFileSync(join(process.cwd(), "src/design-canvas/FocusedNodeChrome.tsx"), "utf8");
 const floatingAgentSource = readFileSync(join(process.cwd(), "src/design-canvas/FloatingNodeAgent.tsx"), "utf8");

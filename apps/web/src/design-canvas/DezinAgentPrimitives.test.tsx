@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
@@ -15,6 +16,9 @@ import {
   DezinAgentThinking,
   DezinAgentToolGroup,
 } from "./DezinAgentPrimitives.tsx";
+
+const require = createRequire(import.meta.url);
+const primitivesCssPath = require.resolve("@capability-foundry/agent-ui/styles.css");
 
 test("Loading State announces real progress without exposing its decorative pixel grid", () => {
   const { container } = render(
@@ -53,7 +57,7 @@ test("Loading State keeps the source pixel geometry and drive-orbit timing patte
   ]);
   expect(orbitPixels.every((pixel) => pixel.style.getPropertyValue("--pixel-duration") === "950ms")).toBe(true);
 
-  const css = readFileSync(resolve(process.cwd(), "src/design-canvas/dezin-agent-primitives.css"), "utf8");
+  const css = readFileSync(primitivesCssPath, "utf8");
   expect(css).toMatch(/grid-template-columns:\s*repeat\(3,\s*4px\)/);
   expect(css).toMatch(/gap:\s*1\.5px/);
   expect(css).toMatch(/width:\s*4px;[^}]*height:\s*4px;/s);
@@ -99,7 +103,7 @@ test("Insight Cards page through supplied metrics without manufacturing a chart"
 });
 
 test("the Dezin primitive stylesheet locks the 324px, radius, row, and motion contracts", () => {
-  const css = readFileSync(resolve(process.cwd(), "src/design-canvas/dezin-agent-primitives.css"), "utf8");
+  const css = readFileSync(primitivesCssPath, "utf8");
   const source = readFileSync(resolve(process.cwd(), "src/design-canvas/DezinAgentPrimitives.tsx"), "utf8");
 
   expect(css).toMatch(/\.dezin-agent\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*min-width:\s*0;/s);

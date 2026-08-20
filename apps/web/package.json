@@ -12,6 +12,8 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@capability-foundry/agent-ui": "file:../../vendor/capability-foundry-agent-ui-0.1.0.tgz",
+    "@capability-foundry/design-foundation": "file:../../vendor/capability-foundry-design-foundation-0.1.0.tgz",
     "@dezin/design-canvas-contracts": "workspace:*",
     "@dezin/leafer-react": "workspace:*",
     "@dnd-kit/react": "^0.5.0",

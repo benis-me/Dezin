@@ -8,24 +8,23 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --no-warnings --test 'src/plugins/*.test.ts'",
-    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=85 --test-coverage-branches=54 --test-coverage-functions=80 --test 'src/plugins/*.test.ts'",
+    "test": "node --experimental-strip-types --no-warnings --test src/index.test.ts",
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test src/index.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "react-reconciler": "^0.33.0"
+    "@capability-foundry/leafer-react": "file:../../vendor/capability-foundry-leafer-react-0.1.0.tgz"
   },
   "peerDependencies": {
     "@leafer-in/editor": "2.1.10",
     "@leafer-in/flow": "2.1.10",
     "leafer-editor": "2.1.10",
-    "react": "^19.0.0"
+    "react": ">=19.2.0 <20"
   },
   "devDependencies": {
     "@leafer-in/editor": "2.1.10",
     "@leafer-in/flow": "2.1.10",
     "@types/react": "^19.0.0",
-    "@types/react-reconciler": "^0.33.0",
     "leafer-editor": "2.1.10",
     "typescript": "^5.7.2"
   }

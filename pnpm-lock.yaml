@@ -88,6 +88,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@capability-foundry/agent-ui':
+        specifier: file:../../vendor/capability-foundry-agent-ui-0.1.0.tgz
+        version: file:vendor/capability-foundry-agent-ui-0.1.0.tgz(react@19.2.7)
+      '@capability-foundry/design-foundation':
+        specifier: file:../../vendor/capability-foundry-design-foundation-0.1.0.tgz
+        version: file:vendor/capability-foundry-design-foundation-0.1.0.tgz
       '@dezin/design-canvas-contracts':
         specifier: workspace:*
         version: link:../../packages/design-canvas-contracts
@@ -246,12 +252,12 @@ importers:
 
   packages/leafer-react:
     dependencies:
+      '@capability-foundry/leafer-react':
+        specifier: file:../../vendor/capability-foundry-leafer-react-0.1.0.tgz
+        version: file:vendor/capability-foundry-leafer-react-0.1.0.tgz(@leafer-in/editor@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/core@2.1.10)(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-in/flow@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(leafer-editor@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(react@19.2.7)
       react:
-        specifier: ^19.0.0
+        specifier: '>=19.2.0 <20'
         version: 19.2.7
-      react-reconciler:
-        specifier: ^0.33.0
-        version: 0.33.0(react@19.2.7)
     devDependencies:
       '@leafer-in/editor':
         specifier: 2.1.10
@@ -262,9 +268,6 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.17
-      '@types/react-reconciler':
-        specifier: ^0.33.0
-        version: 0.33.0(@types/react@19.2.17)
       leafer-editor:
         specifier: 2.1.10
         version: 2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10)
@@ -404,6 +407,28 @@ packages:
 
   '@braintree/sanitize-url@7.1.2':
     resolution: {integrity: sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA==}
+
+  '@capability-foundry/agent-ui@file:vendor/capability-foundry-agent-ui-0.1.0.tgz':
+    resolution: {integrity: sha512-DUMy5uUp6fhZj8uQ1MGOCJHyeKOlQjKYRPG9WqAo0LBPvdP/+iJjjTR6p7/juOqbgOKvLvRjMqFUCTkpiKTJyQ==, tarball: file:vendor/capability-foundry-agent-ui-0.1.0.tgz}
+    version: 0.1.0
+    engines: {node: '>=22'}
+    peerDependencies:
+      react: '>=19 <20'
+
+  '@capability-foundry/design-foundation@file:vendor/capability-foundry-design-foundation-0.1.0.tgz':
+    resolution: {integrity: sha512-Mv5hPgOh8rG/mT5ccK+EaJVqaK/yg5te2Nx/mIN65GReTRLwBDebsp5XI/4VY1vAEzQz/V5oVCHqJUXHCkThCw==, tarball: file:vendor/capability-foundry-design-foundation-0.1.0.tgz}
+    version: 0.1.0
+    engines: {node: '>=22'}
+
+  '@capability-foundry/leafer-react@file:vendor/capability-foundry-leafer-react-0.1.0.tgz':
+    resolution: {integrity: sha512-X5PwtNpJ67a4maQRFDPabvYMP5NVp+ThycL7mKHl4a9gtbOSUAVfDTer5m6G4lVAaKYT1uBgV/YdcPUphG3MYA==, tarball: file:vendor/capability-foundry-leafer-react-0.1.0.tgz}
+    version: 0.1.0
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@leafer-in/editor': '>=2.0.8 <2.2.0'
+      '@leafer-in/flow': '>=2.0.8 <2.2.0'
+      leafer-editor: '>=2.0.8 <2.2.0'
+      react: '>=19.2.0 <20'
 
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
@@ -1943,11 +1968,6 @@ packages:
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
     peerDependencies:
       '@types/react': ^19.2.0
-
-  '@types/react-reconciler@0.33.0':
-    resolution: {integrity: sha512-HZOXsKT0tGI9LlUw2LuedXsVeB88wFa536vVL0M6vE8zN63nI+sSr1ByxmPToP5K5bukaVscyeCJcF9guVNJ1g==}
-    peerDependencies:
-      '@types/react': '*'
 
   '@types/react@19.2.17':
     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
@@ -3770,6 +3790,20 @@ snapshots:
 
   '@braintree/sanitize-url@7.1.2': {}
 
+  '@capability-foundry/agent-ui@file:vendor/capability-foundry-agent-ui-0.1.0.tgz(react@19.2.7)':
+    dependencies:
+      react: 19.2.7
+
+  '@capability-foundry/design-foundation@file:vendor/capability-foundry-design-foundation-0.1.0.tgz': {}
+
+  '@capability-foundry/leafer-react@file:vendor/capability-foundry-leafer-react-0.1.0.tgz(@leafer-in/editor@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/core@2.1.10)(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-in/flow@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(leafer-editor@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(react@19.2.7)':
+    dependencies:
+      '@leafer-in/editor': 2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/core@2.1.10)(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10)
+      '@leafer-in/flow': 2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-in/resize@2.1.10(@leafer-in/interface@2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10))(@leafer-ui/draw@2.1.10)(@leafer-ui/interface@2.1.10)
+      leafer-editor: 2.1.10(@leafer-ui/interface@2.1.10)(@leafer/interface@2.1.10)
+      react: 19.2.7
+      react-reconciler: 0.33.0(react@19.2.7)
+
   '@chevrotain/types@11.1.2': {}
 
   '@csstools/color-helpers@5.1.0': {}
@@ -5462,10 +5496,6 @@ snapshots:
       undici-types: 8.3.0
 
   '@types/react-dom@19.2.3(@types/react@19.2.17)':
-    dependencies:
-      '@types/react': 19.2.17
-
-  '@types/react-reconciler@0.33.0(@types/react@19.2.17)':
     dependencies:
       '@types/react': 19.2.17
 

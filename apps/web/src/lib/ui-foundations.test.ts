@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 
 import {
@@ -37,9 +38,14 @@ test("the web shell uses self-hosted Fontsource assets without remote font origi
 });
 
 test("manual light and dark themes expose their color scheme to native controls", () => {
-  const css = readFileSync(resolve(process.cwd(), "src/styles/globals.css"), "utf8");
-  expect(css).toMatch(/:root\s*\{[^}]*color-scheme:\s*light;/s);
-  expect(css).toMatch(/\.dark\s*\{[^}]*color-scheme:\s*dark;/s);
+  const shellCss = readFileSync(resolve(process.cwd(), "src/styles/globals.css"), "utf8");
+  const themeCss = readFileSync(
+    fileURLToPath(import.meta.resolve("@capability-foundry/design-foundation/theme.css")),
+    "utf8",
+  );
+  expect(shellCss).toContain('@import "@capability-foundry/design-foundation/theme.css"');
+  expect(themeCss).toMatch(/:root\s*\{[^}]*color-scheme:\s*light;/s);
+  expect(themeCss).toMatch(/\.dark\s*\{[^}]*color-scheme:\s*dark;/s);
 });
 
 test("Agent availability explains every selectable runtime state", () => {
