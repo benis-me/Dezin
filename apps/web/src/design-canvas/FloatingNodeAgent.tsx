@@ -341,6 +341,7 @@ export function CanvasAgentPanel({
     contextNodeIds,
     setContextNodeIds,
     relatedJobs,
+    activeTurnJob,
     nodeNames,
     scopedNode,
     mainJobGroups,
@@ -376,6 +377,22 @@ export function CanvasAgentPanel({
     onAttachFiles,
     onRescanAgents,
   });
+
+  const activeTurnLabel = scope.type === "main"
+    ? "Canvas plan"
+    : `${scopedNode?.name ?? "Node"} Agent`;
+  const {
+    stopping: stoppingActiveTurn,
+    stopError: activeTurnStopError,
+    dismissStopError: dismissActiveTurnStopError,
+    stop: stopActiveTurn,
+  } = useJobActionController({
+    jobId: activeTurnJob?.id ?? "",
+    active: activeTurnJob !== null,
+    displayLabel: activeTurnLabel,
+    onCancel: onCancelJob,
+  });
+  const composerError = threadError ?? activeTurnStopError;
 
   const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
   const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
@@ -616,22 +633,35 @@ export function CanvasAgentPanel({
                 )}
               </div>
               <Button
+                type="button"
                 size="icon-sm"
-                aria-label={`Send to ${title}`}
-                disabled={!draft.trim() || submitting || !activeAgent}
-                onClick={() => void submit()}
+                variant={activeTurnJob ? "destructive" : "default"}
+                aria-label={activeTurnJob
+                  ? `${stoppingActiveTurn ? "Stopping" : "Stop"} ${activeTurnLabel}`
+                  : `Send to ${title}`}
+                aria-busy={stoppingActiveTurn || undefined}
+                title={activeTurnJob ? `Stop ${activeTurnLabel}` : undefined}
+                disabled={activeTurnJob
+                  ? stoppingActiveTurn
+                  : !draft.trim() || submitting || !activeAgent}
+                onClick={() => {
+                  if (activeTurnJob) void stopActiveTurn();
+                  else void submit();
+                }}
                 className="size-7"
               >
                 <IconSwap
-                  active={submitting}
-                  first={<ArrowUp aria-hidden />}
-                  second={<LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />}
+                  active={activeTurnJob !== null}
+                  first={submitting
+                    ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
+                    : <ArrowUp aria-hidden />}
+                  second={<Square aria-hidden fill="currentColor" />}
                 />
               </Button>
             </div>
           </div>
         </BorderBeam>
-        {threadError ? (
+        {composerError ? (
           <motion.div
             role="alert"
             className="design-canvas-agent__composer-notice"
@@ -640,8 +670,14 @@ export function CanvasAgentPanel({
             transition={{ duration: reduceMotion ? 0 : 0.18, ease: AGENT_MOTION_EASE }}
           >
             <CircleAlert aria-hidden />
-            <span>{threadError}</span>
-            <button type="button" aria-label="Dismiss Agent error" onClick={dismissThreadError}><X aria-hidden /></button>
+            <span>{composerError}</span>
+            <button
+              type="button"
+              aria-label="Dismiss Agent error"
+              onClick={threadError ? dismissThreadError : dismissActiveTurnStopError}
+            >
+              <X aria-hidden />
+            </button>
           </motion.div>
         ) : null}
       </div>

@@ -124,6 +124,53 @@ test("Main Agent accepts an ordinary text conversation without creating Canvas w
   }
 });
 
+test("Main Agent admits only one live orchestration turn per project", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-single-flight-"));
+  const projectId = "project-main-single-flight";
+  let releaseFirst!: () => void;
+  let markFirstRunning!: () => void;
+  const firstRunning = new Promise<void>((resolve) => { markFirstRunning = resolve; });
+  const release = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const first = await startDesignMainTurn({
+      dataDir,
+      projectId,
+      message: "Coordinate the first canvas turn.",
+      runner: runner("main-single-flight", async () => {
+        markFirstRunning();
+        await release;
+        return {
+          text: JSON.stringify({ reply: "First turn complete.", canvasIntents: [], dispatches: [] }),
+          artifactHtml: "",
+        };
+      }),
+      systemPrompt: "Return the exact orchestration JSON envelope.",
+      async dispatchNode() { throw new Error("must not dispatch"); },
+    });
+    await firstRunning;
+
+    await assert.rejects(startDesignMainTurn({
+      dataDir,
+      projectId,
+      message: "Start a second turn while the first is running.",
+      runner: runner("main-single-flight", async () => ({
+        text: "This runner must not start.",
+        artifactHtml: "",
+      })),
+      systemPrompt: "Return the exact orchestration JSON envelope.",
+      async dispatchNode() { throw new Error("must not dispatch"); },
+    }), /already has an active Main Agent Job/i);
+
+    releaseFirst();
+    assert.equal((await first.completion).status, "ready");
+    assert.equal((await listDesignJobs(dataDir, projectId)).filter((job) => job.kind === "main-agent").length, 1);
+  } finally {
+    releaseFirst?.();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Main Agent returns one invalid command-envelope diagnostic for an in-place repair", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-plan-repair-"));
   const projectId = "project-main-plan-repair";

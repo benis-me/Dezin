@@ -1270,6 +1270,16 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
           };
         }
       }
+      if (input.kind === "main-agent") {
+        // ponytail: Main turns are rare; scan the existing Jobs instead of maintaining a second active-run index.
+        const activeMainJob = (await listDesignJobsUnlocked(root)).find((job) => (
+          job.kind === "main-agent"
+          && (job.status === "queued" || job.status === "running" || job.status === "validating")
+        ));
+        if (activeMainJob) {
+          throw new DesignStorageError("conflict", "Design project already has an active Main Agent Job");
+        }
+      }
       const unavailableContextId = contextNodeIds.find((id) => !nodes.has(id));
       if (unavailableContextId !== undefined) {
         throw new DesignStorageError(

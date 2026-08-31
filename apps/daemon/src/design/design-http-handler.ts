@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
-import type { AgentRunner } from "../../../../packages/agent/src/index.ts";
+import { dedupModels, type AgentRunner } from "../../../../packages/agent/src/index.ts";
 import type { Settings } from "../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../app.ts";
 import { HttpError, readJsonBody, sendJson } from "../http-util.ts";
@@ -224,7 +224,9 @@ function boundedString(value: unknown, label: string, maximum: number, optional 
 /** Undefined inherits Settings; null explicitly requests the provider's default model. */
 function optionalDesignModel(value: unknown): string | null | undefined {
   if (value === undefined || value === null) return value;
-  return boundedString(value, "model", 512);
+  const model = boundedString(value, "model", 512)!;
+  if (dedupModels([model]).length !== 1) throw new HttpError(400, "model is invalid");
+  return model;
 }
 
 function effectiveDesignAgent(
@@ -234,11 +236,13 @@ function effectiveDesignAgent(
   const settingsAgentCommand = settings.agentCommand.trim() || "claude";
   const agentCommand = (override.agentCommand ?? settingsAgentCommand).trim() || "claude";
   const settingsModel = settings.model.trim();
+  const model = override.model !== undefined
+    ? override.model
+    : (agentCommand === settingsAgentCommand ? settingsModel || null : null);
+  if (model !== null && dedupModels([model]).length !== 1) throw new HttpError(400, "model is invalid");
   return {
     agentCommand,
-    model: override.model !== undefined
-      ? override.model
-      : (agentCommand === settingsAgentCommand ? settingsModel || null : null),
+    model,
   };
 }
 

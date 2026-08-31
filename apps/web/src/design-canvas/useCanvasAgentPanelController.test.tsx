@@ -3,7 +3,7 @@ import { expect, test, vi } from "vitest";
 
 import type { AgentInfo } from "../lib/api.ts";
 import type { DesignCanvasApi } from "./api.ts";
-import type { DesignInvalidationMessage, DesignNode, DesignThread, DesignThreadScope } from "./types.ts";
+import type { DesignInvalidationMessage, DesignJob, DesignNode, DesignThread, DesignThreadScope } from "./types.ts";
 import {
   useAgentTranscriptController,
   useCanvasAgentPanelController,
@@ -51,10 +51,12 @@ function contextNode(id: string): DesignNode {
 function panelOptions({
   api,
   scope = { type: "main" },
+  jobs = [],
   onSubmit = vi.fn(async () => {}),
 }: {
   api: DesignCanvasApi;
   scope?: DesignThreadScope;
+  jobs?: readonly DesignJob[];
   onSubmit?: (prompt: string, nodeIds: readonly string[], selection: { agentCommand?: string; model?: string | null }) => Promise<void>;
 }) {
   return {
@@ -62,7 +64,7 @@ function panelOptions({
     api,
     scope,
     nodes: [],
-    jobs: [],
+    jobs,
     versions: [],
     agents: [AGENT],
     initialAgentCommand: AGENT.command,
@@ -90,24 +92,76 @@ test("panel controller publishes an optimistic Prompt immediately and reconciles
     finishSubmit = resolve;
   }));
   const api = { getThread } as unknown as DesignCanvasApi;
-  const { result } = renderHook(() => useCanvasAgentPanelController(panelOptions({ api, onSubmit })));
+  const { result } = renderHook(() => useCanvasAgentPanelController({
+    ...panelOptions({ api, onSubmit }),
+    agentSelection: { agentCommand: "claude", model: "claude-opus-5[1m]" },
+  }));
 
   await waitFor(() => expect(result.current.thread).toEqual(initial));
   act(() => result.current.setDraft("Build the launch page"));
-  act(() => void result.current.submit());
+  act(() => {
+    void result.current.submit();
+    void result.current.submit();
+  });
 
   expect(result.current.visibleOptimisticUserTurn?.message.content).toBe("Build the launch page");
   expect(result.current.submitting).toBe(true);
+  expect(result.current.draft).toBe("");
   expect(onSubmit).toHaveBeenCalledWith("Build the launch page", [], {
     agentCommand: "claude",
     model: null,
   });
 
+  act(() => result.current.setDraft("Review the copy next"));
   await act(async () => finishSubmit());
   await waitFor(() => expect(result.current.thread).toEqual(canonical));
   expect(result.current.visibleOptimisticUserTurn).toBeNull();
-  expect(result.current.draft).toBe("");
+  expect(result.current.draft).toBe("Review the copy next");
   expect(result.current.submitting).toBe(false);
+});
+
+test("panel controller keeps the next Prompt editable while the current scope turn is live", async () => {
+  const activeJob: DesignJob = {
+    schemaVersion: 2,
+    id: "job-active-main",
+    kind: "main-agent",
+    runnerId: "claude",
+    model: null,
+    status: "running",
+    nodeId: null,
+    parentJobId: null,
+    contextHash: "a".repeat(64),
+    canvasRevision: 0,
+    expectedHeadVersionId: null,
+    versionId: null,
+    exportId: null,
+    error: null,
+    cancelRequested: false,
+    conversationOnly: false,
+    activity: [],
+    createdAt: 1,
+    updatedAt: 2,
+    finishedAt: null,
+  };
+  const api = {
+    getThread: vi.fn(async () => thread({ type: "main" })),
+    // eslint-disable-next-line require-yield
+    streamInvalidations: vi.fn(async function* () {}),
+  } as unknown as DesignCanvasApi;
+  const onSubmit = vi.fn(async () => {});
+  const { result } = renderHook(() => useCanvasAgentPanelController(panelOptions({
+    api,
+    jobs: [activeJob],
+    onSubmit,
+  })));
+
+  await waitFor(() => expect(result.current.thread).not.toBeNull());
+  act(() => result.current.setDraft("Queue this as my next Prompt"));
+  await act(async () => result.current.submit());
+
+  expect(result.current.activeTurnJob).toEqual(activeJob);
+  expect(result.current.draft).toBe("Queue this as my next Prompt");
+  expect(onSubmit).not.toHaveBeenCalled();
 });
 
 test("panel controller consumes each context seed once after filtering, deduplicating, and capping it", async () => {

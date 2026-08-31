@@ -1336,6 +1336,11 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(mutatedResponse.status, 200);
     assert.equal((await json(root, "PUT", { expectedRevision: 0, intents: [{ type: "set-viewport", viewport: { x: 0, y: 0, zoom: 1 } }] })).status, 409);
     assert.equal((await json(`${root}/agent/turns`, "POST", { message: "Arrange", unexpected: true })).status, 400);
+    assert.equal((await json(`${root}/agent/turns`, "POST", {
+      message: "Reject a terminal-corrupted model id",
+      agentCommand: "claude",
+      model: "claude-opus-5[1m]",
+    })).status, 400);
     assert.equal((await json(`${root}/exports`, "POST", { canvasRevision: 1 })).status, 409);
     assert.equal((await json(`${root}/nodes/node-page/agent/turns`, "POST", { prompt: "retired alias" })).status, 400);
 

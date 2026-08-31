@@ -9,6 +9,7 @@ import {
 
 import type { AgentInfo } from "../lib/api.ts";
 import {
+  activeAgentActivityPhase,
   agentScopeKey,
   groupMainAgentJobs,
   relatedAgentJobs,
@@ -107,6 +108,7 @@ export function useCanvasAgentPanelController({
   const [threadError, setThreadError] = useState<string | null>(null);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [optimisticUserTurn, setOptimisticUserTurn] = useState<OptimisticUserTurn | null>(null);
   const [appendingRevision, setAppendingRevision] = useState(false);
   const [internalAgentSelection, setInternalAgentSelection] = useState<CanvasAgentSelection>(() => ({
@@ -115,7 +117,9 @@ export function useCanvasAgentPanelController({
   }));
   const agentSelection = controlledAgentSelection ?? internalAgentSelection;
   const setAgentSelection = useCallback((next: CanvasAgentSelection) => {
-    setInternalAgentSelection(next);
+    setInternalAgentSelection((current) => (
+      current.agentCommand === next.agentCommand && current.model === next.model ? current : next
+    ));
     onAgentSelectionChange?.(next);
   }, [onAgentSelectionChange]);
   const [contextNodeIds, setContextNodeIds] = useState<string[]>(() => (
@@ -130,6 +134,10 @@ export function useCanvasAgentPanelController({
     () => relatedAgentJobs(jobs, scope),
     [jobs, scopeKey],
   );
+  const activeTurnJob = useMemo(() => [...relatedJobs].reverse().find((job) => (
+    activeAgentActivityPhase(job) !== null
+    && (scope.type === "node" || job.kind === "main-agent")
+  )) ?? null, [relatedJobs, scopeKey]);
   const nodeNames = useMemo(
     () => new Map(nodes.map((node) => [node.id, node.name])),
     [nodes],
@@ -251,7 +259,8 @@ export function useCanvasAgentPanelController({
 
   const submit = useCallback(async () => {
     const prompt = draft.trim();
-    if (!prompt || submitting || !activeAgent) return;
+    if (!prompt || submittingRef.current || activeTurnJob !== null || !activeAgent) return;
+    submittingRef.current = true;
     const optimisticId = `optimistic-user-${++optimisticTurnSequenceRef.current}`;
     setOptimisticUserTurn({
       scopeKey,
@@ -267,20 +276,25 @@ export function useCanvasAgentPanelController({
     });
     setSubmitting(true);
     setThreadError(null);
+    setDraft("");
     try {
+      const selectedModel = agentSelection.model && activeAgent.models.includes(agentSelection.model)
+        ? agentSelection.model
+        : null;
       await onSubmit(prompt, contextNodeIds, {
         agentCommand: activeAgent.command,
-        ...(agentSelection.model ? { model: agentSelection.model } : { model: null }),
+        model: selectedModel,
       });
-      setDraft("");
       await loadThread();
     } catch (problem) {
       setOptimisticUserTurn((current) => current?.message.id === optimisticId ? null : current);
+      setDraft((current) => current || prompt);
       setThreadError(errorMessage(problem));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
-  }, [activeAgent, agentSelection.model, contextNodeIds, draft, loadThread, onSubmit, relatedJobs, scopeKey, submitting, thread]);
+  }, [activeAgent, activeTurnJob, agentSelection.model, contextNodeIds, draft, loadThread, onSubmit, relatedJobs, scopeKey, thread]);
 
   const appendMaterialRevision = useCallback(async (file: File) => {
     if (!onAppendMaterialVersion || appendingRevision) return;
@@ -337,6 +351,7 @@ export function useCanvasAgentPanelController({
     contextNodeIds,
     setContextNodeIds,
     relatedJobs,
+    activeTurnJob,
     nodeNames,
     scopedNode,
     mainJobGroups,
@@ -451,6 +466,8 @@ export function useJobActionController({
     }
   }, [displayLabel, jobId, onCancel]);
 
+  const dismissStopError = useCallback(() => setStopError(null), []);
+
   const retry = useCallback(async () => {
     if (!onRetry || retryingRef.current) return;
     retryingRef.current = true;
@@ -469,6 +486,7 @@ export function useJobActionController({
   return {
     stopping,
     stopError,
+    dismissStopError,
     stop,
     retrying,
     retryError,
