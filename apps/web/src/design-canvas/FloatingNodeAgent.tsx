@@ -2,6 +2,7 @@ import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import {
   Button,
+  IconSwap,
   Select,
   SelectContent,
   SelectItem,
@@ -236,6 +237,7 @@ export interface CanvasAgentPanelProps {
   initialModel?: string;
   initialContextNodeIds?: readonly string[];
   contextSeedGeneration?: number;
+  initialDraft?: string;
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onRescanAgents?: () => Promise<void>;
@@ -298,6 +300,7 @@ export function CanvasAgentPanel({
   initialModel = "",
   initialContextNodeIds,
   contextSeedGeneration,
+  initialDraft,
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onRescanAgents = async () => {},
@@ -364,6 +367,7 @@ export function CanvasAgentPanel({
     initialModel,
     initialContextNodeIds,
     contextSeedGeneration,
+    initialDraft,
     agentSelection: controlledAgentSelection,
     onAgentSelectionChange,
     onSubmit,
@@ -480,7 +484,11 @@ export function CanvasAgentPanel({
                         disabled={appendingRevision}
                         onClick={() => revisionInputRef.current?.click()}
                       >
-                        {appendingRevision ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : <FileUp aria-hidden />}
+                        <IconSwap
+                          active={appendingRevision}
+                          first={<FileUp aria-hidden />}
+                          second={<LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />}
+                        />
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" sideOffset={6}>Add revision</TooltipContent>
@@ -614,7 +622,11 @@ export function CanvasAgentPanel({
                 onClick={() => void submit()}
                 className="size-7"
               >
-                {submitting ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} /> : <ArrowUp aria-hidden />}
+                <IconSwap
+                  active={submitting}
+                  first={<ArrowUp aria-hidden />}
+                  second={<LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />}
+                />
               </Button>
             </div>
           </div>
@@ -920,9 +932,11 @@ function AgentActivityCard({
             disabled={stopping}
             onClick={() => void stop()}
           >
-            {stopping
-              ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
-              : <Square aria-hidden fill="currentColor" />}
+            <IconSwap
+              active={stopping}
+              first={<Square aria-hidden fill="currentColor" />}
+              second={<LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />}
+            />
             <span>{stopping ? "Stopping" : "Stop"}</span>
           </Button>
         ) : null}

@@ -17,6 +17,7 @@ import {
 
 import {
   Button,
+  IconSwap,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -87,7 +88,11 @@ export function DesignCanvasHeader({
             buttonRef={exportButtonRef}
             onClick={onExport}
           >
-            {exporting ? <LoaderCircle aria-hidden className="animate-spin" /> : <Code2 aria-hidden />}
+            <IconSwap
+              active={exporting}
+              first={<Code2 aria-hidden />}
+              second={<LoaderCircle aria-hidden className="animate-spin" />}
+            />
           </HeaderIconAction>
           <HeaderIconAction label="Settings" disabled={!onOpenSettings} onClick={() => onOpenSettings?.()}>
             <Settings2 aria-hidden />

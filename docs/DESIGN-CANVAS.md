@@ -41,8 +41,8 @@ geometry, and presentation mode. The current runtime distinctions are:
 | Kind | Agent output contract | Canvas/focus presentation |
 | --- | --- | --- |
 | Page | Complete responsive page with one semantic first-publication title | Sandboxed web preview with device controls and portable HTML export |
-| Component | Reusable specimen with states, variants, and usage | Sandboxed component preview |
-| Design System | Visual rules, primitives, and representative components | Sandboxed system reference |
+| Component | Reusable specimen, or a categorized production-scale library when the brief requests one, with states, variants, accessibility, content, motion, and usage | Sandboxed component preview |
+| Design System | Layered tokens, visual rules, full catalog structure, representative interactions, and component contracts | Sandboxed system reference |
 | Research | Evidence, gaps, findings, decisions, and implications | Document-sized research presentation |
 | Design Tokens | CSS-variable and JSON-like token reference | Token-reference presentation |
 | Design Document | Design.md-style rationale, rules, and guidance | Document-sized specification presentation |
@@ -50,6 +50,12 @@ geometry, and presentation mode. The current runtime distinctions are:
 | Knowledge | Facts, constraints, terminology, relationships, and open questions | Document-sized knowledge presentation |
 | Image / Video | Immutable material revision plus scoped analysis | Native aspect-preserving media renderer |
 | Document / File | Immutable material revision plus scoped analysis | MIME/filename-driven Markdown, TanStack code, text editor, or binary fallback |
+
+**Build a component system** is a canvas starter, not a second data model. It
+adds Design System, Component Library, Design Tokens, and Design.md Nodes in one
+revision, selects all four as Main Agent context, and pre-fills a coordination
+brief. Each Node still owns its ordinary immutable Version history and export
+boundary.
 
 The eight generative kinds still publish one validated `index.html` Version.
 Their prompt and presentation contracts differ, but Markdown, token JSON/CSS,

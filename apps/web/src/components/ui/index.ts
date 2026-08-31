@@ -74,4 +74,4 @@ export {
   StudioInspectorSection,
   StudioStatusBadge,
 } from "./StudioInspector.tsx";
-export { FadeIn, Stagger, StaggerItem } from "./motion-primitives.tsx";
+export { FadeIn, IconSwap, Stagger, StaggerItem } from "./motion-primitives.tsx";

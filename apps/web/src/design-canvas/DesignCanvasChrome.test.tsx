@@ -76,6 +76,7 @@ test("Canvas tool docks retain separate named editing and view toolbars", () => 
       addMenuOpen={false}
       onAddMenuOpenChange={() => {}}
       onChooseNode={() => {}}
+      onCreateComponentSystem={() => {}}
       onToolChange={onToolChange}
       arrangeDisabled={false}
       onArrange={onArrange}

@@ -105,6 +105,8 @@ const PRO_OPTIONS = { hideAttribution: true } as const;
 const CANVAS_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
 const DESIGN_CANVAS_MIN_ZOOM = 0.12;
 const HOVER_LABEL_SCREEN_INSET_PX = 12;
+const COMPONENT_SYSTEM_AGENT_OFFSET_PX = 220;
+const COMPONENT_SYSTEM_STARTER_PROMPT = "Build a production-scale component system across these Nodes. Use Design System and Design Tokens as shared authority; make Component Library cover foundations, inputs, navigation, overlays, feedback, data display, and complex composition; keep Design.md, tokens, component states, variants, accessibility, content, and motion consistent.";
 
 function syncHoverLabelViewportScale(surface: HTMLElement | null, zoom: number): void {
   if (!surface) return;
@@ -317,7 +319,8 @@ export function DesignCanvasScreen({
   const [mainAgentContextSeed, setMainAgentContextSeed] = useState<{
     generation: number;
     nodeIds: string[];
-  }>(() => ({ generation: 0, nodeIds: [] }));
+    draft: string;
+  }>(() => ({ generation: 0, nodeIds: [], draft: "" }));
   const [exportConfirmationOpen, setExportConfirmationOpen] = useState(false);
   const [mainAgentSelection, setMainAgentSelection] = useState<CanvasAgentSelection>(() => ({
     agentCommand: isDesignAgentCommand(initialAgentCommand) ? initialAgentCommand : "",
@@ -854,6 +857,7 @@ export function DesignCanvasScreen({
     setMainAgentContextSeed((current) => ({
       generation: current.generation + 1,
       nodeIds: importedNodeIds,
+      draft: "",
     }));
     setMainAgentOpen(false);
     setFocusedPanelNodeId(null);
@@ -976,6 +980,50 @@ export function DesignCanvasScreen({
       // Controller exposes a non-blocking error banner and canonical refresh.
     }
   }, [canvasCenter, controller.applyIntents]);
+
+  const createComponentSystem = useCallback(async (position = canvasCenter()) => {
+    setAddMenuOpen(false);
+    const origin = {
+      x: Math.round(position.x - 464 - COMPONENT_SYSTEM_AGENT_OFFSET_PX / Math.max(zoom, DESIGN_CANVAS_MIN_ZOOM)),
+      y: Math.round(position.y - 364),
+    };
+    const specs = [
+      { kind: "design-system", name: "Design System", x: origin.x, y: origin.y },
+      { kind: "component", name: "Component Library", x: origin.x + 508, y: origin.y },
+      { kind: "design-tokens", name: "Design Tokens", x: origin.x, y: origin.y + 388 },
+      { kind: "design-document", name: "Design.md", x: origin.x + 508, y: origin.y + 388 },
+    ] as const;
+    const nodeIds = specs.map((spec) => createDesignNodeId(spec.kind));
+    try {
+      const next = await controller.applyIntents(specs.map((spec, index) => ({
+        type: "add-node" as const,
+        node: {
+          id: nodeIds[index],
+          kind: spec.kind,
+          name: spec.name,
+          geometry: { x: spec.x, y: spec.y, ...catalogItem(spec.kind).defaultGeometry },
+        },
+      })));
+      const createdNodeIds = nodeIds.filter((nodeId) => next.nodes.some((node) => node.id === nodeId));
+      if (createdNodeIds.length !== specs.length) return;
+      setFocusedNodeId(null);
+      setFocusedPanelNodeId(null);
+      setSelectedNodeIds(createdNodeIds);
+      setMainAgentContextSeed((current) => ({
+        generation: current.generation + 1,
+        nodeIds: createdNodeIds,
+        draft: COMPONENT_SYSTEM_STARTER_PROMPT,
+      }));
+      setMainAgentOpen(true);
+      window.requestAnimationFrame(() => {
+        surfaceRef.current
+          ?.querySelector<HTMLTextAreaElement>('[aria-label="Main Agent message"]')
+          ?.focus();
+      });
+    } catch {
+      // Controller exposes a non-blocking error banner and canonical refresh.
+    }
+  }, [canvasCenter, controller.applyIntents, zoom]);
 
   const importFiles = useCallback(async (files: readonly File[], position = pendingImportPositionRef.current) => {
     if (!files.length) return;
@@ -1759,6 +1807,7 @@ export function DesignCanvasScreen({
           <QuickStart
             onAddPage={() => void addNode("page")}
             onAddResearch={() => void addNode("research")}
+            onCreateComponentSystem={() => void createComponentSystem()}
             onImport={() => void addNode("file")}
             onOpenMainAgent={() => setMainAgentOpen(true)}
           />
@@ -1770,6 +1819,7 @@ export function DesignCanvasScreen({
             addMenuOpen={addMenuOpen}
             onAddMenuOpenChange={setAddMenuOpen}
             onChooseNode={(kind) => void addNode(kind)}
+            onCreateComponentSystem={() => void createComponentSystem()}
             onToolChange={setTool}
             arrangeDisabled={(canvas?.nodes.length ?? 0) < 2 || controller.mutating}
             onArrange={arrange}
@@ -1865,6 +1915,7 @@ export function DesignCanvasScreen({
                 initialModel={initialModel}
                 initialContextNodeIds={mainAgentContextSeed.nodeIds}
                 contextSeedGeneration={mainAgentContextSeed.generation}
+                initialDraft={mainAgentContextSeed.draft}
                 agentSelection={mainAgentSelection}
                 onAgentSelectionChange={updateMainAgentSelection}
                 onRescanAgents={onRescanAgents}
@@ -1928,6 +1979,11 @@ export function DesignCanvasScreen({
           <ContextMenuContent aria-label="Add Design node" className="design-node-catalog design-node-catalog--context">
             <NodeCatalogMenu
               menuType="context"
+              onCreateComponentSystem={() => void createComponentSystem(
+                contextMenu
+                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
+                  : canvasCenter(),
+              )}
               onChoose={(kind) => void addNode(
                 kind,
                 contextMenu

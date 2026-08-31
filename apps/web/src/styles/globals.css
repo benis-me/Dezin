@@ -314,9 +314,39 @@
   will-change: transform, opacity;
 }
 
+.t-icon-swap {
+  --icon-swap-duration: 250ms;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.t-icon-swap > .t-icon {
+  grid-area: 1 / 1;
+  display: inline-grid;
+  place-items: center;
+  transition:
+    opacity var(--icon-swap-duration) cubic-bezier(0.22, 1, 0.36, 1),
+    filter var(--icon-swap-duration) cubic-bezier(0.22, 1, 0.36, 1),
+    transform var(--icon-swap-duration) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-icon-swap > .t-icon--second,
+.t-icon-swap[data-active] > .t-icon--first {
+  opacity: 0;
+  filter: blur(2px);
+  transform: scale(0.25);
+}
+
+.t-icon-swap[data-active] > .t-icon--second {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
 [data-dezin-menu-presence]:not([data-state="closed"]) {
   animation-name: dezin-menu-presence-open !important;
-  animation-duration: var(--dezin-menu-presence-open-duration, 220ms) !important;
+  animation-duration: var(--dezin-menu-presence-open-duration, 250ms) !important;
   animation-timing-function: linear !important;
   animation-fill-mode: both !important;
 }
@@ -341,7 +371,7 @@
 }
 
 [data-slot="context-menu-content"] {
-  --dezin-menu-presence-open-duration: 240ms;
+  --dezin-menu-presence-open-duration: 250ms;
 }
 
 @keyframes dezin-menu-presence-open {
@@ -359,6 +389,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .t-icon-swap > .t-icon {
+    filter: none !important;
+    transition: none !important;
+  }
+
   [data-dezin-menu-presence][data-state] {
     animation-duration: 0.001ms !important;
   }

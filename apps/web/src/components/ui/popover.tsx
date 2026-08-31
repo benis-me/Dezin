@@ -20,7 +20,7 @@ function PopoverContent({
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Content>) {
   const motionRef = useInterruptiblePresenceMotion<HTMLDivElement>(ref, {
-    openDurationMs: 220,
+    openDurationMs: 250,
     closeDurationMs: 150,
   });
   return (

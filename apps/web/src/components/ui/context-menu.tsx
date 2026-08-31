@@ -18,7 +18,7 @@ function ContextMenuContent({
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Content>) {
   const motionRef = useInterruptiblePresenceMotion<HTMLDivElement>(ref, {
-    openDurationMs: 240,
+    openDurationMs: 250,
     closeDurationMs: 150,
     distancePx: 6,
   });

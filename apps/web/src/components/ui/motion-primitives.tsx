@@ -46,3 +46,21 @@ export function StaggerItem({ children, className, as = "div" }: { children: Rea
     </Comp>
   );
 }
+
+/** Crossfades stateful icons without changing the control's geometry. */
+export function IconSwap({
+  active,
+  first,
+  second,
+}: {
+  active: boolean;
+  first: ReactNode;
+  second: ReactNode;
+}) {
+  return (
+    <span className="t-icon-swap" data-active={active || undefined} aria-hidden>
+      <span className="t-icon t-icon--first">{first}</span>
+      <span className="t-icon t-icon--second">{second}</span>
+    </span>
+  );
+}

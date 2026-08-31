@@ -62,6 +62,7 @@ export interface UseCanvasAgentPanelControllerOptions {
   initialModel: string;
   initialContextNodeIds?: readonly string[];
   contextSeedGeneration?: number;
+  initialDraft?: string;
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onSubmit: (
@@ -92,6 +93,7 @@ export function useCanvasAgentPanelController({
   initialModel,
   initialContextNodeIds,
   contextSeedGeneration,
+  initialDraft,
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onSubmit,
@@ -103,7 +105,7 @@ export function useCanvasAgentPanelController({
   const [thread, setThread] = useState<DesignThread | null>(null);
   const [threadLoading, setThreadLoading] = useState(true);
   const [threadError, setThreadError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initialDraft ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [optimisticUserTurn, setOptimisticUserTurn] = useState<OptimisticUserTurn | null>(null);
   const [appendingRevision, setAppendingRevision] = useState(false);
@@ -211,7 +213,8 @@ export function useCanvasAgentPanelController({
       || consumedContextSeedGenerationRef.current === contextSeedGeneration) return;
     consumedContextSeedGenerationRef.current = contextSeedGeneration;
     setContextNodeIds(normalizedInitialContextNodeIds(initialContextNodeIds, nodes));
-  }, [contextSeedGeneration, initialContextNodeIds, nodes]);
+    setDraft(initialDraft ?? "");
+  }, [contextSeedGeneration, initialContextNodeIds, initialDraft, nodes]);
 
   useEffect(() => {
     const selected = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;

@@ -40,7 +40,7 @@ beforeEach(() => {
   presenceClockStyle.textContent = `
     [data-dezin-menu-presence][data-state="open"] {
       animation-name: dezin-menu-presence-open;
-      animation-duration: 220ms;
+      animation-duration: 250ms;
     }
     [data-dezin-menu-presence][data-state="closed"] {
       animation-name: dezin-menu-presence-closed;
@@ -356,9 +356,9 @@ test("global menu presence clocks leave opacity and transform to WAAPI", () => {
   expect(globalsCss).toContain('animation-name: dezin-menu-presence-open');
   expect(globalsCss).toContain('animation-name: dezin-menu-presence-closed');
   expect(globalsCss).toMatch(/data-dezin-menu-presence[^}]*:not\(\[data-state="closed"\]\)/);
-  expect(globalsCss).toMatch(/dezin-menu-presence-open-duration, 220ms/);
+  expect(globalsCss).toMatch(/dezin-menu-presence-open-duration, 250ms/);
   expect(globalsCss).toMatch(/dezin-menu-presence-close-duration, 150ms/);
-  expect(globalsCss).toMatch(/data-slot="context-menu-content"[\s\S]*240ms/);
+  expect(globalsCss).toMatch(/data-slot="context-menu-content"[\s\S]*250ms/);
   for (const name of ["dezin-menu-presence-open", "dezin-menu-presence-closed"]) {
     const body = globalsCss.match(new RegExp(`@keyframes ${name} \\{([\\s\\S]*?)\\n\\}`, "m"))?.[1] ?? "";
     expect(body).not.toMatch(/(?:opacity|transform)\s*:/);
@@ -487,7 +487,7 @@ test("a real Radix ContextMenu retains close presence and interrupts into reopen
   const firstOpenCallCount = animate.mock.calls.length;
   expect(firstMenu).toHaveClass("origin-(--radix-context-menu-content-transform-origin)");
   expect(animate.mock.calls.at(-1)?.[1]).toMatchObject({
-    duration: 240,
+    duration: 250,
     easing: "cubic-bezier(0.22, 1, 0.36, 1)",
   });
 

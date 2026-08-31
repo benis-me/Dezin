@@ -106,7 +106,7 @@ function DropdownMenuContent({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   const motionRef = useInterruptiblePresenceMotion<HTMLDivElement>(ref, {
-    openDurationMs: 220,
+    openDurationMs: 250,
     closeDurationMs: 150,
   })
   return (

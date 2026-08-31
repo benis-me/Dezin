@@ -39,11 +39,11 @@ function closedTransform(element: HTMLElement, distancePx: number, scale: number
 export function useInterruptiblePresenceMotion<T extends HTMLElement>(
   forwardedRef?: Ref<T>,
   {
-    openDurationMs = 220,
+    openDurationMs = 250,
     closeDurationMs = 150,
-    distancePx = 7,
-    openScale = 0.975,
-    closedScale = 0.985,
+    distancePx = 8,
+    openScale = 0.97,
+    closedScale = 0.99,
     skipAnimationOnInstantOpen = false,
   }: PresenceMotionOptions = {},
 ): (node: T | null) => void {

@@ -333,6 +333,44 @@ test("empty projects expose Quick Start and toolbar/right-click share one node c
   await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(3));
 });
 
+test("component system starter creates one coordinated four-Node workspace", async () => {
+  const user = userEvent.setup();
+  const { api, applyIntents } = createCanvasApi(canvas());
+  render(
+    <DesignCanvasScreen
+      projectId={PROJECT_ID}
+      projectName="Editorial"
+      api={api}
+      agents={[CLAUDE_AGENT]}
+    />,
+  );
+
+  await user.click(await screen.findByRole("button", { name: /^Build a component system\b/ }));
+  await waitFor(() => expect(applyIntents).toHaveBeenCalledOnce());
+  const intents = applyIntents.mock.calls[0]?.[1].intents ?? [];
+  expect(intents).toHaveLength(4);
+  expect(intents.map((intent) => intent.type === "add-node" ? intent.node.kind : null)).toEqual([
+    "design-system",
+    "component",
+    "design-tokens",
+    "design-document",
+  ]);
+  expect(intents.map((intent) => intent.type === "add-node" ? intent.node.name : null)).toEqual([
+    "Design System",
+    "Component Library",
+    "Design Tokens",
+    "Design.md",
+  ]);
+
+  const panel = await screen.findByLabelText("Main Agent panel", { selector: "section" });
+  const references = within(panel).getByLabelText("Referenced Nodes");
+  for (const name of ["Design System", "Component Library", "Design Tokens", "Design.md"]) {
+    expect(within(references).getByText(name)).toBeInTheDocument();
+  }
+  expect((within(panel).getByRole("textbox", { name: "Main Agent message" }) as HTMLTextAreaElement).value)
+    .toMatch(/production-scale component system/i);
+});
+
 test("a blank-canvas context menu exits before opening Figma import", async () => {
   const user = userEvent.setup();
   const { api } = createCanvasApi(canvas());

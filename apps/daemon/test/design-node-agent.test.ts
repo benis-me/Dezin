@@ -45,11 +45,25 @@ test("Node generation prompts bind the exact target and expose kind-specific con
       message: "Research it",
       node: { id: "node-research", kind: "research", name: "Audience evidence" },
     });
+    const designSystem = buildDesignNodeSystemPrompt({
+      settings,
+      message: "Build the system",
+      node: { id: "node-system", kind: "design-system", name: "Design System" },
+    });
+    const componentLibrary = buildDesignNodeSystemPrompt({
+      settings,
+      message: "Build the library",
+      node: { id: "node-library", kind: "component", name: "Component Library" },
+    });
     assert.match(page, /node-page.*page/i);
     assert.match(page, /complete responsive page/i);
     assert.match(page, /320px.*horizontal overflow/i);
     assert.match(research, /node-research.*research/i);
     assert.match(research, /evidence.*sources|sources.*evidence/i);
+    assert.match(designSystem, /primitive.*semantic.*component.*UI tokens/i);
+    assert.match(designSystem, /inputs.*navigation.*overlays.*feedback.*data display.*complex composition/i);
+    assert.match(componentLibrary, /production-scale categorized catalog/i);
+    assert.match(componentLibrary, /states.*variants.*accessibility.*content.*motion/i);
     assert.notEqual(page, research);
     assert.doesNotMatch(page, /Dezin Render Frame|dezin:frame-change|Viewer and visual QA|Vite|npm\s+install|pre-installed React|GSAP|CDN/i);
     assert.match(page, /untrusted reference data/i);

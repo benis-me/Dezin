@@ -413,12 +413,12 @@ export function buildDesignNodeSystemPrompt(input: {
     brief: input.message,
   });
   const kindContract: Record<string, string> = {
-    component: "Create a reusable component specimen with its meaningful states, variants, and a compact usage demonstration.",
+    component: "Create a reusable component specimen with meaningful states, variants, accessibility behavior, content guidance, motion, and a compact usage demonstration. If the Node name or brief requests a library or system, create a production-scale categorized catalog spanning foundations, inputs, navigation, overlays, feedback, data display, and complex composition instead of reducing it to a few sample components.",
     page: "Create one complete responsive page with coherent information hierarchy and realistic content.",
-    "design-system": "Create a design-system reference covering visual rules, primitives, and representative components.",
+    "design-system": "Create a production-scale design-system reference with layered primitive, semantic, component, and UI tokens; a navigable component inventory; representative interactive previews; light and dark modes; and explicit anatomy, states, variants, accessibility, content, and motion guidance. Cover foundations, inputs, navigation, overlays, feedback, data display, and complex composition rather than stopping at a few showcase components.",
     research: "Create a decision-grade research document with explicit evidence, sources or evidence gaps, findings, and design implications.",
-    "design-tokens": "Create a readable token reference that exposes CSS custom properties and JSON-like token structure in the document.",
-    "design-document": "Create a clear Design.md-style living specification with rationale, rules, and implementation guidance.",
+    "design-tokens": "Create a readable layered token reference that exposes primitive, semantic, component, and UI CSS custom properties plus JSON-like token structure, including shared motion and reduced-motion rules.",
+    "design-document": "Create a clear Design.md-style living specification with rationale, rules, component catalog, anatomy/state/variant contracts, accessibility, content, motion, and implementation guidance.",
     layout: "Create a layout reference showing responsive grids, spacing, regions, and composition rules.",
     knowledge: "Create a structured knowledge document with durable facts, constraints, terminology, and open questions.",
   };
