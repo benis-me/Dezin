@@ -1544,6 +1544,35 @@ test("retired Node identity exhaustion rejects atomically without corrupting the
   }
 });
 
+test("large finite Node geometry persists and reaches Agent context", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-large-node-"));
+  const projectId = "project-large-node";
+  const geometry = { x: 0, y: 0, width: 12_000, height: 9_000 };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-large", kind: "page" } }],
+    });
+    const canvas = await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 1,
+      intents: [{ type: "update-node", nodeId: "node-large", patch: { geometry } }],
+    });
+    assert.deepEqual(canvas.nodes[0]?.geometry, geometry);
+    assert.deepEqual((await getDesignCanvas(dataDir, projectId)).nodes[0]?.geometry, geometry);
+
+    const created = await createDesignJob(dataDir, projectId, {
+      kind: "node-generation",
+      ...FIXTURE_JOB_IDENTITY,
+      nodeId: "node-large",
+    });
+    const context = await getDesignJobContext(dataDir, projectId, created.job.id);
+    assert.deepEqual(context.nodes.find((node) => node.id === "node-large")?.geometry, geometry);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("project.json rejects identity and bounded Node-schema tampering", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-corrupt-project-"));
   const projectId = "project-corrupt";

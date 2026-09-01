@@ -210,8 +210,8 @@ export function assertStoredFrozenContext(value: unknown, expectedProjectId: str
     const geometryRecord = storedRecord(node.geometry, `Frozen Design context Node ${nodeIndex} geometry`, ["x", "y", "width", "height"]);
     const validGeometry = [geometryRecord.x, geometryRecord.y, geometryRecord.width, geometryRecord.height]
       .every((part) => typeof part === "number" && Number.isFinite(part))
-      && (geometryRecord.width as number) >= 120 && (geometryRecord.width as number) <= 4_096
-      && (geometryRecord.height as number) >= 80 && (geometryRecord.height as number) <= 4_096;
+      && (geometryRecord.width as number) >= 120
+      && (geometryRecord.height as number) >= 80;
     const selectedAbsent = node.selectedVersionId === null && node.selectedVersionContentKind === null
       && node.selectedVersionChecksum === null && node.selectedVersionBytes === null && node.selectedVersionPath === null
       && node.selectedVersionJobId === null && node.selectedVersionRunnerId === null

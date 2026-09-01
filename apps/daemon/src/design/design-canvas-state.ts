@@ -78,8 +78,8 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       width: value?.width === undefined ? base.width : finite(value.width, "Node width"),
       height: value?.height === undefined ? base.height : finite(value.height, "Node height"),
     };
-    if (next.width < 120 || next.width > 4_096 || next.height < 80 || next.height > 4_096) {
-      throw new DesignStorageError("invalid-input", "Node size is outside the supported bounds");
+    if (next.width < 120 || next.height < 80) {
+      throw new DesignStorageError("invalid-input", "Node width must be at least 120 and height at least 80");
     }
     return next;
   }
@@ -244,8 +244,8 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
     const validGeometry = node.geometry && typeof node.geometry === "object"
       && [node.geometry.x, node.geometry.y, node.geometry.width, node.geometry.height]
         .every((part) => typeof part === "number" && Number.isFinite(part))
-      && node.geometry.width >= 120 && node.geometry.width <= 4_096
-      && node.geometry.height >= 80 && node.geometry.height <= 4_096;
+      && node.geometry.width >= 120
+      && node.geometry.height >= 80;
     const validOptionalId = (candidate: unknown) => candidate === null
       || (typeof candidate === "string" && SAFE_SEGMENT.test(candidate));
     if (typeof node.id !== "string" || !SAFE_SEGMENT.test(node.id)
