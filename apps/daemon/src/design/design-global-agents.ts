@@ -127,7 +127,9 @@ function geometry(value: unknown, partial: boolean): Record<string, number> {
 }
 
 function parseCanvasIntent(value: unknown): DesignCanvasIntent {
-  const envelope = exactRecord(value, "Main Agent canvas intent", ["type", "node", "nodeId", "patch", "viewport", "nodes"]);
+  const envelope = exactRecord(value, "Main Agent canvas intent", [
+    "type", "node", "nodeId", "patch", "viewport", "nodes", "connection", "connectionId",
+  ]);
   const type = boundedText(envelope.type, "Canvas intent type", 64);
   if (type === "add-node") {
     const base = exactRecord(value, "Add Node intent", ["type", "node"]);
@@ -149,6 +151,26 @@ function parseCanvasIntent(value: unknown): DesignCanvasIntent {
   if (type === "remove-node") {
     const base = exactRecord(value, "Remove Node intent", ["type", "nodeId"]);
     return { type, nodeId: safeId(base.nodeId, "Removed Node id") };
+  }
+  if (type === "connect-nodes") {
+    const base = exactRecord(value, "Connect Nodes intent", ["type", "connection"]);
+    const connection = exactRecord(base.connection, "Canvas connection", ["id", "sourceNodeId", "targetNodeId", "label"]);
+    const label = connection.label === null || connection.label === undefined
+      ? connection.label
+      : boundedText(connection.label, "Connection label", 256);
+    return {
+      type,
+      connection: {
+        id: safeId(connection.id, "Connection id"),
+        sourceNodeId: safeId(connection.sourceNodeId, "Connection source Node id"),
+        targetNodeId: safeId(connection.targetNodeId, "Connection target Node id"),
+        ...(label === undefined ? {} : { label }),
+      },
+    };
+  }
+  if (type === "disconnect-nodes") {
+    const base = exactRecord(value, "Disconnect Nodes intent", ["type", "connectionId"]);
+    return { type, connectionId: safeId(base.connectionId, "Connection id") };
   }
   if (type === "set-viewport") {
     const base = exactRecord(value, "Set viewport intent", ["type", "viewport"]);
@@ -273,7 +295,7 @@ export function buildDesignMainSystemPrompt(): string {
     + `Your only available tools are Read, Write, Edit, Glob, and Grep. Bash, shell, terminal, subprocess, network, and package-manager tools are unavailable; do not call or search for them.\n\n`
     + `You can also have an ordinary conversation. For greetings, questions, explanations, status summaries, or any request that needs no Canvas mutation or child Agent, answer directly as concise plain text and do not create main-agent-plan.json. A conversational answer can never mutate the Canvas.\n\n`
     + `Only when the user actually requests Canvas changes or scoped Node work may you propose atomic Canvas commands and dispatch focused prompts to scoped Node Agents. A dispatch can only target a Node that exists after your Canvas commands. The child Agent alone creates or revises that Node's design content. Do not write HTML, CSS, JavaScript, images, documents, or any design output. Do not edit index.html. The only file you may create is main-agent-plan.json.\n\n`
-    + `For a Canvas-changing turn, persist to main-agent-plan.json and also return exactly the same root JSON object with no markdown: {"reply":"user-facing answer","canvasIntents":[],"dispatches":[]}. The root has exactly those three keys; never wrap it in "plan" or any other field. Every Canvas intent has a "type" discriminator. An added Node is exactly {"type":"add-node","node":{"id":"unique-id","kind":"page","name":"Name","geometry":{"x":0,"y":0,"width":640,"height":480}}}; never use "kind" as the intent discriminator and never invent "kindEnum". An update is {"type":"update-node","nodeId":"existing-id","patch":{"name":"Name"}}. A layout is {"type":"replace-layout","nodes":[{"nodeId":"existing-or-new-id","geometry":{"x":0,"y":0,"width":640,"height":480}}]}. Remove-node and set-viewport use their public shapes. Every added Node must include an explicit unique id. Each dispatch is exactly {"nodeId":"...","message":"specific scoped brief","contextNodeIds":["priority-node-id"]}. When explicit visual-reference or layout-authority Nodes matter, dispatch their exact priority Node ids in contextNodeIds so the scoped Agent can read the immutable files itself; never replace them with a prose-only summary. Use an empty array when no command or dispatch is needed.`;
+    + `For a Canvas-changing turn, persist to main-agent-plan.json and also return exactly the same root JSON object with no markdown: {"reply":"user-facing answer","canvasIntents":[],"dispatches":[]}. The root has exactly those three keys; never wrap it in "plan" or any other field. Every Canvas intent has a "type" discriminator. An added Node is exactly {"type":"add-node","node":{"id":"unique-id","kind":"page","name":"Name","geometry":{"x":0,"y":0,"width":640,"height":480}}}; never use "kind" as the intent discriminator and never invent "kindEnum". An update is {"type":"update-node","nodeId":"existing-id","patch":{"name":"Name"}}. A layout is {"type":"replace-layout","nodes":[{"nodeId":"existing-or-new-id","geometry":{"x":0,"y":0,"width":640,"height":480}}]}. Connect an ordered flow with {"type":"connect-nodes","connection":{"id":"unique-connection-id","sourceNodeId":"first-page-id","targetNodeId":"next-page-id","label":"Continue"}}; disconnect with {"type":"disconnect-nodes","connectionId":"existing-connection-id"}. Remove-node and set-viewport use their public shapes. Every added Node and connection must include an explicit unique id. When a brief describes a multi-screen user journey, create the necessary page Nodes, lay them out in reading order, connect the actual transitions, and dispatch each page to a scoped Agent; this is ordinary Canvas composition, not a special mode. Each dispatch is exactly {"nodeId":"...","message":"specific scoped brief","contextNodeIds":["priority-node-id"]}. When explicit visual-reference or layout-authority Nodes matter, dispatch their exact priority Node ids in contextNodeIds so the scoped Agent can read the immutable files itself; never replace them with a prose-only summary. Use an empty array when no command or dispatch is needed.`;
 }
 
 export interface StartDesignMainTurnInput {

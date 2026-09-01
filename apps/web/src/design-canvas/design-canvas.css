@@ -3,6 +3,7 @@
   --design-canvas-accent-soft: color-mix(in oklch, var(--design-canvas-accent) 10%, transparent);
   --design-canvas-selection-color: #0d99ff;
   --design-canvas-selection-fill: rgb(13 153 255 / 20%);
+  --design-canvas-connection: oklch(0.5 0.035 258 / 68%);
   --design-canvas-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --design-canvas-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --design-focus-duration: 420ms;
@@ -22,6 +23,7 @@
 .dark .design-canvas-root {
   --design-canvas-accent: oklch(0.72 0.14 258);
   --design-canvas-accent-soft: color-mix(in oklch, var(--design-canvas-accent) 14%, transparent);
+  --design-canvas-connection: oklch(0.7 0.035 258 / 68%);
 }
 
 .design-canvas-surface {
@@ -32,12 +34,29 @@
   background: #e8eaeb;
   transition: background-color 220ms var(--design-canvas-ease-out);
 }
-.dark .design-canvas-surface { background: #e8eaeb; }
+.dark .design-canvas-surface { background: oklch(0.165 0.006 260); }
 .design-canvas-surface .react-flow__background {
   opacity: 0.16;
   transition: opacity 240ms var(--design-canvas-ease-out);
 }
+.dark .design-canvas-surface .react-flow__background { color: oklch(0.54 0.012 260); opacity: 0.2; }
+.dark .design-canvas-surface .react-flow__background pattern circle { fill: currentColor; }
 .design-canvas-surface[data-node-focus] .react-flow__background { opacity: 0; }
+.design-canvas-surface .react-flow__edges {
+  opacity: 1;
+  transition: opacity 180ms var(--design-canvas-ease-out);
+}
+.design-canvas-surface[data-node-focus] .react-flow__edges { opacity: 0; }
+.design-canvas-surface .design-canvas-connection .react-flow__edge-path {
+  stroke-width: 1.5;
+  transition: stroke 180ms var(--design-canvas-ease-out), stroke-width 180ms var(--design-canvas-ease-out);
+}
+.design-canvas-node__flow-handle {
+  width: 1px !important;
+  height: 1px !important;
+  opacity: 0;
+  pointer-events: none;
+}
 .design-canvas-surface[data-node-focus] > .react-flow { z-index: 48 !important; pointer-events: none; }
 .design-canvas-surface[data-node-focus] .react-flow__pane { pointer-events: none; }
 
@@ -62,6 +81,82 @@
   pointer-events: none;
   animation: design-canvas-selection-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
+.design-preview-annotation-layer {
+  position: absolute;
+  z-index: 70;
+  inset: 0;
+  pointer-events: none;
+}
+.design-preview-annotation-target {
+  position: absolute;
+  border: 2px solid var(--design-canvas-selection-color);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--design-canvas-selection-color) 10%, transparent);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 70%), 0 4px 16px rgb(13 153 255 / 18%);
+}
+.design-preview-annotation-target > span {
+  position: absolute;
+  top: -11px;
+  right: -11px;
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  border: 2px solid white;
+  border-radius: 999px;
+  background: var(--design-canvas-selection-color);
+  box-shadow: 0 2px 7px rgb(0 0 0 / 18%);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.design-preview-annotation-composer {
+  position: absolute;
+  display: grid;
+  width: min(330px, calc(100% - 24px));
+  gap: 10px;
+  padding: 12px;
+  pointer-events: auto;
+  border: 1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 6%);
+  border-radius: 13px;
+  background: color-mix(in oklch, var(--card) 96%, transparent);
+  box-shadow: 0 18px 48px oklch(0.08 0.012 260 / 0.2), 0 2px 10px oklch(0.08 0.012 260 / 0.1);
+  backdrop-filter: blur(18px) saturate(1.15);
+}
+.design-preview-annotation-composer__header {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.design-preview-annotation-composer__header strong { font-size: 12px; font-weight: 650; }
+.design-preview-annotation-composer__header code {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.design-preview-annotation-composer textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 10px;
+  outline: none;
+  background: color-mix(in oklch, var(--background) 86%, var(--card));
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  transition: border-color 160ms var(--design-canvas-ease-out), box-shadow 160ms var(--design-canvas-ease-out);
+}
+.design-preview-annotation-composer textarea:focus {
+  border-color: color-mix(in oklch, var(--design-canvas-selection-color) 65%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--design-canvas-selection-color) 13%, transparent);
+}
+.design-preview-annotation-composer__actions { display: flex; justify-content: flex-end; gap: 5px; }
 .design-canvas-surface .react-flow__node:focus,
 .design-canvas-surface .react-flow__node:focus-visible { outline: none; }
 .design-canvas-surface .react-flow__node:focus-visible .design-canvas-node::after {
@@ -228,6 +323,11 @@
   line-height: 1;
   text-overflow: ellipsis;
 }
+.design-canvas-topbar__identity h1[data-editing] {
+  width: clamp(140px, 26vw, 360px);
+  max-width: none;
+  overflow: visible;
+}
 .design-canvas-topbar__project-name > button {
   display: block;
   max-width: 100%;
@@ -241,17 +341,17 @@
   white-space: nowrap;
 }
 .design-canvas-topbar__project-name > input {
-  width: clamp(140px, 26vw, 360px);
+  width: 100%;
   height: 26px;
-  border: 1px solid color-mix(in oklch, var(--design-canvas-accent) 72%, var(--border));
-  border-radius: 7px;
-  padding: 0 7px;
-  background: var(--background);
+  border: 0.5px solid color-mix(in oklch, var(--design-canvas-accent) 68%, var(--border));
+  border-radius: 8px;
+  padding: 0 8px;
+  background: var(--card);
   color: var(--foreground);
   font: inherit;
   letter-spacing: inherit;
   outline: none;
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--design-canvas-accent) 16%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--design-canvas-accent) 14%, transparent), 0 8px 24px oklch(0.08 0 0 / 0.08);
 }
 
 .design-canvas-topbar__view {
@@ -315,9 +415,9 @@
 .design-canvas-tools__divider { width: 1px; height: 18px; margin: 0 3px; background: color-mix(in oklch, var(--border) 82%, transparent); }
 .dark .design-canvas-zoom,
 .dark .design-canvas-tools__modes,
-.dark .design-canvas-tools #design-canvas-add { border-color: oklch(1 0 0 / 12%); background: oklch(0.19 0.006 75 / 94%); color: oklch(0.96 0.003 95); box-shadow: 0 1px 2px oklch(0 0 0 / 0.2), 0 12px 36px oklch(0 0 0 / 0.2); }
-.dark .design-canvas-tools [data-slot="button"][aria-pressed="true"] { background: oklch(1 0 0 / 12%); color: white; }
-.dark .design-canvas-zoom > output { background: oklch(1 0 0 / 7%); color: oklch(0.8 0.004 95); }
+.dark .design-canvas-tools #design-canvas-add { border-color: oklch(1 0 0 / 10%); background: oklch(0.225 0.008 260 / 94%); color: oklch(0.88 0.006 260); box-shadow: 0 1px 2px oklch(0 0 0 / 0.24), 0 14px 38px oklch(0 0 0 / 0.28); }
+.dark .design-canvas-tools [data-slot="button"][aria-pressed="true"] { background: color-mix(in oklch, var(--design-canvas-accent) 22%, transparent); color: oklch(0.97 0.004 260); }
+.dark .design-canvas-zoom > output { background: oklch(1 0 0 / 6%); color: oklch(0.72 0.006 260); }
 .dark .design-canvas-tools__divider { background: oklch(1 0 0 / 14%); }
 .design-canvas-tools,
 .design-canvas-zoom {
@@ -657,6 +757,63 @@
 .design-canvas-node__asset { display: block; width: 100%; height: 100%; border: 0; background: color-mix(in oklch, white 98%, transparent); backface-visibility: hidden; }
 .design-canvas-node__asset--image { object-fit: contain; background-color: transparent; }
 .design-canvas-node__asset--video { object-fit: contain; background-color: color-mix(in oklch, var(--surface-2) 78%, var(--background)); }
+.design-canvas-video-player { position: relative; width: 100%; height: 100%; overflow: hidden; background: oklch(0.1 0.004 260); }
+.design-canvas-video-player > video { pointer-events: none; }
+.design-canvas-video-player__center,
+.design-canvas-video-player__controls button {
+  display: grid;
+  place-items: center;
+  border: 0.5px solid oklch(1 0 0 / 16%);
+  background: oklch(0.12 0.004 260 / 76%);
+  color: white;
+  box-shadow: 0 6px 20px oklch(0 0 0 / 0.24);
+  backdrop-filter: blur(14px) saturate(112%);
+  transition: transform 140ms var(--design-canvas-ease-out), opacity 160ms var(--design-canvas-ease-out), background-color 160ms ease;
+}
+.design-canvas-video-player__center {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: 50%;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%) scale(1);
+}
+.design-canvas-video-player__center svg { width: 16px; height: 16px; margin-left: 2px; }
+.design-canvas-video-player[data-playing] .design-canvas-video-player__center { opacity: 0; pointer-events: none; transform: translate(-50%, -50%) scale(0.82); }
+.design-canvas-video-player__controls {
+  position: absolute;
+  z-index: 5;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 18px 8px 8px;
+  background: linear-gradient(to bottom, transparent, oklch(0.06 0.003 260 / 78%));
+  color: oklch(0.92 0.004 260);
+}
+.design-canvas-video-player__controls button { width: 28px; height: 28px; flex: none; border-radius: 999px; box-shadow: none; }
+.design-canvas-video-player__controls button svg { width: 13px; height: 13px; }
+.design-canvas-video-player__controls button:active,
+.design-canvas-video-player__center:active { transform: scale(0.94); }
+.design-canvas-video-player__center:active { transform: translate(-50%, -50%) scale(0.94); }
+.design-canvas-video-player__controls input[type="range"] {
+  min-width: 36px;
+  height: 12px;
+  flex: 1;
+  appearance: none;
+  border-radius: 999px;
+  background: linear-gradient(to right, oklch(0.92 0.005 260) var(--design-video-progress), oklch(1 0 0 / 24%) var(--design-video-progress));
+  cursor: pointer;
+}
+.design-canvas-video-player__controls input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 999px; }
+.design-canvas-video-player__controls input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; appearance: none; border: 2px solid white; border-radius: 999px; background: white; box-shadow: 0 1px 5px oklch(0 0 0 / 0.35); }
+.design-canvas-video-player__controls > span { display: none; flex: none; font-family: var(--font-mono-stack); font-size: 9px; font-variant-numeric: tabular-nums; }
+.design-canvas-video-player[data-focused] .design-canvas-video-player__controls > span { display: inline; }
 .design-canvas-node[data-node-kind="image"] .design-canvas-node__body {
   background-image: linear-gradient(45deg, color-mix(in oklch, var(--foreground) 2.5%, transparent) 25%, transparent 25%), linear-gradient(-45deg, color-mix(in oklch, var(--foreground) 2.5%, transparent) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, color-mix(in oklch, var(--foreground) 2.5%, transparent) 75%), linear-gradient(-45deg, transparent 75%, color-mix(in oklch, var(--foreground) 2.5%, transparent) 75%);
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
@@ -901,7 +1058,7 @@
   min-height: 0;
   overflow: visible;
   border: 0;
-  border-radius: 16px;
+  border-radius: 18px;
   background: transparent;
   box-shadow: none;
   color: var(--foreground);
@@ -946,14 +1103,40 @@
 .design-canvas-agent__header h2 + p { overflow: hidden; margin-top: 1px; color: var(--muted-foreground); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__header > button { width: 28px !important; height: 28px !important; border-radius: 999px !important; }
 
-.design-canvas-agent__transcript {
+.design-canvas-agent__transcript-wrap {
+  position: relative;
   min-height: 0;
   flex: 1;
+}
+.design-canvas-agent__transcript {
+  height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 14px 14px 12px;
   scrollbar-width: thin;
 }
+.design-canvas-agent__scroll-latest {
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  border: 0.5px solid color-mix(in oklch, var(--border-strong) 76%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--card) 94%, transparent);
+  padding: 0 10px 0 8px;
+  box-shadow: 0 5px 16px color-mix(in oklch, var(--foreground) 14%, transparent);
+  color: var(--foreground);
+  font-size: 10px;
+  font-weight: 620;
+  backdrop-filter: blur(10px);
+  outline: none;
+  transition: border-color 150ms var(--design-canvas-ease-out), background-color 150ms var(--design-canvas-ease-out), color 150ms var(--design-canvas-ease-out);
+}
+.design-canvas-agent__scroll-latest:focus-visible { box-shadow: 0 0 0 2px color-mix(in oklch, var(--design-canvas-accent) 42%, transparent), 0 5px 16px color-mix(in oklch, var(--foreground) 14%, transparent); }
+.design-canvas-agent__scroll-latest > svg { width: 13px; height: 13px; transition: transform 150ms var(--design-canvas-ease-out); }
 .design-canvas-agent__history-more {
   display: flex;
   width: 100%;
@@ -1037,9 +1220,9 @@
   --beam-bloom-opacity: 0.68;
   display: block;
   width: 100%;
-  border-radius: 14px;
+  border-radius: 11px;
 }
-.design-canvas-agent__composer-shell { overflow: hidden; border: 0.5px solid color-mix(in oklch, var(--border) 74%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.design-canvas-agent__composer-shell { overflow: hidden; border: 0.5px solid color-mix(in oklch, var(--border) 74%, transparent); border-radius: 11px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms var(--design-canvas-ease-out), background-color 180ms var(--design-canvas-ease-out); }
 .design-canvas-agent__composer-shell:focus-within,
 .design-canvas-agent__composer-beam[data-active] .design-canvas-agent__composer-shell { border-color: transparent; background: color-mix(in oklch, var(--foreground) 5.5%, var(--card)); box-shadow: none; }
 .design-canvas-agent__mention-anchor { min-width: 0; }
@@ -1261,11 +1444,13 @@
   .design-canvas-tools #design-canvas-add:hover { background: color-mix(in oklch, var(--foreground) 7%, var(--card)); color: var(--foreground); }
   .dark .design-canvas-tools [data-slot="button"]:hover,
   .dark .design-canvas-zoom [data-slot="button"]:hover,
-  .dark .design-canvas-tools #design-canvas-add:hover { background: oklch(1 0 0 / 12%); color: white; }
+  .dark .design-canvas-tools #design-canvas-add:hover { background: oklch(1 0 0 / 10%); color: white; }
   .design-canvas-focus-actions [data-slot="button"]:hover { background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--foreground); }
   .dark .design-canvas-focus-actions [data-slot="button"]:hover { background: oklch(1 0 0 / 12%); color: white; }
   .design-canvas-node:hover .design-canvas-node__frame { border-color: var(--border-strong); }
   .design-canvas-agent__history-more:hover { background: var(--surface-2); color: var(--foreground); }
+  .design-canvas-agent__scroll-latest:hover { border-color: var(--border-strong); background: var(--surface-2); }
+  .design-canvas-agent__scroll-latest:hover > svg { transform: translate3d(0, 2px, 0); }
   .design-canvas-agent__task-stop:hover:not(:disabled) {
     border-color: color-mix(in oklch, var(--destructive) 30%, var(--border));
     background: color-mix(in oklch, var(--destructive) 5%, transparent);
@@ -1347,7 +1532,7 @@
   .design-canvas-topbar__identity h1 { max-width: 25vw; font-size: 13px; }
   .design-canvas-topbar__actions button { width: 32px; padding: 0; font-size: 0; }
   .design-canvas-main-agent { inset: 8px 8px 60px; width: auto; }
-  .design-canvas-main-agent .design-canvas-agent { border: 1px solid color-mix(in oklch, var(--border) 78%, transparent); border-radius: 14px; box-shadow: none; }
+  .design-canvas-main-agent .design-canvas-agent { border: 1px solid color-mix(in oklch, var(--border) 78%, transparent); border-radius: 16px; box-shadow: none; }
   .design-canvas-agent--floating,
   .design-canvas-agent--floating[data-agent-size="focus"] { right: 8px !important; bottom: 8px; left: 8px !important; top: auto !important; width: auto !important; height: min(520px, 56%) !important; }
   .design-canvas-surface[data-node-focus] .design-canvas-focus-actions {
@@ -1379,6 +1564,8 @@
   .design-canvas-agent__composer-beam:focus-within .design-canvas-agent__composer-shell {
     border-color: color-mix(in oklch, var(--design-canvas-accent) 48%, var(--border-strong));
   }
+  .design-canvas-agent__scroll-latest,
+  .design-canvas-agent__scroll-latest > svg { transition: none !important; }
   .design-canvas-topbar,
   .design-canvas-tools,
   .design-canvas-zoom,
@@ -1414,7 +1601,12 @@
   .design-canvas-surface::after,
   .design-canvas-surface .react-flow__background,
   .design-canvas-agent--floating,
-  .design-canvas-agent__task-stop { transition: none !important; }
+  .design-canvas-agent__task-stop,
+  .design-canvas-video-player__center,
+  .design-canvas-video-player__controls button,
+  .design-preview-annotation-composer textarea,
+  .design-canvas-surface .react-flow__edges,
+  .design-canvas-surface .design-canvas-connection .react-flow__edge-path { transition: none !important; }
   .design-canvas-tools,
   .design-canvas-zoom {
     transition: opacity 160ms var(--design-canvas-ease-out) !important;

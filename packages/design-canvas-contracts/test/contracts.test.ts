@@ -94,6 +94,7 @@ const canvas = {
   viewport: { x: 0, y: 0, zoom: 1 },
   nodeOrder: [node.id],
   nodes: [node],
+  connections: [],
   undoDepth: 1,
   redoDepth: 0,
   createdAt: 1,

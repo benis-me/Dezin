@@ -1370,8 +1370,19 @@ function validateDesignJavaScript(
       sourceType,
       plugins: exportProject ? ["typescript", "jsx"] : [],
     });
-  } catch {
-    throw new DesignStorageError("invalid-html", "Generated inline JavaScript is invalid");
+  } catch (error) {
+    const failure = error as { message?: unknown; loc?: { line?: unknown; column?: unknown } };
+    const line = typeof failure.loc?.line === "number" ? failure.loc.line : undefined;
+    const column = typeof failure.loc?.column === "number" ? failure.loc.column + 1 : undefined;
+    const reason = typeof failure.message === "string"
+      ? failure.message.replace(/\s+/g, " ").trim().replace(/\s*\(\d+:\d+\)$/, "").slice(0, 200)
+      : "";
+    const excerpt = line === undefined ? "" : (script.split(/\r?\n/)[line - 1]?.trim().slice(0, 240) ?? "");
+    const diagnostic = [reason, line === undefined ? "" : `at ${line}:${column ?? 1}`, excerpt].filter(Boolean).join(" — ");
+    throw new DesignStorageError(
+      "invalid-html",
+      `Generated inline JavaScript is invalid${diagnostic ? ` (${diagnostic})` : ""}`,
+    );
   }
   const program: unknown = syntax.program;
   if (!designJavaScriptNode(program)) {
@@ -1391,6 +1402,7 @@ function validateDesignJavaScript(
   let opensWindow = false;
   let evaluatesDynamicCode = false;
   let injectsMarkup = false;
+  let markupViolation: string | null = null;
   visitDesignJavaScript(program, (node, parent, key) => {
     if (node.type === "Identifier" && typeof node.name === "string"
       && designJavaScriptReference(node, parent, key, index)
@@ -1665,6 +1677,24 @@ function validateDesignJavaScript(
         }
       }
     }
+    if (injectsMarkup && markupViolation === null) {
+      let operation = node.type;
+      if (node.type === "MemberExpression" || node.type === "OptionalMemberExpression") {
+        operation = `member ${designJavaScriptMemberName(node, index) ?? "<dynamic>"}`;
+      } else if (node.type === "AssignmentExpression" && designJavaScriptNode(node.left)
+        && (node.left.type === "MemberExpression" || node.left.type === "OptionalMemberExpression")) {
+        operation = `assignment to ${designJavaScriptMemberName(node.left, index) ?? "<dynamic member>"}`;
+      } else if (node.type === "CallExpression" && designJavaScriptNode(node.callee)) {
+        operation = node.callee.type === "MemberExpression" || node.callee.type === "OptionalMemberExpression"
+          ? `call to ${designJavaScriptMemberName(node.callee, index) ?? "<dynamic member>"}`
+          : `call to ${node.callee.type === "Identifier" ? String(node.callee.name) : node.callee.type}`;
+      }
+      const location = node.loc as { start?: { line?: number; column?: number } } | undefined;
+      const line = location?.start?.line;
+      const column = location?.start?.column;
+      const excerpt = line === undefined ? "" : (script.split(/\r?\n/)[line - 1]?.trim().slice(0, 240) ?? "");
+      markupViolation = `${operation}${line === undefined ? "" : ` at ${line}:${(column ?? 0) + 1}`}${excerpt ? ` — ${excerpt}` : ""}`;
+    }
     if (accessesRemoteContent && remoteContentViolation === null) {
       let operation = node.type;
       if (node.type === "Identifier" && typeof node.name === "string") {
@@ -1702,7 +1732,10 @@ function validateDesignJavaScript(
     throw new DesignStorageError("invalid-html", "Generated HTML may not evaluate dynamic JavaScript");
   }
   if (injectsMarkup) {
-    throw new DesignStorageError("invalid-html", "Generated HTML may not inject executable markup");
+    throw new DesignStorageError(
+      "invalid-html",
+      `Generated HTML may not inject executable markup${markupViolation === null ? "" : ` (${markupViolation})`}`,
+    );
   }
   if (accessesRemoteContent) {
     throw new DesignStorageError(

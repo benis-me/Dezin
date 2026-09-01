@@ -561,7 +561,11 @@ export interface ApiClient {
   getFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
   setFigmaCredential(input: FigmaCredentialPutInput, signal?: AbortSignal): Promise<FigmaCredentialStatus>;
   forgetFigmaCredential(signal?: AbortSignal): Promise<FigmaCredentialStatus>;
-  generateProjectTitle(id: string, brief: string): Promise<Project>;
+  generateProjectTitle(
+    id: string,
+    brief: string,
+    agent?: { agentCommand?: string; model?: string },
+  ): Promise<Project>;
   getProject(id: string): Promise<Project>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
   deleteProject(id: string): Promise<void>;
@@ -602,6 +606,10 @@ export interface ApiClient {
     fileName?: string;
     createdAt: number;
   }>;
+  uploadDesignCanvasVideo(
+    projectId: string,
+    file: File,
+  ): Promise<{ uploadedFileId: string; bytes: number }>;
   importDesignCanvasAssets(
     projectId: string,
     input: { expectedRevision: number; items: readonly DesignCanvasAssetImportItem[] },
@@ -805,7 +813,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<FigmaCredentialStatus>("/api/figma/credential", { ...jsonInit("PUT", input), signal }),
     forgetFigmaCredential: (signal) =>
       json<FigmaCredentialStatus>("/api/figma/credential", { method: "DELETE", signal }),
-    generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
+    generateProjectTitle: (id, brief, agent) =>
+      json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief, ...agent })),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
     getDesignCanvas: (projectId, signal) =>
       json<DesignCanvas>(`/api/projects/${enc(projectId)}/design-canvas`, signal === undefined ? undefined : { signal }),
@@ -838,6 +847,18 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         fileName?: string;
         createdAt: number;
       }>(`/api/projects/${enc(projectId)}/design-canvas/assets`, jsonInit("POST", input)),
+    uploadDesignCanvasVideo: (projectId, file) =>
+      json<{ uploadedFileId: string; bytes: number }>(
+        `/api/projects/${enc(projectId)}/design-canvas/assets/uploads`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": file.type || "application/octet-stream",
+            "x-filename": encodeURIComponent(file.name),
+          },
+          body: file,
+        },
+      ),
     importDesignCanvasAssets: (projectId, input) =>
       json<DesignCanvas>(`/api/projects/${enc(projectId)}/design-canvas/assets/import`, jsonInit("POST", input)),
     designCanvasAssetUrl: (projectId, assetId) =>

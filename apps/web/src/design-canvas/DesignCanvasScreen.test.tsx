@@ -348,19 +348,20 @@ test("component system starter creates one coordinated four-Node workspace", asy
   await user.click(await screen.findByRole("button", { name: /^Build a component system\b/ }));
   await waitFor(() => expect(applyIntents).toHaveBeenCalledOnce());
   const intents = applyIntents.mock.calls[0]?.[1].intents ?? [];
-  expect(intents).toHaveLength(4);
-  expect(intents.map((intent) => intent.type === "add-node" ? intent.node.kind : null)).toEqual([
+  expect(intents).toHaveLength(7);
+  expect(intents.filter((intent) => intent.type === "add-node").map((intent) => intent.type === "add-node" ? intent.node.kind : null)).toEqual([
     "design-system",
     "component",
     "design-tokens",
     "design-document",
   ]);
-  expect(intents.map((intent) => intent.type === "add-node" ? intent.node.name : null)).toEqual([
+  expect(intents.filter((intent) => intent.type === "add-node").map((intent) => intent.type === "add-node" ? intent.node.name : null)).toEqual([
     "Design System",
     "Component Library",
     "Design Tokens",
     "Design.md",
   ]);
+  expect(intents.filter((intent) => intent.type === "connect-nodes")).toHaveLength(3);
 
   const panel = await screen.findByLabelText("Main Agent panel", { selector: "section" });
   const references = within(panel).getByLabelText("Referenced Nodes");
@@ -368,7 +369,7 @@ test("component system starter creates one coordinated four-Node workspace", asy
     expect(within(references).getByText(name)).toBeInTheDocument();
   }
   expect((within(panel).getByRole("textbox", { name: "Main Agent message" }) as HTMLTextAreaElement).value)
-    .toMatch(/production-scale component system/i);
+    .toMatch(/production-scale, product-agnostic component system/i);
 });
 
 test("a blank-canvas context menu exits before opening Figma import", async () => {
@@ -933,6 +934,26 @@ test("a special-ratio video keeps one logical media plane through focus and the 
     expect(element).not.toBeNull();
     return element!;
   });
+  expect(video).not.toHaveAttribute("controls");
+  expect(video.closest(".design-canvas-node")?.querySelector(".design-canvas-node__gesture-shield")).toBeNull();
+  let paused = true;
+  const play = vi.fn(async () => {
+    paused = false;
+    fireEvent.play(video);
+  });
+  const pause = vi.fn(() => {
+    paused = true;
+    fireEvent.pause(video);
+  });
+  Object.defineProperties(video, {
+    paused: { configurable: true, get: () => paused },
+    play: { configurable: true, value: play },
+    pause: { configurable: true, value: pause },
+  });
+  fireEvent.click(screen.getAllByRole("button", { name: "Play Ultrawide motion reference" })[0]!);
+  expect(play).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole("button", { name: "Pause Ultrawide motion reference" }));
+  expect(pause).toHaveBeenCalledOnce();
   Object.defineProperties(video, {
     videoWidth: { configurable: true, value: 2_560 },
     videoHeight: { configurable: true, value: 1_080 },
@@ -956,7 +977,7 @@ test("a special-ratio video keeps one logical media plane through focus and the 
   expect(canvasScale).toBeGreaterThan(0);
   expect(canvasPlane).toHaveAttribute("data-content-plane-state", "canvas");
 
-  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Ultrawide motion reference; double click to focus and interact" }));
+  fireEvent.doubleClick(video);
   await waitFor(() => expect(canvasPlane).toHaveAttribute("data-content-plane-state", "focus"));
   const source = video.closest<HTMLElement>(".design-canvas-node");
   const startScaleX = Number(source?.style.getPropertyValue("--design-node-focus-start-scale-x"));
@@ -1032,7 +1053,7 @@ test("video metadata arriving during an active focus flight rebases from the sam
     const plane = video.closest<HTMLElement>(".design-canvas-node__content-plane")!;
     const source = video.closest<HTMLElement>(".design-canvas-node")!;
 
-    fireEvent.doubleClick(screen.getByRole("button", { name: "Select Flight metadata video; double click to focus and interact" }));
+    fireEvent.doubleClick(video);
     await waitFor(() => expect(nodeAnimations).toHaveLength(1));
     const previousLayout = {
       width: Number.parseFloat(source.style.width),
@@ -1127,7 +1148,7 @@ test("undoing automatic video ratio correction restores geometry and keeps the n
   expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
 
   const canvasScale = Number(/scale\(([^)]+)\)/.exec(plane.style.transform)?.[1]);
-  fireEvent.doubleClick(screen.getByRole("button", { name: "Select Undo ratio video; double click to focus and interact" }));
+  fireEvent.doubleClick(video);
   await waitFor(() => expect(plane).toHaveAttribute("data-content-plane-state", "focus"));
   const source = video.closest<HTMLElement>(".design-canvas-node")!;
   expect(Number(source.style.getPropertyValue("--design-node-focus-start-scale-x"))).toBeCloseTo(canvasScale, 4);
@@ -1275,6 +1296,11 @@ test("focused previews accept context menus only over their iframe's private Mes
     nonce,
     clientX: 24,
     clientY: 30,
+    tagName: "button",
+    selector: "#checkout",
+    targetPath: "main.checkout > button#checkout",
+    nearbyText: "Continue to checkout",
+    rect: { x: 10, y: 12, width: 128, height: 36 },
   };
   window.dispatchEvent(new MessageEvent("message", { data: message, source: window }));
   expect(screen.queryByRole("menu", { name: "Page Node actions" })).not.toBeInTheDocument();
@@ -1300,8 +1326,13 @@ test("focused previews accept context menus only over their iframe's private Mes
     `/api/projects/${PROJECT_ID}/design-canvas/nodes/${target.id}/versions/${target.currentVersionId}/preview/embed`,
   );
   channel.port1.postMessage(message);
-  const menu = await screen.findByRole("menu", { name: "Page Node actions" });
-  expect(within(menu).getByRole("menuitem", { name: "Fit this Node" })).toHaveAttribute("data-disabled");
+  const comment = await screen.findByRole("textbox", { name: "Preview annotation comment" });
+  expect(screen.getByText("#checkout")).toBeInTheDocument();
+  fireEvent.change(comment, { target: { value: "Make this action clearer" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add to Agent" }));
+  const panel = await screen.findByLabelText("Main Agent panel", { selector: "section" });
+  expect((within(panel).getByRole("textbox", { name: "Main Agent message" }) as HTMLTextAreaElement).value)
+    .toMatch(/Target selector: #checkout[\s\S]*Make this action clearer/);
 
   channel.port1.close();
   rejectedChannel.port1.close();

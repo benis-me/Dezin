@@ -302,13 +302,18 @@ test("transcript controller follows only when the reader remains near the tail",
 
   transcript.scrollTop = 690;
   act(() => result.current.onScroll({ currentTarget: transcript } as React.UIEvent<HTMLDivElement>));
+  expect(result.current.showScrollToBottom).toBe(false);
   scrollHeight = 1_200;
   rerender({ tailKey: "two" });
   expect(transcript.scrollTop).toBe(1_200);
 
   transcript.scrollTop = 100;
   act(() => result.current.onScroll({ currentTarget: transcript } as React.UIEvent<HTMLDivElement>));
+  expect(result.current.showScrollToBottom).toBe(true);
   scrollHeight = 1_400;
   rerender({ tailKey: "three" });
   expect(transcript.scrollTop).toBe(100);
+  act(() => result.current.scrollToBottom());
+  expect(transcript.scrollTop).toBe(1_400);
+  expect(result.current.showScrollToBottom).toBe(false);
 });

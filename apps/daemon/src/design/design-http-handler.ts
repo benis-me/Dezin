@@ -1,11 +1,15 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
+import { join } from "node:path";
 import { dedupModels, type AgentRunner } from "../../../../packages/agent/src/index.ts";
 import type { Settings } from "../../../../packages/core/src/index.ts";
 import type { AppDeps } from "../app.ts";
 import { HttpError, readJsonBody, sendJson } from "../http-util.ts";
+import { SharinganSession } from "../sharingan-browser.ts";
+import { getDesignProject } from "./design-project-store.ts";
 import {
   buildDesignMainSystemPrompt,
   cancelDesignGlobalJob,
@@ -109,13 +113,83 @@ const EMBEDDED_PREVIEW_BRIDGE = Buffer.from(
     'const channel=new MessageChannel();apply(portStart,channel.port1,[]);',
     'addEventListener("contextmenu",(event)=>{if(!event.isTrusted)return;',
     'apply(prevent,event,[]);apply(stop,event,[]);',
+    'const target=event.target instanceof Element?event.target:document.elementFromPoint(event.clientX,event.clientY);if(!target)return;',
+    'const clean=(value,maximum)=>String(value||"").replace(/\\s+/g," ").trim().slice(0,maximum);',
+    'const escapeCss=(value)=>globalThis.CSS&&typeof globalThis.CSS.escape==="function"?globalThis.CSS.escape(value):String(value).replace(/[^a-zA-Z0-9_-]/g,"\\\\$&");',
+    'const segment=(element)=>{const tag=element.tagName.toLowerCase();const parent=element.parentElement;if(!parent)return tag;',
+    'const siblings=Array.from(parent.children).filter((candidate)=>candidate.tagName===element.tagName);return siblings.length>1?`${tag}:nth-of-type(${siblings.indexOf(element)+1})`:tag;};',
+    'const stable=target.id?`#${escapeCss(target.id)}`:target.getAttribute("data-dezin-id")?`[data-dezin-id="${String(target.getAttribute("data-dezin-id")).replace(/["\\\\]/g,"\\\\$&")}"]`:target.getAttribute("data-testid")?`[data-testid="${String(target.getAttribute("data-testid")).replace(/["\\\\]/g,"\\\\$&")}"]`:null;',
+    'const parts=[];let cursor=target;while(cursor&&cursor!==document.documentElement&&parts.length<6){parts.unshift(segment(cursor));cursor=cursor.parentElement;}',
+    'const selector=clean(stable||parts.join(" > "),1024)||target.tagName.toLowerCase();',
+    'const path=[];cursor=target;while(cursor&&cursor!==document.documentElement&&path.length<6){const classes=Array.from(cursor.classList||[]).slice(0,2).map(escapeCss);path.unshift(cursor.tagName.toLowerCase()+(cursor.id?`#${escapeCss(cursor.id)}`:classes.length?`.${classes.join(".")}`:""));cursor=cursor.parentElement;}',
+    'const rect=target.getBoundingClientRect();',
     'apply(portPost,channel.port1,[{source:"dezin",type:"embedded-preview-context-menu",',
-    'nonce,protocol:1,clientX:event.clientX,clientY:event.clientY}]);},true);',
+    'nonce,protocol:1,clientX:event.clientX,clientY:event.clientY,tagName:target.tagName.toLowerCase(),selector,targetPath:clean(path.join(" > "),1024)||selector,nearbyText:clean(target.innerText||target.textContent,512),rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}}]);},true);',
     'apply(parentPost,parent,[{source:"dezin",type:"embedded-preview-context-menu-ready",',
     'nonce,protocol:1},"*",[channel.port2]]);})();</script>',
   ].join(""),
   "utf8",
 );
+
+const designCoverCaptures = new Map<string, Promise<Buffer>>();
+let designCoverCaptureQueue = Promise.resolve();
+
+function queuedDesignCoverCapture(task: () => Promise<Buffer>): Promise<Buffer> {
+  // ponytail: one browser capture at a time; use a small worker pool if the gallery grows past dozens of projects.
+  const capture = designCoverCaptureQueue.then(task, task);
+  designCoverCaptureQueue = capture.then(() => undefined, () => undefined);
+  return capture;
+}
+
+function escapedSvgText(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]!);
+}
+
+function fallbackDesignCover(name: string, nodeCount: number): Buffer {
+  const title = escapedSvgText(name).slice(0, 72);
+  const detail = nodeCount === 1 ? "1 canvas node" : `${nodeCount} canvas nodes`;
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750">`
+      + `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#202126"/><stop offset="1" stop-color="#0f1013"/></linearGradient></defs>`
+      + `<rect width="1200" height="750" fill="url(#g)"/><circle cx="1030" cy="-30" r="310" fill="#6d5dfc" opacity=".18"/>`
+      + `<rect x="72" y="70" width="1056" height="610" rx="32" fill="#18191d" stroke="#ffffff" stroke-opacity=".1"/>`
+      + `<text x="128" y="558" fill="#f5f5f6" font-family="ui-sans-serif,system-ui,sans-serif" font-size="54" font-weight="650">${title}</text>`
+      + `<text x="130" y="608" fill="#a5a7af" font-family="ui-sans-serif,system-ui,sans-serif" font-size="24">${detail}</text>`
+      + `</svg>`,
+    "utf8",
+  );
+}
+
+function sendDesignCover(
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: Buffer,
+  contentType: "image/png" | "image/svg+xml",
+): void {
+  const checksum = createHash("sha256").update(body).digest("hex");
+  const etag = `"sha256-${checksum}"`;
+  const headers = {
+    "content-type": contentType,
+    "content-length": String(body.length),
+    "cache-control": "public, max-age=31536000, immutable",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "x-content-type-options": "nosniff",
+    etag,
+  };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(req.method === "HEAD" ? undefined : body);
+}
 
 function requestUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", "http://127.0.0.1");
@@ -406,11 +480,6 @@ async function sendAsset(
   res: ServerResponse,
   resolved: { path: string; manifest: Awaited<ReturnType<typeof getDesignAssetManifest>> },
 ): Promise<void> {
-  const bytes = await readFile(resolved.path);
-  if (bytes.length !== resolved.manifest.bytes
-    || createHash("sha256").update(bytes).digest("hex") !== resolved.manifest.checksum) {
-    throw new HttpError(409, "Design Asset changed after integrity verification");
-  }
   const etag = `"sha256-${resolved.manifest.checksum}"`;
   const baseHeaders: Record<string, string> = {
     "accept-ranges": "bytes",
@@ -432,29 +501,151 @@ async function sendAsset(
   }
   let range: { start: number; end: number } | null;
   try {
-    range = rangeFor(Array.isArray(req.headers.range) ? req.headers.range[0] : req.headers.range, bytes.length);
+    range = rangeFor(Array.isArray(req.headers.range) ? req.headers.range[0] : req.headers.range, resolved.manifest.bytes);
   } catch (error) {
     if (error instanceof HttpError && error.status === 416) {
-      res.writeHead(416, { ...baseHeaders, "content-range": `bytes */${bytes.length}` });
+      res.writeHead(416, { ...baseHeaders, "content-range": `bytes */${resolved.manifest.bytes}` });
       res.end();
       return;
     }
     throw error;
   }
-  const body = range === null ? bytes : bytes.subarray(range.start, range.end + 1);
+  const start = range?.start ?? 0;
+  const end = range?.end ?? resolved.manifest.bytes - 1;
   const headers = {
     ...baseHeaders,
-    "content-length": String(body.length),
-    ...(range === null ? {} : { "content-range": `bytes ${range.start}-${range.end}/${bytes.length}` }),
+    "content-length": String(end - start + 1),
+    ...(range === null ? {} : { "content-range": `bytes ${start}-${end}/${resolved.manifest.bytes}` }),
   };
   res.writeHead(range === null ? 200 : 206, headers);
-  res.end(req.method === "HEAD" ? undefined : body);
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(resolved.path, { start, end });
+    const done = () => {
+      stream.removeListener("error", reject);
+      res.removeListener("finish", done);
+      res.removeListener("close", done);
+      resolve();
+    };
+    stream.once("error", reject);
+    res.once("finish", done);
+    res.once("close", done);
+    stream.pipe(res);
+  });
 }
 
 export async function handleGetDesignCanvas(
   _req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps,
 ): Promise<void> {
   sendJson(res, 200, await getDesignCanvas(deps.dataDir, params.id!));
+}
+
+export async function handleServeDesignCover(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const [canvas, project] = await Promise.all([
+    getDesignCanvas(deps.dataDir, projectId),
+    getDesignProject(deps.dataDir, projectId),
+  ]);
+  if (!project) throw new HttpError(404, "Design Project not found");
+  const nodesById = new Map(canvas.nodes.map((node) => [node.id, node]));
+  const ordered = canvas.nodeOrder.flatMap((id) => {
+    const node = nodesById.get(id);
+    return node ? [node] : [];
+  });
+  const hasPreview = (node: (typeof canvas.nodes)[number]) =>
+    node.selectedVersionId !== null || node.currentVersionId !== null;
+  const candidate = ordered.find((node) => node.kind === "page" && hasPreview(node))
+    ?? ordered.find((node) => DESIGN_GENERATIVE_NODE_KINDS.includes(node.kind as (typeof DESIGN_GENERATIVE_NODE_KINDS)[number]) && hasPreview(node))
+    ?? ordered.find((node) => node.kind === "image" && hasPreview(node));
+  const fallback = () => sendDesignCover(req, res, fallbackDesignCover(project.name, canvas.nodes.length), "image/svg+xml");
+  if (!candidate) {
+    fallback();
+    return;
+  }
+
+  const versionId = candidate.selectedVersionId ?? candidate.currentVersionId!;
+  let resolved: Awaited<ReturnType<typeof resolveDesignVersionPreview>>;
+  try {
+    resolved = await resolveDesignVersionPreview(deps.dataDir, projectId, candidate.id, versionId);
+  } catch {
+    fallback();
+    return;
+  }
+  if (resolved.kind === "asset") {
+    if (resolved.assetManifest.mimeType.startsWith("image/") && resolved.assetManifest.mimeType !== "image/svg+xml") {
+      await sendAsset(req, res, { path: resolved.path, manifest: resolved.assetManifest });
+      return;
+    }
+    fallback();
+    return;
+  }
+
+  const coverRoot = join(deps.dataDir, "projects", projectId, "design", "cover");
+  const coverPath = join(coverRoot, "cover.png");
+  const metadataPath = join(coverRoot, "cover.json");
+  try {
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as { nodeId?: unknown; versionId?: unknown };
+    if (metadata.nodeId === candidate.id && metadata.versionId === versionId) {
+      const cached = await readFile(coverPath);
+      if (cached.length > 0) {
+        sendDesignCover(req, res, cached, "image/png");
+        return;
+      }
+    }
+  } catch {
+    // A cover is disposable derived data; a cache miss or partial write simply regenerates it.
+  }
+
+  const key = `${projectId}:${candidate.id}:${versionId}`;
+  let capture = designCoverCaptures.get(key);
+  if (!capture) {
+    capture = queuedDesignCoverCapture(async () => {
+      const origin = trustedDesignPreviewOrigin(req.socket);
+      const previewUrl = new URL(
+        `/api/projects/${encodeURIComponent(projectId)}/design-canvas/nodes/${encodeURIComponent(candidate.id)}/versions/${encodeURIComponent(versionId)}/preview`,
+        origin,
+      ).href;
+      const session = await SharinganSession.open(previewUrl, { headless: true });
+      try {
+        await session.setViewport({ width: 1200, height: 750, label: "cover" });
+        await session.settle(2_500);
+        const png = await session.screenshot({ fullPage: false });
+        await mkdir(coverRoot, { recursive: true });
+        const suffix = randomUUID();
+        const temporaryCover = join(coverRoot, `cover-${suffix}.png`);
+        const temporaryMetadata = join(coverRoot, `cover-${suffix}.json`);
+        try {
+          await writeFile(temporaryCover, png, { flag: "wx", mode: 0o600 });
+          await rename(temporaryCover, coverPath);
+          await writeFile(temporaryMetadata, JSON.stringify({ nodeId: candidate.id, versionId }), { flag: "wx", mode: 0o600 });
+          await rename(temporaryMetadata, metadataPath);
+        } finally {
+          await Promise.all([
+            rm(temporaryCover, { force: true }).catch(() => {}),
+            rm(temporaryMetadata, { force: true }).catch(() => {}),
+          ]);
+        }
+        return png;
+      } finally {
+        await session.close();
+      }
+    });
+    designCoverCaptures.set(key, capture);
+    void capture.finally(() => designCoverCaptures.delete(key)).catch(() => {});
+  }
+  try {
+    sendDesignCover(req, res, await capture, "image/png");
+  } catch {
+    fallback();
+  }
 }
 
 export async function handlePutDesignCanvas(
@@ -518,6 +709,43 @@ export async function handleCreateDesignAsset(req: IncomingMessage, res: ServerR
   }));
 }
 
+function stagedDesignUploadPath(dataDir: string, projectId: string, uploadedFileId: string): string | null {
+  const match = /^\.refs\/(design-upload-[a-f0-9-]{36})$/.exec(uploadedFileId);
+  return match ? join(dataDir, "projects", projectId, ".refs", match[1]!) : null;
+}
+
+export async function handleStageDesignVideo(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  await getDesignCanvas(d.dataDir, p.id!);
+  const contentType = String(req.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase();
+  if (!contentType.startsWith("video/")) throw new HttpError(415, "Design video upload requires a video content type");
+  const uploadedFileId = `.refs/design-upload-${randomUUID()}`;
+  const path = stagedDesignUploadPath(d.dataDir, p.id!, uploadedFileId)!;
+  await mkdir(join(d.dataDir, "projects", p.id!, ".refs"), { recursive: true });
+  const handle = await open(path, "wx", 0o600);
+  let bytes = 0;
+  try {
+    for await (const value of req) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const written = await handle.write(chunk, offset, chunk.length - offset, bytes + offset);
+        if (written.bytesWritten < 1) throw new HttpError(500, "Design video upload stopped before completion");
+        offset += written.bytesWritten;
+      }
+      bytes += chunk.length;
+      if (!Number.isSafeInteger(bytes)) throw new HttpError(413, "Design video is too large for this filesystem");
+    }
+    if (bytes < 1) throw new HttpError(400, "Design video upload is empty");
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await rm(path, { force: true }).catch(() => {});
+    throw error;
+  }
+  await handle.close();
+  sendJson(res, 201, { uploadedFileId, bytes });
+}
+
 export async function handleImportDesignAssets(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   const body = exactRecord(
     await readJsonBody(req, Math.ceil(MAX_DESIGN_ASSET_BATCH_BYTES * 4 / 3) + 2 * 1024 * 1024),
@@ -531,11 +759,12 @@ export async function handleImportDesignAssets(req: IncomingMessage, res: Server
   const items = body.items.map((value, index) => {
     const item = exactRecord(value, `Design Asset import item ${index}`, ["asset", "binding"]);
     const asset = exactRecord(item.asset, `Design Asset import item ${index}.asset`, [
-      "name", "mimeType", "base64", "sourceVersion",
+      "name", "mimeType", "base64", "uploadedFileId", "sourceVersion",
     ]);
     const hasBase64 = asset.base64 !== undefined;
+    const hasUploaded = asset.uploadedFileId !== undefined;
     const hasSourceVersion = asset.sourceVersion !== undefined;
-    if (Number(hasBase64) + Number(hasSourceVersion) !== 1) {
+    if (Number(hasBase64) + Number(hasUploaded) + Number(hasSourceVersion) !== 1) {
       throw new HttpError(400, `Design Asset import item ${index} must have exactly one source`);
     }
     let sourceVersion: { projectId: string; nodeId: string; versionId: string } | undefined;
@@ -603,15 +832,28 @@ export async function handleImportDesignAssets(req: IncomingMessage, res: Server
         }),
         ...(hasBase64 ? {
           base64: boundedString(asset.base64, "Asset base64", Math.ceil(MAX_DESIGN_ASSET_BYTES * 4 / 3) + 4)!,
+        } : hasUploaded ? {
+          uploadedFileId: boundedString(asset.uploadedFileId, "uploadedFileId", 96)!,
         } : { sourceVersion: sourceVersion! }),
       },
       binding: parsedBinding,
     };
   });
-  sendJson(res, 200, await importDesignCanvasAssetBatch(d.dataDir, p.id!, {
-    expectedRevision: body.expectedRevision as number,
-    items,
-  }));
+  const stagedUploadPaths = items.flatMap((item) => {
+    const uploadedFileId = "uploadedFileId" in item.asset ? item.asset.uploadedFileId : undefined;
+    if (!uploadedFileId) return [];
+    const path = stagedDesignUploadPath(d.dataDir, p.id!, uploadedFileId);
+    return path ? [path] : [];
+  });
+  try {
+    const canvas = await importDesignCanvasAssetBatch(d.dataDir, p.id!, {
+      expectedRevision: body.expectedRevision as number,
+      items,
+    });
+    sendJson(res, 200, canvas);
+  } finally {
+    await Promise.all(stagedUploadPaths.map((path) => rm(path, { force: true }).catch(() => {})));
+  }
 }
 
 export async function handleServeDesignAssetContent(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {

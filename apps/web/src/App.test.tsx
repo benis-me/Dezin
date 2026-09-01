@@ -216,7 +216,11 @@ test("creating a project asks the daemon for a generated title in the background
   fireEvent.click(screen.getByLabelText("Design"));
 
   await waitFor(() => expect(bootstrapDesignProject).toHaveBeenCalled());
-  await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith("p1", "A dashboard for pricing experiments"));
+  await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith(
+    "p1",
+    "A dashboard for pricing experiments",
+    undefined,
+  ));
 });
 
 test("Home attachment mapping keeps exact source Version identity in the atomic import", () => {

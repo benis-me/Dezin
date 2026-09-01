@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
@@ -93,12 +93,17 @@ test("the real Design process receives only the confined environment", async (t)
   const f = await fixture(t);
   const binDir = await mkdtemp(join(tmpdir(), "dezin-design-env-bin-"));
   t.after(() => rm(binDir, { recursive: true, force: true }));
-  const executable = join(binDir, ".local", "bin", "claude");
-  await mkdir(join(binDir, ".local", "bin"), { recursive: true });
-  await writeFile(executable, `#!/bin/sh
-printf '%s|%s\n' "\${DEZIN_TEST_DAEMON_SECRET-unset}" "\${DEZIN_DAEMON_TOKEN-unset}"
+  const fallbackExecutable = join(binDir, ".local", "bin", "claude");
+  const preferredExecutable = join(binDir, "bin", "claude");
+  await Promise.all([
+    mkdir(join(binDir, ".local", "bin"), { recursive: true }),
+    mkdir(join(binDir, "bin"), { recursive: true }),
+  ]);
+  await writeFile(fallbackExecutable, "#!/bin/sh\nprintf 'fallback\\n'\n", "utf8");
+  await writeFile(preferredExecutable, `#!/bin/sh
+printf 'preferred|%s|%s\n' "\${DEZIN_TEST_DAEMON_SECRET-unset}" "\${DEZIN_DAEMON_TOKEN-unset}"
 `, "utf8");
-  await chmod(executable, 0o755);
+  await Promise.all([chmod(fallbackExecutable, 0o755), chmod(preferredExecutable, 0o755)]);
 
   const priorSecret = process.env.DEZIN_TEST_DAEMON_SECRET;
   const priorToken = process.env.DEZIN_DAEMON_TOKEN;
@@ -116,7 +121,12 @@ printf '%s|%s\n' "\${DEZIN_TEST_DAEMON_SECRET-unset}" "\${DEZIN_DAEMON_TOKEN-uns
     projectId: f.projectId,
     provider: "claude",
     command: "claude",
-    runtimeEnvironment: { HOME: binDir, TMPDIR: tmpdir(), LANG: "C" },
+    runtimeEnvironment: {
+      HOME: binDir,
+      TMPDIR: tmpdir(),
+      LANG: "C",
+      PATH: `${join(binDir, "bin")}${delimiter}${join(binDir, ".local", "bin")}${delimiter}/tmp/untrusted`,
+    },
   }).run({
     command: "claude",
     args: designClaudeArgs(undefined, "system"),
@@ -131,7 +141,7 @@ printf '%s|%s\n' "\${DEZIN_TEST_DAEMON_SECRET-unset}" "\${DEZIN_DAEMON_TOKEN-uns
   });
 
   assert.equal(output.exitCode, 0, output.stderr ?? "");
-  assert.equal(output.stdout.trim(), "unset|unset");
+  assert.equal(output.stdout.trim(), "preferred|unset|unset");
 });
 
 test("Claude Design runners use the exact no-Bash confined policy and job cwd", async (t) => {

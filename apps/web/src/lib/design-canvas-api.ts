@@ -23,10 +23,11 @@ function assertLocalFileBatch(files: readonly File[]): void {
   }
   let total = 0;
   for (const file of files) {
-    if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > MAX_LOCAL_ASSET_BYTES) {
+    const video = inferredMimeType(file).startsWith("video/");
+    if (!Number.isSafeInteger(file.size) || file.size < 1 || (!video && file.size > MAX_LOCAL_ASSET_BYTES)) {
       throw new Error(`${file.name || "A file"} must be between 1 byte and 32 MiB.`);
     }
-    total += file.size;
+    if (!video) total += file.size;
   }
   if (total > MAX_LOCAL_ASSET_BATCH_BYTES) {
     throw new Error("The selected files exceed the 64 MiB import limit.");
@@ -78,6 +79,19 @@ function fileBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+async function localFileAsset(
+  api: ApiClient,
+  projectId: string,
+  file: File,
+  mimeType: string,
+): Promise<DesignCanvasAssetImportItem["asset"]> {
+  if (!mimeType.startsWith("video/")) {
+    return { name: file.name, mimeType, base64: await fileBase64(file) };
+  }
+  const { uploadedFileId } = await api.uploadDesignCanvasVideo(projectId, file);
+  return { name: file.name, mimeType, uploadedFileId };
 }
 
 interface ImportedMediaSize {
@@ -202,27 +216,30 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
 
     importLocalFiles: async (projectId, files, position) => {
       assertLocalFileBatch(files);
-      const items = await Promise.all(files.map(async (file, index): Promise<DesignCanvasAssetImportItem> => {
+      const items: DesignCanvasAssetImportItem[] = [];
+      for (const [index, file] of files.entries()) {
         const mimeType = inferredMimeType(file);
         const kind = fileKind(mimeType);
         const mediaSize = await importedMediaSize(file, kind);
         const node = importedNodeIntent("pending-asset", file.name, mimeType, position, index, undefined, mediaSize).node;
         const { assetId: _assetId, ...materialNode } = node;
-        return {
-          asset: { name: file.name, mimeType, base64: await fileBase64(file) },
+        const asset = await localFileAsset(api, projectId, file, mimeType);
+        items.push({
+          asset,
           binding: {
             type: "create-node",
             node: { ...materialNode, id: importNodeId() },
           },
-        };
-      }));
+        });
+      }
       return importBatchAgainstLatest(api, projectId, items);
     },
     appendMaterialVersion: async (projectId, nodeId, file) => {
       assertLocalFileBatch([file]);
       const mimeType = inferredMimeType(file);
+      const asset = await localFileAsset(api, projectId, file, mimeType);
       return importBatchAgainstLatest(api, projectId, [{
-        asset: { name: file.name, mimeType, base64: await fileBase64(file) },
+        asset,
         binding: { type: "append-version", nodeId },
       }]);
     },

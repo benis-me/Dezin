@@ -29,6 +29,7 @@ export interface PublicDesignProject {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  coverUrl: string;
   projectPath: string;
   sharingan: false;
 }
@@ -343,6 +344,7 @@ export function designProjectPayload(dataDir: string, project: DesignProjectMeta
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     archivedAt: project.archivedAt,
+    coverUrl: `/api/projects/${encodeURIComponent(project.projectId)}/design-canvas/cover?v=${project.updatedAt}`,
     projectPath: projectRoot(dataDir, project.projectId),
     sharingan: false,
   };

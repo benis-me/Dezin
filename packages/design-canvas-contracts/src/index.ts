@@ -77,6 +77,13 @@ export interface DesignNode {
   updatedAt: number;
 }
 
+export interface DesignConnection {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  label: string | null;
+}
+
 export interface DesignCanvas {
   schemaVersion: typeof DESIGN_SCHEMA_VERSION;
   projectId: string;
@@ -84,6 +91,8 @@ export interface DesignCanvas {
   viewport: DesignViewport;
   nodeOrder: string[];
   nodes: DesignNode[];
+  /** Absent only for Canvas payloads produced before connection support. */
+  connections?: DesignConnection[];
   undoDepth: number;
   redoDepth: number;
   createdAt: number;
@@ -110,6 +119,16 @@ export type DesignCanvasIntent =
       };
     }
   | { type: "remove-node"; nodeId: string }
+  | {
+      type: "connect-nodes";
+      connection: {
+        id?: string;
+        sourceNodeId: string;
+        targetNodeId: string;
+        label?: string | null;
+      };
+    }
+  | { type: "disconnect-nodes"; connectionId: string }
   | { type: "set-viewport"; viewport: DesignViewport }
   | {
       type: "replace-layout";
@@ -234,11 +253,13 @@ export interface DesignAgentSelection {
 
 export type DesignCanvasAssetImportSource =
   | { name: string; mimeType: string; base64: string; sourceVersion?: never }
+  | { name: string; mimeType: string; uploadedFileId: string; base64?: never; sourceVersion?: never }
   | {
       name: string;
       mimeType: string;
       sourceVersion: { projectId: string; nodeId: string; versionId: string };
       base64?: never;
+      uploadedFileId?: never;
     };
 
 export interface DesignCanvasAssetImportItem {

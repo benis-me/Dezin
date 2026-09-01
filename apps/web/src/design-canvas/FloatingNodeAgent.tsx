@@ -22,6 +22,7 @@ import { BorderBeam } from "border-beam";
 import { motion } from "motion/react";
 import {
   ArrowUp,
+  ArrowDown,
   CircleAlert,
   FileUp,
   LoaderCircle,
@@ -715,11 +716,14 @@ const AgentTranscript = memo(function AgentTranscript({
   onRetryJob?: (jobId: string) => Promise<void>;
   tailKey: string;
 }) {
+  const reduceMotion = usePrefersReducedMotion();
   const {
     historyPages,
     transcriptRef,
     onScroll,
     showEarlier,
+    showScrollToBottom,
+    scrollToBottom,
   } = useAgentTranscriptController({
     scopeKey,
     tailKey,
@@ -744,15 +748,16 @@ const AgentTranscript = memo(function AgentTranscript({
   });
 
   return (
-    <div
-      ref={transcriptRef}
-      className="design-canvas-agent__transcript"
-      role="log"
-      aria-live="polite"
-      aria-relevant="additions"
-      aria-busy={threadLoading || undefined}
-      onScroll={onScroll}
-    >
+    <div className="design-canvas-agent__transcript-wrap">
+      <div
+        ref={transcriptRef}
+        className="design-canvas-agent__transcript"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-busy={threadLoading || undefined}
+        onScroll={onScroll}
+      >
       {hiddenTranscriptCount > 0 ? (
         <button
           type="button"
@@ -772,7 +777,7 @@ const AgentTranscript = memo(function AgentTranscript({
           </p>
         </div>
       ) : null}
-      {timeline.map((item) => {
+        {timeline.map((item) => {
         if (item.kind === "thinking") {
           return <AgentThinkingIndicator key={item.id} />;
         }
@@ -818,7 +823,22 @@ const AgentTranscript = memo(function AgentTranscript({
             initiallyExpanded={item.job.id === latestVisibleJobId}
           />
         );
-      })}
+        })}
+      </div>
+      {showScrollToBottom ? (
+        <motion.button
+          type="button"
+          className="design-canvas-agent__scroll-latest"
+          aria-label="Scroll to latest activity"
+          initial={reduceMotion ? false : { opacity: 0, y: 6, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: reduceMotion ? 0 : 0.16, ease: AGENT_MOTION_EASE }}
+          onClick={scrollToBottom}
+        >
+          <ArrowDown aria-hidden />
+          Latest
+        </motion.button>
+      ) : null}
     </div>
   );
 });

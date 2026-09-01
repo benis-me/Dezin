@@ -1,5 +1,7 @@
 import {
+  Handle,
   NodeResizeControl,
+  Position,
   type ControlPosition,
   type Node,
   type NodeProps,
@@ -9,8 +11,11 @@ import {
 import {
   CircleAlert,
   LoaderCircle,
+  Pause,
   Play,
   Sparkles,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import {
   useCallback,
@@ -23,7 +28,7 @@ import {
   type RefObject,
 } from "react";
 
-import { Button } from "../components/ui/Button.tsx";
+import { Button, IconSwap } from "../components/ui/index.ts";
 import {
   embeddedPreviewDocumentSrc,
   previewDocumentSrc,
@@ -48,11 +53,21 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void;
   onAppendMaterialVersion?: (nodeId: string, file: File) => Promise<void>;
   onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
-  onPreviewContextMenu?: (nodeId: string, clientX: number, clientY: number) => void;
+  onPreviewContextMenu?: (nodeId: string, target: DesignPreviewAnnotationTarget) => void;
   onFocusAnimationStart?: (nodeId: string, phase: NodeFocusMotion["phase"], durationMs: number) => void;
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
   contentLayout?: DesignNodeContentLayout | null;
   focusMotion?: NodeFocusMotion | null;
+}
+
+export interface DesignPreviewAnnotationTarget {
+  clientX: number;
+  clientY: number;
+  tagName: string;
+  selector: string;
+  targetPath: string;
+  nearbyText: string;
+  rect: { x: number; y: number; width: number; height: number };
 }
 
 export interface DesignNodeContentLayout {
@@ -514,11 +529,20 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       const bounds = iframe.getBoundingClientRect();
       const scaleX = bounds.width / Math.max(1, iframe.clientWidth);
       const scaleY = bounds.height / Math.max(1, iframe.clientHeight);
-      onPreviewContextMenu(
-        node.id,
-        bounds.left + Math.max(0, Math.min(bounds.width, message.clientX * scaleX)),
-        bounds.top + Math.max(0, Math.min(bounds.height, message.clientY * scaleY)),
-      );
+      onPreviewContextMenu(node.id, {
+        clientX: bounds.left + Math.max(0, Math.min(bounds.width, message.clientX * scaleX)),
+        clientY: bounds.top + Math.max(0, Math.min(bounds.height, message.clientY * scaleY)),
+        tagName: message.tagName,
+        selector: message.selector,
+        targetPath: message.targetPath,
+        nearbyText: message.nearbyText,
+        rect: {
+          x: bounds.left + message.rect.x * scaleX,
+          y: bounds.top + message.rect.y * scaleY,
+          width: message.rect.width * scaleX,
+          height: message.rect.height * scaleY,
+        },
+      });
     },
   });
   const previousVersionIdRef = useRef(versionId);
@@ -698,6 +722,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         ...focusStyle,
       }}
     >
+      <Handle type="target" position={Position.Left} className="design-canvas-node__flow-handle" />
+      <Handle type="source" position={Position.Right} className="design-canvas-node__flow-handle" />
       <div className="design-canvas-node__hover-label" aria-hidden="true">
         <span>{node.name}</span>
       </div>
@@ -790,7 +816,7 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
             )}
           </div>
 
-          {hasRichContent && !focusInteractive ? (
+          {hasRichContent && !focusInteractive && node.kind !== "video" ? (
             <button
               type="button"
               className="design-canvas-node__gesture-shield nopan"
@@ -1040,20 +1066,11 @@ function MaterialPreview({
   }
   if (node.kind === "video") {
     return (
-      <video
-        src={url}
-        width={Math.round(node.geometry.width)}
-        height={Math.round(node.geometry.height)}
-        controls={focusMotion?.phase === "opening" && focusMotion.role === "source"}
-        muted
-        preload="metadata"
-        className="design-canvas-node__asset design-canvas-node__asset--video nodrag nopan"
-        onLoadedMetadata={(event) => {
-          const video = event.currentTarget;
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            onContentAspectRatio?.(node.id, video.videoWidth / video.videoHeight);
-          }
-        }}
+      <DesignVideoPlayer
+        node={node}
+        url={url}
+        focused={focusMotion?.role === "source"}
+        onContentAspectRatio={onContentAspectRatio}
         onError={() => setFailed(true)}
       />
     );
@@ -1068,6 +1085,121 @@ function MaterialPreview({
       focusMotion={focusMotion}
       onAppendMaterialVersion={onAppendMaterialVersion}
     />
+  );
+}
+
+function formatVideoTime(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "0:00";
+  const seconds = Math.floor(value);
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function DesignVideoPlayer({
+  node,
+  url,
+  focused,
+  onContentAspectRatio,
+  onError,
+}: {
+  node: DesignNode;
+  url: string;
+  focused: boolean;
+  onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
+  onError: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(true);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const progress = duration > 0 ? Math.min(100, currentTime / duration * 100) : 0;
+
+  const togglePlayback = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => setPlaying(false));
+    else video.pause();
+  }, []);
+
+  return (
+    <div
+      className="design-canvas-video-player nodrag nopan"
+      data-playing={playing || undefined}
+      data-focused={focused || undefined}
+    >
+      <video
+        ref={videoRef}
+        src={url}
+        width={Math.round(node.geometry.width)}
+        height={Math.round(node.geometry.height)}
+        muted={muted}
+        playsInline
+        preload="metadata"
+        className="design-canvas-node__asset design-canvas-node__asset--video"
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          setDuration(video.duration);
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            onContentAspectRatio?.(node.id, video.videoWidth / video.videoHeight);
+          }
+        }}
+        onDurationChange={(event) => setDuration(event.currentTarget.duration)}
+        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onError={onError}
+      />
+      <button
+        type="button"
+        className="design-canvas-video-player__center"
+        aria-label={`Play ${node.name}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          togglePlayback();
+        }}
+      >
+        <Play aria-hidden fill="currentColor" />
+      </button>
+      <div
+        className="design-canvas-video-player__controls"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button type="button" aria-label={playing ? `Pause ${node.name}` : `Play ${node.name}`} onClick={togglePlayback}>
+          <IconSwap active={playing} first={<Play />} second={<Pause />} />
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={duration || 0}
+          step="any"
+          value={Math.min(currentTime, duration || 0)}
+          aria-label={`Seek ${node.name}`}
+          style={{ "--design-video-progress": `${progress}%` } as CSSProperties}
+          onChange={(event) => {
+            const next = Number(event.currentTarget.value);
+            if (!videoRef.current || !Number.isFinite(next)) return;
+            videoRef.current.currentTime = next;
+            setCurrentTime(next);
+          }}
+        />
+        <span>{formatVideoTime(currentTime)} / {formatVideoTime(duration)}</span>
+        <button
+          type="button"
+          aria-label={muted ? `Unmute ${node.name}` : `Mute ${node.name}`}
+          onClick={() => {
+            const next = !muted;
+            setMuted(next);
+            if (videoRef.current) videoRef.current.muted = next;
+          }}
+        >
+          <IconSwap active={muted} first={<Volume2 />} second={<VolumeX />} />
+        </button>
+      </div>
+    </div>
   );
 }
 

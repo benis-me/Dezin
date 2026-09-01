@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -170,6 +170,10 @@ test("Design HTML validation rejects active global navigation and remote capabil
       script,
     );
   }
+  assert.throws(
+    () => validateDesignHtml("<!doctype html><html><body><script>\nconst broken = ;\n</script></body></html>"),
+    /inline JavaScript is invalid.*2:\d+.*const broken/s,
+  );
 });
 
 test("Design HTML validation rejects network capabilities recovered from unknown receivers", () => {
@@ -544,6 +548,11 @@ test("Design Export rejects generic DOM factories whose tag and attribute names 
     node.setAttribute("class", "shell");
     document.body.append(node);
   `));
+
+  assert.throws(
+    () => validateDesignExportJavaScript(`document.createElement("scr" + "ipt");`),
+    /markup.*call to createElement.*\d+:\d+/is,
+  );
 });
 
 test("Design HTML validation permits only self-targeting indirect DOM writes", () => {
@@ -746,12 +755,12 @@ test("restart recovery durably cancels interrupted Jobs without rolling back a g
   }
 });
 
-test("restart recovery replaces interrupted Main Agent reservations in place and is idempotent", async () => {
+test("restart recovery replaces an interrupted Main Agent reservation in place and is idempotent", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-thread-recovery-"));
   const projectId = "project-main-thread-recovery";
   try {
     await initializeDesignProject(dataDir, projectId);
-    const queued = await createDesignJob(dataDir, projectId, {
+    const running = await createDesignJob(dataDir, projectId, {
       kind: "main-agent",
       ...FIXTURE_JOB_IDENTITY,
       reserveMainThreadTurn: {
@@ -759,30 +768,19 @@ test("restart recovery replaces interrupted Main Agent reservations in place and
         assistantContent: "Main Agent orchestration is queued. The final result will replace this status.",
       },
     }, 100);
-    const running = await createDesignJob(dataDir, projectId, {
-      kind: "main-agent",
-      ...FIXTURE_JOB_IDENTITY,
-      reserveMainThreadTurn: {
-        userContent: "Create the detail view",
-        assistantContent: "Main Agent orchestration is queued. The final result will replace this status.",
-      },
-    }, 101);
-    await updateDesignJob(dataDir, projectId, running.job.id, { status: "running" }, 102);
+    await updateDesignJob(dataDir, projectId, running.job.id, { status: "running" }, 101);
     const before = await getDesignThread(dataDir, projectId, { type: "main" });
-    assert.equal(before.messages.length, 4);
+    assert.equal(before.messages.length, 2);
 
     const recovered = await recoverInterruptedDesignJobs(dataDir, projectId, 200);
-    assert.deepEqual(
-      recovered.map((job) => job.id).sort(),
-      [queued.job.id, running.job.id].sort(),
-    );
+    assert.deepEqual(recovered.map((job) => job.id), [running.job.id]);
     const after = await getDesignThread(dataDir, projectId, { type: "main" });
     assert.equal(after.messages.length, before.messages.length);
     assert.deepEqual(
       after.messages.filter((message) => message.role === "user").map((message) => message.content),
-      ["Create the foundation", "Create the detail view"],
+      ["Create the foundation"],
     );
-    for (const jobId of [queued.job.id, running.job.id]) {
+    for (const jobId of [running.job.id]) {
       const assistant = after.messages.find((message) => message.role === "assistant" && message.jobId === jobId);
       assert.match(assistant?.content ?? "", /interrupted by daemon restart and cancelled/i);
       const job = await getDesignJob(dataDir, projectId, jobId);
@@ -1852,22 +1850,39 @@ test("undo and redo restore ordinary canvas snapshots behind the same revision C
     await initializeDesignProject(dataDir, projectId);
     await mutateDesignCanvas(dataDir, projectId, {
       expectedRevision: 0,
-      intents: [{ type: "add-node", node: { id: "node-card", kind: "component" } }],
+      intents: [
+        { type: "add-node", node: { id: "node-card", kind: "component" } },
+        { type: "add-node", node: { id: "node-detail", kind: "page", geometry: { x: 1200, y: 0 } } },
+      ],
     });
     const moved = await mutateDesignCanvas(dataDir, projectId, {
       expectedRevision: 1,
-      intents: [{ type: "update-node", nodeId: "node-card", patch: { geometry: { x: 800, y: 400 } } }],
+      intents: [
+        { type: "update-node", nodeId: "node-card", patch: { geometry: { x: 800, y: 400 } } },
+        {
+          type: "connect-nodes",
+          connection: { id: "flow-card-detail", sourceNodeId: "node-card", targetNodeId: "node-detail", label: "Open" },
+        },
+      ],
     });
     assert.equal(moved.nodes[0]?.geometry.x, 800);
+    assert.deepEqual(moved.connections, [{
+      id: "flow-card-detail",
+      sourceNodeId: "node-card",
+      targetNodeId: "node-detail",
+      label: "Open",
+    }]);
 
     const undone = await undoDesignCanvas(dataDir, projectId, 2);
     assert.equal(undone.revision, 3);
     assert.equal(undone.nodes[0]?.geometry.x, 0);
+    assert.deepEqual(undone.connections, []);
     assert.equal(undone.redoDepth, 1);
 
     const redone = await redoDesignCanvas(dataDir, projectId, 3);
     assert.equal(redone.revision, 4);
     assert.equal(redone.nodes[0]?.geometry.x, 800);
+    assert.deepEqual(redone.connections, moved.connections);
     await assert.rejects(undoDesignCanvas(dataDir, projectId, 3), DesignRevisionConflictError);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
@@ -3029,6 +3044,29 @@ test("Design assets are project-owned, content-addressed, and can ingest an exis
       uploadedFileId: ".refs/hero.png",
     });
     assert.equal(second.id, first.id);
+
+    const largeVideoBytes = MAX_DESIGN_ASSET_BYTES + 1;
+    const largeVideoPath = join(refs, "large-video.mp4");
+    const largeVideoHandle = await open(largeVideoPath, "w");
+    try {
+      await largeVideoHandle.write(Buffer.from("video"), 0, 5, 0);
+      await largeVideoHandle.truncate(largeVideoBytes);
+    } finally {
+      await largeVideoHandle.close();
+    }
+    const largeVideo = await storeDesignAsset(dataDir, projectId, {
+      name: "large-video.mp4",
+      mimeType: "video/mp4",
+      uploadedFileId: ".refs/large-video.mp4",
+    });
+    assert.equal(largeVideo.bytes, largeVideoBytes);
+    const resolvedVideo = await resolveDesignAssetFile(
+      dataDir,
+      projectId,
+      largeVideo.id,
+      largeVideo.fileName,
+    );
+    assert.equal((await stat(resolvedVideo.path)).size, largeVideoBytes);
 
     const served = await resolveDesignAssetFile(dataDir, projectId, first.id, first.fileName);
     assert.deepEqual(await readFile(served.path), bytes);

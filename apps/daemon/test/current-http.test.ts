@@ -193,13 +193,17 @@ test("ordinary Design Project CRUD and title never create or expose a legacy SQL
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-project-crud-"));
   const store = new Store(":memory:");
   const runtimeSupervisor = createRuntimeSupervisor({ store, dataDir });
+  let titleInput: Record<string, unknown> | null = null;
   const server = createApp({
     store,
     dataDir,
     webDir: join(dataDir, "no-web-build"),
     runtimeSupervisor,
     agentProber: async () => ({ available: false }),
-    titleGenerator: async () => "Filesystem title",
+    titleGenerator: async (input) => {
+      titleInput = input as unknown as Record<string, unknown>;
+      return "Filesystem title";
+    },
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
@@ -216,18 +220,38 @@ test("ordinary Design Project CRUD and title never create or expose a legacy SQL
     const project = await created.json() as Record<string, unknown>;
     const projectId = project.id as string;
     assert.equal(store.getProject(projectId), null);
+    assert.match(
+      project.coverUrl as string,
+      new RegExp(`^/api/projects/${projectId}/design-canvas/cover\\?v=\\d+$`),
+    );
+    const cover = await request(project.coverUrl as string);
+    assert.equal(cover.status, 200);
+    assert.match(cover.headers.get("content-type") ?? "", /^image\/svg\+xml/);
+    assert.match(await cover.text(), /Temporary name/);
 
     const listed = await (await request("/api/projects")).json() as Array<Record<string, unknown>>;
     assert.deepEqual(listed.map((candidate) => candidate.id), [projectId]);
+    assert.equal(listed[0]?.coverUrl, project.coverUrl);
 
     const patched = await request(`/api/projects/${projectId}`, "PATCH", { name: "Renamed", archived: true });
     assert.equal(patched.status, 200);
     assert.equal(((await patched.json()) as { name: string; archivedAt: number | null }).name, "Renamed");
 
-    const titled = await request(`/api/projects/${projectId}/title`, "POST", { brief: "A focused brief" });
+    const titled = await request(`/api/projects/${projectId}/title`, "POST", {
+      brief: "A focused brief",
+      agentCommand: "codebuddy",
+      model: "hy4-preview-ioa",
+    });
     assert.equal(titled.status, 200);
     const titlePayload = await titled.json() as Record<string, unknown>;
     assert.equal(titlePayload.name, "Filesystem title");
+    assert.deepEqual(titleInput, {
+      projectId,
+      brief: "A focused brief",
+      currentName: "Renamed",
+      agentCommand: "codebuddy",
+      model: "hy4-preview-ioa",
+    });
     for (const retiredField of ["skillId", "designSystemId", "mode"]) {
       assert.equal(Object.hasOwn(titlePayload, retiredField), false);
     }

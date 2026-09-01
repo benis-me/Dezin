@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerResponse } from "node:http";
@@ -14,6 +14,8 @@ export interface TitleInput {
   projectId: string;
   brief: string;
   currentName: string;
+  agentCommand?: string;
+  model?: string;
 }
 
 export type TitleGenerator = (input: TitleInput, deps: AppDeps) => Promise<string | null>;
@@ -32,11 +34,15 @@ function cleanTitle(value: string): string | null {
 
 export async function generateProjectTitle(input: TitleInput, deps: AppDeps): Promise<string | null> {
   const settings = deps.store.getSettings();
-  const runner = buildAgentRunner(settings);
+  const runner = buildAgentRunner(settings, {
+    agentCommand: input.agentCommand,
+    model: input.model,
+  });
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 8000);
+  const timeout = setTimeout(() => ctrl.abort(), 30_000);
   const dir = await mkdtemp(join(tmpdir(), "dezin-title-"));
   try {
+    await writeFile(join(dir, "index.html"), "<!doctype html><title>Dezin project</title>");
     const result = await runTurnWithRetry(
       runner,
       {
@@ -63,9 +69,23 @@ export async function handleGenerateProjectTitle(req: IncomingMessage, res: Serv
   if (!design && sharingan?.sharingan !== true) return sendError(res, 404, "project not found");
   const project = design ?? sharingan!;
   const projectId = design ? design.projectId : sharingan!.id;
-  const body = (await readJsonBody(req).catch(() => ({}))) as { brief?: unknown };
+  const body = (await readJsonBody(req).catch(() => ({}))) as {
+    brief?: unknown;
+    agentCommand?: unknown;
+    model?: unknown;
+  };
   const brief = typeof body.brief === "string" && body.brief.trim() ? body.brief.trim() : project.name;
-  const generated = await (deps.titleGenerator ?? generateProjectTitle)({ projectId, brief, currentName: project.name }, deps);
+  const agentCommand = typeof body.agentCommand === "string" && body.agentCommand.trim()
+    ? body.agentCommand.trim()
+    : undefined;
+  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+  const generated = await (deps.titleGenerator ?? generateProjectTitle)({
+    projectId,
+    brief,
+    currentName: project.name,
+    ...(agentCommand ? { agentCommand } : {}),
+    ...(model ? { model } : {}),
+  }, deps);
   const title = generated?.trim();
   if (design) {
     const next = title && title !== design.name

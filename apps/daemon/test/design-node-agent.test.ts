@@ -77,6 +77,9 @@ test("Node generation prompts bind the exact target and expose kind-specific con
     assert.match(page, /not.*pixel-perfect/i);
     assert.match(page, /without.*referenceAuthority.*background/i);
     assert.match(page, /re-open.*index\.html.*audit/i);
+    assert.match(page, /never inject markup.*innerHTML/i);
+    assert.match(page, /never construct.*URL-bearing attribute.*dynamically/i);
+    assert.match(page, /never pass.*variable.*tag name.*createElement/i);
     assert.match(page, /Map.*computed.*receiver|computed.*receiver.*Map/i);
   } finally {
     store.close();

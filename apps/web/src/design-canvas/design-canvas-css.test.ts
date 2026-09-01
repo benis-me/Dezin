@@ -136,7 +136,7 @@ test("Agent composer grows within explicit bounds without a separator above it",
   expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 7px 7px;[^}]*background:\s*transparent;/s);
   expect(css).not.toMatch(/\.design-canvas-agent__composer\s*\{[^}]*border-top:/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;[^}]*width:\s*100%;[^}]*border-radius:\s*14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;[^}]*width:\s*100%;[^}]*border-radius:\s*11px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*color-mix\(in oklch, var\(--foreground\) 5\.5%, var\(--card\)\);[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]\s*\{[^}]*animation-duration:\s*0\.001ms !important;[^}]*animation-iteration-count:\s*1 !important;[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]::before,[\s\S]*animation:\s*none !important;/s);
@@ -218,7 +218,7 @@ test("the 324px Message Response keeps Sources, code, and diff surfaces bounded"
   expect(conversationCss).toMatch(/\.agent-code-block__body,\s*\.agent-file-diff__body\s*\{[^}]*max-width:\s*100%;[^}]*overflow-x:\s*auto;/s);
   expect(conversationCss).toMatch(/\.agent-citations__header\s*\{[^}]*width:\s*100%;[^}]*grid-template-columns:\s*14px minmax\(0, 1fr\) auto 12px;[^}]*gap:\s*7px;/s);
   expect(conversationCss).toMatch(/\.agent-citations__references\s*\{[^}]*display:\s*grid;[^}]*min-width:\s*0;[^}]*gap:\s*4px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*overflow:\s*hidden;[^}]*border-radius:\s*14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*overflow:\s*hidden;[^}]*border-radius:\s*11px;/s);
 });
 
 test("Agent composer preserves Beam geometry behind a 12px breath and 18px transcript fade", () => {
@@ -278,7 +278,7 @@ test("selected Nodes do not ship an unreachable inline toolbar", () => {
 
 test("Canvas uses the requested neutral background in both color schemes", () => {
   expect(css).toMatch(/\.design-canvas-surface\s*\{[^}]*background:\s*#e8eaeb;/s);
-  expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*#e8eaeb;/s);
+  expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*oklch\(0\.165 0\.006 260\);/s);
 });
 
 test("Canvas menu surfaces leave presence opacity and transforms to the shared compositor track", () => {

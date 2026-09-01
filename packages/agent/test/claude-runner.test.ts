@@ -234,9 +234,9 @@ test("ClaudeCodeRunner accepts CodeBuddy re-announcing one execution identity af
     _requestId: "request-1",
   };
   const stream = [
-    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:08.307Z" }),
-    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:13.048Z" }),
-    JSON.stringify({ ...baseInit, __timestamp: "2026-08-02T16:18:13.051Z" }),
+    JSON.stringify({ ...baseInit, uuid: "event-1", __timestamp: "2026-08-02T16:18:08.307Z" }),
+    JSON.stringify({ ...baseInit, uuid: "event-2", __timestamp: "2026-08-02T16:18:13.048Z" }),
+    JSON.stringify({ ...baseInit, uuid: "event-3", __timestamp: "2026-08-02T16:18:13.051Z" }),
     `{"type":"assistant","message":{"role":"assistant","model":"hy3-ioa","content":[{"type":"text","text":"Tool Bash not found in agent cli."}]}}`,
     ...lines.slice(1),
   ].join("\n");

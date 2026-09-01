@@ -14,6 +14,7 @@ vi.mock("@xyflow/react", async () => {
   const React = await import("react");
   return {
     ...actual,
+    Handle: () => React.createElement("div"),
     NodeResizeControl: (props: { children?: React.ReactNode } & Record<string, unknown>) => {
       resizeControlHarness.props.push(props);
       return React.createElement("div", null, props.children);

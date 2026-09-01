@@ -382,7 +382,8 @@ export class ClaudeCodeRunner implements AgentRunner {
     if (parsed.initCount < 1 || parsed.initConflict || parsed.init === null || typeof parsed.init.model !== "string"
       || parsed.init.model.trim() !== parsed.init.model || parsed.init.model.length === 0) {
       throw new AgentExecutionIdentityError(
-        `${this.command} did not emit one consistent system/init execution identity`,
+        `${this.command} did not emit one consistent system/init execution identity `
+          + `(initCount=${parsed.initCount}, conflict=${parsed.initConflict})`,
         requested,
         null,
       );
@@ -459,6 +460,10 @@ export class ClaudeCodeRunner implements AgentRunner {
     });
 
     const parsed = parseClaudeStream(output.stdout);
+    // A process that fails before emitting init has no identity to attest and no
+    // publishable result. Preserve its concrete CLI failure instead of masking it
+    // as an identity mismatch; successful or ambiguous streams still fail closed.
+    if (parsed.initCount === 0 && output.exitCode !== 0) assertSuccessfulExit(command, output);
     const executionIdentity = this.executionIdentity(parsed);
     try {
       assertSuccessfulExit(command, output);

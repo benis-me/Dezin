@@ -72,6 +72,11 @@ test("embedded preview context-menu guards require the private port capability",
     nonce: NONCE,
     clientX: 24.5,
     clientY: 48,
+    tagName: "button",
+    selector: "#publish",
+    targetPath: "main > button#publish",
+    nearbyText: "Publish",
+    rect: { x: 12, y: 20, width: 96, height: 32 },
   };
   expect(isEmbeddedPreviewContextMenuPortMessage(message, NONCE)).toBe(true);
   expect(isEmbeddedPreviewContextMenuPortMessage({
@@ -140,6 +145,11 @@ test("cross-origin preview authorization stays on the parent-created MessageChan
       protocol: 1,
       clientX: 24,
       clientY: 48,
+      tagName: "button",
+      selector: "#publish",
+      targetPath: "main > button#publish",
+      nearbyText: "Publish",
+      rect: { x: 12, y: 20, width: 96, height: 32 },
     },
     origin: "http://preview.local",
     source: frameWindow,
@@ -153,6 +163,11 @@ test("cross-origin preview authorization stays on the parent-created MessageChan
     protocol: 1,
     clientX: 24,
     clientY: 48,
+    tagName: "button",
+    selector: "#publish",
+    targetPath: "main > button#publish",
+    nearbyText: "Publish",
+    rect: { x: 12, y: 20, width: 96, height: 32 },
   });
   await vi.waitFor(() => expect(received).toHaveLength(1));
   expect(isEmbeddedPreviewContextMenuPortMessage(received[0]!, NONCE)).toBe(true);
@@ -167,6 +182,11 @@ test("cross-origin preview authorization stays on the parent-created MessageChan
     protocol: 1,
     clientX: 72,
     clientY: 96,
+    tagName: "button",
+    selector: "#publish",
+    targetPath: "main > button#publish",
+    nearbyText: "Publish",
+    rect: { x: 12, y: 20, width: 96, height: 32 },
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(received).toHaveLength(1);

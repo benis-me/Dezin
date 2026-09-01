@@ -8,6 +8,7 @@ import {
   type DesignCanvas,
   type DesignCanvasIntent,
   type DesignCanvasSnapshot,
+  type DesignConnection,
   type DesignJob,
   type DesignNode,
   type DesignNodeGeometry,
@@ -114,11 +115,24 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
     return { ...node, geometry: { ...node.geometry } };
   }
 
+  function cloneConnection(connection: DesignConnection): DesignConnection {
+    return { ...connection };
+  }
+
+  function connectionLabel(value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value.trim(), "utf8") > 256) {
+      throw new DesignStorageError("invalid-input", "Connection label is invalid");
+    }
+    return value.trim();
+  }
+
   function snapshot(project: DesignProjectFile, nodes: Map<string, DesignNode>): DesignCanvasSnapshot {
     return {
       viewport: { ...project.viewport },
       nodeOrder: [...project.nodeOrder],
       nodes: project.nodeOrder.map((id) => cloneNode(nodes.get(id)!)),
+      connections: (project.connections ?? []).map(cloneConnection),
     };
   }
 
@@ -147,6 +161,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
         viewport: defaultViewport(),
         nodeOrder: [],
         nodes: [],
+        connections: [],
         retiredNodeIds: [],
         undo: [],
         redo: [],
@@ -189,6 +204,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       || !validStoredViewport(project.viewport)
       || !validStoredTimestamp(project.createdAt) || !validStoredTimestamp(project.updatedAt)
       || project.nodes.length > 500 || project.undo.length > MAX_HISTORY || project.redo.length > MAX_HISTORY
+      || (project.connections !== undefined && (!Array.isArray(project.connections) || project.connections.length > 1_000))
       || Object.keys(project.turnReceipts).length > 5_000) {
       throw new DesignStorageError("corrupt", "Design project schema is invalid");
     }
@@ -199,6 +215,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       throw new DesignStorageError("corrupt", "Design project Node authority is inconsistent");
     }
     for (const node of project.nodes) assertStoredNode(node);
+    assertStoredConnections(project.connections, new Set(nodeIds));
     for (const history of [...project.undo, ...project.redo]) assertStoredSnapshot(history);
     for (const [key, receipt] of Object.entries(project.turnReceipts)) {
       if (typeof key !== "string" || key.length < 1 || key.length > 512 || !receipt
@@ -267,6 +284,34 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
     if (new Set(ids).size !== ids.length || history.nodeOrder.some((id, index) => id !== ids[index])) {
       throw new DesignStorageError("corrupt", "Design canvas history Node order is invalid");
     }
+    assertStoredConnections(history.connections, new Set(ids));
+  }
+
+  function assertStoredConnections(value: unknown, nodeIds: ReadonlySet<unknown>): void {
+    if (value === undefined) return;
+    if (!Array.isArray(value) || value.length > 1_000) {
+      throw new DesignStorageError("corrupt", "Design Canvas connections are invalid");
+    }
+    const ids = new Set<string>();
+    const pairs = new Set<string>();
+    for (const candidate of value) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        throw new DesignStorageError("corrupt", "Design Canvas contains an invalid connection");
+      }
+      const connection = candidate as Partial<DesignConnection>;
+      const pair = `${connection.sourceNodeId}\u0000${connection.targetNodeId}`;
+      if (typeof connection.id !== "string" || !SAFE_SEGMENT.test(connection.id) || ids.has(connection.id)
+        || typeof connection.sourceNodeId !== "string" || !nodeIds.has(connection.sourceNodeId)
+        || typeof connection.targetNodeId !== "string" || !nodeIds.has(connection.targetNodeId)
+        || connection.sourceNodeId === connection.targetNodeId || pairs.has(pair)
+        || !(connection.label === null || (typeof connection.label === "string"
+          && connection.label.trim() === connection.label && connection.label.length > 0
+          && Buffer.byteLength(connection.label, "utf8") <= 256))) {
+        throw new DesignStorageError("corrupt", "Design Canvas contains an invalid connection");
+      }
+      ids.add(connection.id);
+      pairs.add(pair);
+    }
   }
 
   function readNodes(project: DesignProjectFile): Map<string, DesignNode> {
@@ -293,6 +338,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       viewport: { ...project.viewport },
       nodeOrder: [...project.nodeOrder],
       nodes: project.nodeOrder.map((id) => cloneNode(nodes.get(id)!)),
+      connections: (project.connections ?? []).map(cloneConnection),
       undoDepth: project.undo.length,
       redoDepth: project.redo.length,
       createdAt: project.createdAt,
@@ -413,7 +459,47 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       }
       nodes.delete(id);
       project.nodeOrder = project.nodeOrder.filter((candidate) => candidate !== id);
+      project.connections = (project.connections ?? []).filter((connection) => (
+        connection.sourceNodeId !== id && connection.targetNodeId !== id
+      ));
       retireNodeIdentities(project, [id]);
+      return;
+    }
+    if (intent.type === "connect-nodes") {
+      const connection = intent.connection;
+      if (!connection || typeof connection !== "object" || Array.isArray(connection)) {
+        throw new DesignStorageError("invalid-input", "Connection is invalid");
+      }
+      const sourceNodeId = safeSegment(connection.sourceNodeId, "Connection source Node id");
+      const targetNodeId = safeSegment(connection.targetNodeId, "Connection target Node id");
+      if (sourceNodeId === targetNodeId) throw new DesignStorageError("invalid-input", "A Node cannot connect to itself");
+      if (!nodes.has(sourceNodeId) || !nodes.has(targetNodeId)) {
+        throw new DesignStorageError("not-found", "Connection endpoints must exist on the Canvas");
+      }
+      const connections = project.connections ?? [];
+      const id = safeSegment(connection.id ?? `connection-${randomUUID()}`, "Connection id");
+      if (connections.length >= 1_000 || connections.some((candidate) => candidate.id === id
+        || (candidate.sourceNodeId === sourceNodeId && candidate.targetNodeId === targetNodeId))) {
+        throw new DesignStorageError("conflict", "Design Canvas connection already exists or the limit was reached");
+      }
+      project.connections = [...connections, {
+        id,
+        sourceNodeId,
+        targetNodeId,
+        label: connectionLabel(connection.label),
+      }];
+      changed.add(sourceNodeId);
+      changed.add(targetNodeId);
+      return;
+    }
+    if (intent.type === "disconnect-nodes") {
+      const id = safeSegment(intent.connectionId, "Connection id");
+      const connections = project.connections ?? [];
+      const removed = connections.find((connection) => connection.id === id);
+      if (!removed) throw new DesignStorageError("not-found", `Design Connection ${id} was not found`);
+      project.connections = connections.filter((connection) => connection.id !== id);
+      changed.add(removed.sourceNodeId);
+      changed.add(removed.targetNodeId);
       return;
     }
     if (intent.type === "set-viewport") {
@@ -597,6 +683,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
       // Preserve the live viewport across undo/redo of ordinary Node mutations.
       project.nodeOrder = [...target.nodeOrder];
       project.nodes = project.nodeOrder.map((id) => cloneNode(restored.get(id)!));
+      project.connections = (target.connections ?? []).map(cloneConnection);
       if (direction === "undo") {
         project.undo = project.undo.slice(0, -1);
         project.redo = [...project.redo, current].slice(-MAX_HISTORY);

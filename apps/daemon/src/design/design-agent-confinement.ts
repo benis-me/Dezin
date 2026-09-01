@@ -75,7 +75,11 @@ function minimalDesignAgentEnvironment(
     "/usr/sbin",
     "/sbin",
   ];
-  result.PATH = [...new Set(runtimeDirectories.filter(isAbsolute))].join(delimiter);
+  const trustedDirectories = [...new Set(runtimeDirectories.filter(isAbsolute))];
+  const runtimeOrder = (runtime.PATH ?? "")
+    .split(delimiter)
+    .filter((directory) => trustedDirectories.includes(directory));
+  result.PATH = [...new Set([...runtimeOrder, ...trustedDirectories])].join(delimiter);
   if ((STRICT_DESIGN_AGENT_COMMANDS as readonly string[]).includes(provider)) {
     for (const key of DESIGN_PROVIDER_ENVIRONMENT_KEYS[provider as StrictDesignProvider]) {
       const value = requested?.[key];

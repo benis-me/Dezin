@@ -4,6 +4,7 @@ import {
 } from "@dezin/design-canvas-contracts";
 import type {
   DesignCanvas,
+  DesignConnection,
   DesignCanvasIntent,
   DesignGenerativeNodeKind,
   DesignInvalidationEvent,
@@ -37,6 +38,7 @@ export {
 export { DESIGN_SCHEMA_VERSION };
 export type {
   DesignCanvas,
+  DesignConnection,
   DesignCanvasIntent,
   DesignGenerativeNodeKind,
   DesignInvalidationEvent,
@@ -65,6 +67,8 @@ export interface DesignCanvasSnapshot {
   viewport: DesignViewport;
   nodeOrder: string[];
   nodes: DesignNode[];
+  /** Optional only for snapshots written before Canvas connections existed. */
+  connections?: DesignConnection[];
 }
 
 export interface DesignProjectFile {
@@ -75,6 +79,8 @@ export interface DesignProjectFile {
   nodeOrder: string[];
   /** Complete Canvas/Node authority. Node directories contain immutable payloads and Agent threads only. */
   nodes: DesignNode[];
+  /** Optional only for project manifests written before Canvas connections existed. */
+  connections?: DesignConnection[];
   /** Node identities are never reused after removal; undo may still restore one. */
   retiredNodeIds: string[];
   undo: DesignCanvasSnapshot[];

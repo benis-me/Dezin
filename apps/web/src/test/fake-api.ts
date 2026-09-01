@@ -177,6 +177,10 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
       bytes: 0,
       createdAt: NOW,
     }),
+    uploadDesignCanvasVideo: async (_projectId, file) => ({
+      uploadedFileId: ".refs/design-upload-fake",
+      bytes: file.size,
+    }),
     importDesignCanvasAssets: async (projectId, input) => ({
       ...emptyCanvas(projectId),
       revision: input.expectedRevision + 1,

@@ -329,9 +329,9 @@ export function parseClaudeStream(input: string | string[]): ParsedClaudeStream 
         };
         // CodeBuddy re-emits system/init after an unavailable-tool recovery. That is
         // one execution, not an ambiguous identity, when both its runtime identity
-        // and stable execution identifiers remain identical. Volatile timestamps are
-        // deliberately excluded. A changed session/request still fails closed.
-        const stableExecutionIds = [str(obj.session_id), str(obj.uuid), str(obj._requestId)];
+        // and stable execution identifiers remain identical. Event UUIDs and volatile
+        // timestamps are deliberately excluded. A changed session/request still fails closed.
+        const stableExecutionIds = [str(obj.session_id), str(obj._requestId)];
         const candidateHasStableExecutionId = stableExecutionIds.some((value) => value !== null);
         const candidateExecutionKey = JSON.stringify([
           candidate.model,

@@ -385,11 +385,13 @@ export function useAgentTranscriptController({
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
   const followTailRef = useRef(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   useEffect(() => {
     setHistoryPages(1);
     restoreScrollRef.current = null;
     followTailRef.current = true;
+    setShowScrollToBottom(false);
   }, [scopeKey]);
 
   useEffect(() => {
@@ -402,12 +404,22 @@ export function useAgentTranscriptController({
     } else if (followTailRef.current || optimisticUserTurnId !== null) {
       transcript.scrollTop = transcript.scrollHeight;
       followTailRef.current = true;
+      setShowScrollToBottom(false);
     }
   }, [historyPages, optimisticUserTurnId, tailKey, threadMessageCount, threadUpdatedAt]);
 
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const transcript = event.currentTarget;
     followTailRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= 56;
+    setShowScrollToBottom(!followTailRef.current);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    transcript.scrollTop = transcript.scrollHeight;
+    followTailRef.current = true;
+    setShowScrollToBottom(false);
   }, []);
 
   const showEarlier = useCallback(() => {
@@ -421,7 +433,7 @@ export function useAgentTranscriptController({
     setHistoryPages((current) => current + 1);
   }, []);
 
-  return { historyPages, transcriptRef, onScroll, showEarlier };
+  return { historyPages, transcriptRef, onScroll, showEarlier, showScrollToBottom, scrollToBottom };
 }
 
 export function useJobActionController({

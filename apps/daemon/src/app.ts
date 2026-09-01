@@ -93,10 +93,12 @@ import {
   handleListDesignVersions,
   handlePutDesignCanvas,
   handleRedoDesignCanvas,
+  handleServeDesignCover,
   handleServeDesignAssetContent,
   handleServeDesignVersionPreview,
   handleServeEmbeddedDesignVersionPreview,
   handleServePinnedDesignAsset,
+  handleStageDesignVideo,
   handleStartDesignImplementationExport,
   handleUndoDesignCanvas,
 } from "./design/design-http-handler.ts";
@@ -316,6 +318,8 @@ const routes: Route[] = [
     ),
   },
   { method: "GET", pattern: "/api/projects/:id/design-canvas", handler: handleGetDesignCanvas },
+  { method: "GET", pattern: "/api/projects/:id/design-canvas/cover", handler: handleServeDesignCover, publicRead: true },
+  { method: "HEAD", pattern: "/api/projects/:id/design-canvas/cover", handler: handleServeDesignCover, publicRead: true },
   {
     method: "GET",
     pattern: "/api/projects/:id/design-canvas/events",
@@ -339,6 +343,7 @@ const routes: Route[] = [
   { method: "POST", pattern: "/api/projects/:id/design-canvas/redo", handler: handleRedoDesignCanvas },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/assets", handler: handleListDesignAssets },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/assets", handler: handleCreateDesignAsset },
+  { method: "POST", pattern: "/api/projects/:id/design-canvas/assets/uploads", handler: handleStageDesignVideo },
   { method: "POST", pattern: "/api/projects/:id/design-canvas/assets/import", handler: handleImportDesignAssets },
   { method: "GET", pattern: "/api/projects/:id/design-canvas/assets/:assetId/content", handler: handleServeDesignAssetContent, publicRead: true },
   { method: "HEAD", pattern: "/api/projects/:id/design-canvas/assets/:assetId/content", handler: handleServeDesignAssetContent, publicRead: true },
@@ -549,9 +554,11 @@ const routes: Route[] = [
         .sort((left, right) => right.updatedAt - left.updatedAt || right.id.localeCompare(left.id))
         .map((project) => ({
           ...project,
-          coverUrl: existsSync(join(projectDir(dataDir, project.id), ".cover.png"))
-            ? `/api/projects/${project.id}/cover?t=${project.updatedAt}`
-            : null,
+          coverUrl: project.sharingan === false
+            ? project.coverUrl
+            : existsSync(join(projectDir(dataDir, project.id), ".cover.png"))
+              ? `/api/projects/${project.id}/cover?t=${project.updatedAt}`
+              : null,
         }));
       sendJson(res, 200, projects);
     },

@@ -12,6 +12,7 @@ export type {
   DesignAgentTurnResult,
   DesignAsset,
   DesignCanvas,
+  DesignConnection,
   DesignCanvasAssetImportItem,
   DesignCanvasAssetImportSource,
   DesignCanvasIntent,

@@ -67,6 +67,15 @@ function DesignProjectScreen({
     };
   }, [api, projectId]);
 
+  useEffect(() => {
+    const updateTitle = (event: Event) => {
+      const updated = (event as CustomEvent<Project>).detail;
+      if (updated?.id === projectId) setProject(updated);
+    };
+    window.addEventListener("dezin:project-title", updateTitle);
+    return () => window.removeEventListener("dezin:project-title", updateTitle);
+  }, [projectId]);
+
   const revealExport = useCallback((exportId: string) => revealDesignExport({
     projectPath: project?.projectPath,
     exportId,
@@ -103,7 +112,7 @@ function DesignProjectScreen({
     <DesignCanvasScreen
       key={projectId}
       projectId={projectId}
-      projectName={project?.name ?? "Untitled"}
+      projectName={project?.name ?? "Loading…"}
       api={canvasApi}
       agents={agents}
       initialAgentCommand={agentDefaults?.agentCommand}
@@ -121,7 +130,21 @@ function DesignProjectScreen({
 
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
-  return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
+  return t.length === 0 ? "New Design" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
+}
+
+async function waitForDesignJobsToSettle(api: ApiClient, projectId: string): Promise<void> {
+  // ponytail: browser-lived queue; make title jobs durable only if restart recovery becomes necessary.
+  const deadline = Date.now() + 60 * 60_000;
+  while (Date.now() < deadline) {
+    const jobs = await api.listDesignJobs(projectId).catch(() => null);
+    if (jobs === null) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      continue;
+    }
+    if (!jobs.some((job) => ["queued", "running", "validating"].includes(job.status))) return;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
 }
 
 function stagedAttachmentTitle(value: string, fallback: string): string {
@@ -305,13 +328,13 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
                 idempotencyKey: bootstrapKey,
               });
               if (homeBootstrapKeyRef.current?.key === bootstrapKey) homeBootstrapKeyRef.current = null;
+              navigate(`/projects/${project.id}`);
               if (brief.trim()) {
-                void api
-                  .generateProjectTitle(project.id, brief)
+                void waitForDesignJobsToSettle(api, project.id)
+                  .then(() => api.generateProjectTitle(project.id, brief, agentSelection))
                   .then((updated) => window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated })))
                   .catch(() => {});
               }
-              navigate(`/projects/${project.id}`);
             } catch {
               toast("Couldn't create the project.", { variant: "error" });
             }

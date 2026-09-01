@@ -28,6 +28,11 @@ export type EmbeddedPreviewContextMenuPortMessage = {
   protocol: typeof PREVIEW_BRIDGE_PROTOCOL;
   clientX: number;
   clientY: number;
+  tagName: string;
+  selector: string;
+  targetPath: string;
+  nearbyText: string;
+  rect: { x: number; y: number; width: number; height: number };
 };
 
 type EmbeddedPreviewContextMenuReadyMessage = {
@@ -111,6 +116,11 @@ export function isEmbeddedPreviewContextMenuPortMessage(
 ): value is EmbeddedPreviewContextMenuPortMessage {
   if (!value || typeof value !== "object" || !NONCE_PATTERN.test(bridgeNonce)) return false;
   const message = value as Partial<EmbeddedPreviewContextMenuPortMessage>;
+  const rect = message.rect;
+  const boundedText = (candidate: unknown, maximum: number, allowEmpty = false) => typeof candidate === "string"
+    && (allowEmpty || candidate.length > 0) && candidate.length <= maximum;
+  const boundedNumber = (candidate: unknown) => typeof candidate === "number"
+    && Number.isFinite(candidate) && Math.abs(candidate) <= 1_000_000;
   return message.source === "dezin"
     && message.nonce === bridgeNonce
     && message.protocol === PREVIEW_BRIDGE_PROTOCOL
@@ -118,7 +128,15 @@ export function isEmbeddedPreviewContextMenuPortMessage(
     && typeof message.clientX === "number"
     && Number.isFinite(message.clientX)
     && typeof message.clientY === "number"
-    && Number.isFinite(message.clientY);
+    && Number.isFinite(message.clientY)
+    && boundedText(message.tagName, 64)
+    && boundedText(message.selector, 1_024)
+    && boundedText(message.targetPath, 1_024)
+    && boundedText(message.nearbyText, 512, true)
+    && rect !== null && typeof rect === "object"
+    && boundedNumber(rect.x) && boundedNumber(rect.y)
+    && boundedNumber(rect.width) && rect.width >= 0
+    && boundedNumber(rect.height) && rect.height >= 0;
 }
 
 function isEmbeddedPreviewContextMenuReadyMessage(

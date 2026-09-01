@@ -11,6 +11,7 @@ vi.mock("@xyflow/react", async () => {
   const React = await import("react");
   return {
     ...actual,
+    Handle: () => React.createElement("div"),
     NodeResizeControl: ({ children }: { children?: React.ReactNode }) => React.createElement("div", null, children),
     useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
   };

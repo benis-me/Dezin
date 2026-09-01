@@ -351,12 +351,58 @@ export function createDesignAssetVersionPublication(
     }
   }
 
-  async function readUploadedRef(
+  async function checksumExactImmutablePayload(
+    path: string,
+    expectedBytes: number,
+    label: string,
+  ): Promise<string> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      const [openedBefore, pathBefore] = await Promise.all([handle.stat(), lstat(path)]);
+      if (!openedBefore.isFile() || !pathBefore.isFile() || pathBefore.isSymbolicLink()
+        || openedBefore.dev !== pathBefore.dev || openedBefore.ino !== pathBefore.ino
+        || openedBefore.size !== expectedBytes || pathBefore.size !== expectedBytes) {
+        throw new DesignStorageError("corrupt", `${label} is invalid; expected one exact regular file`);
+      }
+      const hash = createHash("sha256");
+      const chunk = Buffer.allocUnsafe(Math.min(expectedBytes, 1024 * 1024));
+      let offset = 0;
+      while (offset < expectedBytes) {
+        const length = Math.min(chunk.length, expectedBytes - offset);
+        const result = await handle.read(chunk, 0, length, offset);
+        if (result.bytesRead < 1) throw new DesignStorageError("corrupt", `${label} ended before its declared byte length`);
+        hash.update(chunk.subarray(0, result.bytesRead));
+        offset += result.bytesRead;
+      }
+      const [openedAfter, pathAfter] = await Promise.all([handle.stat(), lstat(path)]);
+      if (openedAfter.dev !== openedBefore.dev || openedAfter.ino !== openedBefore.ino
+        || pathAfter.dev !== openedBefore.dev || pathAfter.ino !== openedBefore.ino
+        || openedAfter.size !== expectedBytes || pathAfter.size !== expectedBytes) {
+        throw new DesignStorageError("corrupt", `${label} changed while it was being read`);
+      }
+      return hash.digest("hex");
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
+  interface UploadedDesignAssetPayload {
+    kind: "uploaded-file";
+    handle: FileHandle;
+    bytes: number;
+    checksum: string;
+    signature: Buffer;
+    identity: { dev: number; ino: number; size: number; mtimeMs: number };
+  }
+
+  async function inspectUploadedRef(
     dataDir: string,
     projectId: string,
     uploadedFileId: unknown,
+    maxBytes: number | null,
     hooks?: DesignAssetPayloadReadTestHooks,
-  ): Promise<Buffer> {
+  ): Promise<UploadedDesignAssetPayload> {
     const name = uploadedRefName(uploadedFileId);
     const refsRoot = resolve(dataDir, "projects", safeSegment(projectId, "Project id"), ".refs");
     const path = resolve(refsRoot, name);
@@ -369,21 +415,40 @@ export function createDesignAssetVersionPublication(
       const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
       handle = await open(path, flags);
       const before = await handle.stat();
-      if (!before.isFile() || before.size < 1 || before.size > MAX_DESIGN_ASSET_BYTES) {
-        throw new DesignStorageError("invalid-input", "Uploaded reference is not a bounded regular file");
+      if (!before.isFile() || before.size < 1 || !Number.isSafeInteger(before.size)
+        || (maxBytes !== null && before.size > maxBytes)) {
+        throw new DesignStorageError("invalid-input", "Uploaded reference is not a supported regular file");
       }
-      const bytes = await readExactFileHandle(handle, before.size, "Uploaded reference");
+      const hash = createHash("sha256");
+      const chunk = Buffer.allocUnsafe(Math.min(before.size, 1024 * 1024));
+      let signature = Buffer.alloc(0);
+      let offset = 0;
+      while (offset < before.size) {
+        const length = Math.min(chunk.length, before.size - offset);
+        const result = await handle.read(chunk, 0, length, offset);
+        if (result.bytesRead < 1) throw new DesignStorageError("conflict", "Uploaded reference ended while it was being ingested");
+        const bytes = chunk.subarray(0, result.bytesRead);
+        if (offset === 0) signature = Buffer.from(bytes.subarray(0, 16));
+        hash.update(bytes);
+        offset += result.bytesRead;
+      }
       const after = await handle.stat();
       if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
-        || before.mtimeMs !== after.mtimeMs || bytes.length !== before.size) {
+        || before.mtimeMs !== after.mtimeMs || offset !== before.size) {
         throw new DesignStorageError("conflict", "Uploaded reference changed while it was being ingested");
       }
-      return bytes;
+      return {
+        kind: "uploaded-file",
+        handle,
+        bytes: before.size,
+        checksum: hash.digest("hex"),
+        signature,
+        identity: { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs },
+      };
     } catch (error) {
+      await handle?.close().catch(() => {});
       if (error instanceof DesignStorageError) throw error;
       throw new DesignStorageError("invalid-input", "Uploaded reference is unavailable or unsafe", { cause: error });
-    } finally {
-      await handle?.close().catch(() => {});
     }
   }
 
@@ -414,7 +479,8 @@ export function createDesignAssetVersionPublication(
       || !validStoredText(manifest.mimeType, 120)
       || !SHA256.test(String(manifest.checksum))
       || !Number.isSafeInteger(manifest.bytes) || (manifest.bytes as number) < 1
-      || (manifest.bytes as number) > MAX_DESIGN_ASSET_BYTES
+      || ((manifest.bytes as number) > MAX_DESIGN_ASSET_BYTES
+        && !(typeof manifest.mimeType === "string" && manifest.mimeType.startsWith("video/")))
       || typeof manifest.fileName !== "string" || basename(manifest.fileName) !== manifest.fileName
       || !SAFE_SEGMENT.test(manifest.fileName)
       || !validStoredTimestamp(manifest.createdAt)) {
@@ -485,13 +551,15 @@ export function createDesignAssetVersionPublication(
     }
   }
 
+  type PreparedDesignAssetPayload = { kind: "bytes"; bytes: Buffer } | UploadedDesignAssetPayload;
+
   type PreparedDesignAsset =
     | { manifest: DesignAssetManifest; target: string; existing: true }
     | {
         manifest: DesignAssetManifest;
         target: string;
         existing: false;
-        bytes: Buffer;
+        payload: PreparedDesignAssetPayload;
         bundlePayloads: Array<{ file: DesignAssetBundleFile; bytes: Buffer }>;
       };
 
@@ -703,16 +771,18 @@ export function createDesignAssetVersionPublication(
     sourceVersionSnapshots: ReadonlyMap<string, DesignSourceVersionSnapshot> = new Map(),
     hooks?: DesignAssetPayloadReadTestHooks,
   ): Promise<PreparedDesignAsset> {
-      const name = displayAssetName(input?.name);
-      const hasBase64 = typeof input?.base64 === "string";
-      const hasUploaded = typeof input?.uploadedFileId === "string";
-      const hasSourceVersion = input?.sourceVersion !== undefined;
-      if (Number(hasBase64) + Number(hasUploaded) + Number(hasSourceVersion) !== 1) {
-        throw new DesignStorageError("invalid-input", "Provide exactly one of base64, uploadedFileId, or sourceVersion");
-      }
+    const name = displayAssetName(input?.name);
+    const hasBase64 = typeof input?.base64 === "string";
+    const hasUploaded = typeof input?.uploadedFileId === "string";
+    const hasSourceVersion = input?.sourceVersion !== undefined;
+    if (Number(hasBase64) + Number(hasUploaded) + Number(hasSourceVersion) !== 1) {
+      throw new DesignStorageError("invalid-input", "Provide exactly one of base64, uploadedFileId, or sourceVersion");
+    }
+    let uploaded: UploadedDesignAssetPayload | null = null;
+    try {
       let sourceVersion: DesignAssetManifest["sourceVersion"];
       let bundlePayloads: Array<{ file: DesignAssetBundleFile; bytes: Buffer }> = [];
-      let bytes: Buffer;
+      let payload: PreparedDesignAssetPayload;
       let type: string;
       if (hasSourceVersion) {
         const reference = sourceVersionReference(input.sourceVersion);
@@ -720,10 +790,10 @@ export function createDesignAssetVersionPublication(
         if (snapshot === undefined) {
           throw new DesignStorageError("conflict", "Source Design Version snapshot is unavailable");
         }
-        bytes = snapshot.bytes;
-        bundlePayloads = snapshot.bundlePayloads.map((payload) => ({
-          file: { ...payload.file },
-          bytes: payload.bytes,
+        payload = { kind: "bytes", bytes: snapshot.bytes };
+        bundlePayloads = snapshot.bundlePayloads.map((entry) => ({
+          file: { ...entry.file },
+          bytes: entry.bytes,
         }));
         type = "text/html";
         if (input.mimeType !== undefined && mimeType(input.mimeType) !== type) {
@@ -735,18 +805,30 @@ export function createDesignAssetVersionPublication(
         };
       } else {
         type = mimeType(input?.mimeType);
-        bytes = hasBase64
-          ? strictBase64(input.base64)
-          : await readUploadedRef(dataDir, projectId, input.uploadedFileId, hooks);
+        if (hasBase64) {
+          payload = { kind: "bytes", bytes: strictBase64(input.base64) };
+        } else {
+          uploaded = await inspectUploadedRef(
+            dataDir,
+            projectId,
+            input.uploadedFileId,
+            type.startsWith("video/") ? null : MAX_DESIGN_ASSET_BYTES,
+            hooks,
+          );
+          payload = uploaded;
+        }
       }
       bundlePayloads = bundlePayloads.sort((left, right) => left.file.path.localeCompare(right.file.path));
-      const bundleFiles = bundlePayloads.map((payload) => payload.file);
+      const bundleFiles = bundlePayloads.map((entry) => entry.file);
       assertStoredBundleFiles(bundleFiles, "Design Asset bundle");
-      if (bytes.length < 1 || bytes.length > MAX_DESIGN_ASSET_BYTES) {
+      const bytes = payload.kind === "bytes" ? payload.bytes.length : payload.bytes;
+      if (bytes < 1 || (!type.startsWith("video/") && bytes > MAX_DESIGN_ASSET_BYTES)) {
         throw new DesignStorageError("limit", "Design Asset payload exceeds its bounded size");
       }
-      validateAssetSignature(bytes, type);
-      const checksum = createHash("sha256").update(bytes).digest("hex");
+      validateAssetSignature(payload.kind === "bytes" ? payload.bytes : payload.signature, type);
+      const checksum = payload.kind === "bytes"
+        ? createHash("sha256").update(payload.bytes).digest("hex")
+        : payload.checksum;
       const identity = designAssetIdentity({
         checksum,
         mimeType: type,
@@ -760,15 +842,17 @@ export function createDesignAssetVersionPublication(
       if (await exists(manifestPath)) {
         const existing = await readJson<DesignAssetManifest>(manifestPath, `Design Asset ${id}`);
         assertStoredAssetManifest(existing, id);
-        if (existing.checksum === checksum && existing.bytes === bytes.length && existing.mimeType !== type) {
+        if (existing.checksum === checksum && existing.bytes === bytes && existing.mimeType !== type) {
           throw new DesignStorageError(
             "conflict",
             `The same Asset bytes are already stored with mimeType ${existing.mimeType}`,
           );
         }
-        if (existing.checksum !== checksum || existing.bytes !== bytes.length) {
+        if (existing.checksum !== checksum || existing.bytes !== bytes) {
           throw new DesignStorageError("corrupt", `Design Asset ${id} does not match its content identity`);
         }
+        await uploaded?.handle.close().catch(() => {});
+        uploaded = null;
         return { manifest: existing, target, existing: true };
       }
       const timestamp = nowValue(now);
@@ -779,25 +863,80 @@ export function createDesignAssetVersionPublication(
         name,
         mimeType: type,
         checksum,
-        bytes: bytes.length,
+        bytes,
         fileName,
         bundleFiles,
         ...(sourceVersion ? { sourceVersion } : {}),
         createdAt: timestamp,
       };
-      return { manifest, target, existing: false, bytes, bundlePayloads };
+      uploaded = null;
+      return { manifest, target, existing: false, payload, bundlePayloads };
+    } catch (error) {
+      await uploaded?.handle.close().catch(() => {});
+      throw error;
+    }
+  }
+
+  async function writePreparedPayload(
+    path: string,
+    payload: PreparedDesignAssetPayload,
+    atomic: boolean,
+  ): Promise<void> {
+    if (payload.kind === "bytes") {
+      if (atomic) await writeAtomic(path, payload.bytes);
+      else await writeFile(path, payload.bytes, { flag: "wx", mode: 0o600 });
+      return;
+    }
+    let target: FileHandle | undefined;
+    try {
+      target = await open(path, "wx", 0o600);
+      const hash = createHash("sha256");
+      const chunk = Buffer.allocUnsafe(Math.min(payload.bytes, 1024 * 1024));
+      let offset = 0;
+      while (offset < payload.bytes) {
+        const length = Math.min(chunk.length, payload.bytes - offset);
+        const read = await payload.handle.read(chunk, 0, length, offset);
+        if (read.bytesRead < 1) throw new DesignStorageError("conflict", "Uploaded reference ended while it was being copied");
+        const bytes = chunk.subarray(0, read.bytesRead);
+        hash.update(bytes);
+        let written = 0;
+        while (written < bytes.length) {
+          const result = await target.write(bytes, written, bytes.length - written, offset + written);
+          if (result.bytesWritten < 1) throw new DesignStorageError("corrupt", "Uploaded Asset staging stopped before completion");
+          written += result.bytesWritten;
+        }
+        offset += read.bytesRead;
+      }
+      const after = await payload.handle.stat();
+      const identity = payload.identity;
+      if (after.dev !== identity.dev || after.ino !== identity.ino || after.size !== identity.size
+        || after.mtimeMs !== identity.mtimeMs || offset !== payload.bytes
+        || hash.digest("hex") !== payload.checksum) {
+        throw new DesignStorageError("conflict", "Uploaded reference changed while it was being copied");
+      }
+      await target.sync();
+    } finally {
+      await target?.close().catch(() => {});
+      await payload.handle.close().catch(() => {});
+    }
+  }
+
+  async function discardPreparedDesignAsset(prepared: PreparedDesignAsset): Promise<void> {
+    if (!prepared.existing && prepared.payload.kind === "uploaded-file") {
+      await prepared.payload.handle.close().catch(() => {});
+    }
   }
 
   async function persistPreparedDesignAsset(root: string, prepared: PreparedDesignAsset): Promise<boolean> {
       if (prepared.existing) return false;
-      const { manifest, target, bytes, bundlePayloads } = prepared;
+      const { manifest, target, payload, bundlePayloads } = prepared;
       const { id, fileName, checksum, mimeType: type } = manifest;
       const manifestPath = join(target, "manifest.json");
       const pendingParent = join(root, "assets", ".pending");
       const pending = join(pendingParent, `${id}.${randomUUID()}`);
       await mkdir(pending, { recursive: true });
       try {
-        await writeFile(join(pending, fileName), bytes, { flag: "wx", mode: 0o600 });
+        await writePreparedPayload(join(pending, fileName), payload, false);
         for (const payload of bundlePayloads) {
           const path = join(pending, ...payload.file.path.split("/"));
           await mkdir(resolve(path, ".."), { recursive: true });
@@ -810,7 +949,7 @@ export function createDesignAssetVersionPublication(
         if (await exists(manifestPath)) {
           const existing = await readJson<DesignAssetManifest>(manifestPath, `Design Asset ${id}`);
           assertStoredAssetManifest(existing, id);
-          if (existing.checksum === checksum && existing.bytes === bytes.length && existing.mimeType === type) return false;
+          if (existing.checksum === checksum && existing.bytes === manifest.bytes && existing.mimeType === type) return false;
           if (existing.checksum === checksum && existing.mimeType !== type) {
             throw new DesignStorageError("conflict", `The same Asset bytes are already stored with mimeType ${existing.mimeType}`);
           }
@@ -824,7 +963,7 @@ export function createDesignAssetVersionPublication(
     if (prepared.existing) return;
     await ensureDurableDirectory(directory);
     try {
-      await writeAtomic(join(directory, prepared.manifest.fileName), prepared.bytes);
+      await writePreparedPayload(join(directory, prepared.manifest.fileName), prepared.payload, true);
       for (const payload of prepared.bundlePayloads) {
         const path = join(directory, ...payload.file.path.split("/"));
         await writeAtomic(path, payload.bytes);
@@ -913,12 +1052,13 @@ export function createDesignAssetVersionPublication(
     expectedRevision: number,
   ): asserts value is DesignCanvas {
     const record = storedRecord(value, "Design Asset import result Canvas", [
-      "schemaVersion", "projectId", "revision", "viewport", "nodeOrder", "nodes",
+      "schemaVersion", "projectId", "revision", "viewport", "nodeOrder", "nodes", "connections",
       "undoDepth", "redoDepth", "createdAt", "updatedAt",
     ]);
     if (record.schemaVersion !== DESIGN_SCHEMA_VERSION || record.projectId !== expectedProjectId
       || record.revision !== expectedRevision || !validStoredViewport(record.viewport)
       || !Array.isArray(record.nodeOrder) || !Array.isArray(record.nodes)
+      || (record.connections !== undefined && !Array.isArray(record.connections))
       || !Number.isSafeInteger(record.undoDepth) || (record.undoDepth as number) < 0
       || (record.undoDepth as number) > MAX_HISTORY
       || !Number.isSafeInteger(record.redoDepth) || (record.redoDepth as number) < 0
@@ -933,6 +1073,7 @@ export function createDesignAssetVersionPublication(
       viewport: record.viewport,
       nodeOrder: record.nodeOrder,
       nodes: record.nodes,
+      ...(record.connections === undefined ? {} : { connections: record.connections }),
       retiredNodeIds: [],
       undo: [],
       redo: [],
@@ -1365,8 +1506,9 @@ export function createDesignAssetVersionPublication(
           );
           const preparedBytes = prepared.manifest.bytes
             + prepared.manifest.bundleFiles.reduce((sum, file) => sum + file.bytes, 0);
-          totalBytes += preparedBytes;
+          if (!prepared.manifest.mimeType.startsWith("video/")) totalBytes += preparedBytes;
           if (totalBytes > assetBatchByteLimit) {
+            await discardPreparedDesignAsset(prepared);
             throw new DesignStorageError("limit", "Asset import batch exceeds its bounded size");
           }
           if (!prepared.existing && !createdAssetIds.has(prepared.manifest.id)) {
@@ -1375,6 +1517,8 @@ export function createDesignAssetVersionPublication(
               prepared,
             );
             createdAssetIds.add(prepared.manifest.id);
+          } else {
+            await discardPreparedDesignAsset(prepared);
           }
           const binding = item.binding;
           if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
@@ -1719,7 +1863,7 @@ export function createDesignAssetVersionPublication(
     if (!info.isFile() || info.isSymbolicLink() || info.size !== manifest.bytes) {
       throw new DesignStorageError("corrupt", `Design Asset ${assetId} payload is invalid`);
     }
-    const checksum = createHash("sha256").update(await readFile(path)).digest("hex");
+    const checksum = await checksumExactImmutablePayload(path, manifest.bytes, `Design Asset ${assetId} payload`);
     if (checksum !== manifest.checksum) {
       throw new DesignStorageError("corrupt", `Design Asset ${assetId} payload checksum is invalid`);
     }
@@ -2026,7 +2170,7 @@ export function createDesignAssetVersionPublication(
       || !["html", "asset"].includes(String(manifest.contentKind))
       || !validStoredNullableId(manifest.assetId)
       || !Number.isSafeInteger(manifest.bytes) || (manifest.bytes as number) < 1
-      || (manifest.bytes as number) > (manifest.contentKind === "asset" ? MAX_DESIGN_ASSET_BYTES : MAX_DESIGN_HTML_BYTES)
+      || (manifest.bytes as number) > (manifest.contentKind === "asset" ? Number.MAX_SAFE_INTEGER : MAX_DESIGN_HTML_BYTES)
       || !SHA256.test(String(manifest.contextHash))
       || !Number.isSafeInteger(manifest.canvasRevision) || (manifest.canvasRevision as number) < 0
       || !validStoredNullableId(manifest.expectedHeadVersionId)

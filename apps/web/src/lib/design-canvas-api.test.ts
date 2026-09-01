@@ -72,13 +72,15 @@ function designJob(overrides: Partial<DesignJob> = {}): DesignJob {
   };
 }
 
-test("local files cross the network once as an atomic Asset and material-Node batch", async () => {
+test("local images stay inline while videos stream before the atomic material-Node batch", async () => {
   const importUrl = "http://d/api/projects/project%20%2F1/design-canvas/assets/import";
+  const uploadUrl = "http://d/api/projects/project%20%2F1/design-canvas/assets/uploads";
   const canvasUrl = "http://d/api/projects/project%20%2F1/design-canvas";
   const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
     const url = String(input);
     const method = requestMethod(init);
     if (url === canvasUrl && method === "GET") return jsonResponse(emptyCanvas(4));
+    if (url === uploadUrl && method === "POST") return jsonResponse({ uploadedFileId: ".refs/design-upload-00000000-0000-4000-8000-000000000000", bytes: 2 }, 201);
     if (url === importUrl && method === "POST") return jsonResponse(emptyCanvas(5));
     throw new Error(`Unexpected request: ${method} ${url}`);
   });
@@ -90,6 +92,7 @@ test("local files cross the network once as an atomic Asset and material-Node ba
   ], { x: 100, y: 200 })).resolves.toEqual(emptyCanvas(5));
 
   expect(fetchImpl.mock.calls.map(([, init]) => requestMethod(init))).toEqual([
+    "POST",
     "GET",
     "POST",
   ]);
@@ -97,7 +100,7 @@ test("local files cross the network once as an atomic Asset and material-Node ba
     expectedRevision: number;
     items: Array<{ asset: unknown; binding: { type: "create-node"; node: { id: string } } }>;
   }>(
-    fetchImpl.mock.calls[1]![1],
+    fetchImpl.mock.calls[2]![1],
   );
   expect(request).toEqual({
     expectedRevision: 4,
@@ -115,7 +118,11 @@ test("local files cross the network once as an atomic Asset and material-Node ba
         },
       },
       {
-        asset: { name: "demo.mp4", mimeType: "video/mp4", base64: "BAU=" },
+        asset: {
+          name: "demo.mp4",
+          mimeType: "video/mp4",
+          uploadedFileId: ".refs/design-upload-00000000-0000-4000-8000-000000000000",
+        },
         binding: {
           type: "create-node",
           node: {
