@@ -1,8 +1,8 @@
 import type { IncomingMessage } from "node:http";
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type { Settings } from "@dezin/core";
 import { HttpError } from "./http-util.ts";
 import { redactProviderProfiles } from "./provider-profile-config.ts";
-import type { ExtensionScope } from "../../../packages/core/src/index.ts";
+import type { ExtensionScope } from "@dezin/core";
 import type { ExtensionPairingService, RequestPrincipal } from "./extension-auth.ts";
 
 export interface DaemonSecurityOptions {
@@ -31,7 +31,8 @@ function isLocalHostname(hostname: string): boolean {
 
 export function isTrustedHost(host: string | string[] | undefined): boolean {
   const value = headerValue(host);
-  if (!value) return true;
+  // HTTP/1.1 requires Host; a request without one is not a browser on this machine.
+  if (!value) return false;
   return isLocalHostname(hostNameFromHostHeader(value));
 }
 
@@ -57,12 +58,51 @@ export function extensionIdFromOrigin(origin: string | string[] | undefined): st
   }
 }
 
+export const DAEMON_TOKEN_COOKIE = "dezin_daemon_token";
+
 export function extractBearerToken(req: IncomingMessage): string | null {
   const explicit = headerValue(req.headers["x-dezin-daemon-token"]);
   if (explicit?.trim()) return explicit.trim();
   const authorization = headerValue(req.headers.authorization);
   const match = authorization?.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || null;
+  if (match?.[1]?.trim()) return match[1].trim();
+  return cookieToken(req);
+}
+
+/**
+ * The HttpOnly session cookie set when the daemon serves the Web app. Cookies
+ * are ambient credentials, so the cookie counts only for requests the browser
+ * marks as same-origin (or a top-level navigation). `localhost:5173` and
+ * `localhost:7457` are the same *site*, so SameSite alone is not enough.
+ */
+function cookieToken(req: IncomingMessage): string | null {
+  const cookie = headerValue(req.headers.cookie);
+  if (!cookie) return null;
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${DAEMON_TOKEN_COOKIE}=([^;]+)`));
+  if (!match?.[1]) return null;
+  const site = headerValue(req.headers["sec-fetch-site"]);
+  if (site !== undefined) {
+    if (site !== "same-origin" && site !== "none") return null;
+  } else if (!originMatchesHost(req)) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(match[1]).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function originMatchesHost(req: IncomingMessage): boolean {
+  const origin = headerValue(req.headers.origin);
+  const host = headerValue(req.headers.host);
+  if (!host) return false;
+  if (!origin) return true; // a navigation or an old client without Origin
+  try {
+    return new URL(origin).host.toLowerCase() === host.trim().toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 export function requireExtensionPairingRequest(req: IncomingMessage): string {

@@ -4,8 +4,8 @@ import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { join } from "node:path";
-import { dedupModels, type AgentRunner } from "../../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../../packages/core/src/index.ts";
+import { dedupModels, type AgentRunner } from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 import type { AppDeps } from "../app.ts";
 import { HttpError, readJsonBody, sendJson } from "../http-util.ts";
 import { SharinganSession } from "../sharingan-browser.ts";
@@ -42,6 +42,7 @@ import {
   getDesignAssetManifest,
   getDesignCanvas,
   getDesignJob,
+  getDesignJobByReceiptKey,
   getDesignThread,
   importDesignCanvasAssetBatch,
   listDesignAssets,
@@ -180,6 +181,8 @@ function sendDesignCover(
     "cache-control": "public, max-age=31536000, immutable",
     "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
     "x-content-type-options": "nosniff",
+    // Public, immutable bytes: let the opaque-origin preview sandbox read pixels.
+    "access-control-allow-origin": "*",
     etag,
   };
   if (req.headers["if-none-match"] === etag) {
@@ -487,6 +490,9 @@ async function sendAsset(
     etag,
     "x-content-type-options": "nosniff",
     "content-type": resolved.manifest.mimeType,
+    // Assets are public-read and content-addressed. Without this header the
+    // sandboxed (opaque-origin) preview cannot use them in canvas or WebGL.
+    "access-control-allow-origin": "*",
   };
   if (!inlineAsset(resolved.manifest.mimeType)) {
     baseHeaders["content-disposition"] = contentDisposition(resolved.manifest.name);
@@ -1178,6 +1184,34 @@ export async function handleRetryDesignJob(
   const settings = d.store.getSettings();
   const execution = retryDesignAgent(settings, failedJob, body);
   const retryKey = `retry-${failedJob.id}`;
+
+  // A failed Job has at most one successor. Replaying the Retry after that
+  // successor already exists returns it in whatever state it reached, instead
+  // of re-deriving a request hash that legitimately drifts once it publishes.
+  const nodeScoped = failedJob.kind === "node-generation" || failedJob.kind === "node-analysis";
+  if (!nodeScoped || failedJob.nodeId !== null) {
+    const priorRetry = await getDesignJobByReceiptKey(d.dataDir, p.id!, {
+      kind: failedJob.kind,
+      nodeId: nodeScoped ? failedJob.nodeId : null,
+      idempotencyKey: retryKey,
+    });
+    if (priorRetry !== null) {
+      if (failedJob.kind === "implementation-export") {
+        sendJson(res, 200, { retryOfJobId: failedJob.id, exportId: priorRetry.job.exportId, job: priorRetry.job });
+        return;
+      }
+      const scope = failedJob.kind === "main-agent"
+        ? { type: "main" as const }
+        : { type: "node" as const, nodeId: failedJob.nodeId! };
+      sendJson(res, 200, {
+        retryOfJobId: failedJob.id,
+        thread: await getDesignThread(d.dataDir, p.id!, scope),
+        job: priorRetry.job,
+        canvas: await getDesignCanvas(d.dataDir, p.id!),
+      });
+      return;
+    }
+  }
 
   if (failedJob.kind === "node-generation" || failedJob.kind === "node-analysis") {
     if (failedJob.nodeId === null) throw new HttpError(409, "Failed Node Job lost its target authority");

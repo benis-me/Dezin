@@ -5,8 +5,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Store } from "../../../packages/core/src/index.ts";
-import { AgentTurnError, type AgentRunner } from "../../../packages/agent/src/index.ts";
+import { Store } from "@dezin/core";
+import { AgentTurnError, type AgentRunner } from "@dezin/agent";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import {
   buildDesignMainSystemPrompt,
@@ -95,8 +95,8 @@ test("failed Design Jobs expose one idempotent server-authoritative retry route"
     assert.equal(firstResponse.status, 202, await firstResponse.clone().text());
     const first = await firstResponse.json() as { job: { id: string } };
     let failed = await getDesignJob(dataDir, projectId, first.job.id);
-    for (let attempt = 0; attempt < 100 && failed.status !== "failed"; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 200 && failed.status !== "failed"; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
       failed = await getDesignJob(dataDir, projectId, first.job.id);
     }
     assert.equal(failed.status, "failed");
@@ -117,13 +117,18 @@ test("failed Design Jobs expose one idempotent server-authoritative retry route"
     assert.equal(duplicate.job.id, retried.job.id);
 
     let completed = await getDesignJob(dataDir, projectId, retried.job.id);
-    for (let attempt = 0; attempt < 100 && completed.status !== "ready"; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 200 && completed.status !== "ready"; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
       completed = await getDesignJob(dataDir, projectId, retried.job.id);
     }
     assert.equal(completed.status, "ready", completed.error ?? "Retry did not complete");
     assert.equal(calls, 2);
     assert.equal((await getDesignCanvas(dataDir, projectId)).nodes[0]?.name, "Retried page");
+    // Replaying the Retry after its successor published still returns that successor
+    // (the prompt/canvas hash has moved on; the server-derived key has not).
+    const lateDuplicate = await json(`${root}/jobs/${failed.id}/retry`, "POST", {});
+    assert.equal(lateDuplicate.status, 200, await lateDuplicate.clone().text());
+    assert.equal(((await lateDuplicate.json()) as { job: { id: string } }).job.id, retried.job.id);
     const readyRetry = await json(`${root}/jobs/${completed.id}/retry`, "POST", {});
     assert.equal(readyRetry.status, 409);
 
@@ -133,8 +138,8 @@ test("failed Design Jobs expose one idempotent server-authoritative retry route"
     assert.equal(explicitStart.status, 202, await explicitStart.clone().text());
     const explicitFirst = await explicitStart.json() as { job: { id: string } };
     let explicitFailed = await getDesignJob(dataDir, projectId, explicitFirst.job.id);
-    for (let attempt = 0; attempt < 100 && explicitFailed.status !== "failed"; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 200 && explicitFailed.status !== "failed"; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
       explicitFailed = await getDesignJob(dataDir, projectId, explicitFirst.job.id);
     }
     assert.equal(explicitFailed.status, "failed");
@@ -149,8 +154,8 @@ test("failed Design Jobs expose one idempotent server-authoritative retry route"
     const explicitRetryBody = await explicitRetry.json() as { job: { id: string; model: string | null } };
     assert.equal(explicitRetryBody.job.model, "hy3-ioa", "a compatible explicit provider preserves the attested model");
     let explicitCompleted = await getDesignJob(dataDir, projectId, explicitRetryBody.job.id);
-    for (let attempt = 0; attempt < 100 && explicitCompleted.status !== "ready"; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 200 && explicitCompleted.status !== "ready"; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
       explicitCompleted = await getDesignJob(dataDir, projectId, explicitRetryBody.job.id);
     }
     assert.equal(explicitCompleted.status, "ready", explicitCompleted.error ?? "Explicit retry did not complete");
@@ -404,7 +409,7 @@ test("production Home bootstrap atomically imports attachments and reserves one 
     assert.equal(replay.bootstrap.job.mainJobId, first.bootstrap.job.mainJobId);
     assert.equal(replay.bootstrap.reused, true);
     let completedMainJob = await getDesignJob(dataDir, first.project.id, first.bootstrap.job.mainJobId!);
-    for (let attempt = 0; attempt < 100 && !["ready", "failed", "cancelled", "superseded"].includes(completedMainJob.status); attempt += 1) {
+    for (let attempt = 0; attempt < 200 && !["ready", "failed", "cancelled", "superseded"].includes(completedMainJob.status); attempt += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
       completedMainJob = await getDesignJob(dataDir, first.project.id, first.bootstrap.job.mainJobId!);
     }
@@ -574,7 +579,7 @@ test("startup recovery replaces a bootstrap Main orphan created before its phase
       assert.equal(orphan.status, "cancelled");
       assert.equal(orphan.error, "Interrupted by daemon restart");
       let successor = await getDesignJob(dataDir, projectId, replay.bootstrap.job.mainJobId!);
-      for (let attempt = 0; attempt < 100 && successor.status !== "ready"; attempt += 1) {
+      for (let attempt = 0; attempt < 200 && successor.status !== "ready"; attempt += 1) {
         await new Promise<void>((resolve) => setTimeout(resolve, 5));
         successor = await getDesignJob(dataDir, projectId, successor.id);
       }
@@ -1011,7 +1016,7 @@ test("Project deletion aborts and awaits detached Node, Main, and Export executi
           return response;
         });
         await gate.aborted;
-        await new Promise<void>((resolve) => setImmediate(resolve));
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
         assert.equal(deletionSettled, false, "deletion must await the aborted execution's actual settlement");
         assert.equal((await readFile(join(projectPath, "design", "metadata.json"), "utf8")).length > 0, true);
 
@@ -1025,7 +1030,7 @@ test("Project deletion aborts and awaits detached Node, Main, and Export executi
         ]).finally(() => clearTimeout(deletionTimer));
         assert.equal(deleted.status, 204, await deleted.clone().text());
         await assert.rejects(readFile(join(projectPath, "design", "metadata.json")), { code: "ENOENT" });
-        await new Promise<void>((resolve) => setImmediate(resolve));
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
         assert.deepEqual(unhandled, []);
       } finally {
         gate.release();
@@ -1376,6 +1381,8 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(materialPreview.status, 200, await materialPreview.clone().text());
     assert.equal(materialPreview.headers.get("content-type"), "image/png");
     assert.equal(materialPreview.headers.get("x-content-type-options"), "nosniff");
+    // Opaque-origin preview sandboxes may read these public, immutable bytes in canvas/WebGL.
+    assert.equal(materialPreview.headers.get("access-control-allow-origin"), "*");
     assert.deepEqual(Buffer.from(await materialPreview.arrayBuffer()), imageBytes);
     const materialEmbeddedPreview = await fetch(
       `${base}${root}/nodes/node-image/versions/${imageNode.currentVersionId}/preview/embed`,

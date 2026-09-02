@@ -359,11 +359,6 @@ export class ApiError extends Error {
   }
 }
 
-function defaultDaemonToken(): string {
-  const g = globalThis as typeof globalThis & { __DEZIN_DAEMON_TOKEN__?: string };
-  return typeof g.__DEZIN_DAEMON_TOKEN__ === "string" ? g.__DEZIN_DAEMON_TOKEN__ : "";
-}
-
 async function safeText(res: Response): Promise<string> {
   try {
     return await res.text();
@@ -720,7 +715,10 @@ export interface ApiClient {
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   const baseUrl = opts.baseUrl ?? "";
   const f: FetchLike = opts.fetchImpl ?? ((input, init) => fetch(input, init));
-  const daemonToken = (opts.daemonToken ?? defaultDaemonToken()).trim();
+  // In production the daemon authenticates the page through an HttpOnly cookie
+  // that the browser attaches itself; the explicit header is for dev proxies,
+  // tests, and non-browser clients.
+  const daemonToken = (opts.daemonToken ?? "").trim();
 
   function initWithDaemonToken(init?: RequestInit): RequestInit | undefined {
     if (!daemonToken) return init;

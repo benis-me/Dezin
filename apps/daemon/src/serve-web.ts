@@ -2,6 +2,11 @@
  * Serve the built web app (apps/web/dist) from the daemon, with a SPA fallback to
  * index.html. Lets the daemon be a single same-origin server for UI + API + preview
  * (used by the Electron shell, and any plain-browser prod run). Dev still uses Vite.
+ *
+ * The daemon bearer token reaches the page as an HttpOnly cookie set on the HTML
+ * response, never as a JavaScript-readable global, so an XSS in the UI cannot
+ * read it. Fetches from the page carry the cookie automatically; the daemon
+ * accepts it only for same-origin requests (see security.ts).
  */
 
 import { existsSync } from "node:fs";
@@ -11,16 +16,15 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerResponse } from "node:http";
 import { send, sendError, contentTypeFor } from "./http-util.ts";
+import { DAEMON_TOKEN_COOKIE } from "./security.ts";
 
 export function defaultWebDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist");
 }
 
-function injectDaemonToken(html: string, token: string): string {
-  if (!token) return html;
-  const script = `<script>window.__DEZIN_DAEMON_TOKEN__=${JSON.stringify(token).replace(/</g, "\\u003c")};</script>`;
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (head) => `${head}${script}`);
-  return `${script}${html}`;
+export function daemonTokenCookie(token: string): string {
+  // Not `Secure`: the daemon is plain http on the loopback interface.
+  return `${DAEMON_TOKEN_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict`;
 }
 
 export async function serveWeb(res: ServerResponse, webDir: string, pathname: string, options: { daemonToken?: string } = {}): Promise<void> {
@@ -33,7 +37,12 @@ export async function serveWeb(res: ServerResponse, webDir: string, pathname: st
   try {
     const contentType = contentTypeFor(file);
     const body = await readFile(file);
-    send(res, 200, contentType.startsWith("text/html") ? injectDaemonToken(body.toString("utf8"), options.daemonToken ?? "") : body, contentType);
+    const token = options.daemonToken?.trim() ?? "";
+    if (token && contentType.startsWith("text/html")) {
+      res.setHeader("set-cookie", daemonTokenCookie(token));
+      res.setHeader("cache-control", "no-store");
+    }
+    send(res, 200, body, contentType);
   } catch {
     sendError(res, 404, "not found");
   }

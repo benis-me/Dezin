@@ -2,7 +2,7 @@
 // the app it serves into a window, and exposes native file access — no engine logic
 // lives here. Not packaged/signed; run with `pnpm --filter dezin-desktop start`.
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, safeStorage } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
@@ -12,6 +12,7 @@ const { isAllowedAppNavigation, isSafeExternalUrl } = require("./navigation-poli
 const { handleTaskkillResult } = require("./process-group.js");
 const { readWindowState, writeWindowState } = require("./window-state.js");
 const { createCoverCaptureController } = require("./cover-capture.js");
+const { loadOrCreateSecretsKey } = require("./secrets-key.js");
 
 const ROOT = join(__dirname, "..", "..");
 const DATA_DIR = process.env.DEZIN_DATA_DIR || join(ROOT, ".dezin", "data");
@@ -47,6 +48,12 @@ function spawnDaemon({ ownerId }) {
   } catch {
     /* ignore */
   }
+  // API keys in the settings database are encrypted with a key that only the OS
+  // keystore can unlock; without a keystore the daemon keeps them as before.
+  const secretsKey = loadOrCreateSecretsKey({
+    file: join(app.getPath("userData"), "secrets-key.enc"),
+    safeStorage,
+  });
   const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: join(ROOT, "apps", "daemon"),
     detached: true,
@@ -60,6 +67,7 @@ function spawnDaemon({ ownerId }) {
       DEZIN_DATA_DIR: DATA_DIR,
       DEZIN_ELECTRON: "1",
       DEZIN_DAEMON_OWNER_ID: ownerId,
+      ...(secretsKey ? { DEZIN_SECRETS_KEY: secretsKey } : {}),
     },
     // IPC channel lets the daemon ask us to capture covers via our own Chromium.
     stdio: ["ignore", "pipe", "pipe", "ipc"],

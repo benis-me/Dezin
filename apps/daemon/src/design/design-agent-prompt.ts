@@ -1,4 +1,4 @@
-import type { Settings } from "../../../../packages/core/src/index.ts";
+import type { Settings } from "@dezin/core";
 
 export interface DesignCanvasTastePromptInput {
   settings: Settings;
@@ -27,7 +27,7 @@ export function buildDesignCanvasTastePrompt(input: DesignCanvasTastePromptInput
 
 ## Output medium
 
-Canvas design output is one self-contained HTML document with inline CSS and inline JavaScript. It may reference only immutable assets supplied through the Canvas context. It must not require a package manager, framework scaffold, remote script, remote stylesheet, remote font, remote image, or external runtime.
+Canvas design output is one self-contained HTML document with inline CSS and inline JavaScript. It may reference only immutable assets supplied through the Canvas context. It must not require a package manager, framework scaffold, remote script, remote stylesheet, remote font, remote image, or external runtime. The preview runs in a sandboxed iframe with an opaque origin: any image that canvas or WebGL reads (drawImage into an exported canvas, getImageData, texImage2D) must carry crossorigin="anonymous", and asset responses allow anonymous CORS for exactly that purpose.
 
 ## Current request
 

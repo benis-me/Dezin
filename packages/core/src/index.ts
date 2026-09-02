@@ -62,4 +62,11 @@ export {
   WorkspaceRevisionConflictError,
 } from "./sharingan-workspace-store.ts";
 
-export { Store, type StoreClock } from "./store.ts";
+export { Store, type StoreClock, type StoreOptions } from "./store.ts";
+export {
+  SecretCipherError,
+  createSecretCipher,
+  isEncryptedSecret,
+  secretCipherFromEnv,
+  type SecretCipher,
+} from "./secret-cipher.ts";

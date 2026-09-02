@@ -1551,6 +1551,39 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     });
   }
 
+  /**
+   * Resolve the Job a server-derived idempotency key already produced, without
+   * re-deriving the request hash. Used by Retry replays: the key `retry-<jobId>`
+   * can only ever mean "the successor of that Job", and its prompt/canvas hash
+   * legitimately changes once the successor publishes, so hashing again would
+   * turn an honest duplicate click into a conflict.
+   */
+  async function getDesignJobByReceiptKey(
+    dataDir: string,
+    projectId: string,
+    input: { kind: DesignJobReceiptLookup["kind"]; nodeId: string | null; idempotencyKey: string },
+  ): Promise<{ job: DesignJob } | null> {
+    const root = designRoot(dataDir, projectId);
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      if (!["node-generation", "node-analysis", "main-agent", "implementation-export"].includes(input?.kind)
+        || (input.nodeId !== null && (typeof input.nodeId !== "string" || !SAFE_SEGMENT.test(input.nodeId)))
+        || typeof input.idempotencyKey !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.idempotencyKey)) {
+        throw new DesignStorageError("invalid-input", "Design Job receipt lookup authority is invalid");
+      }
+      const receiptKey = `${input.kind}:${input.nodeId ?? "main"}:${input.idempotencyKey}`;
+      const project = await readProject(root);
+      const receipt = project.turnReceipts[receiptKey];
+      if (receipt === undefined || receipt.kind !== input.kind || receipt.nodeId !== input.nodeId) return null;
+      const job = await readJob(root, receipt.jobId);
+      if (receipt.authorityHash !== job.contextHash) {
+        throw new DesignStorageError("corrupt", "Design Agent receipt authority no longer matches its frozen Job context");
+      }
+      return { job };
+    });
+  }
+
   async function listDesignJobsUnlocked(root: string): Promise<DesignJob[]> {
     const entries = await readdir(join(root, "jobs"), { withFileTypes: true });
     const jobs = await Promise.all(entries
@@ -1936,6 +1969,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     createDesignJob,
     getDesignJob,
     getDesignJobByIdempotencyKey,
+    getDesignJobByReceiptKey,
     getDesignJobContext,
     getDesignMainPlanExecution,
     getDesignThread,

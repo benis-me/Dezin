@@ -4,7 +4,15 @@
   "version": "0.3.0",
   "description": "Capture and analyze designs from Pinterest, Behance, and Dribbble, then import a reference + recreation brief into Dezin.",
   "permissions": ["storage"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://*.pinterest.com/*",
+    "*://*.pinimg.com/*",
+    "*://*.behance.net/*",
+    "*://*.dribbble.com/*",
+    "*://dribbble.com/*"
+  ],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
     {

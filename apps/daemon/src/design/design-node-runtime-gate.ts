@@ -38,6 +38,24 @@ const VIEWPORTS = [
   { name: "mobile", width: 390, height: 844 },
 ] as const;
 
+/**
+ * Turn a raw browser failure into one sentence a designer (or the repairing
+ * Agent) can act on. The raw text stays in parentheses so nothing is hidden.
+ */
+export function describeRuntimeFailure(kind: "blocked-request" | "runtime-error", raw: string): string {
+  const detail = raw.trim();
+  if (kind === "blocked-request") {
+    return `a network request was blocked; generated HTML must keep every resource inline or bound to a dezin-asset:// id (${detail})`;
+  }
+  if (/texImage2D|getImageData|toDataURL|toBlob|tainted|cross-origin/i.test(detail)) {
+    return `a cross-origin image was blocked by the preview sandbox; add crossorigin="anonymous" to every <img> that canvas or WebGL reads (${detail})`;
+  }
+  if (/is not defined|Cannot read propert|is not a function|Unexpected token|SyntaxError/i.test(detail)) {
+    return `a script error stopped rendering; fix the inline JavaScript (${detail})`;
+  }
+  return `the page reported a runtime error (${detail})`;
+}
+
 const ASSET_ID = /^asset-[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_NODE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -253,10 +271,10 @@ export const runDesignNodeRuntimeGate: DesignNodeRuntimeGateRunner = async ({ ht
         };
         meaningfulElements = Math.max(meaningfulElements, snapshot.meaningful);
         if (blockedRequests.length > 0) {
-          throw new DesignNodeRuntimeGateError(`Node runtime gate failed at ${viewport.name}: ${blockedRequests[0]}`);
+          throw new DesignNodeRuntimeGateError(`Node runtime gate failed at ${viewport.name}: ${describeRuntimeFailure("blocked-request", blockedRequests[0]!)}`);
         }
         if (runtimeErrors.length > 0) {
-          throw new DesignNodeRuntimeGateError(`Node runtime gate failed at ${viewport.name}: ${runtimeErrors[0]}`);
+          throw new DesignNodeRuntimeGateError(`Node runtime gate failed at ${viewport.name}: ${describeRuntimeFailure("runtime-error", runtimeErrors[0]!)}`);
         }
         if (snapshot.bodyTextBytes === 0 && snapshot.meaningful === 0) {
           throw new DesignNodeRuntimeGateError(`Node runtime gate failed at ${viewport.name}: rendered output is blank`);

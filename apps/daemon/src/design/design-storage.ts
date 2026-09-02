@@ -132,6 +132,7 @@ export const createDesignJob = ledgerState.createDesignJob;
 export const getDesignJobContext = ledgerState.getDesignJobContext;
 export const getDesignJob = ledgerState.getDesignJob;
 export const getDesignJobByIdempotencyKey = ledgerState.getDesignJobByIdempotencyKey;
+export const getDesignJobByReceiptKey = ledgerState.getDesignJobByReceiptKey;
 export const listDesignJobs = ledgerState.listDesignJobs;
 export const recoverInterruptedDesignJobs = ledgerState.recoverInterruptedDesignJobs;
 export const updateDesignJob = ledgerState.updateDesignJob;

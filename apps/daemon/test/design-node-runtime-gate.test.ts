@@ -106,8 +106,8 @@ test("Node runtime gate reports exact unknown and external blocked URLs without 
   }
   const unknown = `dezin-asset://asset-${"c".repeat(32)}`;
   for (const scenario of [
-    { url: unknown, error: /desktop: unknown frozen Asset: dezin-asset:\/\/asset-c+/i },
-    { url: "https://example.invalid/tracker.png", error: /desktop: blocked external request: https:\/\/example\.invalid\/tracker\.png/i },
+    { url: unknown, error: /desktop: .*unknown frozen Asset: dezin-asset:\/\/asset-c+/i },
+    { url: "https://example.invalid/tracker.png", error: /desktop: .*blocked external request: https:\/\/example\.invalid\/tracker\.png/i },
   ]) {
     await assert.rejects(
       runDesignNodeRuntimeGate({
@@ -135,7 +135,7 @@ test("Node runtime gate isolates a mobile-only blocked request from the desktop 
       assets: [],
     }),
     (error: unknown) => error instanceof Error
-      && /mobile: blocked external request: https:\/\/example\.invalid\/mobile\.png/i.test(error.message)
+      && /mobile: .*blocked external request: https:\/\/example\.invalid\/mobile\.png/i.test(error.message)
       && !/desktop:/i.test(error.message),
   );
 });

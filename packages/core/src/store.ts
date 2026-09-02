@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { isEncryptedSecret, type SecretCipher } from "./secret-cipher.ts";
 
 import type {
   CreateEffectInput,
@@ -59,6 +60,8 @@ const DEFAULT_SETTINGS = {
 } satisfies Settings;
 
 const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS) as Array<keyof typeof DEFAULT_SETTINGS>);
+/** Settings that hold credentials; encrypted at rest when a SecretCipher is configured. */
+const SECRET_SETTINGS_KEYS: ReadonlySet<string> = new Set(["apiKey", "imageApiKey", "videoApiKey", "aiProviderProfiles"]);
 
 function settingColumn(key: string): string {
   return key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
@@ -71,13 +74,20 @@ export interface StoreClock {
 
 const DEFAULT_CLOCK: StoreClock = { now: () => Date.now(), id: () => randomUUID() };
 
+export interface StoreOptions {
+  /** Encrypts secret settings at rest; when absent they are stored as plain text. */
+  secretCipher?: SecretCipher | null;
+}
+
 export class Store {
   readonly db: DatabaseSync;
   readonly workspace: SharinganWorkspaceStore;
   readonly legacyDesignBackupPath: string | null;
   private readonly clock: StoreClock;
+  private readonly secretCipher: SecretCipher | null;
 
-  constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK) {
+  constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK, options: StoreOptions = {}) {
+    this.secretCipher = options.secretCipher ?? null;
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
@@ -519,8 +529,27 @@ export class Store {
 
   // ── App settings ────────────────────────────────────────────────────────
 
+  private readSettingsRow(): Row | undefined {
+    return this.db.prepare("SELECT * FROM settings WHERE id = 'app'").get() as Row | undefined;
+  }
+
+  /** Stored → in-memory. An unreadable ciphertext reads as "not configured" but is never overwritten. */
+  private revealSecret(stored: string): string {
+    if (!isEncryptedSecret(stored)) return stored;
+    if (this.secretCipher === null) return "";
+    try {
+      return this.secretCipher.decrypt(stored);
+    } catch {
+      return "";
+    }
+  }
+
+  private sealSecret(plain: string): string {
+    return this.secretCipher === null || plain === "" ? plain : this.secretCipher.encrypt(plain);
+  }
+
   getSettings(): Settings {
-    const row = this.db.prepare("SELECT * FROM settings WHERE id = 'app'").get() as Row | undefined;
+    const row = this.readSettingsRow();
     if (!row) return { ...DEFAULT_SETTINGS };
     const result = { ...DEFAULT_SETTINGS } as Record<keyof typeof DEFAULT_SETTINGS, string | number | boolean>;
     for (const key of SETTINGS_KEYS) {
@@ -530,12 +559,14 @@ export class Store {
       else if (typeof fallback === "number") {
         const numeric = Number(value);
         result[key] = Number.isFinite(numeric) ? Math.max(0, Math.trunc(numeric)) : fallback;
-      } else result[key] = typeof value === "string" ? value : fallback;
+      } else if (SECRET_SETTINGS_KEYS.has(key)) result[key] = typeof value === "string" ? this.revealSecret(value) : fallback;
+      else result[key] = typeof value === "string" ? value : fallback;
     }
     return result as Settings;
   }
 
   updateSettings(patch: Partial<Settings>): Settings {
+    const row = this.readSettingsRow();
     const current = this.getSettings();
     const next = { ...current };
     for (const key of SETTINGS_KEYS) {
@@ -545,6 +576,15 @@ export class Store {
     const columns = SETTINGS_KEYS.map(settingColumn);
     const values = SETTINGS_KEYS.map((key) => {
       const value = next[key];
+      if (SECRET_SETTINGS_KEYS.has(key)) {
+        // A new value is sealed with the current key. An untouched value keeps its
+        // stored bytes (so a ciphertext we cannot read today is not destroyed),
+        // except legacy plain text, which is migrated to ciphertext on this write.
+        if (patch[key] !== undefined) return this.sealSecret(String(value));
+        const stored = row?.[settingColumn(key)];
+        if (typeof stored !== "string" || stored === "") return "";
+        return isEncryptedSecret(stored) ? stored : this.sealSecret(stored);
+      }
       return typeof value === "boolean" ? (value ? 1 : 0) : value;
     });
     this.db.prepare(

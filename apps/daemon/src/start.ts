@@ -11,15 +11,21 @@ import { closeSync, mkdirSync, openSync, writeFileSync, rmSync, readFileSync } f
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
-import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
+import { Store, secretCipherFromEnv } from "@dezin/core";
+import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "@dezin/design";
 import { createApp, createRuntimeSupervisor } from "./app.ts";
 import { shutdownDaemon } from "./daemon-shutdown.ts";
+import { ensureLoopbackBypassesEnvProxy } from "./loopback-no-proxy.ts";
 import { watchElectronParent } from "./electron-parent-lifecycle.ts";
 import {
   createProductionSharinganBootstrapCapturePort,
   createSharinganBootstrapService,
 } from "./sharingan-bootstrap.ts";
+import { log } from "./log.ts";
+
+// The daemon talks to itself over loopback (preview gates, export checks); never
+// send those calls through a developer's system proxy.
+ensureLoopbackBypassesEnvProxy();
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 // 0 = ephemeral (portless). Set DEZIN_PORT to pin a fixed port.
@@ -87,7 +93,8 @@ async function main(): Promise<void> {
     releaseDaemonLock();
   };
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
-  const store = new Store(join(DATA_DIR, "app.sqlite"));
+  // API keys are encrypted at rest when the shell supplies DEZIN_SECRETS_KEY.
+  const store = new Store(join(DATA_DIR, "app.sqlite"), undefined, { secretCipher: secretCipherFromEnv() });
   if (store.legacyDesignBackupPath !== null) {
     const warning = {
       kind: "legacy-design-store-retired",
@@ -100,7 +107,7 @@ async function main(): Promise<void> {
       `${JSON.stringify(warning, null, 2)}\n`,
       { mode: 0o600 },
     );
-    console.warn(`[DEZIN MIGRATION] ${warning.message} ${warning.backupPath}`);
+    log.warn(`[DEZIN MIGRATION] ${warning.message} ${warning.backupPath}`);
   }
   const startupController = new AbortController();
   let storeClosed = false;
@@ -139,7 +146,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     stopWatchingElectronParent();
     startupController.abort(new Error(`${signal} during daemon startup`));
-    console.log(`\n${signal} — shutting down`);
+    log.info(`\n${signal} — shutting down`);
     try {
       rmSync(PORT_FILE, { force: true });
     } catch {
@@ -155,7 +162,7 @@ async function main(): Promise<void> {
     });
   };
   server.on("error", (error) => {
-    console.error("Dezin daemon server error", error);
+    log.error("Dezin daemon server error", error);
     shutdown("server error", 1);
   });
   process.on("SIGINT", () => shutdown("SIGINT"));
@@ -192,7 +199,7 @@ async function main(): Promise<void> {
       } catch {
         // discovery file is best-effort
       }
-      console.log(`Dezin daemon listening on ${url}  (data: ${DATA_DIR})`);
+      log.info(`Dezin daemon listening on ${url}  (data: ${DATA_DIR})`);
     });
   } catch (error) {
     // A failed Electron-owned startup must release its IPC disconnect listener
@@ -211,6 +218,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error) => {
-  console.error("Dezin daemon failed to start", error);
+  log.error("Dezin daemon failed to start", error);
   process.exitCode = 1;
 });
