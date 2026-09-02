@@ -7,15 +7,10 @@ import {
   MarkerType,
   ReactFlow,
   SelectionMode,
-  applyNodeChanges,
-  type NodeChange,
   type Edge,
-  type OnMove,
-  type OnMoveEnd,
   type OnNodeDrag,
   type NodeMouseHandler,
   type ReactFlowInstance,
-  type Viewport,
 } from "@xyflow/react";
 import { AnimatePresence, motion } from "motion/react";
 import {
@@ -61,16 +56,14 @@ import {
   type DesignNodeContentLayout,
   type DesignPreviewAnnotationTarget,
 } from "./DesignCanvasNode.tsx";
-import { readExactVersionMetadata, useExactVersionMetadata } from "./exact-version-metadata.ts";
-import { FocusedNodeChrome, type FocusedPreviewDevice } from "./FocusedNodeChrome.tsx";
+import { readExactVersionMetadata } from "./exact-version-metadata.ts";
+import { FocusedNodeChrome } from "./FocusedNodeChrome.tsx";
 import {
   focusedNodeLayoutMode,
   focusedNodeTransform,
   NODE_FOCUS_FLIGHT_DURATION_MS,
-  NODE_FOCUS_DETAIL_DELAY_MS,
   nodeFocusEase,
   nodeFocusMotions,
-  type NodeFocusPhase,
   type NodeFocusMotion,
 } from "./node-focus-motion.ts";
 import {
@@ -85,8 +78,6 @@ import type {
   DesignExportResult,
   DesignNode,
   DesignNodeKind,
-  DesignNodeVersion,
-  FigmaImportAnchor,
 } from "./types.ts";
 import { useDesignCanvasController } from "./useDesignCanvasController.ts";
 import { previewVersionIdForNode } from "./useExactVersionPreview.ts";
@@ -94,11 +85,8 @@ import { previewVersionIdForNode } from "./useExactVersionPreview.ts";
 import {
   DESIGN_CANVAS_MIN_ZOOM,
   FOCUSED_PREVIEW_WIDTHS,
-  cancelSpatialFocusAnimations,
   canvasToFlowNodes,
   createDesignNodeId,
-  downloadFileStem,
-  figmaImportedNodeIds,
   flowNodeGeometry,
   focusedLayoutOptions,
   isLiveJobStatus,
@@ -107,12 +95,16 @@ import {
   sameDesignNode,
   sameGeometry,
   sameNodeFocusMotion,
-  sameViewport,
   syncHoverLabelViewportScale,
-  synchronizeFocusTransitionDuration,
-  type NodeFocusTransition,
 } from "./design-canvas-screen-helpers.ts";
 import { DesignNodeContextMenu } from "./DesignNodeContextMenu.tsx";
+import { useCanvasAgentSelection } from "./useCanvasAgentSelection.ts";
+import { useCanvasViewport } from "./useCanvasViewport.ts";
+import { useFigmaImportFlow } from "./useFigmaImportFlow.ts";
+import { useNodeFocus, type SelectionGuardRefs } from "./useNodeFocus.ts";
+import { useNodeGeometryPersistence } from "./useNodeGeometryPersistence.ts";
+import { useNodeVersions } from "./useNodeVersions.ts";
+import { useSelectionGhost } from "./useSelectionGhost.ts";
 
 export {
   cancelSpatialFocusAnimations,
@@ -149,14 +141,6 @@ interface PreviewAnnotationDraft extends DesignPreviewAnnotationTarget {
   top: number;
   surfaceRect: { left: number; top: number; width: number; height: number };
   comment: string;
-}
-
-interface SelectionGhost {
-  id: number;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
 }
 
 export interface DesignCanvasScreenProps {
@@ -203,50 +187,17 @@ export function DesignCanvasScreen({
   const pendingRevisionNodeIdRef = useRef<string | null>(null);
   const pendingContextTargetRef = useRef<string | null>(null);
   const contextMenuActiveRef = useRef(false);
-  const pendingFigmaImportAnchorRef = useRef<FigmaImportAnchor | null>(null);
-  const figmaImportOpenFrameRef = useRef<number | null>(null);
-  const pendingFigmaImportedNodeIdsRef = useRef<string[] | null>(null);
-  const figmaImportFitFrameRef = useRef<number | null>(null);
   const nodePanelRef = useRef<HTMLElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<DesignFlowNode> | null>(null);
   const flowNodesRef = useRef<DesignFlowNode[]>([]);
-  const draggingNodeIdsRef = useRef(new Set<string>());
-  const resizingNodeIdsRef = useRef(new Set<string>());
-  const pendingNodeGeometriesRef = useRef(new Map<string, DesignNode["geometry"]>());
-  const viewportSaveTimerRef = useRef<number | null>(null);
-  const localViewportTargetRef = useRef<Viewport | null>(null);
-  const authoritativeViewportRef = useRef<Viewport | null>(null);
-  const focusViewportLockRef = useRef<Viewport | null>(null);
-  const mountedViewportProjectRef = useRef<string | null>(null);
-  const layoutFrameRef = useRef<number | null>(null);
-  const transientNodeChangesFrameRef = useRef<number | null>(null);
-  const pendingTransientNodeChangesRef = useRef<NodeChange<DesignFlowNode>[]>([]);
   const pendingImportPositionRef = useRef({ x: 120, y: 120 });
   const selectionGuardRef = useRef<string | null>(null);
   const contextSelectionGuardRef = useRef<string | null>(null);
   const contextSelectionGuardFrameRef = useRef<number | null>(null);
   const selectionClearGuardRef = useRef(false);
   const selectionGuardFrameRef = useRef<number | null>(null);
-  const focusClosingRef = useRef(false);
-  const focusTransitionSequenceRef = useRef(0);
-  const focusPanelTimerRef = useRef<number | null>(null);
-  const focusFinishTimerRef = useRef<number | null>(null);
-  const focusReleaseTimerRef = useRef<number | null>(null);
-  const focusCloseCompletionRef = useRef<{ nodeId: string; finish: () => void } | null>(null);
-  const previewDeviceByNodeRef = useRef(new Map<string, FocusedPreviewDevice>());
-  const selectionGhostTimerRef = useRef<number | null>(null);
-  const selectionRectRef = useRef<Omit<SelectionGhost, "id"> | null>(null);
-  const selectionGhostSequenceRef = useRef(0);
   const [flowNodes, setFlowNodes] = useState<DesignFlowNode[]>([]);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
-  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
-  const [focusedPanelNodeId, setFocusedPanelNodeId] = useState<string | null>(null);
-  const [focusTransition, setFocusTransition] = useState<NodeFocusTransition | null>(null);
-  const [focusMotionEnabled, setFocusMotionEnabled] = useState(true);
-  const [focusedPreviewDevice, setFocusedPreviewDevice] = useState<FocusedPreviewDevice>("desktop");
-  const [focusPreviewExporting, setFocusPreviewExporting] = useState(false);
-  const [focusPreviewExportError, setFocusPreviewExportError] = useState<string | null>(null);
-  const [selectionGhost, setSelectionGhost] = useState<SelectionGhost | null>(null);
   const [previewAnnotation, setPreviewAnnotation] = useState<PreviewAnnotationDraft | null>(null);
   const [mainAgentOpen, setMainAgentOpen] = useState(false);
   const [mainAgentContextSeed, setMainAgentContextSeed] = useState<{
@@ -255,82 +206,39 @@ export function DesignCanvasScreen({
     draft: string;
   }>(() => ({ generation: 0, nodeIds: [], draft: "" }));
   const [exportConfirmationOpen, setExportConfirmationOpen] = useState(false);
-  const [mainAgentSelection, setMainAgentSelection] = useState<CanvasAgentSelection>(() => ({
-    agentCommand: isDesignAgentCommand(initialAgentCommand) ? initialAgentCommand : "",
-    model: isDesignAgentCommand(initialAgentCommand) ? initialModel ?? "" : "",
-  }));
-  const mainAgentSelectionTouchedRef = useRef(false);
-  const updateMainAgentSelection = useCallback((selection: CanvasAgentSelection) => {
-    mainAgentSelectionTouchedRef.current = true;
-    setMainAgentSelection(selection);
-    void onAgentDefaultsChange?.(selection).catch(() => undefined);
-  }, [onAgentDefaultsChange]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
-  const [figmaImportAnchor, setFigmaImportAnchor] = useState<FigmaImportAnchor | null>(null);
   const [tool, setTool] = useState<"select" | "hand">("select");
-  const [zoom, setZoom] = useState(1);
-  const [layoutNonce, setLayoutNonce] = useState(0);
-  const [versions, setVersions] = useState<DesignNodeVersion[]>([]);
-  const [versionsNodeId, setVersionsNodeId] = useState<string | null>(null);
-  const [versionsLoading, setVersionsLoading] = useState(false);
   const [contentAspectRatios, setContentAspectRatios] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const focusMotionAllowed = focusMotionEnabled && !reduceMotion;
-  const availableDesignAgents = useMemo(
-    () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),
-    [agents],
-  );
-  const canvasAvailable = controller.loadState === "ready" && canvas !== null;
-
-  useEffect(() => {
-    setMainAgentSelection((current) => {
-      const settingsAgent = isDesignAgentCommand(initialAgentCommand)
-        ? availableDesignAgents.find((agent) => agent.command === initialAgentCommand) ?? null
-        : null;
-      if (!mainAgentSelectionTouchedRef.current && settingsAgent) {
-        const settingsModel = initialModel && settingsAgent.models.includes(initialModel) ? initialModel : "";
-        if (current.agentCommand === settingsAgent.command && current.model === settingsModel) return current;
-        return { agentCommand: settingsAgent.command, model: settingsModel };
-      }
-      const active = availableDesignAgents.find((agent) => agent.command === current.agentCommand) ?? null;
-      if (active && (!current.model || active.models.includes(current.model))) return current;
-      const preferred = settingsAgent ?? availableDesignAgents[0] ?? null;
-      if (!preferred) return current.agentCommand || current.model ? { agentCommand: "", model: "" } : current;
-      const preferredModel = preferred.command === initialAgentCommand
-        && initialModel
-        && preferred.models.includes(initialModel)
-        ? initialModel
-        : "";
-      return { agentCommand: preferred.command, model: preferredModel };
-    });
-  }, [availableDesignAgents, initialAgentCommand, initialModel]);
-
-  const selectedNode = useMemo(() => (
-    canvas?.nodes.find((node) => node.id === focusedPanelNodeId) ?? null
-  ), [canvas?.nodes, focusedPanelNodeId]);
-  const focusedCanvasNode = useMemo(() => (
-    focusTransition
-      ? canvas?.nodes.find((node) => node.id === focusTransition.nodeId) ?? null
-      : null
-  ), [canvas?.nodes, focusTransition]);
-  const focusedVersionId = focusedCanvasNode ? previewVersionIdForNode(focusedCanvasNode) : null;
-  const focusedVersionMetadata = useExactVersionMetadata({
-    api,
+  const {
+    zoom,
+    setZoom,
+    layoutNonce,
+    bumpLayout,
+    applyInitialViewport,
+    onFlowInit,
+    onMove,
+    onMoveEnd,
+    onViewportChange,
+    cancelPendingViewportSave,
+    authoritativeViewportRef,
+    focusViewportLockRef,
+    mountedViewportProjectRef,
+  } = useCanvasViewport({
+    surfaceRef,
+    flowRef,
     projectId,
-    nodeId: focusedCanvasNode?.id ?? null,
-    versionId: focusedVersionId,
-    enabled: focusedCanvasNode !== null,
-  }).metadata;
-  const focusActive = focusTransition !== null;
-  const chooseFocusedPreviewDevice = useCallback((device: FocusedPreviewDevice) => {
-    if (focusTransition) previewDeviceByNodeRef.current.set(focusTransition.nodeId, device);
-    setFocusedPreviewDevice(device);
-  }, [focusTransition]);
-  const historyLocked = useMemo(() => (
-    (canvas?.nodes.some((node) => node.activeJobId !== null) ?? false)
-      || controller.jobs.some((job) => job.nodeId !== null && isLiveJobStatus(job.status))
-  ), [canvas?.nodes, controller.jobs]);
+    applyIntents: controller.applyIntents,
+    refresh: controller.refresh,
+  });
+  const { availableDesignAgents, mainAgentSelection, updateMainAgentSelection } = useCanvasAgentSelection({
+    agents,
+    initialAgentCommand,
+    initialModel,
+    onAgentDefaultsChange,
+  });
+  const canvasAvailable = controller.loadState === "ready" && canvas !== null;
 
   const replaceFlowNodes = useCallback((update: (current: DesignFlowNode[]) => DesignFlowNode[]) => {
     const next = update(flowNodesRef.current);
@@ -339,174 +247,89 @@ export function DesignCanvasScreen({
     return next;
   }, []);
 
+  const selectionGuards = useMemo<SelectionGuardRefs>(() => ({
+    selectionGuardRef,
+    selectionGuardFrameRef,
+    contextSelectionGuardRef,
+    contextSelectionGuardFrameRef,
+    selectionClearGuardRef,
+  }), []);
+  const {
+    focusedNodeId,
+    setFocusedNodeId,
+    focusedPanelNodeId,
+    setFocusedPanelNodeId,
+    focusTransition,
+    focusMotionAllowed,
+    focusedPreviewDevice,
+    focusPreviewExporting,
+    focusPreviewExportError,
+    setFocusPreviewExportError,
+    focusedCanvasNode,
+    focusedVersionId,
+    focusedVersionMetadata,
+    focusActive,
+    previewDeviceByNodeRef,
+    armSelectionGuard,
+    clearSelection,
+    chooseFocusedPreviewDevice,
+    openNodeAgent,
+    setFocusedNodeAgentVisible,
+    closeNodeFocus,
+    onFocusAnimationStart,
+    onFocusAnimationComplete,
+    hideNodeAgentForContextMenu,
+    dropFocusForMissingNodes,
+    exportFocusedPreview,
+  } = useNodeFocus({
+    api,
+    projectId,
+    canvas,
+    contentAspectRatios,
+    reduceMotion,
+    selectedNodeIds,
+    surfaceRef,
+    flowRef,
+    flowNodesRef,
+    nodePanelRef,
+    replaceFlowNodes,
+    setSelectedNodeIds,
+    setMainAgentOpen,
+    focusViewportLockRef,
+    cancelPendingViewportSave,
+    setZoom,
+    guards: selectionGuards,
+  });
+
+  const selectedNode = useMemo(() => (
+    canvas?.nodes.find((node) => node.id === focusedPanelNodeId) ?? null
+  ), [canvas?.nodes, focusedPanelNodeId]);
+  const { versions, versionsNodeId, versionsLoading } = useNodeVersions({ api, projectId, selectedNode });
+  const historyLocked = useMemo(() => (
+    (canvas?.nodes.some((node) => node.activeJobId !== null) ?? false)
+      || controller.jobs.some((job) => job.nodeId !== null && isLiveJobStatus(job.status))
+  ), [canvas?.nodes, controller.jobs]);
+
   const removeNode = useCallback((nodeId: string) => {
     void controller.applyIntents([{ type: "remove-node", nodeId }]).then(() => {
       setSelectedNodeIds((current) => current.filter((id) => id !== nodeId));
     }).catch(() => undefined);
   }, [controller.applyIntents]);
 
-  const openNodeAgent = useCallback((nodeId: string, focusComposer = false, animate = true) => {
-    if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
-    contextSelectionGuardRef.current = null;
-    if (contextSelectionGuardFrameRef.current !== null) {
-      window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
-      contextSelectionGuardFrameRef.current = null;
-    }
-    if (focusPanelTimerRef.current !== null) {
-      window.clearTimeout(focusPanelTimerRef.current);
-      focusPanelTimerRef.current = null;
-    }
-    if (focusFinishTimerRef.current !== null) {
-      window.clearTimeout(focusFinishTimerRef.current);
-      focusFinishTimerRef.current = null;
-    }
-    if (focusReleaseTimerRef.current !== null) {
-      window.clearTimeout(focusReleaseTimerRef.current);
-      focusReleaseTimerRef.current = null;
-    }
-    if (viewportSaveTimerRef.current !== null) {
-      window.clearTimeout(viewportSaveTimerRef.current);
-      viewportSaveTimerRef.current = null;
-      localViewportTargetRef.current = null;
-    }
-    selectionClearGuardRef.current = false;
-    selectionGuardRef.current = nodeId;
-    selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-      selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-        selectionGuardFrameRef.current = null;
-        selectionGuardRef.current = null;
-      });
-    });
-    const motionEnabled = animate && !reduceMotion;
-    const panelAlreadyVisible = focusedPanelNodeId === nodeId;
-    focusClosingRef.current = false;
-    focusCloseCompletionRef.current = null;
-    const sequence = focusTransitionSequenceRef.current + 1;
-    focusTransitionSequenceRef.current = sequence;
-    setFocusMotionEnabled(motionEnabled);
-    const previewDevice = previewDeviceByNodeRef.current.get(nodeId) ?? "desktop";
-    previewDeviceByNodeRef.current.set(nodeId, previewDevice);
-    setFocusedPreviewDevice(previewDevice);
-    setFocusPreviewExporting(false);
-    setFocusPreviewExportError(null);
-    setMainAgentOpen(false);
-    setFocusedNodeId(nodeId);
-    if (!panelAlreadyVisible) setFocusedPanelNodeId(null);
-    const sourceNode = canvas?.nodes.find((candidate) => candidate.id === nodeId) ?? null;
-    const sourceVersionMetadata = sourceNode
-      ? readExactVersionMetadata({
-          api,
-          projectId,
-          nodeId: sourceNode.id,
-          versionId: previewVersionIdForNode(sourceNode),
-        })
-      : null;
-    const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
-    const activeViewport = flowRef.current?.getViewport() ?? canvas?.viewport ?? null;
-    focusViewportLockRef.current = activeViewport ? { ...activeViewport } : null;
-    const durationMs = sourceNode && surfaceBounds && activeViewport
-      ? focusedNodeTransform(
-          sourceNode.geometry,
-          { width: surfaceBounds.width, height: surfaceBounds.height },
-          activeViewport,
-          focusedLayoutOptions(
-            surfaceBounds,
-            sourceNode,
-            undefined,
-            contentAspectRatios.get(sourceNode.id),
-            sourceVersionMetadata,
-          ),
-        ).durationMs
-      : NODE_FOCUS_FLIGHT_DURATION_MS;
-    setFocusTransition({ nodeId, phase: "opening", durationMs });
-    setSelectedNodeIds([nodeId]);
-    replaceFlowNodes((current) => current.map((node) => ({ ...node, selected: node.id === nodeId })));
-
-    const revealPanel = () => {
-      if (focusTransitionSequenceRef.current !== sequence) return;
-      focusPanelTimerRef.current = null;
-      setFocusedPanelNodeId(nodeId);
-      if (focusComposer) {
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => {
-            const selector = `[data-agent-scope="node:${nodeId}"] textarea`;
-            surfaceRef.current?.querySelector<HTMLTextAreaElement>(selector)?.focus();
-          });
-        });
-      }
-    };
-    const panelSurfaceBounds = surfaceRef.current?.getBoundingClientRect();
-    if (panelAlreadyVisible) {
-      revealPanel();
-    } else if (motionEnabled && panelSurfaceBounds && panelSurfaceBounds.width > 0) {
-      focusPanelTimerRef.current = window.setTimeout(revealPanel, NODE_FOCUS_DETAIL_DELAY_MS);
-    } else {
-      revealPanel();
-    }
-
-  }, [api, canvas, contentAspectRatios, focusedPanelNodeId, projectId, reduceMotion, replaceFlowNodes]);
-
-  const setFocusedNodeAgentVisible = useCallback((visible: boolean) => {
-    const nodeId = focusedNodeId ?? focusedPanelNodeId ?? selectedNodeIds[0] ?? null;
-    if (!nodeId) return;
-    if (!focusedNodeId) {
-      setFocusedPanelNodeId(visible ? nodeId : null);
-      return;
-    }
-    if (focusPanelTimerRef.current !== null) {
-      window.clearTimeout(focusPanelTimerRef.current);
-      focusPanelTimerRef.current = null;
-    }
-    const sequence = focusTransitionSequenceRef.current + 1;
-    focusTransitionSequenceRef.current = sequence;
-    const reveal = () => {
-      if (focusTransitionSequenceRef.current !== sequence) return;
-      focusPanelTimerRef.current = null;
-      setFocusedPanelNodeId(nodeId);
-    };
-    if (visible) {
-      if (reduceMotion) reveal();
-      else focusPanelTimerRef.current = window.setTimeout(reveal, 80);
-    } else {
-      setFocusedPanelNodeId(null);
-    }
-    setFocusTransition((current) => current ? { ...current } : current);
-  }, [focusedNodeId, focusedPanelNodeId, reduceMotion, selectedNodeIds]);
-
-  const persistNodeGeometries = useCallback((updates: ReadonlyArray<{
-    nodeId: string;
-    geometry: DesignNode["geometry"];
-  }>) => {
-    if (updates.length === 0) return;
-    for (const update of updates) {
-      pendingNodeGeometriesRef.current.set(update.nodeId, { ...update.geometry });
-    }
-    void controller.applyIntents(updates.map((update) => ({
-      type: "update-node" as const,
-      nodeId: update.nodeId,
-      patch: { geometry: update.geometry },
-    }))).then((next) => {
-      for (const update of updates) {
-        const pending = pendingNodeGeometriesRef.current.get(update.nodeId);
-        const canonical = next.nodes.find((node) => node.id === update.nodeId)?.geometry;
-        if (pending && canonical && sameGeometry(pending, update.geometry) && sameGeometry(canonical, update.geometry)) {
-          pendingNodeGeometriesRef.current.delete(update.nodeId);
-        }
-      }
-    }).catch(() => {
-      for (const update of updates) {
-        const pending = pendingNodeGeometriesRef.current.get(update.nodeId);
-        if (pending && sameGeometry(pending, update.geometry)) {
-          pendingNodeGeometriesRef.current.delete(update.nodeId);
-        }
-      }
-      void controller.refresh();
-    });
-  }, [controller.applyIntents, controller.refresh]);
-
-  const persistNodeResize = useCallback((nodeId: string, geometry: DesignNode["geometry"]) => {
-    persistNodeGeometries([{ nodeId, geometry }]);
-  }, [persistNodeGeometries]);
+  const {
+    draggingNodeIdsRef,
+    resizingNodeIdsRef,
+    pendingNodeGeometriesRef,
+    persistNodeResize,
+    onNodesChange,
+  } = useNodeGeometryPersistence({
+    applyIntents: controller.applyIntents,
+    refresh: controller.refresh,
+    canvasNodes: canvas?.nodes,
+    flowNodesRef,
+    replaceFlowNodes,
+    bumpLayout,
+  });
 
   const appendMaterialRevision = useCallback(async (nodeId: string, file: File): Promise<void> => {
     await controller.appendMaterialVersion(nodeId, file);
@@ -532,59 +355,6 @@ export function DesignCanvasScreen({
     persistNodeResize(nodeId, { ...currentGeometry, ...fitted });
   }, [canvas?.nodes, persistNodeResize]);
 
-  const onFocusAnimationStart = useCallback((nodeId: string, phase: NodeFocusPhase, durationMs: number) => {
-    const sharedDurationMs = Math.max(0, Math.round(durationMs));
-    setFocusTransition((current) => synchronizeFocusTransitionDuration(current, nodeId, phase, sharedDurationMs));
-    if (phase !== "closing") return;
-    const completion = focusCloseCompletionRef.current;
-    if (!completion || completion.nodeId !== nodeId) return;
-    if (focusFinishTimerRef.current !== null) window.clearTimeout(focusFinishTimerRef.current);
-    focusFinishTimerRef.current = window.setTimeout(
-      completion.finish,
-      Math.max(120, sharedDurationMs) + 120,
-    );
-  }, []);
-
-  const onFocusAnimationComplete = useCallback((nodeId: string, phase: NodeFocusPhase) => {
-    if (phase !== "closing") return;
-    const completion = focusCloseCompletionRef.current;
-    if (completion?.nodeId === nodeId) completion.finish();
-  }, []);
-
-  useEffect(() => {
-    if (!selectedNode) {
-      setVersions([]);
-      setVersionsNodeId(null);
-      return;
-    }
-    const controller = new AbortController();
-    setVersions([]);
-    setVersionsNodeId(null);
-    setVersionsLoading(true);
-    void api.listNodeVersions(projectId, selectedNode.id, controller.signal).then((next) => {
-      if (!controller.signal.aborted) {
-        setVersions(next);
-        setVersionsNodeId(selectedNode.id);
-      }
-    }).catch(() => {
-      if (!controller.signal.aborted) {
-        setVersions([]);
-        setVersionsNodeId(selectedNode.id);
-      }
-    }).finally(() => {
-      if (!controller.signal.aborted) setVersionsLoading(false);
-    });
-    return () => controller.abort();
-  }, [api, projectId, selectedNode?.id, selectedNode?.versionCount]);
-
-  const bumpLayout = useCallback(() => {
-    if (layoutFrameRef.current !== null) return;
-    layoutFrameRef.current = window.requestAnimationFrame(() => {
-      layoutFrameRef.current = null;
-      setLayoutNonce((current) => current + 1);
-    });
-  }, []);
-
   const onPreviewContextMenu = useCallback((nodeId: string, target: DesignPreviewAnnotationTarget) => {
     const surface = surfaceRef.current;
     if (!surface) return;
@@ -608,41 +378,6 @@ export function DesignCanvasScreen({
     });
   }, [canvas?.nodes]);
 
-  useEffect(() => {
-    const surface = surfaceRef.current;
-    if (!surface) return;
-    const observer = new ResizeObserver(bumpLayout);
-    observer.observe(surface);
-    window.addEventListener("resize", bumpLayout);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", bumpLayout);
-    };
-  }, [bumpLayout]);
-
-  const applyInitialViewport = useCallback((instance: ReactFlowInstance<DesignFlowNode>, target: Viewport) => {
-    mountedViewportProjectRef.current = projectId;
-    const mounted = instance.getViewport();
-    if (sameViewport(mounted, target)) {
-      syncHoverLabelViewportScale(surfaceRef.current, mounted.zoom);
-      setZoom(mounted.zoom);
-      return;
-    }
-    void instance.setViewport({ ...target }, { duration: 0 }).then(() => {
-      if (flowRef.current !== instance) return;
-      const currentZoom = instance.getZoom();
-      syncHoverLabelViewportScale(surfaceRef.current, currentZoom);
-      setZoom(currentZoom);
-      bumpLayout();
-    }).catch(() => {
-      if (flowRef.current === instance) {
-        const currentZoom = instance.getZoom();
-        syncHoverLabelViewportScale(surfaceRef.current, currentZoom);
-        setZoom(currentZoom);
-      }
-    });
-  }, [bumpLayout, projectId]);
-
   useLayoutEffect(() => {
     if (!canvas) return;
     syncHoverLabelViewportScale(surfaceRef.current, flowRef.current?.getZoom() ?? canvas.viewport.zoom);
@@ -650,16 +385,7 @@ export function DesignCanvasScreen({
     const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
     const selected = new Set(selectedNodeIds.filter((id) => canvasNodeIds.has(id)));
     if (selected.size !== selectedNodeIds.length) setSelectedNodeIds([...selected]);
-    if (focusedNodeId && !canvasNodeIds.has(focusedNodeId)) setFocusedNodeId(null);
-    if (focusedPanelNodeId && !canvasNodeIds.has(focusedPanelNodeId)) setFocusedPanelNodeId(null);
-    if (focusTransition && !canvasNodeIds.has(focusTransition.nodeId)) {
-      focusTransitionSequenceRef.current += 1;
-      focusClosingRef.current = false;
-      focusCloseCompletionRef.current = null;
-      setFocusedPanelNodeId(null);
-      setFocusTransition(null);
-      focusViewportLockRef.current = null;
-    }
+    dropFocusForMissingNodes(canvasNodeIds);
     const surfaceBounds = surfaceRef.current?.getBoundingClientRect();
     const activeViewport = focusViewportLockRef.current ?? flowRef.current?.getViewport() ?? canvas.viewport;
     const contentLayouts = new Map<string, DesignNodeContentLayout>();
@@ -786,18 +512,10 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, focusedCanvasNode, focusedNodeId, focusedPanelNodeId, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+  }, [api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, dropFocusForMissingNodes, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
-  useLayoutEffect(() => {
-    const pendingNodeIds = pendingFigmaImportedNodeIdsRef.current;
-    if (!canvas || !pendingNodeIds?.length) return;
-    const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
-    const importedNodeIds = pendingNodeIds.filter((nodeId) => canvasNodeIds.has(nodeId));
-    if (importedNodeIds.length === 0) return;
+  const revealImportedFigmaNodes = useCallback((importedNodeIds: string[]) => {
     const importedNodeIdSet = new Set(importedNodeIds);
-    const importedFlowNodes = flowNodesRef.current.filter((node) => importedNodeIdSet.has(node.id));
-    if (importedFlowNodes.length !== importedNodeIds.length) return;
-    pendingFigmaImportedNodeIdsRef.current = null;
     setMainAgentContextSeed((current) => ({
       generation: current.generation + 1,
       nodeIds: importedNodeIds,
@@ -810,68 +528,30 @@ export function DesignCanvasScreen({
       ...node,
       selected: importedNodeIdSet.has(node.id),
     })));
-    if (figmaImportFitFrameRef.current !== null) window.cancelAnimationFrame(figmaImportFitFrameRef.current);
-    figmaImportFitFrameRef.current = window.requestAnimationFrame(() => {
-      figmaImportFitFrameRef.current = null;
-      void flowRef.current?.fitView({
-        nodes: flowNodesRef.current.filter((node) => importedNodeIdSet.has(node.id)),
-        padding: 0.18,
-        duration: reduceMotion ? 0 : 260,
-        ease: nodeFocusEase,
-        interpolate: "smooth",
-      });
-    });
-  }, [canvas, reduceMotion, replaceFlowNodes]);
-
-  useLayoutEffect(() => {
-    if (!reduceMotion || !focusTransition || !focusMotionEnabled) return;
-    // Keep this focus session instant even if the preference is switched back
-    // before it closes; otherwise the remaining flight would restart.
-    setFocusMotionEnabled(false);
-    const root = surfaceRef.current?.closest(".design-canvas-root");
-    if (!root) return;
-    const settle = () => cancelSpatialFocusAnimations(root);
-    settle();
-    queueMicrotask(settle);
-    window.requestAnimationFrame(settle);
-  }, [focusMotionEnabled, focusTransition, reduceMotion]);
-
-  const onFlowInit = useCallback((instance: ReactFlowInstance<DesignFlowNode>) => {
-    flowRef.current = instance;
-    syncHoverLabelViewportScale(surfaceRef.current, instance.getZoom());
-    const target = authoritativeViewportRef.current;
-    if (target) applyInitialViewport(instance, target);
-    else setZoom(instance.getZoom());
-    bumpLayout();
-  }, [applyInitialViewport, bumpLayout]);
+  }, [replaceFlowNodes]);
+  const {
+    figmaImportAnchor,
+    stageFigmaImportAnchor,
+    openPendingFigmaImport,
+    closeFigmaImport,
+    onFigmaImported,
+  } = useFigmaImportFlow({
+    canvas,
+    flowRef,
+    flowNodesRef,
+    reduceMotion,
+    adoptCanvas: controller.adoptCanvas,
+    refresh: controller.refresh,
+    toast,
+    onImportedNodesReady: revealImportedFigmaNodes,
+  });
 
   useEffect(() => () => {
-    if (layoutFrameRef.current !== null) window.cancelAnimationFrame(layoutFrameRef.current);
-    if (transientNodeChangesFrameRef.current !== null) {
-      window.cancelAnimationFrame(transientNodeChangesFrameRef.current);
-    }
     if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
     if (contextSelectionGuardFrameRef.current !== null) window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
-    if (focusPanelTimerRef.current !== null) window.clearTimeout(focusPanelTimerRef.current);
-    if (focusFinishTimerRef.current !== null) window.clearTimeout(focusFinishTimerRef.current);
-    if (focusReleaseTimerRef.current !== null) window.clearTimeout(focusReleaseTimerRef.current);
-    if (selectionGhostTimerRef.current !== null) window.clearTimeout(selectionGhostTimerRef.current);
-    if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
-    if (figmaImportOpenFrameRef.current !== null) window.cancelAnimationFrame(figmaImportOpenFrameRef.current);
-    if (figmaImportFitFrameRef.current !== null) window.cancelAnimationFrame(figmaImportFitFrameRef.current);
-    draggingNodeIdsRef.current.clear();
-    resizingNodeIdsRef.current.clear();
-    pendingNodeGeometriesRef.current.clear();
-    pendingTransientNodeChangesRef.current = [];
-    transientNodeChangesFrameRef.current = null;
-    focusTransitionSequenceRef.current += 1;
-    focusCloseCompletionRef.current = null;
     selectionGuardRef.current = null;
     contextSelectionGuardRef.current = null;
     selectionClearGuardRef.current = false;
-    focusClosingRef.current = false;
-    focusViewportLockRef.current = null;
-    mountedViewportProjectRef.current = null;
     flowRef.current = null;
   }, []);
 
@@ -1001,46 +681,7 @@ export function DesignCanvasScreen({
     }
   }, []);
 
-  const captureSelectionRect = useCallback(() => {
-    const surface = surfaceRef.current;
-    const selection = surface?.querySelector<HTMLElement>(".react-flow__selection");
-    if (!surface || !selection) return;
-    const surfaceBounds = surface.getBoundingClientRect();
-    const selectionBounds = selection.getBoundingClientRect();
-    if (selectionBounds.width < 1 || selectionBounds.height < 1) return;
-    selectionRectRef.current = {
-      left: selectionBounds.left - surfaceBounds.left,
-      top: selectionBounds.top - surfaceBounds.top,
-      width: selectionBounds.width,
-      height: selectionBounds.height,
-    };
-  }, []);
-
-  const onSelectionStart = useCallback(() => {
-    if (selectionGhostTimerRef.current !== null) {
-      window.clearTimeout(selectionGhostTimerRef.current);
-      selectionGhostTimerRef.current = null;
-    }
-    selectionRectRef.current = null;
-    setSelectionGhost(null);
-  }, []);
-
-  const onSelectionEnd = useCallback(() => {
-    captureSelectionRect();
-    const rect = selectionRectRef.current;
-    if (!rect || reduceMotion) {
-      selectionRectRef.current = null;
-      return;
-    }
-    const ghost = { ...rect, id: selectionGhostSequenceRef.current + 1 };
-    selectionGhostSequenceRef.current = ghost.id;
-    setSelectionGhost(ghost);
-    selectionGhostTimerRef.current = window.setTimeout(() => {
-      selectionGhostTimerRef.current = null;
-      setSelectionGhost((current) => current?.id === ghost.id ? null : current);
-    }, 180);
-    selectionRectRef.current = null;
-  }, [captureSelectionRect, reduceMotion]);
+  const { selectionGhost, captureSelectionRect, onSelectionStart, onSelectionEnd } = useSelectionGhost({ surfaceRef, reduceMotion });
 
   const onSelectionChange = useCallback(({ nodes }: { nodes: DesignFlowNode[] }) => {
     const next = nodes.map((node) => node.id);
@@ -1076,20 +717,7 @@ export function DesignCanvasScreen({
     if (focusActive) return;
     const uniqueInteractionNodeIds = [...new Set(interactionNodeIds)];
     const nextNodeIds = uniqueInteractionNodeIds.includes(nodeId) ? uniqueInteractionNodeIds : [nodeId];
-    selectionClearGuardRef.current = false;
-    selectionGuardRef.current = nodeId;
-    if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
-    selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-      selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-        selectionGuardFrameRef.current = null;
-        selectionGuardRef.current = null;
-      });
-    });
-    contextSelectionGuardRef.current = null;
-    if (contextSelectionGuardFrameRef.current !== null) {
-      window.cancelAnimationFrame(contextSelectionGuardFrameRef.current);
-      contextSelectionGuardFrameRef.current = null;
-    }
+    armSelectionGuard(nodeId);
     setMainAgentOpen(false);
     setSelectedNodeIds(nextNodeIds);
     setFocusedPanelNodeId(nextNodeIds.length === 1 ? nodeId : null);
@@ -1098,7 +726,7 @@ export function DesignCanvasScreen({
       ...candidate,
       selected: selectedNodeIdSet.has(candidate.id),
     })));
-  }, [focusActive, replaceFlowNodes]);
+  }, [armSelectionGuard, focusActive, replaceFlowNodes]);
 
   const onNodeClick = useCallback<NodeMouseHandler<DesignFlowNode>>((_event, node) => {
     selectNodeFromPointerInteraction(node.id, [node.id]);
@@ -1118,131 +746,6 @@ export function DesignCanvasScreen({
     openNodeAgent(node.id);
   }, [focusActive, focusTransition, openNodeAgent]);
 
-  const persistNodePositions = useCallback((nodeIds: readonly string[], nextFlowNodes: readonly DesignFlowNode[]) => {
-    const authoritativeById = new Map((canvas?.nodes ?? []).map((node) => [node.id, node]));
-    const flowById = new Map(nextFlowNodes.map((node) => [node.id, node]));
-    const updates = [...new Set(nodeIds)].flatMap((nodeId) => {
-      const authoritative = authoritativeById.get(nodeId);
-      const flowNode = flowById.get(nodeId);
-      if (!authoritative || !flowNode) return [];
-      const geometry = flowNodeGeometry(flowNode, authoritative.geometry);
-      if (sameGeometry(geometry, authoritative.geometry)) return [];
-      return [{ nodeId, geometry }];
-    });
-    persistNodeGeometries(updates);
-  }, [canvas?.nodes, persistNodeGeometries]);
-
-  const takePendingTransientNodeChanges = useCallback(() => {
-    if (transientNodeChangesFrameRef.current !== null) {
-      window.cancelAnimationFrame(transientNodeChangesFrameRef.current);
-      transientNodeChangesFrameRef.current = null;
-    }
-    const pending = pendingTransientNodeChangesRef.current;
-    pendingTransientNodeChangesRef.current = [];
-    return pending;
-  }, []);
-
-  const scheduleTransientNodeChanges = useCallback((changes: NodeChange<DesignFlowNode>[]) => {
-    pendingTransientNodeChangesRef.current.push(...changes);
-    if (transientNodeChangesFrameRef.current !== null) return;
-    transientNodeChangesFrameRef.current = window.requestAnimationFrame(() => {
-      transientNodeChangesFrameRef.current = null;
-      const pending = takePendingTransientNodeChanges();
-      if (pending.length > 0) {
-        replaceFlowNodes((current) => applyNodeChanges(pending, current));
-      }
-    });
-  }, [replaceFlowNodes, takePendingTransientNodeChanges]);
-
-  const onNodesChange = useCallback((changes: NodeChange<DesignFlowNode>[]) => {
-    const resizeEnded = changes.some((change) => change.type === "dimensions" && change.resizing === false);
-    const transientResize = !resizeEnded && changes.some((change) => (
-      change.type === "dimensions"
-        && (change.resizing === true || resizingNodeIdsRef.current.has(change.id))
-    ));
-    let next = flowNodesRef.current;
-    if (transientResize) {
-      scheduleTransientNodeChanges(changes);
-    } else {
-      const pending = takePendingTransientNodeChanges();
-      const orderedChanges = pending.length > 0 ? [...pending, ...changes] : changes;
-      next = replaceFlowNodes((current) => applyNodeChanges(orderedChanges, current));
-    }
-    let completedPositionChange = false;
-    for (const change of changes) {
-      if (change.type === "position") {
-        if (change.dragging === true) draggingNodeIdsRef.current.add(change.id);
-        if (change.dragging === false) {
-          draggingNodeIdsRef.current.add(change.id);
-          completedPositionChange = true;
-        }
-      }
-      if (change.type === "dimensions") {
-        if (change.resizing === true) resizingNodeIdsRef.current.add(change.id);
-        if (change.resizing === false) resizingNodeIdsRef.current.delete(change.id);
-      }
-    }
-    if (completedPositionChange) {
-      const completedNodeIds = [...draggingNodeIdsRef.current];
-      draggingNodeIdsRef.current.clear();
-      persistNodePositions(completedNodeIds, next);
-    }
-    if (changes.some((change) => change.type === "position" || change.type === "dimensions")) bumpLayout();
-  }, [bumpLayout, persistNodePositions, replaceFlowNodes, scheduleTransientNodeChanges, takePendingTransientNodeChanges]);
-
-  const persistViewport = useCallback((viewport: Viewport) => {
-    const current = authoritativeViewportRef.current;
-    if (sameViewport(current, viewport) || sameViewport(localViewportTargetRef.current, viewport)) return;
-    if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
-    const intendedViewport = { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
-    localViewportTargetRef.current = intendedViewport;
-    viewportSaveTimerRef.current = window.setTimeout(() => {
-      viewportSaveTimerRef.current = null;
-      const latest = authoritativeViewportRef.current;
-      if (sameViewport(latest, intendedViewport)) {
-        if (sameViewport(localViewportTargetRef.current, intendedViewport)) localViewportTargetRef.current = null;
-        return;
-      }
-      void controller.applyIntents([{
-        type: "set-viewport",
-        viewport: intendedViewport,
-      }]).catch(() => {
-        void controller.refresh();
-      }).finally(() => {
-        if (sameViewport(localViewportTargetRef.current, intendedViewport)) localViewportTargetRef.current = null;
-      });
-    }, 500);
-  }, [controller.applyIntents, controller.refresh]);
-
-  const restoreLockedFocusViewport = useCallback((viewport: Viewport): boolean => {
-    const locked = focusViewportLockRef.current;
-    if (!locked) return false;
-    syncHoverLabelViewportScale(surfaceRef.current, locked.zoom);
-    setZoom(locked.zoom);
-    if (!sameViewport(viewport, locked)) {
-      void flowRef.current?.setViewport({ ...locked }, { duration: 0 }).catch(() => undefined);
-    }
-    return true;
-  }, []);
-
-  const onMove = useCallback<OnMove>((_event, viewport) => {
-    if (restoreLockedFocusViewport(viewport)) return;
-    setZoom(viewport.zoom);
-    bumpLayout();
-  }, [bumpLayout, restoreLockedFocusViewport]);
-
-  const onViewportChange = useCallback((viewport: Viewport) => {
-    // XYFlow updates its viewport transform outside React's render path. Write
-    // the matching counter-scale in that same hot path, before the next paint.
-    syncHoverLabelViewportScale(surfaceRef.current, viewport.zoom);
-  }, []);
-
-  const onMoveEnd = useCallback<OnMoveEnd>((_event, viewport) => {
-    if (restoreLockedFocusViewport(viewport)) return;
-    setZoom(viewport.zoom);
-    persistViewport(viewport);
-  }, [persistViewport, restoreLockedFocusViewport]);
-
   const arrange = useCallback(() => {
     if (!canvas || canvas.nodes.length < 2) return;
     const layout = arrangeDesignNodes(canvas.nodes, canvas.nodeOrder);
@@ -1255,83 +758,6 @@ export function DesignCanvasScreen({
       }));
     }).catch(() => undefined);
   }, [canvas, controller.applyIntents, reduceMotion]);
-
-  const clearSelection = useCallback(() => {
-    selectionGuardRef.current = null;
-    selectionClearGuardRef.current = true;
-    if (selectionGuardFrameRef.current !== null) window.cancelAnimationFrame(selectionGuardFrameRef.current);
-    selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-      selectionGuardFrameRef.current = window.requestAnimationFrame(() => {
-        selectionGuardFrameRef.current = null;
-        selectionClearGuardRef.current = false;
-      });
-    });
-    setSelectedNodeIds([]);
-    setFocusedPanelNodeId(null);
-    replaceFlowNodes((current) => current.map((node) => node.selected ? { ...node, selected: false } : node));
-  }, [replaceFlowNodes]);
-
-  const closeNodeFocus = useCallback((animate = true) => {
-    if (focusClosingRef.current) return;
-    const anchorNodeId = focusedNodeId ?? focusTransition?.nodeId ?? null;
-    if (!anchorNodeId) {
-      clearSelection();
-      return;
-    }
-    focusClosingRef.current = true;
-    const motionEnabled = animate && !reduceMotion;
-    const flightDuration = focusTransition?.durationMs
-      ?? flowNodesRef.current.find((node) => node.id === anchorNodeId)?.data.focusMotion?.durationMs
-      ?? NODE_FOCUS_FLIGHT_DURATION_MS;
-    const sequence = focusTransitionSequenceRef.current + 1;
-    focusTransitionSequenceRef.current = sequence;
-    if (focusPanelTimerRef.current !== null) {
-      window.clearTimeout(focusPanelTimerRef.current);
-      focusPanelTimerRef.current = null;
-    }
-    if (focusFinishTimerRef.current !== null) {
-      window.clearTimeout(focusFinishTimerRef.current);
-      focusFinishTimerRef.current = null;
-    }
-    if (focusReleaseTimerRef.current !== null) {
-      window.clearTimeout(focusReleaseTimerRef.current);
-      focusReleaseTimerRef.current = null;
-    }
-    if (viewportSaveTimerRef.current !== null) {
-      window.clearTimeout(viewportSaveTimerRef.current);
-      viewportSaveTimerRef.current = null;
-      localViewportTargetRef.current = null;
-    }
-    setFocusMotionEnabled(motionEnabled);
-    setFocusedNodeId(null);
-    setFocusedPanelNodeId(null);
-    setFocusTransition({ nodeId: anchorNodeId, phase: "closing", durationMs: flightDuration });
-
-    const releaseFocus = () => {
-      if (focusTransitionSequenceRef.current !== sequence) return;
-      focusReleaseTimerRef.current = null;
-      focusClosingRef.current = false;
-    };
-    const finish = () => {
-      if (focusTransitionSequenceRef.current !== sequence) return;
-      if (focusFinishTimerRef.current !== null) window.clearTimeout(focusFinishTimerRef.current);
-      focusFinishTimerRef.current = null;
-      focusCloseCompletionRef.current = null;
-      const lockedViewport = focusViewportLockRef.current;
-      const currentViewport = flowRef.current?.getViewport();
-      if (lockedViewport && currentViewport && !sameViewport(currentViewport, lockedViewport)) {
-        void flowRef.current?.setViewport({ ...lockedViewport }, { duration: 0 }).catch(() => undefined);
-      }
-      if (lockedViewport) setZoom(lockedViewport.zoom);
-      focusViewportLockRef.current = null;
-      setFocusTransition(null);
-      clearSelection();
-      focusReleaseTimerRef.current = window.setTimeout(releaseFocus, motionEnabled ? 120 : 80);
-    };
-    focusCloseCompletionRef.current = { nodeId: anchorNodeId, finish };
-    if (motionEnabled) focusFinishTimerRef.current = window.setTimeout(finish, flightDuration + 160);
-    else finish();
-  }, [clearSelection, focusTransition?.durationMs, focusTransition?.nodeId, focusedNodeId, reduceMotion]);
 
   const onPaneClick = useCallback(() => {
     setPreviewAnnotation(null);
@@ -1379,20 +805,6 @@ export function DesignCanvasScreen({
       clientX: event.clientX,
       clientY: event.clientY,
     }));
-  }, []);
-
-  const hideNodeAgentForContextMenu = useCallback(() => {
-    if (focusPanelTimerRef.current !== null) {
-      window.clearTimeout(focusPanelTimerRef.current);
-      focusPanelTimerRef.current = null;
-    }
-    const panel = nodePanelRef.current;
-    if (panel) {
-      panel.setAttribute("aria-hidden", "true");
-      panel.setAttribute("inert", "");
-      panel.style.pointerEvents = "none";
-    }
-    setFocusedPanelNodeId(null);
   }, []);
 
   const onPaneContextMenu = useCallback((event: ReactMouseEvent | MouseEvent) => {
@@ -1506,31 +918,6 @@ export function DesignCanvasScreen({
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [clearSelection, closeNodeFocus, controller.applyIntents, controller.redo, controller.undo, focusActive, historyLocked, openNodeAgent, selectedNodeIds]);
-
-  const exportFocusedPreview = useCallback(async () => {
-    const versionId = focusedCanvasNode ? previewVersionIdForNode(focusedCanvasNode) : null;
-    if (!focusedCanvasNode || !versionId || focusPreviewExporting) return;
-    setFocusPreviewExporting(true);
-    setFocusPreviewExportError(null);
-    let objectUrl: string | null = null;
-    try {
-      const portable = await api.downloadExactVersionHtml(projectId, focusedCanvasNode.id, versionId);
-      objectUrl = URL.createObjectURL(portable);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = `${downloadFileStem(focusedCanvasNode.name)}-${versionId}.html`;
-      link.rel = "noreferrer";
-      document.body.append(link);
-      link.click();
-      link.remove();
-    } catch (error) {
-      const detail = error instanceof Error && error.message.trim() ? error.message.trim() : "Unknown export error";
-      setFocusPreviewExportError(`Couldn't export this preview. ${detail}`);
-    } finally {
-      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
-      setFocusPreviewExporting(false);
-    }
-  }, [api, focusPreviewExporting, focusedCanvasNode, projectId]);
 
   const flowEdges = useMemo<Edge[]>(() => (canvas?.connections ?? []).map((connection) => ({
     id: connection.id,
@@ -1719,19 +1106,8 @@ export function DesignCanvasScreen({
         onOpenChange={(open) => {
           contextMenuActiveRef.current = open;
           setContextMenuOpen(open);
-          if (open) {
-            hideNodeAgentForContextMenu();
-          } else if (pendingFigmaImportAnchorRef.current) {
-            const anchor = pendingFigmaImportAnchorRef.current;
-            pendingFigmaImportAnchorRef.current = null;
-            if (figmaImportOpenFrameRef.current !== null) {
-              window.cancelAnimationFrame(figmaImportOpenFrameRef.current);
-            }
-            figmaImportOpenFrameRef.current = window.requestAnimationFrame(() => {
-              figmaImportOpenFrameRef.current = null;
-              setFigmaImportAnchor(anchor);
-            });
-          }
+          if (open) hideNodeAgentForContextMenu();
+          else openPendingFigmaImport();
         }}
       >
         <ContextMenuTrigger asChild disabled={!canvasAvailable}>
@@ -2055,15 +1431,9 @@ export function DesignCanvasScreen({
             <ContextMenuSeparator />
             <ContextMenuItem
               className="design-node-catalog__item"
-              onSelect={() => {
-                const position = contextMenu
-                  ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
-                  : canvasCenter();
-                pendingFigmaImportAnchorRef.current = {
-                  x: Math.round(position.x),
-                  y: Math.round(position.y),
-                };
-              }}
+              onSelect={() => stageFigmaImportAnchor(contextMenu
+                ? { x: contextMenu.canvasX, y: contextMenu.canvasY }
+                : canvasCenter())}
             >
               <span className="design-node-catalog__icon">
                 <Figma aria-hidden className="size-3.5" />
@@ -2078,23 +1448,8 @@ export function DesignCanvasScreen({
         projectId={projectId}
         anchor={figmaImportAnchor ?? { x: 0, y: 0 }}
         returnFocusRef={surfaceRef}
-        onClose={() => setFigmaImportAnchor(null)}
-        onImported={(result) => {
-          pendingFigmaImportedNodeIdsRef.current = figmaImportedNodeIds(result, canvas);
-          controller.adoptCanvas(result.canvas);
-          const limitations = [...new Set([
-            ...result.import.manifest.incomplete,
-            ...result.import.manifest.warnings,
-          ])];
-          if (limitations.length > 0) {
-            const visible = limitations.slice(0, 2).join("; ");
-            toast(`Figma imported with limitations: ${visible}${
-              limitations.length > 2 ? `; +${limitations.length - 2} more` : ""
-            }`);
-          }
-          setFigmaImportAnchor(null);
-          void controller.refresh();
-        }}
+        onClose={closeFigmaImport}
+        onImported={onFigmaImported}
       />
     </main>
   );
