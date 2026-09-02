@@ -9,8 +9,8 @@ import {
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
-} from "../../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DESIGN_FILE_TOOLS = "Read,Write,Edit,Glob,Grep";

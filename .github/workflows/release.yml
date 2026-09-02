@@ -1,0 +1,41 @@
+name: Release
+
+# Tag a commit on main as vX.Y.Z (matching package.json) to cut a draft GitHub
+# release with generated notes and the built Web bundle attached. Electron
+# packaging, signing, and notarization are not automated yet; see ROADMAP.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.16.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Tag must match package.json version
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json ($expected)" >&2
+            exit 1
+          fi
+      - run: pnpm typecheck
+      - run: pnpm build:check
+      - name: Bundle the Web build
+        run: tar -czf "dezin-web-$GITHUB_REF_NAME.tgz" -C apps/web dist
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "dezin-web-$GITHUB_REF_NAME.tgz" --draft --generate-notes --title "Dezin $GITHUB_REF_NAME"

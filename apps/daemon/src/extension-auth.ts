@@ -4,7 +4,7 @@ import type {
   ExtensionCredentialRecord,
   ExtensionScope,
   Store,
-} from "../../../packages/core/src/index.ts";
+} from "@dezin/core";
 import { HttpError } from "./http-util.ts";
 
 export const EXTENSION_PAIR_CODE_TTL_MS = 5 * 60_000;

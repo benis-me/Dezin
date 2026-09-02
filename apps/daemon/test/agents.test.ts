@@ -11,8 +11,8 @@ import {
   abortError,
   isAbortError,
   type AgentProvider,
-} from "../../../packages/agent/src/index.ts";
-import { Store } from "../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import { Store } from "@dezin/core";
 import { createApp } from "../src/index.ts";
 import { detectAgents, getAgents, warmAgents, type AgentProber, type AgentInfo } from "../src/agents-handler.ts";
 import { shutdownDaemon } from "../src/daemon-shutdown.ts";

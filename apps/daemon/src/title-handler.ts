@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerResponse } from "node:http";
-import { runTurnWithRetry } from "../../../packages/agent/src/index.ts";
+import { runTurnWithRetry } from "@dezin/agent";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { buildAgentRunner } from "./agent-runner.ts";
 import type { AppDeps } from "./app.ts";

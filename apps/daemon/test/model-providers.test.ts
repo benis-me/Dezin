@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp, type AppDeps } from "../src/index.ts";
 
 type FetchCall = { url: string; init?: RequestInit };

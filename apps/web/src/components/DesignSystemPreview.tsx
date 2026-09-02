@@ -1,5 +1,4 @@
 import type { DesignSystemCard, Swatch } from "../lib/api.ts";
-import { BrandGlyph, hasBrandLogo } from "./design-system-logos.tsx";
 
 const FALLBACK_SWATCH: Swatch = {
   bg: "var(--surface)",
@@ -31,11 +30,10 @@ export default function DesignSystemPreview({ system }: { system: DesignSystemCa
     <div className="dz-animate-in w-56 overflow-hidden rounded-lg border border-border bg-popover shadow-pop">
       <div className="px-3 py-2.5" style={{ background: sw.bg, color: sw.fg }}>
         <div className="flex items-center gap-1.5">
-          {hasBrandLogo(system.id) ? <BrandGlyph id={system.id} className="size-3.5 shrink-0" /> : null}
           <span className="truncate text-[13px] font-semibold tracking-tight">{system.name}</span>
         </div>
         <div className="mt-0.5 text-[11px]" style={{ opacity: 0.55 }}>
-          Aa — the quick brown fox
+          Aa · the quick brown fox
         </div>
         <div className="mt-2 flex items-center gap-1.5">
           <span

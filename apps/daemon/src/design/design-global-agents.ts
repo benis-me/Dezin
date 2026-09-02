@@ -12,7 +12,7 @@ import {
   normalizeAgentToolName,
   type AgentRunner,
   type AgentTurnResult,
-} from "../../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 import {
   observedDesignAgentIdentity,
   observedDesignAgentIdentityFromError,

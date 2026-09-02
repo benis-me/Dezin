@@ -3,7 +3,7 @@ import {
   AgentTurnError,
   type AgentRunner,
   type AgentTurnResult,
-} from "../../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 
 export interface ObservedDesignAgentIdentity {
   runnerId: string;

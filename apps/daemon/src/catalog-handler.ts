@@ -14,7 +14,7 @@ import {
   userDesignDir,
   BUNDLED_DESIGN_SYSTEMS,
   type DesignSystemCraft,
-} from "../../../packages/design/src/index.ts";
+} from "@dezin/design";
 
 const BUILT_IN_IDS = new Set(BUNDLED_DESIGN_SYSTEMS.map((s) => s.id));
 import { readJsonBody, sendJson, sendError } from "./http-util.ts";

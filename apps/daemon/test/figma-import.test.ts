@@ -18,7 +18,7 @@ import {
 } from "../src/design/figma-import.ts";
 import type { FigmaRestClient } from "../src/design/figma-rest-client.ts";
 import { FigmaUrlError } from "../src/design/figma-url.ts";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 
 const execFile = promisify(execFileCallback);

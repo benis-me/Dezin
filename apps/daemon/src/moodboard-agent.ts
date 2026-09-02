@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import type { Moodboard, MoodboardAsset, MoodboardMessage, MoodboardNode } from "../../../packages/core/src/index.ts";
-import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
+import type { Moodboard, MoodboardAsset, MoodboardMessage, MoodboardNode } from "@dezin/core";
+import { agentSpawnEnv, getProvider } from "@dezin/agent";
 
 export interface MoodboardAgentTextInput {
   board: Moodboard;

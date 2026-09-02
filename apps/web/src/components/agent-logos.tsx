@@ -1,13 +1,14 @@
 import codeBuddySvg from "@lobehub/icons-static-svg/icons/codebuddy-color.svg?raw";
+import copilotSvg from "@lobehub/icons-static-svg/icons/githubcopilot.svg?raw";
 import hermesSvg from "@lobehub/icons-static-svg/icons/hermesagent.svg?raw";
 import kimiSvg from "@lobehub/icons-static-svg/icons/kimi-color.svg?raw";
 import openCodeSvg from "@lobehub/icons-static-svg/icons/opencode.svg?raw";
+import qwenSvg from "@lobehub/icons-static-svg/icons/qwen-color.svg?raw";
 import traeSvg from "@lobehub/icons-static-svg/icons/trae-color.svg?raw";
 import { Pi as PiIcon, Terminal } from "lucide-react";
-import { siGithubcopilot, siQwen } from "simple-icons";
 
-// Brand marks (simple-icons paths, 24×24). Agents without a public mark fall back to a
-// neutral terminal glyph. Logos keep their brand colour — they're identity, not UI accent.
+// Brand marks (inline 24×24 paths or lobehub SVGs). Agents without a public mark fall back
+// to a neutral terminal glyph. Logos keep their brand colour: they're identity, not UI accent.
 const ANTHROPIC =
   "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z";
 const OPENAI =
@@ -78,18 +79,8 @@ export function AgentLogo({ id, className = "size-5" }: { id: string; className?
       </svg>
     );
   if (id === "codebuddy") return <BrandSvg svg={codeBuddySvg} className={className} />;
-  if (id === "copilot")
-    return (
-      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
-        <path d={siGithubcopilot.path} />
-      </svg>
-    );
-  if (id === "qwen")
-    return (
-      <svg viewBox="0 0 24 24" className={className} fill="#6950EF" aria-hidden>
-        <path d={siQwen.path} />
-      </svg>
-    );
+  if (id === "copilot") return <BrandSvg svg={copilotSvg} className={className} />;
+  if (id === "qwen") return <BrandSvg svg={qwenSvg} className={className} />;
   if (id === "opencode") return <BrandSvg svg={openCodeSvg} className={className} />;
   if (id === "kimi") return <BrandSvg svg={kimiSvg} className={className} />;
   if (id === "trae") return <BrandSvg svg={traeSvg} className={className} />;

@@ -7,7 +7,7 @@ import {
   type Resource,
   type ResourceRevision,
   type Store,
-} from "../../../packages/core/src/index.ts";
+} from "@dezin/core";
 import {
   ResourceRevisionPayloadError,
   resolveResourceRevisionPayloadDescriptor,

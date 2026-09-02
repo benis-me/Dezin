@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { Card, Badge, Button, Loading, Segmented } from "../components/ui/index.ts";
-import { BrandGlyph, hasBrandLogo } from "../components/design-system-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { navigate } from "../router.tsx";
@@ -20,20 +19,19 @@ function SwatchRow({ swatch }: { swatch?: Swatch }) {
   );
 }
 
-/** A mini brand vignette — the brand name + a button + chip in the brand's own colors. */
-function Specimen({ id, name, swatch }: { id: string; name: string; swatch?: Swatch }) {
+/** A mini vignette: the system name + a button + chip in the system's own colors. */
+function Specimen({ name, swatch }: { name: string; swatch?: Swatch }) {
   const sw = swatch ?? FALLBACK;
   return (
     <div className="rounded-t-xl border-b border-border px-4 py-3.5" style={{ backgroundColor: sw.bg, color: sw.fg }}>
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
-          {hasBrandLogo(id) ? <BrandGlyph id={id} className="size-4 shrink-0" /> : null}
           {name}
         </span>
         <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: sw.accent }} />
       </div>
       <div className="mt-0.5 text-xs" style={{ color: sw.fg, opacity: 0.55 }}>
-        Aa — the quick brown fox
+        Aa · the quick brown fox
       </div>
       <div className="mt-3 flex items-center gap-1.5">
         <span className="rounded-md px-2.5 py-1 text-[11px] font-medium" style={{ backgroundColor: sw.accent, color: "#fff" }}>
@@ -82,7 +80,7 @@ export function DesignSystemsScreen() {
             <div className="max-w-2xl">
               <h1 className="text-2xl font-semibold tracking-tight text-foreground">Design systems</h1>
               <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
-                The brand visual language each artifact is built from. {systems ? `${systems.length} systems.` : ""}
+                The visual language each artifact is built from. {systems ? `${systems.length} systems.` : ""} Built-in systems are named for the public products that inspired them; Dezin is not affiliated with or endorsed by those companies.
               </p>
             </div>
             <Button onClick={() => navigate("/design-systems/new")} className="gap-2">
@@ -123,7 +121,7 @@ export function DesignSystemsScreen() {
                     onClick={() => navigate(`/design-systems/${s.id}`)}
                     className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
                   >
-                    <Specimen id={s.id} name={s.name} swatch={s.swatch} />
+                    <Specimen name={s.name} swatch={s.swatch} />
                     <div className="flex items-center justify-between gap-2 p-3">
                       {s.category ? <Badge variant="outline">{s.category}</Badge> : <span />}
                       <SwatchRow swatch={s.swatch} />

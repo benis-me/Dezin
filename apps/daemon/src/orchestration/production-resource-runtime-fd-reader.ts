@@ -6,7 +6,7 @@ import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import {
   AgentOutputLimitError,
   NodeSpawner,
-} from "../../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 
 const PROTOCOL = "dezin.capture-fd-reader.v1";
 const TIMEOUT_MS = 60_000;

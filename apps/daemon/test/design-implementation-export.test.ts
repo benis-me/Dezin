@@ -22,8 +22,8 @@ import {
   type AgentRunner,
   type AgentTurnInput,
   type AgentTurnResult,
-} from "../../../packages/agent/src/index.ts";
-import { Store } from "../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import { Store } from "@dezin/core";
 import {
   buildDesignImplementationExportSystemPrompt as facadeBuildDesignImplementationExportSystemPrompt,
   cancelDesignGlobalJob,

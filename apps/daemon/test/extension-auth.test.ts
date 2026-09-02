@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import * as extensionAuth from "../src/extension-auth.ts";
 
 const EXPECTED_PAIR_CODE_TTL_MS = 5 * 60_000;

@@ -15,12 +15,13 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import type { Store } from "../../../packages/core/src/index.ts";
+import type { Store } from "@dezin/core";
 import {
   RESOURCE_REVISION_PAYLOAD_PROTOCOL,
   resolveResourceRevisionPayloadDescriptor,
   resourceRevisionManifestRelativePath,
 } from "./resource-revision-payload.ts";
+import { log } from "./log.ts";
 
 const INTENT_PROTOCOL = "dezin.resource-materialization-payload-intent.v1" as const;
 const INTENT_FILE = "materialization-intent.json";
@@ -370,12 +371,12 @@ export function recoverResourceMaterializationPayloadIntents(input: {
           continue;
         }
       } catch (cleanupError) {
-        console.warn("[dezin:resource-materialization] startup recovery could not remove an invalid unsealed intent", {
+        log.warn("[dezin:resource-materialization] startup recovery could not remove an invalid unsealed intent", {
           path,
           error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
         });
       }
-      console.warn("[dezin:resource-materialization] startup recovery retained an invalid intent", {
+      log.warn("[dezin:resource-materialization] startup recovery retained an invalid intent", {
         path,
         error: error instanceof Error ? error.message : String(error),
       });

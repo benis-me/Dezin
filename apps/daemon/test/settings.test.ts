@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp } from "../src/index.ts";
 
 async function withServer(fn: (base: string) => Promise<void>): Promise<void> {

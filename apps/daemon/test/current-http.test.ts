@@ -4,8 +4,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AgentRunner } from "../../../packages/agent/src/index.ts";
-import { Store } from "../../../packages/core/src/index.ts";
+import type { AgentRunner } from "@dezin/agent";
+import { Store } from "@dezin/core";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import { createDesignProject } from "../src/design/design-project-store.ts";
 import {

@@ -11,9 +11,10 @@ export const DEFAULT_BUNDLE_BUDGETS = {
   maxInitialMinified: 500 * KIB,
   maxInitialGzip: 180 * KIB,
   // Keep the full Design Canvas and Moodboard surfaces outside Home/Settings.
-  initialJsGzipBaseline: 324_676,
+  // Measured 2026-09-02 after dropping simple-icons, react-markdown, and nucleo.
+  initialJsGzipBaseline: 290_225,
   // Bound aggregate drift while allowing the current lazy Canvas and media tools.
-  totalJsGzipBaseline: 931_282,
+  totalJsGzipBaseline: 866_932,
 };
 
 async function filesUnder(root) {

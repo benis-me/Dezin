@@ -9,11 +9,15 @@
   },
   "scripts": {
     "start": "node --experimental-strip-types --experimental-sqlite --no-warnings src/start.ts",
-    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test --test-concurrency=4 'test/*.test.ts'",
-    "test:coverage": "node --experimental-strip-types --experimental-sqlite --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=79 --test-coverage-branches=67 --test-coverage-functions=35 --test --test-concurrency=4 'test/*.test.ts'"
+    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --import ./test/no-proxy.ts --test --test-concurrency=4 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --experimental-sqlite --no-warnings --import ./test/no-proxy.ts --experimental-test-coverage --test-coverage-include='src/**/*' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=82 --test-coverage-branches=75 --test-coverage-functions=78 --test --test-concurrency=4 'test/*.test.ts'"
   },
   "dependencies": {
+    "@dezin/agent": "workspace:*",
+    "@dezin/core": "workspace:*",
+    "@dezin/design": "workspace:*",
     "@dezin/design-canvas-contracts": "workspace:*",
+    "@dezin/effects": "workspace:*",
     "@ai-sdk/azure": "^4.0.5",
     "@ai-sdk/fal": "^3.0.3",
     "@ai-sdk/google": "^4.0.6",

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
+import { agentSpawnEnv, getProvider } from "@dezin/agent";
 
 export interface PromptOptimizeInput {
   prompt: string;

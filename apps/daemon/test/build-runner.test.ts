@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildAgentRunner as buildRunner } from "../src/agent-runner.ts";
-import { ClaudeCodeRunner, GenericCliRunner } from "../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../packages/core/src/index.ts";
+import { ClaudeCodeRunner, GenericCliRunner } from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 
 function settings(over: Partial<Settings>): Settings {
   return {

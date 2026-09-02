@@ -5,6 +5,7 @@ import { createGoogle } from "@ai-sdk/google";
 import { createVertex } from "@ai-sdk/google-vertex";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateImage, type GenerateImageResult, type ImageModel } from "ai";
+import { log } from "./log.ts";
 
 export type ImageGenerationParams = {
   quality?: "auto" | "low" | "medium" | "high";
@@ -112,7 +113,7 @@ function fetchInputUrl(input: Parameters<FetchLike>[0]): string {
 
 async function logImageRequestFailure(res: Response, context: ImageRequestLogContext & { endpoint: string }): Promise<void> {
   const response = await imageErrorResponseText(res);
-  console.warn("[dezin:image-api] request failed", {
+  log.warn("[dezin:image-api] request failed", {
     operation: context.operation,
     providerId: context.opts.providerId || "custom",
     azure: isAzureOpenAi(context.opts),

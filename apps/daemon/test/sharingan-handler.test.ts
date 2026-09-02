@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import {

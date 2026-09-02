@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import {
   broadcastDesignInvalidation,

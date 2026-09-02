@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type { Settings } from "@dezin/core";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import type { AppDeps } from "./app.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";

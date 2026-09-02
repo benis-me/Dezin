@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
-import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
+import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "@dezin/core";
 import { requestImage, requestImageEdit, type ImageGenerationParams, type SourceImageInput } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
@@ -18,6 +18,7 @@ import { HttpError, readJsonBody, send, sendError, sendJson } from "./http-util.
 import { buildAgentEnv } from "./agent-env.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
+import { log } from "./log.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -58,7 +59,7 @@ export async function compensateMoodboardStart(
 ): Promise<void> {
   const directoryError = await retryMoodboardCleanup(() => removeDirectory(moodboardDir(deps.dataDir, boardId)));
   if (directoryError) {
-    console.warn("[dezin:moodboard-start] compensation incomplete; keeping hidden staging row for startup recovery", {
+    log.warn("[dezin:moodboard-start] compensation incomplete; keeping hidden staging row for startup recovery", {
       boardId,
       stage: "filesystem",
       error: directoryError.message,
@@ -67,7 +68,7 @@ export async function compensateMoodboardStart(
   }
   const databaseError = await retryMoodboardCleanup(() => deps.store.deleteMoodboard(boardId));
   if (databaseError) {
-    console.warn("[dezin:moodboard-start] compensation incomplete; hidden staging row will be retried at startup", {
+    log.warn("[dezin:moodboard-start] compensation incomplete; hidden staging row will be retried at startup", {
       boardId,
       stage: "database",
       error: databaseError.message,
@@ -80,7 +81,7 @@ export function recoverIncompleteMoodboards({ store, dataDir }: Pick<AppDeps, "s
     try {
       rmSync(moodboardDir(dataDir, board.id), { recursive: true, force: true, maxRetries: 2, retryDelay: 25 });
     } catch (error) {
-      console.warn("[dezin:moodboard-start] startup recovery could not remove staging files", {
+      log.warn("[dezin:moodboard-start] startup recovery could not remove staging files", {
         boardId: board.id,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -89,7 +90,7 @@ export function recoverIncompleteMoodboards({ store, dataDir }: Pick<AppDeps, "s
     try {
       store.deleteMoodboard(board.id);
     } catch (error) {
-      console.warn("[dezin:moodboard-start] startup recovery could not remove staging row", {
+      log.warn("[dezin:moodboard-start] startup recovery could not remove staging row", {
         boardId: board.id,
         error: error instanceof Error ? error.message : String(error),
       });

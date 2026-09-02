@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
+import { agentSpawnEnv, getProvider } from "@dezin/agent";
 
 const ANALYZE_PROMPT =
   "Look at the design screenshot saved as reference.png in this folder. Write ONE concise paragraph (2 to 4 sentences, plain text, no preamble, no markdown, no lists, no code) describing it as a recreation brief for rebuilding it as a responsive web page: its overall layout, type treatment, colour system, key components, and mood. Do not create, edit, or write any files — only print the paragraph.";

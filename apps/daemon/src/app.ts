@@ -8,10 +8,10 @@ import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Store } from "../../../packages/core/src/index.ts";
-import type { ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
-import type { AgentRunner } from "../../../packages/agent/src/index.ts";
-import type { DesignRegistry } from "../../../packages/design/src/index.ts";
+import { Store } from "@dezin/core";
+import type { ExtensionScope, Project, Settings } from "@dezin/core";
+import type { AgentRunner } from "@dezin/agent";
+import type { DesignRegistry } from "@dezin/design";
 import { HttpError, sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
@@ -120,6 +120,7 @@ import {
 import { recoverFigmaImports } from "./design/figma-import.ts";
 import { resolveFigmaCredential } from "./design/figma-credential-store.ts";
 import { createFigmaRestClient, type FigmaRestClient } from "./design/figma-rest-client.ts";
+import { log } from "./log.ts";
 
 export interface AppDeps {
   store: Store;
@@ -1065,7 +1066,7 @@ export function createApp(deps: AppDeps): http.Server {
     .then(
       () => ({ ok: true as const }),
       (error: unknown) => {
-        console.error("Design startup recovery failed; Design routes will remain unavailable", error);
+        log.error("Design startup recovery failed; Design routes will remain unavailable", error);
         return { ok: false as const, error };
       },
     );

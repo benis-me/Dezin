@@ -10,7 +10,7 @@ import {
   normalizeSharinganBootstrapState,
   type SharinganBootstrapState,
   type Store,
-} from "../../../packages/core/src/index.ts";
+} from "@dezin/core";
 import { cloneAndFreeze } from "./canonical-json.ts";
 import {
   decodeSharinganCaptureResourceBundle,

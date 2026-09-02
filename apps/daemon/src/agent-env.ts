@@ -1,8 +1,8 @@
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type { Settings } from "@dezin/core";
 import {
   CODEBUDDY_CREDENTIAL_ENVIRONMENT_KEYS,
   getProvider,
-} from "../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 
 function setIfPresent(env: NodeJS.ProcessEnv, key: string, value: string | undefined): void {
   const trimmed = value?.trim();

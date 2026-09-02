@@ -8,8 +8,8 @@ import {
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
-} from "../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 import {
   DesignConfinedSpawner,
   designClaudeArgs,

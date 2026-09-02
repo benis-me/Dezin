@@ -16,7 +16,7 @@ import {
   probeVersion,
   type AgentProvider,
   type AgentReadiness,
-} from "../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 import { sendJson } from "./http-util.ts";
 import type { AppDeps } from "./app.ts";
 

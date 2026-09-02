@@ -19,8 +19,8 @@ import {
   normalizeAgentToolName,
   type AgentRunner,
   type AgentTurnResult,
-} from "../../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 import { parse as parseHtml, type DefaultTreeAdapterTypes, type ParserError } from "parse5";
 import ts from "typescript";
 import { build } from "vite";

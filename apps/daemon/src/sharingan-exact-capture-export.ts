@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
 
-import type { Project, Store } from "../../../packages/core/src/index.ts";
+import type { Project, Store } from "@dezin/core";
 import { projectDir } from "./serve-static.ts";
 import { immutableProbeCliScript } from "./sharingan-probe-cli.ts";
 import {

@@ -1,4 +1,4 @@
-import type { Store } from "../../../packages/core/src/index.ts";
+import type { Store } from "@dezin/core";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 

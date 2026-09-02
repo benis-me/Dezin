@@ -15,7 +15,7 @@ import {
   type AgentRunner,
   type AgentTurnInput,
   type AgentTurnResult,
-} from "../../../packages/agent/src/index.ts";
+} from "@dezin/agent";
 import {
   buildDesignMainSystemPrompt,
   parseDesignMainPlan,

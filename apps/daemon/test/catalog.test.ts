@@ -4,8 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
-import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS } from "../../../packages/design/src/index.ts";
+import { Store } from "@dezin/core";
+import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS } from "@dezin/design";
 import { createApp } from "../src/index.ts";
 
 async function withServer(fn: (base: string) => Promise<void>): Promise<void> {

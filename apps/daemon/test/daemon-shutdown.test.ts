@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 import { shutdownDaemon } from "../src/daemon-shutdown.ts";
 

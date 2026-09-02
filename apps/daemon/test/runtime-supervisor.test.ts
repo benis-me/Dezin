@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {

@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { mkdtempSync, existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import { closeAllSharinganSessions, ensureProbeSession, startCapture } from "../src/sharingan-handler.ts";

@@ -2,8 +2,8 @@ import {
   GenericCliRunner,
   getProvider,
   type AgentRunner,
-} from "../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 
 /** Build a provider-backed Agent runner from the current local BYOK settings. */
 export function buildAgentRunner(

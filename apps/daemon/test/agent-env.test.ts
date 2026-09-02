@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type { Settings } from "@dezin/core";
 import { buildAgentEnv } from "../src/agent-env.ts";
 
 const SETTINGS: Settings = {

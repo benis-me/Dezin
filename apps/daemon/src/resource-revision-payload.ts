@@ -14,7 +14,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:p
 import { TextDecoder } from "node:util";
 import { crc32 as zlibCrc32, createInflate } from "node:zlib";
 import { parseFragment, type ParserError } from "parse5";
-import type { Store } from "../../../packages/core/src/index.ts";
+import type { Store } from "@dezin/core";
 
 export const RESOURCE_REVISION_PAYLOAD_PROTOCOL = "dezin-resource-revision-payload-v1" as const;
 export const MAX_RESOURCE_MANIFEST_BYTES = 64 * 1024;
