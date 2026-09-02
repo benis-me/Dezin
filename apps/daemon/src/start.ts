@@ -94,7 +94,8 @@ async function main(): Promise<void> {
   };
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   // API keys are encrypted at rest when the shell supplies DEZIN_SECRETS_KEY.
-  const store = new Store(join(DATA_DIR, "app.sqlite"), undefined, { secretCipher: secretCipherFromEnv() });
+  const secretCipher = secretCipherFromEnv();
+  const store = new Store(join(DATA_DIR, "app.sqlite"), undefined, { secretCipher });
   if (store.legacyDesignBackupPath !== null) {
     const warning = {
       kind: "legacy-design-store-retired",
@@ -135,6 +136,7 @@ async function main(): Promise<void> {
     version: VERSION,
     designRegistry,
     security: { token: DAEMON_TOKEN },
+    secretCipher,
     runtimeSupervisor,
     sharinganBootstrap,
   });

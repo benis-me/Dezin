@@ -8,7 +8,7 @@ import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Store } from "@dezin/core";
+import { Store, type SecretCipher } from "@dezin/core";
 import type { ExtensionScope, Project, Settings } from "@dezin/core";
 import type { AgentRunner } from "@dezin/agent";
 import type { DesignRegistry } from "@dezin/design";
@@ -147,6 +147,8 @@ export interface AppDeps {
   modelProviderFetch?: typeof fetch;
   /** Optional local API boundary guard. */
   security?: DaemonSecurityOptions;
+  /** Seals secrets kept outside SQLite (the Figma token file); the Store carries its own copy. */
+  secretCipher?: SecretCipher | null;
   /** Scoped browser-extension pairing service; defaults to the persistent Store implementation. */
   extensionPairing?: ExtensionPairingService;
   /** Image analyzer hook; tests can avoid launching a real agent. */
@@ -1059,7 +1061,7 @@ export function createApp(deps: AppDeps): http.Server {
         projectIds,
         client: appDeps.figmaClient ?? createFigmaRestClient(),
         credentialProvider: appDeps.figmaCredentialProvider
-          ?? (() => resolveFigmaCredential({ dataDir: appDeps.dataDir })),
+          ?? (() => resolveFigmaCredential({ dataDir: appDeps.dataDir, secretCipher: appDeps.secretCipher ?? null })),
         withProjectLease: appDeps.withFigmaProjectLease,
       });
     })

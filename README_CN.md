@@ -62,7 +62,7 @@ pnpm desktop
 | `DEZIN_PORT` | 临时端口 | 固定 daemon 端口；开发环境通常使用 `7457` |
 | `DEZIN_HOST` | `127.0.0.1` | daemon 监听地址 |
 | `DEZIN_DATA_DIR` | `~/.dezin` | 本地数据库、项目、素材、Job 与 Export |
-| `DEZIN_SECRETS_KEY` | 未设置 | 32 字节 base64url 密钥，用于加密设置库中的 API key；桌面端会通过系统钥匙串自动生成并保存 |
+| `DEZIN_SECRETS_KEY` | 未设置 | 32 字节 base64url 密钥，用于加密设置库中的 API key 与本地保存的 Figma token；桌面端会通过系统钥匙串自动生成并保存 |
 | `DEZIN_AGENT_CMD` | `claude` | 默认 Agent 命令 |
 
 ## 架构

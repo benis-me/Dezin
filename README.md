@@ -63,7 +63,7 @@ This builds the Web UI and launches Electron. Packaging, signing, notarization, 
 | `DEZIN_HOST` | `127.0.0.1` | Daemon bind address |
 | `DEZIN_DATA_DIR` | `~/.dezin` | Local database, projects, assets, Jobs, and exports |
 | `DEZIN_AGENT_CMD` | `claude` | Default Agent command |
-| `DEZIN_SECRETS_KEY` | unset | 32-byte base64url key that encrypts API keys at rest in the settings database; the desktop shell generates and stores one through the OS keystore |
+| `DEZIN_SECRETS_KEY` | unset | 32-byte base64url key that encrypts API keys in the settings database and the stored Figma token at rest; the desktop shell generates and stores one through the OS keystore |
 
 ## Architecture
 

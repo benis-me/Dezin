@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
 
 import type { FigmaCredentialStatus } from "@dezin/design-canvas-contracts";
+import { isEncryptedSecret, type SecretCipher } from "@dezin/core";
 
 const FIGMA_CREDENTIAL_SCHEMA_VERSION = 1;
 const MAX_SECRET_FILE_BYTES = 8 * 1024;
@@ -27,6 +28,8 @@ export interface ResolvedFigmaCredential {
 export interface FigmaCredentialStoreOptions {
   dataDir: string;
   env?: Readonly<Record<string, string | undefined>>;
+  /** Seals the stored token at rest; a token sealed with a key this daemon lacks reads as not configured. */
+  secretCipher?: SecretCipher | null;
   testHooks?: {
     afterCredentialStat?: (path: string) => void | Promise<void>;
     afterCredentialPendingSync?: (path: string) => void | Promise<void>;
@@ -261,7 +264,16 @@ async function readLocalToken(options: FigmaCredentialStoreOptions): Promise<str
       || Object.keys(record).some((key) => !["schemaVersion", "token"].includes(key))) {
       throw new FigmaCredentialStoreError("corrupt", "Stored Figma credential is corrupt");
     }
-    return token(record.token, "corrupt");
+    const stored = record.token;
+    if (typeof stored === "string" && isEncryptedSecret(stored)) {
+      if (!options.secretCipher) return null;
+      try {
+        return token(options.secretCipher.decrypt(stored), "corrupt");
+      } catch {
+        return null;
+      }
+    }
+    return token(stored, "corrupt");
   } catch (error) {
     if (isMissing(error)) return null;
     if (error instanceof Error && "code" in error && error.code === "ELOOP") {
@@ -346,7 +358,8 @@ async function putLocalFigmaCredentialUnlocked(
   let pendingHandle;
   try {
     pendingHandle = await open(pending, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    await pendingHandle.writeFile(`${JSON.stringify({ schemaVersion: FIGMA_CREDENTIAL_SCHEMA_VERSION, token: value })}\n`);
+    const sealed = options.secretCipher ? options.secretCipher.encrypt(value) : value;
+    await pendingHandle.writeFile(`${JSON.stringify({ schemaVersion: FIGMA_CREDENTIAL_SCHEMA_VERSION, token: sealed })}\n`);
     await pendingHandle.sync();
     await options.testHooks?.afterCredentialPendingSync?.(pending);
     await pendingHandle.close();

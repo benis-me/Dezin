@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { SecretCipher } from "@dezin/core";
 import { finished } from "node:stream/promises";
 
 import type {
@@ -31,6 +32,8 @@ export type FigmaProjectLease = NonNullable<ImportFigmaDesignProjectOptions["wit
 
 export interface FigmaImportHttpDeps {
   dataDir: string;
+  /** Seals the locally stored Figma token at rest (see @dezin/core SecretCipher). */
+  secretCipher?: SecretCipher | null;
   figmaClient?: FigmaRestClient;
   figmaCredentialProvider?: FigmaCredentialProvider;
   withFigmaProjectLease?: FigmaProjectLease;
@@ -78,7 +81,7 @@ export async function handleGetFigmaCredential(
   deps: FigmaImportHttpDeps,
 ): Promise<void> {
   try {
-    sendJson(res, 200, await getFigmaCredentialStatus({ dataDir: deps.dataDir }));
+    sendJson(res, 200, await getFigmaCredentialStatus({ dataDir: deps.dataDir, secretCipher: deps.secretCipher ?? null }));
   } catch (error) {
     if (error instanceof FigmaCredentialStoreError) {
       throw new HttpError(error.code === "invalid-input" ? 400 : 409, error.message);
@@ -95,7 +98,7 @@ export async function handlePutFigmaCredential(
 ): Promise<void> {
   const input = credentialInput(await readJsonBody(req, MAX_FIGMA_CREDENTIAL_HTTP_BYTES));
   try {
-    sendJson(res, 200, await putLocalFigmaCredential({ dataDir: deps.dataDir, token: input.token }));
+    sendJson(res, 200, await putLocalFigmaCredential({ dataDir: deps.dataDir, token: input.token, secretCipher: deps.secretCipher ?? null }));
   } catch (error) {
     if (error instanceof FigmaCredentialStoreError) {
       throw new HttpError(error.code === "invalid-input" ? 400 : 409, error.message);
@@ -111,7 +114,7 @@ export async function handleDeleteFigmaCredential(
   deps: FigmaImportHttpDeps,
 ): Promise<void> {
   try {
-    sendJson(res, 200, await deleteLocalFigmaCredential({ dataDir: deps.dataDir }));
+    sendJson(res, 200, await deleteLocalFigmaCredential({ dataDir: deps.dataDir, secretCipher: deps.secretCipher ?? null }));
   } catch (error) {
     if (error instanceof FigmaCredentialStoreError) {
       throw new HttpError(error.code === "invalid-input" ? 400 : 409, error.message);
@@ -135,7 +138,7 @@ export async function handleImportFigmaProject(
       input: decoded as FigmaImportInput,
       client: deps.figmaClient ?? createFigmaRestClient(),
       credentialProvider: deps.figmaCredentialProvider
-        ?? (() => resolveFigmaCredential({ dataDir: deps.dataDir })),
+        ?? (() => resolveFigmaCredential({ dataDir: deps.dataDir, secretCipher: deps.secretCipher ?? null })),
       ...(deps.withFigmaProjectLease === undefined ? {} : { withProjectLease: deps.withFigmaProjectLease }),
       ...(signal === undefined ? {} : { signal }),
       finalizeUnderProjectLease: async (result) => {

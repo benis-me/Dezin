@@ -302,3 +302,29 @@ test("credential temp cleanup uses stable owner identity and a bounded malformed
   assert.deepEqual(await getFigmaCredentialStatus({ dataDir, env: {} }), { configured: false, source: null });
   await assert.rejects(lstat(reusedPid), { code: "ENOENT" });
 });
+
+test("a configured SecretCipher seals the stored PAT; a daemon without the key sees no credential", async (t) => {
+  const { createSecretCipher } = await import("@dezin/core");
+  const { randomBytes } = await import("node:crypto");
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-figma-sealed-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const token = "figd_sealed_token_0123456789";
+  const secretCipher = createSecretCipher(randomBytes(32));
+
+  assert.deepEqual(await putLocalFigmaCredential({ dataDir, token, env: {}, secretCipher }), { configured: true, source: "local" });
+  const onDisk = JSON.parse(await readFile(join(dataDir, "secrets", "figma-pat.json"), "utf8")) as { token: string };
+  assert.notEqual(onDisk.token, token);
+  assert.match(onDisk.token, /^enc:v1:/);
+  assert.equal((await resolveFigmaCredential({ dataDir, env: {}, secretCipher }))?.token, token);
+
+  // No key, or the wrong key: the sealed file is left alone and reads as not configured.
+  assert.equal(await resolveFigmaCredential({ dataDir, env: {} }), null);
+  assert.equal(await resolveFigmaCredential({ dataDir, env: {}, secretCipher: createSecretCipher(randomBytes(32)) }), null);
+  assert.deepEqual(await getFigmaCredentialStatus({ dataDir, env: {} }), { configured: false, source: null });
+  assert.match(JSON.parse(await readFile(join(dataDir, "secrets", "figma-pat.json"), "utf8")).token, /^enc:v1:/);
+
+  // Plain-text files written before the key existed keep working.
+  await deleteLocalFigmaCredential({ dataDir, env: {}, secretCipher });
+  await putLocalFigmaCredential({ dataDir, token, env: {} });
+  assert.equal((await resolveFigmaCredential({ dataDir, env: {}, secretCipher }))?.token, token);
+});
