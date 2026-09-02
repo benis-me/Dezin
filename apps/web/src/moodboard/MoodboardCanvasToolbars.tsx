@@ -303,7 +303,7 @@ function ReferenceImageControl({
             onClick={openUpload}
           >
             <Paperclip size={13} strokeWidth={1.75} />
-            从本地上传图片
+            Upload images from this device
           </button>
           <button
             type="button"
@@ -315,7 +315,7 @@ function ReferenceImageControl({
             onClick={onSelectCanvasReference}
           >
             <SquareDashedMousePointer size={13} strokeWidth={1.75} />
-            从画布选择
+            Pick from the canvas
           </button>
         </PopoverContent>
       </Popover>

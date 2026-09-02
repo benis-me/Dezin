@@ -11,6 +11,7 @@ import { type DesignProjectAttachments } from "./lib/design-attachments.ts";
 import { createDesignCanvasApi } from "./lib/design-canvas-api.ts";
 import { revealDesignExport } from "./lib/design-export.ts";
 import { native } from "./lib/native.ts";
+import { applyThemePreference, readThemePreference, watchSystemTheme, type ThemePreference } from "./lib/theme.ts";
 import { useAgents } from "./lib/agents-context.tsx";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
@@ -395,7 +396,16 @@ export default function App() {
       return true;
     }
   });
+  const [theme, setThemeState] = useState<ThemePreference>(readThemePreference);
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  const setTheme = useCallback((next: ThemePreference) => {
+    setThemeState(next);
+    setDark(applyThemePreference(next));
+  }, []);
+  useEffect(() => {
+    if (theme !== "system") return;
+    return watchSystemTheme(() => setDark(applyThemePreference("system")));
+  }, [theme]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
   const backgroundRouteRef = useRef<Route | null>(route.name === "settings" ? null : route);
@@ -420,17 +430,8 @@ export default function App() {
     }
     replace(settingsReturnPathRef.current || "/");
   }, []);
-  const onToggleDark = () =>
-    setDark((d) => {
-      const next = !d;
-      document.documentElement.classList.toggle("dark", next);
-      try {
-        localStorage.setItem("dezin.theme", next ? "dark" : "light");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+  // The sidebar/palette toggle always lands on an explicit choice.
+  const onToggleDark = () => setTheme(dark ? "light" : "dark");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -487,7 +488,7 @@ export default function App() {
         <Dialog open={route.name === "settings"} onClose={closeSettings} label="Settings" className="sm:max-w-5xl" showClose>
           {route.name === "settings" ? (
             <Suspense fallback={<RouteLoading label="Loading Settings..." />}>
-              <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} />
+              <SettingsScreen theme={theme} onThemeChange={setTheme} initialSection={settingsSection} />
             </Suspense>
           ) : null}
         </Dialog>

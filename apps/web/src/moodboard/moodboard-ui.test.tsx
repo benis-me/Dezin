@@ -1046,7 +1046,7 @@ test("MoodboardCanvasNode renders image generators without a dashed border and w
   expect(container.querySelectorAll("[dashpattern], [dashPattern]")).toHaveLength(0);
   expect(container.querySelectorAll("rect")).toHaveLength(1);
   const icon = container.querySelector("image");
-  expect(icon).toHaveAttribute("url", expect.stringContaining("IconImageMountainFill18"));
+  expect(icon).toHaveAttribute("url", expect.stringContaining("image-generator"));
   expect(icon).toHaveAttribute("width", "36");
   expect(icon).toHaveAttribute("height", "36");
 });
@@ -2879,9 +2879,9 @@ test("GeneratorPromptToolbar exposes reference image actions and submits referen
   expect(within(referenceStrip).getAllByRole("img").map((image) => image.getAttribute("alt"))).toEqual(["first reference.png"]);
 
   fireEvent.click(screen.getByLabelText("Add reference image"));
-  expect(screen.getByRole("button", { name: "从本地上传图片" }).closest("[data-slot='popover-content']")).not.toHaveClass("rounded-xl");
-  expect(screen.getByRole("button", { name: "从本地上传图片" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
+  expect(screen.getByRole("button", { name: "Upload images from this device" }).closest("[data-slot='popover-content']")).not.toHaveClass("rounded-xl");
+  expect(screen.getByRole("button", { name: "Upload images from this device" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Pick from the canvas" }));
   expect(onSelectCanvasReference).toHaveBeenCalledOnce();
 
   const input = screen.getByLabelText("Upload reference image") as HTMLInputElement;
@@ -3121,7 +3121,7 @@ test("QuickEditPromptToolbar exposes reference image actions and submits referen
   );
 
   fireEvent.click(screen.getByLabelText("Add reference image"));
-  fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pick from the canvas" }));
   expect(onSelectCanvasReference).toHaveBeenCalledOnce();
 
   fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });

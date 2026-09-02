@@ -1,3 +1,4 @@
+import { formatShortDate } from "../lib/format-date.ts";
 import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { CopyPlus, Eye, EyeOff, LayoutGrid, Lock, LockOpen, PencilLine, WandSparkles } from "lucide-react";
@@ -322,7 +323,7 @@ function formatRatio(width: number, height: number): string {
 
 function formatDate(value: number): string {
   if (!value) return "Unknown";
-  return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return formatShortDate(value);
 }
 
 function PropertySection({ title, children }: { title: string; children: ReactNode }) {

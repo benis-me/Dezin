@@ -230,7 +230,7 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
                 <div>
                   <div className="label-mono mb-1.5 !text-current opacity-50">Body · {groups.fonts.body}</div>
                   <p className="max-w-prose text-[15px] leading-relaxed" style={{ fontFamily: "var(--font-body)", color: "var(--fg-2, var(--fg))" }}>
-                    A design system is a contract: tokens, type, and components a team agrees to. The quick brown fox jumps over the lazy dog — 0123456789.
+                    A design system is a contract: tokens, type, and components a team agrees to. The quick brown fox jumps over the lazy dog. 0123456789.
                   </p>
                 </div>
                 <div>

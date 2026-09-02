@@ -1,3 +1,5 @@
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { formatRecent } from "../lib/format-date.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import type { Moodboard, Settings } from "../lib/api.ts";
@@ -37,10 +39,7 @@ interface PromptImage {
 type StartMode = "agent" | "generate";
 
 function formatUpdatedAt(ts: number): string {
-  const d = new Date(ts);
-  const now = Date.now();
-  if (now - ts < 24 * 60 * 60 * 1000) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  return formatRecent(ts);
 }
 
 function BoardThumb({ coverUrl }: { coverUrl?: string | null }) {
@@ -261,8 +260,12 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
     }
   };
 
-  const remove = async (board: Moodboard) => {
-    if (!window.confirm(`Delete ${board.name} permanently? This can't be undone.`)) return;
+  const [pendingDelete, setPendingDelete] = useState<Moodboard | null>(null);
+  const remove = (board: Moodboard) => setPendingDelete(board);
+  const confirmRemove = async () => {
+    const board = pendingDelete;
+    setPendingDelete(null);
+    if (board === null) return;
     try {
       await api.deleteMoodboard(board.id);
       refresh();
@@ -300,6 +303,14 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
 
   return (
     <div className="relative h-full w-full overflow-auto">
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete "${pendingDelete?.name ?? "this moodboard"}"?`}
+        description="The board, its references, notes, and generated images are removed from this machine. This can't be undone."
+        confirmLabel="Delete moodboard"
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={confirmRemove}
+      />
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-[38vh]"

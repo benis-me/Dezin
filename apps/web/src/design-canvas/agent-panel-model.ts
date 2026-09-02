@@ -1,3 +1,4 @@
+import { formatDateTime } from "../lib/format-date.ts";
 import type {
   DesignJob,
   DesignJobActivity,
@@ -343,7 +344,7 @@ export function versionOptionLabel(version: DesignNodeVersion): string {
   const materialName = version.contentKind === "asset"
     ? version.fileName ?? version.mimeType ?? "Material"
     : null;
-  const timestamp = new Date(version.createdAt).toLocaleString();
+  const timestamp = formatDateTime(version.createdAt);
   return `V${version.sequence} · ${materialName ? `${materialName} · ` : ""}${timestamp}`;
 }
 

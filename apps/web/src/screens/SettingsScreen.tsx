@@ -1,3 +1,7 @@
+import { Segmented } from "../components/ui/index.ts";
+import { Monitor, Moon } from "lucide-react";
+import type { ThemePreference } from "../lib/theme.ts";
+import { formatTime } from "../lib/format-date.ts";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
 import { Button, Picker, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
@@ -60,7 +64,7 @@ function PreferenceSuggestion({ onApply }: { onApply: (lines: string) => void })
     setBusy(true);
     try {
       const { suggestion, signals } = await api.suggestPreferences();
-      if (signals === 0) toast("No feedback yet — rate a few results with 👍/👎 first.");
+      if (signals === 0) toast("No feedback yet. Rate a few results with 👍/👎 first.");
       else if (!suggestion.trim()) toast("Not enough feedback for a confident suggestion yet.");
       setSuggestion(suggestion.trim() || null);
     } catch {
@@ -98,12 +102,12 @@ function PreferenceSuggestion({ onApply }: { onApply: (lines: string) => void })
 }
 
 export function SettingsScreen({
-  dark,
-  onToggleDark,
+  theme,
+  onThemeChange,
   initialSection,
 }: {
-  dark: boolean;
-  onToggleDark: () => void;
+  theme: ThemePreference;
+  onThemeChange: (theme: ThemePreference) => void;
   initialSection?: string;
 }) {
   const api = useApi();
@@ -303,7 +307,7 @@ export function SettingsScreen({
       {/* Sidebar */}
       <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
         <div className="px-2 py-2">
-          <div className="truncate text-sm font-semibold leading-tight">Settings</div>
+          <h1 className="truncate text-sm font-semibold leading-tight">Settings</h1>
           <div className="truncate text-[11px] text-muted-foreground">Local workspace</div>
         </div>
         <div className="mt-1 flex flex-col gap-0.5">
@@ -348,11 +352,18 @@ export function SettingsScreen({
             {section === "appearance" && (
               <SettingsPanel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
                 <SettingsRows>
-                  <SettingRow label="Theme" desc="Switch between light and dark.">
-                    <Button variant="outline" size="sm" onClick={onToggleDark} className="gap-2">
-                      <Sun size={14} strokeWidth={1.75} />
-                      {dark ? "Dark" : "Light"}
-                    </Button>
+                  <SettingRow label="Theme" desc="Light, dark, or follow the system setting.">
+                    <Segmented
+                      ariaLabel="Theme"
+                      size="sm"
+                      value={theme}
+                      onChange={onThemeChange}
+                      options={[
+                        { value: "light", label: "Light", icon: <Sun size={13} strokeWidth={1.75} aria-hidden /> },
+                        { value: "dark", label: "Dark", icon: <Moon size={13} strokeWidth={1.75} aria-hidden /> },
+                        { value: "system", label: "System", icon: <Monitor size={13} strokeWidth={1.75} aria-hidden /> },
+                      ]}
+                    />
                   </SettingRow>
                 </SettingsRows>
               </SettingsPanel>
@@ -433,7 +444,7 @@ export function SettingsScreen({
                       <div className="mt-3 flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
                         <code className="font-mono text-xl font-semibold tracking-[0.2em] text-foreground">{pairingCode.code}</code>
                         <span className="text-xs text-muted-foreground">
-                          Expires {new Date(pairingCode.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          Expires {formatTime(pairingCode.expiresAt)}
                         </span>
                       </div>
                     ) : null}
@@ -475,8 +486,8 @@ export function SettingsScreen({
                     ))}
                   </ol>
                   <p className="text-muted-foreground">
-                    A <span className="font-medium text-foreground">✦ Capture</span> button then appears on images and videos —
-                    click it to send a reference into the home composer.
+                    A <span className="font-medium text-foreground">✦ Capture</span> button then appears on images and videos.
+                    Click it to send a reference into the home composer.
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
@@ -499,11 +510,11 @@ export function SettingsScreen({
               <SettingsPanel title="About" desc="A tasteful, local-first design generator.">
                 <div className="space-y-3 text-sm leading-relaxed text-muted-foreground">
                   <p>
-                    Dezin runs entirely on your machine — no telemetry, no analytics. It drives your own coding-agent CLI and
+                    Dezin runs entirely on your machine: no telemetry, no analytics. It drives your own coding-agent CLI and
                     lints every artifact against an anti-AI-slop quality kernel.
                   </p>
                   <div className="flex items-center gap-2">
-                    <Badge variant="secondary">Daemon {version ? `v${version}` : "—"}</Badge>
+                    <Badge variant="secondary">Daemon {version ? `v${version}` : "version unknown"}</Badge>
                     <Badge variant="outline">Local-first</Badge>
                   </div>
                 </div>

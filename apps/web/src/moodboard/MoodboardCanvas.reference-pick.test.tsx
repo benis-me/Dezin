@@ -252,7 +252,7 @@ test("MoodboardCanvas hides generator controls and shows a top banner while pick
   );
 
   fireEvent.click(screen.getByLabelText("Add reference image"));
-  fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pick from the canvas" }));
 
   expect(screen.getByRole("status", { name: "Canvas reference picking" })).toHaveTextContent("Select an image on the canvas");
   expect(screen.queryByLabelText("Image generator prompt")).toBeNull();

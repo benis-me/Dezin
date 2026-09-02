@@ -1,3 +1,4 @@
+import { formatTime } from "../lib/format-date.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AgentMessageBody } from "../components/AgentMessageBody.tsx";
 import {
@@ -791,7 +792,7 @@ const AgentTranscript = memo(function AgentTranscript({
             >
               <div className="design-canvas-agent__message-meta">
                 <span>{message.role === "user" ? "Prompt" : message.role === "assistant" ? "Response" : message.role === "system" ? "System" : "Tool"}</span>
-                <time dateTime={new Date(message.createdAt).toISOString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                <time dateTime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)}</time>
               </div>
               <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
             </article>

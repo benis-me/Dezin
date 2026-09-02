@@ -44,13 +44,15 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   const busy = loading || scanning;
   const status = scanStatus || "Detecting installed agents…";
   const cbScanning = scanStatus.includes("CodeBuddy");
+  const isWindows = native?.platform === "win32"
+    || (typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent));
 
   const finish = async () => {
     setSaving(true);
     try {
       if (agent) await api.updateSettings({ agentCommand: agent, model: model || "" });
     } catch {
-      toast("Couldn't save your choice — you can set it later in Settings.", { variant: "error" });
+      toast("Couldn't save your choice. You can set it later in Settings.", { variant: "error" });
     } finally {
       setSaving(false);
       onDone();
@@ -65,8 +67,13 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
           <span className="font-brand text-4xl tracking-tight">Dezin</span>
           <h1 className="mt-5 text-xl font-semibold tracking-tight">Welcome</h1>
           <p className="mx-auto mt-1.5 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            Describe what you want and Dezin builds it with your own coding agent, then holds the result to a strict anti-slop bar. Pick the agent it should drive.
+            Describe what you want and Dezin builds it on one canvas with your own coding agent, validating every version before it is published. Pick the agent it should drive.
           </p>
+          {isWindows ? (
+            <p role="note" className="mx-auto mt-3 max-w-sm rounded-md border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              Windows can browse and organize projects, but Agent generation and Export stay off until process confinement is proven on Windows. Use macOS or Linux to generate.
+            </p>
+          ) : null}
         </div>
 
         <div className="rounded-2xl border border-border bg-card p-4">
@@ -83,14 +90,14 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
               <Spinner size={20} />
               {status}
               <span className="text-xs text-muted-foreground/70">
-                {cbScanning ? "CodeBuddy's list comes from its interactive UI — about 30 seconds." : "This can take a moment the first time."}
+                {cbScanning ? "CodeBuddy's list comes from its interactive UI, about 30 seconds." : "This can take a moment the first time."}
               </span>
             </div>
           ) : available.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               <p className="font-medium text-foreground">No coding agents found</p>
               <p className="mx-auto mt-1.5 max-w-xs leading-relaxed">
-                Install one — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes — and authenticate it, then Rescan.
+                Install one (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticate it, then Rescan.
               </p>
             </div>
           ) : (

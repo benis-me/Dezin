@@ -1,3 +1,4 @@
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import {
   lazy,
   Suspense,
@@ -899,8 +900,12 @@ export function HomeScreen({
     }
   };
 
-  const remove = async (id: string) => {
-    if (!window.confirm("Delete this project permanently? This can't be undone.")) return;
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const remove = (id: string) => setPendingDelete(id);
+  const confirmRemove = async () => {
+    const id = pendingDelete;
+    setPendingDelete(null);
+    if (id === null) return;
     try {
       await api.deleteProject(id);
       refresh();
@@ -908,6 +913,7 @@ export function HomeScreen({
       toast("Couldn't delete the project.", { variant: "error" });
     }
   };
+  const pendingDeleteName = projects.find((p) => p.id === pendingDelete)?.name ?? "this project";
   const archive = async (id: string) => {
     try {
       await api.patchProject(id, { archived: true });
@@ -980,6 +986,14 @@ export function HomeScreen({
 
   return (
     <div className="relative h-full w-full overflow-auto">
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete "${pendingDeleteName}"?`}
+        description="The project, its canvas history, generated versions, and exports are removed from this machine. This can't be undone."
+        confirmLabel="Delete project"
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={confirmRemove}
+      />
       {/* one restrained top glow — atmosphere, not a marketing mesh */}
       <div
         aria-hidden
@@ -1001,7 +1015,7 @@ export function HomeScreen({
                 )}
                 <h1
                   className={cn("text-2xl font-semibold tracking-tight transition-colors duration-300", sharingan ? "sharingan-title" : "text-foreground")}
-                  title={sharingan ? "Double-click to exit Sharingan" : "Double-click for Sharingan — clone from a URL"}
+                  title={sharingan ? "Double-click to exit Sharingan" : "Double-click for Sharingan: clone from a URL"}
                   onDoubleClick={toggleSharingan}
                 >
                   {sharingan ? "Sharingan" : "Start a design"}
@@ -1257,7 +1271,7 @@ export function HomeScreen({
                 {q.trim()
                   ? "No projects match your search. Try a different term."
                   : view === "archived"
-                    ? "Projects you archive will show up here — restore them any time."
+                    ? "Projects you archive will show up here. Restore them any time."
                     : "Describe a design in the box above and hit Design to create your first project."}
               </p>
             </div>
@@ -1426,7 +1440,7 @@ export function HomeScreen({
         <div className="p-5">
           <h2 className="text-base font-semibold tracking-tight">Confirm authorized use</h2>
           <p className="mt-3 text-sm text-muted-foreground">
-            Sharingan reproduces a site — its structure, design, and imagery — as a new, editable project, including the source's
+            Sharingan reproduces a site (its structure, design, and imagery) as a new, editable project, including the source's
             real images and content. Only clone sites you own or are authorized to reproduce.
           </p>
           <div className="mt-5 flex justify-end gap-2">

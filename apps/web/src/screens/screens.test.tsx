@@ -206,11 +206,11 @@ test("Shell sidebar can be resized outside project pages", () => {
   expect(resize.className).not.toContain("primary");
   expect(resize.className).not.toContain("focus-visible");
   expect(resize.className).not.toContain("w-1");
-  expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
-  const design = screen.getByRole("button", { name: "Design" });
+  expect(screen.getByRole("button", { name: "Projects" })).toBeInTheDocument();
+  const design = screen.getByRole("button", { name: "Projects" });
   const designSystems = screen.getByRole("button", { name: "Design Systems" });
   const effects = screen.getByRole("button", { name: "Effects" });
-  const moodboard = screen.getByRole("button", { name: "Moodboard" });
+  const moodboard = screen.getByRole("button", { name: "Moodboards" });
   expect(design.compareDocumentPosition(designSystems) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(designSystems.compareDocumentPosition(effects) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(effects.compareDocumentPosition(moodboard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -240,8 +240,8 @@ test("Shell uses a mobile navigation layout at 390px without a resizable sidebar
     expect(screen.getByTestId("app-shell")).toHaveAttribute("data-shell-layout", "mobile");
     expect(screen.queryByRole("separator", { name: "Resize app sidebar" })).toBeNull();
     expect(document.querySelector("aside")).toBeNull();
-    expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Moodboard" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Projects" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Moodboards" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByText("Mobile content")).toBeInTheDocument();
   } finally {
@@ -276,7 +276,7 @@ test("HomeScreen keeps Sharingan hidden behind the heading gesture", () => {
   expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
   expect(screen.getByRole("heading", { name: "Start a design" })).toHaveAttribute(
     "title",
-    "Double-click for Sharingan — clone from a URL",
+    "Double-click for Sharingan: clone from a URL",
   );
 });
 
@@ -1029,7 +1029,7 @@ test("DesignSystemsScreen loads systems from the daemon", async () => {
   });
   const heading = screen.getByRole("heading", { name: "Design systems" });
   expect(heading).toHaveClass("text-2xl", "font-semibold", "tracking-tight", "text-foreground");
-  const subtitle = screen.getByText(/The brand visual language each artifact is built from/i);
+  const subtitle = screen.getByText(/The visual language each artifact is built from/i);
   expect(subtitle).toHaveClass("mt-1.5", "text-sm", "leading-relaxed", "text-muted-foreground");
   const action = screen.getByRole("button", { name: "New design system" });
   expect(action).toHaveAttribute("data-variant", "default");
@@ -1474,18 +1474,28 @@ test("HomeScreen keeps a signed-out saved CodeBuddy visible and blocks Design un
 });
 
 function renderSettings(over = {}) {
-  const onToggleDark = vi.fn();
+  const onThemeChange = vi.fn();
   const updateSettings = vi.fn(async (p: Partial<Settings>) => settingsFixture(p));
   const api = makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
   render(
     <ApiProvider client={api}>
       <AgentsProvider>
-        <SettingsScreen dark={false} onToggleDark={onToggleDark} />
+        <SettingsScreen theme="light" onThemeChange={onThemeChange} />
       </AgentsProvider>
     </ApiProvider>,
   );
-  return { onToggleDark, updateSettings };
+  return { onThemeChange, updateSettings };
 }
+
+test("SettingsScreen Appearance offers light, dark, and system as one segmented choice", async () => {
+  const { onThemeChange } = renderSettings();
+  const group = await screen.findByRole("group", { name: "Theme" });
+  expect(within(group).getByRole("button", { name: "Light" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(within(group).getByRole("button", { name: "System" }));
+  expect(onThemeChange).toHaveBeenCalledWith("system");
+  fireEvent.click(within(group).getByRole("button", { name: "Dark" }));
+  expect(onThemeChange).toHaveBeenCalledWith("dark");
+});
 
 test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data", async () => {
   renderSettings();
@@ -1642,7 +1652,7 @@ test("SettingsScreen initial Defaults focus targets a function model field", asy
   render(
     <ApiProvider client={makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS })}>
       <AgentsProvider>
-        <SettingsScreen dark={false} onToggleDark={() => {}} initialSection="defaults:editRegionModel" />
+        <SettingsScreen theme="light" onThemeChange={() => {}} initialSection="defaults:editRegionModel" />
       </AgentsProvider>
     </ApiProvider>,
   );
@@ -1955,8 +1965,8 @@ test("SettingsScreen keeps a cleared provider endpoint empty instead of restorin
   );
 });
 
-test("SettingsScreen theme toggle calls onToggleDark", async () => {
-  const { onToggleDark } = renderSettings();
-  fireEvent.click(await screen.findByText("Light"));
-  expect(onToggleDark).toHaveBeenCalled();
+test("SettingsScreen theme control reports the chosen preference", async () => {
+  const { onThemeChange } = renderSettings();
+  fireEvent.click(await screen.findByRole("button", { name: "Dark" }));
+  expect(onThemeChange).toHaveBeenCalledWith("dark");
 });

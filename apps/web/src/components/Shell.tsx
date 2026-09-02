@@ -16,10 +16,10 @@ interface NavLink {
 }
 
 const NAV: NavLink[] = [
-  { label: "Design", path: "/", icon: Palette, match: (r) => r.name === "home" },
+  { label: "Projects", path: "/", icon: Palette, match: (r) => r.name === "home" },
   { label: "Design Systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
   { label: "Effects", path: "/effects", icon: Eclipse, match: (r) => r.name === "effects" || r.name === "effect" || r.name === "effect-new" },
-  { label: "Moodboard", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
+  { label: "Moodboards", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
 ];
 
 const SHELL_SIDEBAR_WIDTH_KEY = "dezin.shell.sidebar.width";

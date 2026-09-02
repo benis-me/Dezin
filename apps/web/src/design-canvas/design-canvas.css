@@ -354,21 +354,6 @@
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--design-canvas-accent) 14%, transparent), 0 8px 24px oklch(0.08 0 0 / 0.08);
 }
 
-.design-canvas-topbar__view {
-  display: inline-flex;
-  height: 22px;
-  align-items: center;
-  gap: 5px;
-  border-radius: 6px;
-  padding: 0 6px;
-  background: var(--surface-2);
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  transition: opacity 160ms var(--ease-smooth);
-}
-.design-canvas-topbar__view svg { width: 11px; height: 11px; }
 
 /* Floating canvas controls */
 .design-canvas-tools,
@@ -1529,7 +1514,6 @@
 @media (max-width: 720px) {
   .electron-mac .design-canvas-topbar { padding-left: 76px; }
   .design-canvas-topbar { gap: 6px; padding-right: 7px; }
-  .design-canvas-topbar__view { display: none; }
   .design-canvas-topbar__identity h1 { max-width: 25vw; font-size: 13px; }
   .design-canvas-topbar__actions button { width: 32px; padding: 0; font-size: 0; }
   .design-canvas-main-agent { inset: 8px 8px 60px; width: auto; }

@@ -7,7 +7,9 @@ const css = readFileSync(join(process.cwd(), "src/design-canvas/design-canvas.cs
 const conversationCss = readFileSync(join(process.cwd(), "src/components/agent-conversation.css"), "utf8");
 const require = createRequire(import.meta.url);
 const primitivesCss = readFileSync(require.resolve("@capability-foundry/agent-ui/styles.css"), "utf8");
-const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8");
+// The screen plus the pure helpers it was split into; assertions target the pair as one surface.
+const screenSource = readFileSync(join(process.cwd(), "src/design-canvas/DesignCanvasScreen.tsx"), "utf8")
+  + readFileSync(join(process.cwd(), "src/design-canvas/design-canvas-screen-helpers.ts"), "utf8");
 const focusedChromeSource = readFileSync(join(process.cwd(), "src/design-canvas/FocusedNodeChrome.tsx"), "utf8");
 const floatingAgentSource = readFileSync(join(process.cwd(), "src/design-canvas/FloatingNodeAgent.tsx"), "utf8");
 const outputRendererSource = readFileSync(join(process.cwd(), "src/design-canvas/AgentOutputRenderer.tsx"), "utf8");

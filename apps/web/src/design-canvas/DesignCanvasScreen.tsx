@@ -19,13 +19,9 @@ import {
 } from "@xyflow/react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  FileUp,
   Figma,
   LoaderCircle,
-  LocateFixed,
   RotateCcw,
-  Sparkles,
-  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -61,7 +57,6 @@ import { DesignCanvasHeader } from "./DesignCanvasHeader.tsx";
 import { ImplementationExportConfirmation } from "./ImplementationExportConfirmation.tsx";
 import {
   DesignCanvasNode,
-  designNodeAriaLabel,
   type DesignFlowNode,
   type DesignNodeContentLayout,
   type DesignPreviewAnnotationTarget,
@@ -88,24 +83,48 @@ import { NodeCatalogMenu } from "./NodeCatalogMenu.tsx";
 import { QuickStart } from "./QuickStart.tsx";
 import type {
   DesignExportResult,
-  DesignCanvas,
-  DesignJobStatus,
   DesignNode,
   DesignNodeKind,
   DesignNodeVersion,
-  FigmaCanvasImportResponse,
   FigmaImportAnchor,
 } from "./types.ts";
 import { useDesignCanvasController } from "./useDesignCanvasController.ts";
 import { previewVersionIdForNode } from "./useExactVersionPreview.ts";
+
+import {
+  DESIGN_CANVAS_MIN_ZOOM,
+  FOCUSED_PREVIEW_WIDTHS,
+  cancelSpatialFocusAnimations,
+  canvasToFlowNodes,
+  createDesignNodeId,
+  downloadFileStem,
+  figmaImportedNodeIds,
+  flowNodeGeometry,
+  focusedLayoutOptions,
+  isLiveJobStatus,
+  isTypingTarget,
+  sameContentLayout,
+  sameDesignNode,
+  sameGeometry,
+  sameNodeFocusMotion,
+  sameViewport,
+  syncHoverLabelViewportScale,
+  synchronizeFocusTransitionDuration,
+  type NodeFocusTransition,
+} from "./design-canvas-screen-helpers.ts";
+import { DesignNodeContextMenu } from "./DesignNodeContextMenu.tsx";
+
+export {
+  cancelSpatialFocusAnimations,
+  synchronizeFocusTransitionDuration,
+  type NodeFocusTransition,
+} from "./design-canvas-screen-helpers.ts";
 
 const NODE_TYPES = { design: DesignCanvasNode } as const;
 const SELECT_PAN_BUTTONS = [1];
 const MULTI_SELECTION_KEYS = ["Meta", "Control", "Shift"];
 const PRO_OPTIONS = { hideAttribution: true } as const;
 const CANVAS_MOTION_EASE: [number, number, number, number] = [0.23, 1, 0.32, 1];
-const DESIGN_CANVAS_MIN_ZOOM = 0.12;
-const HOVER_LABEL_SCREEN_INSET_PX = 12;
 const COMPONENT_SYSTEM_AGENT_OFFSET_PX = 220;
 const COMPONENT_SYSTEM_STARTER_PROMPT = [
   "Build a production-scale, product-agnostic component system across these four existing Nodes and dispatch all four to scoped Node Agents.",
@@ -116,58 +135,6 @@ const COMPONENT_SYSTEM_STARTER_PROMPT = [
   "Design.md must document the required repository tree, package exports, manifest contract, component catalog/API, generation notes, and the pointer/keyboard/theme/layout acceptance checklist, including typecheck, production build, structure validation, and browser verification gates.",
   "Keep names, tokens, anatomy, variants, states, content, motion, manifest entries, and documentation consistent across every Node; do not collapse the system into a single moodboard or one component specimen.",
 ].join(" ");
-
-function syncHoverLabelViewportScale(surface: HTMLElement | null, zoom: number): void {
-  if (!surface) return;
-  const safeZoom = Math.max(Number.isFinite(zoom) ? zoom : 1, DESIGN_CANVAS_MIN_ZOOM);
-  const inverseScale = String(1 / safeZoom);
-  const screenInset = `${HOVER_LABEL_SCREEN_INSET_PX / safeZoom}px`;
-  if (surface.style.getPropertyValue("--design-canvas-viewport-inverse-scale") !== inverseScale) {
-    surface.style.setProperty("--design-canvas-viewport-inverse-scale", inverseScale);
-  }
-  if (surface.style.getPropertyValue("--design-canvas-hover-label-inset") !== screenInset) {
-    surface.style.setProperty("--design-canvas-hover-label-inset", screenInset);
-  }
-}
-
-const SPATIAL_FOCUS_MOTION_SELECTOR = [
-  ".design-canvas-node[data-node-focus-role]",
-  ".design-canvas-focus-dismiss",
-  ".design-canvas-focus-back",
-  ".design-canvas-focus-actions",
-  ".design-canvas-topbar__leading",
-  ".design-canvas-topbar__actions",
-  ".design-canvas-tools",
-  ".design-canvas-zoom",
-  ".design-canvas-agent--floating",
-].join(",");
-
-export function cancelSpatialFocusAnimations(root: Element): number {
-  if (typeof root.getAnimations !== "function") return 0;
-  let cancelled = 0;
-  for (const animation of root.getAnimations({ subtree: true })) {
-    const target = animation.effect && "target" in animation.effect
-      ? animation.effect.target
-      : null;
-    if (!(target instanceof Element)) continue;
-    if (!target.matches(SPATIAL_FOCUS_MOTION_SELECTOR)
-      && !target.closest(".design-canvas-node[data-node-focus-role]")) continue;
-    try {
-      animation.finish();
-      animation.commitStyles();
-    } catch {
-      // A delayed animation can be non-finishable; cancelling still reveals
-      // the static target state committed by React and focus CSS.
-    }
-    animation.cancel();
-    cancelled += 1;
-  }
-  return cancelled;
-}
-
-function isLiveJobStatus(status: DesignJobStatus): boolean {
-  return status === "queued" || status === "running" || status === "validating";
-}
 
 interface ContextMenuState {
   canvasX: number;
@@ -184,65 +151,12 @@ interface PreviewAnnotationDraft extends DesignPreviewAnnotationTarget {
   comment: string;
 }
 
-export interface NodeFocusTransition {
-  nodeId: string;
-  phase: NodeFocusPhase;
-  durationMs: number;
-}
-
-export function synchronizeFocusTransitionDuration(
-  current: NodeFocusTransition | null,
-  nodeId: string,
-  phase: NodeFocusPhase,
-  durationMs: number,
-): NodeFocusTransition | null {
-  if (!current || current.nodeId !== nodeId || current.phase !== phase) return current;
-  return { ...current, durationMs: Math.max(0, Math.round(durationMs)) };
-}
-
 interface SelectionGhost {
   id: number;
   left: number;
   top: number;
   width: number;
   height: number;
-}
-
-const FOCUSED_PREVIEW_WIDTHS: Record<FocusedPreviewDevice, number | undefined> = {
-  desktop: undefined,
-  tablet: 768,
-  mobile: 390,
-};
-
-function focusedLayoutOptions(
-  surface: { width: number; height: number },
-  node: DesignNode,
-  targetWidth?: number,
-  contentAspectRatio?: number,
-  metadata?: DesignNodeVersion | null,
-): Parameters<typeof focusedNodeTransform>[3] {
-  const layoutMode = focusedNodeLayoutMode({
-    kind: node.kind,
-    fileName: metadata?.fileName ?? node.name,
-    mimeType: metadata?.mimeType,
-  });
-  const responsiveTargetWidth = layoutMode === "web" ? targetWidth : undefined;
-  if (surface.width <= 720) {
-    return {
-      reservedRight: 0,
-      horizontalInset: 16,
-      bottomInset: Math.min(520, surface.height * 0.56) + 90,
-      layoutMode,
-      targetWidth: responsiveTargetWidth,
-      contentAspectRatio,
-    };
-  }
-  return {
-    reservedRight: FLOATING_NODE_AGENT_WIDTH_PX + 24,
-    layoutMode,
-    targetWidth: responsiveTargetWidth,
-    contentAspectRatio,
-  };
 }
 
 export interface DesignCanvasScreenProps {
@@ -2184,196 +2098,4 @@ export function DesignCanvasScreen({
       />
     </main>
   );
-}
-
-function figmaImportedNodeIds(
-  result: FigmaCanvasImportResponse,
-  previousCanvas: DesignCanvas | null,
-): string[] {
-  const responseNodeIds = new Set(result.canvas.nodes.map((node) => node.id));
-  const artifactNodeIds = [...new Set(result.import.manifest.artifacts.flatMap((artifact) => (
-    artifact.nodeId && responseNodeIds.has(artifact.nodeId) ? [artifact.nodeId] : []
-  )))];
-  if (artifactNodeIds.length > 0) return artifactNodeIds;
-  const previousNodeIds = new Set(previousCanvas?.nodes.map((node) => node.id) ?? []);
-  return result.canvas.nodes
-    .map((node) => node.id)
-    .filter((nodeId) => !previousNodeIds.has(nodeId));
-}
-
-function DesignNodeContextMenu({
-  node,
-  onOpenAgent,
-  onAddRevision,
-  fitDisabled,
-  onFit,
-  onDelete,
-}: {
-  node: DesignNode;
-  onOpenAgent: () => void;
-  onAddRevision: () => void;
-  fitDisabled: boolean;
-  onFit: () => void;
-  onDelete: () => void;
-}) {
-  const item = catalogItem(node.kind);
-  const material = isMaterialNodeKind(node.kind);
-  return (
-    <>
-      <ContextMenuItem onSelect={onOpenAgent}>
-        <Sparkles aria-hidden />
-        {material
-          ? `Inspect ${item.label.toLocaleLowerCase()} with Agent`
-          : node.versionCount > 0
-            ? `Create new ${item.label.toLocaleLowerCase()} version`
-            : `Create ${item.label.toLocaleLowerCase()} with Agent`}
-      </ContextMenuItem>
-      {material ? (
-        <ContextMenuItem onSelect={onAddRevision}>
-          <FileUp aria-hidden />
-          Add {item.label.toLocaleLowerCase()} revision…
-        </ContextMenuItem>
-      ) : null}
-      <ContextMenuItem disabled={fitDisabled} onSelect={onFit}>
-        <LocateFixed aria-hidden />
-        Fit this Node
-      </ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem className="design-node-context-menu__danger" onSelect={onDelete}>
-        <Trash2 aria-hidden />
-        Delete {item.label.toLocaleLowerCase()}
-      </ContextMenuItem>
-    </>
-  );
-}
-
-function canvasToFlowNodes(
-  nodes: readonly DesignNode[],
-  projectId: string,
-  api: DesignCanvasApi,
-  onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void,
-  onAppendMaterialVersion: (nodeId: string, file: File) => Promise<void>,
-  onContentAspectRatio: (nodeId: string, aspectRatio: number) => void,
-  onPreviewContextMenu: (nodeId: string, target: DesignPreviewAnnotationTarget) => void,
-  onFocusAnimationStart: (nodeId: string, phase: NodeFocusPhase, durationMs: number) => void,
-  onFocusAnimationComplete: (nodeId: string, phase: NodeFocusPhase) => void,
-  selectedIds: ReadonlySet<string>,
-  contentLayouts: ReadonlyMap<string, DesignNodeContentLayout>,
-  focusMotions: ReadonlyMap<string, NodeFocusMotion>,
-): DesignFlowNode[] {
-  return nodes.map((node) => {
-    const focusMotion = focusMotions.get(node.id) ?? null;
-    const contentLayout = contentLayouts.get(node.id) ?? null;
-    return {
-    id: node.id,
-    type: "design",
-    ariaLabel: designNodeAriaLabel(node),
-    className: focusMotion?.role === "source"
-      ? "design-canvas-flow-node--focused"
-      : focusMotion
-        ? "design-canvas-flow-node--inactive"
-        : undefined,
-    position: { x: node.geometry.x, y: node.geometry.y },
-    width: node.geometry.width,
-    height: node.geometry.height,
-    selected: selectedIds.has(node.id),
-    data: {
-      node,
-      projectId,
-      api,
-      onResize,
-      onAppendMaterialVersion,
-      onContentAspectRatio,
-      onPreviewContextMenu,
-      onFocusAnimationStart,
-      onFocusAnimationComplete,
-      contentLayout,
-      focusMotion,
-    },
-  };
-  });
-}
-
-function isTypingTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || target.matches("input, textarea, select, [role='textbox']") || target.closest("iframe") !== null;
-}
-
-function createDesignNodeId(kind: DesignNodeKind): string {
-  return `${kind}-${globalThis.crypto.randomUUID()}`;
-}
-
-function downloadFileStem(name: string): string {
-  const normalized = name.trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "");
-  return normalized || "dezin-preview";
-}
-
-function flowNodeGeometry(
-  node: DesignFlowNode,
-  fallback: DesignNode["geometry"],
-): DesignNode["geometry"] {
-  return {
-    x: node.position.x,
-    y: node.position.y,
-    width: node.measured?.width ?? node.width ?? fallback.width,
-    height: node.measured?.height ?? node.height ?? fallback.height,
-  };
-}
-
-function sameDesignNode(left: DesignNode, right: DesignNode): boolean {
-  return left.id === right.id
-    && left.kind === right.kind
-    && left.name === right.name
-    && sameGeometry(left.geometry, right.geometry)
-    && left.state === right.state
-    && left.currentVersionId === right.currentVersionId
-    && left.selectedVersionId === right.selectedVersionId
-    && left.versionCount === right.versionCount
-    && left.assetId === right.assetId
-    && left.activeJobId === right.activeJobId
-    && left.error === right.error
-    && left.createdAt === right.createdAt
-    && left.updatedAt === right.updatedAt;
-}
-
-function sameNodeFocusMotion(left: NodeFocusMotion | null | undefined, right: NodeFocusMotion | null | undefined): boolean {
-  if (!left || !right) return left === right || (left == null && right == null);
-  return left.phase === right.phase
-    && left.role === right.role
-    && left.startX === right.startX
-    && left.startY === right.startY
-    && left.shiftX === right.shiftX
-    && left.shiftY === right.shiftY
-    && left.arcX === right.arcX
-    && left.arcY === right.arcY
-    && left.startScaleX === right.startScaleX
-    && left.startScaleY === right.startScaleY
-    && left.scaleX === right.scaleX
-    && left.scaleY === right.scaleY
-    && left.scale === right.scale
-    && left.startWidth === right.startWidth
-    && left.startHeight === right.startHeight
-    && left.layoutWidth === right.layoutWidth
-    && left.layoutHeight === right.layoutHeight
-    && left.durationMs === right.durationMs
-    && left.delayMs === right.delayMs
-    && left.fadeDurationMs === right.fadeDurationMs;
-}
-
-function sameContentLayout(
-  left: DesignNodeContentLayout | null | undefined,
-  right: DesignNodeContentLayout | null | undefined,
-): boolean {
-  if (!left || !right) return left === right || (left == null && right == null);
-  return left.width === right.width
-    && left.height === right.height
-    && left.canvasScale === right.canvasScale;
-}
-
-function sameViewport(left: Viewport | null, right: Viewport | null): boolean {
-  return left !== null && right !== null && left.x === right.x && left.y === right.y && left.zoom === right.zoom;
-}
-
-function sameGeometry(left: DesignNode["geometry"], right: DesignNode["geometry"]): boolean {
-  return left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height;
 }

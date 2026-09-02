@@ -154,7 +154,7 @@ export function DesignSystemNewScreen() {
     // Asset file UPLOAD isn't wired up yet (importBrand takes no asset content). Record the names so
     // the choice isn't silently lost, but tell the user the files themselves aren't sent — don't
     // pretend they were attached.
-    toast("Fonts/logos aren't uploaded yet — noted as reference. Describe them in the brief for now.");
+    toast("Fonts/logos aren't uploaded yet, so they are noted as reference. Describe them in the brief for now.");
   };
 
   const onFolderDrop = (event: ReactDragEvent<HTMLButtonElement>): void => {
@@ -293,7 +293,7 @@ export function DesignSystemNewScreen() {
                 )}
               </ResourceRow>
 
-              <ResourceRow label="Upload a .fig file" hint="Parsed locally — never uploaded to a third party. Its palette and fonts seed the system.">
+              <ResourceRow label="Upload a .fig file" hint="Parsed locally, never uploaded to a third party. Its palette and fonts seed the system.">
                 {fig ? (
                   <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm">
                     <span className="truncate">{fig.name}</span>

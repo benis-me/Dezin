@@ -6,6 +6,7 @@ import { ApiProvider } from "./lib/api-context.tsx";
 import { AgentsProvider } from "./lib/agents-context.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { native } from "./lib/native.ts";
+import { applyThemePreference, readThemePreference } from "./lib/theme.ts";
 import "@fontsource-variable/geist";
 import "@fontsource-variable/geist-mono";
 import "@fontsource/space-grotesk/500.css";
@@ -13,8 +14,7 @@ import "@fontsource/space-grotesk/600.css";
 import "./styles/globals.css";
 
 // Dark-first: design tools look most premium dark. Set before first paint (no flash).
-const saved = localStorage.getItem("dezin.theme");
-if (saved !== "light") document.documentElement.classList.add("dark");
+applyThemePreference(readThemePreference());
 
 // Light up native chrome (draggable regions, traffic-light clearance) inside Electron.
 if (native?.isElectron) {

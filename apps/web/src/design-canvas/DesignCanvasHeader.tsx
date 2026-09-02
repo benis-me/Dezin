@@ -2,7 +2,6 @@ import {
   ArrowLeft,
   Bot,
   Code2,
-  LayoutGrid,
   LoaderCircle,
   Settings2,
 } from "lucide-react";
@@ -69,7 +68,6 @@ export function DesignCanvasHeader({
           ) : null}
           <div className="design-canvas-topbar__identity">
             <EditableProjectName name={projectName} onRename={onRenameProject} />
-            <span className="design-canvas-topbar__view"><LayoutGrid aria-hidden />Canvas</span>
           </div>
         </div>
         <div className="app-no-drag design-canvas-topbar__actions" role="toolbar" aria-label="Project actions">

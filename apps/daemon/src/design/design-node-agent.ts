@@ -1,3 +1,4 @@
+import { getDesignProject, updateDesignProject } from "./design-project-store.ts";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -8,8 +9,8 @@ import {
   type AgentRunner,
   type AgentTurnInput,
   type ProcessSpawner,
-} from "../../../../packages/agent/src/index.ts";
-import type { Settings } from "../../../../packages/core/src/index.ts";
+} from "@dezin/agent";
+import type { Settings } from "@dezin/core";
 import { buildAgentEnv } from "../agent-env.ts";
 import {
   observedDesignAgentIdentity,
@@ -733,6 +734,9 @@ async function executeDesignNodeTurn(
     if (completed === null || completed.status !== terminal || completed.versionId !== published.manifest.id) {
       throw new Error("Node Agent Version publication did not terminalize its exact Job");
     }
+    if (terminal === "ready" && pageTitle !== null) {
+      await adoptPlaceholderProjectName(input.dataDir, input.projectId, pageTitle);
+    }
     await updateDesignThreadMessage(input.dataDir, input.projectId, { type: "node", nodeId: input.nodeId }, assistantMessageId, {
       content: terminal === "ready"
         ? (result.text.trim() || `Published ${published.manifest.id}`)
@@ -895,4 +899,22 @@ export function productionDesignAgentEnvironment(
   // Design Agents never receive daemon bearer authority. Their provider
   // credentials are narrowed again by DesignConfinedSpawner before spawn.
   return buildAgentEnv(settings, command);
+}
+
+const PLACEHOLDER_PROJECT_NAMES = new Set(["untitled", "new design"]);
+
+/**
+ * A blank-canvas project keeps its placeholder name until its first Page
+ * publishes a semantic <title>; adopt that title once, and never rename a
+ * project the user has named. Naming is best-effort and never fails a Job.
+ */
+export async function adoptPlaceholderProjectName(dataDir: string, projectId: string, title: string): Promise<boolean> {
+  try {
+    const project = await getDesignProject(dataDir, projectId);
+    if (project === null || !PLACEHOLDER_PROJECT_NAMES.has(project.name.trim().toLowerCase())) return false;
+    await updateDesignProject(dataDir, projectId, { name: title });
+    return true;
+  } catch {
+    return false;
+  }
 }

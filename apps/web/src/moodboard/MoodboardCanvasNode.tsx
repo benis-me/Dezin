@@ -1,5 +1,5 @@
 import { Frame, Img, Rect, Txt } from "@dezin/leafer-react";
-import { IconImageMountainFill18 } from "nucleo-ui-essential-fill-18";
+import { Image as ImageIcon } from "lucide-react";
 import { Platform } from "leafer-editor";
 import { useEffect, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -134,7 +134,7 @@ function nodeLabel(node: MoodboardNode): string {
 const GENERATOR_ICON_COLOR = "#c2c2bd";
 const GENERATOR_LOADING_SWEEP_MS = 1400;
 const IMAGE_GENERATOR_ICON_URL = Platform.toURL(
-  renderToStaticMarkup(<IconImageMountainFill18 data-nucleo-icon="IconImageMountainFill18" color={GENERATOR_ICON_COLOR} />),
+  renderToStaticMarkup(<ImageIcon data-dezin-icon="image-generator" color={GENERATOR_ICON_COLOR} strokeWidth={1.75} />),
   "svg",
 );
 

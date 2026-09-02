@@ -1,3 +1,4 @@
+import { formatDate } from "../lib/format-date.ts";
 import { useState } from "react";
 import { Check, ChevronDown, MessageSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import { Input, Popover, PopoverContent, PopoverTrigger, ScrollArea } from "./ui/index.ts";
@@ -14,7 +15,7 @@ function relTime(ts: number): string {
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return new Date(ts).toLocaleDateString();
+  return formatDate(ts);
 }
 
 /** The conversation switcher — list with turn count + time, inline rename, and delete. */

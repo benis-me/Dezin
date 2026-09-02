@@ -182,7 +182,7 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
                   const rel = p.screenshots.desktop ?? Object.values(p.screenshots)[0];
                   return rel ? <img alt={p.title} src={api.sharinganShotUrl(projectId, rel)} className="w-full" /> : null;
                 })()}
-                <figcaption className="truncate p-2 text-xs text-muted-foreground">{p.title} — {p.url}</figcaption>
+                <figcaption className="truncate p-2 text-xs text-muted-foreground">{p.title} · {p.url}</figcaption>
               </figure>
             ))}
           </div>
