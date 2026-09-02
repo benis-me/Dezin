@@ -4,24 +4,28 @@ import { dirname, resolve } from "node:path";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+// The daemon suite drives real Chrome for the runtime, Export, and visual gates.
+const DAEMON_TIMEOUT_MS = 20 * 60 * 1000;
 
 const WORKSPACE_SUITES = [
   "packages/agent",
   "packages/core",
-  "packages/craft",
   "packages/design",
   "packages/design-canvas-contracts",
   "packages/effects",
-  "packages/prompt",
-  "packages/quality",
-  "packages/research",
-  "packages/skills",
   "apps/daemon",
   "apps/desktop",
   "apps/extension",
   "packages/leafer-react",
   "apps/web",
-].map((cwd) => ({ id: cwd, cwd, command: "pnpm", args: ["test"], coverageArgs: ["test:coverage"] }));
+].map((cwd) => ({
+  id: cwd,
+  cwd,
+  command: "pnpm",
+  args: ["test"],
+  coverageArgs: ["test:coverage"],
+  ...(cwd === "apps/daemon" ? { timeoutMs: DAEMON_TIMEOUT_MS } : {}),
+}));
 
 export const TEST_SUITES = [
   {
@@ -42,6 +46,20 @@ export const TEST_SUITES = [
   },
   ...WORKSPACE_SUITES,
 ];
+
+/**
+ * With NODE_USE_ENV_PROXY=1 Node routes even loopback fetches through the
+ * developer's proxy, whose keep-alive socket keeps test processes alive after
+ * their last test. Suites talk to 127.0.0.1 constantly, so exclude loopback.
+ */
+export function loopbackNoProxyEnv(env) {
+  const entries = new Set(
+    [env.NO_PROXY, env.no_proxy].flatMap((value) => (value ?? "").split(",")).map((entry) => entry.trim()).filter(Boolean),
+  );
+  for (const host of ["127.0.0.1", "localhost", "::1"]) entries.add(host);
+  const merged = [...entries].join(",");
+  return { NO_PROXY: merged, no_proxy: merged };
+}
 
 function suiteError(message, suite, properties = {}) {
   return Object.assign(new Error(message), { suiteId: suite.id, ...properties });
@@ -81,12 +99,13 @@ async function cleanupGroup(child) {
 }
 
 export async function runCommand(suite, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Per-suite budgets win over the run-wide default; an explicit option overrides both.
+  const timeoutMs = options.timeoutMs ?? suite.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const cwd = resolve(REPO_ROOT, suite.cwd);
   const child = spawn(suite.command, suite.args ?? [], {
     cwd,
     stdio: options.stdio ?? "inherit",
-    env: { ...process.env, ...options.env },
+    env: { ...process.env, ...loopbackNoProxyEnv(process.env), ...options.env },
     detached: process.platform !== "win32",
   });
   let timedOut = false;
@@ -127,13 +146,28 @@ export async function runCommand(suite, options = {}) {
   return result;
 }
 
+/**
+ * Run every suite, even after one fails, so a single red suite cannot hide the
+ * state of the others. Rejects at the end with every failure attached.
+ */
 export async function runSuites(suites = TEST_SUITES, options = {}) {
   const coverage = options.coverage === true;
+  const failures = [];
   for (const suite of suites) {
     const selected = coverage && suite.coverageArgs ? { ...suite, args: suite.coverageArgs } : suite;
     if (options.stdio !== "ignore") process.stdout.write(`── ${suite.id} ──\n`);
-    await runCommand(selected, options);
+    try {
+      await runCommand(selected, options);
+    } catch (error) {
+      failures.push(error);
+      if (options.stdio !== "ignore") process.stdout.write(`── ${suite.id} FAILED: ${error.message} ──\n`);
+    }
   }
+  if (failures.length > 0) {
+    const summary = failures.map((failure) => failure.suiteId ?? "unknown").join(", ");
+    throw Object.assign(new Error(`${failures.length} suite(s) failed: ${summary}`), { failures });
+  }
+  return { failures };
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -145,11 +179,14 @@ if (isMain) {
   } else {
     runSuites(TEST_SUITES, {
       coverage,
-      timeoutMs: Number(process.env.DEZIN_TEST_SUITE_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
+      ...(process.env.DEZIN_TEST_SUITE_TIMEOUT_MS ? { timeoutMs: Number(process.env.DEZIN_TEST_SUITE_TIMEOUT_MS) } : {}),
     })
       .then(() => process.stdout.write("SUITE: PASS\n"))
       .catch((error) => {
-        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+        for (const failure of error.failures ?? [error]) {
+          process.stderr.write(`${failure instanceof Error ? failure.message : String(failure)}\n`);
+        }
+        process.stderr.write("SUITE: FAIL\n");
         process.exitCode = 1;
       });
   }

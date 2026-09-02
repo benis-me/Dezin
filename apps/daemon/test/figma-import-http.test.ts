@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { Store } from "../../../packages/core/src/index.ts";
+import { Store } from "@dezin/core";
 import { createApp, createRuntimeSupervisor } from "../src/app.ts";
 import { createDesignProject } from "../src/design/design-project-store.ts";
 import { getDesignCanvas } from "../src/design/design-storage.ts";
@@ -530,7 +530,7 @@ test("Figma HTTP waits for startup recovery, enforces daemon auth, and propagate
     body,
     signal: controller.signal,
   });
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setTimeout(resolve, 25));
   assert.equal(metadataCalls, 0, "the import route must wait for Design startup recovery");
   releaseRecovery();
   await Promise.race([
@@ -542,8 +542,8 @@ test("Figma HTTP waits for startup recovery, enforces daemon auth, and propagate
   assert.equal(metadataCalls, 1);
   controller.abort();
   await assert.rejects(pending, (error: unknown) => error instanceof Error && error.name === "AbortError");
-  for (let attempt = 0; attempt < 100 && !requestAborted; attempt += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let attempt = 0; attempt < 200 && !requestAborted; attempt += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
   assert.equal(requestAborted, true);
 });
@@ -604,7 +604,7 @@ test("Figma HTTP keeps the Project lease through response projection before conc
     deletionSettled = true;
     return response;
   });
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setTimeout(resolve, 25));
   assert.equal(deletionSettled, false, "DELETE must wait while the import response is projected");
   releaseProjection();
   const importResponse = await importing;

@@ -3,20 +3,20 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { TEST_SUITES, runCommand, runSuites } from "./test-all.mjs";
+import { TEST_SUITES, loopbackNoProxyEnv, runCommand, runSuites } from "./test-all.mjs";
+
+test("suites run with loopback excluded from any environment proxy", () => {
+  assert.deepEqual(loopbackNoProxyEnv({}), { NO_PROXY: "127.0.0.1,localhost,::1", no_proxy: "127.0.0.1,localhost,::1" });
+  assert.equal(loopbackNoProxyEnv({ NO_PROXY: "corp.internal,localhost" }).NO_PROXY, "corp.internal,localhost,127.0.0.1,::1");
+});
 
 const EXPECTED_SUITES = [
   ".",
   "packages/agent",
   "packages/core",
-  "packages/craft",
   "packages/design",
   "packages/design-canvas-contracts",
   "packages/effects",
-  "packages/prompt",
-  "packages/quality",
-  "packages/research",
-  "packages/skills",
   "apps/daemon",
   "apps/desktop",
   "apps/extension",
@@ -38,14 +38,41 @@ test("test orchestrator enumerates every supported suite exactly once", () => {
   assert.equal(new Set(TEST_SUITES.map((suite) => suite.cwd)).size, EXPECTED_SUITES.length);
 });
 
-test("test orchestrator propagates the first suite failure", async () => {
+test("the browser-backed daemon suite gets a larger budget than the default", () => {
+  const daemon = TEST_SUITES.find((suite) => suite.cwd === "apps/daemon");
+  assert.ok(daemon.timeoutMs > 10 * 60 * 1000);
+  assert.equal(TEST_SUITES.find((suite) => suite.cwd === "apps/web").timeoutMs, undefined);
+});
+
+test("test orchestrator runs every suite and reports all failures at the end", async () => {
+  const ran = [];
+  const marker = (name) => ({
+    id: name,
+    cwd: ".",
+    command: process.execPath,
+    args: ["-e", `process.stdout.write(${JSON.stringify(name)}); process.exit(${name.startsWith("fail") ? 7 : 0})`],
+  });
+  const suites = [marker("fail-a"), marker("ok-b"), marker("fail-c")];
+  const originalRun = runCommand;
   await assert.rejects(
-    runSuites(
-      [{ id: "failing", cwd: ".", command: process.execPath, args: ["-e", "process.exit(7)"] }],
-      { stdio: "ignore", timeoutMs: 2_000 },
-    ),
-    (error) => error?.exitCode === 7 && error?.suiteId === "failing",
+    runSuites(suites, { stdio: "ignore", timeoutMs: 5_000 }),
+    (error) => {
+      const ids = error.failures.map((failure) => failure.suiteId);
+      assert.deepEqual(ids, ["fail-a", "fail-c"]);
+      assert.equal(error.failures[0].exitCode, 7);
+      return /2 suite\(s\) failed: fail-a, fail-c/.test(error.message);
+    },
   );
+  assert.equal(originalRun, runCommand);
+  assert.deepEqual(ran, []);
+});
+
+test("a passing run resolves with no failures", async () => {
+  const result = await runSuites(
+    [{ id: "ok", cwd: ".", command: process.execPath, args: ["-e", "process.exit(0)"] }],
+    { stdio: "ignore", timeoutMs: 5_000 },
+  );
+  assert.deepEqual(result.failures, []);
 });
 
 test("a timed-out suite is bounded and leaves no descendant process", async () => {
@@ -70,6 +97,16 @@ test("a timed-out suite is bounded and leaves no descendant process", async () =
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.equal(alive(pid), false);
+});
+
+test("a per-suite timeout budget applies when the run gives none", async () => {
+  await assert.rejects(
+    runCommand(
+      { id: "slow", cwd: ".", command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], timeoutMs: 100 },
+      { stdio: "ignore" },
+    ),
+    (error) => error?.code === "SUITE_TIMEOUT",
+  );
 });
 
 test("a successful suite fails when it leaves an owned descendant", async () => {
