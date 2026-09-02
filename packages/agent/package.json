@@ -3,15 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Agent runner abstraction + generateArtifact(): wires the @dezin/quality lint→repair closed loop into a runner-driven generation.",
+  "description": "Agent runner abstraction: provider CLI runners, Claude stream parsing, turn retry and failure classification.",
   "exports": {
     ".": "./src/index.ts"
   },
   "scripts": {
     "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
     "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=85 --test-coverage-branches=76 --test-coverage-functions=79 --test 'test/*.test.ts'"
-  },
-  "dependencies": {
-    "@dezin/quality": "workspace:*"
   }
 }

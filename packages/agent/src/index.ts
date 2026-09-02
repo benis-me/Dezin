@@ -1,6 +1,6 @@
 /**
- * @dezin/agent — agent runner abstraction + the generation service that wires the
- * lint→repair closed loop into a runner-driven generation.
+ * @dezin/agent — agent runner abstraction: provider CLI runners, Claude stream
+ * parsing, and bounded turn retry with failure classification.
  */
 
 export type {
@@ -23,15 +23,11 @@ export {
 } from "./types.ts";
 export { FakeRunner, type FakeRunnerOptions } from "./fake-runner.ts";
 export {
-  generateArtifact,
   runTurnWithRetry,
   classifyAgentTurnFailure,
-  type GenerateInput,
-  type GenerateResult,
-  type GenerateEvent,
   type AgentTurnFailureCategory,
   type AgentTurnFailureClassification,
-} from "./generate.ts";
+} from "./turn-retry.ts";
 export {
   parseClaudeStream,
   parseClaudeLine,

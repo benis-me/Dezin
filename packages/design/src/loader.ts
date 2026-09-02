@@ -1,5 +1,5 @@
 /**
- * Lazy filesystem loader for design systems, mirroring @dezin/skills. Scans
+ * Lazy filesystem loader for design systems. Scans
  * <dir>/<id>/{DESIGN.md, tokens.css, manifest.json?} and returns DesignSystem[].
  */
 

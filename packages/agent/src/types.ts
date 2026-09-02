@@ -69,7 +69,7 @@ export const abortError = (): AbortError => new AbortError();
 export const isAbortError = (e: unknown): boolean => e instanceof Error && e.name === "AbortError";
 
 export interface AgentTurnInput {
-  /** The composed system prompt (from @dezin/prompt). */
+  /** The composed system prompt. */
   systemPrompt: string;
   /** This turn's user message: the brief, or the <artifact-lint> feedback on a repair turn. */
   message: string;
