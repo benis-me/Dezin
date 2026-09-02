@@ -386,7 +386,9 @@ test("a blank-canvas context menu exits before opening Figma import", async () =
   fireEvent.contextMenu(surface, { clientX: 320.6, clientY: 259.6 });
   const menu = screen.getByRole("menu", { name: "Add Design node" });
   const figmaItem = within(menu).getByRole("menuitem", { name: "Import from Figma" });
-  expect(within(menu).getAllByRole("menuitem").at(-1)).toBe(figmaItem);
+  // Figma import closes the catalog; the shared View section follows it.
+  const fitView = within(menu).getByRole("menuitem", { name: "Fit view" });
+  expect(figmaItem.compareDocumentPosition(fitView) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(figmaItem.querySelector("svg")).toHaveClass("size-3.5");
   await user.click(figmaItem);
 
@@ -1330,9 +1332,11 @@ test("focused previews accept context menus only over their iframe's private Mes
   expect(screen.getByText("#checkout")).toBeInTheDocument();
   fireEvent.change(comment, { target: { value: "Make this action clearer" } });
   fireEvent.click(screen.getByRole("button", { name: "Add to Agent" }));
-  const panel = await screen.findByLabelText("Main Agent panel", { selector: "section" });
-  expect((within(panel).getByRole("textbox", { name: "Main Agent message" }) as HTMLTextAreaElement).value)
-    .toMatch(/Target selector: #checkout[\s\S]*Make this action clearer/);
+  // Annotations land in the focused Node's own Agent composer; focus stays open.
+  const panel = await screen.findByLabelText("Embedded page Agent panel", { selector: "section" });
+  expect((within(panel).getByRole("textbox", { name: "Embedded page Agent message" }) as HTMLTextAreaElement).value)
+    .toMatch(/Annotation 1: <button> #checkout[\s\S]*Make this action clearer/);
+  expect(frame).toHaveAttribute("tabindex", "0");
 
   channel.port1.close();
   rejectedChannel.port1.close();

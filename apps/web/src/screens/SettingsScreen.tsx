@@ -303,7 +303,7 @@ export function SettingsScreen({
     return [{ value: "", label: "None" }, ...[...models].map((model) => ({ value: model, label: model }))];
   }, [settings]);
   return (
-    <div className="flex h-[clamp(460px,72vh,660px)]">
+    <div className="flex h-full">
       {/* Sidebar */}
       <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
         <div className="px-2 py-2">

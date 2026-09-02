@@ -12,7 +12,7 @@ function EffectThumb({ effect }: { effect: EffectCard }) {
       {effect.previewUrl ? (
         <img src={effect.previewUrl} alt={`${effect.name} preview`} loading="lazy" draggable={false} className="h-full w-full object-cover" />
       ) : (
-        <div className="grid h-full w-full place-items-center bg-[linear-gradient(135deg,var(--surface),var(--surface-2))] text-muted-foreground">
+        <div className="dz-canvas grid h-full w-full place-items-center text-muted-foreground/60">
           <Sparkles size={18} strokeWidth={1.8} />
         </div>
       )}
@@ -116,7 +116,7 @@ export function EffectsScreen({ startNew = false }: { startNew?: boolean }) {
                 <Card
                   key={effect.id}
                   onClick={() => navigate(`/effects/${effect.id}`)}
-                  className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                  className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong"
                 >
                   <EffectThumb effect={effect} />
                   <div className="flex items-center justify-between gap-3 p-3">

@@ -14,6 +14,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "../components/ui/index.ts";
+import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { resolveFloatingChromeRect, type CanvasRect } from "../moodboard/canvas-utils.ts";
 import type { AgentInfo } from "../lib/api.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
@@ -240,6 +241,7 @@ export interface CanvasAgentPanelProps {
   initialContextNodeIds?: readonly string[];
   contextSeedGeneration?: number;
   initialDraft?: string;
+  draftSeedMode?: "replace" | "append";
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onRescanAgents?: () => Promise<void>;
@@ -303,6 +305,7 @@ export function CanvasAgentPanel({
   initialContextNodeIds,
   contextSeedGeneration,
   initialDraft,
+  draftSeedMode,
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onRescanAgents = async () => {},
@@ -330,6 +333,11 @@ export function CanvasAgentPanel({
   const {
     scopeKey,
     thread,
+    sessions,
+    createSession,
+    switchSession,
+    renameSession,
+    deleteSession,
     threadLoading,
     threadError,
     dismissThreadError,
@@ -371,6 +379,7 @@ export function CanvasAgentPanel({
     initialContextNodeIds,
     contextSeedGeneration,
     initialDraft,
+    draftSeedMode,
     agentSelection: controlledAgentSelection,
     onAgentSelectionChange,
     onSubmit,
@@ -398,6 +407,11 @@ export function CanvasAgentPanel({
 
   const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
   const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
+  const sessionLabel = (session: { title: string | null }, index: number) => session.title || `Session ${index + 1}`;
+  const activeSessionIndex = sessions?.sessions.findIndex((session) => session.id === sessions.activeId) ?? -1;
+  const panelSubtitle = sessions && activeSessionIndex >= 0
+    ? sessionLabel(sessions.sessions[activeSessionIndex]!, activeSessionIndex)
+    : subtitle;
   const panelTransformOrigin = floating
     ? `${entryX < -1 ? "left" : entryX > 1 ? "right" : "center"} ${entryY < -1 ? "top" : entryY > 1 ? "bottom" : "center"}`
     : "center center";
@@ -441,11 +455,24 @@ export function CanvasAgentPanel({
         <div className="design-canvas-agent__header-copy">
           {panelEyebrow ? <span className="design-canvas-agent__eyebrow">{panelEyebrow}</span> : null}
           <h2>{panelTitle}</h2>
-          {subtitle ? <p>{subtitle}</p> : null}
+          {panelSubtitle ? <p>{panelSubtitle}</p> : null}
         </div>
-        {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose ? (
+        {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose || sessions ? (
           <TooltipProvider delayDuration={120}>
             <div className="design-canvas-agent__header-controls">
+              {sessions ? (
+                <ConversationSelect
+                  conversations={sessions.sessions.map((session) => ({ ...session, title: session.title ?? "" }))}
+                  activeId={sessions.activeId}
+                  onSwitch={(sessionId) => void switchSession(sessionId)}
+                  onCreate={() => void createSession()}
+                  onRename={(sessionId, nextTitle) => void renameSession(sessionId, nextTitle)}
+                  onDelete={(sessionId) => void deleteSession(sessionId)}
+                  label={sessionLabel}
+                  ariaLabel="Sessions"
+                  newLabel="New session"
+                />
+              ) : null}
               {activeVersion && onSelectVersion ? (
                 <Select
                   value={activeVersionId}

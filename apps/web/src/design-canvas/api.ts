@@ -8,6 +8,7 @@ import type {
   DesignInvalidationMessage,
   DesignJob,
   DesignJobRetryResult,
+  DesignMainSessionList,
   DesignNodeVersion,
   DesignThread,
   DesignThreadScope,
@@ -92,6 +93,12 @@ export interface DesignCanvasApi {
     scope: DesignThreadScope,
     request: DesignAgentTurnRequest,
   ): Promise<DesignAgentTurnResult>;
+  /** Main Agent sessions; optional so adapters without session support hide the switcher. */
+  listMainSessions?(projectId: string, signal?: AbortSignal): Promise<DesignMainSessionList>;
+  createMainSession?(projectId: string): Promise<DesignMainSessionList>;
+  activateMainSession?(projectId: string, sessionId: string): Promise<DesignMainSessionList>;
+  renameMainSession?(projectId: string, sessionId: string, title: string | null): Promise<DesignMainSessionList>;
+  deleteMainSession?(projectId: string, sessionId: string): Promise<DesignMainSessionList>;
   listJobs(projectId: string, signal?: AbortSignal): Promise<DesignJob[]>;
   cancelJob(projectId: string, jobId: string): Promise<DesignJob>;
   retryJob(projectId: string, jobId: string): Promise<DesignJobRetryResult>;

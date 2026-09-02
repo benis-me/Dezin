@@ -181,6 +181,21 @@ export interface DesignThread {
   updatedAt: number;
 }
 
+/** One Main Agent conversation. Only the active session's transcript is `thread.json`. */
+export interface DesignMainSession {
+  id: string;
+  title: string | null;
+  createdAt: number;
+  updatedAt: number;
+  /** User turns in the session. */
+  turns: number;
+}
+
+export interface DesignMainSessionList {
+  activeId: string;
+  sessions: DesignMainSession[];
+}
+
 export type DesignJobKind =
   | "node-generation"
   | "node-analysis"

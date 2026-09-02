@@ -188,10 +188,12 @@ function formatUpdatedAt(value: number): string {
 }
 
 function ProjectThumb({ coverUrl }: { coverUrl?: string | null }) {
+  // The daemon 404s until a Node has something to capture; fall back to the hatch placeholder.
+  const [brokenUrl, setBrokenUrl] = useState<string | null>(null);
   return (
     <div className="relative aspect-[16/10] overflow-hidden border-b border-border bg-surface-2">
-      {coverUrl ? (
-        <img src={coverUrl} alt="" loading="lazy" draggable={false} className="h-full w-full object-cover object-top" />
+      {coverUrl && brokenUrl !== coverUrl ? (
+        <img src={coverUrl} alt="" loading="lazy" draggable={false} className="h-full w-full object-cover object-top" onError={() => setBrokenUrl(coverUrl)} />
       ) : (
         <div className="dz-canvas grid h-full w-full place-items-center text-muted-foreground/40">
           <ImageIcon size={22} strokeWidth={1.5} />
@@ -1281,7 +1283,7 @@ export function HomeScreen({
             {visible.map((p) => (
               <StaggerItem as="li" key={p.id}>
                 <Card
-                  className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                  className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong"
                 >
                   <a
                     href={`/projects/${encodeURIComponent(p.id)}`}

@@ -1488,7 +1488,10 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.doesNotMatch(embeddedHtml, /parent\.postMessage\(/);
     assert.match(embeddedHtml, /type:"embedded-preview-context-menu-ready"/);
     assert.match(embeddedHtml, /type:"embedded-preview-context-menu"/);
-    assert.match(embeddedHtml, /clientX:event\.clientX,clientY:event\.clientY/);
+    assert.match(embeddedHtml, /describe\(target,event\.clientX,event\.clientY\)/);
+    assert.match(embeddedHtml, /type:"embedded-preview-layout"/);
+    assert.match(embeddedHtml, /type:"embedded-preview-escape"/);
+    assert.match(embeddedHtml, /data\.type==="annotate-mode"/);
     const bridgeBody = /<script data-dezin-embedded-preview-bridge>([\s\S]*?)<\/script>/.exec(embeddedHtml)?.[1];
     assert.ok(bridgeBody);
     assert.doesNotThrow(() => new Function(bridgeBody));

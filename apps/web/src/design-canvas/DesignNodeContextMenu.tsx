@@ -1,8 +1,29 @@
-import { FileUp, LocateFixed, Sparkles, Trash2 } from "lucide-react";
+import { FileUp, LocateFixed, Maximize2, Minus, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
-import { ContextMenuItem, ContextMenuSeparator } from "../components/ui/index.ts";
+import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuShortcut } from "../components/ui/index.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import type { DesignNode } from "./types.ts";
+
+export interface CanvasViewMenuActions {
+  onFitView: () => void;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetZoom: () => void;
+}
+
+/** The shared "View" section both canvas context menus end with. */
+export function CanvasViewMenuItems({ onFitView, onZoomIn, onZoomOut, onResetZoom }: CanvasViewMenuActions) {
+  return (
+    <>
+      <ContextMenuSeparator />
+      <ContextMenuLabel>View</ContextMenuLabel>
+      <ContextMenuItem onSelect={onFitView}><Maximize2 aria-hidden />Fit view<ContextMenuShortcut>Shift 1</ContextMenuShortcut></ContextMenuItem>
+      <ContextMenuItem onSelect={onZoomIn}><Plus aria-hidden />Zoom in<ContextMenuShortcut>Cmd +</ContextMenuShortcut></ContextMenuItem>
+      <ContextMenuItem onSelect={onZoomOut}><Minus aria-hidden />Zoom out<ContextMenuShortcut>Cmd -</ContextMenuShortcut></ContextMenuItem>
+      <ContextMenuItem onSelect={onResetZoom}><RotateCcw aria-hidden />Reset zoom<ContextMenuShortcut>Cmd 0</ContextMenuShortcut></ContextMenuItem>
+    </>
+  );
+}
 
 /** Context-menu items for one canvas Node: Agent, revision, fit, delete. */
 export function DesignNodeContextMenu({
@@ -24,6 +45,7 @@ export function DesignNodeContextMenu({
   const material = isMaterialNodeKind(node.kind);
   return (
     <>
+      <ContextMenuLabel>Selection</ContextMenuLabel>
       <ContextMenuItem onSelect={onOpenAgent}>
         <Sparkles aria-hidden />
         {material
@@ -31,6 +53,7 @@ export function DesignNodeContextMenu({
           : node.versionCount > 0
             ? `Create new ${item.label.toLocaleLowerCase()} version`
             : `Create ${item.label.toLocaleLowerCase()} with Agent`}
+        <ContextMenuShortcut>Enter</ContextMenuShortcut>
       </ContextMenuItem>
       {material ? (
         <ContextMenuItem onSelect={onAddRevision}>
@@ -42,10 +65,10 @@ export function DesignNodeContextMenu({
         <LocateFixed aria-hidden />
         Fit this Node
       </ContextMenuItem>
-      <ContextMenuSeparator />
       <ContextMenuItem className="design-node-context-menu__danger" onSelect={onDelete}>
         <Trash2 aria-hidden />
         Delete {item.label.toLocaleLowerCase()}
+        <ContextMenuShortcut>Del</ContextMenuShortcut>
       </ContextMenuItem>
     </>
   );

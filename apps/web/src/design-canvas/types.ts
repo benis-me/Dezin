@@ -41,6 +41,8 @@ export type {
   DesignThreadMessage,
   DesignThreadRole,
   DesignThreadScope,
+  DesignMainSession,
+  DesignMainSessionList,
   DesignViewport,
   FigmaCredentialPutInput,
   FigmaCredentialStatus,

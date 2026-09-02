@@ -27,6 +27,8 @@ export function ConversationSelect({
   onDelete,
   onCreate,
   label,
+  ariaLabel = "Conversations",
+  newLabel = "New conversation",
 }: {
   conversations: ConversationOption[];
   activeId: string | null;
@@ -35,6 +37,8 @@ export function ConversationSelect({
   onDelete: (id: string) => void;
   onCreate?: () => void;
   label: (c: ConversationOption, i: number) => string;
+  ariaLabel?: string;
+  newLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -49,7 +53,7 @@ export function ConversationSelect({
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
         type="button"
-        aria-label="Conversations"
+        aria-label={ariaLabel}
         className="flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         <MessageSquare size={13} strokeWidth={1.75} />
@@ -59,7 +63,7 @@ export function ConversationSelect({
         {onCreate ? (
           <button
             type="button"
-            aria-label="New conversation"
+            aria-label={newLabel}
             onClick={() => {
               onCreate();
               setOpen(false);
@@ -67,7 +71,7 @@ export function ConversationSelect({
             className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-foreground transition-colors hover:bg-accent"
           >
             <Plus size={13} strokeWidth={2} className="text-muted-foreground" />
-            New conversation
+            {newLabel}
           </button>
         ) : null}
         <ScrollArea viewportClassName="max-h-72">

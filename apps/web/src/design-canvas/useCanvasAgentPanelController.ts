@@ -20,6 +20,7 @@ import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
 import type {
   DesignJob,
   DesignInvalidationTopic,
+  DesignMainSessionList,
   DesignNode,
   DesignNodeVersion,
   DesignThread,
@@ -64,6 +65,8 @@ export interface UseCanvasAgentPanelControllerOptions {
   initialContextNodeIds?: readonly string[];
   contextSeedGeneration?: number;
   initialDraft?: string;
+  /** "append" keeps what the user already typed and adds the seed below it (preview annotations). */
+  draftSeedMode?: "replace" | "append";
   agentSelection?: CanvasAgentSelection;
   onAgentSelectionChange?: (selection: CanvasAgentSelection) => void;
   onSubmit: (
@@ -95,6 +98,7 @@ export function useCanvasAgentPanelController({
   initialContextNodeIds,
   contextSeedGeneration,
   initialDraft,
+  draftSeedMode = "replace",
   agentSelection: controlledAgentSelection,
   onAgentSelectionChange,
   onSubmit,
@@ -104,6 +108,7 @@ export function useCanvasAgentPanelController({
   onRescanAgents,
 }: UseCanvasAgentPanelControllerOptions) {
   const [thread, setThread] = useState<DesignThread | null>(null);
+  const [sessions, setSessions] = useState<DesignMainSessionList | null>(null);
   const [threadLoading, setThreadLoading] = useState(true);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [draft, setDraft] = useState(initialDraft ?? "");
@@ -130,10 +135,21 @@ export function useCanvasAgentPanelController({
   const threadLoadSequenceRef = useRef(0);
   const loadedThreadScopeRef = useRef<string | null>(null);
   const scopeKey = agentScopeKey(scope);
-  const relatedJobs = useMemo(
-    () => relatedAgentJobs(jobs, scope),
-    [jobs, scopeKey],
-  );
+  const sessionsSupported = scope.type === "main" && typeof api.listMainSessions === "function";
+  const relatedJobs = useMemo(() => {
+    const related = relatedAgentJobs(jobs, scope);
+    if (scope.type !== "main" || !sessionsSupported || thread === null) return related;
+    // Only the active session's turns belong in this transcript; the daemon
+    // reserves a thread message for every Main Agent Job, so unreferenced
+    // terminal Jobs come from another session.
+    const threadJobIds = new Set(thread.messages.flatMap((message) => message.jobId === null ? [] : [message.jobId]));
+    return related.filter((job) => (
+      job.kind === "implementation-export"
+      || threadJobIds.has(job.id)
+      || (job.parentJobId !== null && threadJobIds.has(job.parentJobId))
+      || activeAgentActivityPhase(job) !== null
+    ));
+  }, [jobs, scopeKey, sessionsSupported, thread]);
   const activeTurnJob = useMemo(() => [...relatedJobs].reverse().find((job) => (
     activeAgentActivityPhase(job) !== null
     && (scope.type === "node" || job.kind === "main-agent")
@@ -198,11 +214,22 @@ export function useCanvasAgentPanelController({
     }
   }, [api, projectId, scopeKey]);
 
+  const loadSessions = useCallback(async (signal?: AbortSignal) => {
+    if (!sessionsSupported) return;
+    try {
+      const next = await api.listMainSessions!(projectId, signal);
+      if (!signal?.aborted) setSessions(next);
+    } catch (problem) {
+      if (!signal?.aborted) setThreadError(errorMessage(problem));
+    }
+  }, [api, projectId, sessionsSupported]);
+
   useEffect(() => {
     const controller = new AbortController();
     void loadThread(controller.signal);
+    void loadSessions(controller.signal);
     return () => controller.abort();
-  }, [loadThread]);
+  }, [loadSessions, loadThread]);
 
   useEffect(() => {
     setOptimisticUserTurn(null);
@@ -220,9 +247,13 @@ export function useCanvasAgentPanelController({
     if (contextSeedGeneration === undefined
       || consumedContextSeedGenerationRef.current === contextSeedGeneration) return;
     consumedContextSeedGenerationRef.current = contextSeedGeneration;
+    if (draftSeedMode === "append") {
+      setDraft((current) => current.trim() ? `${current.trimEnd()}\n\n${initialDraft ?? ""}` : initialDraft ?? "");
+      return;
+    }
     setContextNodeIds(normalizedInitialContextNodeIds(initialContextNodeIds, nodes));
     setDraft(initialDraft ?? "");
-  }, [contextSeedGeneration, initialContextNodeIds, initialDraft, nodes]);
+  }, [contextSeedGeneration, draftSeedMode, initialContextNodeIds, initialDraft, nodes]);
 
   useEffect(() => {
     const selected = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
@@ -248,6 +279,7 @@ export function useCanvasAgentPanelController({
           if (controller.signal.aborted) return;
           if (message.type === "reset" || message.topics.includes(threadInvalidationTopic)) {
             await loadThread(controller.signal);
+            await loadSessions(controller.signal);
           }
         }
       } catch (problem) {
@@ -255,7 +287,35 @@ export function useCanvasAgentPanelController({
       }
     })();
     return () => controller.abort();
-  }, [api, loadThread, projectId, threadInvalidationTopic]);
+  }, [api, loadSessions, loadThread, projectId, threadInvalidationTopic]);
+
+  const runSessionAction = useCallback(async (action: () => Promise<DesignMainSessionList>) => {
+    setThreadError(null);
+    try {
+      const next = await action();
+      setOptimisticUserTurn(null);
+      setSessions(next);
+      await loadThread();
+    } catch (problem) {
+      setThreadError(errorMessage(problem));
+    }
+  }, [loadThread]);
+  const createSession = useCallback(
+    () => runSessionAction(() => api.createMainSession!(projectId)),
+    [api, projectId, runSessionAction],
+  );
+  const switchSession = useCallback(
+    (sessionId: string) => runSessionAction(() => api.activateMainSession!(projectId, sessionId)),
+    [api, projectId, runSessionAction],
+  );
+  const renameSession = useCallback(
+    (sessionId: string, title: string) => runSessionAction(() => api.renameMainSession!(projectId, sessionId, title.trim() || null)),
+    [api, projectId, runSessionAction],
+  );
+  const deleteSession = useCallback(
+    (sessionId: string) => runSessionAction(() => api.deleteMainSession!(projectId, sessionId)),
+    [api, projectId, runSessionAction],
+  );
 
   const submit = useCallback(async () => {
     const prompt = draft.trim();
@@ -338,6 +398,11 @@ export function useCanvasAgentPanelController({
   return {
     scopeKey,
     thread,
+    sessions: sessionsSupported ? sessions : null,
+    createSession,
+    switchSession,
+    renameSession,
+    deleteSession,
     threadLoading,
     threadError,
     dismissThreadError: () => setThreadError(null),

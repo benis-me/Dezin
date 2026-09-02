@@ -486,11 +486,14 @@ export default function App() {
           onOpenSettings={() => openSettings()}
         />
         <Dialog open={route.name === "settings"} onClose={closeSettings} label="Settings" className="sm:max-w-5xl" showClose>
-          {route.name === "settings" ? (
-            <Suspense fallback={<RouteLoading label="Loading Settings..." />}>
-              <SettingsScreen theme={theme} onThemeChange={setTheme} initialSection={settingsSection} />
-            </Suspense>
-          ) : null}
+          {/* Fixed height up front so the lazy screen and its settings fetch never resize the open animation. */}
+          <div className="h-[clamp(460px,72vh,660px)]">
+            {route.name === "settings" ? (
+              <Suspense fallback={<RouteLoading label="Loading Settings..." />}>
+                <SettingsScreen theme={theme} onThemeChange={setTheme} initialSection={settingsSection} />
+              </Suspense>
+            ) : null}
+          </div>
         </Dialog>
       </RouteErrorBoundary>
     </Shell>

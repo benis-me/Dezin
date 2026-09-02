@@ -4,6 +4,7 @@ import {
   Bot,
   Download,
   LoaderCircle,
+  MessageSquarePlus,
   Monitor,
   Smartphone,
   Tablet,
@@ -31,10 +32,13 @@ export function FocusedNodeChrome({
   previewDevice,
   previewExporting,
   agentVisible,
+  annotateAvailable = false,
+  annotateMode = false,
   onClose,
   onChooseDevice,
   onExport,
   onSetAgentVisible,
+  onToggleAnnotate,
 }: {
   transition: { nodeId: string; phase: NodeFocusPhase } | null;
   motionAllowed: boolean;
@@ -43,10 +47,13 @@ export function FocusedNodeChrome({
   previewDevice: FocusedPreviewDevice;
   previewExporting: boolean;
   agentVisible: boolean;
+  annotateAvailable?: boolean;
+  annotateMode?: boolean;
   onClose: () => void;
   onChooseDevice: (device: FocusedPreviewDevice) => void;
   onExport: () => void;
   onSetAgentVisible: (visible: boolean) => void;
+  onToggleAnnotate?: () => void;
 }) {
   return (
     <>
@@ -164,7 +171,16 @@ export function FocusedNodeChrome({
                   </CanvasToolButton>
                 </span>
               ) : null}
-              {previewToolsVisible ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
+              {previewToolsVisible || (annotateAvailable && onToggleAnnotate) ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
+              {annotateAvailable && onToggleAnnotate ? (
+                <CanvasToolButton
+                  label={annotateMode ? "Stop annotating (C)" : "Annotate an element (C)"}
+                  active={annotateMode}
+                  onClick={onToggleAnnotate}
+                >
+                  <MessageSquarePlus aria-hidden />
+                </CanvasToolButton>
+              ) : null}
               {previewToolsVisible ? (
                 <CanvasToolButton
                   label={previewExporting ? "Exporting preview" : "Export preview HTML"}

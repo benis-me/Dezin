@@ -119,7 +119,7 @@ export function DesignSystemsScreen() {
                   <Card
                     key={s.id}
                     onClick={() => navigate(`/design-systems/${s.id}`)}
-                    className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                    className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong"
                   >
                     <Specimen name={s.name} swatch={s.swatch} />
                     <div className="flex items-center justify-between gap-2 p-3">

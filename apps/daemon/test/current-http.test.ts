@@ -224,10 +224,9 @@ test("ordinary Design Project CRUD and title never create or expose a legacy SQL
       project.coverUrl as string,
       new RegExp(`^/api/projects/${projectId}/design-canvas/cover\\?v=\\d+$`),
     );
+    // No synthetic cover: an empty canvas 404s and the web renders its own placeholder.
     const cover = await request(project.coverUrl as string);
-    assert.equal(cover.status, 200);
-    assert.match(cover.headers.get("content-type") ?? "", /^image\/svg\+xml/);
-    assert.match(await cover.text(), /Temporary name/);
+    assert.equal(cover.status, 404);
 
     const listed = await (await request("/api/projects")).json() as Array<Record<string, unknown>>;
     assert.deepEqual(listed.map((candidate) => candidate.id), [projectId]);

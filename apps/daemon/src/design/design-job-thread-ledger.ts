@@ -13,6 +13,7 @@ import {
   type DesignJobKind,
   type DesignJobStatus,
   type DesignJobToolName,
+  type DesignMainSessionList,
   type DesignNode,
   type DesignNodeState,
   type DesignProjectFile,
@@ -403,6 +404,226 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
         [threadInvalidationTopic(scope)],
       );
       return { thread, message };
+    });
+  }
+
+  // ── Main Agent sessions ──────────────────────────────────────────────────
+  // The active session IS agents/main/thread.json, so Jobs, receipts, and the
+  // Main Agent prompt keep reading one path. Other sessions are parked as
+  // agents/main/sessions/<id>.json and swapped in on activation.
+  // ponytail: three sequential writes, not one transaction; a crash between them
+  // leaves an orphan session file at worst (never lost messages).
+  const MAX_MAIN_SESSIONS = 200;
+  const MAX_SESSION_TITLE_BYTES = 160;
+
+  interface MainSessionEntry {
+    id: string;
+    title: string | null;
+    createdAt: number;
+    updatedAt: number;
+    turns: number;
+  }
+
+  interface MainSessionIndex {
+    activeId: string;
+    sessions: MainSessionEntry[];
+  }
+
+  function mainSessionsIndexPath(root: string): string {
+    return join(root, "agents", "main", "sessions.json");
+  }
+
+  function mainSessionFilePath(root: string, sessionId: string): string {
+    return join(root, "agents", "main", "sessions", `${safeSegment(sessionId, "Session id")}.json`);
+  }
+
+  function userTurns(thread: DesignThread): number {
+    return thread.messages.filter((message) => message.role === "user").length;
+  }
+
+  function assertStoredMainSessionIndex(value: unknown): asserts value is MainSessionIndex {
+    const index = storedRecord(value, "Main Agent session index", ["activeId", "sessions"]);
+    if (typeof index.activeId !== "string" || !SAFE_SEGMENT.test(index.activeId)
+      || !Array.isArray(index.sessions) || index.sessions.length === 0 || index.sessions.length > MAX_MAIN_SESSIONS) {
+      throw new DesignStorageError("corrupt", "Main Agent session index is invalid");
+    }
+    const ids = new Set<string>();
+    for (const candidate of index.sessions) {
+      const entry = storedRecord(candidate, "Main Agent session", ["id", "title", "createdAt", "updatedAt", "turns"]);
+      if (typeof entry.id !== "string" || !SAFE_SEGMENT.test(entry.id) || ids.has(entry.id)
+        || !validStoredText(entry.title, MAX_SESSION_TITLE_BYTES, { nullable: true })
+        || !validStoredTimestamp(entry.createdAt) || !validStoredTimestamp(entry.updatedAt)
+        || !Number.isSafeInteger(entry.turns) || (entry.turns as number) < 0) {
+        throw new DesignStorageError("corrupt", "Main Agent session index is invalid");
+      }
+      ids.add(entry.id);
+    }
+    if (!ids.has(index.activeId)) throw new DesignStorageError("corrupt", "Main Agent session index is invalid");
+  }
+
+  async function readMainSessionIndexUnlocked(root: string, now?: number): Promise<MainSessionIndex> {
+    const path = mainSessionsIndexPath(root);
+    if (await exists(path)) {
+      const index = await readJson<MainSessionIndex>(path, "Main Agent session index");
+      assertStoredMainSessionIndex(index);
+      return index;
+    }
+    // First contact: the existing (or empty) main thread becomes session one.
+    const thread = await readThreadOrNewUnlocked(root, { type: "main" }, now);
+    const index: MainSessionIndex = {
+      activeId: `session-${randomUUID()}`,
+      sessions: [{ id: "", title: null, createdAt: thread.createdAt, updatedAt: thread.updatedAt, turns: userTurns(thread) }],
+    };
+    index.sessions[0]!.id = index.activeId;
+    await writeAtomicJson(path, index);
+    return index;
+  }
+
+  function mainSessionList(index: MainSessionIndex, active: DesignThread): DesignMainSessionList {
+    return {
+      activeId: index.activeId,
+      sessions: index.sessions.map((entry) => (
+        entry.id === index.activeId
+          ? { ...entry, updatedAt: active.updatedAt, turns: userTurns(active) }
+          : { ...entry }
+      )),
+    };
+  }
+
+  async function assertNoLiveMainJobUnlocked(root: string): Promise<void> {
+    const jobs = await listDesignJobsUnlocked(root);
+    if (jobs.some((job) => job.kind === "main-agent" && !TERMINAL_JOB_STATUSES.has(job.status))) {
+      throw new DesignStorageError("conflict", "Wait for the running Main Agent turn to finish before switching sessions");
+    }
+  }
+
+  /** Park the active thread under its session id and record its final shape in the index. */
+  async function parkActiveMainSessionUnlocked(root: string, index: MainSessionIndex, active: DesignThread): Promise<void> {
+    await writeAtomicJson(mainSessionFilePath(root, index.activeId), active);
+    const entry = index.sessions.find((candidate) => candidate.id === index.activeId)!;
+    entry.updatedAt = active.updatedAt;
+    entry.turns = userTurns(active);
+  }
+
+  async function listDesignMainSessions(dataDir: string, projectId: string): Promise<DesignMainSessionList> {
+    const root = designRoot(dataDir, projectId);
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const index = await readMainSessionIndexUnlocked(root);
+      return mainSessionList(index, await readThreadOrNewUnlocked(root, { type: "main" }));
+    });
+  }
+
+  async function createDesignMainSession(dataDir: string, projectId: string, now?: number): Promise<DesignMainSessionList> {
+    const root = designRoot(dataDir, projectId);
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const index = await readMainSessionIndexUnlocked(root, now);
+      const active = await readThreadOrNewUnlocked(root, { type: "main" }, now);
+      // An empty session is already "new"; do not stack blank sessions.
+      if (active.messages.length === 0) return mainSessionList(index, active);
+      if (index.sessions.length >= MAX_MAIN_SESSIONS) {
+        throw new DesignStorageError("limit", "Main Agent session limit reached");
+      }
+      await assertNoLiveMainJobUnlocked(root);
+      const timestamp = nowValue(now);
+      await parkActiveMainSessionUnlocked(root, index, active);
+      const fresh = newThread({ type: "main" }, timestamp);
+      const sessionId = `session-${randomUUID()}`;
+      await writeAuthorityJson(root, threadFilePath(root, { type: "main" }), fresh, [threadInvalidationTopic({ type: "main" })]);
+      index.sessions.push({ id: sessionId, title: null, createdAt: timestamp, updatedAt: timestamp, turns: 0 });
+      index.activeId = sessionId;
+      await writeAtomicJson(mainSessionsIndexPath(root), index);
+      return mainSessionList(index, fresh);
+    });
+  }
+
+  async function activateDesignMainSession(dataDir: string, projectId: string, sessionId: string, now?: number): Promise<DesignMainSessionList> {
+    const root = designRoot(dataDir, projectId);
+    safeSegment(sessionId, "Session id");
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const index = await readMainSessionIndexUnlocked(root, now);
+      const active = await readThreadOrNewUnlocked(root, { type: "main" }, now);
+      if (sessionId === index.activeId) return mainSessionList(index, active);
+      if (!index.sessions.some((entry) => entry.id === sessionId)) {
+        throw new DesignStorageError("not-found", `Main Agent session ${sessionId} was not found`);
+      }
+      await assertNoLiveMainJobUnlocked(root);
+      await parkActiveMainSessionUnlocked(root, index, active);
+      const parkedPath = mainSessionFilePath(root, sessionId);
+      let target: DesignThread;
+      if (await exists(parkedPath)) {
+        target = await readJson<DesignThread>(parkedPath, "Design Agent thread");
+        assertStoredThread(target, { type: "main" });
+      } else {
+        target = newThread({ type: "main" }, nowValue(now));
+      }
+      await writeAuthorityJson(root, threadFilePath(root, { type: "main" }), target, [threadInvalidationTopic({ type: "main" })]);
+      await rm(parkedPath, { force: true });
+      index.activeId = sessionId;
+      await writeAtomicJson(mainSessionsIndexPath(root), index);
+      return mainSessionList(index, target);
+    });
+  }
+
+  async function renameDesignMainSession(dataDir: string, projectId: string, sessionId: string, title: string | null): Promise<DesignMainSessionList> {
+    const root = designRoot(dataDir, projectId);
+    safeSegment(sessionId, "Session id");
+    const normalized = title === null ? null : title.trim();
+    if (normalized !== null && (!normalized || Buffer.byteLength(normalized, "utf8") > MAX_SESSION_TITLE_BYTES)) {
+      throw new DesignStorageError("invalid-input", "Main Agent session title is invalid");
+    }
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const index = await readMainSessionIndexUnlocked(root);
+      const entry = index.sessions.find((candidate) => candidate.id === sessionId);
+      if (!entry) throw new DesignStorageError("not-found", `Main Agent session ${sessionId} was not found`);
+      entry.title = normalized;
+      await writeAuthorityJson(root, mainSessionsIndexPath(root), index, [threadInvalidationTopic({ type: "main" })]);
+      return mainSessionList(index, await readThreadOrNewUnlocked(root, { type: "main" }));
+    });
+  }
+
+  async function deleteDesignMainSession(dataDir: string, projectId: string, sessionId: string, now?: number): Promise<DesignMainSessionList> {
+    const root = designRoot(dataDir, projectId);
+    safeSegment(sessionId, "Session id");
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const index = await readMainSessionIndexUnlocked(root, now);
+      if (!index.sessions.some((entry) => entry.id === sessionId)) {
+        throw new DesignStorageError("not-found", `Main Agent session ${sessionId} was not found`);
+      }
+      if (sessionId !== index.activeId) {
+        await rm(mainSessionFilePath(root, sessionId), { force: true });
+        index.sessions = index.sessions.filter((entry) => entry.id !== sessionId);
+        await writeAuthorityJson(root, mainSessionsIndexPath(root), index, [threadInvalidationTopic({ type: "main" })]);
+        return mainSessionList(index, await readThreadOrNewUnlocked(root, { type: "main" }));
+      }
+      await assertNoLiveMainJobUnlocked(root);
+      index.sessions = index.sessions.filter((entry) => entry.id !== sessionId);
+      // Fall back to the most recently touched remaining session, else a fresh one.
+      const next = [...index.sessions].sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null;
+      let target: DesignThread;
+      if (next) {
+        const parkedPath = mainSessionFilePath(root, next.id);
+        if (await exists(parkedPath)) {
+          target = await readJson<DesignThread>(parkedPath, "Design Agent thread");
+          assertStoredThread(target, { type: "main" });
+          await rm(parkedPath, { force: true });
+        } else {
+          target = newThread({ type: "main" }, nowValue(now));
+        }
+        index.activeId = next.id;
+      } else {
+        const timestamp = nowValue(now);
+        target = newThread({ type: "main" }, timestamp);
+        index.activeId = `session-${randomUUID()}`;
+        index.sessions.push({ id: index.activeId, title: null, createdAt: timestamp, updatedAt: timestamp, turns: 0 });
+      }
+      await writeAuthorityJson(root, threadFilePath(root, { type: "main" }), target, [threadInvalidationTopic({ type: "main" })]);
+      await writeAtomicJson(mainSessionsIndexPath(root), index);
+      return mainSessionList(index, target);
     });
   }
 
@@ -1974,6 +2195,11 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     getDesignMainPlanExecution,
     getDesignThread,
     listDesignJobs,
+    listDesignMainSessions,
+    createDesignMainSession,
+    activateDesignMainSession,
+    renameDesignMainSession,
+    deleteDesignMainSession,
     readDesignMainPlanExecutionUnlocked,
     readJob,
     recoverPendingJobCreationsUnlocked,

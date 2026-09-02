@@ -7,6 +7,7 @@ import type {
   DesignInvalidationMessage,
   DesignJob,
   DesignJobRetryResult,
+  DesignMainSessionList,
   DesignNodeVersion,
   DesignProjectBootstrapInput,
   DesignProjectBootstrapResult,
@@ -629,6 +630,11 @@ export interface ApiClient {
       idempotencyKey?: string;
     },
   ): Promise<DesignAgentTurnResult>;
+  listDesignMainSessions(projectId: string, signal?: AbortSignal): Promise<DesignMainSessionList>;
+  createDesignMainSession(projectId: string): Promise<DesignMainSessionList>;
+  activateDesignMainSession(projectId: string, sessionId: string): Promise<DesignMainSessionList>;
+  renameDesignMainSession(projectId: string, sessionId: string, title: string | null): Promise<DesignMainSessionList>;
+  deleteDesignMainSession(projectId: string, sessionId: string): Promise<DesignMainSessionList>;
   listDesignJobs(projectId: string, signal?: AbortSignal): Promise<DesignJob[]>;
   streamDesignCanvasInvalidations(
     projectId: string,
@@ -883,6 +889,28 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
           ? `/api/projects/${enc(projectId)}/design-canvas/agent/turns`
           : `/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(scope.nodeId)}/agent/turns`,
         jsonInit("POST", input),
+      ),
+    listDesignMainSessions: (projectId, signal) =>
+      json<DesignMainSessionList>(
+        `/api/projects/${enc(projectId)}/design-canvas/agent/sessions`,
+        signal === undefined ? undefined : { signal },
+      ),
+    createDesignMainSession: (projectId) =>
+      json<DesignMainSessionList>(`/api/projects/${enc(projectId)}/design-canvas/agent/sessions`, jsonInit("POST", {})),
+    activateDesignMainSession: (projectId, sessionId) =>
+      json<DesignMainSessionList>(
+        `/api/projects/${enc(projectId)}/design-canvas/agent/sessions/${enc(sessionId)}/activate`,
+        jsonInit("POST", {}),
+      ),
+    renameDesignMainSession: (projectId, sessionId, title) =>
+      json<DesignMainSessionList>(
+        `/api/projects/${enc(projectId)}/design-canvas/agent/sessions/${enc(sessionId)}`,
+        jsonInit("PATCH", { title }),
+      ),
+    deleteDesignMainSession: (projectId, sessionId) =>
+      json<DesignMainSessionList>(
+        `/api/projects/${enc(projectId)}/design-canvas/agent/sessions/${enc(sessionId)}`,
+        { method: "DELETE" },
       ),
     listDesignJobs: (projectId, signal) =>
       json<DesignJob[]>(

@@ -38,7 +38,7 @@ test("selected and keyboard-focused Nodes use restrained depth with discoverable
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*10px;/s);
   expect(css).toMatch(/\.design-canvas-node__frame\s*\{[^}]*border-radius:\s*7px;/s);
   expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:[^}]*0 10px 20px/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:\s*none;/s);
   expect(css).not.toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*white/s);
   expect(css).toMatch(/\[data-node-focus\][^{]*\[data-node-focus-role="source"\]::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
@@ -241,7 +241,7 @@ test("light-mode bottom controls and context menus follow the Spatial surface la
   expect(css).toMatch(/\.design-canvas-surface\[data-main-agent\] \.design-canvas-tools\s*\{[^}]*--design-canvas-toolbar-offset-x:\s*calc\(-1 \* \(clamp\(380px, 32vw, 492px\) \+ 8px\)\);/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*\.design-canvas-node\s*\{\s*opacity:\s*0\.45;/s);
   expect(css).toMatch(/\[data-context-menu-open\][^{]*::after\s*\{[^}]*opacity:\s*1;[^}]*transition-duration:\s*180ms,\s*200ms;/s);
-  expect(css).toMatch(/\.design-node-context-menu\s*\{[^}]*width:\s*284px;[^}]*border-radius:\s*16px;/s);
+  expect(css).toMatch(/\.design-node-catalog--context\s*\{[^}]*border-radius:\s*6px;[^}]*box-shadow:\s*none;[^}]*backdrop-filter:\s*none;/s);
   expect(css).not.toMatch(/\.design-canvas-node:hover(?:\s+\.design-canvas-node__frame)?\s*\{[^}]*\btransform:\s*[^;}]*scale/s);
 });
 
@@ -279,8 +279,8 @@ test("selected Nodes do not ship an unreachable inline toolbar", () => {
 });
 
 test("Canvas uses the requested neutral background in both color schemes", () => {
-  expect(css).toMatch(/\.design-canvas-surface\s*\{[^}]*background:\s*#e8eaeb;/s);
-  expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*oklch\(0\.165 0\.006 260\);/s);
+  expect(css).toMatch(/\.design-canvas-surface\s*\{[^}]*background:\s*oklch\(0\.925 0 0\);/s);
+  expect(css).toMatch(/\.dark \.design-canvas-surface\s*\{\s*background:\s*oklch\(0\.165 0 0\);/s);
 });
 
 test("Canvas menu surfaces leave presence opacity and transforms to the shared compositor track", () => {

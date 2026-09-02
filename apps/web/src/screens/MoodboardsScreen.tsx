@@ -498,7 +498,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
               {visible.map((board) => (
                 <StaggerItem as="li" key={board.id}>
                   <Card
-                    className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                    className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong"
                   >
                     <a
                       href={`/moodboards/${encodeURIComponent(board.id)}`}

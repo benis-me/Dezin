@@ -1,6 +1,6 @@
 {
   "name": "dezin",
-  "version": "0.31.8",
+  "version": "0.32.0",
   "private": true,
   "type": "module",
   "description": "Local-first Design Canvas driven by the coding-agent CLI you already use.",
@@ -24,7 +24,7 @@
     "ci": "pnpm typecheck && node scripts/check-process-leaks.mjs -- pnpm test:coverage && pnpm build:check && pnpm audit --prod --audit-level high",
     "qa:design:codebuddy": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/qa-design-codebuddy.ts"
   },
-  "packageManager": "pnpm@11.9.0",
+  "packageManager": "pnpm@11.25.0",
   "devDependencies": {
     "@types/node": "^26.0.0",
     "typescript": "^6.0.3"

@@ -30,7 +30,7 @@ function ContextMenuContent({
         data-dezin-menu-presence=""
         collisionPadding={8}
         className={cn(
-          "z-50 max-h-(--radix-context-menu-content-available-height) origin-(--radix-context-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border-[0.5px] border-border/80 bg-popover/95 p-1.5 text-popover-foreground shadow-pop outline-none backdrop-blur-xl",
+          "z-50 w-56 max-h-(--radix-context-menu-content-available-height) origin-(--radix-context-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border border-border bg-card p-1 text-sm text-popover-foreground shadow-none outline-none",
           className,
         )}
         {...props}
@@ -47,7 +47,7 @@ function ContextMenuItem({
     <ContextMenuPrimitive.Item
       data-slot="context-menu-item"
       className={cn(
-        "relative flex cursor-default select-none items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-hidden transition-[transform,background-color,color] duration-150 ease-[var(--ease-smooth)] active:scale-[0.985] motion-reduce:active:scale-100 focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-hidden transition-colors focus:bg-accent focus:text-accent-foreground data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&>svg]:size-3.5 [&>svg]:shrink-0",
         className,
       )}
       {...props}
@@ -62,7 +62,7 @@ function ContextMenuLabel({
   return (
     <ContextMenuPrimitive.Label
       data-slot="context-menu-label"
-      className={cn("px-2 py-1.5 text-xs font-medium text-muted-foreground", className)}
+      className={cn("px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground", className)}
       {...props}
     />
   );
@@ -75,7 +75,18 @@ function ContextMenuSeparator({
   return (
     <ContextMenuPrimitive.Separator
       data-slot="context-menu-separator"
-      className={cn("-mx-1 my-1 h-px bg-border", className)}
+      className={cn("my-1 h-px bg-border", className)}
+      {...props}
+    />
+  );
+}
+
+function ContextMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="context-menu-shortcut"
+      aria-hidden
+      className={cn("ml-auto shrink-0 pl-3 text-[10px] font-medium text-muted-foreground", className)}
       {...props}
     />
   );
@@ -87,5 +98,6 @@ export {
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger,
 };

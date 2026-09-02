@@ -10,8 +10,14 @@ import {
   DesignRevisionConflictError,
   MAX_DESIGN_ASSET_BYTES,
   MAX_DESIGN_CONTEXT_BYTES,
+  activateDesignMainSession,
   appendDesignJobActivity,
+  appendDesignThreadMessage,
   assertDesignFrozenContextBudget,
+  createDesignMainSession,
+  deleteDesignMainSession,
+  listDesignMainSessions,
+  renameDesignMainSession,
   buildPortableDesignVersionHtml,
   cancelDesignJob,
   createDesignJob,
@@ -4074,6 +4080,51 @@ test("document Nodes accept common Office MIME types and identical bytes cannot 
     });
     assert.notEqual(renamed.id, png.id);
     assert.equal(renamed.checksum, png.checksum);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Main Agent sessions park the active thread and swap transcripts", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-main-sessions-"));
+  const projectId = "project-main-sessions";
+  const mainMessages = async () => (await getDesignThread(dataDir, projectId, { type: "main" })).messages.map((message) => message.content);
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    const initial = await listDesignMainSessions(dataDir, projectId);
+    assert.equal(initial.sessions.length, 1);
+    assert.equal(initial.activeId, initial.sessions[0]!.id);
+    // An empty active session already is the fresh one.
+    assert.equal((await createDesignMainSession(dataDir, projectId)).sessions.length, 1);
+
+    await appendDesignThreadMessage(dataDir, projectId, { type: "main" }, { role: "user", content: "First brief" }, 100);
+    const created = await createDesignMainSession(dataDir, projectId, 200);
+    assert.equal(created.sessions.length, 2);
+    assert.notEqual(created.activeId, initial.activeId);
+    assert.deepEqual(await mainMessages(), []);
+    assert.equal(created.sessions.find((session) => session.id === initial.activeId)?.turns, 1);
+
+    await appendDesignThreadMessage(dataDir, projectId, { type: "main" }, { role: "user", content: "Second brief" }, 300);
+    const renamed = await renameDesignMainSession(dataDir, projectId, created.activeId, "Landing page");
+    assert.equal(renamed.sessions.find((session) => session.id === created.activeId)?.title, "Landing page");
+
+    const switched = await activateDesignMainSession(dataDir, projectId, initial.activeId, 400);
+    assert.equal(switched.activeId, initial.activeId);
+    assert.deepEqual(await mainMessages(), ["First brief"]);
+
+    // Deleting the active session falls back to the most recent remaining one.
+    const deleted = await deleteDesignMainSession(dataDir, projectId, initial.activeId, 500);
+    assert.equal(deleted.activeId, created.activeId);
+    assert.equal(deleted.sessions.length, 1);
+    assert.deepEqual(await mainMessages(), ["Second brief"]);
+
+    // A live Main Agent Job pins the transcript it is writing into.
+    await createDesignJob(dataDir, projectId, {
+      kind: "main-agent",
+      ...FIXTURE_JOB_IDENTITY,
+      reserveMainThreadTurn: { userContent: "Go", assistantContent: DESIGN_MAIN_AGENT_QUEUED_MESSAGE },
+    }, 600);
+    await assert.rejects(createDesignMainSession(dataDir, projectId, 700), /running Main Agent turn/);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

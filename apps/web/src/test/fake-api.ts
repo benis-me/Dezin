@@ -36,6 +36,13 @@ function emptyCanvas(projectId: string): DesignCanvas {
   };
 }
 
+function fakeSessions() {
+  return {
+    activeId: "session-fake",
+    sessions: [{ id: "session-fake", title: null, createdAt: NOW, updatedAt: NOW, turns: 0 }],
+  };
+}
+
 function emptyThread(scope: DesignThread["scope"]): DesignThread {
   return {
     schemaVersion: 2,
@@ -209,6 +216,11 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
       }),
       canvas: emptyCanvas(projectId),
     }),
+    listDesignMainSessions: async () => fakeSessions(),
+    createDesignMainSession: async () => fakeSessions(),
+    activateDesignMainSession: async () => fakeSessions(),
+    renameDesignMainSession: async () => fakeSessions(),
+    deleteDesignMainSession: async () => fakeSessions(),
     listDesignJobs: async () => [],
     // eslint-disable-next-line require-yield
     streamDesignCanvasInvalidations: async function* () {},

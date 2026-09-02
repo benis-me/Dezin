@@ -38,7 +38,10 @@ import {
   DesignAgentProviderUnsupportedError,
 } from "./design-agent-confinement.ts";
 import {
+  activateDesignMainSession,
   buildPortableDesignVersionHtml,
+  createDesignMainSession,
+  deleteDesignMainSession,
   getDesignAssetManifest,
   getDesignCanvas,
   getDesignJob,
@@ -47,8 +50,10 @@ import {
   importDesignCanvasAssetBatch,
   listDesignAssets,
   listDesignJobs,
+  listDesignMainSessions,
   listDesignVersions,
   mutateDesignCanvas,
+  renameDesignMainSession,
   redoDesignCanvas,
   resolveDesignAssetFile,
   resolveDesignVersionPreview,
@@ -103,6 +108,11 @@ const EMBEDDED_PREVIEW_CSP = [
   "sandbox allow-scripts",
 ].join("; ");
 
+/**
+ * Injected into the sandboxed exact-Version document. One private MessagePort
+ * carries: right-click / annotate-click element descriptions, Escape, and the
+ * document's natural size; the parent can only toggle annotate mode over it.
+ */
 const EMBEDDED_PREVIEW_BRIDGE = Buffer.from(
   [
     '<script data-dezin-embedded-preview-bridge>(()=>{const apply=Reflect.apply;',
@@ -112,20 +122,41 @@ const EMBEDDED_PREVIEW_BRIDGE = Buffer.from(
     'let binary="";for(const byte of bytes)binary+=String.fromCharCode(byte);',
     'const nonce=btoa(binary).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/g,"");',
     'const channel=new MessageChannel();apply(portStart,channel.port1,[]);',
-    'addEventListener("contextmenu",(event)=>{if(!event.isTrusted)return;',
-    'apply(prevent,event,[]);apply(stop,event,[]);',
-    'const target=event.target instanceof Element?event.target:document.elementFromPoint(event.clientX,event.clientY);if(!target)return;',
+    'const post=(message)=>apply(portPost,channel.port1,[Object.assign({source:"dezin",nonce,protocol:1},message)]);',
     'const clean=(value,maximum)=>String(value||"").replace(/\\s+/g," ").trim().slice(0,maximum);',
     'const escapeCss=(value)=>globalThis.CSS&&typeof globalThis.CSS.escape==="function"?globalThis.CSS.escape(value):String(value).replace(/[^a-zA-Z0-9_-]/g,"\\\\$&");',
     'const segment=(element)=>{const tag=element.tagName.toLowerCase();const parent=element.parentElement;if(!parent)return tag;',
     'const siblings=Array.from(parent.children).filter((candidate)=>candidate.tagName===element.tagName);return siblings.length>1?`${tag}:nth-of-type(${siblings.indexOf(element)+1})`:tag;};',
+    'const describe=(target,clientX,clientY)=>{',
     'const stable=target.id?`#${escapeCss(target.id)}`:target.getAttribute("data-dezin-id")?`[data-dezin-id="${String(target.getAttribute("data-dezin-id")).replace(/["\\\\]/g,"\\\\$&")}"]`:target.getAttribute("data-testid")?`[data-testid="${String(target.getAttribute("data-testid")).replace(/["\\\\]/g,"\\\\$&")}"]`:null;',
     'const parts=[];let cursor=target;while(cursor&&cursor!==document.documentElement&&parts.length<6){parts.unshift(segment(cursor));cursor=cursor.parentElement;}',
     'const selector=clean(stable||parts.join(" > "),1024)||target.tagName.toLowerCase();',
     'const path=[];cursor=target;while(cursor&&cursor!==document.documentElement&&path.length<6){const classes=Array.from(cursor.classList||[]).slice(0,2).map(escapeCss);path.unshift(cursor.tagName.toLowerCase()+(cursor.id?`#${escapeCss(cursor.id)}`:classes.length?`.${classes.join(".")}`:""));cursor=cursor.parentElement;}',
     'const rect=target.getBoundingClientRect();',
-    'apply(portPost,channel.port1,[{source:"dezin",type:"embedded-preview-context-menu",',
-    'nonce,protocol:1,clientX:event.clientX,clientY:event.clientY,tagName:target.tagName.toLowerCase(),selector,targetPath:clean(path.join(" > "),1024)||selector,nearbyText:clean(target.innerText||target.textContent,512),rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}}]);},true);',
+    'return {type:"embedded-preview-context-menu",clientX,clientY,tagName:target.tagName.toLowerCase(),selector,targetPath:clean(path.join(" > "),1024)||selector,nearbyText:clean(target.innerText||target.textContent,512),rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}};};',
+    'const targetAt=(event)=>event.target instanceof Element&&event.target!==highlight?event.target:document.elementFromPoint(event.clientX,event.clientY);',
+    'addEventListener("contextmenu",(event)=>{if(!event.isTrusted)return;apply(prevent,event,[]);apply(stop,event,[]);',
+    'const target=targetAt(event);if(target)post(describe(target,event.clientX,event.clientY));},true);',
+    // Annotate mode: hover outline + click-to-describe, toggled by the parent.
+    'let annotating=false;const highlight=document.createElement("div");highlight.setAttribute("data-dezin-annotate-highlight","");',
+    'highlight.style.cssText="position:fixed;z-index:2147483647;pointer-events:none;border:1.5px solid #0d99ff;background:rgba(13,153,255,.07);border-radius:2px;box-sizing:border-box;display:none;transition:top 60ms,left 60ms,width 60ms,height 60ms";',
+    'const hideHighlight=()=>{highlight.style.display="none";};',
+    'const moveHighlight=(target)=>{if(!target||target===highlight||target===document.documentElement||target===document.body){hideHighlight();return;}const rect=target.getBoundingClientRect();highlight.style.display="block";highlight.style.left=rect.left+"px";highlight.style.top=rect.top+"px";highlight.style.width=rect.width+"px";highlight.style.height=rect.height+"px";};',
+    'const setAnnotating=(enabled)=>{annotating=!!enabled;document.documentElement.style.cursor=annotating?"crosshair":"";if(annotating){if(!highlight.isConnected)(document.body||document.documentElement).appendChild(highlight);}else hideHighlight();};',
+    'addEventListener("mousemove",(event)=>{if(annotating)moveHighlight(targetAt(event));},true);',
+    'addEventListener("mouseleave",()=>{if(annotating)hideHighlight();},true);',
+    'addEventListener("scroll",()=>{if(annotating)hideHighlight();},true);',
+    'addEventListener("click",(event)=>{if(!annotating||!event.isTrusted)return;apply(prevent,event,[]);apply(stop,event,[]);',
+    'const target=targetAt(event);if(target)post(describe(target,event.clientX,event.clientY));},true);',
+    'addEventListener("keydown",(event)=>{if(event.isTrusted&&event.key==="Escape")post({type:"embedded-preview-escape"});},true);',
+    'channel.port1.onmessage=(event)=>{const data=event.data;if(!data||data.source!=="dezin-parent"||data.nonce!==nonce||data.protocol!==1)return;if(data.type==="annotate-mode")setAnnotating(data.enabled===true);};',
+    // Natural document size so the Canvas can fit the Node frame to its content.
+    'let lastLayout="",layoutFrame=0;const reportLayout=()=>{if(layoutFrame)return;layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;',
+    'const root=document.documentElement,body=document.body;const width=root.clientWidth||innerWidth;const height=Math.max(root.scrollHeight,body?body.scrollHeight:0,root.clientHeight);',
+    'const key=width+"x"+height;if(!width||!height||key===lastLayout)return;lastLayout=key;post({type:"embedded-preview-layout",width,height});});};',
+    'addEventListener("load",reportLayout);addEventListener("resize",reportLayout);',
+    'if(typeof ResizeObserver==="function"){const observer=new ResizeObserver(reportLayout);observer.observe(document.documentElement);if(document.body)observer.observe(document.body);}',
+    'if(document.readyState==="complete")reportLayout();',
     'apply(parentPost,parent,[{source:"dezin",type:"embedded-preview-context-menu-ready",',
     'nonce,protocol:1},"*",[channel.port2]]);})();</script>',
   ].join(""),
@@ -140,31 +171,6 @@ function queuedDesignCoverCapture(task: () => Promise<Buffer>): Promise<Buffer> 
   const capture = designCoverCaptureQueue.then(task, task);
   designCoverCaptureQueue = capture.then(() => undefined, () => undefined);
   return capture;
-}
-
-function escapedSvgText(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[character]!);
-}
-
-function fallbackDesignCover(name: string, nodeCount: number): Buffer {
-  const title = escapedSvgText(name).slice(0, 72);
-  const detail = nodeCount === 1 ? "1 canvas node" : `${nodeCount} canvas nodes`;
-  return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750">`
-      + `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#202126"/><stop offset="1" stop-color="#0f1013"/></linearGradient></defs>`
-      + `<rect width="1200" height="750" fill="url(#g)"/><circle cx="1030" cy="-30" r="310" fill="#6d5dfc" opacity=".18"/>`
-      + `<rect x="72" y="70" width="1056" height="610" rx="32" fill="#18191d" stroke="#ffffff" stroke-opacity=".1"/>`
-      + `<text x="128" y="558" fill="#f5f5f6" font-family="ui-sans-serif,system-ui,sans-serif" font-size="54" font-weight="650">${title}</text>`
-      + `<text x="130" y="608" fill="#a5a7af" font-family="ui-sans-serif,system-ui,sans-serif" font-size="24">${detail}</text>`
-      + `</svg>`,
-    "utf8",
-  );
 }
 
 function sendDesignCover(
@@ -571,27 +577,23 @@ export async function handleServeDesignCover(
   const candidate = ordered.find((node) => node.kind === "page" && hasPreview(node))
     ?? ordered.find((node) => DESIGN_GENERATIVE_NODE_KINDS.includes(node.kind as (typeof DESIGN_GENERATIVE_NODE_KINDS)[number]) && hasPreview(node))
     ?? ordered.find((node) => node.kind === "image" && hasPreview(node));
-  const fallback = () => sendDesignCover(req, res, fallbackDesignCover(project.name, canvas.nodes.length), "image/svg+xml");
-  if (!candidate) {
-    fallback();
-    return;
-  }
+  // No synthetic cover: the web shows its own themed placeholder when this 404s.
+  const noCover = () => new HttpError(404, "Design Project has no cover yet");
+  if (!candidate) throw noCover();
 
   const versionId = candidate.selectedVersionId ?? candidate.currentVersionId!;
   let resolved: Awaited<ReturnType<typeof resolveDesignVersionPreview>>;
   try {
     resolved = await resolveDesignVersionPreview(deps.dataDir, projectId, candidate.id, versionId);
   } catch {
-    fallback();
-    return;
+    throw noCover();
   }
   if (resolved.kind === "asset") {
     if (resolved.assetManifest.mimeType.startsWith("image/") && resolved.assetManifest.mimeType !== "image/svg+xml") {
       await sendAsset(req, res, { path: resolved.path, manifest: resolved.assetManifest });
       return;
     }
-    fallback();
-    return;
+    throw noCover();
   }
 
   const coverRoot = join(deps.dataDir, "projects", projectId, "design", "cover");
@@ -647,11 +649,13 @@ export async function handleServeDesignCover(
     designCoverCaptures.set(key, capture);
     void capture.finally(() => designCoverCaptures.delete(key)).catch(() => {});
   }
+  let png: Buffer;
   try {
-    sendDesignCover(req, res, await capture, "image/png");
+    png = await capture;
   } catch {
-    fallback();
+    throw noCover();
   }
+  sendDesignCover(req, res, png, "image/png");
 }
 
 export async function handlePutDesignCanvas(
@@ -921,6 +925,28 @@ export async function handleDownloadPortableDesignVersionPreview(req: IncomingMe
 
 export async function handleGetMainDesignThread(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   sendJson(res, 200, await getDesignThread(d.dataDir, p.id!, { type: "main" }));
+}
+
+export async function handleListMainDesignSessions(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  sendJson(res, 200, await listDesignMainSessions(d.dataDir, p.id!));
+}
+
+export async function handleCreateMainDesignSession(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  sendJson(res, 201, await createDesignMainSession(d.dataDir, p.id!));
+}
+
+export async function handleActivateMainDesignSession(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  sendJson(res, 200, await activateDesignMainSession(d.dataDir, p.id!, p.sessionId!));
+}
+
+export async function handleRenameMainDesignSession(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  const body = exactRecord(await readJsonBody(req), "Main Agent session", ["title"]);
+  const title = body.title === null ? null : boundedString(body.title, "Main Agent session title", 160)!;
+  sendJson(res, 200, await renameDesignMainSession(d.dataDir, p.id!, p.sessionId!, title));
+}
+
+export async function handleDeleteMainDesignSession(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  sendJson(res, 200, await deleteDesignMainSession(d.dataDir, p.id!, p.sessionId!));
 }
 
 export async function handleGetNodeDesignThread(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {

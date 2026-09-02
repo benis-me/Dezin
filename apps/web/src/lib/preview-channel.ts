@@ -1,8 +1,10 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 export const PREVIEW_BRIDGE_PROTOCOL = 1 as const;
 export const EMBEDDED_PREVIEW_CONTEXT_MENU_MESSAGE = "embedded-preview-context-menu" as const;
 export const EMBEDDED_PREVIEW_CONTEXT_MENU_READY_MESSAGE = "embedded-preview-context-menu-ready" as const;
+export const EMBEDDED_PREVIEW_LAYOUT_MESSAGE = "embedded-preview-layout" as const;
+export const EMBEDDED_PREVIEW_ESCAPE_MESSAGE = "embedded-preview-escape" as const;
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const MAX_PENDING_MESSAGES = 32;
 const EXACT_DESIGN_VERSION_PREVIEW_PATH = new RegExp(
@@ -33,6 +35,16 @@ export type EmbeddedPreviewContextMenuPortMessage = {
   targetPath: string;
   nearbyText: string;
   rect: { x: number; y: number; width: number; height: number };
+};
+
+export type EmbeddedPreviewLayoutPortMessage = {
+  source: "dezin";
+  type: typeof EMBEDDED_PREVIEW_LAYOUT_MESSAGE;
+  nonce: string;
+  protocol: typeof PREVIEW_BRIDGE_PROTOCOL;
+  /** Natural document size in CSS px at the iframe's current layout width. */
+  width: number;
+  height: number;
 };
 
 type EmbeddedPreviewContextMenuReadyMessage = {
@@ -137,6 +149,31 @@ export function isEmbeddedPreviewContextMenuPortMessage(
     && boundedNumber(rect.x) && boundedNumber(rect.y)
     && boundedNumber(rect.width) && rect.width >= 0
     && boundedNumber(rect.height) && rect.height >= 0;
+}
+
+export function isEmbeddedPreviewLayoutPortMessage(
+  value: unknown,
+  bridgeNonce: string,
+): value is EmbeddedPreviewLayoutPortMessage {
+  if (!value || typeof value !== "object" || !NONCE_PATTERN.test(bridgeNonce)) return false;
+  const message = value as Partial<EmbeddedPreviewLayoutPortMessage>;
+  const boundedSize = (candidate: unknown) => typeof candidate === "number"
+    && Number.isFinite(candidate) && candidate > 0 && candidate <= 1_000_000;
+  return message.source === "dezin"
+    && message.nonce === bridgeNonce
+    && message.protocol === PREVIEW_BRIDGE_PROTOCOL
+    && message.type === EMBEDDED_PREVIEW_LAYOUT_MESSAGE
+    && boundedSize(message.width)
+    && boundedSize(message.height);
+}
+
+function isEmbeddedPreviewEscapePortMessage(value: unknown, bridgeNonce: string): boolean {
+  if (!value || typeof value !== "object" || !NONCE_PATTERN.test(bridgeNonce)) return false;
+  const message = value as Partial<PreviewChannelMessage>;
+  return message.source === "dezin"
+    && message.nonce === bridgeNonce
+    && message.protocol === PREVIEW_BRIDGE_PROTOCOL
+    && message.type === EMBEDDED_PREVIEW_ESCAPE_MESSAGE;
 }
 
 function isEmbeddedPreviewContextMenuReadyMessage(
@@ -377,27 +414,54 @@ export function usePreviewChannel({
  * Accept the first child-created MessagePort from one instrumented preview
  * document. The parent deliberately never reconnects on iframe load, so a
  * document that navigates itself cannot inherit the original document's menu
- * capability.
+ * capability. The same port carries element picks (right-click, or click while
+ * annotating), Escape, and the document's natural size; the parent only ever
+ * sends the annotate-mode toggle back.
  */
 export function useEmbeddedPreviewContextMenuChannel({
   iframeRef,
   previewSrc,
   enabled,
+  annotateMode = false,
   onContextMenu,
+  onLayout,
+  onEscape,
 }: {
   iframeRef: RefObject<HTMLIFrameElement | null>;
   previewSrc: string | null;
   enabled: boolean;
+  annotateMode?: boolean;
   onContextMenu: (message: EmbeddedPreviewContextMenuPortMessage) => void;
+  onLayout?: (message: EmbeddedPreviewLayoutPortMessage) => void;
+  onEscape?: () => void;
 }): void {
   const onContextMenuRef = useRef(onContextMenu);
   onContextMenuRef.current = onContextMenu;
+  const onLayoutRef = useRef(onLayout);
+  onLayoutRef.current = onLayout;
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
+  const annotateModeRef = useRef(annotateMode);
+  annotateModeRef.current = annotateMode;
+  const sendAnnotateModeRef = useRef<((enabled: boolean) => void) | null>(null);
 
   useLayoutEffect(() => {
     if (!enabled || previewSrc === null || previewBridgeAddressForSrc(previewSrc).kind === "invalid") return;
     let disposed = false;
     let acceptedPort: MessagePort | null = null;
     let acceptedNonce: string | null = null;
+
+    const sendAnnotateMode = (value: boolean) => {
+      if (disposed || acceptedPort === null || acceptedNonce === null) return;
+      acceptedPort.postMessage({
+        source: "dezin-parent",
+        type: "annotate-mode",
+        nonce: acceptedNonce,
+        protocol: PREVIEW_BRIDGE_PROTOCOL,
+        enabled: value,
+      });
+    };
+    sendAnnotateModeRef.current = sendAnnotateMode;
 
     const receiveReady = (event: MessageEvent<unknown>) => {
       const frameWindow = iframeRef.current?.contentWindow;
@@ -411,20 +475,31 @@ export function useEmbeddedPreviewContextMenuChannel({
       acceptedPort = port;
       acceptedNonce = event.data.nonce;
       port.onmessage = (messageEvent) => {
-        if (disposed || port !== acceptedPort || acceptedNonce === null
-          || !isEmbeddedPreviewContextMenuPortMessage(messageEvent.data, acceptedNonce)) return;
-        onContextMenuRef.current(messageEvent.data);
+        if (disposed || port !== acceptedPort || acceptedNonce === null) return;
+        if (isEmbeddedPreviewContextMenuPortMessage(messageEvent.data, acceptedNonce)) {
+          onContextMenuRef.current(messageEvent.data);
+        } else if (isEmbeddedPreviewLayoutPortMessage(messageEvent.data, acceptedNonce)) {
+          onLayoutRef.current?.(messageEvent.data);
+        } else if (isEmbeddedPreviewEscapePortMessage(messageEvent.data, acceptedNonce)) {
+          onEscapeRef.current?.();
+        }
       };
       port.start();
+      if (annotateModeRef.current) sendAnnotateMode(true);
     };
 
     window.addEventListener("message", receiveReady);
     return () => {
       disposed = true;
+      sendAnnotateModeRef.current = null;
       window.removeEventListener("message", receiveReady);
       acceptedPort?.close();
       acceptedPort = null;
       acceptedNonce = null;
     };
   }, [enabled, iframeRef, previewSrc]);
+
+  useEffect(() => {
+    sendAnnotateModeRef.current?.(annotateMode);
+  }, [annotateMode]);
 }

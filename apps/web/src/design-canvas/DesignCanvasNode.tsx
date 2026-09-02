@@ -11,16 +11,17 @@ import {
 import {
   CircleAlert,
   LoaderCircle,
-  Pause,
   Play,
   Sparkles,
   Volume2,
   VolumeX,
 } from "lucide-react";
+import { DOME_CIRCLE, Glass } from "refractive-glass-react";
 import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -54,6 +55,10 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   onAppendMaterialVersion?: (nodeId: string, file: File) => Promise<void>;
   onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
   onPreviewContextMenu?: (nodeId: string, target: DesignPreviewAnnotationTarget) => void;
+  /** Escape pressed inside the focused preview document. */
+  onPreviewEscape?: (nodeId: string) => void;
+  /** Hover-highlight elements in the focused preview and report clicks as annotation targets. */
+  annotateMode?: boolean;
   onFocusAnimationStart?: (nodeId: string, phase: NodeFocusMotion["phase"], durationMs: number) => void;
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
   contentLayout?: DesignNodeContentLayout | null;
@@ -481,6 +486,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     onAppendMaterialVersion,
     onContentAspectRatio,
     onPreviewContextMenu,
+    onPreviewEscape,
+    annotateMode = false,
     onFocusAnimationStart,
     onFocusAnimationComplete,
     contentLayout = null,
@@ -523,6 +530,13 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
     iframeRef,
     previewSrc: previewFrameAddressValue?.src ?? null,
     enabled: previewFrameAddressValue?.instrumented === true && onPreviewContextMenu !== undefined,
+    annotateMode: focusSource && annotateMode,
+    onLayout: (message) => {
+      if (!material) onContentAspectRatio?.(node.id, message.width / message.height);
+    },
+    onEscape: () => {
+      if (focusSource) onPreviewEscape?.(node.id);
+    },
     onContextMenu: (message) => {
       const iframe = iframeRef.current;
       if (!focusSource || !onPreviewContextMenu || !iframe) return;
@@ -1095,6 +1109,42 @@ function formatVideoTime(value: number): string {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+function clampNumber(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+/** Glyphs from react-liquid-glass's video demo, so the lens and its icon read as one control. */
+function PlayGlyph() {
+  return (
+    <svg viewBox="-9.86 -5.5 52 52" fill="currentColor" aria-hidden>
+      <path d="M35.25 24.3575C37.9167 22.8179 37.9167 18.9689 35.25 17.4293L6.00001 0.541836C3.33334 -0.997765 1.73986e-06 0.926732 1.87446e-06 4.00593L3.35081e-06 37.7809C3.48541e-06 40.8601 3.33334 42.7846 6 41.245L35.25 24.3575Z" />
+    </svg>
+  );
+}
+
+function PauseGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <rect x="5.25" y="2.625" width="4.5" height="18.75" rx="1.125" />
+      <rect x="14.25" y="2.625" width="4.5" height="18.75" rx="1.125" />
+    </svg>
+  );
+}
+
+/** Dome lens for the play control; no wash or drop shadow so nothing lingers while the filter is off. */
+const VIDEO_PLAY_LENS = {
+  ...DOME_CIRCLE,
+  mapSize: 256,
+  brightness: 0,
+  edgeShadow: undefined,
+  restEdgeShadow: undefined,
+};
+
+/**
+ * Video node player: the exact <video> refracted through a liquid-glass play
+ * lens (react-liquid-glass), with a glass seek bar. Controls show while paused
+ * or hovered; the refraction filter is only active while they show.
+ */
 function DesignVideoPlayer({
   node,
   url,
@@ -1108,12 +1158,41 @@ function DesignVideoPlayer({
   onContentAspectRatio?: (nodeId: string, aspectRatio: number) => void;
   onError: () => void;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const resumeAfterSeekRef = useRef(false);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(true);
+  const [hovering, setHovering] = useState(false);
+  const [seeking, setSeeking] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [size, setSize] = useState({
+    width: Math.round(node.geometry.width),
+    height: Math.round(node.geometry.height),
+  });
   const progress = duration > 0 ? Math.min(100, currentTime / duration * 100) : 0;
+  const controlsVisible = !playing || hovering || seeking;
+  // Lens and bar scale with the frame: a canvas thumbnail gets a small control, a focused node a large one.
+  const playRadius = Math.round(clampNumber(Math.min(size.width, size.height) * 0.14, 20, 56));
+  const margin = Math.round(clampNumber(size.width * 0.04, 10, 24));
+  const barHeight = Math.round(clampNumber(playRadius * 0.5, 22, 30));
+  const lens = useMemo(
+    () => ({ ...VIDEO_PLAY_LENS, lensW: playRadius, lensH: playRadius, borderRadius: playRadius }),
+    [playRadius],
+  );
+
+  useEffect(() => {
+    const element = rootRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => {
+      const box = entry?.contentRect;
+      if (box && box.width > 0 && box.height > 0) setSize({ width: box.width, height: box.height });
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   const togglePlayback = useCallback(() => {
     const video = videoRef.current;
@@ -1122,82 +1201,132 @@ function DesignVideoPlayer({
     else video.pause();
   }, []);
 
+  const seekToPointer = useCallback((clientX: number) => {
+    const video = videoRef.current;
+    const track = trackRef.current;
+    if (!video || !track || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = clampNumber((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    video.currentTime = ratio * video.duration;
+    setCurrentTime(video.currentTime);
+  }, []);
+
   return (
     <div
-      className="design-canvas-video-player nodrag nopan"
+      ref={rootRef}
+      className="design-canvas-video-player"
       data-playing={playing || undefined}
       data-focused={focused || undefined}
+      onPointerEnter={() => setHovering(true)}
+      onPointerLeave={() => setHovering(false)}
     >
-      <video
-        ref={videoRef}
-        src={url}
-        width={Math.round(node.geometry.width)}
-        height={Math.round(node.geometry.height)}
-        muted={muted}
-        playsInline
-        preload="metadata"
-        className="design-canvas-node__asset design-canvas-node__asset--video"
-        onLoadedMetadata={(event) => {
-          const video = event.currentTarget;
-          setDuration(video.duration);
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            onContentAspectRatio?.(node.id, video.videoWidth / video.videoHeight);
-          }
-        }}
-        onDurationChange={(event) => setDuration(event.currentTarget.duration)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
-        onError={onError}
-      />
-      <button
-        type="button"
-        className="design-canvas-video-player__center"
-        aria-label={`Play ${node.name}`}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          togglePlayback();
-        }}
+      <Glass
+        className="design-canvas-video-player__glass"
+        lens={lens}
+        x={0.5}
+        y={0.5}
+        filterEnabled={controlsVisible}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
       >
-        <Play aria-hidden fill="currentColor" />
-      </button>
-      <div
-        className="design-canvas-video-player__controls"
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button type="button" aria-label={playing ? `Pause ${node.name}` : `Play ${node.name}`} onClick={togglePlayback}>
-          <IconSwap active={playing} first={<Play />} second={<Pause />} />
-        </button>
-        <input
-          type="range"
-          min={0}
-          max={duration || 0}
-          step="any"
-          value={Math.min(currentTime, duration || 0)}
-          aria-label={`Seek ${node.name}`}
-          style={{ "--design-video-progress": `${progress}%` } as CSSProperties}
-          onChange={(event) => {
-            const next = Number(event.currentTarget.value);
-            if (!videoRef.current || !Number.isFinite(next)) return;
-            videoRef.current.currentTime = next;
-            setCurrentTime(next);
-          }}
-        />
-        <span>{formatVideoTime(currentTime)} / {formatVideoTime(duration)}</span>
+        <div className="design-canvas-video-player__stage" style={{ width: size.width, height: size.height }}>
+          <video
+            ref={videoRef}
+            src={url}
+            width={Math.round(node.geometry.width)}
+            height={Math.round(node.geometry.height)}
+            muted={muted}
+            playsInline
+            preload="metadata"
+            className="design-canvas-node__asset design-canvas-node__asset--video"
+            onLoadedMetadata={(event) => {
+              const video = event.currentTarget;
+              setDuration(video.duration);
+              if (video.videoWidth > 0 && video.videoHeight > 0) {
+                onContentAspectRatio?.(node.id, video.videoWidth / video.videoHeight);
+              }
+            }}
+            onDurationChange={(event) => setDuration(event.currentTarget.duration)}
+            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onEnded={() => setPlaying(false)}
+            onError={onError}
+          />
+        </div>
+      </Glass>
+      <div className="design-canvas-video-player__controls" data-visible={controlsVisible ? "true" : "false"}>
         <button
           type="button"
-          aria-label={muted ? `Unmute ${node.name}` : `Mute ${node.name}`}
-          onClick={() => {
-            const next = !muted;
-            setMuted(next);
-            if (videoRef.current) videoRef.current.muted = next;
+          className="design-canvas-video-player__play nodrag nopan"
+          style={{ width: playRadius * 2, height: playRadius * 2 }}
+          aria-label={playing ? `Pause ${node.name}` : `Play ${node.name}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            togglePlayback();
           }}
         >
-          <IconSwap active={muted} first={<Volume2 />} second={<VolumeX />} />
+          {playing ? <PauseGlyph /> : <PlayGlyph />}
         </button>
+        <div
+          className="design-canvas-video-player__bar nodrag nopan"
+          style={{ left: margin, right: margin, bottom: margin, height: barHeight }}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+            const video = videoRef.current;
+            resumeAfterSeekRef.current = video !== null && !video.paused;
+            video?.pause();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setSeeking(true);
+            seekToPointer(event.clientX);
+          }}
+          onPointerMove={(event) => {
+            if (seeking) seekToPointer(event.clientX);
+          }}
+          onPointerUp={(event) => {
+            if (!seeking) return;
+            event.currentTarget.releasePointerCapture(event.pointerId);
+            setSeeking(false);
+            if (resumeAfterSeekRef.current) void videoRef.current?.play().catch(() => setPlaying(false));
+          }}
+          onPointerCancel={() => setSeeking(false)}
+        >
+          <div
+            ref={trackRef}
+            className="design-canvas-video-player__track"
+            role="slider"
+            aria-label={`Seek ${node.name}`}
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration)}
+            aria-valuenow={Math.round(currentTime)}
+            aria-valuetext={`${formatVideoTime(currentTime)} of ${formatVideoTime(duration)}`}
+            tabIndex={0}
+            onKeyDown={(event) => {
+              const video = videoRef.current;
+              if (!video || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+              event.preventDefault();
+              video.currentTime = clampNumber(video.currentTime + (event.key === "ArrowRight" ? 5 : -5), 0, video.duration || 0);
+              setCurrentTime(video.currentTime);
+            }}
+          >
+            <div className="design-canvas-video-player__progress" style={{ width: `${progress}%` }} />
+          </div>
+          <span className="design-canvas-video-player__time">{formatVideoTime(currentTime)} / {formatVideoTime(duration)}</span>
+          <button
+            type="button"
+            className="design-canvas-video-player__mute"
+            aria-label={muted ? `Unmute ${node.name}` : `Mute ${node.name}`}
+            onClick={() => {
+              const next = !muted;
+              setMuted(next);
+              if (videoRef.current) videoRef.current.muted = next;
+            }}
+          >
+            <IconSwap active={muted} first={<Volume2 />} second={<VolumeX />} />
+          </button>
+        </div>
       </div>
     </div>
   );

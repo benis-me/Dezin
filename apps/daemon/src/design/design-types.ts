@@ -25,6 +25,8 @@ import type {
   DesignThreadMessage,
   DesignThreadRole,
   DesignThreadScope,
+  DesignMainSession,
+  DesignMainSessionList,
   DesignViewport,
   NewDesignNode,
 } from "@dezin/design-canvas-contracts";
@@ -59,6 +61,8 @@ export type {
   DesignThreadMessage,
   DesignThreadRole,
   DesignThreadScope,
+  DesignMainSession,
+  DesignMainSessionList,
   DesignViewport,
   NewDesignNode,
 };
