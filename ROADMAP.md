@@ -19,7 +19,8 @@ Dezin is an early open-source Design Canvas. This file describes the current pro
 - **Implementation Export** to an immutable local Vite + TypeScript directory with a frozen manifest, strict source/built-output scanning, CSP, TypeScript, isolated Vite build, and Chrome desktop/mobile visual evidence.
 - One bounded continuation for incomplete/timeout Export work and one bounded validation-repair turn.
 - Moodboards, Design Systems, Effects, Settings, Electron development shell, and Chrome reference-capture extension.
-- CI gates for tests, measured coverage floors, typechecking, bundle budgets, child-process leaks, and high-severity production dependency audit.
+- CI gates for tests, measured coverage floors, typechecking, bundle budgets, child-process leaks, and high-severity production dependency audit; parallel jobs plus a macOS desktop suite; a tag-triggered draft release workflow.
+- September 2026 hardening: the daemon token reaches the Web app as an HttpOnly cookie instead of a page global; API keys are encrypted at rest when the desktop shell supplies a keystore-backed key; public asset and preview responses allow anonymous CORS so opaque-origin previews can use images in canvas and WebGL; runtime-gate failures are explained in plain language; blank-canvas projects adopt their first Page title; the retired `quality`/`research`/`prompt`/`skills`/`craft` packages were deleted.
 
 ## Required before the next release
 
@@ -40,7 +41,7 @@ Dezin is an early open-source Design Canvas. This file describes the current pro
 
 ## Formally retired from the primary Canvas contract
 
-The repository still contains useful standalone or historical code for these concepts, but the current application does not claim them as shipped Canvas features:
+The code for these concepts was removed from the repository in September 2026 (`docs/DESIGN-PROCESS.md` keeps the design history); the current application does not claim them as shipped Canvas features:
 
 - Prototype/Standard build-mode selection.
 - Project variant branches and the old Files/Versions workspace.
@@ -49,7 +50,7 @@ The repository still contains useful standalone or historical code for these con
 - The legacy `@dezin/quality` anti-slop lint→repair loop as a Canvas publication gate.
 - Browser ZIP download for Implementation Export; publication currently produces a local immutable directory.
 
-Reintroducing one of these requires a new Canvas-native contract, tests, and documentation—it must not be inferred from the retained package alone.
+Reintroducing one of these requires a new Canvas-native contract, tests, and documentation.
 
 ## Explicitly out of scope
 

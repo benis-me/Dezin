@@ -6,12 +6,7 @@
 
 **Source and implementation evidence**
 
-- Source visual truth: `/tmp/dezin-beautiful-ui-audit/04-thinking-streaming-mobile.png`, `/tmp/dezin-beautiful-ui-audit/05-tool-chips-task-rows-mobile.png`, and the supporting desktop captures in `/tmp/dezin-beautiful-ui-audit/`.
-- Rendered Agent implementation: `/tmp/dezin-agent-visual.V9u3EX/agent-panel.png`.
-- Normalized side-by-side comparison input: `/tmp/dezin-agent-visual.V9u3EX/reference-vs-agent-panel.png`.
-- Browser-rendered integration evidence: `/tmp/dezin-electron-qa.WFCUak/screens/06-main-agent-expanded.png` and `/tmp/dezin-electron-qa.WFCUak/screens/07-node-agent.png`.
-- Browser-rendered Figma evidence: `/tmp/dezin-electron-qa.WFCUak/screens/04-figma-dialog-920x600-scrolled.png` and `/tmp/dezin-electron-qa.WFCUak/screens/05-figma-dialog-430x900.png`.
-- Electron measurements and interaction log: `/tmp/dezin-electron-qa.WFCUak/electron-report.json`.
+The screenshots and the Electron interaction log for this pass lived in temporary directories on the reviewer's machine and were not committed. Future QA notes in this folder should commit their evidence next to the note (or link to a durable location) so the comparison can be re-checked.
 
 **Viewport and normalization**
 

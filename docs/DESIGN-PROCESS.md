@@ -3,9 +3,10 @@
 > **Historical document.** This pipeline belonged to the pre-Canvas application and is
 > not part of the current Design Canvas runtime or public product contract. In particular,
 > the active app does not expose Prototype/Standard modes, a direction gate, project
-> variants, or `@dezin/quality` as a Canvas publication gate. The code packages are retained
-> for reference and standalone tests. See [`DESIGN-CANVAS.md`](./DESIGN-CANVAS.md) for the
-> authoritative current architecture.
+> variants, or `@dezin/quality` as a Canvas publication gate. The code packages that
+> implemented this pipeline (`quality`, `research`, `prompt`, `skills`, `craft`) were removed
+> from the repository in September 2026; this document is the only record of the design.
+> See [`DESIGN-CANVAS.md`](./DESIGN-CANVAS.md) for the authoritative current architecture.
 
 Historical status: this predecessor was implemented and validated on CodeBuddy + Hunyuan
 before the Canvas transition. The remainder of this document records that design rather

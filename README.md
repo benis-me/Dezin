@@ -12,7 +12,7 @@ English · [简体中文](./README_CN.md)
 
 Dezin is an early desktop-first design tool. A project is an infinite Canvas of typed Nodes—Pages, Components, Design Systems, Research, Tokens, Documents, Layouts, Knowledge, and imported media. Agents can plan the Canvas, generate one Node at a time, and rebuild selected immutable versions into an implementation project.
 
-Project state, Canvas history, generated versions, assets, Agent threads, jobs, and exports stay on local disk. Dezin has no hosted account, telemetry, model router, or paid inference service. The selected third-party coding-agent CLI may still contact its own provider under that CLI's authentication and policy.
+Project state, Canvas history, generated versions, assets, Agent threads, jobs, and exports stay on local disk. Dezin operates no servers: there is no hosted account, telemetry, or model router. Everything that leaves your machine is listed under [Network egress](#network-egress) and happens with credentials you supplied.
 
 ## Current product contract
 
@@ -22,10 +22,10 @@ Project state, Canvas history, generated versions, assets, Agent threads, jobs, 
 - **Bring your own Agent.** Dezin discovers installed provider CLIs and custom commands and exposes their available models. Claude and CodeBuddy receive the strongest tool/argument and execution-identity policy; every provider is still restricted to an exact daemon-owned pending working directory and a narrowed environment. Windows Design execution remains unavailable until its confinement can be proven.
 - **Local, explicit assets.** Frozen context is byte-copied into each Job. Generated HTML cannot load remote scripts, styles, fonts, images, or other resources. Remote Markdown images in the app are never fetched automatically; they remain explicit links.
 - **Implementation Export.** Export rebuilds selected immutable Node Versions as a Vite + TypeScript project in a local export directory. It does **not** currently download a ZIP.
-- **Fail-closed validation.** Node HTML and Export source pass path allowlists, URL/DOM capability checks, CSP binding, strict TypeScript, an isolated Vite build, built-output scanning, and a Chrome desktop/mobile visual gate before publication. Export validation is intentionally narrower and more security-focused than the legacy `@dezin/quality` taste linter.
+- **Fail-closed validation.** Node HTML and Export source pass path allowlists, URL/DOM capability checks, CSP binding, strict TypeScript, an isolated Vite build, built-output scanning, and a Chrome desktop/mobile visual gate before publication. Export validation is intentionally narrow and security-focused; it is not a taste linter.
 - **Bounded recovery.** Export may continue one incomplete or timed-out build in place and may run one diagnostic repair turn. Identity drift, frozen-input changes, unauthorized paths, and repeated validation failures are terminal.
 
-The earlier `skills × design systems × craft` generation pipeline, staged Research direction gate, deterministic lint→repair loop, Prototype/Standard modes, branch variants, and ZIP delivery remain in the repository as historical or standalone modules. They are not claims of the current Design Canvas runtime. See [`docs/DESIGN-CANVAS.md`](./docs/DESIGN-CANVAS.md) for the authoritative architecture and [`docs/DESIGN-PROCESS.md`](./docs/DESIGN-PROCESS.md) for the archived predecessor.
+The earlier `skills × design systems × craft` generation pipeline, staged Research direction gate, deterministic lint→repair loop, Prototype/Standard modes, branch variants, and ZIP delivery are no longer in the repository. See [`docs/DESIGN-CANVAS.md`](./docs/DESIGN-CANVAS.md) for the authoritative architecture and [`docs/DESIGN-PROCESS.md`](./docs/DESIGN-PROCESS.md) for the archived description of that predecessor.
 
 ## Supporting surfaces
 
@@ -63,6 +63,7 @@ This builds the Web UI and launches Electron. Packaging, signing, notarization, 
 | `DEZIN_HOST` | `127.0.0.1` | Daemon bind address |
 | `DEZIN_DATA_DIR` | `~/.dezin` | Local database, projects, assets, Jobs, and exports |
 | `DEZIN_AGENT_CMD` | `claude` | Default Agent command |
+| `DEZIN_SECRETS_KEY` | unset | 32-byte base64url key that encrypts API keys at rest in the settings database; the desktop shell generates and stores one through the OS keystore |
 
 ## Architecture
 
@@ -77,11 +78,10 @@ packages/
   core/      node:sqlite metadata and legacy Sharingan workspace state
   design/    bundled Design Systems
   effects/   built-in and custom Effect models
-  quality/   standalone/legacy artifact taste and geometry checks
-  research/  standalone/legacy staged Research utilities
-  prompt/    legacy layered prompt composition
-  skills/    legacy SKILL.md loader
-  craft/     generated legacy anti-slop craft document
+  design-canvas-contracts/  browser-safe wire contracts shared by daemon and Web
+  leafer-react/             React reconciler bridge for the Moodboard canvas
+content/
+  design-systems/           bundled Design Systems loaded by packages/design
 ```
 
 The active Design path is:
@@ -123,6 +123,35 @@ The CodeBuddy receipt is valid only when the production runner/confinement path 
 - [`docs/SELF-DESIGN.md`](./docs/SELF-DESIGN.md) — UI design principles.
 - [`docs/DESIGN-PROCESS.md`](./docs/DESIGN-PROCESS.md) — archived pre-Canvas pipeline; not a current runtime promise.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — development and contribution guide.
+
+## Support matrix
+
+| Platform | Run the app | Agent generation and Export |
+| --- | --- | --- |
+| macOS | Yes (development shell) | Yes |
+| Linux | Yes | Yes |
+| Windows | Yes | Not yet: Design execution stays fail-closed until process confinement is proven there |
+
+Packaged, signed builds are not shipped yet; run from source with `pnpm dev` or `pnpm desktop`.
+
+## Network egress
+
+Dezin itself never phones home. These are the only outbound connections. Each one is started by an explicit action and authenticated with credentials you supplied:
+
+| Feature | Destination | Credential |
+| --- | --- | --- |
+| Design Canvas Agents, Moodboard Agent, prompt optimization, title generation, image analysis | Your coding-agent CLI's own provider (Claude Code, Codex, CodeBuddy, ...) | The CLI's login |
+| Moodboard image generation | Azure OpenAI, Google AI Studio, Google Vertex, fal, or any OpenAI-compatible endpoint you configure | API key in Settings → Providers |
+| Model discovery | The configured provider endpoint, or a local Ollama at `127.0.0.1:11434` | Same key |
+| Figma import | `api.figma.com` | Personal access token in Settings |
+| Chrome extension capture | The page you capture (Pinterest, Behance, Dribbble and their image CDNs) and your local daemon | Pairing code |
+| Sharingan capture | The URL you enter, fetched by local Chrome | None |
+
+Generated HTML and Implementation Exports are validated to load no remote scripts, styles, fonts, or images.
+
+## Trademarks
+
+Bundled Design Systems are named for the public products whose design language inspired them (for example Airbnb, Apple, Linear, Stripe). Those names are trademarks of their respective owners. Dezin is not affiliated with, sponsored by, or endorsed by any of them, and ships none of their logos.
 
 ## License
 
