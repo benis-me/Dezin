@@ -176,8 +176,8 @@ Settings → Generation → “Web fonts and icons” on (the default), a Node m
 Fontsource CSS from `https://cdn.jsdelivr.net/fontsource/`; the preview CSP and
 the runtime gate admit exactly that origin, the design system's `--font-*`
 families are named in the prompt with their Fontsource ids, and fonts that fail
-to load fall back to the declared stack. Icons come from Iconify sets (Lucide,
-Phosphor, Remix, Tabler, Hugeicons free, MingCute) that the daemon fetches once
+to load fall back to the declared stack. Icons come from open-source Iconify
+sets (Lucide, Phosphor, Remix, Tabler, Hugeicons free, MingCute, Heroicons) that the daemon fetches once
 from jsDelivr into `web-resources/icons/`; the Agent greps names in
 `.context/icons/<set>.txt`, writes `<svg data-icon="set:name">`, and the daemon
 inlines the vector before validation, so published Versions stay self-contained.

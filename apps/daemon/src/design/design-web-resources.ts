@@ -75,6 +75,7 @@ export const DESIGN_ICON_SETS: readonly DesignIconSetSource[] = [
   { prefix: "tabler", name: "Tabler Icons", license: "MIT" },
   { prefix: "hugeicons", name: "Hugeicons (free)", license: "MIT" },
   { prefix: "mingcute", name: "MingCute", license: "Apache-2.0" },
+  { prefix: "heroicons", name: "Heroicons", license: "MIT" },
 ];
 
 export interface DesignIconSet extends DesignIconSetSource {
