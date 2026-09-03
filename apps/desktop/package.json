@@ -10,6 +10,6 @@
     "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=93 --test-coverage-branches=76 --test-coverage-functions=93 --test 'test/*.test.*'"
   },
   "devDependencies": {
-    "electron": "^43.1.0"
+    "electron": "^44.0.0"
   }
 }
