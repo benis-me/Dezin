@@ -19,6 +19,7 @@ import {
 } from "./design-types.ts";
 import {
   buildPortableDesignHtmlFromAssetLoader,
+  buildPortableDesignHtmlPlan,
   PortableDesignHtmlError,
 } from "./design-portable-html.ts";
 import {
@@ -213,6 +214,85 @@ export function createDesignVersionResolution(deps: DesignVersionResolutionDeps)
     });
   }
 
+  /**
+   * The same exact Version as a built directory: `index.html` referencing its
+   * pinned Assets as `assets/<assetId>/<file>` files instead of data URLs.
+   */
+  async function buildDesignVersionExportBundle(
+    dataDir: string,
+    projectId: string,
+    nodeId: string,
+    versionId: string,
+  ): Promise<{ files: Array<{ path: string; bytes: Buffer }>; checksum: string }> {
+    const root = designRoot(dataDir, projectId);
+    return withProjectLock(root, async () => {
+      await requireInitialized(root);
+      const resolved = await resolveDesignVersionPreviewUnlocked(root, nodeId, versionId);
+      if (resolved.kind !== "html") {
+        throw new DesignStorageError("invalid-input", "Export requires an HTML Design Version");
+      }
+      const source = await readExactImmutablePayload({
+        path: resolved.path,
+        expectedBytes: resolved.manifest.bytes,
+        expectedChecksum: resolved.manifest.checksum,
+        label: `Exported Design Version ${versionId}`,
+      });
+      try {
+        const assetManifests = new Map<string, DesignAssetManifest>();
+        const descriptors = [] as Array<{
+          assetId: string;
+          checksum: string;
+          mimeType: string;
+          canonicalUrl: string;
+          byteLength: number;
+        }>;
+        for (const pin of resolved.manifest.assetPins) {
+          const asset = await getDesignAssetManifestUnlocked(root, pin.assetId);
+          if (asset.checksum !== pin.checksum) {
+            throw new DesignStorageError("corrupt", `Design Asset ${pin.assetId} diverges from its Version pin`);
+          }
+          assetManifests.set(asset.id, asset);
+          descriptors.push({
+            assetId: asset.id,
+            checksum: asset.checksum,
+            mimeType: asset.mimeType,
+            canonicalUrl: `/api/projects/${projectId}/design-canvas/assets/${asset.id}/${asset.fileName}`
+              + `?nodeId=${nodeId}&versionId=${versionId}&checksum=${asset.checksum}`,
+            byteLength: asset.bytes,
+          });
+        }
+        const plan = buildPortableDesignHtmlPlan({ html: source, assets: descriptors });
+        const relativePath = (assetId: string) => `assets/${assetId}/${assetManifests.get(assetId)!.fileName}`;
+        const html = plan.template.replace(/__DEZIN_PORTABLE_ASSET_(\d+)__/g, (placeholder, rawIndex: string) => {
+          const asset = plan.assets[Number(rawIndex)];
+          if (!asset || asset.placeholder !== placeholder) {
+            throw new DesignStorageError("corrupt", "Exported Design HTML contains an invalid asset placeholder");
+          }
+          return relativePath(asset.assetId);
+        });
+        const files: Array<{ path: string; bytes: Buffer }> = [{ path: "index.html", bytes: Buffer.from(html, "utf8") }];
+        for (const asset of plan.assets) {
+          const manifest = assetManifests.get(asset.assetId)!;
+          const bytes = await readExactImmutablePayload({
+            path: join(assetRoot(root, manifest.id), manifest.fileName),
+            expectedBytes: manifest.bytes,
+            expectedChecksum: manifest.checksum,
+            label: `Exported Design Asset ${manifest.id}`,
+          });
+          files.push({ path: relativePath(manifest.id), bytes: Buffer.from(bytes) });
+        }
+        const digest = createHash("sha256");
+        for (const file of files) digest.update(file.path).update("\0").update(file.bytes);
+        return { files, checksum: digest.digest("hex") };
+      } catch (error) {
+        if (error instanceof PortableDesignHtmlError) {
+          throw new DesignStorageError(error.code, error.message, { cause: error });
+        }
+        throw error;
+      }
+    });
+  }
+
   async function resolvePinnedDesignAssetFile(
     dataDir: string,
     projectId: string,
@@ -243,6 +323,7 @@ export function createDesignVersionResolution(deps: DesignVersionResolutionDeps)
     resolveDesignVersionPreviewUnlocked,
     resolveDesignVersionPreview,
     buildPortableDesignVersionHtml,
+    buildDesignVersionExportBundle,
     resolvePinnedDesignAssetFile,
   };
 }

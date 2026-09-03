@@ -84,6 +84,103 @@ interface FloatingPosition {
 }
 
 export const FLOATING_NODE_AGENT_WIDTH_PX = 352;
+export const MAIN_AGENT_WIDTH_PX = 440;
+
+export interface PanelWidthRange {
+  min: number;
+  max: number;
+}
+
+function clampPanelWidth(width: number, range: PanelWidthRange): number {
+  return Math.round(Math.min(range.max, Math.max(range.min, width)));
+}
+
+/** A right-docked panel width the user can drag, remembered per storage key. */
+export function usePersistedPanelWidth(
+  storageKey: string,
+  fallback: number,
+  range: PanelWidthRange,
+): [number, (width: number) => void] {
+  const [width, setWidth] = useState(() => {
+    try {
+      const stored = Number(localStorage.getItem(storageKey));
+      if (Number.isFinite(stored) && stored > 0) return clampPanelWidth(stored, range);
+    } catch {
+      // localStorage may be unavailable
+    }
+    return clampPanelWidth(fallback, range);
+  });
+  const update = useCallback((next: number) => {
+    const clamped = clampPanelWidth(next, range);
+    setWidth(clamped);
+    try {
+      localStorage.setItem(storageKey, String(clamped));
+    } catch {
+      // ignore
+    }
+  }, [range, storageKey]);
+  return [width, update];
+}
+
+/**
+ * Drag strip on the left edge of a right-docked panel. Dragging left widens
+ * the panel; arrow keys nudge it for keyboard users.
+ */
+export function PanelResizeHandle({
+  width,
+  range,
+  label,
+  onResize,
+}: {
+  width: number;
+  range: PanelWidthRange;
+  label: string;
+  onResize: (width: number) => void;
+}) {
+  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuemin={range.min}
+      aria-valuemax={range.max}
+      aria-valuenow={Math.round(width)}
+      tabIndex={0}
+      className="design-canvas-agent__resize-handle nodrag nopan"
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.currentTarget.setAttribute("data-dragging", "");
+        dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        onResize(drag.startWidth + (drag.startX - event.clientX));
+      }}
+      onPointerUp={(event) => {
+        if (dragRef.current?.pointerId !== event.pointerId) return;
+        dragRef.current = null;
+        event.currentTarget.removeAttribute("data-dragging");
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }}
+      onPointerCancel={(event) => {
+        dragRef.current = null;
+        event.currentTarget.removeAttribute("data-dragging");
+      }}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? 48 : 16;
+        if (event.key === "ArrowLeft") onResize(width + step);
+        else if (event.key === "ArrowRight") onResize(width - step);
+        else return;
+        event.preventDefault();
+      }}
+    />
+  );
+}
 
 const COMPACT_AGENT_SIZE = { width: FLOATING_NODE_AGENT_WIDTH_PX, height: 520 } as const;
 const FOCUSED_AGENT_SIZE = { width: FLOATING_NODE_AGENT_WIDTH_PX, height: 720 } as const;
@@ -253,6 +350,8 @@ export interface CanvasAgentPanelProps {
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onSelectVersion?: (versionId: string) => Promise<void>;
   onClose?: () => void;
+  /** Present when the panel's width can be dragged from its left edge. */
+  panelWidth?: { width: number; range: PanelWidthRange; onResize: (width: number) => void };
   className?: string;
   style?: React.CSSProperties;
   floating?: boolean;
@@ -317,6 +416,7 @@ export function CanvasAgentPanel({
   onRevealExport,
   onSelectVersion,
   onClose,
+  panelWidth,
   className,
   style,
   floating = false,
@@ -405,13 +505,13 @@ export function CanvasAgentPanel({
   });
   const composerError = threadError ?? activeTurnStopError;
 
-  const panelTitle = title === "Main Agent" ? "Canvas" : title.replace(/\s+Agent$/, "");
-  const panelEyebrow = scope.type === "main" ? "Main Agent" : null;
+  // One row: the title, the session switcher (Main Agent only), then the controls.
+  const panelTitle = title === "Main Agent" ? "Main Agent" : title.replace(/\s+Agent$/, "");
   const sessionLabel = (session: { title: string | null }, index: number) => session.title || `Session ${index + 1}`;
   const activeSessionIndex = sessions?.sessions.findIndex((session) => session.id === sessions.activeId) ?? -1;
-  const panelSubtitle = sessions && activeSessionIndex >= 0
+  const activeSessionLabel = sessions && activeSessionIndex >= 0
     ? sessionLabel(sessions.sessions[activeSessionIndex]!, activeSessionIndex)
-    : subtitle;
+    : undefined;
   const panelTransformOrigin = floating
     ? `${entryX < -1 ? "left" : entryX > 1 ? "right" : "center"} ${entryY < -1 ? "top" : entryY > 1 ? "bottom" : "center"}`
     : "center center";
@@ -450,29 +550,36 @@ export function CanvasAgentPanel({
       aria-label={`${title} panel`}
       onContextMenu={(event) => event.stopPropagation()}
     >
+      {panelWidth ? (
+        <PanelResizeHandle
+          width={panelWidth.width}
+          range={panelWidth.range}
+          label={`Resize ${title} panel`}
+          onResize={panelWidth.onResize}
+        />
+      ) : null}
       <div className="design-canvas-agent__surface">
       <header className="design-canvas-agent__header">
         <div className="design-canvas-agent__header-copy">
-          {panelEyebrow ? <span className="design-canvas-agent__eyebrow">{panelEyebrow}</span> : null}
-          <h2>{panelTitle}</h2>
-          {panelSubtitle ? <p>{panelSubtitle}</p> : null}
+          <h2 title={subtitle || undefined}>{panelTitle}</h2>
+          {sessions ? (
+            <ConversationSelect
+              conversations={sessions.sessions.map((session) => ({ ...session, title: session.title ?? "" }))}
+              activeId={sessions.activeId}
+              onSwitch={(sessionId) => void switchSession(sessionId)}
+              onCreate={() => void createSession()}
+              onRename={(sessionId, nextTitle) => void renameSession(sessionId, nextTitle)}
+              onDelete={(sessionId) => void deleteSession(sessionId)}
+              label={sessionLabel}
+              ariaLabel="Sessions"
+              newLabel="New session"
+              triggerLabel={activeSessionLabel}
+            />
+          ) : null}
         </div>
-        {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose || sessions ? (
+        {(activeVersion && onSelectVersion) || onAppendMaterialVersion || onClose ? (
           <TooltipProvider delayDuration={120}>
             <div className="design-canvas-agent__header-controls">
-              {sessions ? (
-                <ConversationSelect
-                  conversations={sessions.sessions.map((session) => ({ ...session, title: session.title ?? "" }))}
-                  activeId={sessions.activeId}
-                  onSwitch={(sessionId) => void switchSession(sessionId)}
-                  onCreate={() => void createSession()}
-                  onRename={(sessionId, nextTitle) => void renameSession(sessionId, nextTitle)}
-                  onDelete={(sessionId) => void deleteSession(sessionId)}
-                  label={sessionLabel}
-                  ariaLabel="Sessions"
-                  newLabel="New session"
-                />
-              ) : null}
               {activeVersion && onSelectVersion ? (
                 <Select
                   value={activeVersionId}
@@ -593,7 +700,7 @@ export function CanvasAgentPanel({
         />
         <BorderBeam
           active={composerBeamActive(composerFocused, reduceMotion)}
-          borderRadius={14}
+          borderRadius={11}
           brightness={1.22}
           className="design-canvas-agent__composer-beam"
           colorVariant="colorful"

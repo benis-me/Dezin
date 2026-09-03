@@ -29,6 +29,7 @@ export function ConversationSelect({
   label,
   ariaLabel = "Conversations",
   newLabel = "New conversation",
+  triggerLabel,
 }: {
   conversations: ConversationOption[];
   activeId: string | null;
@@ -39,6 +40,8 @@ export function ConversationSelect({
   label: (c: ConversationOption, i: number) => string;
   ariaLabel?: string;
   newLabel?: string;
+  /** Inline text on the trigger (the active conversation name); icon-only when omitted. */
+  triggerLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -57,6 +60,7 @@ export function ConversationSelect({
         className="flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         <MessageSquare size={13} strokeWidth={1.75} />
+        {triggerLabel ? <span className="max-w-[150px] truncate">{triggerLabel}</span> : null}
         <ChevronDown size={13} strokeWidth={2} />
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-1">

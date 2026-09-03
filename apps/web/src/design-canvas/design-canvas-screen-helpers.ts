@@ -12,7 +12,6 @@ import {
   type DesignNodeContentLayout,
   type DesignPreviewAnnotationTarget,
 } from "./DesignCanvasNode.tsx";
-import { FLOATING_NODE_AGENT_WIDTH_PX } from "./FloatingNodeAgent.tsx";
 import type { FocusedPreviewDevice } from "./FocusedNodeChrome.tsx";
 import {
   focusedNodeLayoutMode,
@@ -29,7 +28,7 @@ import type {
   FigmaCanvasImportResponse,
 } from "./types.ts";
 
-export const DESIGN_CANVAS_MIN_ZOOM = 0.12;
+export const DESIGN_CANVAS_MIN_ZOOM = 0.05;
 const HOVER_LABEL_SCREEN_INSET_PX = 12;
 
 export function syncHoverLabelViewportScale(surface: HTMLElement | null, zoom: number): void {
@@ -108,12 +107,19 @@ export const FOCUSED_PREVIEW_WIDTHS: Record<FocusedPreviewDevice, number | undef
   mobile: 390,
 };
 
+export interface FocusedLayoutContext {
+  /** Width of the Node Agent panel docked on the right, or null when it is hidden. */
+  agentPanelWidth?: number | null;
+  naturalSize?: { width: number; height: number } | null;
+}
+
 export function focusedLayoutOptions(
   surface: { width: number; height: number },
   node: DesignNode,
   targetWidth?: number,
   contentAspectRatio?: number,
   metadata?: DesignNodeVersion | null,
+  context: FocusedLayoutContext = {},
 ): Parameters<typeof focusedNodeTransform>[3] {
   const layoutMode = focusedNodeLayoutMode({
     kind: node.kind,
@@ -121,6 +127,7 @@ export function focusedLayoutOptions(
     mimeType: metadata?.mimeType,
   });
   const responsiveTargetWidth = layoutMode === "web" ? targetWidth : undefined;
+  const naturalSize = context.naturalSize ?? null;
   if (surface.width <= 720) {
     return {
       reservedRight: 0,
@@ -129,13 +136,15 @@ export function focusedLayoutOptions(
       layoutMode,
       targetWidth: responsiveTargetWidth,
       contentAspectRatio,
+      naturalSize,
     };
   }
   return {
-    reservedRight: FLOATING_NODE_AGENT_WIDTH_PX + 24,
+    reservedRight: context.agentPanelWidth ? context.agentPanelWidth + 24 : 0,
     layoutMode,
     targetWidth: responsiveTargetWidth,
     contentAspectRatio,
+    naturalSize,
   };
 }
 
@@ -161,7 +170,7 @@ export function canvasToFlowNodes(
   api: DesignCanvasApi,
   onResize: (nodeId: string, geometry: DesignNode["geometry"]) => void,
   onAppendMaterialVersion: (nodeId: string, file: File) => Promise<void>,
-  onContentAspectRatio: (nodeId: string, aspectRatio: number) => void,
+  onContentAspectRatio: (nodeId: string, aspectRatio: number, naturalSize?: { width: number; height: number }) => void,
   onPreviewContextMenu: (nodeId: string, target: DesignPreviewAnnotationTarget) => void,
   onFocusAnimationStart: (nodeId: string, phase: NodeFocusPhase, durationMs: number) => void,
   onFocusAnimationComplete: (nodeId: string, phase: NodeFocusPhase) => void,

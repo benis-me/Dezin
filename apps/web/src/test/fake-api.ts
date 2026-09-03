@@ -198,6 +198,7 @@ export function makeFakeApi(overrides: FakeApiOverrides = {}): ApiClient {
     designNodeVersionPreviewUrl: (projectId, nodeId, versionId) =>
       `/api/projects/${projectId}/design-canvas/nodes/${nodeId}/versions/${versionId}/preview/`,
     downloadDesignNodeVersionHtml: async () => new Blob(["<!doctype html>"], { type: "text/html" }),
+    downloadDesignNodeVersionExport: async () => new Blob(["PK"], { type: "application/zip" }),
     getDesignThread: async (_projectId, scope) => emptyThread(scope),
     submitDesignAgentTurn: async (projectId, scope, input) => ({
       thread: {

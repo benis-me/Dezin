@@ -312,7 +312,6 @@ test("empty projects expose Quick Start and toolbar/right-click share one node c
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   expect(await screen.findByRole("heading", { name: "Quick Start" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Export code" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: /^Create a page\b/ }));
   await waitFor(() => expect(applyIntents).toHaveBeenCalledWith(PROJECT_ID, expect.objectContaining({
     intents: [expect.objectContaining({ type: "add-node", node: expect.objectContaining({ kind: "page" }) })],
@@ -487,7 +486,7 @@ test("topbar project actions are independent icon buttons and the Project name i
 
   const actions = await screen.findByRole("toolbar", { name: "Project actions" });
   const iconActions = within(actions).getAllByRole("button");
-  expect(iconActions.map((button) => button.getAttribute("aria-label"))).toEqual(["Main Agent", "Export code", "Settings"]);
+  expect(iconActions.map((button) => button.getAttribute("aria-label"))).toEqual(["Main Agent", "Settings"]);
   expect(iconActions.every((button) => button.textContent === "")).toBe(true);
   expect(iconActions.every((button) => button.getAttribute("data-size") === "icon-sm")).toBe(true);
   expect(iconActions.every((button) => !button.hasAttribute("title"))).toBe(true);
@@ -520,7 +519,6 @@ test("Canvas failure removes every canvas control and disables topbar actions", 
   expect(screen.queryByRole("toolbar", { name: "Canvas tools" })).not.toBeInTheDocument();
   expect(screen.queryByRole("toolbar", { name: "Canvas view controls" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Main Agent" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Export code" })).toBeDisabled();
 });
 
 test("Agent panels preserve the native context menu without opening the canvas Node catalog", async () => {
@@ -764,7 +762,7 @@ test("double-clicking a ready generated Node enters focus with an operable stric
   expect(screen.getByRole("button", { name: "Desktop preview" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "Tablet preview" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Mobile preview" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Export preview HTML" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
   expect(screen.getByRole("toolbar", { name: "Focused preview tools" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /Node Agent/ })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Select Landing page; double click to focus and interact" })).not.toBeInTheDocument();
@@ -798,7 +796,7 @@ test("focused Page export downloads the daemon-authored portable exact Version",
   fireEvent.doubleClick(await screen.findByRole("button", {
     name: "Select Portable landing; double click to focus and interact",
   }));
-  fireEvent.click(await screen.findByRole("button", { name: "Export preview HTML" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Export" }));
 
   await waitFor(() => expect(api.downloadExactVersionHtml).toHaveBeenCalledWith(
     PROJECT_ID,
@@ -833,13 +831,13 @@ test("focused Page export failure stays visible, dismissible, and retryable", as
   fireEvent.doubleClick(await screen.findByRole("button", {
     name: "Select Retry landing; double click to focus and interact",
   }));
-  fireEvent.click(await screen.findByRole("button", { name: "Export preview HTML" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Export" }));
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent("Couldn't export this preview. Asset integrity check failed");
   fireEvent.click(screen.getByRole("button", { name: "Dismiss preview export error" }));
   expect(screen.queryByText(/Asset integrity check failed/)).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Export preview HTML" }));
+  fireEvent.click(screen.getByRole("button", { name: "Export" }));
   await waitFor(() => expect(api.downloadExactVersionHtml).toHaveBeenCalledTimes(2));
   expect(screen.queryByText(/Asset integrity check failed/)).not.toBeInTheDocument();
 });
@@ -932,7 +930,7 @@ test("a special-ratio video keeps one logical media plane through focus and the 
   const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   const video = await waitFor(() => {
-    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-video-player__video");
     expect(element).not.toBeNull();
     return element!;
   });
@@ -986,7 +984,7 @@ test("a special-ratio video keeps one logical media plane through focus and the 
   const startScaleY = Number(source?.style.getPropertyValue("--design-node-focus-start-scale-y"));
   expect(startScaleX).toBeCloseTo(canvasScale, 4);
   expect(startScaleY).toBeCloseTo(canvasScale, 4);
-  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+  expect(rendered.container.querySelector("video.design-canvas-video-player__video")).toBe(video);
   expect(video.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
   expect(canvasPlane!.style.width).toBe(logicalWidth);
   expect(canvasPlane!.style.height).toBe(logicalHeight);
@@ -997,7 +995,7 @@ test("a special-ratio video keeps one logical media plane through focus and the 
   expect(canvasPlane!.style.width).toBe(logicalWidth);
   expect(canvasPlane!.style.height).toBe(logicalHeight);
   await waitFor(() => expect(document.querySelector(".design-canvas-surface")).not.toHaveAttribute("data-node-focus"));
-  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+  expect(rendered.container.querySelector("video.design-canvas-video-player__video")).toBe(video);
   expect(video.closest(".design-canvas-node__content-plane")).toBe(canvasPlane);
   expect(canvasPlane!.style.width).toBe(logicalWidth);
   expect(canvasPlane!.style.height).toBe(logicalHeight);
@@ -1048,7 +1046,7 @@ test("video metadata arriving during an active focus flight rebases from the sam
   try {
     const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
     const video = await waitFor(() => {
-      const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+      const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-video-player__video");
       expect(element).not.toBeNull();
       return element!;
     });
@@ -1091,7 +1089,7 @@ test("video metadata arriving during an active focus flight rebases from the sam
     expect(nextLayout.width / 2 + rebased.x).toBeCloseTo(previousLayout.width / 2 + live.x, 4);
     expect(nextLayout.height / 2 + rebased.y).toBeCloseTo(previousLayout.height / 2 + live.y, 4);
     expect(nodeAnimations[0]!.cancel).toHaveBeenCalledOnce();
-    expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+    expect(rendered.container.querySelector("video.design-canvas-video-player__video")).toBe(video);
     expect(video.closest(".design-canvas-node__content-plane")).toBe(plane);
     expect(video.closest(".design-canvas-node")).toBe(source);
   } finally {
@@ -1119,7 +1117,7 @@ test("undoing automatic video ratio correction restores geometry and keeps the n
   vi.mocked(api.undo).mockImplementation(async (_projectId, revision) => canvas([target], revision + 1, 0, 1));
   const rendered = render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
   const video = await waitFor(() => {
-    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-node__asset--video");
+    const element = rendered.container.querySelector<HTMLVideoElement>("video.design-canvas-video-player__video");
     expect(element).not.toBeNull();
     return element!;
   });
@@ -1143,11 +1141,13 @@ test("undoing automatic video ratio correction restores geometry and keeps the n
 
   fireEvent.keyDown(window, { key: "z", metaKey: true });
   await waitFor(() => expect(api.undo).toHaveBeenCalledWith(PROJECT_ID, 2));
+  // The intrinsic 2560×1080 stays known, so the plane keeps its natural-size
+  // cap; what undo restores is the 4:3 frame ratio the plane must follow.
+  const planePx = (value: string) => Number.parseFloat(/(-?\d+(?:\.\d+)?)px/.exec(value)?.[1] ?? "NaN");
   await waitFor(() => {
-    expect(plane.style.width).toBe(originalLogicalSize.width);
-    expect(plane.style.height).toBe(originalLogicalSize.height);
+    expect(planePx(plane.style.width) / planePx(plane.style.height)).toBeCloseTo(400 / 300, 1);
   });
-  expect(rendered.container.querySelector("video.design-canvas-node__asset--video")).toBe(video);
+  expect(rendered.container.querySelector("video.design-canvas-video-player__video")).toBe(video);
 
   const canvasScale = Number(/scale\(([^)]+)\)/.exec(plane.style.transform)?.[1]);
   fireEvent.doubleClick(video);
@@ -1244,7 +1244,7 @@ test("exact generated Page metadata keeps browser layout and website tools", asy
   fireEvent.doubleClick(shield);
   await waitFor(() => expect(document.querySelector(".design-canvas-surface")).toHaveAttribute("data-focused-content", "web"));
   expect(screen.getByRole("button", { name: "Desktop preview" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Export preview HTML" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
 });
 
 test("focused previews accept context menus only over their iframe's private MessagePort", async () => {
@@ -2623,295 +2623,6 @@ test("Main Agent toggles from the topbar, sees canvas scope, and submits orchest
       context: { nodeIds: ["page-1"] },
     }),
   ));
-});
-
-test("Export waits for explicit confirmation before starting an implementation job", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT]}
-      initialAgentCommand="claude"
-      initialModel="sonnet"
-    />,
-  );
-
-  const exportButton = await screen.findByRole("button", { name: "Export code" });
-  await user.click(exportButton);
-
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-  const confirmation = screen.getByRole("dialog", { name: "Start implementation export?" });
-  expect(confirmation).toHaveTextContent("fresh implementation from the selected Versions");
-  expect(confirmation).toHaveTextContent("consume quota from your configured provider");
-  expect(within(confirmation).getByRole("button", { name: "Cancel" })).toBeEnabled();
-  expect(within(confirmation).getByRole("button", { name: "Start export" })).toBeEnabled();
-});
-
-test("Export confirmation Cancel and Escape restore focus without starting", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT]}
-      initialAgentCommand="claude"
-    />,
-  );
-
-  const exportButton = await screen.findByRole("button", { name: "Export code" });
-  await user.click(exportButton);
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
-  expect(exportButton).toHaveFocus();
-
-  await user.click(exportButton);
-  await user.keyboard("{Escape}");
-  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
-  expect(exportButton).toHaveFocus();
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-});
-
-test("confirmed Export starts exactly once and disables duplicate confirmation while pending", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  let resolveExport!: (result: DesignExportResult) => void;
-  vi.mocked(api.startImplementationExport).mockImplementation(() => new Promise((resolve) => {
-    resolveExport = resolve;
-  }));
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT]}
-      initialAgentCommand="claude"
-      initialModel="sonnet"
-    />,
-  );
-
-  const exportButton = await screen.findByRole("button", { name: "Export code" });
-  await user.click(exportButton);
-  const start = screen.getByRole("button", { name: "Start export" });
-  fireEvent.click(start);
-  fireEvent.click(start);
-
-  expect(api.startImplementationExport).toHaveBeenCalledOnce();
-  expect(api.startImplementationExport).toHaveBeenCalledWith(
-    PROJECT_ID,
-    1,
-    { agentCommand: "claude", model: "sonnet" },
-  );
-  expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
-
-  resolveExport({
-    exportId: "export-1",
-    job: { ...job, kind: "implementation-export", exportId: "export-1" },
-  });
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument());
-  expect(screen.getByLabelText("Main Agent panel")).toBeInTheDocument();
-  expect(exportButton).toHaveFocus();
-});
-
-test("late Settings defaults replace an untouched Agent fallback before Export", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  const rendered = render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT, CODEBUDDY_AGENT]}
-    />,
-  );
-
-  await screen.findByRole("button", { name: "Export code" });
-  rendered.rerender(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT, CODEBUDDY_AGENT]}
-      initialAgentCommand="codebuddy"
-      initialModel="hy3-ioa"
-    />,
-  );
-
-  await user.click(screen.getByRole("button", { name: "Export code" }));
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Start export" }));
-  await waitFor(() => expect(api.startImplementationExport).toHaveBeenCalledWith(
-    PROJECT_ID,
-    1,
-    { agentCommand: "codebuddy", model: "hy3-ioa" },
-  ));
-});
-
-test("Export opens Main Agent and keeps the implementation job visible through completion", async () => {
-  const user = userEvent.setup();
-  const revealExport = vi.fn(async () => "revealed" as const);
-  const persistAgentDefaults = vi.fn(async () => {});
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  const exportJob: DesignJob = {
-    ...job,
-    id: "job-export",
-    kind: "implementation-export",
-    status: "ready",
-    exportId: "export-1",
-    activity: [{ id: "activity-export", kind: "status", text: "High-fidelity implementation ready", createdAt: 3 }],
-    finishedAt: 3,
-  };
-  let exported = false;
-  vi.mocked(api.startImplementationExport).mockImplementation(async () => {
-    exported = true;
-    return { exportId: "export-1", job: exportJob };
-  });
-  vi.mocked(api.listJobs).mockImplementation(async () => exported ? [exportJob] : []);
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      projectPath="/tmp/editorial"
-      api={api}
-      agents={[CLAUDE_AGENT]}
-      initialAgentCommand="claude"
-      initialModel="sonnet"
-      onAgentDefaultsChange={persistAgentDefaults}
-      onRevealExport={revealExport}
-    />,
-  );
-
-  await user.click(await screen.findByRole("button", { name: "Main Agent" }));
-  await user.click(screen.getByRole("button", { name: "Agent and model" }));
-  await user.click(await screen.findByRole("button", { name: "opus" }));
-  await waitFor(() => expect(persistAgentDefaults).toHaveBeenCalledWith({ agentCommand: "claude", model: "opus" }));
-  await user.keyboard("{Escape}");
-  await user.click(screen.getByRole("button", { name: "Close Main Agent" }));
-  await waitFor(() => expect(screen.queryByLabelText("Main Agent panel")).not.toBeInTheDocument());
-  await user.click(screen.getByRole("button", { name: "Export code" }));
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-  expect(screen.queryByLabelText("Main Agent panel")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Start export" }));
-  await waitFor(() => expect(api.startImplementationExport).toHaveBeenCalledWith(
-    PROJECT_ID,
-    1,
-    { agentCommand: "claude", model: "opus" },
-  ));
-  expect(await screen.findByLabelText("Main Agent panel")).toBeInTheDocument();
-  await waitFor(() => expect(document.querySelector(`[data-job-id="${exportJob.id}"]`)).toBeInTheDocument());
-  const exportRecord = document.querySelector<HTMLElement>(`[data-job-id="${exportJob.id}"]`)!;
-  const exportTask = exportRecord.querySelector<HTMLElement>('[data-dezin-agent-job]')!;
-  expect(exportTask).toHaveAttribute("data-status", "ready");
-  const exportDisclosure = within(exportTask).getByRole("button", { name: "Implementation export · ready" });
-  expect(exportDisclosure).toHaveAttribute("aria-expanded", "false");
-  await user.click(exportDisclosure);
-  expect(exportDisclosure).toHaveAttribute("aria-expanded", "true");
-  const recommendation = within(exportTask).getByRole("group", { name: "Export ready" });
-  expect(recommendation).toHaveAttribute("data-dezin-agent-primitive", "recommendation");
-  expect(within(exportTask).queryByRole("button", { name: /tool calls/ })).not.toBeInTheDocument();
-  expect(within(recommendation).getByTitle("/tmp/editorial/design/exports/export-1")).toBeInTheDocument();
-  await user.click(within(recommendation).getByRole("button", { name: "Reveal export" }));
-  await waitFor(() => expect(revealExport).toHaveBeenCalledWith("export-1"));
-  expect(await screen.findByText("Opened in Finder.")).toBeInTheDocument();
-});
-
-test("confirmed Export failure closes confirmation and keeps the existing visible error", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  vi.mocked(api.startImplementationExport).mockRejectedValue(new Error("Configured provider quota is exhausted."));
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[CLAUDE_AGENT]}
-      initialAgentCommand="claude"
-    />,
-  );
-
-  await user.click(await screen.findByRole("button", { name: "Export code" }));
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Start export" }));
-
-  const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Configured provider quota is exhausted.");
-  expect(screen.queryByRole("dialog", { name: "Start implementation export?" })).not.toBeInTheDocument();
-  expect(api.startImplementationExport).toHaveBeenCalledOnce();
-});
-
-test("Export stays disabled with provider-neutral guidance when no runtime Agent is available", async () => {
-  const user = userEvent.setup();
-  const { api } = createCanvasApi(canvas([node({ state: "ready", currentVersionId: "version-1", versionCount: 1 })]));
-  render(
-    <DesignCanvasScreen
-      projectId={PROJECT_ID}
-      projectName="Editorial"
-      api={api}
-      agents={[{
-        id: "codex",
-        command: "codex",
-        available: false,
-        availability: "authentication-required",
-        unavailableReason: "Authentication required",
-        models: ["gpt-5"],
-      }]}
-      initialAgentCommand="codex"
-      initialModel="gpt-5"
-    />,
-  );
-
-  const exportButton = await screen.findByRole("button", { name: "Export code" });
-  expect(exportButton).toBeDisabled();
-  expect(exportButton).not.toHaveAttribute("title");
-  await user.hover(exportButton.parentElement!);
-  expect(await screen.findByRole("tooltip")).toHaveTextContent("No Design Agent is currently available for export");
-  await user.unhover(exportButton.parentElement!);
-  await user.click(screen.getByRole("button", { name: "Main Agent" }));
-  expect(within(screen.getByLabelText("Main Agent panel")).getByRole("button", { name: "Agent unavailable" })).toBeInTheDocument();
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
-});
-
-test("Export stays disabled while any generated Node still has projected or listed live work", async () => {
-  const user = userEvent.setup();
-  const nodeA = node({
-    id: "page-a",
-    name: "Checkout",
-    state: "generating",
-    currentVersionId: "version-a",
-    versionCount: 1,
-    activeJobId: "job-projected",
-  });
-  const nodeB = node({
-    id: "page-b",
-    name: "Account",
-    state: "ready",
-    currentVersionId: "version-b",
-    versionCount: 1,
-  });
-  const { api } = createCanvasApi(canvas([nodeA, nodeB]));
-  vi.mocked(api.listJobs).mockResolvedValue([{
-    ...job,
-    id: "job-listed",
-    kind: "node-generation",
-    status: "running",
-    nodeId: nodeB.id,
-    finishedAt: null,
-  }]);
-
-  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
-
-  const exportButton = await screen.findByRole("button", { name: "Export code" });
-  expect(exportButton).toBeDisabled();
-  expect(exportButton).not.toHaveAttribute("title");
-  await user.hover(exportButton.parentElement!);
-  expect(await screen.findByRole("tooltip")).toHaveTextContent(
-    "Wait for Node generation to finish before exporting: Checkout, Account",
-  );
-  expect(api.startImplementationExport).not.toHaveBeenCalled();
 });
 
 test("file drops become material context nodes and undo/redo shortcuts call authoritative history", async () => {

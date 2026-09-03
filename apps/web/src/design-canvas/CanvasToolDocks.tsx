@@ -5,7 +5,6 @@ import {
   Minus,
   MousePointer2,
   Plus,
-  X,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -14,7 +13,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-  IconSwap,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -107,11 +105,7 @@ export function CanvasToolDocks({
                     size="sm"
                     aria-label="Add Design node"
                   >
-                    <IconSwap
-                      active={addMenuOpen}
-                      first={<Plus aria-hidden />}
-                      second={<X aria-hidden />}
-                    />
+                    <Plus aria-hidden className="design-canvas-add-icon" data-open={addMenuOpen || undefined} />
                   </Button>
                 </DropdownMenuTrigger>
               </span>

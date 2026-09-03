@@ -274,6 +274,8 @@ export function createDesignCanvasApi(api: ApiClient): DesignCanvasApi {
     }),
     downloadExactVersionHtml: (projectId, nodeId, versionId) =>
       api.downloadDesignNodeVersionHtml(projectId, nodeId, versionId),
+    downloadExactVersionExport: (projectId, nodeId, versionId) =>
+      api.downloadDesignNodeVersionExport(projectId, nodeId, versionId),
     getThread: (projectId, scope, signal) => api.getDesignThread(projectId, scope, signal),
     streamInvalidations: (projectId, signal) => api.streamDesignCanvasInvalidations(projectId, signal),
     submitAgentTurn: (projectId, scope, request) => api.submitDesignAgentTurn(projectId, scope, {

@@ -38,25 +38,25 @@ test("selected and keyboard-focused Nodes use restrained depth with discoverable
   expect(css).toMatch(/\.design-canvas-node::after\s*\{[^}]*inset:\s*-3px;[^}]*border-radius:\s*10px;/s);
   expect(css).toMatch(/\.design-canvas-node__frame\s*\{[^}]*border-radius:\s*7px;/s);
   expect(css).toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:\s*none;/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__frame\s*\{[^}]*box-shadow:\s*inset 0 0 0 1px/s);
   expect(css).not.toMatch(/\.design-canvas-node--selected::after\s*\{[^}]*border-color:\s*white/s);
   expect(css).toMatch(/\[data-node-focus\][^{]*\[data-node-focus-role="source"\]::after\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/s);
   expect(css).toMatch(/\.react-flow__node:focus-visible\s+\.design-canvas-node::after\s*\{[^}]*border-color:[^}]*box-shadow:/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0;[^}]*transition:\s*opacity 160ms[^}]*transform 180ms/s);
+  // Corner brackets slide out from the node corner (--corner-inset shrinks) and
+  // darken by state; there is no scale/transform choreography any more.
+  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*13px;[^}]*width:\s*12px;[^}]*height:\s*12px;[^}]*pointer-events:\s*none;[^}]*opacity:\s*0;[^}]*transition:\s*top 220ms[^}]*opacity 180ms[^}]*border-color 180ms/s);
   expect(css.match(/\.design-canvas-node__resize-corner\s*\{[^}]*\}/s)?.[0]).not.toContain("will-change");
+  expect(css.match(/\.design-canvas-node__resize-corner\s*\{[^}]*\}/s)?.[0]).not.toContain("transform");
   expect(css).toMatch(/\.design-canvas-node__resize-hit-target\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*width:\s*100%;[^}]*height:\s*100%;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-corner\s*\{[^}]*width:\s*13px;[^}]*height:\s*13px;[^}]*pointer-events:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-control:active \.design-canvas-node__resize-corner,[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-corner\s*\{[^}]*will-change:\s*opacity, transform;/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*8px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 48%, transparent\);/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control:active \.design-canvas-node__resize-corner,[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*opacity:\s*1;/s);
   expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{\s*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover \.design-canvas-node__resize-control--enabled\s*\{\s*pointer-events:\s*auto;/s);
-  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-node:hover \.design-canvas-node__resize-corner\s*\{[^}]*will-change:\s*opacity, transform;/s);
-  expect(css).toMatch(/\.design-canvas-node:hover \.design-canvas-node__resize-control--affordance \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.18;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-control:hover \.design-canvas-node__resize-corner\s*\{[^}]*opacity:\s*0\.68;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 34%, transparent\);/s);
+  expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-node:hover \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*10px;[^}]*opacity:\s*1;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control:hover \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 72%, transparent\);/s);
   expect(css).toMatch(/\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node__resize-control--interactive,[^{]*\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-control--enabled\s*\{[^}]*pointer-events:\s*auto/s);
-  expect(css).toContain(".design-canvas-node__resize-control:hover .design-canvas-node__resize-corner");
   expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible\s*\{[^}]*outline:[^}]*transition:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible \.design-canvas-node__resize-corner\s*\{[^}]*transition:\s*none;[^}]*opacity:\s*1;[^}]*transform:\s*scale\(1\);/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*7px;[^}]*left:\s*7px;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*transition:\s*none;[^}]*opacity:\s*1;/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*var\(--corner-inset\);[^}]*left:\s*var\(--corner-inset\);/s);
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
 
@@ -128,7 +128,7 @@ test("focused Agent morphs its real height without scaling its content", () => {
 });
 
 test("Agent header is compact and its solid surface does not use backdrop glass", () => {
-  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*50px;[^}]*min-height:\s*50px;[^}]*padding:\s*0 9px 0 14px;/s);
+  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*40px;[^}]*min-height:\s*40px;[^}]*padding:\s*0 6px 0 12px;/s);
   expect(css).toMatch(/\.design-canvas-agent__surface\s*\{[^}]*background:\s*var\(--card\);/s);
   expect(css).not.toMatch(/\.design-canvas-agent__surface\s*\{[^}]*backdrop-filter/s);
   expect(css).not.toContain(".design-canvas-agent__mark");
@@ -192,8 +192,8 @@ test("Agent transcript restores the original right-aligned Canvas user bubble", 
   expect(floatingAgentSource).not.toContain("text-muted-foreground/80");
 });
 
-test("Agent panel header uses the locked 50px shell and 2px control rhythm", () => {
-  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*50px;[^}]*min-height:\s*50px;[^}]*padding:\s*0 9px 0 14px;/s);
+test("Agent panel header uses one 40px row and 2px control rhythm", () => {
+  expect(css).toMatch(/\.design-canvas-agent__header\s*\{[^}]*height:\s*40px;[^}]*min-height:\s*40px;[^}]*padding:\s*0 6px 0 12px;/s);
   expect(floatingAgentSource).toContain('className="design-canvas-agent__header-controls"');
   expect(css).toMatch(/\.design-canvas-agent__header-controls\s*\{[^}]*display:\s*flex;[^}]*gap:\s*2px;/s);
 });

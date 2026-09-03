@@ -174,7 +174,7 @@ export function FocusedNodeChrome({
               {previewToolsVisible || (annotateAvailable && onToggleAnnotate) ? <span className="design-canvas-tools__divider" aria-hidden /> : null}
               {annotateAvailable && onToggleAnnotate ? (
                 <CanvasToolButton
-                  label={annotateMode ? "Stop annotating (C)" : "Annotate an element (C)"}
+                  label={annotateMode ? "Stop commenting (C)" : "Comment on an element (C)"}
                   active={annotateMode}
                   onClick={onToggleAnnotate}
                 >
@@ -183,7 +183,7 @@ export function FocusedNodeChrome({
               ) : null}
               {previewToolsVisible ? (
                 <CanvasToolButton
-                  label={previewExporting ? "Exporting preview" : "Export preview HTML"}
+                  label={previewExporting ? "Exporting" : "Export"}
                   disabled={previewExporting}
                   onClick={onExport}
                 >

@@ -114,6 +114,7 @@ export const publishDesignVersion = publicationState.publishDesignVersion;
 export const resolveDesignVersionFile = publicationState.resolveDesignVersionFile;
 export const resolveDesignVersionPreview = publicationState.resolveDesignVersionPreview;
 export const buildPortableDesignVersionHtml = publicationState.buildPortableDesignVersionHtml;
+export const buildDesignVersionExportBundle = publicationState.buildDesignVersionExportBundle;
 export const resolvePinnedDesignAssetFile = publicationState.resolvePinnedDesignAssetFile;
 
 ledgerState = createDesignJobThreadLedger({

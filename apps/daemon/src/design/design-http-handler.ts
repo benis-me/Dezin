@@ -37,8 +37,10 @@ import {
   DesignAgentConfinementError,
   DesignAgentProviderUnsupportedError,
 } from "./design-agent-confinement.ts";
+import { createZip } from "../zip.ts";
 import {
   activateDesignMainSession,
+  buildDesignVersionExportBundle,
   buildPortableDesignVersionHtml,
   createDesignMainSession,
   deleteDesignMainSession,
@@ -921,6 +923,20 @@ export async function handleServeEmbeddedDesignVersionPreview(req: IncomingMessa
 export async function handleDownloadPortableDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   const portable = await buildPortableDesignVersionHtml(d.dataDir, p.id!, p.nodeId!, p.versionId!);
   sendPortablePreviewHtml(req, res, portable.html, portable.checksum, `dezin-preview-${p.versionId!}.html`);
+}
+
+export async function handleDownloadDesignVersionExportBundle(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
+  const bundle = await buildDesignVersionExportBundle(d.dataDir, p.id!, p.nodeId!, p.versionId!);
+  const zip = createZip(bundle.files.map((file) => ({ path: file.path, data: file.bytes })));
+  res.writeHead(200, {
+    "content-type": "application/zip",
+    "content-length": String(zip.length),
+    "content-disposition": contentDisposition(`dezin-export-${p.versionId!}.zip`),
+    "cache-control": "private, no-store",
+    etag: `"sha256-${bundle.checksum}"`,
+    "x-content-type-options": "nosniff",
+  });
+  res.end(req.method === "HEAD" ? undefined : zip);
 }
 
 export async function handleGetMainDesignThread(_req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {

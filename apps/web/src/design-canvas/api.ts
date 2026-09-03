@@ -82,6 +82,8 @@ export interface DesignCanvasApi {
     signal?: AbortSignal,
   ): Promise<ExactVersionPreview>;
   downloadExactVersionHtml(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
+  /** Built directory as a ZIP; adapters without it fall back to the single HTML file. */
+  downloadExactVersionExport?(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
 
   getThread(projectId: string, scope: DesignThreadScope, signal?: AbortSignal): Promise<DesignThread>;
   streamInvalidations(

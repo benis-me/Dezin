@@ -172,7 +172,6 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  transition: opacity 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .design-canvas-node__resize-hit-target {
   position: absolute;
@@ -186,28 +185,38 @@
   color: inherit;
   cursor: inherit;
 }
+/*
+ * Corner brackets sit on the 26px resize control centred on the node corner.
+ * --corner-inset is the bracket's distance from the control's outer edge, so a
+ * smaller value moves the bracket further out from the node:
+ *   13px hidden (flush with the corner) → 10px hover → 8px selected → 5px hovered corner.
+ */
 .design-canvas-node__resize-corner {
+  --corner-inset: 13px;
   position: absolute;
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   border: 0;
-  border-color: color-mix(in oklch, var(--foreground) 28%, transparent);
+  border-color: color-mix(in oklch, var(--foreground) 24%, transparent);
   background: transparent;
   pointer-events: none;
   opacity: 0;
-  transform: scale(0.86);
-  transform-origin: center;
-  transition: opacity 160ms cubic-bezier(0.22, 1, 0.36, 1), transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 140ms var(--ease-smooth);
+  transition: top 220ms var(--design-canvas-ease-out), right 220ms var(--design-canvas-ease-out), bottom 220ms var(--design-canvas-ease-out), left 220ms var(--design-canvas-ease-out), opacity 180ms var(--design-canvas-ease-out), border-color 180ms var(--design-canvas-ease-out);
 }
-.design-canvas-node__resize-control.top.left .design-canvas-node__resize-corner { top: 7px; left: 7px; border-top: 2px solid; border-left: 2px solid; border-top-left-radius: 7px; }
-.design-canvas-node__resize-control.top.right .design-canvas-node__resize-corner { top: 7px; right: 7px; border-top: 2px solid; border-right: 2px solid; border-top-right-radius: 7px; }
-.design-canvas-node__resize-control.bottom.left .design-canvas-node__resize-corner { bottom: 7px; left: 7px; border-bottom: 2px solid; border-left: 2px solid; border-bottom-left-radius: 7px; }
-.design-canvas-node__resize-control.bottom.right .design-canvas-node__resize-corner { right: 7px; bottom: 7px; border-right: 2px solid; border-bottom: 2px solid; border-bottom-right-radius: 7px; }
+.design-canvas-node__resize-control.top.left .design-canvas-node__resize-corner { top: var(--corner-inset); left: var(--corner-inset); border-top: 1.5px solid; border-left: 1.5px solid; border-top-left-radius: 5px; }
+.design-canvas-node__resize-control.top.right .design-canvas-node__resize-corner { top: var(--corner-inset); right: var(--corner-inset); border-top: 1.5px solid; border-right: 1.5px solid; border-top-right-radius: 5px; }
+.design-canvas-node__resize-control.bottom.left .design-canvas-node__resize-corner { bottom: var(--corner-inset); left: var(--corner-inset); border-bottom: 1.5px solid; border-left: 1.5px solid; border-bottom-left-radius: 5px; }
+.design-canvas-node__resize-control.bottom.right .design-canvas-node__resize-corner { right: var(--corner-inset); bottom: var(--corner-inset); border-right: 1.5px solid; border-bottom: 1.5px solid; border-bottom-right-radius: 5px; }
+.design-canvas-node--selected .design-canvas-node__resize-corner {
+  --corner-inset: 8px;
+  opacity: 1;
+  border-color: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
 .design-canvas-node__resize-control:active .design-canvas-node__resize-corner,
 .design-canvas-node--resizing .design-canvas-node__resize-corner {
+  --corner-inset: 5px;
   opacity: 1;
-  transform: scale(1);
-  will-change: opacity, transform;
+  border-color: color-mix(in oklch, var(--foreground) 72%, transparent);
 }
 .design-canvas-node__resize-hit-target:focus-visible {
   outline: 2px solid color-mix(in oklch, var(--design-canvas-accent) 72%, var(--foreground));
@@ -215,30 +224,25 @@
   transition: none;
 }
 .design-canvas-node__resize-hit-target:focus-visible .design-canvas-node__resize-corner {
-  border-color: color-mix(in oklch, var(--foreground) 48%, transparent);
+  --corner-inset: 5px;
+  border-color: color-mix(in oklch, var(--foreground) 72%, transparent);
   transition: none;
   opacity: 1;
-  transform: scale(1);
 }
 @media (hover: hover) and (pointer: fine) {
   .design-canvas-surface:not([data-node-focus]) .design-canvas-node:hover .design-canvas-node__resize-control--enabled { pointer-events: auto; }
-  .design-canvas-node:hover .design-canvas-node__resize-corner { will-change: opacity, transform; }
+  /* Hovering the node slides all four brackets out, lightly. */
+  .design-canvas-node:hover .design-canvas-node__resize-corner { --corner-inset: 10px; opacity: 1; }
+  .design-canvas-node--selected:hover .design-canvas-node__resize-corner { --corner-inset: 8px; }
+  /* Hovering one bracket steps that bracket out further and darkens it. */
   .design-canvas-node__resize-control:hover .design-canvas-node__resize-corner {
-    opacity: 0.68;
-    transform: scale(1);
-    border-color: color-mix(in oklch, var(--foreground) 34%, transparent);
-  }
-  .design-canvas-node:hover .design-canvas-node__resize-control--affordance .design-canvas-node__resize-corner {
-    opacity: 0.18;
-    transform: scale(1);
+    --corner-inset: 5px;
+    opacity: 1;
+    border-color: color-mix(in oklch, var(--foreground) 72%, transparent);
   }
 }
 .design-canvas-surface:not([data-node-focus]) .design-canvas-node .design-canvas-node__resize-control--interactive,
 .design-canvas-surface:not([data-node-focus]) .design-canvas-node--resizing .design-canvas-node__resize-control--enabled { pointer-events: auto; }
-.design-canvas-node__resize-control--interactive .design-canvas-node__resize-corner {
-  opacity: 0.38;
-  transform: scale(1);
-}
 
 /* Top bar */
 .design-canvas-topbar {
@@ -398,6 +402,8 @@
 .design-canvas-tools [data-slot="button"][aria-pressed="true"] { background: color-mix(in oklch, var(--foreground) 7%, var(--card)); color: var(--foreground); }
 .design-canvas-zoom > output { min-width: 48px; margin: 0 1px; border-radius: 9px; background: color-mix(in oklch, var(--foreground) 4.5%, transparent); color: color-mix(in oklch, var(--foreground) 72%, transparent); font-size: 11px; font-weight: 620; font-variant-numeric: tabular-nums; letter-spacing: -0.012em; text-align: center; }
 .design-canvas-tools__divider { width: 1px; height: 18px; margin: 0 3px; background: color-mix(in oklch, var(--border) 82%, transparent); }
+.design-canvas-add-icon { transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1); }
+.design-canvas-add-icon[data-open] { transform: rotate(45deg); }
 .dark .design-canvas-zoom,
 .dark .design-canvas-tools__modes,
 .dark .design-canvas-tools #design-canvas-add { border-color: oklch(1 0 0 / 10%); background: oklch(0.225 0.008 260 / 94%); color: oklch(0.88 0.006 260); box-shadow: 0 1px 2px oklch(0 0 0 / 0.24), 0 14px 38px oklch(0 0 0 / 0.28); }
@@ -736,7 +742,7 @@
   transition: border-color 180ms var(--ease-smooth);
 }
 .design-canvas-node--entering .design-canvas-node__frame { animation: design-canvas-node-frame-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
-.design-canvas-node--selected .design-canvas-node__frame { border-color: color-mix(in oklch, var(--foreground) 16%, var(--border)); box-shadow: none; }
+.design-canvas-node--selected .design-canvas-node__frame { border-color: color-mix(in oklch, var(--foreground) 22%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 22%, var(--border)); }
 .design-canvas-node[data-node-kind="image"] .design-canvas-node__frame { border-color: transparent; background: transparent; }
 .design-canvas-surface[data-node-focus] .design-canvas-node[data-node-focus-role="source"] .design-canvas-node__frame {
   border-color: transparent;
@@ -758,14 +764,15 @@
 .design-canvas-node__asset { display: block; width: 100%; height: 100%; border: 0; background: color-mix(in oklch, white 98%, transparent); backface-visibility: hidden; }
 .design-canvas-node__asset--image { object-fit: contain; background-color: transparent; }
 .design-canvas-node__asset--video { object-fit: contain; background-color: color-mix(in oklch, var(--surface-2) 78%, var(--background)); }
-.design-canvas-video-player { position: relative; width: 100%; height: 100%; overflow: hidden; background: oklch(0.09 0 0); }
-.design-canvas-video-player video { pointer-events: none; }
-.design-canvas-video-player__stage { position: relative; }
-.design-canvas-video-player__stage > video { display: block; width: 100%; height: 100%; }
-/* Controls: a liquid-glass play lens (refraction lives in the Glass layer underneath) and a glass seek bar. */
+/* Video Node player (react-liquid-glass VideoGlassDemo port): video under a WebGL lens canvas, DOM controls on top. */
+.design-canvas-video-player { position: relative; width: 100%; height: 100%; overflow: hidden; background: oklch(0.09 0 0); isolation: isolate; }
+.design-canvas-video-player__video,
+.design-canvas-video-player__canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.design-canvas-video-player__video { z-index: 1; pointer-events: none; }
+.design-canvas-video-player__canvas { z-index: 2; pointer-events: none; transition: opacity 300ms ease; }
 .design-canvas-video-player__controls {
   position: absolute;
-  z-index: 5;
+  z-index: 3;
   inset: 0;
   opacity: 0;
   filter: blur(4px);
@@ -773,12 +780,11 @@
   transition: opacity 250ms ease-out, filter 250ms ease-out;
 }
 .design-canvas-video-player__controls[data-visible="true"] { opacity: 1; filter: blur(0); }
-.design-canvas-video-player__play {
+.design-canvas-video-player__button {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -787,36 +793,27 @@
   cursor: pointer;
   pointer-events: none;
   transform: translate(-50%, -50%);
-  transition: transform 180ms var(--design-canvas-ease-out);
   will-change: transform;
 }
-.design-canvas-video-player__controls[data-visible="true"] .design-canvas-video-player__play,
+.design-canvas-video-player__controls[data-visible="true"] .design-canvas-video-player__button,
 .design-canvas-video-player__controls[data-visible="true"] .design-canvas-video-player__bar { pointer-events: auto; }
-.design-canvas-video-player__play svg { width: 50%; height: 50%; filter: drop-shadow(0 1px 2px oklch(0 0 0 / 0.25)); }
-.design-canvas-video-player__play:hover { transform: translate(-50%, -50%) scale(1.045); }
-.design-canvas-video-player__play:active { transform: translate(-50%, -50%) scale(0.96); }
-.design-canvas-video-player__play:focus-visible { outline: 1.5px solid white; outline-offset: 2px; }
+.design-canvas-video-player__button svg { display: block; overflow: visible; }
+.design-canvas-video-player__button--large svg { width: 49.55%; height: 49.55%; }
+.design-canvas-video-player__button--small svg { width: 70.83%; height: 67.83%; }
+.design-canvas-video-player__button:focus-visible { outline: 2px solid white; outline-offset: 2px; }
 .design-canvas-video-player__bar {
   position: absolute;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 14px;
-  border: 0.5px solid oklch(1 0 0 / 22%);
-  border-radius: 999px;
-  background: oklch(1 0 0 / 8%);
-  box-shadow: inset 0 1px 0 oklch(1 0 0 / 18%), 0 6px 18px oklch(0 0 0 / 0.18);
-  backdrop-filter: blur(14px) saturate(140%);
+  gap: 8px;
   cursor: pointer;
   pointer-events: none;
   touch-action: none;
 }
-.design-canvas-video-player__track { position: relative; flex: 1; height: 6px; border-radius: 3px; background: oklch(1 0 0 / 30%); }
-.design-canvas-video-player__track:focus-visible { outline: 1.5px solid white; outline-offset: 3px; }
-.design-canvas-video-player__progress { position: absolute; top: 0; left: 0; height: 100%; border-radius: inherit; background: white; }
-.design-canvas-video-player__time { display: none; flex: none; color: oklch(1 0 0 / 88%); font-family: var(--font-mono-stack); font-size: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }
-.design-canvas-video-player[data-focused] .design-canvas-video-player__time { display: inline; }
-.design-canvas-video-player__mute { display: grid; width: 22px; height: 22px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: white; cursor: pointer; }
+.design-canvas-video-player__bar:focus-visible { outline: 1.5px solid white; outline-offset: 3px; border-radius: 999px; }
+.design-canvas-video-player__track { position: relative; flex: 1; height: 6px; border-radius: 3px; background: rgb(255 255 255 / 30%); pointer-events: none; }
+.design-canvas-video-player__progress { position: absolute; top: 0; left: 0; width: 0; height: 100%; border-radius: inherit; background: white; pointer-events: none; }
+.design-canvas-video-player__mute { display: grid; width: 20px; height: 20px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: white; cursor: pointer; }
 .design-canvas-video-player__mute svg { width: 13px; height: 13px; }
 .design-canvas-video-player__mute:focus-visible { outline: 1.5px solid white; outline-offset: 1px; }
 .design-canvas-node[data-node-kind="image"] .design-canvas-node__body {
@@ -1047,7 +1044,8 @@
   top: 8px;
   right: 8px;
   bottom: 8px;
-  width: clamp(380px, 32vw, 492px);
+  width: 440px;
+  max-width: calc(100% - 16px);
   transform-origin: right center;
   will-change: transform, opacity;
 }
@@ -1081,6 +1079,37 @@
   background: var(--card);
 }
 
+.design-canvas-agent__resize-handle {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.design-canvas-agent__resize-handle::after {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--design-canvas-selection-color);
+  content: "";
+  opacity: 0;
+  transition: opacity 140ms var(--design-canvas-ease-out);
+}
+.design-canvas-agent__resize-handle:hover::after,
+.design-canvas-agent__resize-handle:focus-visible::after,
+.design-canvas-agent__resize-handle[data-dragging]::after { opacity: 1; }
+.design-canvas-agent__resize-handle:focus-visible { outline: none; }
+.design-canvas-surface[data-annotating] .design-canvas-node[data-node-focus-role="source"] .design-canvas-node__frame {
+  outline: 2px solid var(--design-canvas-selection-color);
+  outline-offset: -2px;
+}
+
 .design-canvas-agent--floating {
   position: absolute;
   z-index: 49;
@@ -1091,21 +1120,20 @@
 }
 .design-canvas-agent--floating[data-agent-size="focus"] { height: calc(100% - 24px); }
 
+/* One 40px row: title, optional session switcher, controls. */
 .design-canvas-agent__header {
   display: flex;
-  height: 50px;
-  min-height: 50px;
+  height: 40px;
+  min-height: 40px;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  border-bottom: 0.5px solid color-mix(in oklch, var(--border) 42%, transparent);
-  padding: 0 9px 0 14px;
+  gap: 8px;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  padding: 0 6px 0 12px;
 }
-.design-canvas-agent__header-copy { display: grid; min-width: 0; gap: 1px; }
+.design-canvas-agent__header-copy { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .design-canvas-agent__header-controls { display: flex; flex: none; align-items: center; gap: 2px; }
-.design-canvas-agent__eyebrow { color: var(--muted-foreground); font-family: var(--font-mono-stack); font-size: 8px; font-weight: 560; letter-spacing: 0.075em; line-height: 1; text-transform: uppercase; }
-.design-canvas-agent__header h2 { overflow: hidden; color: var(--foreground); font-size: 12.5px; font-weight: 620; letter-spacing: -0.016em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
-.design-canvas-agent__header h2 + p { overflow: hidden; margin-top: 1px; color: var(--muted-foreground); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.design-canvas-agent__header h2 { overflow: hidden; margin: 0; color: var(--foreground); font-size: 13px; font-weight: 600; letter-spacing: -0.012em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-agent__header > button { width: 28px !important; height: 28px !important; border-radius: 999px !important; }
 
 .design-canvas-agent__transcript-wrap {
@@ -1227,7 +1255,8 @@
   width: 100%;
   border-radius: 11px;
 }
-.design-canvas-agent__composer-shell { overflow: hidden; border: 0.5px solid color-mix(in oklch, var(--border) 74%, transparent); border-radius: 11px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms var(--design-canvas-ease-out), background-color 180ms var(--design-canvas-ease-out); }
+.design-canvas-agent__composer-beam:not([data-active]):not([data-fading]) { overflow: visible; }
+.design-canvas-agent__composer-shell { overflow: hidden; border: 1px solid color-mix(in oklch, var(--border) 88%, transparent); border-radius: 11px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms var(--design-canvas-ease-out), background-color 180ms var(--design-canvas-ease-out); }
 .design-canvas-agent__composer-shell:focus-within,
 .design-canvas-agent__composer-beam[data-active] .design-canvas-agent__composer-shell { border-color: transparent; background: color-mix(in oklch, var(--foreground) 5.5%, var(--card)); box-shadow: none; }
 .design-canvas-agent__mention-anchor { min-width: 0; }
@@ -1335,32 +1364,30 @@
 
 /* Node catalogue — Radix owns positioning, dismissal, focus, and lifecycle. */
 .design-node-catalog {
-  width: 344px;
+  width: 300px;
   max-width: calc(100vw - 20px);
   max-height: min(620px, calc(100vh - 72px));
   overflow: auto;
-  border: 0.5px solid color-mix(in oklch, var(--border) 78%, transparent);
-  border-radius: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   padding: 6px;
-  background: color-mix(in oklch, var(--popover) 94%, transparent);
+  background: var(--card);
   color: var(--popover-foreground);
-  box-shadow: var(--shadow-pop);
+  box-shadow: 0 10px 28px oklch(0 0 0 / 0.08);
   transform-origin: var(--radix-dropdown-menu-content-transform-origin, var(--radix-context-menu-content-transform-origin, 100% 100%));
-  backdrop-filter: blur(20px) saturate(120%);
 }
-.design-node-catalog > section + section { margin-top: 6px; border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent); padding-top: 6px; }
-.design-node-catalog__label { padding: 5px 8px 4px; color: var(--muted-foreground); font-family: var(--font-mono-stack); font-size: 8.5px; font-weight: 520; letter-spacing: 0.065em; text-transform: uppercase; }
+.design-node-catalog > section + section { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+.design-node-catalog__label { padding: 6px 8px 4px; color: var(--muted-foreground); font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
 .design-node-catalog__grid { display: grid; grid-template-columns: 1fr; gap: 1px; }
-.design-node-catalog__item { display: flex; min-width: 0; min-height: 40px; align-items: center; gap: 8px; border-radius: 10px; padding: 5px 7px; text-align: left; transition: background-color 140ms ease, transform 140ms var(--design-canvas-ease-out); }
+.design-node-catalog__item { display: flex; min-width: 0; min-height: 40px; align-items: center; gap: 10px; border-radius: 8px; padding: 6px 8px; text-align: left; transition: background-color 140ms ease; }
 .design-node-catalog__item:focus,
 .design-node-catalog__item[data-highlighted] { background: color-mix(in oklch, var(--foreground) 5.5%, transparent); color: var(--foreground); outline: none; }
-.design-node-catalog__item:active { transform: scale(0.97); }
-.design-node-catalog__icon { display: grid; width: 27px; height: 27px; flex: none; place-items: center; border: 0.5px solid color-mix(in oklch, var(--border) 68%, transparent); border-radius: 999px; background: color-mix(in oklch, var(--surface) 48%, transparent); color: var(--muted-foreground); }
-.design-node-catalog__icon svg { width: 12px; height: 12px; stroke-width: 1.75; }
+.design-node-catalog__icon { display: grid; width: 28px; height: 28px; flex: none; place-items: center; border: 1px solid color-mix(in oklch, var(--border) 80%, transparent); border-radius: 8px; background: color-mix(in oklch, var(--surface-2) 70%, var(--card)); color: var(--foreground); }
+.design-node-catalog__icon svg { width: 14px; height: 14px; stroke-width: 1.75; }
 .design-node-catalog__grid strong,
-.design-node-catalog__starter strong { display: block; overflow: hidden; font-size: 11.5px; font-weight: 590; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.design-node-catalog__starter strong { display: block; overflow: hidden; font-size: 12.5px; font-weight: 560; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .design-node-catalog__grid small,
-.design-node-catalog__starter small { display: block; margin-top: 1px; overflow: hidden; color: var(--muted-foreground); font-size: 9.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.design-node-catalog__starter small { display: block; margin-top: 2px; overflow: hidden; color: var(--muted-foreground); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .design-node-catalog__starter .design-node-catalog__item { min-height: 48px; border: 0.5px solid color-mix(in oklch, var(--design-canvas-accent) 20%, var(--border)); background: color-mix(in oklch, var(--design-canvas-accent) 5%, transparent); }
 .design-node-catalog__starter .design-node-catalog__icon { border-color: color-mix(in oklch, var(--design-canvas-accent) 26%, var(--border)); color: color-mix(in oklch, var(--design-canvas-accent) 80%, var(--foreground)); }
 .design-node-catalog__starter-arrow { width: 13px; height: 13px; margin-left: auto; color: var(--muted-foreground); transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1); }
@@ -1498,7 +1525,7 @@
     background: var(--card) !important;
     backdrop-filter: none;
   }
-  .design-canvas-video-player__bar { background: oklch(0.1 0 0) !important; backdrop-filter: none; }
+  .design-canvas-video-player__canvas { display: none; }
 }
 
 @media (prefers-contrast: more) {
@@ -1594,7 +1621,7 @@
   .design-canvas-surface .react-flow__background,
   .design-canvas-agent--floating,
   .design-canvas-agent__task-stop,
-  .design-canvas-video-player__play,
+  .design-canvas-video-player__canvas,
   .design-canvas-video-player__controls,
   .design-preview-annotation-composer textarea,
   .design-canvas-surface .react-flow__edges,

@@ -68,6 +68,8 @@ export interface FocusedNodeTransform {
 
 export interface FocusedNodeLayoutOptions {
   reservedRight?: number;
+  /** Intrinsic pixel size of media content; focus shows it 1:1 when it fits. */
+  naturalSize?: { width: number; height: number } | null;
   targetWidth?: number;
   targetHeight?: number;
   maxWidth?: number;
@@ -336,11 +338,21 @@ function focusedLayoutSize(
     return containedLayoutSize(geometry, maximumWidth, maximumHeight);
   }
 
+  const natural = mode === "media" && options.naturalSize
+    && options.naturalSize.width > 0 && options.naturalSize.height > 0
+    ? options.naturalSize
+    : null;
   const defaultMaxWidth = mode === "media" ? 760 : 960;
   const defaultMaxHeight = mode === "media" ? 640 : 720;
-  const maximumScale = mode === "media" ? 1.55 : 1.35;
-  const maximumWidth = Math.min(available.width, options.maxWidth ?? defaultMaxWidth, options.targetWidth ?? Number.POSITIVE_INFINITY);
-  const maximumHeight = Math.min(available.height, options.maxHeight ?? defaultMaxHeight, options.targetHeight ?? Number.POSITIVE_INFINITY);
+  // Media with known intrinsic pixels opens at its original size, capped only by
+  // the free area; everything else keeps its bounded upscale.
+  const maximumScale = natural ? Number.POSITIVE_INFINITY : mode === "media" ? 1.55 : 1.35;
+  const maximumWidth = natural
+    ? Math.min(available.width, natural.width)
+    : Math.min(available.width, options.maxWidth ?? defaultMaxWidth, options.targetWidth ?? Number.POSITIVE_INFINITY);
+  const maximumHeight = natural
+    ? Math.min(available.height, natural.height)
+    : Math.min(available.height, options.maxHeight ?? defaultMaxHeight, options.targetHeight ?? Number.POSITIVE_INFINITY);
   // The outer FLIP must retain the canonical card's aspect ratio. Intrinsic
   // media is contained inside that stable coordinate space until its metadata
   // updates the canonical geometry; using its ratio here would make the outer

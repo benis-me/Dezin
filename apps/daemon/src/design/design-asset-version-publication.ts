@@ -143,6 +143,7 @@ export function createDesignAssetVersionPublication(
   return {
     appendDesignMaterialVersion: imports.appendDesignMaterialVersion,
     buildPortableDesignVersionHtml: versionFiles.buildPortableDesignVersionHtml,
+    buildDesignVersionExportBundle: versionFiles.buildDesignVersionExportBundle,
     getDesignAssetManifest: resolution.getDesignAssetManifest,
     getDesignAssetManifestUnlocked: resolution.getDesignAssetManifestUnlocked,
     getDesignVersion: versions.getDesignVersion,

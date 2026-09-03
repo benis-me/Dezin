@@ -443,44 +443,57 @@ export function useEmbeddedPreviewContextMenuChannel({
   onEscapeRef.current = onEscape;
   const annotateModeRef = useRef(annotateMode);
   annotateModeRef.current = annotateMode;
-  const sendAnnotateModeRef = useRef<((enabled: boolean) => void) | null>(null);
+  // The child announces its port exactly once per document, so the accepted
+  // port must outlive effect re-runs (hot reloads, callback identity churn)
+  // and only close when the iframe element or its document address changes.
+  const acceptedRef = useRef<{
+    iframe: HTMLIFrameElement;
+    previewSrc: string;
+    port: MessagePort;
+    nonce: string;
+  } | null>(null);
+
+  const sendAnnotateMode = useCallback((value: boolean) => {
+    const accepted = acceptedRef.current;
+    if (!accepted) return;
+    accepted.port.postMessage({
+      source: "dezin-parent",
+      type: "annotate-mode",
+      nonce: accepted.nonce,
+      protocol: PREVIEW_BRIDGE_PROTOCOL,
+      enabled: value,
+    });
+  }, []);
 
   useLayoutEffect(() => {
     if (!enabled || previewSrc === null || previewBridgeAddressForSrc(previewSrc).kind === "invalid") return;
+    const accepted = acceptedRef.current;
+    if (accepted && (accepted.iframe !== iframeRef.current || accepted.previewSrc !== previewSrc)) {
+      accepted.port.close();
+      acceptedRef.current = null;
+    }
     let disposed = false;
-    let acceptedPort: MessagePort | null = null;
-    let acceptedNonce: string | null = null;
-
-    const sendAnnotateMode = (value: boolean) => {
-      if (disposed || acceptedPort === null || acceptedNonce === null) return;
-      acceptedPort.postMessage({
-        source: "dezin-parent",
-        type: "annotate-mode",
-        nonce: acceptedNonce,
-        protocol: PREVIEW_BRIDGE_PROTOCOL,
-        enabled: value,
-      });
-    };
-    sendAnnotateModeRef.current = sendAnnotateMode;
 
     const receiveReady = (event: MessageEvent<unknown>) => {
-      const frameWindow = iframeRef.current?.contentWindow;
-      if (disposed || !frameWindow || event.source !== frameWindow
+      const iframe = iframeRef.current;
+      const frameWindow = iframe?.contentWindow;
+      if (disposed || !iframe || !frameWindow || event.source !== frameWindow
         || !isEmbeddedPreviewContextMenuReadyMessage(event.data)) return;
-      if (acceptedPort !== null || event.ports.length !== 1) {
+      if (acceptedRef.current !== null || event.ports.length !== 1) {
         for (const port of event.ports) port.close();
         return;
       }
       const port = event.ports[0]!;
-      acceptedPort = port;
-      acceptedNonce = event.data.nonce;
+      const nonce = event.data.nonce;
+      const record = { iframe, previewSrc, port, nonce };
+      acceptedRef.current = record;
       port.onmessage = (messageEvent) => {
-        if (disposed || port !== acceptedPort || acceptedNonce === null) return;
-        if (isEmbeddedPreviewContextMenuPortMessage(messageEvent.data, acceptedNonce)) {
+        if (acceptedRef.current !== record) return;
+        if (isEmbeddedPreviewContextMenuPortMessage(messageEvent.data, nonce)) {
           onContextMenuRef.current(messageEvent.data);
-        } else if (isEmbeddedPreviewLayoutPortMessage(messageEvent.data, acceptedNonce)) {
+        } else if (isEmbeddedPreviewLayoutPortMessage(messageEvent.data, nonce)) {
           onLayoutRef.current?.(messageEvent.data);
-        } else if (isEmbeddedPreviewEscapePortMessage(messageEvent.data, acceptedNonce)) {
+        } else if (isEmbeddedPreviewEscapePortMessage(messageEvent.data, nonce)) {
           onEscapeRef.current?.();
         }
       };
@@ -491,15 +504,16 @@ export function useEmbeddedPreviewContextMenuChannel({
     window.addEventListener("message", receiveReady);
     return () => {
       disposed = true;
-      sendAnnotateModeRef.current = null;
       window.removeEventListener("message", receiveReady);
-      acceptedPort?.close();
-      acceptedPort = null;
-      acceptedNonce = null;
     };
-  }, [enabled, iframeRef, previewSrc]);
+  }, [enabled, iframeRef, previewSrc, sendAnnotateMode]);
+
+  useEffect(() => () => {
+    acceptedRef.current?.port.close();
+    acceptedRef.current = null;
+  }, []);
 
   useEffect(() => {
-    sendAnnotateModeRef.current?.(annotateMode);
-  }, [annotateMode]);
+    sendAnnotateMode(annotateMode);
+  }, [annotateMode, sendAnnotateMode]);
 }

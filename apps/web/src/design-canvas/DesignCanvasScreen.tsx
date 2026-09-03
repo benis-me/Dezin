@@ -45,11 +45,10 @@ import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { arrangeDesignNodes } from "./auto-layout.ts";
-import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
+import type { DesignCanvasApi } from "./api.ts";
 import { CanvasToolDocks } from "./CanvasToolDocks.tsx";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
 import { DesignCanvasHeader } from "./DesignCanvasHeader.tsx";
-import { ImplementationExportConfirmation } from "./ImplementationExportConfirmation.tsx";
 import {
   DesignCanvasNode,
   preferredGeneratedNodeGeometry,
@@ -70,6 +69,9 @@ import {
 import {
   CanvasAgentPanel,
   FLOATING_NODE_AGENT_WIDTH_PX,
+  MAIN_AGENT_WIDTH_PX,
+  usePersistedPanelWidth,
+  type PanelWidthRange,
   useFloatingNodePanel,
   type CanvasAgentSelection,
 } from "./FloatingNodeAgent.tsx";
@@ -129,6 +131,9 @@ const COMPONENT_SYSTEM_STARTER_PROMPT = [
   "Keep names, tokens, anatomy, variants, states, content, motion, manifest entries, and documentation consistent across every Node; do not collapse the system into a single moodboard or one component specimen.",
 ].join(" ");
 
+const NODE_AGENT_WIDTH_RANGE: PanelWidthRange = { min: 300, max: 640 };
+const MAIN_AGENT_WIDTH_RANGE: PanelWidthRange = { min: 340, max: 760 };
+
 interface ContextMenuState {
   canvasX: number;
   canvasY: number;
@@ -183,7 +188,6 @@ export function DesignCanvasScreen({
   const { canvas } = controller;
   const surfaceRef = useRef<HTMLElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
   const pendingRevisionNodeIdRef = useRef<string | null>(null);
   const pendingContextTargetRef = useRef<string | null>(null);
@@ -214,12 +218,14 @@ export function DesignCanvasScreen({
     nodeIds: string[];
     draft: string;
   }>(() => ({ generation: 0, nodeIds: [], draft: "" }));
-  const [exportConfirmationOpen, setExportConfirmationOpen] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const [tool, setTool] = useState<"select" | "hand">("select");
   const [contentAspectRatios, setContentAspectRatios] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [contentNaturalSizes, setContentNaturalSizes] = useState<ReadonlyMap<string, { width: number; height: number }>>(() => new Map());
+  const [nodeAgentWidth, setNodeAgentWidth] = usePersistedPanelWidth("dezin.design.nodeAgentWidth", FLOATING_NODE_AGENT_WIDTH_PX, NODE_AGENT_WIDTH_RANGE);
+  const [mainAgentWidth, setMainAgentWidth] = usePersistedPanelWidth("dezin.design.mainAgentWidth", MAIN_AGENT_WIDTH_PX, MAIN_AGENT_WIDTH_RANGE);
   const {
     zoom,
     setZoom,
@@ -241,7 +247,7 @@ export function DesignCanvasScreen({
     applyIntents: controller.applyIntents,
     refresh: controller.refresh,
   });
-  const { availableDesignAgents, mainAgentSelection, updateMainAgentSelection } = useCanvasAgentSelection({
+  const { mainAgentSelection, updateMainAgentSelection } = useCanvasAgentSelection({
     agents,
     initialAgentCommand,
     initialModel,
@@ -278,6 +284,7 @@ export function DesignCanvasScreen({
     focusedVersionId,
     focusedVersionMetadata,
     focusActive,
+    focusAgentReserved,
     previewDeviceByNodeRef,
     armSelectionGuard,
     clearSelection,
@@ -295,6 +302,8 @@ export function DesignCanvasScreen({
     projectId,
     canvas,
     contentAspectRatios,
+    contentNaturalSizes,
+    nodeAgentWidth,
     reduceMotion,
     selectedNodeIds,
     surfaceRef,
@@ -354,8 +363,17 @@ export function DesignCanvasScreen({
     await controller.appendMaterialVersion(nodeId, file);
   }, [controller.appendMaterialVersion]);
 
-  const reportContentAspectRatio = useCallback((nodeId: string, aspectRatio: number) => {
+  const reportContentAspectRatio = useCallback((nodeId: string, aspectRatio: number, naturalSize?: { width: number; height: number }) => {
     if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) return;
+    if (naturalSize && naturalSize.width > 0 && naturalSize.height > 0) {
+      setContentNaturalSizes((current) => {
+        const previous = current.get(nodeId);
+        if (previous && previous.width === naturalSize.width && previous.height === naturalSize.height) return current;
+        const next = new Map(current);
+        next.set(nodeId, { width: naturalSize.width, height: naturalSize.height });
+        return next;
+      });
+    }
     const source = canvas?.nodes.find((node) => node.id === nodeId);
     if (!source || resizingNodeIdsRef.current.has(nodeId)) return;
     const pending = pendingNodeGeometriesRef.current.get(nodeId);
@@ -456,6 +474,10 @@ export function DesignCanvasScreen({
             FOCUSED_PREVIEW_WIDTHS[device],
             contentAspectRatios.get(node.id),
             metadata,
+            {
+              agentPanelWidth: focusAgentReserved ? nodeAgentWidth : null,
+              naturalSize: contentNaturalSizes.get(node.id) ?? null,
+            },
           ),
         );
         measuredTransforms.set(node.id, transform);
@@ -563,7 +585,7 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, dropFocusForMissingNodes, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+  }, [annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, contentNaturalSizes, dropFocusForMissingNodes, focusAgentReserved, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, nodeAgentWidth, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
   const revealImportedFigmaNodes = useCallback((importedNodeIds: string[]) => {
     const importedNodeIdSet = new Set(importedNodeIds);
@@ -1083,7 +1105,6 @@ export function DesignCanvasScreen({
     tool,
   ]);
 
-  const exporting = controller.jobs.some((job) => job.kind === "implementation-export" && isLiveJobStatus(job.status));
   const focusedContentLayoutMode = focusedCanvasNode
     ? focusedNodeLayoutMode({
         kind: focusedCanvasNode.kind,
@@ -1095,31 +1116,7 @@ export function DesignCanvasScreen({
     && focusedContentLayoutMode === "web"
     && focusedVersionId !== null;
   const activeFocusDurationMs = focusTransition?.durationMs ?? NODE_FOCUS_FLIGHT_DURATION_MS;
-  const generativeNodes = canvas?.nodes.filter((node) => !isMaterialNodeKind(node.kind)) ?? [];
-  const liveNodeJobIds = new Set(controller.jobs
-    .filter((job) => job.nodeId !== null && isLiveJobStatus(job.status))
-    .map((job) => job.nodeId));
-  const generatingNodes = generativeNodes.filter((node) => node.activeJobId !== null || liveNodeJobIds.has(node.id));
-  const ungeneratedNodes = generativeNodes.filter((node) => (node.selectedVersionId ?? node.currentVersionId) === null);
-  const designReadyForExport = generativeNodes.length > 0 && ungeneratedNodes.length === 0 && generatingNodes.length === 0;
-  const executionAgent = availableDesignAgents.find((agent) => agent.command === mainAgentSelection.agentCommand) ?? null;
   const contextMenuNode = contextMenu?.targetNode ?? null;
-  const canExport = canvasAvailable && designReadyForExport && executionAgent !== null;
-  const exportModel = executionAgent
-    && (!mainAgentSelection.model || executionAgent.models.includes(mainAgentSelection.model))
-    ? mainAgentSelection.model || null
-    : null;
-  const exportTitle = !canvasAvailable
-    ? "Canvas unavailable"
-    : generativeNodes.length === 0
-    ? "Add and generate at least one design Node before exporting"
-    : generatingNodes.length > 0
-      ? `Wait for Node generation to finish before exporting: ${generatingNodes.map((node) => node.name).join(", ")}`
-      : ungeneratedNodes.length > 0
-      ? `Generate every design Node before exporting: ${ungeneratedNodes.map((node) => node.name).join(", ")}`
-      : !executionAgent
-        ? "No Design Agent is currently available for export"
-        : "Reimplement selected Node versions as Vite + TypeScript";
 
   return (
     <main
@@ -1166,24 +1163,7 @@ export function DesignCanvasScreen({
           setMainAgentOpen(nextOpen);
           if (nextOpen) setFocusedPanelNodeId(null);
         }}
-        exportTitle={exportTitle}
-        exporting={exporting}
-        exportDisabled={exporting || controller.mutating || !canExport}
-        exportButtonRef={exportButtonRef}
-        onExport={() => setExportConfirmationOpen(true)}
         onOpenSettings={onOpenSettings}
-      />
-
-      <ImplementationExportConfirmation
-        open={exportConfirmationOpen}
-        onOpenChange={setExportConfirmationOpen}
-        returnFocusRef={exportButtonRef}
-        onConfirm={async () => {
-          if (!executionAgent || !isDesignAgentCommand(executionAgent.command)) return;
-          if (focusActive) closeNodeFocus(false);
-          setMainAgentOpen(true);
-          await controller.startExport({ agentCommand: executionAgent.command, model: exportModel });
-        }}
       />
 
       <ContextMenu
@@ -1206,10 +1186,11 @@ export function DesignCanvasScreen({
             data-preview-device={focusTransition ? focusedPreviewDevice : undefined}
             data-focused-content={focusTransition ? focusedContentLayoutMode ?? undefined : undefined}
             data-context-menu-open={contextMenuOpen || undefined}
+            data-annotating={annotateMode && focusActive ? "" : undefined}
             data-focus-motion={focusMotionAllowed ? "animated" : "instant"}
             style={{
               "--design-focus-duration": `${activeFocusDurationMs}ms`,
-              "--design-node-agent-width": `${FLOATING_NODE_AGENT_WIDTH_PX}px`,
+              "--design-node-agent-width": `${nodeAgentWidth}px`,
             } as CSSProperties}
             aria-label="Infinite Design canvas"
             tabIndex={0}
@@ -1253,7 +1234,7 @@ export function DesignCanvasScreen({
           onToggleAnnotate={() => setAnnotateMode((current) => !current)}
         />
         {annotateMode && focusActive && !previewAnnotation ? (
-          <div className="design-canvas-annotate-hint" role="status">Click an element in the preview to comment · Esc to stop</div>
+          <div className="design-canvas-annotate-hint" role="status">Click any element to comment on it · Esc to stop</div>
         ) : null}
 
         {selectionGhost ? (
@@ -1405,6 +1386,7 @@ export function DesignCanvasScreen({
               await controller.applyIntents([{ type: "update-node", nodeId: selectedNode.id, patch: { selectedVersionId: versionId } }]);
             }}
             onClose={() => setFocusedNodeAgentVisible(false)}
+            panelWidth={{ width: nodeAgentWidth, range: NODE_AGENT_WIDTH_RANGE, onResize: setNodeAgentWidth }}
             style={{
               left: floatingPosition.left,
               top: floatingPosition.top,
@@ -1421,6 +1403,7 @@ export function DesignCanvasScreen({
             <motion.div
               key="main-agent"
               className="design-canvas-main-agent"
+              style={{ width: mainAgentWidth }}
               initial={reduceMotion ? false : { opacity: 0, transform: "translate3d(18px, 0px, 0px) scale(0.985)" }}
               animate={{
                 opacity: 1,
@@ -1457,6 +1440,7 @@ export function DesignCanvasScreen({
                 projectPath={projectPath}
                 onRevealExport={onRevealExport}
                 onClose={() => setMainAgentOpen(false)}
+                panelWidth={{ width: mainAgentWidth, range: MAIN_AGENT_WIDTH_RANGE, onResize: setMainAgentWidth }}
               />
             </motion.div>
           ) : null}

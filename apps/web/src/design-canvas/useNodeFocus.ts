@@ -45,6 +45,8 @@ export function useNodeFocus({
   projectId,
   canvas,
   contentAspectRatios,
+  contentNaturalSizes,
+  nodeAgentWidth,
   reduceMotion,
   selectedNodeIds,
   surfaceRef,
@@ -63,6 +65,8 @@ export function useNodeFocus({
   projectId: string;
   canvas: DesignCanvas | null;
   contentAspectRatios: ReadonlyMap<string, number>;
+  contentNaturalSizes: ReadonlyMap<string, { width: number; height: number }>;
+  nodeAgentWidth: number;
   reduceMotion: boolean;
   selectedNodeIds: readonly string[];
   surfaceRef: RefObject<HTMLElement | null>;
@@ -89,6 +93,10 @@ export function useNodeFocus({
   const [focusTransition, setFocusTransition] = useState<NodeFocusTransition | null>(null);
   const [focusMotionEnabled, setFocusMotionEnabled] = useState(true);
   const [focusedPreviewDevice, setFocusedPreviewDevice] = useState<FocusedPreviewDevice>("desktop");
+  // Whether the focused layout keeps room for the Node Agent on the right. It
+  // reflects the user's intent, not the panel's delayed mount, so the flight
+  // targets the final position from its first frame.
+  const [focusAgentReserved, setFocusAgentReserved] = useState(true);
   const [focusPreviewExporting, setFocusPreviewExporting] = useState(false);
   const [focusPreviewExportError, setFocusPreviewExportError] = useState<string | null>(null);
   const focusMotionAllowed = focusMotionEnabled && !reduceMotion;
@@ -182,6 +190,7 @@ export function useNodeFocus({
     setFocusPreviewExportError(null);
     setMainAgentOpen(false);
     setFocusedNodeId(nodeId);
+    setFocusAgentReserved(true);
     if (!panelAlreadyVisible) setFocusedPanelNodeId(null);
     const sourceNode = canvas?.nodes.find((candidate) => candidate.id === nodeId) ?? null;
     const sourceVersionMetadata = sourceNode
@@ -206,6 +215,7 @@ export function useNodeFocus({
             undefined,
             contentAspectRatios.get(sourceNode.id),
             sourceVersionMetadata,
+            { agentPanelWidth: nodeAgentWidth, naturalSize: contentNaturalSizes.get(sourceNode.id) ?? null },
           ),
         ).durationMs
       : NODE_FOCUS_FLIGHT_DURATION_MS;
@@ -234,11 +244,12 @@ export function useNodeFocus({
     } else {
       revealPanel();
     }
-  }, [api, armSelectionGuard, cancelPendingViewportSave, canvas, clearFocusTimers, contentAspectRatios, flowRef, focusViewportLockRef, focusedPanelNodeId, projectId, reduceMotion, replaceFlowNodes, setMainAgentOpen, setSelectedNodeIds, surfaceRef]);
+  }, [api, armSelectionGuard, cancelPendingViewportSave, canvas, clearFocusTimers, contentAspectRatios, contentNaturalSizes, flowRef, focusViewportLockRef, focusedPanelNodeId, nodeAgentWidth, projectId, reduceMotion, replaceFlowNodes, setMainAgentOpen, setSelectedNodeIds, surfaceRef]);
 
   const setFocusedNodeAgentVisible = useCallback((visible: boolean) => {
     const nodeId = focusedNodeId ?? focusedPanelNodeId ?? selectedNodeIds[0] ?? null;
     if (!nodeId) return;
+    setFocusAgentReserved(visible);
     if (!focusedNodeId) {
       setFocusedPanelNodeId(visible ? nodeId : null);
       return;
@@ -365,11 +376,13 @@ export function useNodeFocus({
     setFocusPreviewExportError(null);
     let objectUrl: string | null = null;
     try {
-      const portable = await api.downloadExactVersionHtml(projectId, focusedCanvasNode.id, versionId);
-      objectUrl = URL.createObjectURL(portable);
+      const bundle = api.downloadExactVersionExport
+        ? await api.downloadExactVersionExport(projectId, focusedCanvasNode.id, versionId)
+        : await api.downloadExactVersionHtml(projectId, focusedCanvasNode.id, versionId);
+      objectUrl = URL.createObjectURL(bundle);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = `${downloadFileStem(focusedCanvasNode.name)}-${versionId}.html`;
+      link.download = `${downloadFileStem(focusedCanvasNode.name)}-${versionId}.${api.downloadExactVersionExport ? "zip" : "html"}`;
       link.rel = "noreferrer";
       document.body.append(link);
       link.click();
@@ -420,6 +433,7 @@ export function useNodeFocus({
     focusedVersionId,
     focusedVersionMetadata,
     focusActive,
+    focusAgentReserved,
     previewDeviceByNodeRef,
     armSelectionGuard,
     clearSelection,

@@ -1,8 +1,6 @@
 import {
   ArrowLeft,
   Bot,
-  Code2,
-  LoaderCircle,
   Settings2,
 } from "lucide-react";
 import {
@@ -16,7 +14,6 @@ import {
 
 import {
   Button,
-  IconSwap,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -31,11 +28,6 @@ export function DesignCanvasHeader({
   canvasAvailable,
   mainAgentOpen,
   onToggleMainAgent,
-  exportTitle,
-  exporting,
-  exportDisabled,
-  exportButtonRef,
-  onExport,
   onOpenSettings,
 }: {
   projectName: string;
@@ -44,11 +36,6 @@ export function DesignCanvasHeader({
   canvasAvailable: boolean;
   mainAgentOpen: boolean;
   onToggleMainAgent: () => void;
-  exportTitle: string;
-  exporting: boolean;
-  exportDisabled: boolean;
-  exportButtonRef?: Ref<HTMLButtonElement>;
-  onExport: () => void;
   onOpenSettings?: () => void;
 }) {
   return (
@@ -78,19 +65,6 @@ export function DesignCanvasHeader({
             onClick={onToggleMainAgent}
           >
             <Bot aria-hidden />
-          </HeaderIconAction>
-          <HeaderIconAction
-            label="Export code"
-            tooltip={exportTitle}
-            disabled={exportDisabled}
-            buttonRef={exportButtonRef}
-            onClick={onExport}
-          >
-            <IconSwap
-              active={exporting}
-              first={<Code2 aria-hidden />}
-              second={<LoaderCircle aria-hidden className="animate-spin" />}
-            />
           </HeaderIconAction>
           <HeaderIconAction label="Settings" disabled={!onOpenSettings} onClick={() => onOpenSettings?.()}>
             <Settings2 aria-hidden />

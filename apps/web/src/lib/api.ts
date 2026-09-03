@@ -614,6 +614,8 @@ export interface ApiClient {
   listDesignNodeVersions(projectId: string, nodeId: string, signal?: AbortSignal): Promise<DesignNodeVersion[]>;
   designNodeVersionPreviewUrl(projectId: string, nodeId: string, versionId: string): string;
   downloadDesignNodeVersionHtml(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
+  /** ZIP of the built Version: index.html plus its pinned assets as files. */
+  downloadDesignNodeVersionExport(projectId: string, nodeId: string, versionId: string): Promise<Blob>;
   getDesignThread(
     projectId: string,
     scope: { type: "main" } | { type: "node"; nodeId: string },
@@ -876,6 +878,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       `${baseUrl}/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(nodeId)}/versions/${enc(versionId)}/preview/`,
     downloadDesignNodeVersionHtml: (projectId, nodeId, versionId) =>
       blob(`/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(nodeId)}/versions/${enc(versionId)}/preview/download`),
+    downloadDesignNodeVersionExport: (projectId, nodeId, versionId) =>
+      blob(`/api/projects/${enc(projectId)}/design-canvas/nodes/${enc(nodeId)}/versions/${enc(versionId)}/preview/export`),
     getDesignThread: (projectId, scope, signal) =>
       json<DesignThread>(
         scope.type === "main"

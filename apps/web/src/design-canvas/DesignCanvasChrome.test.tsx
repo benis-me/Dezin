@@ -7,29 +7,22 @@ import { FocusedNodeChrome } from "./FocusedNodeChrome.tsx";
 
 test("Design Canvas header keeps one named Project-actions toolbar", () => {
   const onToggleMainAgent = vi.fn();
-  const onExport = vi.fn();
   render(
     <DesignCanvasHeader
       projectName="Afterlight"
       canvasAvailable
       mainAgentOpen={false}
       onToggleMainAgent={onToggleMainAgent}
-      exportTitle="Export implementation"
-      exporting={false}
-      exportDisabled={false}
-      onExport={onExport}
     />,
   );
 
   expect(screen.getByRole("heading", { level: 1, name: "Afterlight" })).toBeInTheDocument();
   const actions = screen.getByRole("toolbar", { name: "Project actions" });
   expect(within(actions).getAllByRole("button").map((button) => button.getAttribute("aria-label")))
-    .toEqual(["Main Agent", "Export code", "Settings"]);
+    .toEqual(["Main Agent", "Settings"]);
   expect(within(actions).getByRole("button", { name: "Settings" })).toBeDisabled();
   fireEvent.click(within(actions).getByRole("button", { name: "Main Agent" }));
-  fireEvent.click(within(actions).getByRole("button", { name: "Export code" }));
   expect(onToggleMainAgent).toHaveBeenCalledOnce();
-  expect(onExport).toHaveBeenCalledOnce();
 });
 
 test("focused Node chrome exposes one back action and a labelled preview toolbar", () => {
@@ -59,7 +52,7 @@ test("focused Node chrome exposes one back action and a labelled preview toolbar
   expect(within(tools).getByRole("group", { name: "Preview device" })).toBeInTheDocument();
   expect(within(tools).getByRole("button", { name: "Tablet preview" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(within(tools).getByRole("button", { name: "Mobile preview" }));
-  fireEvent.click(within(tools).getByRole("button", { name: "Export preview HTML" }));
+  fireEvent.click(within(tools).getByRole("button", { name: "Export" }));
   fireEvent.click(within(tools).getByRole("button", { name: "Show Node Agent" }));
   expect(onChooseDevice).toHaveBeenCalledWith("mobile");
   expect(onExport).toHaveBeenCalledOnce();

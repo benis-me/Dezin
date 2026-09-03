@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { inflateRawSync } from "node:zlib";
 import { join } from "node:path";
 import test from "node:test";
 import { Store } from "@dezin/core";
@@ -1536,6 +1537,30 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     assert.equal(portableHead.status, 200);
     assert.equal(portableHead.headers.get("content-length"), String(Buffer.byteLength(portableHtml, "utf8")));
     assert.equal((await portableHead.arrayBuffer()).byteLength, 0);
+
+    // The built-directory export ships index.html plus the pinned asset as files.
+    const exportBundle = await fetch(`${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/export`);
+    assert.equal(exportBundle.status, 200, await exportBundle.clone().text());
+    assert.equal(exportBundle.headers.get("content-type"), "application/zip");
+    assert.match(exportBundle.headers.get("content-disposition") ?? "", /^attachment;.*\.zip/);
+    const zip = Buffer.from(await exportBundle.arrayBuffer());
+    assert.equal(zip.readUInt32LE(0), 0x04034b50);
+    const entries: Array<{ path: string; data: Buffer }> = [];
+    for (let offset = 0; offset + 30 <= zip.length && zip.readUInt32LE(offset) === 0x04034b50;) {
+      const compressedSize = zip.readUInt32LE(offset + 18);
+      const nameLength = zip.readUInt16LE(offset + 26);
+      const extraLength = zip.readUInt16LE(offset + 28);
+      const dataStart = offset + 30 + nameLength + extraLength;
+      entries.push({
+        path: zip.subarray(offset + 30, offset + 30 + nameLength).toString("utf8"),
+        data: inflateRawSync(zip.subarray(dataStart, dataStart + compressedSize)),
+      });
+      offset = dataStart + compressedSize;
+    }
+    assert.deepEqual(entries.map((entry) => entry.path), ["index.html", `assets/${asset.id}/${asset.fileName}`]);
+    assert.match(entries[0]!.data.toString("utf8"), new RegExp(`assets/${asset.id}/${asset.fileName}`));
+    assert.doesNotMatch(entries[0]!.data.toString("utf8"), /dezin-asset:|\/api\/projects\//i);
+    assert.deepEqual(entries[1]!.data, imageBytes);
 
     let pinnedPath: string | undefined;
     rewriteDesignHtmlUrlReferences({
