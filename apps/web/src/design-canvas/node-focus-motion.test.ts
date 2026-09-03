@@ -111,21 +111,22 @@ test("focused Node flies to its responsive content slot while preserving a net 1
   expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
   expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
   expect(transform.scale).toBe(transform.scaleX);
+  // Webpages take the free width; a slot shorter than the page keeps that width
+  // and the page scrolls inside it, so the outer start scales may differ.
   expect(transform).toMatchObject({
-    startX: -136,
+    startX: -372,
     startY: -102,
     startWidth: 800,
     startHeight: 600,
-    layoutWidth: 1_072,
+    layoutWidth: 1_544,
     layoutHeight: 804,
   });
-  expect(transform.startScaleX).toBeCloseTo(800 / 1_072, 4);
+  expect(transform.startScaleX).toBeCloseTo(800 / 1_544, 4);
   expect(transform.startScaleY).toBeCloseTo(600 / 804, 4);
-  expect(transform.startScaleX).toBeCloseTo(transform.startScaleY, 4);
   const sourceMotion = nodeFocusMotions([{ id: "focus", geometry: node }], "focus", "opening", transform).get("focus")!;
   const frames = nodeFocusAnimationFrames(sourceMotion);
   expect(frames[0]).toMatchObject({
-    transform: `translate3d(-136px, -102px, 0) scale(${transform.startScaleX}, ${transform.startScaleY})`,
+    transform: `translate3d(-372px, -102px, 0) scale(${transform.startScaleX}, ${transform.startScaleY})`,
   });
   expect(frames.at(-1)?.transform).toBe(`translate3d(${transform.shiftX}px, ${transform.shiftY}px, 0) scale(2, 2)`);
   for (const frame of frames) {
@@ -134,17 +135,19 @@ test("focused Node flies to its responsive content slot while preserving a net 1
   }
 });
 
-test("focused layout adapts until the first viewport bound while preserving a uniform content scale", () => {
+test("focused webpages keep their width across viewport heights and scroll inside a capped frame", () => {
   const node = geometry(240, 160, 800, 600);
   const viewport = { x: 20, y: -30, zoom: 0.6 };
   const short = focusedNodeTransform(node, { width: 1_200, height: 620 }, viewport);
   const tall = focusedNodeTransform(node, { width: 1_200, height: 920 }, viewport);
   expect(short.layoutHeight).toBe(530);
-  expect(short.layoutWidth).toBeCloseTo(706.6667, 4);
+  expect(short.layoutWidth).toBe(768);
   expect(tall.layoutHeight).toBe(576);
   expect(tall.layoutWidth).toBe(768);
   expect(tall.layoutHeight).toBeGreaterThan(short.layoutHeight);
-  expect(short.startScaleX).toBeCloseTo(short.startScaleY, 4);
+  // The short viewport caps the height only; the page scrolls inside the frame.
+  expect(short.startScaleX).toBeCloseTo(800 / 768, 4);
+  expect(short.startScaleY).toBeCloseTo(600 / 530, 4);
   expect(tall.startScaleX).toBeCloseTo(tall.startScaleY, 4);
   expect(short.scaleX * viewport.zoom).toBeCloseTo(1, 4);
   expect(short.scaleY * viewport.zoom).toBeCloseTo(1, 4);
@@ -211,15 +214,32 @@ test("documents, code, and webpages use bounded 1:1 surfaces without distorting 
     layoutMode: "preview",
   });
 
-  expect(web).toMatchObject({ layoutWidth: 1_215, layoutHeight: 810 });
+  expect(web).toMatchObject({ layoutWidth: 1_544, layoutHeight: 810 });
   expect(document).toMatchObject({ layoutWidth: 720, layoutHeight: 480 });
   expect(code).toMatchObject({ layoutWidth: 900, layoutHeight: 600 });
   expect(preview).toMatchObject({ layoutWidth: 648, layoutHeight: 486 });
-  for (const transform of [web, document, code, preview]) {
+  for (const transform of [document, code, preview]) {
     expect(transform.startScaleX).toBeCloseTo(transform.startScaleY, 4);
+  }
+  for (const transform of [web, document, code, preview]) {
     expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
     expect(transform.scaleY * viewport.zoom).toBeCloseTo(1, 4);
   }
+});
+
+test("a tall page focuses at its responsive width, capped to the free height, so it scrolls instead of shrinking", () => {
+  const node = geometry(0, 0, 1_280, 3_072);
+  const surface = { width: 1_600, height: 900 };
+  const viewport = { x: 0, y: 0, zoom: 0.25 };
+  const transform = focusedNodeTransform(node, surface, viewport, { reservedRight: 0, layoutMode: "web", targetWidth: 1_280 });
+  expect(transform).toMatchObject({ layoutWidth: 1_280, layoutHeight: 810 });
+  expect(transform.startScaleX).toBe(1);
+  expect(transform.startScaleY).toBeCloseTo(3_072 / 810, 4);
+  expect(transform.scaleX * viewport.zoom).toBeCloseTo(1, 4);
+  // A page that fits keeps its aspect and a uniform flight.
+  const fits = focusedNodeTransform(geometry(0, 0, 1_280, 700), surface, viewport, { reservedRight: 0, layoutMode: "web", targetWidth: 1_280 });
+  expect(fits).toMatchObject({ layoutWidth: 1_280, layoutHeight: 700 });
+  expect(fits.startScaleX).toBeCloseTo(fits.startScaleY, 4);
 });
 
 test("content-specific focus geometry is deterministic so closing can exactly reverse opening", () => {

@@ -48,15 +48,17 @@ test("selected and keyboard-focused Nodes use restrained depth with discoverable
   expect(css.match(/\.design-canvas-node__resize-corner\s*\{[^}]*\}/s)?.[0]).not.toContain("will-change");
   expect(css.match(/\.design-canvas-node__resize-corner\s*\{[^}]*\}/s)?.[0]).not.toContain("transform");
   expect(css).toMatch(/\.design-canvas-node__resize-hit-target\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*width:\s*100%;[^}]*height:\s*100%;/s);
-  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*8px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 48%, transparent\);/s);
+  expect(css).toMatch(/\.design-canvas-node--selected \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*8px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 34%, transparent\);/s);
   expect(css).toMatch(/\.design-canvas-node__resize-control:active \.design-canvas-node__resize-corner,[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*opacity:\s*1;/s);
   expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[^{]*\{\s*\.design-canvas-surface:not\(\[data-node-focus\]\) \.design-canvas-node:hover \.design-canvas-node__resize-control--enabled\s*\{\s*pointer-events:\s*auto;/s);
   expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\)[\s\S]*\.design-canvas-node:hover \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*10px;[^}]*opacity:\s*1;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-control:hover \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 72%, transparent\);/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control:hover \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*opacity:\s*1;[^}]*border-color:\s*color-mix\(in oklch, var\(--foreground\) 58%, transparent\);/s);
   expect(css).toMatch(/\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node__resize-control--interactive,[^{]*\.design-canvas-surface:not\(\[data-node-focus\]\)[^{]*\.design-canvas-node--resizing \.design-canvas-node__resize-control--enabled\s*\{[^}]*pointer-events:\s*auto/s);
   expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible\s*\{[^}]*outline:[^}]*transition:\s*none;/s);
   expect(css).toMatch(/\.design-canvas-node__resize-hit-target:focus-visible \.design-canvas-node__resize-corner\s*\{[^}]*--corner-inset:\s*5px;[^}]*transition:\s*none;[^}]*opacity:\s*1;/s);
-  expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*var\(--corner-inset\);[^}]*left:\s*var\(--corner-inset\);/s);
+  expect(css).toMatch(/\.design-canvas-node__resize-control\.top\.left \.design-canvas-node__resize-corner\s*\{[^}]*top:\s*var\(--corner-inset\);[^}]*left:\s*var\(--corner-inset\);[^}]*border-top-width:\s*1\.5px;[^}]*border-top-style:\s*solid;/s);
+  // A border shorthand would reset the bracket colour to currentColor and defeat the opacity ladder.
+  expect(css.match(/\.design-canvas-node__resize-control\.(?:top|bottom)\.(?:left|right) \.design-canvas-node__resize-corner\s*\{[^}]*\}/gs)?.join("\n")).not.toMatch(/border-(?:top|right|bottom|left):/);
   expect(css).not.toContain(".react-flow__resize-control.line { border-color");
 });
 
@@ -232,7 +234,7 @@ test("Agent composer preserves Beam geometry behind a 12px breath and 18px trans
 });
 
 test("light-mode bottom controls and context menus follow the Spatial surface language", () => {
-  expect(css).toMatch(/\.design-canvas-tools__modes,\s*\.design-canvas-tools #design-canvas-add\s*\{[^}]*background:\s*color-mix\(in oklch, var\(--card\) 86%, transparent\);/s);
+  expect(css).toMatch(/\.design-canvas-tools__modes,\s*\.design-canvas-tools #design-canvas-add\s*\{[^}]*background:\s*color-mix\(in oklch, var\(--card\) 68%, transparent\);/s);
   expect(css).toMatch(/\.design-canvas-tools\s*\{\s*right:\s*12px;\s*bottom:\s*12px;/s);
   expect(css).toMatch(/\.design-canvas-zoom\s*\{\s*bottom:\s*12px;\s*left:\s*12px;/s);
   expect(css).toMatch(/#design-canvas-add\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;[^}]*padding:\s*0;/s);

@@ -323,11 +323,18 @@ function focusedLayoutSize(
 ): { layoutWidth: number; layoutHeight: number } {
   const mode = options.layoutMode ?? "web";
   if (mode === "web") {
-    return containedLayoutSize(
-      geometry,
-      Math.min(available.width, options.targetWidth ?? Number.POSITIVE_INFINITY),
-      Math.min(available.height, options.targetHeight ?? Number.POSITIVE_INFINITY),
-    );
+    // Pages read at their width. The slot takes the free width (capped at the
+    // responsive target), and a page taller than the free height keeps that
+    // width and scrolls inside the frame instead of shrinking to fit; only in
+    // that case do the outer start scales become non-uniform.
+    const layoutWidth = roundMotionValue(Math.max(1, Math.min(available.width, options.targetWidth ?? Number.POSITIVE_INFINITY)));
+    const ratio = clamp(geometry.width / Math.max(1, geometry.height), 0.05, 20);
+    const layoutHeight = roundMotionValue(Math.max(1, Math.min(
+      available.height,
+      options.targetHeight ?? Number.POSITIVE_INFINITY,
+      layoutWidth / ratio,
+    )));
+    return { layoutWidth, layoutHeight };
   }
 
   if (mode === "document" || mode === "code") {
