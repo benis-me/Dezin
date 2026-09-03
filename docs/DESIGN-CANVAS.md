@@ -171,7 +171,25 @@ Preview iframes use `sandbox="allow-scripts"` without `allow-same-origin` and
 receive no daemon authorization token. Preview responses apply a restrictive
 CSP (`connect-src`, `frame-src`, and `object-src` are `none`). Generated HTML
 cannot navigate the parent and cannot rely on a Vite project, package install,
-remote script, or remote stylesheet.
+remote script, or remote stylesheet. The one remote exception is opt-out: with
+Settings → Generation → “Web fonts and icons” on (the default), a Node may link
+Fontsource CSS from `https://cdn.jsdelivr.net/fontsource/`; the preview CSP and
+the runtime gate admit exactly that origin, the design system's `--font-*`
+families are named in the prompt with their Fontsource ids, and fonts that fail
+to load fall back to the declared stack. Icons come from Iconify sets (Lucide,
+Phosphor, Remix, Tabler, Hugeicons free, MingCute) that the daemon fetches once
+from jsDelivr into `web-resources/icons/`; the Agent greps names in
+`.context/icons/<set>.txt`, writes `<svg data-icon="set:name">`, and the daemon
+inlines the vector before validation, so published Versions stay self-contained.
+
+Two more Generation toggles shape the publication gate. “Quality lint” (default
+on) evaluates objective checks in the rendered page after the hard runtime
+checks: WCAG AA contrast on visible text, filler copy, a body that falls back
+to the browser default font, and overlapping text; findings enter the existing
+bounded validation-repair loop as one diagnostic. “Screenshot review” (default
+off) captures bounded full-page desktop and mobile PNGs into the job's
+`.review/` directory and runs one extra Agent turn that reads them; an
+unchanged `index.html` counts as approval, a revised one is validated again.
 
 The immutable `/preview` response remains the exact validated Version bytes.
 Focused generated iframes use a separate `/preview/embed` response that repeats

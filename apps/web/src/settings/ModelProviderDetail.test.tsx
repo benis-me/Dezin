@@ -27,6 +27,9 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     sharinganAffirmed: false,
+    webResources: true,
+    qualityLint: true,
+    visualReview: false,
     ...overrides,
   };
 }

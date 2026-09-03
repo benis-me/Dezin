@@ -299,6 +299,9 @@ export interface Settings {
   aiProviderOrganization: string;
   aiProviderProfiles: string;
   sharinganAffirmed: boolean;
+  webResources: boolean;
+  qualityLint: boolean;
+  visualReview: boolean;
 }
 
 export interface ModelProviderModel {

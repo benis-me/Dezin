@@ -46,6 +46,9 @@ function settings(overrides: Partial<Settings> = {}): Settings {
       },
     }),
     sharinganAffirmed: false,
+    webResources: true,
+    qualityLint: true,
+    visualReview: false,
     ...overrides,
   };
 }

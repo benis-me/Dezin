@@ -35,6 +35,12 @@ import {
 } from "./design-node-agent.ts";
 import { runDesignNodeRuntimeGate } from "./design-node-runtime-gate.ts";
 import {
+  DESIGN_WEB_RESOURCE_CSP_SOURCE,
+  designSystemWebFonts,
+  loadDesignIconSets,
+  type DesignWebResourcesInput,
+} from "./design-web-resources.ts";
+import {
   designAgentProviderId,
   DesignAgentConfinementError,
   DesignAgentProviderUnsupportedError,
@@ -77,13 +83,18 @@ import {
   type DesignNodeKind,
 } from "./design-types.ts";
 
-const PREVIEW_CSP = [
+/** Fontsource CSS and fonts are the only remote sources a preview may load, and only when Settings allow them. */
+function webResourceCspSources(webResources: boolean): string {
+  return webResources ? ` ${DESIGN_WEB_RESOURCE_CSP_SOURCE}` : "";
+}
+
+const previewCsp = (webResources: boolean): string => [
   "default-src 'none'",
   "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
+  `style-src 'unsafe-inline'${webResourceCspSources(webResources)}`,
   "img-src 'self' data: blob:",
   "media-src 'self' data: blob:",
-  "font-src 'self' data: blob:",
+  `font-src 'self' data: blob:${webResourceCspSources(webResources)}`,
   "connect-src 'none'",
   "frame-src 'none'",
   "child-src 'none'",
@@ -94,13 +105,13 @@ const PREVIEW_CSP = [
   "sandbox allow-scripts",
 ].join("; ");
 
-const EMBEDDED_PREVIEW_CSP = [
+const embeddedPreviewCsp = (webResources: boolean): string => [
   "default-src 'none'",
   "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
+  `style-src 'unsafe-inline'${webResourceCspSources(webResources)}`,
   "img-src 'self' data: blob:",
   "media-src 'self' data: blob:",
-  "font-src 'self' data: blob:",
+  `font-src 'self' data: blob:${webResourceCspSources(webResources)}`,
   "connect-src 'none'",
   "frame-src 'none'",
   "child-src 'none'",
@@ -368,14 +379,14 @@ function superviseDesignExecution(
   );
 }
 
-function sendImmutableHtml(req: IncomingMessage, res: ServerResponse, html: Buffer, checksum: string): void {
+function sendImmutableHtml(req: IncomingMessage, res: ServerResponse, html: Buffer, checksum: string, webResources: boolean): void {
   const etag = `"sha256-${checksum}"`;
   const headers = {
     "content-type": "text/html; charset=utf-8",
     "content-length": String(html.length),
     "cache-control": "public, max-age=31536000, immutable",
     etag,
-    "content-security-policy": PREVIEW_CSP,
+    "content-security-policy": previewCsp(webResources),
     "x-content-type-options": "nosniff",
     "x-dns-prefetch-control": "off",
     "referrer-policy": "no-referrer",
@@ -401,7 +412,7 @@ function instrumentEmbeddedPreview(html: Buffer): Buffer {
   ]);
 }
 
-function sendEmbeddedPreviewHtml(req: IncomingMessage, res: ServerResponse, html: Buffer): void {
+function sendEmbeddedPreviewHtml(req: IncomingMessage, res: ServerResponse, html: Buffer, webResources: boolean): void {
   const checksum = createHash("sha256").update(html).digest("hex");
   const etag = `"sha256-${checksum}"`;
   const headers = {
@@ -409,7 +420,7 @@ function sendEmbeddedPreviewHtml(req: IncomingMessage, res: ServerResponse, html
     "content-length": String(html.length),
     "cache-control": "private, no-cache",
     etag,
-    "content-security-policy": EMBEDDED_PREVIEW_CSP,
+    "content-security-policy": embeddedPreviewCsp(webResources),
     "x-content-type-options": "nosniff",
     "x-dns-prefetch-control": "off",
     "referrer-policy": "no-referrer",
@@ -906,7 +917,7 @@ export async function handleServeDesignVersionPreview(req: IncomingMessage, res:
     || createHash("sha256").update(html).digest("hex") !== resolved.manifest.checksum) {
     throw new HttpError(409, "Design Version changed after integrity verification");
   }
-  sendImmutableHtml(req, res, html, resolved.manifest.checksum);
+  sendImmutableHtml(req, res, html, resolved.manifest.checksum, d.store.getSettings().webResources);
 }
 
 export async function handleServeEmbeddedDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
@@ -919,7 +930,7 @@ export async function handleServeEmbeddedDesignVersionPreview(req: IncomingMessa
     || createHash("sha256").update(html).digest("hex") !== resolved.manifest.checksum) {
     throw new HttpError(409, "Design Version changed after integrity verification");
   }
-  sendEmbeddedPreviewHtml(req, res, instrumentEmbeddedPreview(html));
+  sendEmbeddedPreviewHtml(req, res, instrumentEmbeddedPreview(html), d.store.getSettings().webResources);
 }
 
 export async function handleDownloadPortableDesignVersionPreview(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
@@ -979,6 +990,26 @@ function projectDesignSystem(d: AppDeps, project: DesignProjectMetadata | null):
   return { id: system.id, name: system.name, summary: system.summary, designMd: system.designMd, tokensCss: system.tokensCss };
 }
 
+/**
+ * Web resources for one Node turn: the design system's Fontsource ids plus the
+ * cached icon catalogs. Null when Settings keep generation fully offline.
+ */
+async function designWebResources(
+  d: AppDeps,
+  settings: Settings,
+  designSystem: DesignSystemContextInput | null,
+): Promise<DesignWebResourcesInput | null> {
+  if (!settings.webResources) return null;
+  return {
+    fonts: designSystem ? designSystemWebFonts(designSystem.tokensCss) : [],
+    iconSets: await loadDesignIconSets(d.dataDir, d.designRunner === undefined ? {} : { sets: [] }),
+  };
+}
+
+function designQuality(settings: Settings): { lint: boolean; visualReview: boolean } {
+  return { lint: settings.qualityLint, visualReview: settings.visualReview };
+}
+
 export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   const body = exactRecord(await readJsonBody(req), "Node Agent turn", [
     "message", "context", "agentCommand", "model", "idempotencyKey",
@@ -1002,6 +1033,7 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
   const settings = d.store.getSettings();
   const project = await getDesignProject(d.dataDir, p.id!).catch(() => null);
   const designSystem = projectDesignSystem(d, project);
+  const webResources = await designWebResources(d, settings, designSystem);
   const execution = effectiveDesignAgent(settings, {
     agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
     model: optionalDesignModel(body.model),
@@ -1017,10 +1049,12 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     artifactOutput: generative,
   });
   const systemPrompt = generative
-    ? buildDesignNodeSystemPrompt({ settings, message, node, designSystem })
+    ? buildDesignNodeSystemPrompt({ settings, message, node, designSystem, webResources })
     : buildDesignNodeAnalysisSystemPrompt({ settings, message, node });
   const started = await startDesignNodeTurn({
     designSystem,
+    webResources,
+    quality: designQuality(settings),
     dataDir: d.dataDir,
     projectId: p.id!,
     nodeId: p.nodeId!,
@@ -1083,6 +1117,7 @@ export async function startDesignMainAgentTurn(
   const settings = d.store.getSettings();
   const project = await getDesignProject(d.dataDir, projectId).catch(() => null);
   const designSystem = projectDesignSystem(d, project);
+  const webResources = await designWebResources(d, settings, designSystem);
   const execution = effectiveDesignAgent(settings, {
     agentCommand: parsed.agentCommand,
     model: parsed.model,
@@ -1113,10 +1148,12 @@ export async function startDesignMainAgentTurn(
       artifactOutput: generative,
     });
     const systemPrompt = generative
-      ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem })
+      ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem, webResources })
       : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
     const child = await startDesignNodeTurn({
       designSystem,
+      webResources,
+      quality: designQuality(settings),
       dataDir: d.dataDir,
       projectId,
       nodeId: dispatch.nodeId,
@@ -1244,6 +1281,7 @@ export async function handleRetryDesignJob(
   const settings = d.store.getSettings();
   const project = await getDesignProject(d.dataDir, p.id!).catch(() => null);
   const designSystem = projectDesignSystem(d, project);
+  const webResources = await designWebResources(d, settings, designSystem);
   const execution = retryDesignAgent(settings, failedJob, body);
   const retryKey = `retry-${failedJob.id}`;
 
@@ -1294,10 +1332,12 @@ export async function handleRetryDesignJob(
       artifactOutput: generative,
     });
     const systemPrompt = generative
-      ? buildDesignNodeSystemPrompt({ settings, message: originalMessage, node, designSystem })
+      ? buildDesignNodeSystemPrompt({ settings, message: originalMessage, node, designSystem, webResources })
       : buildDesignNodeAnalysisSystemPrompt({ settings, message: originalMessage, node });
     const started = await startDesignNodeTurn({
       designSystem,
+      webResources,
+      quality: designQuality(settings),
       dataDir: d.dataDir,
       projectId: p.id!,
       nodeId: node.id,
@@ -1351,10 +1391,12 @@ export async function handleRetryDesignJob(
         artifactOutput: generative,
       });
       const systemPrompt = generative
-        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem })
+        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem, webResources })
         : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
       const child = await startDesignNodeTurn({
         designSystem,
+        webResources,
+        quality: designQuality(settings),
         dataDir: d.dataDir,
         projectId: p.id!,
         nodeId: node.id,

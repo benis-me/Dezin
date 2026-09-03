@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  AgentArtifactError,
   AgentExecutionIdentityError,
   AgentTurnError,
   ClaudeCodeRunner,
@@ -19,6 +20,7 @@ import {
   initializeDesignProject,
   importDesignCanvasAssetBatch,
   listDesignVersions,
+  resolveDesignVersionFile,
   listDesignJobs,
   mutateDesignCanvas,
   publishDesignVersion,
@@ -29,6 +31,7 @@ import {
   cancelDesignNodeTurn,
   startDesignNodeTurn,
 } from "../src/design/design-node-agent.ts";
+import { loadDesignIconSets } from "../src/design/design-web-resources.ts";
 import type { DesignNodeRuntimeAssetDescriptor } from "../src/design/design-node-runtime-gate.ts";
 
 test("Node generation prompts bind the exact target and expose kind-specific contracts", () => {
@@ -1495,6 +1498,125 @@ test("a Node Agent reserves a complete thread turn before creating a Job or taki
     assert.equal(completedThread.messages.length, 2_000);
     assert.equal(completedThread.messages.at(-1)?.role, "assistant");
     assert.match(completedThread.messages.at(-1)?.content ?? "", /Generation failed/i);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("visual review captures screenshots into .review, revalidates a revised document, and inlines catalog icons", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-visual-review-"));
+  const projectId = "project-node-visual-review";
+  const iconSet = JSON.stringify({
+    prefix: "lucide",
+    width: 24,
+    height: 24,
+    icons: { "arrow-right": { body: '<path d="M5 12h14"/>' } },
+  });
+  const gateOptions: unknown[] = [];
+  let runnerCalls = 0;
+  const runner: AgentRunner = {
+    id: "visual-review-fake",
+    async runTurn(input) {
+      runnerCalls += 1;
+      if (runnerCalls === 2) {
+        assert.match(input.message, /Visual review/);
+        assert.match(input.message, /\.review\/desktop\.png \(1280×2000\)/);
+        assert.equal(input.isRepair, true);
+        assert.deepEqual([...(await readFile(join(input.projectDir, ".review", "desktop.png"))).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+        assert.match(await readFile(join(input.projectDir, ".context", "icons", "lucide.txt"), "utf8"), /^arrow-right\n$/);
+      }
+      const html = `<!doctype html><html><head><title>Reviewed</title></head><body><main>${runnerCalls === 1 ? "Draft" : "Revised after review"}<svg data-icon="lucide:arrow-right" width="16" height="16"></svg></main></body></html>`;
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: `turn-${runnerCalls}`, artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    const iconSets = await loadDesignIconSets(dataDir, {
+      fetch: (async () => new Response(iconSet, { status: 200 })) as unknown as typeof fetch,
+      sets: [{ prefix: "lucide", name: "Lucide", license: "ISC" }],
+    });
+    assert.equal(iconSets.length, 1);
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const completed = await (await startDesignNodeTurn({
+      dataDir,
+      projectId,
+      nodeId: "node-page",
+      message: "Build",
+      systemPrompt: "Write",
+      runner,
+      webResources: { fonts: [{ family: "Inter", id: "inter" }], iconSets },
+      quality: { lint: true, visualReview: true },
+      runtimeGate: async (gateInput) => {
+        gateOptions.push(gateInput.options);
+        assert.match(gateInput.html, /viewBox="0 0 24 24" data-icon="lucide:arrow-right" width="16" height="16" aria-hidden="true"><path d="M5 12h14"\/>/);
+        return {
+          viewports: 2,
+          meaningfulElements: 1,
+          ...(gateInput.options?.screenshots
+            ? { screenshots: [{ viewport: "desktop" as const, width: 1280, height: 2000, png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]) }] }
+            : {}),
+        };
+      },
+    })).completion;
+    assert.equal(completed.status, "ready", completed.error ?? "visual review flow failed");
+    assert.equal(runnerCalls, 2);
+    assert.deepEqual(gateOptions, [
+      { webResources: true, lint: true, screenshots: true },
+      { webResources: true, lint: true, screenshots: false },
+    ]);
+    assert.ok(completed.activity.some((entry) => /Visual review revised index\.html/.test(entry.text)));
+    const versions = await listDesignVersions(dataDir, projectId, "node-page");
+    assert.equal(versions.length, 1);
+    const published = await readFile((await resolveDesignVersionFile(dataDir, projectId, "node-page", versions[0]!.id, "index.html")).path, "utf8");
+    assert.match(published, /Revised after review/);
+    assert.match(published, /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 24 24" data-icon="lucide:arrow-right"/);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("visual review treats an unchanged index.html as approval and publishes without a second gate run", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-node-visual-review-lgtm-"));
+  const projectId = "project-node-visual-review-lgtm";
+  let runnerCalls = 0;
+  let gateCalls = 0;
+  const html = "<!doctype html><html><head><title>Approved</title></head><body><main>Final</main></body></html>";
+  const runner: AgentRunner = {
+    id: "visual-review-lgtm-fake",
+    async runTurn(input) {
+      runnerCalls += 1;
+      if (runnerCalls === 1) await writeFile(join(input.projectDir, "index.html"), html);
+      else throw new AgentArtifactError("visual review", "index.html", "unchanged");
+      return { text: runnerCalls === 1 ? "draft" : "LGTM", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, {
+      expectedRevision: 0,
+      intents: [{ type: "add-node", node: { id: "node-page", kind: "page" } }],
+    });
+    const completed = await (await startDesignNodeTurn({
+      dataDir,
+      projectId,
+      nodeId: "node-page",
+      message: "Build",
+      systemPrompt: "Write",
+      runner,
+      quality: { lint: false, visualReview: true },
+      runtimeGate: async () => {
+        gateCalls += 1;
+        return { viewports: 2, meaningfulElements: 1, screenshots: [{ viewport: "mobile", width: 390, height: 844, png: Buffer.from([1]) }] };
+      },
+    })).completion;
+    assert.equal(completed.status, "ready", completed.error ?? "LGTM flow failed");
+    assert.equal(runnerCalls, 2);
+    assert.equal(gateCalls, 1);
+    assert.ok(completed.activity.some((entry) => /Visual review approved/.test(entry.text)));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

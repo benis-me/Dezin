@@ -1452,6 +1452,13 @@ test("Design Canvas HTTP supports CAS, exact preview pins, safe Asset delivery, 
     }
     assert.doesNotMatch(csp, /navigate-to/);
     assert.doesNotMatch(csp, /allow-top-navigation/);
+    // Web fonts ride on the Settings toggle: Fontsource on jsDelivr is admitted by default and nothing else.
+    assert.match(csp, /style-src 'unsafe-inline' https:\/\/cdn\.jsdelivr\.net\/fontsource\//);
+    assert.match(csp, /font-src 'self' data: blob: https:\/\/cdn\.jsdelivr\.net\/fontsource\//);
+    store.updateSettings({ webResources: false });
+    const offlineCsp = (await fetch(`${base}${root}/nodes/node-page/versions/${published.manifest.id}/preview/`)).headers.get("content-security-policy") ?? "";
+    assert.doesNotMatch(offlineCsp, /jsdelivr/);
+    store.updateSettings({ webResources: true });
     const previewHtml = await preview.text();
     assert.equal(
       createHash("sha256").update(Buffer.from(previewHtml, "utf8")).digest("hex"),

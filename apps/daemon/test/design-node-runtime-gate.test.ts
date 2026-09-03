@@ -174,3 +174,42 @@ test("Node runtime gate rejects blank, horizontal overflow, runtime errors, and 
     );
   }
 });
+
+test("Node runtime gate quality lint reports contrast, filler copy, and overlap, and screenshots are bounded captures", async (t) => {
+  if (!findDesignExportChrome()) {
+    t.skip("Chrome is required for the production Node runtime gate");
+    return;
+  }
+  const shell = (body: string, css = "") => `<!doctype html><html><head><title>Lint</title><style>body{margin:0;font-family:Arial,sans-serif}main{padding:24px;max-width:100%;box-sizing:border-box}${css}</style></head><body><main>${body}</main></body></html>`;
+  await assert.rejects(runDesignNodeRuntimeGate({
+    html: shell('<p style="color:#999;background:#fff">Lorem ipsum dolor sit amet, filler paragraph</p>'),
+    signal: new AbortController().signal,
+    assets: [],
+    options: { lint: true },
+  }), (error: Error) => /Quality lint failed at desktop/.test(error.message)
+    && /placeholder copy "lorem ipsum"/i.test(error.message)
+    && /contrast .*WCAG AA needs 4\.5:1/.test(error.message));
+  await assert.rejects(runDesignNodeRuntimeGate({
+    html: shell('<div style="position:relative;height:40px"><p style="position:absolute;top:0;left:0;margin:0">First headline text</p><p style="position:absolute;top:4px;left:8px;margin:0">Second headline text</p></div>'),
+    signal: new AbortController().signal,
+    assets: [],
+    options: { lint: true },
+  }), /text elements overlap/);
+  const clean = await runDesignNodeRuntimeGate({
+    html: shell('<h1 style="color:#111">Readable</h1><p style="color:#333">Real copy with enough contrast.</p><div style="height:2400px"></div>'),
+    signal: new AbortController().signal,
+    assets: [],
+    options: { lint: true, screenshots: true },
+  });
+  assert.equal(clean.screenshots?.length, 2);
+  const desktop = clean.screenshots!.find((shot) => shot.viewport === "desktop")!;
+  assert.equal(desktop.width, 1280);
+  assert.ok(desktop.height > 800 && desktop.height <= 4000, `bounded full-page height, got ${desktop.height}`);
+  assert.deepEqual([...desktop.png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+  const silent = await runDesignNodeRuntimeGate({
+    html: shell('<p style="color:#999">Lorem ipsum dolor sit amet</p>'),
+    signal: new AbortController().signal,
+    assets: [],
+  });
+  assert.equal(silent.screenshots, undefined);
+});

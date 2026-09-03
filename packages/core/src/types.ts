@@ -183,4 +183,10 @@ export interface Settings {
   aiProviderOrganization: string;
   aiProviderProfiles: string;
   sharinganAffirmed: boolean;
+  /** Let generated Nodes load Fontsource web fonts and inline Iconify icon sets from jsDelivr. */
+  webResources: boolean;
+  /** Deterministic quality lint (contrast, filler copy, overlapping text) in the Node runtime gate. */
+  qualityLint: boolean;
+  /** One screenshot self-review turn before a Node Version is published. */
+  visualReview: boolean;
 }

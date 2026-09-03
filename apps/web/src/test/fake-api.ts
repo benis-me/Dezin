@@ -100,6 +100,9 @@ const defaultSettings: Settings = {
   aiProviderOrganization: "",
   aiProviderProfiles: "",
   sharinganAffirmed: false,
+  webResources: true,
+  qualityLint: true,
+  visualReview: false,
 };
 
 /** Build a current ApiClient fake; tests override only the behavior they exercise. */

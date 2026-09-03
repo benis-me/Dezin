@@ -11,6 +11,7 @@ import {
 } from "./design-storage-primitives.ts";
 import { isSafePassiveDesignDataUrl } from "./design-data-url-policy.ts";
 import { designHtmlUrlContext } from "./design-html-url-context.ts";
+import { isDesignWebFontFileUrl, isDesignWebFontStylesheetUrl } from "./design-web-resources.ts";
 
 function allowedDesignUrl(value: string, allowCanonicalAssets: boolean): boolean {
   const url = value.trim();
@@ -1836,9 +1837,15 @@ function validateDesignCss(
   }
   for (const dependency of dependencies ?? []) {
     if (dependency.type === "import") {
-      throw new DesignStorageError("invalid-html", "Generated HTML must keep styles and style assets local");
+      throw new DesignStorageError(
+        "invalid-html",
+        isDesignWebFontStylesheetUrl(dependency.url)
+          ? "Generated HTML must load Fontsource CSS with a <link rel=\"stylesheet\"> element, not @import"
+          : "Generated HTML must keep styles and style assets local",
+      );
     }
-    if (dependency.type !== "url" || !allowedDesignUrl(dependency.url, allowCanonicalAssets)) {
+    if (dependency.type !== "url"
+      || !(allowedDesignUrl(dependency.url, allowCanonicalAssets) || isDesignWebFontFileUrl(dependency.url))) {
       throw new DesignStorageError("invalid-html", "Generated HTML contains an unpinned style asset URL");
     }
     onAllowedUrl?.(dependency.url);
@@ -2141,8 +2148,12 @@ function validateDesignHtmlElement(
     throw new DesignStorageError("invalid-html", "Generated HTML may not redefine navigation");
   }
   const rel = designHtmlAttribute(element, "rel")?.trim().toLowerCase().split(/\s+/) ?? [];
-  if (tagName === "link" && rel.includes("stylesheet")) {
-    throw new DesignStorageError("invalid-html", "Generated HTML must keep styles inline");
+  // Fontsource stylesheets on jsDelivr are the one permitted remote stylesheet;
+  // the preview CSP and the runtime gate decide whether they may actually load.
+  const webFontStylesheet = tagName === "link" && rel.includes("stylesheet")
+    && isDesignWebFontStylesheetUrl(designHtmlAttribute(element, "href") ?? "");
+  if (tagName === "link" && rel.includes("stylesheet") && !webFontStylesheet) {
+    throw new DesignStorageError("invalid-html", "Generated HTML must keep styles inline (Fontsource CSS links from https://cdn.jsdelivr.net/fontsource/ are the only exception)");
   }
   if (tagName === "meta" && designHtmlAttribute(element, "http-equiv")?.trim().toLowerCase() === "refresh") {
     throw new DesignStorageError("invalid-html", "Generated HTML may not refresh navigation");
@@ -2166,7 +2177,8 @@ function validateDesignHtmlElement(
     if (urlContext?.kind === "style-value") {
       validateDesignCss(`${urlContext.cssPropertyName}:${attribute.value}`, allowCanonicalAssets, "attribute");
     }
-    if (urlContext?.kind === "single" && !allowedDesignUrl(attribute.value, allowCanonicalAssets)) {
+    if (urlContext?.kind === "single" && !(webFontStylesheet && name === "href")
+      && !allowedDesignUrl(attribute.value, allowCanonicalAssets)) {
       const rejected = attribute.value.trim();
       const preview = rejected.length > 160 ? `${rejected.slice(0, 160)}…` : rejected;
       throw new DesignStorageError(

@@ -25,6 +25,9 @@ const SETTINGS: Settings = {
   aiProviderOrganization: "org-test",
   aiProviderProfiles: "",
   sharinganAffirmed: false,
+  webResources: true,
+  qualityLint: true,
+  visualReview: false,
 };
 
 test("buildAgentEnv maps BYOK settings only for Claude", () => {

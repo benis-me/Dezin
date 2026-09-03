@@ -70,6 +70,9 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     sharinganAffirmed: false,
+    webResources: true,
+    qualityLint: true,
+    visualReview: false,
     ...patch,
   };
 }
@@ -907,6 +910,9 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       aiProviderOrganization: "",
       aiProviderProfiles: "",
       sharinganAffirmed: false,
+      webResources: true,
+      qualityLint: true,
+      visualReview: false,
     }),
     startMoodboard,
   });
@@ -1359,6 +1365,9 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     sharinganAffirmed: false,
+    webResources: true,
+    qualityLint: true,
+    visualReview: false,
   };
   render(
     <ApiProvider
@@ -1969,4 +1978,18 @@ test("SettingsScreen theme control reports the chosen preference", async () => {
   const { onThemeChange } = renderSettings();
   fireEvent.click(await screen.findByRole("button", { name: "Dark" }));
   expect(onThemeChange).toHaveBeenCalledWith("dark");
+});
+
+test("SettingsScreen Generation toggles save web resources, quality lint, and screenshot review", async () => {
+  const { updateSettings } = renderSettings();
+  fireEvent.click(screen.getByRole("button", { name: "Generation" }));
+  const review = await screen.findByRole("switch", { name: "Screenshot review" });
+  expect(review).toHaveAttribute("aria-checked", "false");
+  expect(screen.getByRole("switch", { name: "Web fonts and icons" })).toHaveAttribute("aria-checked", "true");
+  expect(screen.getByRole("switch", { name: "Quality lint" })).toHaveAttribute("aria-checked", "true");
+  fireEvent.click(review);
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith({ visualReview: true }));
+  expect(review).toHaveAttribute("aria-checked", "true");
+  fireEvent.click(screen.getByRole("switch", { name: "Web fonts and icons" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith({ webResources: false }));
 });

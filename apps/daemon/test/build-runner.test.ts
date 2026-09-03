@@ -26,6 +26,9 @@ function settings(over: Partial<Settings>): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     sharinganAffirmed: false,
+    webResources: true,
+    qualityLint: true,
+    visualReview: false,
     ...over,
   };
 }

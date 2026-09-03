@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS settings (
   ai_provider_models TEXT,
   ai_provider_organization TEXT,
   ai_provider_profiles TEXT,
-  sharingan_affirmed INTEGER NOT NULL DEFAULT 0 CHECK(sharingan_affirmed IN (0, 1))
+  sharingan_affirmed INTEGER NOT NULL DEFAULT 0 CHECK(sharingan_affirmed IN (0, 1)),
+  web_resources INTEGER NOT NULL DEFAULT 1 CHECK(web_resources IN (0, 1)),
+  quality_lint INTEGER NOT NULL DEFAULT 1 CHECK(quality_lint IN (0, 1)),
+  visual_review INTEGER NOT NULL DEFAULT 0 CHECK(visual_review IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS extension_credentials (

@@ -146,8 +146,9 @@ Dezin itself never phones home. These are the only outbound connections. Each on
 | Figma import | `api.figma.com` | Personal access token in Settings |
 | Chrome extension capture | The page you capture (Pinterest, Behance, Dribbble and their image CDNs) and your local daemon | Pairing code |
 | Sharingan capture | The URL you enter, fetched by local Chrome | None |
+| Web fonts and icons (Settings → Generation, on by default) | `cdn.jsdelivr.net`: Fontsource CSS and font files loaded by previews, Iconify icon-set JSON cached once by the daemon | None |
 
-Generated HTML and Implementation Exports are validated to load no remote scripts, styles, fonts, or images.
+Generated HTML and Implementation Exports are validated to load no remote scripts, styles, fonts, or images, with one exception: when web fonts and icons are enabled, a Node may link Fontsource stylesheets from `https://cdn.jsdelivr.net/fontsource/`. Icons are inlined as SVG before publication, so Versions never fetch them.
 
 ## Trademarks
 

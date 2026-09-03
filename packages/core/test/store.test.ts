@@ -401,3 +401,26 @@ test("Store configures a bounded busy timeout", () => {
   assert.equal(Number(Object.values(row)[0]), 5_000);
   store.close();
 });
+
+test("settings added after a database was created arrive as additive columns", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dezin-store-settings-migration-"));
+  const path = join(dir, "app.sqlite");
+  try {
+    new Store(path).close();
+    const raw = new DatabaseSync(path);
+    raw.exec("ALTER TABLE settings DROP COLUMN quality_lint");
+    raw.exec("ALTER TABLE settings DROP COLUMN visual_review");
+    raw.close();
+    const store = new Store(path);
+    try {
+      assert.equal(store.getSettings().qualityLint, true);
+      assert.equal(store.getSettings().visualReview, false);
+      assert.equal(store.updateSettings({ visualReview: true, qualityLint: false }).visualReview, true);
+      assert.equal(store.getSettings().qualityLint, false);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

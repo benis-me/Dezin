@@ -3,8 +3,8 @@ import { Monitor, Moon } from "lucide-react";
 import type { ThemePreference } from "../lib/theme.ts";
 import { formatTime } from "../lib/format-date.ts";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Picker, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
+import { Info, Palette, Puzzle, Server, SlidersHorizontal, Sparkles, Sun, Type } from "lucide-react";
+import { Button, Picker, Switch, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
@@ -17,7 +17,25 @@ import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui
 import { IMAGE_ACTION_DEFAULTS, IMAGE_ACTION_MODEL_FIELDS, type ImageActionModelField } from "../lib/image-action-defaults.ts";
 import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 
-type SectionId = "appearance" | "provider" | "models" | "defaults" | "instructions" | "extension" | "about";
+type SectionId = "appearance" | "provider" | "models" | "defaults" | "generation" | "instructions" | "extension" | "about";
+
+const GENERATION_TOGGLES: { field: "webResources" | "qualityLint" | "visualReview"; label: string; desc: string }[] = [
+  {
+    field: "webResources",
+    label: "Web fonts and icons",
+    desc: "Nodes may load Fontsource fonts from jsDelivr, and the daemon caches Iconify icon sets to inline real icons. Off keeps previews fully offline.",
+  },
+  {
+    field: "qualityLint",
+    label: "Quality lint",
+    desc: "Rendered checks for low contrast, filler copy, default fonts, and overlapping text; findings go back to the Agent for repair.",
+  },
+  {
+    field: "visualReview",
+    label: "Screenshot review",
+    desc: "One extra Agent turn that looks at desktop and mobile screenshots before publishing. Slower, catches what lint cannot see.",
+  },
+];
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
 
@@ -36,6 +54,7 @@ const SECTION_GROUPS: { id: SectionId; label: string; icon: typeof Palette }[][]
     { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   ],
   [
+    { id: "generation", label: "Generation", icon: Sparkles },
     { id: "instructions", label: "Custom instructions", icon: Type },
   ],
   [
@@ -401,6 +420,25 @@ export function SettingsScreen({
                           options={imageActionModelOptions}
                         />
                       </div>
+                    </SettingRow>
+                  ))}
+                </SettingsRows>
+              </SettingsPanel>
+            )}
+
+            {section === "generation" && (
+              <SettingsPanel title="Generation" desc="What every Node turn may reach for, and how hard the daemon checks the result before publishing.">
+                <SettingsRows>
+                  {GENERATION_TOGGLES.map((item) => (
+                    <SettingRow key={item.field} label={item.label} desc={item.desc}>
+                      <Switch
+                        aria-label={item.label}
+                        checked={settings[item.field]}
+                        onCheckedChange={(checked) => {
+                          setLocal(item.field, checked);
+                          save(item.field, checked);
+                        }}
+                      />
                     </SettingRow>
                   ))}
                 </SettingsRows>

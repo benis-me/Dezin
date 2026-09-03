@@ -57,6 +57,9 @@ const DEFAULT_SETTINGS = {
   aiProviderOrganization: "",
   aiProviderProfiles: "",
   sharinganAffirmed: false,
+  webResources: true,
+  qualityLint: true,
+  visualReview: false,
 } satisfies Settings;
 
 const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULT_SETTINGS) as Array<keyof typeof DEFAULT_SETTINGS>);
@@ -96,6 +99,7 @@ export class Store {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.exec(STORE_SCHEMA);
+      this.addMissingSettingsColumns();
       this.db.exec("COMMIT");
     } catch (error) {
       try {
@@ -111,6 +115,22 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Settings added after a database was created arrive as additive columns. */
+  private addMissingSettingsColumns(): void {
+    const present = new Set(
+      (this.db.prepare("PRAGMA table_info(settings)").all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    for (const key of SETTINGS_KEYS) {
+      const column = settingColumn(key);
+      if (present.has(column)) continue;
+      const fallback = DEFAULT_SETTINGS[key];
+      const definition = typeof fallback === "boolean"
+        ? `INTEGER NOT NULL DEFAULT ${fallback ? 1 : 0} CHECK(${column} IN (0, 1))`
+        : "TEXT";
+      this.db.exec(`ALTER TABLE settings ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   // ── browser extension credentials ───────────────────────────────────────
