@@ -9,7 +9,8 @@ import type { Settings } from "@dezin/core";
 import type { AppDeps } from "../app.ts";
 import { HttpError, readJsonBody, sendJson } from "../http-util.ts";
 import { SharinganSession } from "../sharingan-browser.ts";
-import { getDesignProject } from "./design-project-store.ts";
+import { defaultRegistry } from "@dezin/design";
+import { getDesignProject, type DesignProjectMetadata } from "./design-project-store.ts";
 import {
   buildDesignMainSystemPrompt,
   cancelDesignGlobalJob,
@@ -30,6 +31,7 @@ import {
   createProductionDesignNodeRunner,
   productionDesignAgentEnvironment,
   startDesignNodeTurn,
+  type DesignSystemContextInput,
 } from "./design-node-agent.ts";
 import { runDesignNodeRuntimeGate } from "./design-node-runtime-gate.ts";
 import {
@@ -969,6 +971,14 @@ export async function handleGetNodeDesignThread(_req: IncomingMessage, res: Serv
   sendJson(res, 200, await getDesignThread(d.dataDir, p.id!, { type: "node", nodeId: p.nodeId! }));
 }
 
+/** The design system a Project's Agents design inside: its pick, else the registry default. */
+function projectDesignSystem(d: AppDeps, project: DesignProjectMetadata | null): DesignSystemContextInput | null {
+  const registry = d.designRegistry ?? defaultRegistry();
+  const system = (project?.designSystemId ? registry.get(project.designSystemId) : null) ?? registry.default();
+  if (!system) return null;
+  return { id: system.id, name: system.name, summary: system.summary, designMd: system.designMd, tokensCss: system.tokensCss };
+}
+
 export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResponse, p: Record<string, string>, d: AppDeps): Promise<void> {
   const body = exactRecord(await readJsonBody(req), "Node Agent turn", [
     "message", "context", "agentCommand", "model", "idempotencyKey",
@@ -990,6 +1000,8 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     throw new HttpError(400, "Node Agent context references a Node outside the canvas");
   }
   const settings = d.store.getSettings();
+  const project = await getDesignProject(d.dataDir, p.id!).catch(() => null);
+  const designSystem = projectDesignSystem(d, project);
   const execution = effectiveDesignAgent(settings, {
     agentCommand: boundedString(body.agentCommand, "agentCommand", 512, true),
     model: optionalDesignModel(body.model),
@@ -1005,9 +1017,10 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
     artifactOutput: generative,
   });
   const systemPrompt = generative
-    ? buildDesignNodeSystemPrompt({ settings, message, node })
+    ? buildDesignNodeSystemPrompt({ settings, message, node, designSystem })
     : buildDesignNodeAnalysisSystemPrompt({ settings, message, node });
   const started = await startDesignNodeTurn({
+    designSystem,
     dataDir: d.dataDir,
     projectId: p.id!,
     nodeId: p.nodeId!,
@@ -1068,6 +1081,8 @@ export async function startDesignMainAgentTurn(
   parsed: StartDesignMainAgentRequest,
 ) {
   const settings = d.store.getSettings();
+  const project = await getDesignProject(d.dataDir, projectId).catch(() => null);
+  const designSystem = projectDesignSystem(d, project);
   const execution = effectiveDesignAgent(settings, {
     agentCommand: parsed.agentCommand,
     model: parsed.model,
@@ -1098,9 +1113,10 @@ export async function startDesignMainAgentTurn(
       artifactOutput: generative,
     });
     const systemPrompt = generative
-      ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node })
+      ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem })
       : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
     const child = await startDesignNodeTurn({
+      designSystem,
       dataDir: d.dataDir,
       projectId,
       nodeId: dispatch.nodeId,
@@ -1118,11 +1134,13 @@ export async function startDesignMainAgentTurn(
     return child.job;
   };
   const started = await startDesignMainTurn({
+    designSystem,
     dataDir: d.dataDir,
     projectId,
     message: parsed.message,
     runner: mainRunner,
-    systemPrompt: buildDesignMainSystemPrompt(),
+    systemPrompt: buildDesignMainSystemPrompt({ projectName: project?.name, designSystem, customInstructions: settings.customInstructions }),
+    promptIdentity: buildDesignMainSystemPrompt(),
     contextNodeIds: parsed.contextNodeIds,
     idempotencyKey: parsed.idempotencyKey ?? null,
     terminalReceiptPolicy: parsed.terminalReceiptPolicy,
@@ -1224,6 +1242,8 @@ export async function handleRetryDesignJob(
   const failedJob = await getDesignJob(d.dataDir, p.id!, p.jobId!);
   if (failedJob.status !== "failed") throw new HttpError(409, "Only a failed Design Job can be retried");
   const settings = d.store.getSettings();
+  const project = await getDesignProject(d.dataDir, p.id!).catch(() => null);
+  const designSystem = projectDesignSystem(d, project);
   const execution = retryDesignAgent(settings, failedJob, body);
   const retryKey = `retry-${failedJob.id}`;
 
@@ -1274,9 +1294,10 @@ export async function handleRetryDesignJob(
       artifactOutput: generative,
     });
     const systemPrompt = generative
-      ? buildDesignNodeSystemPrompt({ settings, message: originalMessage, node })
+      ? buildDesignNodeSystemPrompt({ settings, message: originalMessage, node, designSystem })
       : buildDesignNodeAnalysisSystemPrompt({ settings, message: originalMessage, node });
     const started = await startDesignNodeTurn({
+      designSystem,
       dataDir: d.dataDir,
       projectId: p.id!,
       nodeId: node.id,
@@ -1330,9 +1351,10 @@ export async function handleRetryDesignJob(
         artifactOutput: generative,
       });
       const systemPrompt = generative
-        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node })
+        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem })
         : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
       const child = await startDesignNodeTurn({
+        designSystem,
         dataDir: d.dataDir,
         projectId: p.id!,
         nodeId: node.id,
@@ -1350,11 +1372,13 @@ export async function handleRetryDesignJob(
       return child.job;
     };
     const started = await startDesignMainTurn({
+      designSystem,
       dataDir: d.dataDir,
       projectId: p.id!,
       message: originalMessage,
       runner: mainRunner,
-      systemPrompt: buildDesignMainSystemPrompt(),
+      systemPrompt: buildDesignMainSystemPrompt({ projectName: project?.name, designSystem, customInstructions: settings.customInstructions }),
+    promptIdentity: buildDesignMainSystemPrompt(),
       idempotencyKey: retryKey,
       env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
       model: execution.model,

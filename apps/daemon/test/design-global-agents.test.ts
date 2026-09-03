@@ -44,6 +44,19 @@ function sha256(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+test("Main Agent prompt carries the project name, design system, sizes, and user instructions", () => {
+  const prompt = buildDesignMainSystemPrompt({
+    projectName: "Afterlight",
+    designSystem: { name: "Modern Minimal", summary: "Neutral grayscale." },
+    customInstructions: "Prefer editorial serif display type.",
+  });
+  assert.match(prompt, /named “Afterlight”/);
+  assert.match(prompt, /“Modern Minimal” design system[\s\S]*\.context\/design-system\//);
+  assert.match(prompt, /default Node sizes are page 720×540/);
+  assert.match(prompt, /## User design instructions\n\nPrefer editorial serif display type\./);
+  assert.doesNotMatch(buildDesignMainSystemPrompt(), /design system|User design instructions/);
+});
+
 test("Main Agent preserves explicit visual and layout authority when dispatching scoped design work", () => {
   const prompt = buildDesignMainSystemPrompt();
   assert.match(prompt, /visual-reference.*layout-authority/i);

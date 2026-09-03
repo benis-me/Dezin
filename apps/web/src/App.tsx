@@ -5,7 +5,7 @@ import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
-import type { ApiClient, DesignCanvasAssetImportItem, Project, Settings } from "./lib/api.ts";
+import type { ApiClient, DesignCanvasAssetImportItem, DesignSystemCard, Project, Settings } from "./lib/api.ts";
 import type { DesignProjectBootstrapInput } from "./design-canvas/types.ts";
 import { type DesignProjectAttachments } from "./lib/design-attachments.ts";
 import { createDesignCanvasApi } from "./lib/design-canvas-api.ts";
@@ -43,6 +43,7 @@ function DesignProjectScreen({
   onOpenSettings: (section?: string) => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
+  const [designSystems, setDesignSystems] = useState<DesignSystemCard[] | undefined>(undefined);
   const [agentDefaults, setAgentDefaults] = useState<Pick<Settings, "agentCommand" | "model"> | null>(null);
   const agentDefaultsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestAgentDefaultsRef = useRef<Pick<Settings, "agentCommand" | "model"> | null>(null);
@@ -92,6 +93,23 @@ function DesignProjectScreen({
     window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated }));
   }, [api, projectId]);
 
+  useEffect(() => {
+    let active = true;
+    void api.listDesignSystems().then((systems) => {
+      if (active) setDesignSystems(systems);
+    }).catch(() => {
+      if (active) setDesignSystems([]);
+    });
+    return () => {
+      active = false;
+    };
+  }, [api]);
+
+  const changeDesignSystem = useCallback(async (designSystemId: string | null) => {
+    const updated = await api.patchProject(projectId, { designSystemId });
+    setProject(updated);
+  }, [api, projectId]);
+
   const persistAgentDefaults = useCallback((selection: { agentCommand: string; model: string }) => {
     latestAgentDefaultsRef.current = selection;
     setAgentDefaults(selection);
@@ -125,6 +143,9 @@ function DesignProjectScreen({
       onOpenSettings={onOpenSettings}
       projectPath={project?.projectPath}
       onRevealExport={revealExport}
+      designSystems={designSystems}
+      designSystemId={project?.designSystemId ?? null}
+      onChangeDesignSystem={changeDesignSystem}
     />
   );
 }

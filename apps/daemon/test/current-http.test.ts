@@ -102,7 +102,7 @@ test("current Project HTTP is minimal and retired Design architecture stays unre
     assert.equal(createdResponse.status, 201);
     const project = await createdResponse.json() as Record<string, unknown>;
     assert.equal(project.name, "Blank canvas");
-    for (const retiredField of ["skillId", "designSystemId", "mode"]) {
+    for (const retiredField of ["skillId", "mode"]) {
       assert.equal(Object.hasOwn(project, retiredField), false);
     }
 
@@ -114,6 +114,14 @@ test("current Project HTTP is minimal and retired Design architecture stays unre
     assert.equal(((await renamed.json()) as { name: string }).name, "Renamed canvas");
     const rejectedLegacyPatch = await request(`/api/projects/${project.id as string}`, "PATCH", { mode: "standard" });
     assert.equal(rejectedLegacyPatch.status, 400);
+    const systemPatched = await request(`/api/projects/${project.id as string}`, "PATCH", { designSystemId: "modern-minimal" });
+    assert.equal(systemPatched.status, 200);
+    assert.equal(((await systemPatched.json()) as { designSystemId: string | null }).designSystemId, "modern-minimal");
+    assert.equal((await request(`/api/projects/${project.id as string}`, "PATCH", { designSystemId: "not-installed" })).status, 400);
+    assert.equal(
+      ((await (await request(`/api/projects/${project.id as string}`)).json()) as { designSystemId: string | null }).designSystemId,
+      "modern-minimal",
+    );
 
     const id = project.id as string;
     const retiredRoutes: Array<[method: string, path: string, expected?: number]> = [
@@ -251,7 +259,7 @@ test("ordinary Design Project CRUD and title never create or expose a legacy SQL
       agentCommand: "codebuddy",
       model: "hy4-preview-ioa",
     });
-    for (const retiredField of ["skillId", "designSystemId", "mode"]) {
+    for (const retiredField of ["skillId", "mode"]) {
       assert.equal(Object.hasOwn(titlePayload, retiredField), false);
     }
     assert.equal(store.getProject(projectId), null);

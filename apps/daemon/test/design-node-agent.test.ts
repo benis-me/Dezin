@@ -58,6 +58,14 @@ test("Node generation prompts bind the exact target and expose kind-specific con
     assert.match(page, /node-page.*page/i);
     assert.match(page, /complete responsive page/i);
     assert.match(page, /320px.*horizontal overflow/i);
+    assert.doesNotMatch(page, /## Design system/);
+    const systemBound = buildDesignNodeSystemPrompt({
+      settings,
+      message: "Create it",
+      node: { id: "node-page", kind: "page", name: "Home" },
+      designSystem: { name: "Modern Minimal", summary: "Neutral grayscale, one cobalt accent." },
+    });
+    assert.match(systemBound, /## Design system[\s\S]*“Modern Minimal”[\s\S]*\.context\/design-system\/DESIGN\.md[\s\S]*\.context\/design-system\/tokens\.css/);
     assert.match(research, /node-research.*research/i);
     assert.match(research, /evidence.*sources|sources.*evidence/i);
     assert.match(designSystem, /primitive.*semantic.*component.*UI tokens/i);

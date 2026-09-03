@@ -53,6 +53,8 @@ export interface Project {
   sharingan?: boolean;
   /** The source URL Sharingan cloned this project from, when sharingan is true. */
   sourceUrl?: string;
+  /** Design system the Canvas Agents follow; null means the daemon's default system. */
+  designSystemId?: string | null;
 }
 
 export interface CreateProjectInput {
@@ -563,7 +565,7 @@ export interface ApiClient {
     agent?: { agentCommand?: string; model?: string },
   ): Promise<Project>;
   getProject(id: string): Promise<Project>;
-  patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
+  patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean; designSystemId?: string | null }): Promise<Project>;
   deleteProject(id: string): Promise<void>;
   getDesignCanvas(projectId: string, signal?: AbortSignal): Promise<DesignCanvas>;
   mutateDesignCanvas(

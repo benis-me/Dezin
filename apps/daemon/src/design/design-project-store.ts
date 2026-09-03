@@ -21,6 +21,18 @@ export interface DesignProjectMetadata {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  /** Registry id of the design system Node Agents follow; null means the registry default. */
+  designSystemId: string | null;
+}
+
+const DESIGN_SYSTEM_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function designSystemIdOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !DESIGN_SYSTEM_ID.test(value)) {
+    throw new DesignStorageError("invalid-input", "Design system id is invalid");
+  }
+  return value;
 }
 
 export interface PublicDesignProject {
@@ -32,6 +44,7 @@ export interface PublicDesignProject {
   coverUrl: string;
   projectPath: string;
   sharingan: false;
+  designSystemId: string | null;
 }
 
 function safeProjectId(projectId: string): string {
@@ -88,7 +101,7 @@ function parseMetadata(value: unknown, expectedProjectId: string): DesignProject
     throw new DesignStorageError("corrupt", "Design Project metadata must be an object");
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "projectId", "name", "createdAt", "updatedAt", "archivedAt"]);
+  const allowed = new Set(["schemaVersion", "projectId", "name", "createdAt", "updatedAt", "archivedAt", "designSystemId"]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new DesignStorageError("corrupt", "Design Project metadata contains an unexpected field");
   }
@@ -101,6 +114,12 @@ function parseMetadata(value: unknown, expectedProjectId: string): DesignProject
     throw new DesignStorageError("corrupt", "Design Project metadata timestamps are invalid");
   }
   const archivedAt = record.archivedAt === null ? null : timestamp(record.archivedAt, "archivedAt");
+  let designSystemId: string | null;
+  try {
+    designSystemId = designSystemIdOrNull(record.designSystemId);
+  } catch {
+    throw new DesignStorageError("corrupt", "Design Project metadata design system id is invalid");
+  }
   return {
     schemaVersion: DESIGN_PROJECT_METADATA_SCHEMA_VERSION,
     projectId: expectedProjectId,
@@ -108,6 +127,7 @@ function parseMetadata(value: unknown, expectedProjectId: string): DesignProject
     createdAt,
     updatedAt,
     archivedAt,
+    designSystemId,
   };
 }
 
@@ -201,6 +221,7 @@ export async function createDesignProject(
       createdAt,
       updatedAt: createdAt,
       archivedAt: null,
+      designSystemId: null,
     };
     try {
       await mkdir(join(root, "design"), { recursive: false });
@@ -247,6 +268,7 @@ export async function ensureDesignProjectAtId(
       schemaVersion: DESIGN_PROJECT_METADATA_SCHEMA_VERSION,
       projectId,
       name,
+      designSystemId: null,
       createdAt,
       updatedAt: createdAt,
       archivedAt: null,
@@ -314,7 +336,7 @@ export async function listInitializedDesignProjectIds(dataDir: string): Promise<
 export async function updateDesignProject(
   dataDir: string,
   projectId: string,
-  patch: { name?: string; archived?: boolean },
+  patch: { name?: string; archived?: boolean; designSystemId?: string | null },
   now = Date.now(),
 ): Promise<DesignProjectMetadata> {
   return withMetadataLock(dataDir, projectId, async () => {
@@ -330,6 +352,7 @@ export async function updateDesignProject(
       ...current,
       ...(patch.name === undefined ? {} : { name: projectName(patch.name) }),
       ...(patch.archived === undefined ? {} : { archivedAt: patch.archived ? updatedAt : null }),
+      ...(patch.designSystemId === undefined ? {} : { designSystemId: designSystemIdOrNull(patch.designSystemId) }),
       updatedAt,
     };
     await writeAtomicJson(metadataPath(dataDir, projectId), next);
@@ -347,5 +370,6 @@ export function designProjectPayload(dataDir: string, project: DesignProjectMeta
     coverUrl: `/api/projects/${encodeURIComponent(project.projectId)}/design-canvas/cover?v=${project.updatedAt}`,
     projectPath: projectRoot(dataDir, project.projectId),
     sharingan: false,
+    designSystemId: project.designSystemId ?? null,
   };
 }

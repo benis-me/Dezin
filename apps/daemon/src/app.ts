@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { Store, type SecretCipher } from "@dezin/core";
 import type { ExtensionScope, Project, Settings } from "@dezin/core";
 import type { AgentRunner } from "@dezin/agent";
-import type { DesignRegistry } from "@dezin/design";
+import { defaultRegistry, type DesignRegistry } from "@dezin/design";
 import { HttpError, sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
@@ -832,18 +832,25 @@ const routes: Route[] = [
   {
     method: "PATCH",
     pattern: "/api/projects/:id",
-    handler: async (req, res, { id }, { store, dataDir }) => {
+    handler: async (req, res, { id }, { store, dataDir, designRegistry }) => {
       const decoded = await readJsonBody(req);
       if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
         return sendError(res, 400, "project patch must be an object");
       }
       const body = decoded as Record<string, unknown>;
-      const unexpected = Object.keys(body).find((field) => field !== "name" && field !== "archived");
+      const unexpected = Object.keys(body).find((field) => field !== "name" && field !== "archived" && field !== "designSystemId");
       if (unexpected) return sendError(res, 400, `project patch contains unexpected field: ${unexpected}`);
-      if (body.name === undefined && body.archived === undefined) return sendError(res, 400, "project patch is empty");
+      if (body.name === undefined && body.archived === undefined && body.designSystemId === undefined) {
+        return sendError(res, 400, "project patch is empty");
+      }
       if (body.name !== undefined && !isNonEmptyString(body.name)) return sendError(res, 400, "name is required");
       if (body.archived !== undefined && typeof body.archived !== "boolean") {
         return sendError(res, 400, "archived must be a boolean");
+      }
+      if (body.designSystemId !== undefined && body.designSystemId !== null) {
+        if (typeof body.designSystemId !== "string" || !(designRegistry ?? defaultRegistry()).has(body.designSystemId)) {
+          return sendError(res, 400, "designSystemId must name an installed design system");
+        }
       }
 
       const design = await getDesignProject(dataDir, id!);
@@ -851,9 +858,11 @@ const routes: Route[] = [
         const project = await updateDesignProject(dataDir, id!, {
           ...(body.name === undefined ? {} : { name: body.name.trim() }),
           ...(body.archived === undefined ? {} : { archived: body.archived }),
+          ...(body.designSystemId === undefined ? {} : { designSystemId: body.designSystemId as string | null }),
         });
         return sendJson(res, 200, designProjectPayload(dataDir, project));
       }
+      if (body.designSystemId !== undefined) return sendError(res, 400, "designSystemId applies to Design Canvas projects only");
 
       let project = store.getProject(id!);
       if (project?.sharingan !== true) return sendError(res, 404, "project not found");

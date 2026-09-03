@@ -262,6 +262,7 @@
   background: color-mix(in oklch, var(--background) 72%, transparent) !important;
 }
 .design-canvas-root[data-node-focus] .design-canvas-topbar__leading,
+.design-canvas-topbar__design-system { display: flex; min-width: 0; max-width: 220px; align-items: center; margin-right: 4px; }
 .design-canvas-root[data-node-focus] .design-canvas-topbar__actions { pointer-events: none; }
 .design-canvas-root[data-node-focus="opening"] .design-canvas-topbar__leading {
   opacity: 0;

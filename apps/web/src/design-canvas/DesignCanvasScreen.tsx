@@ -40,7 +40,7 @@ import {
 } from "../components/ui/index.ts";
 import { FigmaImportDialog } from "../components/FigmaImportDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
-import type { AgentInfo } from "../lib/api.ts";
+import type { AgentInfo, DesignSystemCard } from "../lib/api.ts";
 import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
@@ -164,6 +164,9 @@ export interface DesignCanvasScreenProps {
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
   onExportReady?: (result: DesignExportResult) => void;
+  designSystems?: DesignSystemCard[];
+  designSystemId?: string | null;
+  onChangeDesignSystem?: (id: string | null) => Promise<void>;
 }
 
 export function DesignCanvasScreen({
@@ -181,6 +184,9 @@ export function DesignCanvasScreen({
   projectPath,
   onRevealExport,
   onExportReady,
+  designSystems,
+  designSystemId,
+  onChangeDesignSystem,
 }: DesignCanvasScreenProps) {
   const { toast } = useToast();
   const reduceMotion = usePrefersReducedMotion();
@@ -1164,6 +1170,9 @@ export function DesignCanvasScreen({
           if (nextOpen) setFocusedPanelNodeId(null);
         }}
         onOpenSettings={onOpenSettings}
+        designSystems={designSystems}
+        designSystemId={designSystemId}
+        onChangeDesignSystem={onChangeDesignSystem}
       />
 
       <ContextMenu

@@ -38,14 +38,6 @@ const CLAUDE_AGENT: AgentInfo = {
   version: "1",
   models: ["sonnet", "opus"],
 };
-const CODEBUDDY_AGENT: AgentInfo = {
-  id: "codebuddy",
-  command: "codebuddy",
-  available: true,
-  availability: "ready",
-  version: "1",
-  models: ["hy3-ioa"],
-};
 
 test("focus chrome adopts the actual remaining duration for opening reversals", () => {
   const opening = { nodeId: "page-1", phase: "opening" as const, durationMs: 420 };

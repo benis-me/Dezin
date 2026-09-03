@@ -12,6 +12,8 @@ import {
   type Ref,
 } from "react";
 
+import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
+import type { DesignSystemCard } from "../lib/api.ts";
 import {
   Button,
   Tooltip,
@@ -21,6 +23,9 @@ import {
 } from "../components/ui/index.ts";
 import { StudioToolbarHeader } from "../components/ui/StudioHeader.tsx";
 
+/** Mirrors the daemon registry default (packages/design DEFAULT_DESIGN_SYSTEM_ID). */
+const DEFAULT_DESIGN_SYSTEM_ID = "modern-minimal";
+
 export function DesignCanvasHeader({
   projectName,
   onRenameProject,
@@ -29,6 +34,9 @@ export function DesignCanvasHeader({
   mainAgentOpen,
   onToggleMainAgent,
   onOpenSettings,
+  designSystems,
+  designSystemId,
+  onChangeDesignSystem,
 }: {
   projectName: string;
   onRenameProject?: (name: string) => Promise<void>;
@@ -37,7 +45,16 @@ export function DesignCanvasHeader({
   mainAgentOpen: boolean;
   onToggleMainAgent: () => void;
   onOpenSettings?: () => void;
+  /** Installed design systems; the picker renders only when a change handler exists. */
+  designSystems?: DesignSystemCard[];
+  designSystemId?: string | null;
+  onChangeDesignSystem?: (id: string | null) => Promise<void>;
 }) {
+  const [designSystemSaving, setDesignSystemSaving] = useState(false);
+  const designSystemCatalog = designSystems ?? [];
+  // null means the daemon default; show it as the selected system when installed.
+  const effectiveDesignSystemId = designSystemId
+    ?? (designSystemCatalog.some((system) => system.id === DEFAULT_DESIGN_SYSTEM_ID) ? DEFAULT_DESIGN_SYSTEM_ID : "");
   return (
     <StudioToolbarHeader className="design-canvas-topbar app-drag">
       <TooltipProvider delayDuration={120}>
@@ -58,6 +75,21 @@ export function DesignCanvasHeader({
           </div>
         </div>
         <div className="app-no-drag design-canvas-topbar__actions" role="toolbar" aria-label="Project actions">
+          {onChangeDesignSystem ? (
+            <div className="design-canvas-topbar__design-system">
+              <DesignSystemSelect
+                compact
+                systems={designSystemCatalog}
+                value={effectiveDesignSystemId}
+                selectionStatus={designSystemSaving ? "loading" : "ready"}
+                catalogStatus={designSystems ? "ready" : "loading"}
+                onChange={(id) => {
+                  setDesignSystemSaving(true);
+                  void onChangeDesignSystem(id || null).finally(() => setDesignSystemSaving(false));
+                }}
+              />
+            </div>
+          ) : null}
           <HeaderIconAction
             label="Main Agent"
             active={mainAgentOpen}
