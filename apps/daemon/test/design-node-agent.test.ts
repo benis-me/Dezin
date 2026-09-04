@@ -1533,7 +1533,7 @@ test("visual review captures screenshots into .review, revalidates a revised doc
   try {
     const iconSets = await loadDesignIconSets(dataDir, {
       fetch: (async () => new Response(iconSet, { status: 200 })) as unknown as typeof fetch,
-      sets: [{ prefix: "lucide", name: "Lucide", license: "ISC" }],
+      sets: [{ prefix: "lucide", name: "Lucide", license: "ISC", version: "1.2.129" }],
     });
     assert.equal(iconSets.length, 1);
     await initializeDesignProject(dataDir, projectId);

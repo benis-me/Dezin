@@ -68,11 +68,14 @@ test("icon placeholders expand to inline SVG from a cached Iconify set and unkno
     }) as unknown as typeof fetch;
     const sets = await loadDesignIconSets(dataDir, {
       fetch: fakeFetch,
-      sets: [{ prefix: "lucide", name: "Lucide", license: "ISC" }, { prefix: "missing", name: "Missing", license: "MIT" }],
+      sets: [
+        { prefix: "lucide", name: "Lucide", license: "ISC", version: "1.2.129" },
+        { prefix: "missing", name: "Missing", license: "MIT", version: "1.0.0" },
+      ],
     });
     assert.equal(sets.length, 1);
     assert.deepEqual(sets[0]!.names, ["arrow-left", "arrow-right"]);
-    assert.equal(await readFile(join(dataDir, "web-resources", "icons", "lucide.json"), "utf8"), ICONIFY_SET);
+    assert.equal(await readFile(join(dataDir, "web-resources", "icons", "lucide@1.2.129.json"), "utf8"), ICONIFY_SET);
     assert.ok(fetched >= 2);
 
     const html = '<button><svg data-icon="lucide:arrow-right" class="ic" width="20" height="20"></svg>Next</button>'

@@ -65,17 +65,23 @@ export interface DesignIconSetSource {
   prefix: string;
   name: string;
   license: string;
+  /** Exact @iconify-json package version: immutable data whose embedded license was checked. */
+  version: string;
 }
 
-/** Iconify sets with permissive licenses that suit interface work. */
+/**
+ * Open-source Iconify sets that suit interface work. Versions are pinned on
+ * purpose: Remix Icon moved upstream to a custom licence in January 2026, and
+ * @iconify-json/ri 1.2.10 still carries the Apache-2.0 4.8.0 data.
+ */
 export const DESIGN_ICON_SETS: readonly DesignIconSetSource[] = [
-  { prefix: "lucide", name: "Lucide", license: "ISC" },
-  { prefix: "ph", name: "Phosphor", license: "MIT" },
-  { prefix: "ri", name: "Remix Icon", license: "Apache-2.0" },
-  { prefix: "tabler", name: "Tabler Icons", license: "MIT" },
-  { prefix: "hugeicons", name: "Hugeicons (free)", license: "MIT" },
-  { prefix: "mingcute", name: "MingCute", license: "Apache-2.0" },
-  { prefix: "heroicons", name: "Heroicons", license: "MIT" },
+  { prefix: "lucide", name: "Lucide", license: "ISC", version: "1.2.129" },
+  { prefix: "ph", name: "Phosphor", license: "MIT", version: "1.2.2" },
+  { prefix: "ri", name: "Remix Icon", license: "Apache-2.0", version: "1.2.10" },
+  { prefix: "tabler", name: "Tabler Icons", license: "MIT", version: "1.2.38" },
+  { prefix: "hugeicons", name: "Hugeicons (free)", license: "MIT", version: "1.2.34" },
+  { prefix: "mingcute", name: "MingCute", license: "Apache-2.0", version: "1.2.8" },
+  { prefix: "heroicons", name: "Heroicons", license: "MIT", version: "1.2.3" },
 ];
 
 export interface DesignIconSet extends DesignIconSetSource {
@@ -110,12 +116,15 @@ const ICON_SET_TIMEOUT_MS = 20_000;
 const MAX_ICON_SET_BYTES = 32 * 1024 * 1024;
 const SAFE_ICON_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-export function designIconSetUrl(prefix: string): string {
-  return `https://cdn.jsdelivr.net/npm/@iconify-json/${prefix}@1/icons.json`;
+const SAFE_PACKAGE_VERSION = /^\d+\.\d+\.\d+$/;
+
+export function designIconSetUrl(source: Pick<DesignIconSetSource, "prefix" | "version">): string {
+  if (!SAFE_PACKAGE_VERSION.test(source.version)) throw new Error(`Icon set ${source.prefix} needs an exact version`);
+  return `https://cdn.jsdelivr.net/npm/@iconify-json/${source.prefix}@${source.version}/icons.json`;
 }
 
-function designIconSetPath(dataDir: string, prefix: string): string {
-  return join(dataDir, "web-resources", "icons", `${prefix}.json`);
+function designIconSetPath(dataDir: string, source: Pick<DesignIconSetSource, "prefix" | "version">): string {
+  return join(dataDir, "web-resources", "icons", `${source.prefix}@${source.version}.json`);
 }
 
 function parseIconifyJson(text: string, prefix: string): IconifyJson {
@@ -151,7 +160,7 @@ export async function loadDesignIconSets(
 ): Promise<DesignIconSet[]> {
   const fetchImpl = options.fetch ?? createProviderFetch();
   const loads = (options.sets ?? DESIGN_ICON_SETS).map(async (source): Promise<DesignIconSet | null> => {
-    const path = designIconSetPath(dataDir, source.prefix);
+    const path = designIconSetPath(dataDir, source);
     const memoized = loadedIconSets.get(path);
     if (memoized) return memoized;
     try {
@@ -164,7 +173,7 @@ export async function loadDesignIconSets(
         const onAbort = () => controller.abort();
         options.signal?.addEventListener("abort", onAbort, { once: true });
         try {
-          const response = await fetchImpl(designIconSetUrl(source.prefix), { signal: controller.signal });
+          const response = await fetchImpl(designIconSetUrl(source), { signal: controller.signal });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const length = Number(response.headers.get("content-length") ?? 0);
           if (length > MAX_ICON_SET_BYTES) throw new Error("icon set is too large");
