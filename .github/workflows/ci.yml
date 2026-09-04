@@ -76,7 +76,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Audit production dependencies
-        run: pnpm audit --prod --audit-level high
+        # The advisories endpoint times out now and then; one paused retry keeps a registry hiccup from failing the run.
+        run: pnpm audit --prod --audit-level high || (sleep 60 && pnpm audit --prod --audit-level high)
 
   desktop-macos:
     # The product is desktop-first on macOS; run the shell and extension suites there.

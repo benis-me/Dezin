@@ -1130,7 +1130,8 @@ body{margin:0}.page{min-height:100vh;display:grid;place-items:center;padding:48p
     });
     assert.equal(startedResponse.status, 202, await startedResponse.clone().text());
     const started = await startedResponse.json() as { exportId: string; job: { id: string } };
-    const deadline = Date.now() + 20_000;
+    // A cold Vite build plus two Chrome viewports takes 15-20s on a shared CI runner.
+    const deadline = Date.now() + 60_000;
     let terminal: { status: string; error: string | null; activity: Array<{ kind: string; text: string }> } | undefined;
     while (Date.now() < deadline) {
       const jobs = await (await json(`${root}/jobs`)).json() as Array<{ id: string; status: string; error: string | null; activity: Array<{ kind: string; text: string }> }>;
