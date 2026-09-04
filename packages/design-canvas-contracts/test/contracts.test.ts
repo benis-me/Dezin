@@ -48,7 +48,7 @@ type ExpectedGenerativeKind =
   | "layout"
   | "knowledge";
 type ExpectedMaterialKind = "image" | "video" | "document" | "file";
-type ExpectedNodeKind = ExpectedGenerativeKind | ExpectedMaterialKind;
+type ExpectedNodeKind = ExpectedGenerativeKind | ExpectedMaterialKind | "group-chat";
 type ExpectedJobToolName = "write" | "read" | "command" | "search" | "tool";
 
 type GenerativeKindsAreExact = Expect<Equal<DesignGenerativeNodeKind, ExpectedGenerativeKind>>;
@@ -254,6 +254,7 @@ test("node kind partitions are exact, ordered, and exhaustive", () => {
   assert.deepEqual(DESIGN_NODE_KINDS, [
     ...DESIGN_GENERATIVE_NODE_KINDS,
     ...DESIGN_MATERIAL_NODE_KINDS,
+    "group-chat",
   ]);
 });
 

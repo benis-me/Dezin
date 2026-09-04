@@ -1026,7 +1026,7 @@ export function HomeScreen({
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 {sharingan
                   ? "Paste a URL to clone it into an editable project."
-                  : "Start empty or describe the system you need. Every reference, page, component, and decision stays visible on one canvas."}
+                  : "Describe a website, app screen, or visual idea. Keep your references, designs, and conversations together, then refine or reuse them."}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2 pb-0.5 sm:shrink-0">

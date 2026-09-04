@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   LayoutTemplate,
   Library,
+  MessagesSquare,
   Palette,
   Search,
   Video,
@@ -22,6 +23,7 @@ import { DESIGN_NODE_CATALOG, type DesignNodeCatalogItem } from "./catalog.ts";
 import type { DesignNodeKind } from "./types.ts";
 
 const ICONS: Record<DesignNodeKind, LucideIcon> = {
+  "group-chat": MessagesSquare,
   component: Component,
   page: LayoutTemplate,
   "design-system": Palette,
@@ -70,12 +72,12 @@ export function NodeCatalogMenu({
           </DropdownMenuItem>
         )}
       </section>
-      {(["generate", "context"] as const).map((category) => {
+      {(["collaborate", "generate", "context"] as const).map((category) => {
         const labelId = `design-node-catalog-${menuType}-${category}`;
         return (
           <section key={category} role="group" aria-labelledby={labelId}>
             <p id={labelId} className="design-node-catalog__label">
-              {category === "generate" ? "Generate" : "Add context"}
+              {category === "collaborate" ? "Collaborate" : category === "generate" ? "Generate" : "Add context"}
             </p>
             <div className="design-node-catalog__grid">
               {DESIGN_NODE_CATALOG.filter((item) => item.category === category).map((item) => (

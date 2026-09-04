@@ -42,6 +42,7 @@ import { DesignVideoGlassPlayer } from "./DesignVideoGlassPlayer.tsx";
 import { TypedMaterialSurface } from "./TypedMaterialSurface.tsx";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
+import { GroupChatPreview } from "./GroupChatPreview.tsx";
 import "./generation-particles.css";
 
 export interface DesignFlowNodeData extends Record<string, unknown> {
@@ -60,6 +61,8 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
   contentLayout?: DesignNodeContentLayout | null;
   focusMotion?: NodeFocusMotion | null;
+  groupMemberNames?: readonly string[];
+  onOpenGroupChat?: (nodeId: string) => void;
 }
 
 export interface DesignPreviewAnnotationTarget {
@@ -765,7 +768,9 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
                 : `translate3d(0, 0, 0) scale(${contentLayout.canvasScale})`,
             } : undefined}
           >
-            {versionId ? (
+            {node.kind === "group-chat" && nearViewport ? (
+              <GroupChatPreview node={node} projectId={projectId} api={api} members={data.groupMemberNames ?? []} onOpen={() => data.onOpenGroupChat?.(node.id)} />
+            ) : versionId ? (
               shouldMountRichPreview ? (
                 preview ? (
                   material ? (

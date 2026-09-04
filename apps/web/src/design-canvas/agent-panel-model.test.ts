@@ -6,6 +6,7 @@ import {
   buildAgentOutputModel,
   buildAgentTranscriptPage,
   groupMainAgentJobs,
+  relatedAgentJobs,
 } from "./agent-panel-model.ts";
 import type { DesignJob, DesignThread } from "./types.ts";
 
@@ -46,6 +47,14 @@ function mainThread(messages: DesignThread["messages"] = []): DesignThread {
     updatedAt: messages.at(-1)?.createdAt ?? 1,
   };
 }
+
+test("group work stays out of Main Agent while prior orphaned work remains visible", () => {
+  const parent = job({ id: "group-run", nodeId: "group-node" });
+  const child = job({ id: "child", kind: "node-generation", nodeId: "page", parentJobId: parent.id, createdAt: 101 });
+  const prior = job({ id: "prior", kind: "node-analysis", nodeId: "reference", parentJobId: "missing-parent" });
+  expect(relatedAgentJobs([parent, child, prior], { type: "main" })).toEqual([prior]);
+  expect(relatedAgentJobs([parent, child, prior], { type: "node", nodeId: "group-node" })).toEqual([parent, child]);
+});
 
 test("main Agent grouping keeps delegated work but omits completed conversation-only turns", () => {
   const conversation = job({

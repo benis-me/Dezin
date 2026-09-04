@@ -1,4 +1,4 @@
-import { FileUp, LocateFixed, Maximize2, Minus, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { CopyPlus, FileUp, LocateFixed, Maximize2, MessagesSquare, Minus, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuShortcut } from "../components/ui/index.ts";
 import { catalogItem, isMaterialNodeKind } from "./catalog.ts";
@@ -33,6 +33,8 @@ export function DesignNodeContextMenu({
   fitDisabled,
   onFit,
   onDelete,
+  onCreateVariation,
+  onCreateGroup,
 }: {
   node: DesignNode;
   onOpenAgent: () => void;
@@ -40,6 +42,8 @@ export function DesignNodeContextMenu({
   fitDisabled: boolean;
   onFit: () => void;
   onDelete: () => void;
+  onCreateVariation?: () => void;
+  onCreateGroup?: () => void;
 }) {
   const item = catalogItem(node.kind);
   const material = isMaterialNodeKind(node.kind);
@@ -48,13 +52,19 @@ export function DesignNodeContextMenu({
       <ContextMenuLabel>Selection</ContextMenuLabel>
       <ContextMenuItem onSelect={onOpenAgent}>
         <Sparkles aria-hidden />
-        {material
+        {node.kind === "group-chat" ? "Open group chat" : material
           ? `Inspect ${item.label.toLocaleLowerCase()} with Agent`
           : node.versionCount > 0
             ? `Create new ${item.label.toLocaleLowerCase()} version`
             : `Create ${item.label.toLocaleLowerCase()} with Agent`}
         <ContextMenuShortcut>Enter</ContextMenuShortcut>
       </ContextMenuItem>
+      {onCreateVariation && !material && node.kind !== "group-chat" && node.versionCount > 0 ? (
+        <ContextMenuItem onSelect={onCreateVariation}><CopyPlus aria-hidden />Create variation</ContextMenuItem>
+      ) : null}
+      {onCreateGroup && node.kind !== "group-chat" ? (
+        <ContextMenuItem onSelect={onCreateGroup}><MessagesSquare aria-hidden />Discuss in a group</ContextMenuItem>
+      ) : null}
       {material ? (
         <ContextMenuItem onSelect={onAddRevision}>
           <FileUp aria-hidden />

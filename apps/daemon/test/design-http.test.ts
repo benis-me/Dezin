@@ -15,7 +15,7 @@ import {
   DESIGN_EXPORT_VITE_VERSION,
   startDesignMainTurn,
 } from "../src/design/design-global-agents.ts";
-import { trustedDesignPreviewOrigin } from "../src/design/design-http-handler.ts";
+import { startDesignMainAgentTurn, trustedDesignPreviewOrigin } from "../src/design/design-http-handler.ts";
 import { bootstrapDesignProject } from "../src/design/design-project-bootstrap.ts";
 import { ensureDesignProjectAtId } from "../src/design/design-project-store.ts";
 import { findDesignExportChrome } from "../src/design/design-export-visual-gate.ts";
@@ -23,10 +23,75 @@ import { rewriteDesignHtmlUrlReferences } from "../src/design/design-portable-ht
 import {
   getDesignCanvas,
   getDesignJob,
+  getDesignThread,
   initializeDesignProject,
   listDesignJobs,
+  mutateDesignCanvas,
   publishDesignVersion,
 } from "../src/design/design-storage.ts";
+
+test("group chat retains its own discussion and delegates a saved design with bundled skills", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "dezin-group-chat-"));
+  const store = new Store(":memory:");
+  const runtimeSupervisor = createRuntimeSupervisor({ dataDir, store });
+  const projectId = "group-project";
+  const designRunner: AgentRunner = {
+    id: "group-test",
+    async runTurn(input) {
+      const skill = await readFile(join(input.projectDir, ".context/skills/better-interface/SKILL.md"), "utf8");
+      assert.match(skill, /Evidence, not taste/);
+      assert.match(input.systemPrompt, /Bundled design playbooks/);
+      if (input.message === "Discuss the launch") return { text: "Use an editorial layout with a clear signup action.", artifactHtml: "" };
+      if (input.message === "Generate designs") {
+        assert.match(input.systemPrompt, /persistent group chat Node group-one/);
+        assert.ok(input.history?.some((message) => message.content === "Discuss the launch"));
+        return { text: JSON.stringify({
+          reply: "Creating the agreed launch page.",
+          canvasIntents: [{ type: "add-node", node: { id: "launch-page", kind: "page" } }],
+          dispatches: [{ nodeId: "launch-page", message: "Make the editorial launch page", contextNodeIds: [] }],
+        }), artifactHtml: "" };
+      }
+      const context = JSON.parse(await readFile(join(input.projectDir, ".context/canvas.json"), "utf8"));
+      assert.ok(context.priorityNodeIds.includes("reference"));
+      const html = "<!doctype html><html><head><title>Editorial launch</title></head><body><main><h1>Launch with purpose</h1></main></body></html>";
+      await writeFile(join(input.projectDir, "index.html"), html);
+      return { text: "Created the launch design.", artifactHtml: html, artifactPath: "index.html" };
+    },
+  };
+  const deps = { dataDir, store, runtimeSupervisor, designRunner };
+  try {
+    await initializeDesignProject(dataDir, projectId);
+    await mutateDesignCanvas(dataDir, projectId, { expectedRevision: 0, intents: [
+      { type: "add-node", node: { id: "group-one", kind: "group-chat" } },
+      { type: "add-node", node: { id: "reference", kind: "knowledge" } },
+      { type: "connect-nodes", connection: { sourceNodeId: "group-one", targetNodeId: "reference" } },
+    ] });
+    const discussion = await startDesignMainAgentTurn(deps, projectId, { groupNodeId: "group-one", message: "Discuss the launch", contextNodeIds: [] });
+    const discussed = await discussion.completion;
+    assert.equal(discussed.status, "ready", discussed.error ?? "discussion failed");
+    const request = { groupNodeId: "group-one", message: "Generate designs", contextNodeIds: [], idempotencyKey: "generate-once" };
+    const turn = await startDesignMainAgentTurn(deps, projectId, request);
+    const completed = await turn.completion;
+    assert.equal(completed.status, "ready", completed.error ?? "group failed");
+    let children = (await listDesignJobs(dataDir, projectId)).filter((job) => job.parentJobId === turn.job.id);
+    for (let attempt = 0; attempt < 100 && children.some((job) => ["queued", "running", "validating"].includes(job.status)); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      children = (await listDesignJobs(dataDir, projectId)).filter((job) => job.parentJobId === turn.job.id);
+    }
+    assert.equal(children.length, 1);
+    assert.equal(children[0]!.status, "ready", children[0]!.error ?? "child failed");
+    const reopened = await getDesignCanvas(dataDir, projectId);
+    assert.equal(reopened.nodes.find((node) => node.id === "launch-page")?.versionCount, 1);
+    assert.ok(reopened.connections?.some((edge) => edge.sourceNodeId === "group-one" && edge.targetNodeId === "launch-page"));
+    assert.equal((await getDesignThread(dataDir, projectId, { type: "node", nodeId: "group-one" })).messages.length, 4);
+    assert.equal((await getDesignThread(dataDir, projectId, { type: "main" })).messages.length, 0);
+    assert.equal((await startDesignMainAgentTurn(deps, projectId, request)).job.id, turn.job.id);
+  } finally {
+    await runtimeSupervisor.shutdown();
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("failed Design Jobs expose one idempotent server-authoritative retry route", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "dezin-design-http-job-retry-"));

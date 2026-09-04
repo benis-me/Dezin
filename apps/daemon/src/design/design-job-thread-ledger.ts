@@ -761,7 +761,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     receiptKey: string,
   ): Promise<DesignMainPlanExecution | null> {
     const receipt = project.turnReceipts[receiptKey];
-    if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || !SHA256.test(receipt.requestHash ?? "")) {
+    if (!receipt || receipt.kind !== "main-agent" || !SHA256.test(receipt.requestHash ?? "")) {
       throw new DesignStorageError("conflict", "Main Agent plan execution is not bound to this idempotent request");
     }
     const executionId = mainPlanExecutionId(receiptKey);
@@ -786,7 +786,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
       throw new DesignStorageError("corrupt", "Design Main Agent plan receipt checksum diverges");
     }
     const sourceJob = await readJob(root, stored.sourceJobId);
-    if (sourceJob.kind !== "main-agent" || sourceJob.contextHash === null
+    if (sourceJob.kind !== "main-agent" || sourceJob.nodeId !== receipt.nodeId || sourceJob.contextHash === null
       || sourceJob.canvasRevision !== stored.canvasRevision
       || sourceJob.runnerId !== stored.runnerId || sourceJob.model !== stored.model) {
       throw new DesignStorageError("corrupt", "Design Main Agent plan source Job authority diverges");
@@ -846,7 +846,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
       const project = await readProject(root);
       const receipt = project.turnReceipts[input.receiptKey];
       const job = await readJob(root, jobId);
-      if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || receipt.jobId !== job.id
+      if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== job.nodeId || receipt.jobId !== job.id
         || receipt.authorityHash !== job.contextHash || !SHA256.test(receipt.requestHash ?? "")
         || job.kind !== "main-agent" || job.status !== "running" || job.contextHash === null
         || job.canvasRevision !== input.canvasRevision) {
@@ -906,7 +906,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
     const kind = String(job.kind);
     const status = String(job.status);
     const terminal = ["ready", "failed", "cancelled", "superseded"].includes(status);
-    const nodeScoped = kind === "node-generation" || kind === "node-analysis";
+    const nodeScoped = kind === "node-generation" || kind === "node-analysis" || (kind === "main-agent" && job.nodeId !== null);
     if (job.schemaVersion !== DESIGN_SCHEMA_VERSION || job.id !== expectedId || !SAFE_SEGMENT.test(expectedId)
       || !kinds.includes(kind) || !statuses.includes(status)
       || !validStoredText(job.runnerId, 512) || (job.runnerId as string).trim() !== job.runnerId
@@ -1035,7 +1035,8 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
       || after.createdAt !== before.createdAt) fail();
 
     const scopedNodeJob = transaction.job.kind === "node-generation"
-      || transaction.job.kind === "node-analysis";
+      || transaction.job.kind === "node-analysis"
+      || (transaction.job.kind === "main-agent" && transaction.job.nodeId !== null);
     if (scopedNodeJob !== (transaction.job.nodeId !== null)) fail();
     if (transaction.job.nodeId === null) {
       if (after.revision !== before.revision || after.updatedAt !== before.updatedAt
@@ -1515,7 +1516,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
         throw new DesignStorageError("limit", "Design Agent idempotency receipt limit reached");
       }
       let node: DesignNode | undefined;
-      if (input.kind === "node-generation" || input.kind === "node-analysis") {
+      if (input.kind === "node-generation" || input.kind === "node-analysis" || (input.kind === "main-agent" && nodeId !== null)) {
         if (nodeId === null) throw new DesignStorageError("invalid-input", "Scoped Node Job requires a Node");
         node = nodes.get(safeSegment(nodeId, "Node id"));
         if (!node) throw new DesignStorageError("not-found", `Design Node ${nodeId} was not found`);
@@ -1523,7 +1524,10 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
         if (input.kind === "node-generation" && !generative) {
           throw new DesignStorageError("invalid-input", "Material Nodes cannot run generation Jobs");
         }
-        if (input.kind === "node-analysis" && generative) {
+        if (input.kind === "main-agent" && node.kind !== "group-chat") {
+          throw new DesignStorageError("invalid-input", "Scoped Main Agent requires a group chat Node");
+        }
+        if (input.kind === "node-analysis" && (generative || node.kind === "group-chat")) {
           throw new DesignStorageError("invalid-input", "Generative Nodes use generation Jobs");
         }
         if (node.activeJobId !== null) {
@@ -1535,7 +1539,7 @@ export function createDesignJobThreadLedger(sources: DesignJobThreadLedgerSource
       const timestamp = nowValue(now);
       const reservedScope = reservedTurn === undefined
         ? null
-        : input.kind === "node-generation" || input.kind === "node-analysis"
+        : nodeId !== null
           ? { type: "node" as const, nodeId: nodeId! }
           : { type: "main" as const };
       let reservedThread: DesignThread | null = null;

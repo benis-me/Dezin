@@ -1456,6 +1456,7 @@
 .design-canvas-quick-start__secondary button { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 10px 13px; border: 0; background: transparent; text-align: left; }
 .design-canvas-quick-start__secondary button:nth-child(odd) { border-right: 0.5px solid color-mix(in oklch, var(--border) 82%, transparent); }
 .design-canvas-quick-start__secondary button:nth-child(n + 3) { border-top: 0.5px solid color-mix(in oklch, var(--border) 82%, transparent); }
+.design-canvas-quick-start__secondary button:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
 .design-canvas-quick-start__secondary svg { width: 14px; height: 14px; flex: none; color: var(--muted-foreground); }
 .design-canvas-quick-start__secondary span { overflow: hidden; font-size: 10.5px; font-weight: 540; text-overflow: ellipsis; white-space: nowrap; }
 .design-canvas-quick-start__hint { margin-top: 12px; color: var(--muted-foreground); font-size: 9px; }
@@ -1650,3 +1651,16 @@
   .design-node-catalog__item:active,
   .design-canvas-quick-start__actions > button:active { transform: none; }
 }
+
+/* Group conversations use the same compact surface as the Agent panel. */
+.design-group-chat { display: flex; height: 100%; min-height: 0; flex-direction: column; gap: 12px; padding: 18px; background: var(--card); color: var(--foreground); }
+.design-group-chat header { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.design-group-chat header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.design-group-chat svg { width: 16px; height: 16px; flex: none; }
+.design-group-chat__goal, .design-group-chat__reply { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.design-group-chat__reply { color: var(--muted-foreground); }
+.design-group-chat__members { display: flex; flex-wrap: wrap; gap: 4px; max-height: 56px; overflow: auto; }
+.design-group-chat__members span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; padding: 3px 6px; background: var(--surface-2); font-size: 12px; }
+.design-group-chat > button { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 8px; flex: none; margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; text-align: start; }
+.design-group-chat > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.design-canvas-agent__group-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 2px 7px; }

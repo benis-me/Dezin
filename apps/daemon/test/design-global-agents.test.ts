@@ -54,7 +54,7 @@ test("Main Agent prompt carries the project name, design system, sizes, and user
   assert.match(prompt, /“Modern Minimal” design system[\s\S]*\.context\/design-system\//);
   assert.match(prompt, /default Node sizes are page 720×540/);
   assert.match(prompt, /## User design instructions\n\nPrefer editorial serif display type\./);
-  assert.doesNotMatch(buildDesignMainSystemPrompt(), /design system|User design instructions/);
+  assert.doesNotMatch(buildDesignMainSystemPrompt(), /The project follows|User design instructions/);
 });
 
 test("Main Agent preserves explicit visual and layout authority when dispatching scoped design work", () => {

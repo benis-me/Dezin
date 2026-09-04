@@ -1030,6 +1030,13 @@ export async function handleDesignNodeTurn(req: IncomingMessage, res: ServerResp
   if (contextNodeIds.some((nodeId) => !canvas.nodeOrder.includes(nodeId))) {
     throw new HttpError(400, "Node Agent context references a Node outside the canvas");
   }
+  if (node.kind === "group-chat") {
+    const started = await startDesignMainAgentTurn(d, p.id!, {
+      ...designAgentTurnBody(body, "Group chat"), groupNodeId: node.id,
+    });
+    sendJson(res, started.reused ? 200 : 202, { thread: started.thread, job: started.job, canvas: await getDesignCanvas(d.dataDir, p.id!) });
+    return;
+  }
   const settings = d.store.getSettings();
   const project = await getDesignProject(d.dataDir, p.id!).catch(() => null);
   const designSystem = projectDesignSystem(d, project);
@@ -1101,6 +1108,7 @@ function designAgentTurnBody(
 }
 
 export interface StartDesignMainAgentRequest {
+  groupNodeId?: string;
   message: string;
   contextNodeIds: string[];
   agentCommand?: string;
@@ -1114,6 +1122,12 @@ export async function startDesignMainAgentTurn(
   projectId: string,
   parsed: StartDesignMainAgentRequest,
 ) {
+  if (parsed.groupNodeId) {
+    const canvas = await getDesignCanvas(d.dataDir, projectId);
+    if (!canvas.nodes.some((node) => node.id === parsed.groupNodeId && node.kind === "group-chat")) {
+      throw new HttpError(404, "Group chat Node not found");
+    }
+  }
   const settings = d.store.getSettings();
   const project = await getDesignProject(d.dataDir, projectId).catch(() => null);
   const designSystem = projectDesignSystem(d, project);
@@ -1172,11 +1186,12 @@ export async function startDesignMainAgentTurn(
   };
   const started = await startDesignMainTurn({
     designSystem,
+    groupNodeId: parsed.groupNodeId,
     dataDir: d.dataDir,
     projectId,
     message: parsed.message,
     runner: mainRunner,
-    systemPrompt: buildDesignMainSystemPrompt({ projectName: project?.name, designSystem, customInstructions: settings.customInstructions }),
+    systemPrompt: buildDesignMainSystemPrompt({ projectName: project?.name, designSystem, customInstructions: settings.customInstructions, groupNodeId: parsed.groupNodeId }),
     promptIdentity: buildDesignMainSystemPrompt(),
     contextNodeIds: parsed.contextNodeIds,
     idempotencyKey: parsed.idempotencyKey ?? null,
@@ -1292,7 +1307,7 @@ export async function handleRetryDesignJob(
   if (!nodeScoped || failedJob.nodeId !== null) {
     const priorRetry = await getDesignJobByReceiptKey(d.dataDir, p.id!, {
       kind: failedJob.kind,
-      nodeId: nodeScoped ? failedJob.nodeId : null,
+      nodeId: failedJob.nodeId,
       idempotencyKey: retryKey,
     });
     if (priorRetry !== null) {
@@ -1300,7 +1315,7 @@ export async function handleRetryDesignJob(
         sendJson(res, 200, { retryOfJobId: failedJob.id, exportId: priorRetry.job.exportId, job: priorRetry.job });
         return;
       }
-      const scope = failedJob.kind === "main-agent"
+      const scope = failedJob.nodeId === null
         ? { type: "main" as const }
         : { type: "node" as const, nodeId: failedJob.nodeId! };
       sendJson(res, 200, {
@@ -1361,72 +1376,19 @@ export async function handleRetryDesignJob(
   }
 
   if (failedJob.kind === "main-agent") {
-    const priorThread = await getDesignThread(d.dataDir, p.id!, { type: "main" });
+    const scope = failedJob.nodeId === null ? { type: "main" as const } : { type: "node" as const, nodeId: failedJob.nodeId };
+    const priorThread = await getDesignThread(d.dataDir, p.id!, scope);
     const originalMessage = priorThread.messages.find((message) =>
       message.jobId === failedJob.id && message.role === "user")?.content;
     if (!originalMessage) throw new HttpError(409, "Failed Main Agent Job original request is unavailable");
-    const mainRunner = d.designRunner ?? productionDesignRunner({
-      deps: d,
-      projectId: p.id!,
-      settings,
+    const started = await startDesignMainAgentTurn(d, p.id!, {
+      groupNodeId: failedJob.nodeId ?? undefined,
+      message: originalMessage,
+      contextNodeIds: [],
       agentCommand: execution.agentCommand,
       model: execution.model,
-      artifactOutput: false,
-    });
-    const dispatchNode = async (
-      dispatch: DesignMainDispatch,
-      parentJobId: string,
-      idempotencyKey?: string | null,
-    ) => {
-      const canvas = await getDesignCanvas(d.dataDir, p.id!);
-      const node = canvas.nodes.find((candidate) => candidate.id === dispatch.nodeId);
-      if (!node) throw new HttpError(409, `Main Agent dispatch target ${dispatch.nodeId} no longer exists`);
-      const generative = (DESIGN_GENERATIVE_NODE_KINDS as readonly string[]).includes(node.kind);
-      const childRunner = d.designRunner ?? productionDesignRunner({
-        deps: d,
-        projectId: p.id!,
-        settings,
-        agentCommand: execution.agentCommand,
-        model: execution.model,
-        artifactOutput: generative,
-      });
-      const systemPrompt = generative
-        ? buildDesignNodeSystemPrompt({ settings, message: dispatch.message, node, designSystem, webResources })
-        : buildDesignNodeAnalysisSystemPrompt({ settings, message: dispatch.message, node });
-      const child = await startDesignNodeTurn({
-        designSystem,
-        webResources,
-        quality: designQuality(settings),
-        dataDir: d.dataDir,
-        projectId: p.id!,
-        nodeId: node.id,
-        message: dispatch.message,
-        runner: childRunner,
-        systemPrompt,
-        contextNodeIds: dispatch.contextNodeIds,
-        idempotencyKey: idempotencyKey ?? null,
-        parentJobId,
-        env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
-        model: execution.model,
-        runtimeGate: d.designRunner === undefined && generative ? runDesignNodeRuntimeGate : undefined,
-      });
-      if (!child.reused) superviseDesignExecution(d, p.id!, child);
-      return child.job;
-    };
-    const started = await startDesignMainTurn({
-      designSystem,
-      dataDir: d.dataDir,
-      projectId: p.id!,
-      message: originalMessage,
-      runner: mainRunner,
-      systemPrompt: buildDesignMainSystemPrompt({ projectName: project?.name, designSystem, customInstructions: settings.customInstructions }),
-    promptIdentity: buildDesignMainSystemPrompt(),
       idempotencyKey: retryKey,
-      env: productionDesignAgentEnvironment(settings, execution.agentCommand, d.security?.token),
-      model: execution.model,
-      dispatchNode,
     });
-    if (!started.reused) superviseDesignExecution(d, p.id!, started);
     sendJson(res, started.reused ? 200 : 202, {
       retryOfJobId: failedJob.id,
       thread: started.thread,

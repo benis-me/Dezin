@@ -21,6 +21,13 @@ interface DesignNodePresentation {
 }
 
 const PRESENTATIONS: Record<DesignNodeKind, DesignNodePresentation> = {
+  "group-chat": {
+    mode: "document",
+    creating: "Coordinating the group",
+    updating: "Continuing the discussion",
+    validating: "Preparing the next steps",
+    detail: "Discuss a shared goal, delegate design work, and keep the decisions together.",
+  },
   page: {
     mode: "web",
     creating: "Building a responsive page",

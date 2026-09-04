@@ -216,6 +216,7 @@ export function DesignCanvasScreen({
   const [nodeAgentContextSeed, setNodeAgentContextSeed] = useState<{
     generation: number;
     nodeId: string | null;
+    nodeIds?: string[];
     draft: string;
   }>(() => ({ generation: 0, nodeId: null, draft: "" }));
   const [mainAgentOpen, setMainAgentOpen] = useState(false);
@@ -444,11 +445,23 @@ export function DesignCanvasScreen({
     });
   }, [canvas?.nodes]);
 
+  const openGroupChat = useCallback((nodeId: string) => openNodeAgent(nodeId, false), [openNodeAgent]);
+
   useLayoutEffect(() => {
     if (!canvas) return;
     syncHoverLabelViewportScale(surfaceRef.current, flowRef.current?.getZoom() ?? canvas.viewport.zoom);
     authoritativeViewportRef.current = canvas.viewport;
-    const canvasNodeIds = new Set(canvas.nodes.map((node) => node.id));
+    const canvasNodesById = new Map(canvas.nodes.map((node) => [node.id, node]));
+    const groupMembers = new Map<string, Set<string>>();
+    for (const edge of canvas.connections ?? []) {
+      for (const [groupId, memberId] of [[edge.sourceNodeId, edge.targetNodeId], [edge.targetNodeId, edge.sourceNodeId]] as const) {
+        if (canvasNodesById.get(groupId)?.kind !== "group-chat") continue;
+        const members = groupMembers.get(groupId) ?? new Set<string>();
+        members.add(memberId);
+        groupMembers.set(groupId, members);
+      }
+    }
+    const canvasNodeIds = new Set(canvasNodesById.keys());
     const selected = new Set(selectedNodeIds.filter((id) => canvasNodeIds.has(id)));
     if (selected.size !== selectedNodeIds.length) setSelectedNodeIds([...selected]);
     dropFocusForMissingNodes(canvasNodeIds);
@@ -521,7 +534,7 @@ export function DesignCanvasScreen({
       if (!canvasNodeIds.has(nodeId)) resizingNodeIdsRef.current.delete(nodeId);
     }
     for (const [nodeId, pending] of pendingNodeGeometriesRef.current) {
-      const canonical = canvas.nodes.find((node) => node.id === nodeId)?.geometry;
+      const canonical = canvasNodesById.get(nodeId)?.geometry;
       if (!canonical || sameGeometry(canonical, pending)) pendingNodeGeometriesRef.current.delete(nodeId);
     }
 
@@ -540,6 +553,10 @@ export function DesignCanvasScreen({
       focusMotions,
     );
     const nextFlowNodes = canonicalFlowNodes.map((canonicalNode) => {
+      if (canonicalNode.data.node.kind === "group-chat") {
+        canonicalNode.data.groupMemberNames = [...(groupMembers.get(canonicalNode.id) ?? [])].map((id) => canvasNodesById.get(id)?.name ?? id);
+        canonicalNode.data.onOpenGroupChat = openGroupChat;
+      }
       const existing = currentById.get(canonicalNode.id);
       const authoritativeNode = canonicalNode.data.node;
       const pending = pendingNodeGeometriesRef.current.get(canonicalNode.id);
@@ -553,6 +570,8 @@ export function DesignCanvasScreen({
         : { ...authoritativeNode, geometry: { ...localGeometry } };
       const nodeAnnotateMode = annotateMode && focusedCanvasNode?.id === canonicalNode.id;
       if (existing
+        && existing.data.onOpenGroupChat === canonicalNode.data.onOpenGroupChat
+        && JSON.stringify(existing.data.groupMemberNames) === JSON.stringify(canonicalNode.data.groupMemberNames)
         && existing.selected === canonicalNode.selected
         && existing.position.x === localGeometry.x
         && existing.position.y === localGeometry.y
@@ -591,7 +610,7 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, contentNaturalSizes, dropFocusForMissingNodes, focusAgentReserved, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, nodeAgentWidth, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+  }, [openGroupChat, annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, contentNaturalSizes, dropFocusForMissingNodes, focusAgentReserved, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, nodeAgentWidth, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
   const revealImportedFigmaNodes = useCallback((importedNodeIds: string[]) => {
     const importedNodeIdSet = new Set(importedNodeIds);
@@ -651,7 +670,7 @@ export function DesignCanvasScreen({
     return flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 });
   }, []);
 
-  const addNode = useCallback(async (kind: DesignNodeKind, position = canvasCenter()) => {
+  const addNode = useCallback(async (kind: DesignNodeKind, position = canvasCenter(), contextIds: readonly string[] = []) => {
     setAddMenuOpen(false);
     if (isMaterialNodeKind(kind)) {
       pendingImportPositionRef.current = position;
@@ -662,6 +681,16 @@ export function DesignCanvasScreen({
       return;
     }
     const item = catalogItem(kind);
+    const source = kind !== "group-chat" && contextIds.length === 1
+      ? canvas?.nodes.find((node) => node.id === contextIds[0] && node.kind === kind) : undefined;
+    const size = source ? { width: source.geometry.width, height: source.geometry.height } : item.defaultGeometry;
+    if (contextIds.length) {
+      const row = (canvas?.nodes ?? []).filter(({ geometry }) =>
+        geometry.y < position.y + size.height && geometry.y + geometry.height > position.y);
+      if (row.some(({ geometry }) => geometry.x < position.x + size.width && geometry.x + geometry.width > position.x)) {
+        position = { x: Math.max(...row.map(({ geometry }) => geometry.x + geometry.width)) + 80, y: position.y };
+      }
+    }
     const nodeId = createDesignNodeId(kind);
     try {
       const next = await controller.applyIntents([{
@@ -670,11 +699,17 @@ export function DesignCanvasScreen({
           id: nodeId,
           kind,
           name: item.label,
-          geometry: { x: Math.round(position.x), y: Math.round(position.y), ...item.defaultGeometry },
+          geometry: { x: Math.round(position.x), y: Math.round(position.y), ...size },
         },
-      }]);
+      }, ...contextIds.map((id, index) => ({ type: "connect-nodes" as const, connection: {
+        id: `${nodeId}-context-${index}`, sourceNodeId: nodeId, targetNodeId: id, label: "Context",
+      } }))]);
       const created = next.nodes.find((node) => node.id === nodeId);
       if (created) {
+        if (contextIds.length) setNodeAgentContextSeed((current) => ({
+          generation: current.generation + 1, nodeId, nodeIds: [...contextIds],
+          draft: kind === "group-chat" ? "" : "Create a distinct design variation using the referenced Node. Preserve its purpose and content while exploring a different visual direction.",
+        }));
         setMainAgentOpen(false);
         setSelectedNodeIds([created.id]);
         setFocusedPanelNodeId(created.id);
@@ -682,7 +717,7 @@ export function DesignCanvasScreen({
     } catch {
       // Controller exposes a non-blocking error banner and canonical refresh.
     }
-  }, [canvasCenter, controller.applyIntents]);
+  }, [canvas?.nodes, canvasCenter, controller.applyIntents]);
 
   const createComponentSystem = useCallback(async (position = canvasCenter()) => {
     setAddMenuOpen(false);
@@ -1323,6 +1358,7 @@ export function DesignCanvasScreen({
 
         {canvas && canvas.nodes.length === 0 && controller.loadState === "ready" ? (
           <QuickStart
+            onAddGroupChat={() => void addNode("group-chat")}
             onAddPage={() => void addNode("page")}
             onAddResearch={() => void addNode("research")}
             onCreateComponentSystem={() => void createComponentSystem()}
@@ -1366,7 +1402,7 @@ export function DesignCanvasScreen({
             projectId={projectId}
             api={api}
             scope={{ type: "node", nodeId: selectedNode.id }}
-            title={`${selectedNode.name} Agent`}
+            title={selectedNode.kind === "group-chat" ? selectedNode.name : `${selectedNode.name} Agent`}
             subtitle=""
             nodes={canvas?.nodes ?? []}
             jobs={controller.jobs}
@@ -1381,6 +1417,8 @@ export function DesignCanvasScreen({
             agents={agents}
             initialAgentCommand={initialAgentCommand}
             initialModel={initialModel}
+            initialContextNodeIds={(nodeAgentContextSeed.nodeId === selectedNode.id ? nodeAgentContextSeed.nodeIds : undefined)
+              ?? (canvas?.connections ?? []).filter((edge) => edge.sourceNodeId === selectedNode.id && edge.label === "Context").map((edge) => edge.targetNodeId)}
             contextSeedGeneration={nodeAgentContextSeed.nodeId === selectedNode.id ? nodeAgentContextSeed.generation : undefined}
             initialDraft={nodeAgentContextSeed.nodeId === selectedNode.id ? nodeAgentContextSeed.draft : undefined}
             draftSeedMode="append"
@@ -1487,6 +1525,12 @@ export function DesignCanvasScreen({
               node={contextMenuNode}
               onOpenAgent={() => openNodeAgent(contextMenuNode.id, true)}
               onAddRevision={() => requestMaterialRevision(contextMenuNode)}
+              onCreateVariation={() => void addNode(contextMenuNode.kind, {
+                x: contextMenuNode.geometry.x + contextMenuNode.geometry.width + 80, y: contextMenuNode.geometry.y,
+              }, [contextMenuNode.id])}
+              onCreateGroup={() => void addNode("group-chat", {
+                x: contextMenuNode.geometry.x - 480, y: contextMenuNode.geometry.y,
+              }, selectedNodeIds.includes(contextMenuNode.id) ? selectedNodeIds : [contextMenuNode.id])}
               fitDisabled={focusActive}
               onFit={() => void flowRef.current?.fitView({
                 nodes: flowNodesRef.current.filter((node) => node.id === contextMenuNode.id),

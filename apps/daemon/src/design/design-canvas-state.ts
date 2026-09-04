@@ -579,7 +579,7 @@ export function createDesignCanvasState(sources: DesignCanvasStateSources) {
         const receipt = project.turnReceipts[application.receiptKey];
         const job = await readJob(root, jobId);
         const execution = await readDesignMainPlanExecutionUnlocked(root, project, application.receiptKey);
-        if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== null || receipt.jobId !== job.id
+        if (!receipt || receipt.kind !== "main-agent" || receipt.nodeId !== job.nodeId || receipt.jobId !== job.id
           || receipt.authorityHash !== job.contextHash || job.kind !== "main-agent" || job.status !== "running"
           || execution === null || execution.planHash !== application.planHash) {
           throw new DesignStorageError("conflict", "Main Agent plan application requires its active Job authority");

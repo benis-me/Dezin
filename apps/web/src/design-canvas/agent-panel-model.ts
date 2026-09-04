@@ -179,13 +179,14 @@ export function relatedAgentJobs(
   jobs: readonly DesignJob[],
   scope: DesignThreadScope,
 ): DesignJob[] {
+  const parentScopes = new Map(jobs.filter((job) => job.kind === "main-agent").map((job) => [job.id, job.nodeId]));
   const related = scope.type === "main"
     ? jobs.filter((job) => (
-      job.kind === "main-agent"
+      (job.kind === "main-agent" && job.nodeId === null)
       || job.kind === "implementation-export"
-      || job.parentJobId !== null
+      || (job.parentJobId !== null && (parentScopes.get(job.parentJobId) ?? null) === null)
     ))
-    : jobs.filter((job) => job.nodeId === scope.nodeId);
+    : jobs.filter((job) => job.nodeId === scope.nodeId || (job.parentJobId !== null && parentScopes.get(job.parentJobId) === scope.nodeId));
   return [...related].sort((left, right) => (
     left.createdAt - right.createdAt || left.id.localeCompare(right.id)
   ));

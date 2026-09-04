@@ -28,6 +28,7 @@ export const DESIGN_MATERIAL_NODE_KINDS = [
 export const DESIGN_NODE_KINDS = [
   ...DESIGN_GENERATIVE_NODE_KINDS,
   ...DESIGN_MATERIAL_NODE_KINDS,
+  "group-chat",
 ] as const;
 
 export type DesignNodeKind = (typeof DESIGN_NODE_KINDS)[number];

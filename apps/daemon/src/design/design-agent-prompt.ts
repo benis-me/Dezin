@@ -1,4 +1,5 @@
 import type { Settings } from "@dezin/core";
+import { DESIGN_SKILLS_PROMPT } from "./design-skills.ts";
 
 export interface DesignCanvasTastePromptInput {
   settings: Settings;
@@ -31,5 +32,7 @@ Canvas design output is one self-contained HTML document with inline CSS and inl
 
 ## Current request
 
-${request || "Improve this Node while preserving the Canvas direction."}${userInstructions ? `\n\n## User design instructions\n\n${userInstructions}` : ""}`;
+${request || "Improve this Node while preserving the Canvas direction."}
+
+${DESIGN_SKILLS_PROMPT}${userInstructions ? `\n\n## User design instructions\n\n${userInstructions}` : ""}`;
 }

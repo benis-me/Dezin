@@ -152,7 +152,7 @@ export function useCanvasAgentPanelController({
   }, [jobs, scopeKey, sessionsSupported, thread]);
   const activeTurnJob = useMemo(() => [...relatedJobs].reverse().find((job) => (
     activeAgentActivityPhase(job) !== null
-    && (scope.type === "node" || job.kind === "main-agent")
+    && (scope.type === "node" ? job.nodeId === scope.nodeId : job.kind === "main-agent")
   )) ?? null, [relatedJobs, scopeKey]);
   const nodeNames = useMemo(
     () => new Map(nodes.map((node) => [node.id, node.name])),
@@ -162,8 +162,8 @@ export function useCanvasAgentPanelController({
     ? nodes.find((node) => node.id === scope.nodeId) ?? null
     : null;
   const mainJobGroups = useMemo(
-    () => scope.type === "main" ? groupMainAgentJobs(relatedJobs, thread) : [],
-    [relatedJobs, scope.type, thread],
+    () => scope.type === "main" || scopedNode?.kind === "group-chat" ? groupMainAgentJobs(relatedJobs, thread) : [],
+    [relatedJobs, scope.type, scopedNode?.kind, thread],
   );
   const availableAgents = useMemo(
     () => agents.filter((agent) => isDesignAgentCommand(agent.command) && agent.available),

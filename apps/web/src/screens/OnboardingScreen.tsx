@@ -67,7 +67,7 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
           <span className="font-brand text-4xl tracking-tight">Dezin</span>
           <h1 className="mt-5 text-xl font-semibold tracking-tight">Welcome</h1>
           <p className="mx-auto mt-1.5 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            Describe what you want and Dezin builds it on one canvas with your own coding agent, validating every version before it is published. Pick the agent it should drive.
+            Turn an idea into a design you can keep and refine. Choose the coding agent Dezin will use to help you create it.
           </p>
           {isWindows ? (
             <p role="note" className="mx-auto mt-3 max-w-sm rounded-md border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-muted-foreground">

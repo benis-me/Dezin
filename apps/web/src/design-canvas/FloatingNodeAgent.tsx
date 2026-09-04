@@ -229,8 +229,7 @@ export function useFloatingNodePanel({
         : current);
       return;
     }
-    const node = [...host.querySelectorAll<HTMLElement>("[data-design-node-id]")]
-      .find((candidate) => candidate.dataset.designNodeId === nodeId);
+    const node = host.querySelector<HTMLElement>(`[data-design-node-id="${CSS.escape(nodeId)}"]`);
     if (!node) {
       setPosition((current) => current.visible || current.nodeId !== null
         ? { ...current, nodeId: null, visible: false }
@@ -244,16 +243,6 @@ export function useFloatingNodePanel({
     const expectedSize = focused ? FOCUSED_AGENT_SIZE : COMPACT_AGENT_SIZE;
     const panelWidth = panel?.offsetWidth || expectedSize.width;
     const panelHeight = Math.min(panel?.offsetHeight || expectedSize.height, hostRect.height - 24);
-    if (!focused && (
-      nodeRect.right < hostRect.left
-      || nodeRect.left > hostRect.right
-      || nodeRect.bottom < hostRect.top
-      || nodeRect.top > hostRect.bottom
-    )) {
-      setPosition((current) => current.visible ? { ...current, visible: false } : current);
-      return;
-    }
-
     const occluders: CanvasRect[] = mainPanelOpen ? [{
       left: Math.max(0, hostRect.width - 400),
       top: 0,
@@ -671,7 +660,8 @@ export function CanvasAgentPanel({
 
       <AgentTranscript
         scopeKey={scopeKey}
-        scopeType={scope.type}
+        isGroupChat={scopedNode?.kind === "group-chat"}
+        scopeType={scopedNode?.kind === "group-chat" ? "main" : scope.type}
         thread={thread}
         optimisticUserTurn={visibleOptimisticUserTurn}
         threadLoading={threadLoading && visibleOptimisticUserTurn === null}
@@ -686,6 +676,12 @@ export function CanvasAgentPanel({
       />
 
       <div className="design-canvas-agent__composer">
+        {scopedNode?.kind === "group-chat" ? (
+          <div className="design-canvas-agent__group-actions" role="group" aria-label="Group chat actions">
+            <Button size="xs" variant="ghost" onClick={() => setDraft((current) => `${current.trim() ? `${current.trimEnd()}\n\n` : ""}Generate the designs we agreed on. Delegate each deliverable to its own Node Agent and connect the results to this group.`)}>Generate designs</Button>
+            <Button size="xs" variant="ghost" onClick={() => setDraft((current) => `${current.trim() ? `${current.trimEnd()}\n\n` : ""}Save our agreed brief and decisions as a Design.md Node, including open questions. Reuse an existing brief Node if one is connected to this group.`)}>Save brief</Button>
+          </div>
+        ) : null}
         <input
           ref={fileInputRef}
           type="file"
@@ -725,7 +721,7 @@ export function CanvasAgentPanel({
               priorityNodeIds={contextNodeIds}
               onPriorityNodeIdsChange={setContextNodeIds}
               ariaLabel={`${title} message`}
-              placeholder={scope.type === "main"
+              placeholder={scopedNode?.kind === "group-chat" ? "Discuss a direction, or ask the group to generate…" : scope.type === "main"
                 ? "Coordinate the canvas. Type @ to reference a Node…"
                 : "Ask this Node's Agent. Type @ to add context…"}
               onSubmitShortcut={() => void submit()}
@@ -825,6 +821,7 @@ export function CanvasAgentPanel({
 const AgentTranscript = memo(function AgentTranscript({
   scopeKey,
   scopeType,
+  isGroupChat,
   thread,
   optimisticUserTurn,
   threadLoading,
@@ -839,6 +836,7 @@ const AgentTranscript = memo(function AgentTranscript({
 }: {
   scopeKey: string;
   scopeType: DesignThreadScope["type"];
+  isGroupChat: boolean;
   thread: DesignThread | null;
   optimisticUserTurn: OptimisticUserTurn | null;
   threadLoading: boolean;
@@ -905,10 +903,10 @@ const AgentTranscript = memo(function AgentTranscript({
       {!threadLoading && presentableMessages.length === 0 && reservedMainReplies.length === 0 && relatedJobs.length === 0 ? (
         <div className="design-canvas-agent__empty">
           <p className="text-[11px] font-medium text-foreground/75">
-            {scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
+            {isGroupChat ? "Discuss a direction together." : scopeType === "main" ? "Coordinate the canvas." : "Describe what this Node should become."}
           </p>
           <p className="max-w-[24rem] text-[10.5px] leading-[1.45] text-muted-foreground">
-            Complete canvas context is already available to this Agent.
+            {isGroupChat ? "Connected Nodes share context. Designs and decisions stay on this canvas." : "Complete canvas context is already available to this Agent."}
           </p>
         </div>
       ) : null}

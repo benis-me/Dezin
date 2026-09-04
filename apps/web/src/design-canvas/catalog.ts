@@ -4,12 +4,13 @@ export interface DesignNodeCatalogItem {
   kind: DesignNodeKind;
   label: string;
   description: string;
-  category: "generate" | "context";
+  category: "generate" | "context" | "collaborate";
   defaultGeometry: Pick<DesignNodeGeometry, "width" | "height">;
   lockAspectRatio?: boolean;
   accepts?: string;
 }
 export const DESIGN_NODE_CATALOG: readonly DesignNodeCatalogItem[] = [
+  { kind: "group-chat", label: "Group chat", description: "Discuss, generate, and keep decisions", category: "collaborate", defaultGeometry: { width: 400, height: 320 } },
   { kind: "page", label: "Page", description: "A complete product page", category: "generate", defaultGeometry: { width: 520, height: 440 } },
   { kind: "component", label: "Component", description: "Reusable interface component", category: "generate", defaultGeometry: { width: 400, height: 300 } },
   { kind: "design-system", label: "Design system", description: "Visual language and rules", category: "generate", defaultGeometry: { width: 460, height: 340 } },
