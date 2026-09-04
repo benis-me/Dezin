@@ -16,16 +16,16 @@
     "@capability-foundry/leafer-react": "file:../../vendor/capability-foundry-leafer-react-0.1.0.tgz"
   },
   "peerDependencies": {
-    "@leafer-in/editor": "2.1.10",
-    "@leafer-in/flow": "2.1.10",
-    "leafer-editor": "2.1.10",
+    "@leafer-in/editor": "2.2.9",
+    "@leafer-in/flow": "2.2.9",
+    "leafer-editor": "2.2.9",
     "react": ">=19.2.0 <20"
   },
   "devDependencies": {
-    "@leafer-in/editor": "2.1.10",
-    "@leafer-in/flow": "2.1.10",
-    "@types/react": "^19.0.0",
-    "leafer-editor": "2.1.10",
-    "typescript": "^6.0.3"
+    "@leafer-in/editor": "2.2.9",
+    "@leafer-in/flow": "2.2.9",
+    "@types/react": "^19.2.18",
+    "leafer-editor": "2.2.9",
+    "typescript": "^7.0.2"
   }
 }
