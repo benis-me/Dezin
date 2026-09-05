@@ -52,6 +52,7 @@
   transition: stroke 180ms var(--design-canvas-ease-out), stroke-width 180ms var(--design-canvas-ease-out);
 }
 .design-canvas-node .design-canvas-node__flow-handle {
+  z-index: 5;
   display: grid;
   width: 28px;
   height: 28px;
@@ -65,14 +66,13 @@
 .design-canvas-node__flow-handle.react-flow__handle-right { right: 0; transform: translate(50%, -50%) scale(var(--design-canvas-viewport-inverse-scale, 1)); }
 .design-canvas-node__flow-handle::after {
   content: "";
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--muted-foreground);
+  width: 8px;
+  height: 8px;
+  border: 1.25px solid var(--muted-foreground);
   border-radius: 50%;
   background: var(--card);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
 }
-.design-canvas-node__flow-handle.source::after { border-radius: 3px; }
+.design-canvas-node__flow-handle.source::after { background: var(--muted-foreground); }
 .design-canvas-node__flow-handle:hover::after,
 .design-canvas-node__flow-handle:focus-visible::after,
 .design-canvas-node__flow-handle.clickconnecting::after,
@@ -80,7 +80,7 @@
 .design-canvas-node__flow-handle.valid::after {
   border-color: var(--design-canvas-accent);
   background: var(--design-canvas-accent);
-  box-shadow: 0 0 0 4px var(--design-canvas-accent-soft);
+  box-shadow: 0 0 0 3px var(--design-canvas-accent-soft);
 }
 .design-canvas-node__flow-handle:focus-visible { outline: 2px solid var(--design-canvas-accent); outline-offset: 1px; }
 .design-canvas-surface[data-node-focus] .design-canvas-node__flow-handle { visibility: hidden; }

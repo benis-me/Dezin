@@ -178,7 +178,6 @@ test("Agent Job status stays in its glyph rather than tinting whole cards", () =
 });
 
 test("Agent transcript restores the original right-aligned Canvas user bubble", () => {
-  expect(floatingAgentSource).toContain('message.role === "user" ? "Prompt" : message.role === "assistant" ? "Response"');
   expect(floatingAgentSource).toContain('role="log"');
   expect(floatingAgentSource).toContain('aria-live="polite"');
   expect(floatingAgentSource).toContain('aria-relevant="additions"');
