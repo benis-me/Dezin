@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -180,17 +180,20 @@ test("cancelling a live job refreshes the canonical canvas projection immediatel
 
 test("an invalidation event refreshes Canvas and Jobs from canonical GETs", async () => {
   let emit!: (message: DesignInvalidationMessage) => void;
-  const streamInvalidations = vi.fn(async function* () {
-    yield await new Promise<DesignInvalidationMessage>((resolve) => { emit = resolve; });
+  const streamInvalidations = vi.fn(async function* (): AsyncGenerator<DesignInvalidationMessage> {
+    const event = await new Promise<DesignInvalidationMessage>((resolve) => { emit = resolve; });
+    yield { ...event, type: "invalidate", topics: ["thread:node:group-1"] };
+    yield { ...event, type: "invalidate", topics: ["thread:node:group-2"] };
+    yield event;
   });
   const getCanvas = vi.fn()
     .mockResolvedValueOnce(canvas(1))
     .mockResolvedValueOnce(canvas(5));
   const listJobs = vi.fn(async () => []);
   const api = fakeApi({ getCanvas, listJobs, streamInvalidations });
-  render(<Harness api={api} />);
+  const { result } = renderHook(() => useDesignCanvasController({ projectId: PROJECT_ID, api }));
 
-  await screen.findByText("1");
+  await waitFor(() => expect(result.current.canvas?.revision).toBe(1));
   await waitFor(() => expect(streamInvalidations).toHaveBeenCalledWith(PROJECT_ID, expect.any(AbortSignal)));
   await act(async () => emit({
     type: "invalidate",
@@ -200,7 +203,8 @@ test("an invalidation event refreshes Canvas and Jobs from canonical GETs", asyn
     topics: ["jobs"],
   }));
 
-  await screen.findByText("5");
+  await waitFor(() => expect(result.current.canvas?.revision).toBe(5));
+  expect(result.current.threadRevisions).toEqual({ "thread:node:group-1": "epoch:1", "thread:node:group-2": "epoch:1" });
   expect(getCanvas).toHaveBeenCalledTimes(2);
   expect(listJobs).toHaveBeenCalledTimes(2);
 });

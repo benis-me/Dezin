@@ -3,7 +3,7 @@ import { expect, test, vi } from "vitest";
 
 import type { AgentInfo } from "../lib/api.ts";
 import type { DesignCanvasApi } from "./api.ts";
-import type { DesignInvalidationMessage, DesignJob, DesignNode, DesignThread, DesignThreadScope } from "./types.ts";
+import type { DesignJob, DesignNode, DesignThread, DesignThreadScope } from "./types.ts";
 import {
   useAgentTranscriptController,
   useCanvasAgentPanelController,
@@ -63,6 +63,7 @@ function panelOptions({
     projectId: PROJECT_ID,
     api,
     scope,
+    threadRevision: "",
     nodes: [],
     jobs,
     versions: [],
@@ -145,8 +146,6 @@ test("panel controller keeps the next Prompt editable while the current scope tu
   };
   const api = {
     getThread: vi.fn(async () => thread({ type: "main" })),
-    // eslint-disable-next-line require-yield
-    streamInvalidations: vi.fn(async function* () {}),
   } as unknown as DesignCanvasApi;
   const onSubmit = vi.fn(async () => {});
   const { result } = renderHook(() => useCanvasAgentPanelController(panelOptions({
@@ -168,8 +167,6 @@ test("panel controller consumes each context seed once after filtering, deduplic
   const nodes = Array.from({ length: 26 }, (_, index) => contextNode(`node-${index + 1}`));
   const api = {
     getThread: vi.fn(async () => thread({ type: "main" })),
-    // eslint-disable-next-line require-yield
-    streamInvalidations: vi.fn(async function* () {}),
   } as unknown as DesignCanvasApi;
   const initialSeed = ["missing", nodes[0]!.id, nodes[0]!.id, ...nodes.map((node) => node.id)];
   const { result, rerender } = renderHook(
@@ -229,28 +226,34 @@ test("the matching thread invalidation reloads the canonical thread without poll
     jobId: "job-1",
     createdAt: 10,
   }]);
-  let emit!: (message: DesignInvalidationMessage) => void;
-  const streamInvalidations = vi.fn(async function* () {
-    yield await new Promise<DesignInvalidationMessage>((resolve) => { emit = resolve; });
-  });
   const getThread = vi.fn()
     .mockResolvedValueOnce(initial)
     .mockResolvedValueOnce(canonical);
-  const api = { getThread, streamInvalidations } as unknown as DesignCanvasApi;
-  const { result } = renderHook(() => useCanvasAgentPanelController(panelOptions({ api, scope })));
+  const api = { getThread } as unknown as DesignCanvasApi;
+  const { result, rerender } = renderHook(({ threadRevision }) => useCanvasAgentPanelController({ ...panelOptions({ api, scope }), threadRevision }), { initialProps: { threadRevision: "" } });
 
   await waitFor(() => expect(result.current.thread).toEqual(initial));
-  await waitFor(() => expect(streamInvalidations).toHaveBeenCalledWith(PROJECT_ID, expect.any(AbortSignal)));
-  await act(async () => emit({
-    type: "invalidate",
-    cursor: "epoch:2",
-    epoch: "epoch",
-    sequence: 2,
-    topics: ["thread:node:node-1"],
-  }));
+  rerender({ threadRevision: "epoch:2" });
 
   await waitFor(() => expect(result.current.thread).toEqual(canonical));
   expect(getThread).toHaveBeenCalledTimes(2);
+});
+
+test("an unrelated canvas event does not cancel an in-flight shared thread refresh", async () => {
+  const scope: DesignThreadScope = { type: "node", nodeId: "node-1" };
+  const initial = thread(scope);
+  const updated = { ...initial, updatedAt: 20 };
+  let finish!: (value: DesignThread) => void;
+  const getThread = vi.fn().mockResolvedValueOnce(initial).mockImplementationOnce(() => new Promise<DesignThread>((resolve) => { finish = resolve; }));
+  const api = { getThread, streamInvalidations: vi.fn() } as unknown as DesignCanvasApi;
+  const { result, rerender } = renderHook(({ threadRevision }) => useCanvasAgentPanelController({ ...panelOptions({ api, scope }), threadRevision }), { initialProps: { threadRevision: "" } });
+  await waitFor(() => expect(result.current.thread).toEqual(initial));
+  rerender({ threadRevision: "epoch:2" });
+  await waitFor(() => expect(getThread).toHaveBeenCalledTimes(2));
+  rerender({ threadRevision: "epoch:2" }); // Other topics do not advance this thread.
+  await act(async () => finish(updated));
+  expect(result.current.thread).toEqual(updated);
+  expect(api.streamInvalidations).not.toHaveBeenCalled();
 });
 
 test("Job actions keep rejection feedback visible and allow the same action to retry", async () => {

@@ -283,6 +283,23 @@ test("generated Node previews have kind-aware fit dimensions without resizing ma
   expect(preferredGeneratedNodeGeometry(node({ kind: "image" }))).toMatchObject({ width: 480, height: 360 });
 });
 
+test("group Nodes keep an inline conversation and draft while sharing the canvas event stream", async () => {
+  const user = userEvent.setup();
+  const group = node({ id: "group-1", kind: "group-chat", name: "Design discussion" });
+  const { api } = createCanvasApi(canvas([group, node({ id: "group-2", kind: "group-chat", name: "Another discussion" }), node()]));
+  render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} agents={[CLAUDE_AGENT]} />);
+  const groupNode = await screen.findByTestId("rf__node-group-1");
+  const composer = within(groupNode).getByRole("textbox", { name: "Design discussion message" });
+  await user.type(composer, "Explore a quieter direction");
+  fireEvent.click(await screen.findByTestId("rf__node-page-1"));
+  expect(composer).toHaveValue("Explore a quieter direction");
+  expect(screen.getAllByRole("region", { name: "Design discussion panel" })).toHaveLength(1);
+  await user.click(within(groupNode).getByRole("button", { name: "Send to Design discussion" }));
+  await waitFor(() => expect(api.submitAgentTurn).toHaveBeenCalledWith(PROJECT_ID, { type: "node", nodeId: group.id }, expect.objectContaining({ prompt: "Explore a quieter direction" })));
+  expect(api.streamInvalidations).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Open group chat" })).not.toBeInTheDocument();
+});
+
 test("Node previews stay title-bar-free at every canvas zoom", async () => {
   const zoomedCanvas = canvas([node({
     name: "7666005930341717169001.webp",

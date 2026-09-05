@@ -19,7 +19,6 @@ import {
 import { isDesignAgentCommand, type DesignCanvasApi } from "./api.ts";
 import type {
   DesignJob,
-  DesignInvalidationTopic,
   DesignMainSessionList,
   DesignNode,
   DesignNodeVersion,
@@ -57,6 +56,8 @@ export interface UseCanvasAgentPanelControllerOptions {
   scope: DesignThreadScope;
   nodes: readonly DesignNode[];
   jobs: readonly DesignJob[];
+  /** Latest revision from the canvas's shared event subscription. */
+  threadRevision: string;
   versions: readonly DesignNodeVersion[];
   selectedVersionId?: string | null;
   agents: readonly AgentInfo[];
@@ -90,6 +91,7 @@ export function useCanvasAgentPanelController({
   scope,
   nodes,
   jobs,
+  threadRevision,
   versions,
   selectedVersionId,
   agents,
@@ -170,9 +172,6 @@ export function useCanvasAgentPanelController({
     [agents],
   );
   const activeAgent = availableAgents.find((agent) => agent.command === agentSelection.agentCommand) ?? null;
-  const threadInvalidationTopic: DesignInvalidationTopic = scope.type === "main"
-    ? "thread:main"
-    : `thread:node:${scope.nodeId}`;
   const transcriptTailKey = relatedJobs.map((job) => (
     `${job.id}:${job.status}:${job.activity.length}:${job.error ?? ""}`
   )).join("|");
@@ -229,7 +228,7 @@ export function useCanvasAgentPanelController({
     void loadThread(controller.signal);
     void loadSessions(controller.signal);
     return () => controller.abort();
-  }, [loadSessions, loadThread]);
+  }, [loadSessions, loadThread, threadRevision]);
 
   useEffect(() => {
     setOptimisticUserTurn(null);
@@ -270,24 +269,6 @@ export function useCanvasAgentPanelController({
       setAgentSelection({ agentCommand: "", model: "" });
     }
   }, [agentSelection.agentCommand, agentSelection.model, availableAgents, setAgentSelection]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        for await (const message of api.streamInvalidations(projectId, controller.signal)) {
-          if (controller.signal.aborted) return;
-          if (message.type === "reset" || message.topics.includes(threadInvalidationTopic)) {
-            await loadThread(controller.signal);
-            await loadSessions(controller.signal);
-          }
-        }
-      } catch (problem) {
-        if (!controller.signal.aborted) setThreadError(errorMessage(problem));
-      }
-    })();
-    return () => controller.abort();
-  }, [api, loadSessions, loadThread, projectId, threadInvalidationTopic]);
 
   const runSessionAction = useCallback(async (action: () => Promise<DesignMainSessionList>) => {
     setThreadError(null);

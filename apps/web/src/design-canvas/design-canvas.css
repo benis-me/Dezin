@@ -51,12 +51,39 @@
   stroke-width: 1.5;
   transition: stroke 180ms var(--design-canvas-ease-out), stroke-width 180ms var(--design-canvas-ease-out);
 }
-.design-canvas-node__flow-handle {
-  width: 1px !important;
-  height: 1px !important;
-  opacity: 0;
-  pointer-events: none;
+.design-canvas-node .design-canvas-node__flow-handle {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: crosshair;
 }
+.design-canvas-node__flow-handle.react-flow__handle-left { left: 0; transform: translate(-50%, -50%) scale(var(--design-canvas-viewport-inverse-scale, 1)); }
+.design-canvas-node__flow-handle.react-flow__handle-right { right: 0; transform: translate(50%, -50%) scale(var(--design-canvas-viewport-inverse-scale, 1)); }
+.design-canvas-node__flow-handle::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--muted-foreground);
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}
+.design-canvas-node__flow-handle.source::after { border-radius: 3px; }
+.design-canvas-node__flow-handle:hover::after,
+.design-canvas-node__flow-handle:focus-visible::after,
+.design-canvas-node__flow-handle.clickconnecting::after,
+.design-canvas-node__flow-handle.connectingfrom::after,
+.design-canvas-node__flow-handle.valid::after {
+  border-color: var(--design-canvas-accent);
+  background: var(--design-canvas-accent);
+  box-shadow: 0 0 0 4px var(--design-canvas-accent-soft);
+}
+.design-canvas-node__flow-handle:focus-visible { outline: 2px solid var(--design-canvas-accent); outline-offset: 1px; }
+.design-canvas-surface[data-node-focus] .design-canvas-node__flow-handle { visibility: hidden; }
 .design-canvas-surface[data-node-focus] > .react-flow { z-index: 48 !important; pointer-events: none; }
 .design-canvas-surface[data-node-focus] .react-flow__pane { pointer-events: none; }
 
@@ -1652,15 +1679,13 @@
   .design-canvas-quick-start__actions > button:active { transform: none; }
 }
 
-/* Group conversations use the same compact surface as the Agent panel. */
-.design-group-chat { display: flex; height: 100%; min-height: 0; flex-direction: column; gap: 12px; padding: 18px; background: var(--card); color: var(--foreground); }
-.design-group-chat header { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-.design-group-chat header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.design-group-chat svg { width: 16px; height: 16px; flex: none; }
-.design-group-chat__goal, .design-group-chat__reply { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
-.design-group-chat__reply { color: var(--muted-foreground); }
-.design-group-chat__members { display: flex; flex-wrap: wrap; gap: 4px; max-height: 56px; overflow: auto; }
-.design-group-chat__members span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; padding: 3px 6px; background: var(--surface-2); font-size: 12px; }
-.design-group-chat > button { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 8px; flex: none; margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; text-align: start; }
-.design-group-chat > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-.design-canvas-agent__group-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 2px 7px; }
+.design-canvas-agent--embedded { border-radius: inherit; }
+.design-canvas-agent--embedded .design-canvas-agent__surface { border: 0; }
+.design-canvas-agent--embedded .design-canvas-agent__header { cursor: grab; }
+.design-canvas-agent--embedded .design-canvas-agent__header:active { cursor: grabbing; }
+.design-canvas-agent__connections { flex: none; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.design-canvas-agent__connections summary { cursor: pointer; color: var(--muted-foreground); }
+.design-canvas-agent__connections summary:focus-visible { outline: 2px solid var(--design-canvas-accent); outline-offset: 3px; border-radius: 3px; }
+.design-canvas-agent__connections ul { display: flex; flex-wrap: wrap; gap: 5px; max-height: 80px; overflow: auto; margin-top: 8px; }
+.design-canvas-agent__connections li { padding: 3px 7px; border-radius: 5px; background: var(--surface-2); overflow-wrap: anywhere; }
+.design-canvas-agent__connections p { margin-top: 8px; color: var(--muted-foreground); line-height: 1.5; }

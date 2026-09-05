@@ -16,6 +16,7 @@ export interface DesignCanvasController {
   loadState: LoadState;
   canvas: DesignCanvas | null;
   jobs: DesignJob[];
+  threadRevisions: Readonly<Record<string, string>>;
   error: string | null;
   mutating: boolean;
   adoptCanvas: (canvas: DesignCanvas) => void;
@@ -49,6 +50,7 @@ export function useDesignCanvasController({
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [canvas, setCanvasState] = useState<DesignCanvas | null>(null);
   const [jobs, setJobs] = useState<DesignJob[]>([]);
+  const [threadRevisions, setThreadRevisions] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [mutating, setMutating] = useState(false);
   const canvasRef = useRef<DesignCanvas | null>(null);
@@ -150,6 +152,7 @@ export function useDesignCanvasController({
     const controller = new AbortController();
     const sequence = ++refreshSequenceRef.current;
     setLoadState("loading");
+    setThreadRevisions({});
     setError(null);
     void Promise.all([
       api.getCanvas(projectId, controller.signal),
@@ -320,6 +323,11 @@ export function useDesignCanvasController({
       try {
         for await (const message of api.streamInvalidations(projectId, controller.signal)) {
           if (controller.signal.aborted || projectRef.current !== projectId) return;
+          const threadTopics = message.type === "reset" ? ["reset"] : message.topics.filter((topic) => topic.startsWith("thread:"));
+          if (threadTopics.length) setThreadRevisions((current) => ({
+            ...current,
+            ...Object.fromEntries(threadTopics.map((topic) => [topic, message.cursor])),
+          }));
           if (message.type === "reset"
             || message.topics.includes("canvas")
             || message.topics.includes("jobs")) {
@@ -337,6 +345,7 @@ export function useDesignCanvasController({
     loadState,
     canvas,
     jobs,
+    threadRevisions,
     error,
     mutating,
     adoptCanvas,

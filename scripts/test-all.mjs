@@ -174,10 +174,17 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(imp
 if (isMain) {
   const coverage = process.argv.includes("--coverage");
   const listOnly = process.argv.includes("--list");
+  const requested = process.argv.slice(2).filter((arg) => arg !== "--coverage" && arg !== "--list" && arg !== "--");
+  const unknown = requested.filter((id) => !TEST_SUITES.some((suite) => suite.id === id));
+  if (unknown.length) {
+    process.stderr.write(`Unknown test suite: ${unknown.join(", ")}. Run pnpm test --list for available suites.\n`);
+    process.exit(1);
+  }
+  const suites = requested.length ? TEST_SUITES.filter((suite) => requested.includes(suite.id)) : TEST_SUITES;
   if (listOnly) {
-    process.stdout.write(`${TEST_SUITES.map((suite) => suite.cwd).join("\n")}\n`);
+    process.stdout.write(`${suites.map((suite) => suite.id).join("\n")}\n`);
   } else {
-    runSuites(TEST_SUITES, {
+    runSuites(suites, {
       coverage,
       ...(process.env.DEZIN_TEST_SUITE_TIMEOUT_MS ? { timeoutMs: Number(process.env.DEZIN_TEST_SUITE_TIMEOUT_MS) } : {}),
     })

@@ -8,6 +8,7 @@ import {
   ReactFlow,
   SelectionMode,
   type Edge,
+  type Connection,
   type OnNodeDrag,
   type NodeMouseHandler,
   type ReactFlowInstance,
@@ -116,6 +117,7 @@ export {
 } from "./design-canvas-screen-helpers.ts";
 
 const NODE_TYPES = { design: DesignCanvasNode } as const;
+const EMPTY_AGENTS: readonly AgentInfo[] = [];
 const SELECT_PAN_BUTTONS = [1];
 const MULTI_SELECTION_KEYS = ["Meta", "Control", "Shift"];
 const PRO_OPTIONS = { hideAttribution: true } as const;
@@ -173,7 +175,7 @@ export function DesignCanvasScreen({
   projectId,
   projectName,
   api,
-  agents = [],
+  agents = EMPTY_AGENTS,
   initialAgentCommand,
   initialModel,
   onAgentDefaultsChange,
@@ -445,22 +447,60 @@ export function DesignCanvasScreen({
     });
   }, [canvas?.nodes]);
 
-  const openGroupChat = useCallback((nodeId: string) => openNodeAgent(nodeId, false), [openNodeAgent]);
+  const importFiles = useCallback(async (files: readonly File[], position = pendingImportPositionRef.current) => {
+    if (!files.length) return;
+    try {
+      await controller.importLocalFiles(files, position);
+    } catch {
+      // Controller keeps the canvas usable and exposes retry context.
+    }
+  }, [controller.importLocalFiles]);
+
+  const groupMembers = useMemo(() => {
+    const byId = new Map(canvas?.nodes.map((node) => [node.id, node]));
+    const members = new Map<string, Map<string, DesignNode>>();
+    for (const edge of canvas?.connections ?? []) {
+      for (const [groupId, memberId] of [[edge.sourceNodeId, edge.targetNodeId], [edge.targetNodeId, edge.sourceNodeId]] as const) {
+        const member = byId.get(memberId);
+        if (byId.get(groupId)?.kind !== "group-chat" || !member) continue;
+        const group = members.get(groupId) ?? new Map<string, DesignNode>();
+        group.set(member.id, member);
+        members.set(groupId, group);
+      }
+    }
+    return members;
+  }, [canvas?.nodes, canvas?.connections]);
+
+  const renderGroupChat = useCallback((node: DesignNode) => (
+    <CanvasAgentPanel
+      projectId={projectId}
+      api={api}
+      scope={{ type: "node", nodeId: node.id }}
+      title={node.name}
+      subtitle="Drag the header to move this group"
+      className="design-canvas-agent--embedded"
+      connectedNodes={[...(groupMembers.get(node.id)?.values() ?? [])]}
+      nodes={canvas?.nodes ?? []}
+      jobs={controller.jobs}
+      threadRevision={`${controller.threadRevisions.reset ?? ""}:${controller.threadRevisions[`thread:node:${node.id}`] ?? ""}`}
+      agents={agents}
+      initialAgentCommand={initialAgentCommand}
+      initialModel={initialModel}
+      agentSelection={mainAgentSelection}
+      onAgentSelectionChange={updateMainAgentSelection}
+      onRescanAgents={onRescanAgents}
+      onCancelJob={controller.cancelJob}
+      onRetryJob={controller.retryJob}
+      onSubmit={(prompt, nodeIds, selection) => controller.submitAgentTurn({ type: "node", nodeId: node.id }, prompt, nodeIds, selection)}
+      onAttachFiles={(files) => importFiles(files, { x: node.geometry.x + node.geometry.width + 48, y: node.geometry.y })}
+    />
+  ), [projectId, api, groupMembers, canvas?.nodes, controller.jobs, controller.threadRevisions, agents, initialAgentCommand, initialModel, mainAgentSelection, updateMainAgentSelection, onRescanAgents, controller.cancelJob, controller.retryJob, controller.submitAgentTurn, importFiles]);
 
   useLayoutEffect(() => {
     if (!canvas) return;
     syncHoverLabelViewportScale(surfaceRef.current, flowRef.current?.getZoom() ?? canvas.viewport.zoom);
     authoritativeViewportRef.current = canvas.viewport;
     const canvasNodesById = new Map(canvas.nodes.map((node) => [node.id, node]));
-    const groupMembers = new Map<string, Set<string>>();
-    for (const edge of canvas.connections ?? []) {
-      for (const [groupId, memberId] of [[edge.sourceNodeId, edge.targetNodeId], [edge.targetNodeId, edge.sourceNodeId]] as const) {
-        if (canvasNodesById.get(groupId)?.kind !== "group-chat") continue;
-        const members = groupMembers.get(groupId) ?? new Set<string>();
-        members.add(memberId);
-        groupMembers.set(groupId, members);
-      }
-    }
     const canvasNodeIds = new Set(canvasNodesById.keys());
     const selected = new Set(selectedNodeIds.filter((id) => canvasNodeIds.has(id)));
     if (selected.size !== selectedNodeIds.length) setSelectedNodeIds([...selected]);
@@ -554,8 +594,7 @@ export function DesignCanvasScreen({
     );
     const nextFlowNodes = canonicalFlowNodes.map((canonicalNode) => {
       if (canonicalNode.data.node.kind === "group-chat") {
-        canonicalNode.data.groupMemberNames = [...(groupMembers.get(canonicalNode.id) ?? [])].map((id) => canvasNodesById.get(id)?.name ?? id);
-        canonicalNode.data.onOpenGroupChat = openGroupChat;
+        canonicalNode.data.renderGroupChat = renderGroupChat;
       }
       const existing = currentById.get(canonicalNode.id);
       const authoritativeNode = canonicalNode.data.node;
@@ -570,8 +609,7 @@ export function DesignCanvasScreen({
         : { ...authoritativeNode, geometry: { ...localGeometry } };
       const nodeAnnotateMode = annotateMode && focusedCanvasNode?.id === canonicalNode.id;
       if (existing
-        && existing.data.onOpenGroupChat === canonicalNode.data.onOpenGroupChat
-        && JSON.stringify(existing.data.groupMemberNames) === JSON.stringify(canonicalNode.data.groupMemberNames)
+        && existing.data.renderGroupChat === canonicalNode.data.renderGroupChat
         && existing.selected === canonicalNode.selected
         && existing.position.x === localGeometry.x
         && existing.position.y === localGeometry.y
@@ -610,7 +648,7 @@ export function DesignCanvasScreen({
     } else if (!instance && mountedViewportProjectRef.current !== projectId) {
       setZoom(canvas.viewport.zoom);
     }
-  }, [openGroupChat, annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, contentNaturalSizes, dropFocusForMissingNodes, focusAgentReserved, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, nodeAgentWidth, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
+  }, [renderGroupChat, annotateMode, api, appendMaterialRevision, applyInitialViewport, canvas, contentAspectRatios, contentNaturalSizes, dropFocusForMissingNodes, focusAgentReserved, focusedCanvasNode, focusedPreviewDevice, focusedVersionMetadata, focusMotionAllowed, focusTransition, layoutNonce, nodeAgentWidth, onFocusAnimationComplete, onFocusAnimationStart, onPreviewContextMenu, onPreviewEscape, persistNodeResize, projectId, reportContentAspectRatio, selectedNodeIds]);
 
   const revealImportedFigmaNodes = useCallback((importedNodeIds: string[]) => {
     const importedNodeIdSet = new Set(importedNodeIds);
@@ -656,7 +694,7 @@ export function DesignCanvasScreen({
   const floatingPosition = useFloatingNodePanel({
     hostRef: surfaceRef,
     panelRef: nodePanelRef,
-    nodeId: selectedNode?.id ?? null,
+    nodeId: selectedNode?.kind === "group-chat" ? null : selectedNode?.id ?? null,
     focused: focusActive,
     mainPanelOpen: mainAgentOpen,
     layoutNonce,
@@ -670,8 +708,11 @@ export function DesignCanvasScreen({
     return flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 });
   }, []);
 
-  const addNode = useCallback(async (kind: DesignNodeKind, position = canvasCenter(), contextIds: readonly string[] = []) => {
+  const addNode = useCallback(async (kind: DesignNodeKind, requestedPosition?: { x: number; y: number }, contextIds: readonly string[] = []) => {
     setAddMenuOpen(false);
+    const item = catalogItem(kind);
+    const center = canvasCenter();
+    let position = requestedPosition ?? { x: center.x - item.defaultGeometry.width / 2, y: center.y - item.defaultGeometry.height / 2 };
     if (isMaterialNodeKind(kind)) {
       pendingImportPositionRef.current = position;
       if (fileInputRef.current) {
@@ -680,7 +721,6 @@ export function DesignCanvasScreen({
       }
       return;
     }
-    const item = catalogItem(kind);
     const source = kind !== "group-chat" && contextIds.length === 1
       ? canvas?.nodes.find((node) => node.id === contextIds[0] && node.kind === kind) : undefined;
     const size = source ? { width: source.geometry.width, height: source.geometry.height } : item.defaultGeometry;
@@ -777,15 +817,6 @@ export function DesignCanvasScreen({
       // Controller exposes a non-blocking error banner and canonical refresh.
     }
   }, [canvasCenter, controller.applyIntents, zoom]);
-
-  const importFiles = useCallback(async (files: readonly File[], position = pendingImportPositionRef.current) => {
-    if (!files.length) return;
-    try {
-      await controller.importLocalFiles(files, position);
-    } catch {
-      // Controller keeps the canvas usable and exposes retry context.
-    }
-  }, [controller.importLocalFiles]);
 
   const requestMaterialRevision = useCallback((node: DesignNode) => {
     pendingRevisionNodeIdRef.current = node.id;
@@ -1084,6 +1115,19 @@ export function DesignCanvasScreen({
     focusable: false,
   })), [canvas?.connections]);
 
+  const isValidConnection = useCallback((connection: Connection | Edge) => (
+    connection.source !== connection.target
+    && !(canvas?.connections ?? []).some((edge) => edge.sourceNodeId === connection.source && edge.targetNodeId === connection.target)
+  ), [canvas?.connections]);
+  const onConnect = useCallback((connection: Connection) => {
+    if (!isValidConnection(connection)) return;
+    void controller.applyIntents([{ type: "connect-nodes", connection: {
+      id: `connection-${globalThis.crypto.randomUUID()}`,
+      sourceNodeId: connection.source,
+      targetNodeId: connection.target,
+    } }]).catch(() => {}); // The controller displays failures and keeps the saved graph.
+  }, [controller.applyIntents, isValidConnection]);
+
   const flowCanvas = useMemo(() => canvas ? (
     <ReactFlow<DesignFlowNode>
       nodes={flowNodes}
@@ -1092,7 +1136,10 @@ export function DesignCanvasScreen({
       defaultViewport={canvas.viewport}
       minZoom={DESIGN_CANVAS_MIN_ZOOM}
       maxZoom={2.4}
-      nodesConnectable={false}
+      nodesConnectable={!focusActive}
+      onConnect={onConnect}
+      isValidConnection={isValidConnection}
+      connectionRadius={28}
       nodesDraggable={!focusActive}
       elementsSelectable={!focusActive}
       selectionMode={SelectionMode.Partial}
@@ -1125,6 +1172,8 @@ export function DesignCanvasScreen({
     </ReactFlow>
   ) : null, [
     bumpLayout,
+    onConnect,
+    isValidConnection,
     canvas?.viewport,
     flowEdges,
     flowNodes,
@@ -1391,7 +1440,7 @@ export function DesignCanvasScreen({
 
         {contextMenuOpen ? null : (
           <AnimatePresence>
-            {selectedNode && floatingPosition.visible && floatingPosition.nodeId === selectedNode.id ? (
+            {selectedNode && selectedNode.kind !== "group-chat" && floatingPosition.visible && floatingPosition.nodeId === selectedNode.id ? (
             <CanvasAgentPanel
             key={selectedNode.id}
             rootRef={nodePanelRef}
@@ -1402,10 +1451,11 @@ export function DesignCanvasScreen({
             projectId={projectId}
             api={api}
             scope={{ type: "node", nodeId: selectedNode.id }}
-            title={selectedNode.kind === "group-chat" ? selectedNode.name : `${selectedNode.name} Agent`}
+            title={`${selectedNode.name} Agent`}
             subtitle=""
             nodes={canvas?.nodes ?? []}
             jobs={controller.jobs}
+            threadRevision={`${controller.threadRevisions.reset ?? ""}:${controller.threadRevisions[`thread:node:${selectedNode.id}`] ?? ""}`}
             versions={versionsNodeId === selectedNode.id ? versions : []}
             selectedVersionId={selectedNode.selectedVersionId ?? selectedNode.currentVersionId}
             onAppendMaterialVersion={isMaterialNodeKind(selectedNode.kind)
@@ -1471,6 +1521,7 @@ export function DesignCanvasScreen({
                 subtitle=""
                 nodes={canvas?.nodes ?? []}
                 jobs={controller.jobs}
+                threadRevision={`${controller.threadRevisions.reset ?? ""}:${controller.threadRevisions["thread:main"] ?? ""}`}
                 agents={agents}
                 initialAgentCommand={initialAgentCommand}
                 initialModel={initialModel}

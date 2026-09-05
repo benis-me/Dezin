@@ -174,6 +174,14 @@ export function useNodeFocus({
 
   const openNodeAgent = useCallback((nodeId: string, focusComposer = false, animate = true) => {
     armSelectionGuard(nodeId);
+    if (canvas?.nodes.find((node) => node.id === nodeId)?.kind === "group-chat") {
+      setSelectedNodeIds([nodeId]);
+      setMainAgentOpen(false);
+      setFocusedPanelNodeId(null);
+      void flowRef.current?.fitView({ nodes: [{ id: nodeId }], padding: 0.24, maxZoom: 1, duration: reduceMotion ? 0 : 220 });
+      surfaceRef.current?.querySelector<HTMLTextAreaElement>(`[data-design-node-id="${CSS.escape(nodeId)}"] textarea`)?.focus({ preventScroll: true });
+      return;
+    }
     clearFocusTimers();
     cancelPendingViewportSave();
     const motionEnabled = animate && !reduceMotion;

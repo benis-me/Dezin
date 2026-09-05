@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +36,8 @@ function alive(pid) {
 
 test("test orchestrator enumerates every supported suite exactly once", () => {
   assert.deepEqual(TEST_SUITES.map((suite) => suite.cwd), EXPECTED_SUITES);
+  assert.equal(execFileSync(process.execPath, ["scripts/test-all.mjs", "apps/web", "--list"], { encoding: "utf8" }).trim(), "apps/web");
+  assert.equal(spawnSync(process.execPath, ["scripts/test-all.mjs", "apps/weeb", "--list"]).status, 1);
   assert.equal(new Set(TEST_SUITES.map((suite) => suite.cwd)).size, EXPECTED_SUITES.length);
 });
 

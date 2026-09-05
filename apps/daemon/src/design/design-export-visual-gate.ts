@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -15,6 +14,8 @@ import type {
   DesignFrozenContext,
 } from "./design-types.ts";
 import { DESIGN_EXPORT_CONTENT_SECURITY_POLICY } from "./design-export-policy.ts";
+import { findChrome as findDesignExportChrome } from "../capture-cover.ts";
+export { findDesignExportChrome };
 
 export const DESIGN_EXPORT_VISUAL_THRESHOLDS = Object.freeze({
   meanAbsoluteError: 0.04,
@@ -52,14 +53,6 @@ const SAFE_EVIDENCE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const NAVIGATION_TIMEOUT_MS = 12_000;
 const SETTLE_TIMEOUT_MS = 8_000;
 const SESSION_CLOSE_TIMEOUT_MS = 5_000;
-const DESIGN_EXPORT_CHROME_PATHS = [
-  process.env.DEZIN_CHROME ?? "",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/chromium",
-];
 const OUTPUT_CSP = DESIGN_EXPORT_CONTENT_SECURITY_POLICY;
 
 export interface DesignExportVisualCaptureInput {
@@ -601,10 +594,6 @@ export async function runDesignExportVisualGate(
   }
 }
 
-export function findDesignExportChrome(): string | null {
-  return DESIGN_EXPORT_CHROME_PATHS.find((path) => path.length > 0 && existsSync(path)) ?? null;
-}
-
 function abortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
   return new DOMException("Design Export visual gate aborted", "AbortError");
@@ -779,13 +768,14 @@ function allowedRequest(value: string, activeOrigin: string | null): boolean {
     && parsed.origin === activeOrigin;
 }
 
-async function closeBrowser(browser: Browser | undefined): Promise<void> {
+export async function closeBrowser(browser: Browser | undefined): Promise<void> {
   if (!browser) return;
   let closed = false;
   await new Promise<void>((resolveClose) => {
     const timer = setTimeout(resolveClose, SESSION_CLOSE_TIMEOUT_MS);
-    void browser.close().catch(() => {}).then(() => {
+    void browser.close().then(() => {
       closed = true;
+    }).catch(() => {}).finally(() => {
       clearTimeout(timer);
       resolveClose();
     });

@@ -42,7 +42,6 @@ import { DesignVideoGlassPlayer } from "./DesignVideoGlassPlayer.tsx";
 import { TypedMaterialSurface } from "./TypedMaterialSurface.tsx";
 import type { DesignNode, DesignNodeKind } from "./types.ts";
 import { useExactVersionPreview } from "./useExactVersionPreview.ts";
-import { GroupChatPreview } from "./GroupChatPreview.tsx";
 import "./generation-particles.css";
 
 export interface DesignFlowNodeData extends Record<string, unknown> {
@@ -61,8 +60,7 @@ export interface DesignFlowNodeData extends Record<string, unknown> {
   onFocusAnimationComplete?: (nodeId: string, phase: NodeFocusMotion["phase"]) => void;
   contentLayout?: DesignNodeContentLayout | null;
   focusMotion?: NodeFocusMotion | null;
-  groupMemberNames?: readonly string[];
-  onOpenGroupChat?: (nodeId: string) => void;
+  renderGroupChat?: (node: DesignNode) => React.ReactNode;
 }
 
 export interface DesignPreviewAnnotationTarget {
@@ -219,6 +217,7 @@ const NODE_ENTERING_DURATION_MS = 1_500;
 export function designNodeAriaLabel(
   node: Pick<DesignNode, "kind" | "name" | "state">,
 ): string {
+  if (node.kind === "group-chat") return `${node.name}, Group chat, ${LIVE_STATES.has(node.state) ? "Replying" : node.state === "failed" ? "Needs attention" : "Conversation"}`;
   return `${node.name}, ${catalogItem(node.kind).label}, ${STATE_LABELS[node.state]}`;
 }
 
@@ -719,6 +718,9 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
       data-node-state={node.state}
       data-node-focus-role={focusMotion?.role}
       data-node-focus-phase={focusMotion?.phase}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest(".react-flow__handle")) event.stopPropagation();
+      }}
       className={cn(
         "design-canvas-node",
         selected && "design-canvas-node--selected",
@@ -736,11 +738,28 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
         ...focusStyle,
       }}
     >
-      <Handle type="target" position={Position.Left} className="design-canvas-node__flow-handle" />
-      <Handle type="source" position={Position.Right} className="design-canvas-node__flow-handle" />
-      <div className="design-canvas-node__hover-label" aria-hidden="true">
+      {(["target", "source"] as const).map((type) => (
+        <Handle
+          key={type}
+          type={type}
+          position={type === "target" ? Position.Left : Position.Right}
+          className="design-canvas-node__flow-handle"
+          role="button"
+          tabIndex={focusMotion ? -1 : 0}
+          aria-label={`${node.name} ${type === "target" ? "input" : "output"}`}
+          title={`${type === "target" ? "Input" : "Output"} · drag or click to connect`}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.click();
+            }
+          }}
+        />
+      ))}
+      {node.kind !== "group-chat" ? <div className="design-canvas-node__hover-label" aria-hidden="true">
         <span>{node.name}</span>
-      </div>
+      </div> : null}
 
       <NodeCornerResizeControls
         node={node}
@@ -768,8 +787,8 @@ export function DesignCanvasNode({ data, selected }: NodeProps<DesignFlowNode>) 
                 : `translate3d(0, 0, 0) scale(${contentLayout.canvasScale})`,
             } : undefined}
           >
-            {node.kind === "group-chat" && nearViewport ? (
-              <GroupChatPreview node={node} projectId={projectId} api={api} members={data.groupMemberNames ?? []} onOpen={() => data.onOpenGroupChat?.(node.id)} />
+            {node.kind === "group-chat" ? (
+              data.renderGroupChat?.(node)
             ) : versionId ? (
               shouldMountRichPreview ? (
                 preview ? (

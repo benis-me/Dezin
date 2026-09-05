@@ -102,6 +102,8 @@ Old SQLite Design tables are destructively retired only after the daemon creates
 
 ```sh
 pnpm test
+pnpm test apps/web # UI tests only; does not run daemon browser checks
+pnpm test --list   # List selectable workspace suites
 pnpm test:coverage
 pnpm typecheck
 pnpm build:check

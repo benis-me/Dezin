@@ -5,7 +5,7 @@ import { lstat, open } from "node:fs/promises";
 import puppeteer from "puppeteer-core";
 
 import { createProviderFetch } from "../provider-fetch.ts";
-import { findDesignExportChrome } from "./design-export-visual-gate.ts";
+import { closeBrowser, findDesignExportChrome } from "./design-export-visual-gate.ts";
 import { isDesignWebResourceUrl } from "./design-web-resources.ts";
 
 export interface DesignNodeRuntimeGateScreenshot {
@@ -329,7 +329,7 @@ export const runDesignNodeRuntimeGate: DesignNodeRuntimeGateRunner = async ({ ht
       "--no-sandbox",
     ],
   });
-  const abort = () => { void browser.close().catch(() => {}); };
+  const abort = () => { void closeBrowser(browser); };
   signal.addEventListener("abort", abort, { once: true });
   let meaningfulElements = 0;
   try {
@@ -561,6 +561,6 @@ export const runDesignNodeRuntimeGate: DesignNodeRuntimeGateRunner = async ({ ht
     };
   } finally {
     signal.removeEventListener("abort", abort);
-    await browser.close().catch(() => {});
+    await closeBrowser(browser);
   }
 };

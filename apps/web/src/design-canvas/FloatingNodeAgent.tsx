@@ -28,6 +28,7 @@ import {
   CircleAlert,
   FileUp,
   LoaderCircle,
+  MessagesSquare,
   Paperclip,
   PanelRightClose,
   Square,
@@ -317,6 +318,8 @@ export interface CanvasAgentPanelProps {
   subtitle: string;
   nodes: readonly DesignNode[];
   jobs: readonly DesignJob[];
+  threadRevision?: string;
+  connectedNodes?: readonly DesignNode[];
   versions?: readonly DesignNodeVersion[];
   selectedVersionId?: string | null;
   onAppendMaterialVersion?: (file: File) => Promise<void>;
@@ -383,6 +386,8 @@ export function CanvasAgentPanel({
   subtitle,
   nodes,
   jobs,
+  threadRevision = "",
+  connectedNodes,
   versions = [],
   selectedVersionId,
   onAppendMaterialVersion,
@@ -460,6 +465,7 @@ export function CanvasAgentPanel({
     scope,
     nodes,
     jobs,
+    threadRevision,
     versions,
     selectedVersionId,
     agents,
@@ -537,6 +543,10 @@ export function CanvasAgentPanel({
         layout: { duration: reduceMotion ? 0 : 0.28, ease: AGENT_MORPH_EASE },
       }}
       aria-label={`${title} panel`}
+      onKeyDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => {
+        if (connectedNodes !== undefined && !(event.target as HTMLElement).closest("header")) event.stopPropagation();
+      }}
       onContextMenu={(event) => event.stopPropagation()}
     >
       {panelWidth ? (
@@ -550,7 +560,8 @@ export function CanvasAgentPanel({
       <div className="design-canvas-agent__surface">
       <header className="design-canvas-agent__header">
         <div className="design-canvas-agent__header-copy">
-          <h2 title={subtitle || undefined}>{panelTitle}</h2>
+          {connectedNodes !== undefined ? <MessagesSquare size={16} aria-hidden /> : null}
+          <h2 title={subtitle ? `${panelTitle} · ${subtitle}` : panelTitle}>{panelTitle}</h2>
           {sessions ? (
             <ConversationSelect
               conversations={sessions.sessions.map((session) => ({ ...session, title: session.title ?? "" }))}
@@ -657,6 +668,14 @@ export function CanvasAgentPanel({
           </TooltipProvider>
         ) : null}
       </header>
+      {connectedNodes !== undefined ? (
+        <details className="design-canvas-agent__connections nodrag nopan nowheel">
+          <summary>{connectedNodes.length ? `${connectedNodes.length} connected ${connectedNodes.length === 1 ? "Node" : "Nodes"}` : "Connect Nodes to share context"}</summary>
+          {connectedNodes.length ? (
+            <ul>{connectedNodes.map((node) => <li key={node.id}>{node.name}</li>)}</ul>
+          ) : <p>Drag between the ports on either side of a Node. You can also mention a Node with @.</p>}
+        </details>
+      ) : null}
 
       <AgentTranscript
         scopeKey={scopeKey}
@@ -675,13 +694,7 @@ export function CanvasAgentPanel({
         tailKey={`${transcriptTailKey}|${visibleOptimisticUserTurn?.message.id ?? ""}`}
       />
 
-      <div className="design-canvas-agent__composer">
-        {scopedNode?.kind === "group-chat" ? (
-          <div className="design-canvas-agent__group-actions" role="group" aria-label="Group chat actions">
-            <Button size="xs" variant="ghost" onClick={() => setDraft((current) => `${current.trim() ? `${current.trimEnd()}\n\n` : ""}Generate the designs we agreed on. Delegate each deliverable to its own Node Agent and connect the results to this group.`)}>Generate designs</Button>
-            <Button size="xs" variant="ghost" onClick={() => setDraft((current) => `${current.trim() ? `${current.trimEnd()}\n\n` : ""}Save our agreed brief and decisions as a Design.md Node, including open questions. Reuse an existing brief Node if one is connected to this group.`)}>Save brief</Button>
-          </div>
-        ) : null}
+      <div className="design-canvas-agent__composer nodrag nopan nowheel">
         <input
           ref={fileInputRef}
           type="file"
@@ -884,7 +897,7 @@ const AgentTranscript = memo(function AgentTranscript({
     <div className="design-canvas-agent__transcript-wrap">
       <div
         ref={transcriptRef}
-        className="design-canvas-agent__transcript"
+        className="design-canvas-agent__transcript nodrag nopan nowheel"
         role="log"
         aria-live="polite"
         aria-relevant="additions"
@@ -923,7 +936,7 @@ const AgentTranscript = memo(function AgentTranscript({
               data-role={message.role}
             >
               <div className="design-canvas-agent__message-meta">
-                <span>{message.role === "user" ? "Prompt" : message.role === "assistant" ? "Response" : message.role === "system" ? "System" : "Tool"}</span>
+                <span>{message.role === "user" ? "You" : message.role === "assistant" ? isGroupChat ? "Coordinator" : "Response" : message.role === "system" ? "System" : "Tool"}</span>
                 <time dateTime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)}</time>
               </div>
               <AgentMessageBody role={message.role === "user" ? "user" : "assistant"} content={message.content} />
@@ -934,6 +947,7 @@ const AgentTranscript = memo(function AgentTranscript({
           return (
             <MainAgentJobGroupView
               key={item.id}
+              isGroupChat={isGroupChat}
               group={item.group}
               nodeNames={nodeNames}
               projectPath={projectPath}
@@ -978,6 +992,7 @@ const AgentTranscript = memo(function AgentTranscript({
 
 function MainAgentJobGroupView({
   group,
+  isGroupChat,
   nodeNames,
   projectPath,
   onRevealExport,
@@ -986,6 +1001,7 @@ function MainAgentJobGroupView({
   latestVisibleJobId,
 }: {
   group: MainAgentJobGroup;
+  isGroupChat: boolean;
   nodeNames: ReadonlyMap<string, string>;
   projectPath?: string | null;
   onRevealExport?: (exportId: string) => Promise<DesignExportRevealResult>;
@@ -1009,7 +1025,9 @@ function MainAgentJobGroupView({
           {childLabel ? <span>{childLabel}</span> : null}
         </header>
       ) : null}
-      {group.jobs.map((job) => (
+      {group.jobs.map((job) => isGroupChat && job.kind === "main-agent" && ["queued", "running", "validating"].includes(job.status) ? (
+        <AgentThinkingIndicator key={job.id} />
+      ) : isGroupChat && job.kind === "main-agent" && job.status === "ready" ? null : (
         <AgentActivityCard
           key={job.id}
           job={job}
@@ -1067,14 +1085,14 @@ function AgentActivityCard({
     : job.kind === "node-analysis"
       ? "Node analysis"
       : job.kind === "main-agent"
-        ? "Main Agent"
+        ? job.nodeId === null ? "Main Agent" : "Coordinator"
         : "Implementation export";
   const displayLabel = job.kind === "node-generation"
     ? `${nodeName ?? "Node"} generation`
     : job.kind === "node-analysis"
       ? `${nodeName ?? "Node"} analysis`
       : job.kind === "main-agent"
-        ? "Canvas plan"
+        ? job.nodeId === null ? "Canvas plan" : `${nodeName ?? "Group"} discussion`
         : "Implementation export";
   const {
     stopping,
