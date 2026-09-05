@@ -20,7 +20,6 @@ import type { AgentInfo } from "../lib/api.ts";
 import type { DesignExportRevealResult } from "../lib/design-export.ts";
 import { usePrefersReducedMotion } from "../lib/use-prefers-reduced-motion.ts";
 import { cn } from "../lib/utils.ts";
-import { BorderBeam } from "border-beam";
 import { motion } from "motion/react";
 import {
   ArrowUp,
@@ -353,31 +352,6 @@ export interface CanvasAgentPanelProps {
   rootRef?: Ref<HTMLElement>;
 }
 
-export function composerBeamActive(focused: boolean, reduceMotion: boolean | null): boolean {
-  return focused && reduceMotion !== true;
-}
-
-function useApplicationBeamTheme(): "dark" | "light" {
-  const readTheme = () => (
-    typeof document !== "undefined" && document.documentElement.classList.contains("dark")
-      ? "dark" as const
-      : "light" as const
-  );
-  const [theme, setTheme] = useState<"dark" | "light">(readTheme);
-
-  useEffect(() => {
-    if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
-    const root = document.documentElement;
-    const updateTheme = () => setTheme(readTheme());
-    updateTheme();
-    const observer = new MutationObserver(updateTheme);
-    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
-    return () => observer.disconnect();
-  }, []);
-
-  return theme;
-}
-
 export function CanvasAgentPanel({
   projectId,
   api,
@@ -420,8 +394,6 @@ export function CanvasAgentPanel({
   rootRef,
 }: CanvasAgentPanelProps) {
   const reduceMotion = usePrefersReducedMotion();
-  const composerBeamTheme = useApplicationBeamTheme();
-  const [composerFocused, setComposerFocused] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const revisionInputRef = useRef<HTMLInputElement | null>(null);
   const {
@@ -707,105 +679,86 @@ export function CanvasAgentPanel({
             if (files.length) void attachFiles(files);
           }}
         />
-        <BorderBeam
-          active={composerBeamActive(composerFocused, reduceMotion)}
-          borderRadius={11}
-          brightness={1.22}
-          className="design-canvas-agent__composer-beam"
-          colorVariant="colorful"
-          data-beam-theme={composerBeamTheme}
-          duration={2.18}
-          hueRange={22}
-          saturation={1.05}
-          staticColors={reduceMotion === true}
-          strength={0.56}
-          theme={composerBeamTheme}
-          onFocusCapture={() => setComposerFocused(true)}
-          onBlurCapture={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget)) setComposerFocused(false);
-          }}
-        >
-          <div className="design-canvas-agent__composer-shell">
-            <NodeMentionInput
-              nodes={nodes}
-              excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
-              value={draft}
-              onChange={setDraft}
-              priorityNodeIds={contextNodeIds}
-              onPriorityNodeIdsChange={setContextNodeIds}
-              ariaLabel={`${title} message`}
-              placeholder={scopedNode?.kind === "group-chat" ? "Discuss a direction, or ask the group to generate…" : scope.type === "main"
-                ? "Coordinate the canvas. Type @ to reference a Node…"
-                : "Ask this Node's Agent. Type @ to add context…"}
-              onSubmitShortcut={() => void submit()}
-            />
-            <div className="design-canvas-agent__actions">
-              <div className="flex min-w-0 items-center gap-1">
-                <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
-                  <Paperclip aria-hidden />
-                </Button>
-                {availableAgents.length > 0 ? (
-                  <AgentModelSelect
-                    agents={availableAgents}
-                    agent={agentSelection.agentCommand}
-                    model={agentSelection.model}
-                    onAgentChange={(agentCommand) => {
-                      if (agentSelection.agentCommand !== agentCommand) {
-                        setAgentSelection({ agentCommand, model: "" });
-                      }
-                    }}
-                    onModelChange={(model) => {
-                      if (agentSelection.model !== model) {
-                        setAgentSelection({ ...agentSelection, model });
-                      }
-                    }}
-                    onRescan={rescanAgents}
-                    dropUp
-                  />
-                ) : (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    className="design-canvas-agent__agent-unavailable"
-                    title="No Design Agent is currently available"
-                    onClick={() => {
-                      void rescanAgents();
-                    }}
-                  >
-                    <CircleAlert aria-hidden />Agent unavailable
-                  </Button>
-                )}
-              </div>
-              <Button
-                type="button"
-                size="icon-sm"
-                variant={activeTurnJob ? "destructive" : "default"}
-                aria-label={activeTurnJob
-                  ? `${stoppingActiveTurn ? "Stopping" : "Stop"} ${activeTurnLabel}`
-                  : `Send to ${title}`}
-                aria-busy={stoppingActiveTurn || undefined}
-                title={activeTurnJob ? `Stop ${activeTurnLabel}` : undefined}
-                disabled={activeTurnJob
-                  ? stoppingActiveTurn
-                  : !draft.trim() || submitting || !activeAgent}
-                onClick={() => {
-                  if (activeTurnJob) void stopActiveTurn();
-                  else void submit();
-                }}
-                className="size-7"
-              >
-                <IconSwap
-                  active={activeTurnJob !== null}
-                  first={submitting
-                    ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
-                    : <ArrowUp aria-hidden />}
-                  second={<Square aria-hidden fill="currentColor" />}
-                />
+        <div className="design-canvas-agent__composer-shell">
+          <NodeMentionInput
+            nodes={nodes}
+            excludeNodeId={scope.type === "node" ? scope.nodeId : undefined}
+            value={draft}
+            onChange={setDraft}
+            priorityNodeIds={contextNodeIds}
+            onPriorityNodeIdsChange={setContextNodeIds}
+            ariaLabel={`${title} message`}
+            placeholder={scopedNode?.kind === "group-chat" ? "Discuss a direction, or ask the group to generate…" : scope.type === "main"
+              ? "Coordinate the canvas. Type @ to reference a Node…"
+              : "Ask this Node's Agent. Type @ to add context…"}
+            onSubmitShortcut={() => void submit()}
+          />
+          <div className="design-canvas-agent__actions">
+            <div className="flex min-w-0 items-center gap-1">
+              <Button variant="ghost" size="icon-xs" aria-label="Attach canvas context files" onClick={() => fileInputRef.current?.click()}>
+                <Paperclip aria-hidden />
               </Button>
+              {availableAgents.length > 0 ? (
+                <AgentModelSelect
+                  agents={availableAgents}
+                  agent={agentSelection.agentCommand}
+                  model={agentSelection.model}
+                  onAgentChange={(agentCommand) => {
+                    if (agentSelection.agentCommand !== agentCommand) {
+                      setAgentSelection({ agentCommand, model: "" });
+                    }
+                  }}
+                  onModelChange={(model) => {
+                    if (agentSelection.model !== model) {
+                      setAgentSelection({ ...agentSelection, model });
+                    }
+                  }}
+                  onRescan={rescanAgents}
+                  dropUp
+                />
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="design-canvas-agent__agent-unavailable"
+                  title="No Design Agent is currently available"
+                  onClick={() => {
+                    void rescanAgents();
+                  }}
+                >
+                  <CircleAlert aria-hidden />Agent unavailable
+                </Button>
+              )}
             </div>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant={activeTurnJob ? "destructive" : "default"}
+              aria-label={activeTurnJob
+                ? `${stoppingActiveTurn ? "Stopping" : "Stop"} ${activeTurnLabel}`
+                : `Send to ${title}`}
+              aria-busy={stoppingActiveTurn || undefined}
+              title={activeTurnJob ? `Stop ${activeTurnLabel}` : undefined}
+              disabled={activeTurnJob
+                ? stoppingActiveTurn
+                : !draft.trim() || submitting || !activeAgent}
+              onClick={() => {
+                if (activeTurnJob) void stopActiveTurn();
+                else void submit();
+              }}
+              className="size-7"
+            >
+              <IconSwap
+                active={activeTurnJob !== null}
+                first={submitting
+                  ? <LoaderCircle aria-hidden className={reduceMotion ? undefined : "animate-spin"} />
+                  : <ArrowUp aria-hidden />}
+                second={<Square aria-hidden fill="currentColor" />}
+              />
+            </Button>
           </div>
-        </BorderBeam>
+        </div>
         {composerError ? (
           <motion.div
             role="alert"

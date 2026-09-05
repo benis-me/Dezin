@@ -17,7 +17,7 @@ import {
   DesignCanvasScreen,
   synchronizeFocusTransitionDuration,
 } from "./DesignCanvasScreen.tsx";
-import { CanvasAgentPanel, composerBeamActive, floatingAgentTransform } from "./FloatingNodeAgent.tsx";
+import { CanvasAgentPanel, floatingAgentTransform } from "./FloatingNodeAgent.tsx";
 import type {
   DesignAgentTurnResult,
   DesignCanvas,
@@ -291,6 +291,10 @@ test("group Nodes keep an inline conversation and draft while sharing the canvas
   const groupNode = await screen.findByTestId("rf__node-group-1");
   const composer = within(groupNode).getByRole("textbox", { name: "Design discussion message" });
   await user.type(composer, "Explore a quieter direction");
+  fireEvent.click(groupNode);
+  fireEvent.keyDown(within(groupNode).getByRole("button", { name: "Resize Design discussion from bottom right" }), { key: "ArrowRight" });
+  await waitFor(() => expect(groupNode).toHaveStyle({ width: `${group.geometry.width + 8}px` }));
+  expect(within(groupNode).getByRole("textbox", { name: "Design discussion message" })).toBe(composer);
   fireEvent.click(await screen.findByTestId("rf__node-page-1"));
   expect(composer).toHaveValue("Explore a quieter direction");
   expect(screen.getAllByRole("region", { name: "Design discussion panel" })).toHaveLength(1);
@@ -548,36 +552,12 @@ test("Agent panels preserve the native context menu without opening the canvas N
   expect(composer.closest(".design-canvas-agent__composer-shell")).not.toHaveAttribute(
     "data-agent-component",
   );
-  const beam = composer.closest<HTMLElement>(".design-canvas-agent__composer-beam");
-  expect(beam?.style.getPropertyValue("--beam-strength")).toBe("0.56");
-  expect(beam).toHaveAttribute(
-    "data-beam-theme",
-    document.documentElement.classList.contains("dark") ? "dark" : "light",
-  );
-  const initiallyDark = document.documentElement.classList.contains("dark");
-  try {
-    document.documentElement.classList.toggle("dark", !initiallyDark);
-    await waitFor(() => expect(beam).toHaveAttribute("data-beam-theme", initiallyDark ? "light" : "dark"));
-  } finally {
-    document.documentElement.classList.toggle("dark", initiallyDark);
-  }
-  await waitFor(() => expect(beam).toHaveAttribute("data-beam-theme", initiallyDark ? "dark" : "light"));
-  expect(beam).not.toHaveAttribute("data-active");
-  fireEvent.focus(composer);
-  await waitFor(() => expect(beam).toHaveAttribute("data-active"));
-  fireEvent.blur(composer, { relatedTarget: null });
-  await waitFor(() => expect(beam).not.toHaveAttribute("data-active"));
+  await user.click(composer);
+  expect(composer).toHaveFocus();
   const mainEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   expect(mainPanel.dispatchEvent(mainEvent)).toBe(true);
   expect(mainEvent.defaultPrevented).toBe(false);
   expect(screen.queryByRole("menu", { name: "Add Design node" })).not.toBeInTheDocument();
-});
-
-test("Agent composer keeps a visible static Beam focus boundary for reduced motion", () => {
-  expect(composerBeamActive(false, false)).toBe(false);
-  expect(composerBeamActive(true, false)).toBe(true);
-  expect(composerBeamActive(true, null)).toBe(true);
-  expect(composerBeamActive(true, true)).toBe(false);
 });
 
 test("selected Nodes have no redundant Agent or delete buttons and expose kind-specific context menus", async () => {

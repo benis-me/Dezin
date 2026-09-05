@@ -1276,18 +1276,8 @@
 .design-canvas-agent__composer { position: relative; flex: none; padding: 0 7px 7px; background: transparent; }
 .design-canvas-agent__composer::before { position: absolute; right: 0; bottom: 100%; left: 0; height: 18px; background: linear-gradient(to bottom, transparent, color-mix(in oklch, var(--card) 94%, transparent)); content: ""; pointer-events: none; }
 
-.design-canvas-agent__composer-beam {
-  --beam-stroke-opacity: 1.42;
-  --beam-inner-opacity: 0.9;
-  --beam-bloom-opacity: 0.68;
-  display: block;
-  width: 100%;
-  border-radius: 11px;
-}
-.design-canvas-agent__composer-beam:not([data-active]):not([data-fading]) { overflow: visible; }
 .design-canvas-agent__composer-shell { overflow: hidden; border: 1px solid color-mix(in oklch, var(--border) 88%, transparent); border-radius: 11px; background: color-mix(in oklch, var(--surface-2) 54%, var(--card)); box-shadow: none; transition: border-color 180ms var(--design-canvas-ease-out), background-color 180ms var(--design-canvas-ease-out); }
-.design-canvas-agent__composer-shell:focus-within,
-.design-canvas-agent__composer-beam[data-active] .design-canvas-agent__composer-shell { border-color: transparent; background: color-mix(in oklch, var(--foreground) 5.5%, var(--card)); box-shadow: none; }
+.design-canvas-agent__composer-shell:focus-within { border-color: var(--design-canvas-accent); outline: 1px solid var(--design-canvas-accent); background: color-mix(in oklch, var(--foreground) 5.5%, var(--card)); }
 .design-canvas-agent__mention-anchor { min-width: 0; }
 .design-canvas-agent__composer textarea { display: block; width: 100%; max-height: 160px; min-height: 62px; resize: none; border: 0; background: transparent; padding: 11px 10px 3px; color: var(--foreground); font-size: 12.5px; line-height: 19px; letter-spacing: -0.01em; outline: 0; scrollbar-width: thin; }
 .design-canvas-agent__composer textarea::placeholder { color: color-mix(in oklch, var(--foreground) 68%, var(--card)); }
@@ -1602,18 +1592,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .design-canvas-agent__composer-beam[data-active] {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-  }
-  .design-canvas-agent__composer-beam[data-active]::before,
-  .design-canvas-agent__composer-beam[data-active]::after,
-  .design-canvas-agent__composer-beam[data-active] [data-beam-bloom] {
-    animation: none !important;
-  }
-  .design-canvas-agent__composer-beam:focus-within .design-canvas-agent__composer-shell {
-    border-color: color-mix(in oklch, var(--design-canvas-accent) 48%, var(--border-strong));
-  }
+  .design-canvas-agent__composer-shell { transition: none; }
   .design-canvas-agent__scroll-latest,
   .design-canvas-agent__scroll-latest > svg { transition: none !important; }
   .design-canvas-topbar,

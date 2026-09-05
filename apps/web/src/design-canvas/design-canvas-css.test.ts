@@ -140,11 +140,9 @@ test("Agent composer grows within explicit bounds without a separator above it",
   expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 7px 7px;[^}]*background:\s*transparent;/s);
   expect(css).not.toMatch(/\.design-canvas-agent__composer\s*\{[^}]*border-top:/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;[^}]*width:\s*100%;[^}]*border-radius:\s*11px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\[data-active\][^{]*\.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*color-mix\(in oklch, var\(--foreground\) 5\.5%, var\(--card\)\);[^}]*box-shadow:\s*none;/s);
-  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]\s*\{[^}]*animation-duration:\s*0\.001ms !important;[^}]*animation-iteration-count:\s*1 !important;[\s\S]*\.design-canvas-agent__composer-beam\[data-active\]::before,[\s\S]*animation:\s*none !important;/s);
-  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-beam:focus-within \.design-canvas-agent__composer-shell\s*\{[^}]*border-color:\s*color-mix\(in oklch, var\(--design-canvas-accent\) 48%, var\(--border-strong\)\);/s);
+  expect(css).toMatch(/\.design-canvas-agent__composer-shell:focus-within\s*\{[^}]*border-color:\s*var\(--design-canvas-accent\);[^}]*outline:\s*1px solid var\(--design-canvas-accent\);/s);
+  expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.design-canvas-agent__composer-shell\s*\{[^}]*transition:\s*none;/s);
 });
 
 test("Agent execution uses a flat Tool-style disclosure without a Task capsule", () => {
@@ -224,11 +222,10 @@ test("the 324px Message Response keeps Sources, code, and diff surfaces bounded"
   expect(css).toMatch(/\.design-canvas-agent__composer-shell\s*\{[^}]*overflow:\s*hidden;[^}]*border-radius:\s*11px;/s);
 });
 
-test("Agent composer preserves Beam geometry behind a 12px breath and 18px transcript fade", () => {
+test("Agent composer keeps 12px transcript spacing and an 18px fade", () => {
   expect(css).toMatch(/\.design-canvas-agent__transcript\s*\{[^}]*padding:\s*14px 14px 12px;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer\s*\{[^}]*padding:\s*0 7px 7px;[^}]*background:\s*transparent;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer::before\s*\{[^}]*bottom:\s*100%;[^}]*height:\s*18px;[^}]*background:\s*linear-gradient\(to bottom, transparent, color-mix\(in oklch, var\(--card\) 94%, transparent\)\);[^}]*pointer-events:\s*none;/s);
-  expect(css).toMatch(/\.design-canvas-agent__composer-beam\s*\{[^}]*--beam-stroke-opacity:\s*1\.42;[^}]*--beam-inner-opacity:\s*0\.9;[^}]*--beam-bloom-opacity:\s*0\.68;/s);
   expect(css).toMatch(/\.design-canvas-agent__composer textarea\s*\{[^}]*max-height:\s*160px;[^}]*min-height:\s*62px;[^}]*padding:\s*11px 10px 3px;/s);
 });
 
