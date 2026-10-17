@@ -10,6 +10,15 @@ updates:
         dependency-type: production
       development:
         dependency-type: development
+    ignore:
+      # apps/daemon calls the TypeScript compiler API at runtime; TypeScript 7 ships without it.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # The vendored @capability-foundry/leafer-react supports leafer >=2.0.8 <2.2.0; lift these with a refreshed tarball.
+      - dependency-name: leafer-editor
+        versions: [">=2.2.0"]
+      - dependency-name: "@leafer-in/*"
+        versions: [">=2.2.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

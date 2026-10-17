@@ -65,7 +65,8 @@ test("assistant output exposes one Message Response surface with explicit stream
     "data-dezin-agent-primitive",
     "context",
   );
-  expect(within(sources).getByRole("link", { name: "1 example.com" })).toHaveAttribute(
+  // The chip's number and host are flex items in the app; jsdom has no CSS and joins them.
+  expect(within(sources).getByRole("link", { name: /^1\s*example\.com$/ })).toHaveAttribute(
     "href",
     "https://example.com/spec",
   );

@@ -8,13 +8,15 @@ const KIB = 1024;
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const DEFAULT_BUNDLE_BUDGETS = {
-  maxInitialMinified: 500 * KIB,
+  // React 19.3's larger react-dom put the shared ui-core chunk at 522 KiB on 2026-10-17.
+  maxInitialMinified: 550 * KIB,
   maxInitialGzip: 180 * KIB,
   // Keep the full Design Canvas and Moodboard surfaces outside Home/Settings.
-  // Measured 2026-09-02 after dropping simple-icons, react-markdown, and nucleo.
-  initialJsGzipBaseline: 290_225,
+  // Measured 2026-10-17 after the React 19.3 upgrade.
+  initialJsGzipBaseline: 312_973,
   // Bound aggregate drift while allowing the current lazy Canvas and media tools.
-  totalJsGzipBaseline: 866_932,
+  // Measured 2026-10-17; Streamdown 2.7 grew the lazy Markdown chunk.
+  totalJsGzipBaseline: 929_168,
 };
 
 async function filesUnder(root) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { Figma, KeyRound, LoaderCircle } from "lucide-react";
+import { createLucideIcon, KeyRound, LoaderCircle } from "lucide-react";
 import {
   FIGMA_IMPORT_SCHEMA_VERSION,
   type FigmaCanvasImportResponse,
@@ -10,6 +10,15 @@ import { ApiError } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { hasFigmaVersionSelection, previewFigmaImportUrl } from "../lib/figma-import-url.ts";
 import { Button, Dialog, Input } from "./ui/index.ts";
+
+// lucide-react 1.x dropped its brand icons; this is the 0.469 Figma glyph (ISC) so the import UI keeps its look.
+export const FigmaIcon = createLucideIcon("Figma", [
+  ["path", { d: "M5 5.5A3.5 3.5 0 0 1 8.5 2H12v7H8.5A3.5 3.5 0 0 1 5 5.5z", key: "1340ok" }],
+  ["path", { d: "M12 2h3.5a3.5 3.5 0 1 1 0 7H12V2z", key: "1hz3m3" }],
+  ["path", { d: "M12 12.5a3.5 3.5 0 1 1 7 0 3.5 3.5 0 1 1-7 0z", key: "1oz8n2" }],
+  ["path", { d: "M5 19.5A3.5 3.5 0 0 1 8.5 16H12v3.5a3.5 3.5 0 1 1-7 0z", key: "1ff65i" }],
+  ["path", { d: "M5 12.5A3.5 3.5 0 0 1 8.5 9H12v7H8.5A3.5 3.5 0 0 1 5 12.5z", key: "pdip6e" }],
+]);
 
 const FIGMA_PENDING_IMPORT_STORAGE_KEY = "dezin:figma-import-intent:v1";
 const FIGMA_IMPORT_KEY = /^figma-[A-Za-z0-9._:-]{1,153}$/;
@@ -265,7 +274,7 @@ export function FigmaImportDialog({
         <div className="shrink-0 px-5 pt-5">
           <div className="flex items-start gap-3">
             <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-border bg-surface-2 text-foreground">
-              <Figma size={18} strokeWidth={1.7} aria-hidden />
+              <FigmaIcon size={18} strokeWidth={1.7} aria-hidden />
             </span>
             <div className="min-w-0">
               <h2 className="text-base font-semibold tracking-tight">Import from Figma</h2>

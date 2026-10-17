@@ -18,8 +18,7 @@
     "verbatimModuleSyntax": true,
     "types": [
       "vite/client",
-      "vitest/globals",
-      "@testing-library/jest-dom"
+      "vitest/globals"
     ],
     "paths": {
       "@/*": [

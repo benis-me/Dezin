@@ -325,7 +325,8 @@ test("empty projects expose Quick Start and toolbar/right-click share one node c
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
 
   expect(await screen.findByRole("heading", { name: "Quick Start" })).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: /^Create a page\b/ }));
+  // jsdom loads no app CSS, so the inline title and description join without a space.
+  await user.click(screen.getByRole("button", { name: /^Create a page/ }));
   await waitFor(() => expect(applyIntents).toHaveBeenCalledWith(PROJECT_ID, expect.objectContaining({
     intents: [expect.objectContaining({ type: "add-node", node: expect.objectContaining({ kind: "page" }) })],
   })));
@@ -698,7 +699,7 @@ test("add-node retries preserve one explicit id and open only that Node after a 
 
   render(<DesignCanvasScreen projectId={PROJECT_ID} projectName="Editorial" api={api} />);
   await screen.findByRole("heading", { name: "Quick Start" });
-  fireEvent.click(screen.getByRole("button", { name: /^Create a page\b/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^Create a page/ }));
 
   await waitFor(() => expect(applyIntents).toHaveBeenCalledTimes(2));
   const firstIntent = applyIntents.mock.calls[0]?.[1].intents[0];
