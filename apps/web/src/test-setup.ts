@@ -1,4 +1,11 @@
 import "@testing-library/jest-dom";
+import type { TestingLibraryMatchers } from "@testing-library/jest-dom/matchers";
+
+// Vitest 5 types custom matchers through Matchers<R, T>, but jest-dom 7.0.1 still augments
+// the Vitest 4 Assertion<T>, so its matchers are declared here until jest-dom catches up.
+declare module "vitest" {
+  interface Matchers<R, T> extends TestingLibraryMatchers<unknown, R> {}
+}
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();

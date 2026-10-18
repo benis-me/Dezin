@@ -54,6 +54,17 @@ beforeEach(() => {
     }
   `;
   document.head.append(presenceClockStyle);
+  // Radix Presence reads animation-name on close from the getComputedStyle() result it kept at
+  // mount. Browsers return a live declaration; jsdom returns a snapshot, so recompute on each read.
+  const computeStyle = window.getComputedStyle.bind(window);
+  vi.stubGlobal("getComputedStyle", (element: Element, pseudoElement?: string | null) =>
+    new Proxy({} as CSSStyleDeclaration, {
+      get(_target, property) {
+        const style = computeStyle(element, pseudoElement);
+        const value = Reflect.get(style, property);
+        return typeof value === "function" ? value.bind(style) : value;
+      },
+    }));
 });
 
 afterEach(() => {

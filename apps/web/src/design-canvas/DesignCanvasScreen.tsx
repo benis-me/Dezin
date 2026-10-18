@@ -15,7 +15,6 @@ import {
 } from "@xyflow/react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  Figma,
   LoaderCircle,
   RotateCcw,
   X,
@@ -39,7 +38,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "../components/ui/index.ts";
-import { FigmaImportDialog } from "../components/FigmaImportDialog.tsx";
+import { FigmaIcon, FigmaImportDialog } from "../components/FigmaImportDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { AgentInfo, DesignSystemCard } from "../lib/api.ts";
 import { fittedImageNodeSize } from "../lib/design-canvas-geometry.ts";
@@ -1619,7 +1618,7 @@ export function DesignCanvasScreen({
                 : canvasCenter())}
             >
               <span className="design-node-catalog__icon">
-                <Figma aria-hidden className="size-3.5" />
+                <FigmaIcon aria-hidden className="size-3.5" />
               </span>
               Import from Figma
             </ContextMenuItem>

@@ -22,6 +22,7 @@ describe("Design Node presentation matrix", () => {
       "media",
       "typed-file",
       "typed-file",
+      "document",
     ]);
 
     const creationTitles = DESIGN_NODE_KINDS.map((kind) =>

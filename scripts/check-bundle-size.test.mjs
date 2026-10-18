@@ -18,9 +18,9 @@ async function fixture(manifest, assets) {
 test("bundle checker rejects an oversized initial static chunk", async () => {
   const distDir = await fixture(
     { "index.html": { file: "assets/index.js", isEntry: true } },
-    { "index.js": randomBytes(501 * 1024) },
+    { "index.js": randomBytes(551 * 1024) },
   );
-  await assert.rejects(checkBundle({ distDir }), /initial chunk.*500(?:\.0)? KiB minified/i);
+  await assert.rejects(checkBundle({ distDir }), /initial chunk.*550(?:\.0)? KiB minified/i);
 });
 
 test("bundle checker rejects initial gzip and aggregate gzip regressions", async () => {

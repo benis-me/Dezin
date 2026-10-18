@@ -813,7 +813,9 @@ async function executeDesignMainTurn(
         text: `Canvas revision ${resultingCanvas.revision}; ${dispatchedCount} child Job${dispatchedCount === 1 ? "" : "s"}; ${dispatchFailures.length} dispatch failure${dispatchFailures.length === 1 ? "" : "s"}`,
       });
     }
-    return updateDesignJob(input.dataDir, input.projectId, job.id, {
+    // Await so a Job cancelled at the last moment reaches the terminal-state handling below
+    // instead of rejecting unobserved while `finally` cleans up.
+    return await updateDesignJob(input.dataDir, input.projectId, job.id, {
       status: "ready",
       error: null,
       conversationOnly,
