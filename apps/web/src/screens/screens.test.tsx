@@ -1399,8 +1399,11 @@ test("HomeScreen drops a saved model that the restored agent no longer advertise
   });
 
   const trigger = await screen.findByRole("button", { name: "Agent and model" });
-  await waitFor(() => expect(trigger).toHaveTextContent("Codex"));
-  expect(trigger).not.toHaveTextContent("retired-codex-model");
+  // The saved model renders for one commit before the advertised-model check drops it.
+  await waitFor(() => {
+    expect(trigger).toHaveTextContent("Codex");
+    expect(trigger).not.toHaveTextContent("retired-codex-model");
+  });
 
   await user.type(screen.getByRole("textbox", { name: "Describe your design" }), "Design a travel planner");
   await user.click(screen.getByRole("button", { name: "Design" }));

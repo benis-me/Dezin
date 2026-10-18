@@ -33,7 +33,7 @@
     "pdfjs-dist": "6.3.289",
     "puppeteer-core": "^25.12.0",
     "typescript": "^6.0.3",
-    "undici": "^8.11.2",
+    "undici": "^7.30.1",
     "vite": "^8.3.1"
   }
 }
